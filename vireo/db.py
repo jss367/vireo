@@ -2870,7 +2870,7 @@ class Database:
         self.conn.execute(
             "UPDATE photos SET sharpness = ? WHERE id = ?", (sharpness, photo_id)
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     def update_photo_quality(
         self,
@@ -2893,7 +2893,7 @@ class Database:
                 photo_id,
             ),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     def update_photo_mask(self, photo_id, mask_path):
         """Store the mask file path for a photo."""
@@ -2901,7 +2901,7 @@ class Database:
             "UPDATE photos SET mask_path=? WHERE id=?",
             (mask_path, photo_id),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     def update_photo_pipeline_features(
         self,
@@ -2950,7 +2950,7 @@ class Database:
         self.conn.execute(
             f"UPDATE photos SET {set_clause} WHERE id=?", values
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     def get_photos_missing_masks(self, folder_ids=None):
         """Get photos that have detections but no masks yet.
@@ -3148,7 +3148,7 @@ class Database:
             "dino_embedding_variant=? WHERE id=?",
             (dino_subject_embedding, dino_global_embedding, variant, photo_id),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     # -- Keywords --
 
@@ -4285,7 +4285,7 @@ class Database:
                              reviewed_at = excluded.reviewed_at""",
             (pred_id, ws, individual, group_id, vote_count, total_votes),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     def is_keyword_species(self, keyword_id):
         """Return True if the keyword is marked as a species."""
@@ -4468,7 +4468,7 @@ class Database:
                              run_at = datetime('now')""",
             (detection_id, classifier_model, labels_fingerprint, prediction_count),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     def get_classifier_run_keys(self, detection_id):
         rows = self.conn.execute(
@@ -4548,7 +4548,7 @@ class Database:
                  det["confidence"], det.get("category", "animal")),
             )
             ids.append(cur.lastrowid)
-        self.conn.commit()
+        commit_with_retry(self.conn)
         return ids
 
     def write_detection_batch(self, photo_id, detector_model, detections):
@@ -4596,7 +4596,7 @@ class Database:
                                  run_at = datetime('now')""",
                 (photo_id, detector_model, len(detections)),
             )
-            self.conn.commit()
+            commit_with_retry(self.conn)
             return ids
         except Exception:
             self.conn.rollback()
