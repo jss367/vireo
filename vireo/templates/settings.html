@@ -31,6 +31,16 @@
   .collapsible-header.open .toggle-icon { transform: rotate(90deg); }
   .collapsible-body { display: none; }
   .collapsible-body.open { display: block; }
+
+  /* All-settings (schema-rendered, read-only) */
+  .provenance-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    flex-shrink: 0; margin-top: 6px;
+  }
+  .dot-default { background: var(--border-secondary); }
+  .dot-global { background: var(--accent); }
+  .dot-workspace { background: #a855f7; }
+  .setting-row-card:last-child { border-bottom: none !important; }
 </style>
 </head>
 <body>
@@ -994,6 +1004,27 @@
     </div>
   </div>
 
+  <!-- All settings (schema-driven, read-only) -->
+  <div class="section" id="allSettingsSection">
+    <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+      <span>All settings</span>
+      <input type="search" id="allSettingsSearch" placeholder="Search settings…" autocomplete="off"
+             oninput="filterAllSettings()"
+             style="flex:1;min-width:200px;max-width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 10px;font-size:13px;">
+    </div>
+    <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
+      Every Vireo setting, including ones not surfaced by the curated sections above. Read-only — edit from the curated sections.
+    </div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:14px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
+      <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-default" style="margin-top:0;"></span> default</span>
+      <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-global" style="margin-top:0;"></span> set globally</span>
+      <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-workspace" style="margin-top:0;"></span> set for this workspace</span>
+    </div>
+    <div id="allSettingsCategories">
+      <span style="color:var(--text-ghost);font-size:13px;">Loading…</span>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -1008,6 +1039,7 @@ loadVersion();
 loadThemePicker();
 loadPreviewCacheStatus();
 loadDetectionCacheStats();
+loadAllSettings();
 
 function toggleSection(header) {
   header.classList.toggle('open');
@@ -2476,6 +2508,126 @@ async function doInstallUpdate() {
     btn.disabled = false;
     status.textContent = 'Install failed. Check logs for details.';
   }
+}
+
+// --- All settings (schema-rendered, read-only) -----------------------------
+
+async function loadAllSettings() {
+  var container = document.getElementById('allSettingsCategories');
+  try {
+    var [schemaRes, valuesRes] = await Promise.all([
+      fetch('/api/settings/schema'),
+      fetch('/api/settings/values'),
+    ]);
+    if (!schemaRes.ok || !valuesRes.ok) throw new Error('HTTP error');
+    var schemaData = await schemaRes.json();
+    var values = await valuesRes.json();
+    renderAllSettings(schemaData.schema, schemaData.categories, values, container);
+  } catch (err) {
+    container.innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load settings: '
+      + escapeHtml(err && err.message || String(err)) + '</span>';
+  }
+}
+
+function renderAllSettings(schema, categories, values, container) {
+  var byCategory = {};
+  categories.forEach(function(c) { byCategory[c] = []; });
+  Object.keys(schema).sort().forEach(function(key) {
+    var cat = schema[key].category || 'Other';
+    if (!byCategory[cat]) byCategory[cat] = [];
+    byCategory[cat].push(key);
+  });
+
+  var parts = [];
+  categories.forEach(function(cat) {
+    var keys = byCategory[cat];
+    if (!keys || !keys.length) return;
+    parts.push('<div class="setting-category" data-category="' + escapeHtml(cat) + '" style="margin-top:14px;">');
+    parts.push('<div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;border-bottom:1px solid var(--border-primary);padding-bottom:4px;">'
+      + escapeHtml(cat) + '</div>');
+    keys.forEach(function(key) {
+      parts.push(renderSettingRow(key, schema[key], values));
+    });
+    parts.push('</div>');
+  });
+  container.innerHTML = parts.join('');
+}
+
+function renderSettingRow(key, spec, values) {
+  var hasWs = Object.prototype.hasOwnProperty.call(values.workspace, key);
+  var hasGlobal = Object.prototype.hasOwnProperty.call(values['global'], key);
+  var dotClass, dotTitle;
+  if (hasWs) {
+    dotClass = 'dot-workspace';
+    dotTitle = 'Set for this workspace';
+  } else if (hasGlobal) {
+    dotClass = 'dot-global';
+    dotTitle = 'Set globally';
+  } else {
+    dotClass = 'dot-default';
+    dotTitle = 'Using default';
+  }
+  var effective = values.effective[key];
+  var defaultVal = values['default'][key];
+  var displayValue = formatSettingValue(effective, spec, true);
+  var fullValue = formatSettingValue(effective, spec, false);
+  var meta = escapeHtml(key);
+  if (hasWs || hasGlobal) {
+    meta += ' · default: ' + escapeHtml(formatSettingValue(defaultVal, spec, true));
+  }
+  var search = (key + ' ' + spec.label + ' ' + spec.desc + ' ' + spec.category).toLowerCase();
+  return '<div class="setting-row-card" data-search="' + escapeHtml(search) + '" data-key="' + escapeHtml(key) + '" '
+       +    'style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border-primary);">'
+       +   '<span class="provenance-dot ' + dotClass + '" title="' + escapeHtml(dotTitle) + '"></span>'
+       +   '<div style="flex:1;min-width:0;">'
+       +     '<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">'
+       +       '<div style="font-size:13px;color:var(--text-primary);font-weight:500;">' + escapeHtml(spec.label) + '</div>'
+       +       '<div title="' + escapeHtml(fullValue) + '" '
+       +            'style="font-size:12px;color:var(--text-secondary);font-family:monospace;text-align:right;max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+       +         escapeHtml(displayValue)
+       +       '</div>'
+       +     '</div>'
+       +     '<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">' + escapeHtml(spec.desc) + '</div>'
+       +     '<div style="font-size:11px;color:var(--text-ghost);margin-top:2px;font-family:monospace;">' + meta + '</div>'
+       +   '</div>'
+       + '</div>';
+}
+
+function formatSettingValue(v, spec, mask) {
+  if (v === undefined || v === null) return '';
+  if (spec.type === 'bool') return v ? 'true' : 'false';
+  if (spec.type === 'secret') {
+    if (!v) return '(unset)';
+    return mask ? '••••••••' : String(v);
+  }
+  if (spec.type === 'enum') {
+    if (spec.enum_labels && spec.enum_labels[v]) return spec.enum_labels[v];
+    return String(v);
+  }
+  if (spec.type === 'list_string') {
+    if (!Array.isArray(v) || v.length === 0) return '(empty)';
+    return v.join(', ');
+  }
+  if (spec.type === 'string' || spec.type === 'path') {
+    if (v === '') return '(empty)';
+    return String(v);
+  }
+  return String(v);
+}
+
+function filterAllSettings() {
+  var q = (document.getElementById('allSettingsSearch').value || '').trim().toLowerCase();
+  var rows = document.querySelectorAll('#allSettingsCategories .setting-row-card');
+  rows.forEach(function(row) {
+    row.style.display = (!q || row.getAttribute('data-search').indexOf(q) !== -1) ? '' : 'none';
+  });
+  document.querySelectorAll('#allSettingsCategories .setting-category').forEach(function(cat) {
+    var anyVisible = false;
+    cat.querySelectorAll('.setting-row-card').forEach(function(r) {
+      if (r.style.display !== 'none') anyVisible = true;
+    });
+    cat.style.display = anyVisible ? '' : 'none';
+  });
 }
 </script>
 </body>

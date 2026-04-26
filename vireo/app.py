@@ -3018,6 +3018,83 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         evict_preview_cache_if_over_quota(_get_db(), vireo_dir)
         return jsonify({"ok": True})
 
+    @app.route("/api/settings/schema")
+    def api_settings_schema():
+        """Return the SCHEMA dict and the ordered category list.
+
+        Consumed by the schema-rendered settings UI to generate widgets.
+        """
+        import config_schema as schema
+
+        return jsonify({
+            "schema": schema.SCHEMA,
+            "categories": list(schema.CATEGORIES),
+        })
+
+    @app.route("/api/settings/values")
+    def api_settings_values():
+        """Return values across all four layers (default / global / workspace / effective).
+
+        Each layer is a dotted-flat dict, restricted to keys present in SCHEMA.
+        Keys hand-edited into config.json or stored as workspace metadata
+        (e.g. active_labels) that are not declared in SCHEMA are intentionally
+        omitted from the response so they don't show up as "overridden" in
+        the UI; they are preserved on disk and visible in the raw-JSON tab.
+        """
+        import config as cfg
+        import config_schema as schema
+
+        schema_keys = set(schema.SCHEMA.keys())
+
+        # Default layer: flatten DEFAULTS, restrict to schema keys.
+        default_flat = schema.flatten(cfg.DEFAULTS)
+        default_layer = {k: default_flat[k] for k in schema_keys if k in default_flat}
+
+        # Global layer: read the raw file (not cfg.load(), which deep-merges
+        # with DEFAULTS — we want only what the user explicitly set).
+        global_layer = {}
+        if os.path.exists(cfg.CONFIG_PATH):
+            try:
+                with open(cfg.CONFIG_PATH) as f:
+                    raw = json.load(f)
+                global_flat = schema.flatten(raw if isinstance(raw, dict) else {})
+                global_layer = {k: v for k, v in global_flat.items() if k in schema_keys}
+            except (OSError, json.JSONDecodeError):
+                global_layer = {}
+
+        # Workspace layer: parse config_overrides for the active workspace.
+        workspace_layer = {}
+        db = _get_db()
+        ws = db.get_workspace(db._active_workspace_id)
+        if ws and ws["config_overrides"]:
+            try:
+                overrides = (
+                    json.loads(ws["config_overrides"])
+                    if isinstance(ws["config_overrides"], str)
+                    else ws["config_overrides"]
+                )
+                ws_flat = schema.flatten(overrides if isinstance(overrides, dict) else {})
+                workspace_layer = {k: v for k, v in ws_flat.items() if k in schema_keys}
+            except (json.JSONDecodeError, TypeError):
+                workspace_layer = {}
+
+        # Effective layer: workspace > global > default for every schema key.
+        effective_layer = {}
+        for k in schema_keys:
+            if k in workspace_layer:
+                effective_layer[k] = workspace_layer[k]
+            elif k in global_layer:
+                effective_layer[k] = global_layer[k]
+            elif k in default_layer:
+                effective_layer[k] = default_layer[k]
+
+        return jsonify({
+            "default": default_layer,
+            "global": global_layer,
+            "workspace": workspace_layer,
+            "effective": effective_layer,
+        })
+
     @app.route("/api/darktable/status")
     def api_darktable_status():
         import config as cfg
