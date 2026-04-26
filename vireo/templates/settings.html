@@ -2852,6 +2852,15 @@ async function resetSchemaSetting(key) {
   setRowStatus(key, 'Resetting…', false);
   try {
     var scope = ALL_SETTINGS_SCOPE;
+    // Cancel any pending debounced autosave for this key+scope. Without
+    // this, a still-queued PATCH from a recent edit would fire 300ms after
+    // the DELETE and re-create the override, making Reset appear to "not
+    // stick" depending on click timing.
+    var token = key + '|' + scope;
+    if (ALL_SETTINGS_DEBOUNCE[token]) {
+      clearTimeout(ALL_SETTINGS_DEBOUNCE[token]);
+      ALL_SETTINGS_DEBOUNCE[token] = null;
+    }
     var resp = await fetch(_settingsScopeBaseFor(scope) + '/' + encodeURIComponent(key), {
       method: 'DELETE',
     });
