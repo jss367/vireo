@@ -994,7 +994,7 @@ def test_default_collections_created(tmp_path):
     colls = db.get_collections()
     names = {c['name'] for c in colls}
     assert 'All Photos' in names
-    assert 'Needs Classification' in names
+    assert 'Needs Identification' in names
     assert 'Untagged' in names
     assert 'Flagged' in names
     assert 'Recent Import' in names
@@ -1028,10 +1028,72 @@ def test_default_collections_adds_missing(tmp_path):
     colls = db.get_collections()
     names = {c['name'] for c in colls}
     assert 'All Photos' in names
-    assert 'Needs Classification' in names
+    assert 'Needs Identification' in names
     assert 'Untagged' in names
     assert 'Recent Import' in names
     assert len(colls) == 5  # no duplicate Flagged
+
+
+def test_default_collection_uses_has_subject_for_new_workspaces(tmp_path):
+    """A newly-created workspace gets 'Needs Identification' (not 'Needs
+    Classification') with the has_subject==0 rule."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    db.create_default_collections()
+
+    cols = {c["name"]: json.loads(c["rules"]) for c in db.get_collections()}
+    assert "Needs Identification" in cols
+    assert "Needs Classification" not in cols
+    assert cols["Needs Identification"] == [
+        {"field": "has_subject", "op": "equals", "value": 0}
+    ]
+
+
+def test_existing_needs_classification_collection_migrated_idempotently(tmp_path):
+    """A workspace pre-populated with the legacy default gets renamed; running
+    the migration again is a no-op."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    # Force-create the legacy state.
+    db.add_collection(
+        "Needs Classification",
+        json.dumps([{"field": "has_species", "op": "equals", "value": 0}]),
+    )
+    db.migrate_default_subject_collection()
+    db.migrate_default_subject_collection()  # idempotent
+
+    cols = {c["name"]: json.loads(c["rules"]) for c in db.get_collections()}
+    assert "Needs Identification" in cols
+    assert "Needs Classification" not in cols
+    assert cols["Needs Identification"] == [
+        {"field": "has_subject", "op": "equals", "value": 0}
+    ]
+
+
+def test_migration_skips_user_customized_collection(tmp_path):
+    """If 'Needs Classification' exists with a non-default rule (the user
+    edited it), leave it alone."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    custom = [{"field": "rating", "op": ">=", "value": 3}]
+    db.add_collection("Needs Classification", json.dumps(custom))
+    db.migrate_default_subject_collection()
+
+    cols = {c["name"]: json.loads(c["rules"]) for c in db.get_collections()}
+    assert "Needs Classification" in cols
+    assert cols["Needs Classification"] == custom
 
 
 def test_all_photos_collection_returns_all_photos(tmp_path):

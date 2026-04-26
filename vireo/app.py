@@ -639,6 +639,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     log.info("Database init took %.2fs (workspace: %s)", time.time() - _t0,
              init_db.get_workspace(init_db._active_workspace_id)["name"])
     init_db.create_default_collections()
+    init_db.migrate_default_subject_collection()
 
     # Mark species keywords from taxonomy in background (avoids slow startup)
     import threading

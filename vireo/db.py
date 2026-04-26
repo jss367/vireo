@@ -5814,8 +5814,8 @@ class Database:
         defaults = [
             ("All Photos", [{"field": "all"}]),
             (
-                "Needs Classification",
-                [{"field": "has_species", "op": "equals", "value": 0}],
+                "Needs Identification",
+                [{"field": "has_subject", "op": "equals", "value": 0}],
             ),
             ("Untagged", [{"field": "keyword_count", "op": "equals", "value": 0}]),
             ("Flagged", [{"field": "flag", "op": "equals", "value": "flagged"}]),
@@ -5827,6 +5827,42 @@ class Database:
         for name, rules in defaults:
             if name not in existing_names:
                 self.add_collection(name, json.dumps(rules))
+
+    def migrate_default_subject_collection(self):
+        """Rename legacy 'Needs Classification' (with rule has_species==0)
+        to 'Needs Identification' (rule has_subject==0). Skips collections
+        the user has customized. Idempotent."""
+        rows = self.conn.execute(
+            "SELECT id, rules FROM collections "
+            "WHERE workspace_id = ? AND name = ?",
+            (self._ws_id(), "Needs Classification"),
+        ).fetchall()
+        legacy_rule = [{"field": "has_species", "op": "equals", "value": 0}]
+        for row in rows:
+            try:
+                current = json.loads(row["rules"])
+            except (TypeError, ValueError):
+                continue
+            if current != legacy_rule:
+                continue
+            # Don't clobber an existing "Needs Identification"
+            existing = self.conn.execute(
+                "SELECT 1 FROM collections WHERE workspace_id = ? AND name = ?",
+                (self._ws_id(), "Needs Identification"),
+            ).fetchone()
+            if existing:
+                continue
+            self.conn.execute(
+                "UPDATE collections SET name = ?, rules = ? WHERE id = ?",
+                (
+                    "Needs Identification",
+                    json.dumps(
+                        [{"field": "has_subject", "op": "equals", "value": 0}]
+                    ),
+                    row["id"],
+                ),
+            )
+        self.conn.commit()
 
     # ------ iNaturalist submissions ------
 
