@@ -2595,7 +2595,7 @@ function renderAllSettings(container) {
   categories.forEach(function(cat) {
     var keys = byCategory[cat];
     if (!keys || !keys.length) return;
-    parts.push('<div class="setting-category" data-category="' + escapeHtml(cat) + '" style="margin-top:14px;">');
+    parts.push('<div class="setting-category" data-category="' + escapeAttr(cat) + '" style="margin-top:14px;">');
     parts.push('<div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;border-bottom:1px solid var(--border-primary);padding-bottom:4px;">'
       + escapeHtml(cat) + '</div>');
     keys.forEach(function(key) {
@@ -2673,8 +2673,8 @@ function renderSettingRow(key) {
     var resetTitle = workspaceTab
       ? 'Remove workspace override (inherit global / default)'
       : 'Reset to default: ' + formatSettingValue(defaultVal, spec, true);
-    resetBtn = '<button type="button" onclick="resetSchemaSetting(\'' + escapeHtml(key) + '\')" '
-             +    'title="' + escapeHtml(resetTitle) + '" '
+    resetBtn = '<button type="button" onclick="resetSchemaSetting(\'' + escapeAttr(key) + '\')" '
+             +    'title="' + escapeAttr(resetTitle) + '" '
              +    'style="background:transparent;border:1px solid var(--border-secondary);color:var(--text-dim);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;flex-shrink:0;">'
              +  'Reset</button>';
   }
@@ -2688,9 +2688,9 @@ function renderSettingRow(key) {
     meta += ' · default: ' + escapeHtml(formatSettingValue(defaultVal, spec, true));
   }
   var search = (key + ' ' + spec.label + ' ' + spec.desc + ' ' + spec.category).toLowerCase();
-  return '<div class="setting-row-card" data-search="' + escapeHtml(search) + '" data-key="' + escapeHtml(key) + '" '
+  return '<div class="setting-row-card" data-search="' + escapeAttr(search) + '" data-key="' + escapeAttr(key) + '" '
        +    'style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border-primary);">'
-       +   '<span class="provenance-dot ' + dotClass + '" title="' + escapeHtml(dotTitle) + '"></span>'
+       +   '<span class="provenance-dot ' + dotClass + '" title="' + escapeAttr(dotTitle) + '"></span>'
        +   '<div style="flex:1;min-width:0;">'
        +     '<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;">'
        +       '<div style="font-size:13px;color:var(--text-primary);font-weight:500;flex:1;min-width:140px;">' + escapeHtml(spec.label) + '</div>'
@@ -2710,7 +2710,7 @@ function renderSettingRow(key) {
 
 function renderSettingWidget(key, spec, effective) {
   var inputStyle = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:12px;';
-  var keyAttr = 'data-input-key="' + escapeHtml(key) + '"';
+  var keyAttr = 'data-input-key="' + escapeAttr(key) + '"';
   if (spec.type === 'bool') {
     return '<input type="checkbox" ' + keyAttr + ' '
          +     (effective ? 'checked ' : '')
@@ -2721,7 +2721,7 @@ function renderSettingWidget(key, spec, effective) {
     var opts = (spec.enum || []).map(function(opt) {
       var label = (spec.enum_labels && spec.enum_labels[opt]) ? spec.enum_labels[opt] : opt;
       var sel = (opt === effective) ? ' selected' : '';
-      return '<option value="' + escapeHtml(opt) + '"' + sel + '>' + escapeHtml(label) + '</option>';
+      return '<option value="' + escapeAttr(opt) + '"' + sel + '>' + escapeHtml(label) + '</option>';
     }).join('');
     return '<select ' + keyAttr + ' onchange="onSchemaInputChange(this, true)" '
          +    'style="' + inputStyle + 'min-width:120px;">'
@@ -2732,7 +2732,7 @@ function renderSettingWidget(key, spec, effective) {
     var min = spec.min != null ? ' min="' + spec.min + '"' : '';
     var max = spec.max != null ? ' max="' + spec.max + '"' : '';
     var val = (effective != null) ? effective : '';
-    return '<input type="number" ' + keyAttr + ' value="' + escapeHtml(String(val)) + '" '
+    return '<input type="number" ' + keyAttr + ' value="' + escapeAttr(String(val)) + '" '
          +     'step="' + step + '"' + min + max + ' '
          +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
      +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
@@ -2740,7 +2740,7 @@ function renderSettingWidget(key, spec, effective) {
   }
   if (spec.type === 'secret') {
     var sval = (effective != null) ? String(effective) : '';
-    return '<input type="password" ' + keyAttr + ' value="' + escapeHtml(sval) + '" '
+    return '<input type="password" ' + keyAttr + ' value="' + escapeAttr(sval) + '" '
          +     'placeholder="(unset)" autocomplete="off" '
          +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
      +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
@@ -2752,8 +2752,8 @@ function renderSettingWidget(key, spec, effective) {
       var checks = spec.items_enum.map(function(item) {
         var checked = current.indexOf(item) !== -1 ? ' checked' : '';
         return '<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text-secondary);cursor:pointer;">'
-             +   '<input type="checkbox" data-list-item="' + escapeHtml(item) + '" data-list-key="' + escapeHtml(key) + '"' + checked
-             +     ' onchange="onSchemaListChange(\'' + escapeHtml(key) + '\')" style="accent-color:var(--accent);">'
+             +   '<input type="checkbox" data-list-item="' + escapeAttr(item) + '" data-list-key="' + escapeAttr(key) + '"' + checked
+             +     ' onchange="onSchemaListChange(\'' + escapeAttr(key) + '\')" style="accent-color:var(--accent);">'
              +   escapeHtml(item)
              + '</label>';
       }).join(' ');
@@ -2761,14 +2761,14 @@ function renderSettingWidget(key, spec, effective) {
     }
     // Read-only fallback for list_string without items_enum (e.g. scan_roots).
     var asText = (Array.isArray(effective) && effective.length) ? effective.join(', ') : '(empty)';
-    return '<span style="font-size:12px;color:var(--text-secondary);font-family:monospace;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;" title="' + escapeHtml(asText) + '">'
+    return '<span style="font-size:12px;color:var(--text-secondary);font-family:monospace;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;" title="' + escapeAttr(asText) + '">'
          +   escapeHtml(asText)
          + '</span>'
          + '<span style="font-size:10px;color:var(--text-ghost);margin-left:6px;">(edit above)</span>';
   }
   // string / path / fallback
   var tval = (effective != null) ? String(effective) : '';
-  return '<input type="text" ' + keyAttr + ' value="' + escapeHtml(tval) + '" '
+  return '<input type="text" ' + keyAttr + ' value="' + escapeAttr(tval) + '" '
        +     'placeholder="(empty)" '
        +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
      +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
