@@ -70,7 +70,8 @@ class JobRunner:
         except Exception:
             db.conn.execute("ALTER TABLE job_history ADD COLUMN summary TEXT DEFAULT ''")
 
-    def start(self, job_type, work_fn, config=None, workspace_id=None):
+    def start(self, job_type, work_fn, config=None, workspace_id=None,
+              ephemeral=False):
         """Start a background job.
 
         Args:
@@ -79,6 +80,12 @@ class JobRunner:
                      job['progress'] and return a result dict.
             config: optional dict of job configuration (persisted to history)
             workspace_id: optional workspace id to associate with this job
+            ephemeral: if True, the job runs and streams events normally but
+                       is never written to ``job_history``. Use for transient
+                       background work surfaced to the user for transparency
+                       (e.g. the new-images filesystem walk) — it is fine to
+                       lose the record on process restart and we don't want
+                       it to clutter the history list.
 
         Returns:
             job_id string
@@ -98,6 +105,7 @@ class JobRunner:
             "config": config or {},
             "workspace_id": workspace_id,
             "steps": [],
+            "ephemeral": ephemeral,
         }
 
         with self._lock:
@@ -183,7 +191,7 @@ class JobRunner:
                     "errors": job["errors"],
                 },
             )
-            if self._db_path:
+            if self._db_path and not job.get("ephemeral"):
                 self._persist_job(job, elapsed)
 
     def _persist_job(self, job, duration):

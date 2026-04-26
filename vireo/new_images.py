@@ -67,11 +67,20 @@ def mapped_roots(db, workspace_id):
     ]
 
 
-def count_new_images_for_workspace(db, workspace_id, sample_limit=5):
+def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
+                                   progress_callback=None,
+                                   progress_every=250):
     """Return {'new_count': int, 'per_root': [...], 'sample': [abs_path, ...]}.
 
     Walks each mapped root recursively, collects image files, and diffs against
     the set of photo paths already ingested into the workspace.
+
+    ``progress_callback``, if given, is invoked as
+    ``progress_callback(files_checked, new_found)`` once every
+    ``progress_every`` files traversed (counting all candidate filenames,
+    including ones we skip), and once at the end with the final totals.
+    Callers use this to surface live progress for transparency without
+    needing to refactor the walk.
     """
     known = _known_paths_for_workspace(db, workspace_id)
     roots = mapped_roots(db, workspace_id)
@@ -79,6 +88,17 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5):
     per_root = []
     sample = []
     total = 0
+    files_checked = 0
+    last_emitted = 0
+
+    def _maybe_emit():
+        nonlocal last_emitted
+        if progress_callback is None:
+            return
+        if files_checked - last_emitted >= progress_every:
+            progress_callback(files_checked, total)
+            last_emitted = files_checked
+
     for root in roots:
         root_path = root["path"]
         if not os.path.isdir(root_path):
@@ -88,24 +108,32 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5):
         root_new = 0
         for dirpath, _dirnames, filenames in os.walk(root_path):
             for name in filenames:
+                files_checked += 1
                 # Mirror ``vireo/scanner.py``: skip dotfiles (e.g. macOS
                 # AppleDouble sidecars ``._IMG_0001.JPG``) so we don't count
                 # files the scanner will never ingest, which would otherwise
                 # produce a stuck "new images" banner.
                 if name.startswith("."):
+                    _maybe_emit()
                     continue
                 ext = Path(name).suffix.lower()
                 if ext not in SUPPORTED_EXTENSIONS:
+                    _maybe_emit()
                     continue
                 full = os.path.join(dirpath, name)
                 if full in known:
+                    _maybe_emit()
                     continue
                 root_new += 1
+                total += 1
                 if sample_limit is None or len(sample) < sample_limit:
                     sample.append(full)
+                _maybe_emit()
 
-        total += root_new
         per_root.append({"folder_id": root["id"], "path": root_path, "new_count": root_new})
+
+    if progress_callback is not None:
+        progress_callback(files_checked, total)
 
     return {"new_count": total, "per_root": per_root, "sample": sample}
 
@@ -222,7 +250,7 @@ class NewImagesCache:
                 return None
             return err_msg
 
-    def kickoff_compute(self, db_path, workspace_id, compute_fn):
+    def kickoff_compute(self, db_path, workspace_id, compute_fn, on_spawn=None):
         """Ensure a background compute is running for ``(db_path, workspace_id)``.
 
         If a recent compute failed (within ``ERROR_BACKOFF_SECONDS``), no new
@@ -241,6 +269,19 @@ class NewImagesCache:
         (e.g. the scan path's per-folder ``invalidate_workspaces``), avoiding
         a fan-out of concurrent ``os.walk`` jobs that would thrash disk/CPU
         on large libraries.
+
+        ``on_spawn`` is an optional callable invoked exactly once if (and
+        only if) this kickoff causes a new background worker to be spawned
+        — not when an in-flight worker is reused or when the error backoff
+        short-circuits the call. It is called after the in-flight slot has
+        been claimed but before the worker thread starts, with the spawned
+        ``threading.Event`` as its only argument so the caller can block on
+        it (e.g. from a separate JobRunner thread that wants to mirror the
+        worker's lifecycle). If ``on_spawn`` returns a callable, that
+        callable is used as a ``progress_callback(files_checked, new_found)``
+        and passed to ``compute_fn`` via keyword. Use this to register a
+        transparency-only job entry that streams progress while the walk
+        runs.
 
         Returns an ``Event`` that fires when the in-flight compute finishes
         so the caller can ``Event.wait(timeout=...)`` to optionally block
@@ -281,9 +322,24 @@ class NewImagesCache:
             event = threading.Event()
             self._inflight[key] = (event, generation)
 
+        # Run on_spawn outside the cache lock so user code (e.g. JobRunner
+        # registration) cannot deadlock the cache on a contended lock.
+        progress_cb = None
+        if on_spawn is not None:
+            try:
+                progress_cb = on_spawn(event)
+            except Exception:
+                log.exception(
+                    "new-images on_spawn callback raised; continuing without it"
+                )
+                progress_cb = None
+
         def worker():
             try:
-                result = compute_fn()
+                if progress_cb is not None:
+                    result = compute_fn(progress_callback=progress_cb)
+                else:
+                    result = compute_fn()
                 self.set(db_path, workspace_id, result, generation=generation)
                 # Successful compute clears any prior failure so a transient
                 # error doesn't keep suppressing retries after recovery.

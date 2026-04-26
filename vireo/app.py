@@ -2304,12 +2304,65 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from db import Database
         from new_images import count_new_images_for_workspace
 
-        def compute():
+        def compute(progress_callback=None):
             wdb = Database(db_path)
             wdb.set_active_workspace(ws_id)
-            return count_new_images_for_workspace(wdb, ws_id)
+            return count_new_images_for_workspace(
+                wdb, ws_id, progress_callback=progress_callback,
+            )
 
-        event = cache.kickoff_compute(db_path, ws_id, compute)
+        # Surface the walk as an ephemeral job so the user can see it in the
+        # bottom panel rather than wondering why their workspace is silent.
+        # ``on_spawn`` only fires when this kickoff actually starts a new
+        # worker (cache truly cold) — cache hits and reuse of an in-flight
+        # walk skip job creation, so navbar polls don't clutter the list.
+        ws_row = db.get_workspace(ws_id)
+        ws_name = ws_row["name"] if ws_row else f"workspace #{ws_id}"
+        runner = app._job_runner
+
+        def on_spawn(spawn_event):
+            progress_state = {"checked": 0, "found": 0}
+
+            def job_work_fn(job):
+                # Mirror the cache worker's lifecycle. ``spawn_event`` fires
+                # in the worker's finally clause, so we wake when the walk
+                # ends regardless of success or failure. Final totals come
+                # from progress_state, which the cache worker populated via
+                # progress_callback.
+                spawn_event.wait()
+                return {
+                    "files_checked": progress_state["checked"],
+                    "new_count": progress_state["found"],
+                }
+
+            job_id = runner.start(
+                "new_images_walk",
+                job_work_fn,
+                ephemeral=True,
+                workspace_id=ws_id,
+                config={"workspace_name": ws_name},
+            )
+
+            def progress_callback(files_checked, new_found):
+                progress_state["checked"] = files_checked
+                progress_state["found"] = new_found
+                runner.push_event(
+                    job_id,
+                    "progress",
+                    {
+                        "current": files_checked,
+                        "total": 0,
+                        "phase": (
+                            f"{files_checked:,} checked, {new_found:,} new"
+                        ),
+                        "files_checked": files_checked,
+                        "new_count": new_found,
+                    },
+                )
+
+            return progress_callback
+
+        event = cache.kickoff_compute(db_path, ws_id, compute, on_spawn=on_spawn)
         if event.wait(timeout=0.5):
             cached = cache.get(db_path, ws_id)
             if cached is not None:
