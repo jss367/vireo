@@ -6250,3 +6250,29 @@ def test_get_folder_tree_includes_partial_folders_with_status(tmp_path):
     assert missing_id not in rows, "missing folder must not appear in tree"
     assert rows[ok_id]["status"] == "ok"
     assert rows[partial_id]["status"] == "partial"
+
+
+def test_keyword_types_constant():
+    """KEYWORD_TYPES contains exactly the five valid enum values."""
+    from db import KEYWORD_TYPES
+    assert frozenset({"taxonomy", "individual", "place", "scene", "general"}) == KEYWORD_TYPES
+
+
+def test_add_keyword_accepts_valid_types(tmp_path):
+    """add_keyword stores the requested type when it's a valid enum value."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    kid = db.add_keyword("Charlie", kw_type="individual")
+    row = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid,)).fetchone()
+    assert row["type"] == "individual"
+
+
+def test_add_keyword_rejects_unknown_type(tmp_path):
+    """add_keyword raises ValueError for unknown type values."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    with pytest.raises(ValueError, match="invalid keyword type"):
+        db.add_keyword("BadType", kw_type="alien")

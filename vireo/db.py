@@ -13,6 +13,18 @@ log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
 
+# Canonical set of keyword type values stored in keywords.type.
+# - taxonomy: a species/genus/etc. (linked to taxa via taxon_id)
+# - individual: a named person, pet, or otherwise tracked individual
+# - place: a named location ("Yosemite", "backyard")
+# - scene: a non-subject visual category ("Landscape", "Sunset")
+# - general: catch-all/free-form tag (the legacy default)
+KEYWORD_TYPES = frozenset({"taxonomy", "individual", "place", "scene", "general"})
+
+# Default set of types that count as "identifying" a photo for queue
+# membership / classifier skip purposes. Workspaces can override.
+SUBJECT_TYPES_DEFAULT = frozenset({"taxonomy", "individual", "scene"})
+
 
 def commit_with_retry(conn, max_retries=5, base_delay=0.1):
     """Commit ``conn`` with retry on transient "locked"/"busy" errors.
@@ -3135,7 +3147,7 @@ class Database:
             return name.title()
         return name
 
-    def add_keyword(self, name, parent_id=None, is_species=False, _commit=True):
+    def add_keyword(self, name, parent_id=None, is_species=False, kw_type=None, _commit=True):
         """Insert a keyword. Returns existing id if duplicate (case-insensitive).
 
         If a keyword with the same name but different casing exists, reuses
@@ -3145,9 +3157,15 @@ class Database:
         from existing keywords and applies it (unless overridden by config).
 
         Args:
+            kw_type: Optional explicit keyword type. Must be one of
+                     ``KEYWORD_TYPES`` if provided. When ``None``, the type is
+                     auto-detected (``taxonomy`` for species or names matching
+                     a known taxon, otherwise ``general``).
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
+        if kw_type is not None and kw_type not in KEYWORD_TYPES:
+            raise ValueError(f"invalid keyword type: {kw_type!r}")
         # Case-insensitive lookup
         if parent_id is None:
             existing = self.conn.execute(
@@ -3182,30 +3200,31 @@ class Database:
                 if convention:
                     name = self._apply_case_convention(name, convention)
 
-        # Auto-detect taxonomy type from taxa table
-        kw_type = 'general'
         taxon_id = None
-        if is_species:
-            kw_type = 'taxonomy'
-        else:
-            # Check if name matches a known taxon (common name or scientific name)
-            taxon = self.conn.execute(
-                """SELECT t.id FROM taxa t
-                   WHERE t.common_name = ? COLLATE NOCASE
-                      OR t.name = ? COLLATE NOCASE
-                   LIMIT 1""",
-                (name, name),
-            ).fetchone()
-            if not taxon:
-                taxon = self.conn.execute(
-                    """SELECT t.taxon_id AS id FROM taxa_common_names t
-                       WHERE t.name = ? COLLATE NOCASE
-                       LIMIT 1""",
-                    (name,),
-                ).fetchone()
-            if taxon:
+        if kw_type is None:
+            # Auto-detect taxonomy type from taxa table
+            kw_type = 'general'
+            if is_species:
                 kw_type = 'taxonomy'
-                taxon_id = taxon["id"]
+            else:
+                # Check if name matches a known taxon (common name or scientific name)
+                taxon = self.conn.execute(
+                    """SELECT t.id FROM taxa t
+                       WHERE t.common_name = ? COLLATE NOCASE
+                          OR t.name = ? COLLATE NOCASE
+                       LIMIT 1""",
+                    (name, name),
+                ).fetchone()
+                if not taxon:
+                    taxon = self.conn.execute(
+                        """SELECT t.taxon_id AS id FROM taxa_common_names t
+                           WHERE t.name = ? COLLATE NOCASE
+                           LIMIT 1""",
+                        (name,),
+                    ).fetchone()
+                if taxon:
+                    kw_type = 'taxonomy'
+                    taxon_id = taxon["id"]
 
         cur = self.conn.execute(
             "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES (?, ?, ?, ?, ?)",
