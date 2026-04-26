@@ -852,3 +852,17 @@ def test_new_workspace_gets_default_open_tabs(db):
     ).fetchone()
     assert row["open_tabs"] is not None
     assert _json.loads(row["open_tabs"]) == ["settings", "workspace", "lightroom"]
+
+
+def test_get_open_tabs_returns_default_for_new_workspace(db):
+    ws_id = db.create_workspace("WS")
+    db.set_active_workspace(ws_id)
+    assert db.get_open_tabs() == ["settings", "workspace", "lightroom"]
+
+
+def test_get_open_tabs_returns_empty_list_when_null(db):
+    ws_id = db.create_workspace("WS2")
+    db.conn.execute("UPDATE workspaces SET open_tabs = NULL WHERE id = ?", (ws_id,))
+    db.conn.commit()
+    db.set_active_workspace(ws_id)
+    assert db.get_open_tabs() == []

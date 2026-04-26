@@ -637,6 +637,17 @@ class Database:
         except (json.JSONDecodeError, TypeError):
             return None
 
+    def get_open_tabs(self):
+        """Return the active workspace's list of open tab nav-ids in display order."""
+        ws = self.get_workspace(self._ws_id())
+        if not ws or not ws["open_tabs"]:
+            return []
+        try:
+            value = json.loads(ws["open_tabs"]) if isinstance(ws["open_tabs"], str) else ws["open_tabs"]
+            return value if isinstance(value, list) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
     def set_workspace_active_labels(self, labels_files):
         """Store active_labels in the workspace's config_overrides."""
         ws = self.get_workspace(self._ws_id())
