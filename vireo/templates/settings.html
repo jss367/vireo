@@ -2921,7 +2921,8 @@ async function importSettingsFile(file) {
     alert('Could not read file: ' + (err && err.message || err));
     return;
   }
-  // Cancel any queued debounced autosaves first — a PATCH that fires
+  // Cancel any queued debounced autosaves first — a PATCH or a curated
+  // /api/config / /api/workspaces/active/config snapshot save that fires
   // mid-import would clobber part of the just-restored config.
   Object.keys(ALL_SETTINGS_DEBOUNCE).forEach(function(token) {
     if (ALL_SETTINGS_DEBOUNCE[token]) {
@@ -2929,6 +2930,14 @@ async function importSettingsFile(file) {
       ALL_SETTINGS_DEBOUNCE[token] = null;
     }
   });
+  if (typeof _saveTimer !== 'undefined' && _saveTimer) {
+    clearTimeout(_saveTimer);
+    _saveTimer = null;
+  }
+  if (typeof _wsSaveTimer !== 'undefined' && _wsSaveTimer) {
+    clearTimeout(_wsSaveTimer);
+    _wsSaveTimer = null;
+  }
   try {
     var resp = await fetch('/api/settings/import', {
       method: 'POST',
