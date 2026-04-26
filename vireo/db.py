@@ -3452,13 +3452,62 @@ class Database:
     VALID_KEYWORD_TYPES = ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event')
 
     def update_keyword(self, keyword_id, **kwargs):
-        """Update keyword fields. Supports: type, taxon_id, latitude, longitude, name."""
+        """Update keyword fields. Supports: type, taxon_id, latitude, longitude, name.
+
+        On a name change, re-runs the same taxonomy auto-detection that
+        add_keyword does on insert: if the keyword's current type is
+        'general' and the new name matches a taxon, it's promoted to
+        type='taxonomy' with the matching taxon_id. If the current type is
+        already 'taxonomy' and the new name matches a different taxon,
+        taxon_id is updated. Manually-set non-'general' types (e.g.
+        'location', 'people') are preserved. Explicit type/taxon_id
+        kwargs always win over auto-detection.
+        """
         if 'type' in kwargs and kwargs['type'] not in self.VALID_KEYWORD_TYPES:
             raise ValueError(f"Invalid keyword type: {kwargs['type']}")
         allowed = {'type', 'taxon_id', 'latitude', 'longitude', 'name'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return
+
+        # Auto-retype on rename: same logic as add_keyword.
+        if 'name' in updates:
+            new_name = updates['name']
+            current = self.conn.execute(
+                "SELECT type, taxon_id FROM keywords WHERE id = ?",
+                (keyword_id,),
+            ).fetchone()
+            if current is not None:
+                cur_type = current["type"]
+                taxon = self.conn.execute(
+                    """SELECT t.id FROM taxa t
+                       WHERE t.common_name = ? COLLATE NOCASE
+                          OR t.name = ? COLLATE NOCASE
+                       LIMIT 1""",
+                    (new_name, new_name),
+                ).fetchone()
+                if not taxon:
+                    taxon = self.conn.execute(
+                        """SELECT t.taxon_id AS id FROM taxa_common_names t
+                           WHERE t.name = ? COLLATE NOCASE
+                           LIMIT 1""",
+                        (new_name,),
+                    ).fetchone()
+
+                if cur_type == 'general':
+                    # Only promote to taxonomy if a match exists; otherwise
+                    # leave type/taxon_id alone.
+                    if taxon:
+                        updates.setdefault('type', 'taxonomy')
+                        updates.setdefault('taxon_id', taxon["id"])
+                elif cur_type == 'taxonomy' and taxon:
+                    # Already taxonomy: refresh taxon_id only if the new
+                    # name matches a (possibly different) taxon. If no
+                    # match, leave the existing link in place.
+                    updates.setdefault('taxon_id', taxon["id"])
+                # Other manual types ('location', 'people', etc.) are
+                # preserved — user intent wins.
+
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [keyword_id]
         self.conn.execute(f"UPDATE keywords SET {set_clause} WHERE id = ?", values)

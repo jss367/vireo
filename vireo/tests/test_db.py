@@ -6250,3 +6250,220 @@ def test_get_folder_tree_includes_partial_folders_with_status(tmp_path):
     assert missing_id not in rows, "missing folder must not appear in tree"
     assert rows[ok_id]["status"] == "ok"
     assert rows[partial_id]["status"] == "partial"
+
+
+# -- update_keyword: rename re-runs taxonomy auto-detection --
+#
+# Regression tests for: when a keyword name is changed (e.g. fixing a typo
+# like "Lesser scaub" -> "Lesser Scaup"), the same auto-detection logic
+# that add_keyword uses on insert must re-fire so the keyword gets
+# re-typed as 'taxonomy' with a linked taxon_id. Manual user overrides
+# (any non-'general' type, or explicit type/taxon_id kwargs) win over
+# auto-detection.
+
+
+def _seed_taxa(db, rows):
+    """Insert minimal taxa rows for keyword auto-detect tests.
+
+    rows: list of (inat_id, scientific_name, common_name) tuples.
+    Returns dict mapping common_name -> taxa.id (local PK).
+    """
+    out = {}
+    for inat_id, sci, common in rows:
+        cur = db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+            "VALUES (?, ?, ?, 'species', 'Animalia')",
+            (inat_id, sci, common),
+        )
+        out[common] = cur.lastrowid
+    db.conn.commit()
+    return out
+
+
+def test_update_keyword_rename_general_to_matching_taxon_auto_retypes(tmp_path):
+    """Renaming a 'general' keyword to a name matching a taxon retypes it
+    as 'taxonomy' and links taxon_id. This is the typo-fix path."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
+
+    # User adds a typo'd keyword that does NOT match any taxon.
+    kid = db.add_keyword("Lesser scaub")
+    pre = db.conn.execute(
+        "SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert pre["type"] == "general"
+    assert pre["taxon_id"] is None
+
+    # User fixes the typo via update_keyword.
+    db.update_keyword(kid, name="Lesser Scaup")
+
+    row = db.conn.execute(
+        "SELECT name, type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Lesser Scaup"
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] == taxa["Lesser Scaup"]
+
+
+def test_update_keyword_rename_general_no_match_stays_general(tmp_path):
+    """Renaming a 'general' keyword to a name with no taxon match leaves
+    it as 'general' with NULL taxon_id."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
+
+    kid = db.add_keyword("Misc thing")
+    db.update_keyword(kid, name="Still misc")
+
+    row = db.conn.execute(
+        "SELECT name, type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Still misc"
+    assert row["type"] == "general"
+    assert row["taxon_id"] is None
+
+
+def test_update_keyword_rename_taxonomy_to_different_taxon_updates_taxon_id(tmp_path):
+    """Renaming a keyword that's already 'taxonomy' to a name matching a
+    DIFFERENT taxon updates taxon_id and keeps type='taxonomy'."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (7000, "Aythya affinis", "Lesser Scaup"),
+        (7001, "Aythya marila", "Greater Scaup"),
+    ])
+
+    kid = db.add_keyword("Lesser Scaup")
+    pre = db.conn.execute(
+        "SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert pre["type"] == "taxonomy"
+    assert pre["taxon_id"] == taxa["Lesser Scaup"]
+
+    db.update_keyword(kid, name="Greater Scaup")
+
+    row = db.conn.execute(
+        "SELECT name, type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Greater Scaup"
+    assert row["type"] == "taxonomy"
+    # Documented behavior: when the new name matches a different taxon,
+    # taxon_id is updated to point at the new match.
+    assert row["taxon_id"] == taxa["Greater Scaup"]
+
+
+def test_update_keyword_rename_taxonomy_to_unknown_name_keeps_taxon_id(tmp_path):
+    """Renaming a 'taxonomy' keyword to a name with no taxon match keeps
+    type='taxonomy' and leaves taxon_id as-is (don't drop the link)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
+
+    kid = db.add_keyword("Lesser Scaup")
+    pre_taxon_id = taxa["Lesser Scaup"]
+    assert db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()["taxon_id"] == pre_taxon_id
+
+    db.update_keyword(kid, name="Some custom name")
+
+    row = db.conn.execute(
+        "SELECT name, type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Some custom name"
+    # type is preserved (not 'general'), taxon_id is preserved.
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] == pre_taxon_id
+
+
+def test_update_keyword_rename_location_keyword_preserves_type_and_taxon_id(tmp_path):
+    """User intent wins: a manually-typed 'location' keyword that's
+    renamed to a string matching a taxon must NOT be re-classified as
+    'taxonomy'. type and taxon_id stay intact."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
+
+    # Add a general keyword, then user marks it as 'location'.
+    kid = db.add_keyword("Backyard")
+    db.update_keyword(kid, type="location")
+    pre = db.conn.execute(
+        "SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert pre["type"] == "location"
+    assert pre["taxon_id"] is None
+
+    # User renames it to a name that happens to match a taxon.
+    db.update_keyword(kid, name="Lesser Scaup")
+
+    row = db.conn.execute(
+        "SELECT name, type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Lesser Scaup"
+    assert row["type"] == "location", "manual 'location' must not be auto-overridden"
+    assert row["taxon_id"] is None
+
+
+def test_update_keyword_no_name_change_does_not_touch_type(tmp_path):
+    """Updates that don't include 'name' don't trigger auto-detect logic
+    and behave like the pre-fix update_keyword."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
+
+    kid = db.add_keyword("Backyard")
+    # Just change type — name stays 'Backyard'.
+    db.update_keyword(kid, type="location")
+    row = db.conn.execute(
+        "SELECT name, type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Backyard"
+    assert row["type"] == "location"
+    assert row["taxon_id"] is None
+
+
+def test_update_keyword_explicit_type_and_taxon_id_kwargs_win(tmp_path):
+    """Caller-supplied type and taxon_id win over auto-detection. Used by
+    the bulk-type-apply UI path."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (7000, "Aythya affinis", "Lesser Scaup"),
+        (7001, "Aythya marila", "Greater Scaup"),
+    ])
+
+    kid = db.add_keyword("Misc")  # general, no taxon
+    # Caller renames AND explicitly sets type+taxon_id to a different taxon.
+    # Auto-detect would pick "Lesser Scaup" -> taxa["Lesser Scaup"], but
+    # the explicit kwargs must override.
+    db.update_keyword(
+        kid,
+        name="Lesser Scaup",
+        type="taxonomy",
+        taxon_id=taxa["Greater Scaup"],
+    )
+    row = db.conn.execute(
+        "SELECT name, type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Lesser Scaup"
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] == taxa["Greater Scaup"]
+
+
+def test_update_keyword_rename_with_empty_taxa_table_no_op(tmp_path):
+    """If the taxa table is empty (user hasn't downloaded taxonomy yet),
+    rename succeeds without error and without auto-reclassification."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # No _seed_taxa call — taxa table is empty.
+
+    kid = db.add_keyword("Lesser scaub")
+    db.update_keyword(kid, name="Lesser Scaup")
+
+    row = db.conn.execute(
+        "SELECT name, type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Lesser Scaup"
+    assert row["type"] == "general"
+    assert row["taxon_id"] is None
