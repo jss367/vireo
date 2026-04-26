@@ -6250,3 +6250,31 @@ def test_get_folder_tree_includes_partial_folders_with_status(tmp_path):
     assert missing_id not in rows, "missing folder must not appear in tree"
     assert rows[ok_id]["status"] == "ok"
     assert rows[partial_id]["status"] == "partial"
+
+
+def test_keywords_has_place_id_column_and_unique_index(db):
+    import sqlite3
+
+    import pytest
+
+    cols = {row[1] for row in db.conn.execute("PRAGMA table_info(keywords)").fetchall()}
+    assert "place_id" in cols
+
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, place_id) VALUES (?, ?, ?)",
+        ("Central Park", "location", "ChIJ_test_1"),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db.conn.execute(
+            "INSERT INTO keywords (name, type, place_id) VALUES (?, ?, ?)",
+            ("Different Name", "location", "ChIJ_test_1"),
+        )
+
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, place_id) VALUES (?, ?, NULL)",
+        ("free text 1", "location"),
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, place_id) VALUES (?, ?, NULL)",
+        ("free text 2", "location"),
+    )

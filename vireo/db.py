@@ -433,6 +433,15 @@ class Database:
                 ON pending_changes(workspace_id);
         """
         )
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(keywords)")
+        kw_cols = {row[1] for row in cur.fetchall()}
+        if "place_id" not in kw_cols:
+            cur.execute("ALTER TABLE keywords ADD COLUMN place_id TEXT")
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_keywords_place_id "
+            "ON keywords(place_id) WHERE place_id IS NOT NULL"
+        )
         # Phase 1 storage-philosophy migration: classifier embeddings move
         # from single-slot photos.(embedding, embedding_model) columns into
         # the per-(photo, model, variant) photo_embeddings table. Rows whose
