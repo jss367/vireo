@@ -1549,6 +1549,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return ""
         return " · ".join(parts)
 
+    def _walk_parent_chain(db, leaf_parent_id):
+        """Walk ``parent_id`` upward from ``leaf_parent_id`` to the root.
+
+        Returns a list of ``{"id": int, "name": str}`` dicts in broadest →
+        narrowest order, EXCLUDING the leaf itself. Pass the leaf's
+        ``parent_id`` (i.e. the *first* parent), not the leaf's own id.
+
+        Depth cap of 10 — chains are bounded ~5 in practice, but guard
+        against pathological/malformed cycles (link_keyword_to_place
+        already prevents creating cycles, but a corrupted DB could).
+        """
+        parents = []
+        current_parent_id = leaf_parent_id
+        for _ in range(10):
+            if current_parent_id is None:
+                break
+            row = db.conn.execute(
+                "SELECT id, name, parent_id FROM keywords WHERE id = ?",
+                (current_parent_id,),
+            ).fetchone()
+            if row is None:
+                break
+            parents.append({"id": row["id"], "name": row["name"]})
+            current_parent_id = row["parent_id"]
+        # Reverse so broadest (e.g. country) comes first, narrowest last.
+        parents.reverse()
+        return parents
+
     def _serialize_photo_location(db, photo_id):
         """Return a summary dict for the photo's current location keyword.
 
@@ -1564,8 +1592,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             }
 
         Returns ``None`` if the photo has no ``type='location'`` keyword link.
-        Walks ``parent_id`` upward via repeated SELECTs — fine for v1 since the
-        chain is bounded (~5 deep).
         """
         leaf = db.conn.execute(
             "SELECT k.id, k.name, k.place_id, k.latitude, k.longitude, k.parent_id "
@@ -1578,32 +1604,39 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if leaf is None:
             return None
 
-        parents = []
-        current_parent_id = leaf["parent_id"]
-        # Depth cap of 10 — chains are bounded ~5 in practice, but guard
-        # against pathological/malformed cycles (link_keyword_to_place
-        # already prevents creating cycles, but a corrupted DB could).
-        for _ in range(10):
-            if current_parent_id is None:
-                break
-            row = db.conn.execute(
-                "SELECT id, name, parent_id FROM keywords WHERE id = ?",
-                (current_parent_id,),
-            ).fetchone()
-            if row is None:
-                break
-            parents.append({"id": row["id"], "name": row["name"]})
-            current_parent_id = row["parent_id"]
-        # Reverse so broadest (e.g. country) comes first, narrowest last.
-        parents.reverse()
-
         return {
             "keyword_id": leaf["id"],
             "name": leaf["name"],
             "place_id": leaf["place_id"],
             "latitude": leaf["latitude"],
             "longitude": leaf["longitude"],
-            "parent_chain": parents,
+            "parent_chain": _walk_parent_chain(db, leaf["parent_id"]),
+        }
+
+    def _serialize_keyword(db, keyword_id):
+        """Return a summary dict for a single ``type='location'`` keyword row.
+
+        Same shape as :func:`_serialize_photo_location` (leaf fields + a
+        broadest-first parent chain), but keyed on the keyword id directly
+        rather than via a photo. Used by the ``link-place`` route, which
+        operates on a keyword and isn't tied to a photo.
+
+        Returns ``None`` if the keyword does not exist.
+        """
+        leaf = db.conn.execute(
+            "SELECT id, name, place_id, latitude, longitude, parent_id "
+            "FROM keywords WHERE id = ?",
+            (keyword_id,),
+        ).fetchone()
+        if leaf is None:
+            return None
+        return {
+            "keyword_id": leaf["id"],
+            "name": leaf["name"],
+            "place_id": leaf["place_id"],
+            "latitude": leaf["latitude"],
+            "longitude": leaf["longitude"],
+            "parent_chain": _walk_parent_chain(db, leaf["parent_id"]),
         }
 
     # Location keywords don't propagate to dc:subject sidecars — structured XMP (exif:GPS*, Iptc4xmpCore:Location) is a future feature.
@@ -1740,6 +1773,83 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return jsonify({
             "place_id": cache_place_id,
             "summary": _summarize_details(details),
+        })
+
+    @app.route("/api/keywords/<int:keyword_id>/link-place", methods=["POST"])
+    def api_link_keyword_to_place(keyword_id):
+        """Attach Google place data to an existing keyword.
+
+        Body: ``{"place_id": "ChIJ..."}``. Looks up the place via
+        :func:`places.place_details` and delegates to
+        :meth:`Database.link_keyword_to_place`, which UPDATEs the target row
+        in-place — or, if another keyword already owns this ``place_id``,
+        re-points the target's ``photo_keywords`` rows onto the canonical row
+        and deletes the now-empty target.
+
+        Response: ``{"keyword": <serialized leaf+chain>, "merged": <bool>}``.
+        ``merged`` is True when an existing place-bearing row absorbed the
+        target.
+
+        Error modes:
+        - 400 ``missing place_id`` — empty body.
+        - 400 ``no_api_key`` — config has no ``google_maps_api_key``.
+        - 404 ``place_not_found`` — Google had no record of ``place_id``.
+        - 404 ``keyword_not_found`` — ``keyword_id`` doesn't exist.
+        - 409 ``name_conflict`` — the parent chain would clash with an
+          existing keyword of a different ``type`` at the same
+          ``(name, parent_id)``. Carries an ``error_detail`` string from the
+          underlying RuntimeError for debugging.
+        """
+        body = request.get_json(silent=True) or {}
+        place_id = (body.get("place_id") or "").strip()
+        if not place_id:
+            return json_error("missing place_id", 400)
+
+        import config as cfg
+        key = cfg.load().get("google_maps_api_key", "")
+        if not key:
+            return json_error("no_api_key", 400)
+
+        details = places.place_details(place_id, key)
+        if details is None:
+            return json_error("place_not_found", 404)
+
+        db = _get_db()
+        try:
+            result = db.link_keyword_to_place(keyword_id, details)
+        except ValueError:
+            # Database raises ValueError when the keyword id doesn't exist.
+            return json_error("keyword_not_found", 404)
+        except RuntimeError as err:
+            # _upsert_one_keyword raises RuntimeError when the parent-chain
+            # build hits an existing keyword of a different type at the same
+            # (name, parent_id). Surface the message for debugging.
+            return jsonify({
+                "error": "name_conflict",
+                "error_detail": str(err),
+            }), 409
+
+        # Audit log: this action isn't tied to a single photo (it operates on
+        # a keyword), so we omit the per-photo items list. ``photo_id`` in
+        # ``edit_history_items`` is FK-constrained to ``photos.id``, so a
+        # placeholder like 0 would IntegrityError. The ``new_value`` column on
+        # the parent ``edit_history`` row carries the canonical keyword id;
+        # the ``description`` carries the place name and the source-id pair.
+        db.record_edit(
+            'location_link',
+            (
+                f"linked keyword {keyword_id} to place: "
+                f"{details.get('name', 'unknown')} "
+                f"(canonical keyword_id={result['keyword_id']}, "
+                f"merged={result['merged']})"
+            ),
+            str(result['keyword_id']),
+            [],
+        )
+
+        return jsonify({
+            "keyword": _serialize_keyword(db, result["keyword_id"]),
+            "merged": result["merged"],
         })
 
     # -- Batch operations --

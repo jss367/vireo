@@ -2105,3 +2105,255 @@ def test_reverse_geocode_400_on_invalid_coords(app_and_db):
     r2 = client.get("/api/places/reverse-geocode?lat=foo&lng=1.0")
     assert r2.status_code == 400
     assert r2.get_json()["error"] == "invalid coords"
+
+
+# --- POST /api/keywords/<id>/link-place -------------------------------------
+#
+# Attach Google place data to an existing free-text location keyword. Builds
+# the parent chain server-side and either UPDATEs the target row or merges it
+# into a pre-existing canonical place_id-bearing row. ``places.place_details``
+# is monkeypatched so no HTTP traffic happens.
+
+def test_post_keyword_link_place_attaches_metadata(app_and_db, monkeypatch):
+    """Successful link: target keyword gains place_id + coords + parent chain."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    # Pre-create a free-text "Central Park" keyword and tag a photo with it.
+    kw_id = db.get_or_create_text_location("Central Park")
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+    db.set_photo_location(pid, kw_id)
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+
+    assert data["merged"] is False
+    kw = data["keyword"]
+    assert kw["keyword_id"] == kw_id  # canonical row is the original
+    assert kw["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+    assert kw["latitude"] == 40.7828
+    assert kw["longitude"] == -73.9654
+    assert kw["name"] == "Central Park"
+    # Parent chain: broadest -> narrowest, EXCLUDES leaf.
+    assert [p["name"] for p in kw["parent_chain"]] == [
+        "United States", "New York", "New York County", "New York",
+    ]
+
+    # DB-level: original keyword row now has place_id + coords.
+    row = db.conn.execute(
+        "SELECT name, place_id, latitude, longitude FROM keywords WHERE id = ?",
+        (kw_id,),
+    ).fetchone()
+    assert row["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+    assert row["latitude"] == 40.7828
+    assert row["longitude"] == -73.9654
+
+    # Photo is still tagged with the same row.
+    rows = db.conn.execute(
+        "SELECT k.id FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == kw_id
+
+
+def test_post_keyword_link_place_merges_when_place_id_already_taken(
+    app_and_db, monkeypatch,
+):
+    """Second link to the same Google place merges into the canonical row."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    # Distinct names so they're separate rows in keywords.
+    kw_a = db.get_or_create_text_location("Central Park A")
+    kw_b = db.get_or_create_text_location("Central Park B")
+
+    client = app.test_client()
+    # First link -> kw_a becomes the place_id-bearing canonical row.
+    r1 = client.post(
+        f"/api/keywords/{kw_a}/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert r1.status_code == 200, r1.get_json()
+    assert r1.get_json()["merged"] is False
+
+    # Second link to the SAME place_id -> kw_b should be absorbed by kw_a.
+    r2 = client.post(
+        f"/api/keywords/{kw_b}/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert r2.status_code == 200, r2.get_json()
+    data = r2.get_json()
+    assert data["merged"] is True
+    assert data["keyword"]["keyword_id"] == kw_a  # canonical wins
+
+    # kw_b is gone from the DB after the merge.
+    row = db.conn.execute(
+        "SELECT 1 FROM keywords WHERE id = ?", (kw_b,),
+    ).fetchone()
+    assert row is None
+
+
+def test_post_keyword_link_place_returns_404_on_missing_keyword(
+    app_and_db, monkeypatch,
+):
+    """Unknown keyword id -> 404 keyword_not_found."""
+    import config as cfg
+    import places
+    app, _ = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/keywords/999999/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "keyword_not_found"
+
+
+def test_post_keyword_link_place_returns_400_on_missing_place_id(app_and_db):
+    """Empty body / missing place_id -> 400 (never reaches Google)."""
+    app, db = app_and_db
+    kw_id = db.get_or_create_text_location("Central Park")
+
+    client = app.test_client()
+    resp = client.post(f"/api/keywords/{kw_id}/link-place", json={})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "missing place_id"
+
+
+def test_post_keyword_link_place_returns_400_on_empty_api_key(app_and_db):
+    """No API key configured -> 400 no_api_key."""
+    import config as cfg
+    app, db = app_and_db
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+    kw_id = db.get_or_create_text_location("Central Park")
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "no_api_key"
+
+
+def test_post_keyword_link_place_returns_404_when_google_returns_none(
+    app_and_db, monkeypatch,
+):
+    """Google returns None -> 404 place_not_found."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details", lambda place_id, key: None)
+
+    kw_id = db.get_or_create_text_location("Central Park")
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={"place_id": "ChIJ_unknown"},
+    )
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "place_not_found"
+
+
+def test_post_keyword_link_place_returns_409_on_cross_type_collision(
+    app_and_db, monkeypatch,
+):
+    """Pre-existing non-location keyword in a non-root chain slot -> 409.
+
+    SQLite's UNIQUE(name, parent_id) doesn't fire when ``parent_id`` is NULL
+    (NULL != NULL), so collisions can only occur on non-root chain levels.
+    We pre-build a ``location`` chain ``United States -> New York`` directly,
+    then plant a ``general`` ``"New York County"`` under the state. The
+    chain walk will try to INSERT a ``location`` ``"New York County"`` in
+    the same slot, hitting UNIQUE(name, parent_id) and surfacing as 409.
+    """
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    us_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES (?, 'location', NULL)",
+        ("United States",),
+    ).lastrowid
+    state_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES (?, 'location', ?)",
+        ("New York", us_id),
+    ).lastrowid
+    # Plant a 'general' "New York County" under the state — the chain walk
+    # wants a 'location' row in this exact slot.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES (?, 'general', ?)",
+        ("New York County", state_id),
+    )
+    db.conn.commit()
+
+    kw_id = db.get_or_create_text_location("Central Park")
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 409, resp.get_json()
+    body = resp.get_json()
+    assert body["error"] == "name_conflict"
+    # The exception detail should mention the offending name for debugging.
+    assert "New York County" in body.get("error_detail", "")
+
+
+def test_post_keyword_link_place_records_edit(app_and_db, monkeypatch):
+    """Successful link adds an audit-log entry under action_type='location_link'."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    kw_id = db.get_or_create_text_location("Central Park")
+
+    pre_history = db.get_edit_history()
+    pre_count = len(pre_history)
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+
+    post_history = db.get_edit_history()
+    assert len(post_history) == pre_count + 1
+    entry = post_history[0]
+    assert entry["action_type"] == "location_link"
+    assert "Central Park" in entry["description"]
