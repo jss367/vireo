@@ -1573,21 +1573,19 @@ function sendReport() {
   // Reorder nav links from workspace config
   function reorderNavLinks(order) {
     var navbar = document.querySelector('.navbar');
-    var spacer = navbar.querySelector('.nav-spacer');
+    var divider = navbar.querySelector('.nav-tab-divider') || navbar.querySelector('.nav-spacer');
     var links = {};
-    navbar.querySelectorAll('a[data-nav-id]').forEach(function(a) {
+    navbar.querySelectorAll('a[data-nav-id]:not([data-tab])').forEach(function(a) {
       links[a.dataset.navId] = a;
     });
-    // Move ordered links before the spacer
     order.forEach(function(id) {
       if (links[id]) {
-        navbar.insertBefore(links[id], spacer);
+        navbar.insertBefore(links[id], divider);
         delete links[id];
       }
     });
-    // Append any remaining links not in the saved order (new pages)
     Object.keys(links).forEach(function(id) {
-      navbar.insertBefore(links[id], spacer);
+      navbar.insertBefore(links[id], divider);
     });
   }
 
@@ -1607,7 +1605,8 @@ function sendReport() {
     var indicator = null;
 
     function getNavLinks() {
-      return Array.from(navbar.querySelectorAll('a[data-nav-id]'));
+      // Linger pages only — exclude openable tabs (which are governed by open_tabs).
+      return Array.from(navbar.querySelectorAll('a[data-nav-id]:not([data-tab])'));
     }
 
     function createIndicator() {
