@@ -6299,11 +6299,43 @@ def test_update_keyword_rename_general_to_matching_taxon_auto_retypes(tmp_path):
     db.update_keyword(kid, name="Lesser Scaup")
 
     row = db.conn.execute(
-        "SELECT name, type, taxon_id FROM keywords WHERE id = ?", (kid,)
+        "SELECT name, type, taxon_id, is_species FROM keywords WHERE id = ?",
+        (kid,),
     ).fetchone()
     assert row["name"] == "Lesser Scaup"
     assert row["type"] == "taxonomy"
     assert row["taxon_id"] == taxa["Lesser Scaup"]
+    # Mirror add_keyword's invariant: an auto-promoted taxonomy keyword
+    # backed by a matched taxon must have is_species=1, otherwise
+    # species-only queries (filtering on is_species=1) would silently
+    # exclude it.
+    assert row["is_species"] == 1
+
+
+def test_update_keyword_rename_general_to_matching_taxon_visible_to_species_query(tmp_path):
+    """After auto-promoting a renamed 'general' keyword to 'taxonomy',
+    species-only queries (which filter on is_species=1) must include it.
+    Regression for the case where update_keyword set type/taxon_id but
+    forgot to flip is_species, leaving auto-promoted keywords invisible
+    to get_species_keywords_for_photos."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
+
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    kid = db.add_keyword("Lesser scaub")  # typo, no taxon match
+    db.tag_photo(pid, kid)
+
+    # Before rename: general keyword, species query returns nothing.
+    assert db.get_species_keywords_for_photos([pid]) == {}
+
+    db.update_keyword(kid, name="Lesser Scaup")
+
+    # After rename: auto-promoted to taxonomy + is_species=1, so the
+    # species query now includes it.
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Lesser Scaup"]}
 
 
 def test_update_keyword_rename_general_no_match_stays_general(tmp_path):

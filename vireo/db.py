@@ -3500,6 +3500,13 @@ class Database:
                     if taxon:
                         updates.setdefault('type', 'taxonomy')
                         updates.setdefault('taxon_id', taxon["id"])
+                        # Mirror add_keyword's invariant: a taxonomy
+                        # keyword backed by a matched taxon is is_species=1,
+                        # so species-only queries (filtering on
+                        # is_species=1, e.g. get_species_keywords_for_photos)
+                        # include the auto-promoted keyword.
+                        if updates.get('type') == 'taxonomy':
+                            updates['is_species'] = 1
                 elif cur_type == 'taxonomy' and taxon:
                     # Already taxonomy: refresh taxon_id only if the new
                     # name matches a (possibly different) taxon. If no
