@@ -1888,7 +1888,7 @@ def test_classify_job_skips_photos_with_subject_keywords(tmp_path):
     ]
     assert progress_events, "Expected a progress event with skipped_subject"
     assert progress_events[0]["skipped_subject"] == 1
-    assert progress_events[0]["phase"] == "Step 2/5: Loading photos"
+    assert progress_events[0]["phase"] == "Step 1/5: Loading photos"
 
 
 def test_classify_job_reclassify_true_bypasses_subject_skip(tmp_path):
@@ -1985,6 +1985,59 @@ def test_classify_job_short_circuits_when_all_photos_skipped(tmp_path):
         "Classifier was initialized despite zero photos to process. "
         "The early-return short-circuit was not taken."
     )
+    assert result["total"] == 0
+    assert result["predictions_stored"] == 0
+
+
+def test_classify_job_zero_photos_skips_model_resolution(tmp_path):
+    """Regression: when the subject-skip filter empties the photo set, the
+    job must short-circuit BEFORE model resolution. Otherwise a user with no
+    classifier downloaded would get a misleading 'No model available' error
+    for a job that has zero work to do."""
+    from unittest.mock import patch
+
+    from classify_job import ClassifyParams, run_classify_job
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    db.add_workspace_folder(ws, folder_id)
+    p1 = db.add_photo(
+        folder_id, "p1.jpg", extension=".jpg", file_size=100, file_mtime=1.0,
+    )
+    # Tag with a genre keyword so the subject-skip gate filters it out.
+    scene_kid = db.add_keyword("Landscape", kw_type="genre")
+    db.tag_photo(p1, scene_kid)
+    col_id = db.add_collection(
+        "static-only-tagged",
+        json.dumps([{"field": "photo_ids", "value": [p1]}]),
+    )
+    db.conn.close()
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    params = ClassifyParams(
+        collection_id=col_id,
+        labels_file=None,
+        labels_files=None,
+        model_id=None,
+        model_name="TestModel",
+        grouping_window=10,
+        similarity_threshold=0.85,
+        reclassify=False,
+    )
+
+    # Simulate the "no model downloaded" environment: get_active_model
+    # returns None (which would normally raise RuntimeError downstream).
+    # The short-circuit must execute first and avoid touching the model.
+    with patch("classify_job.get_active_model", return_value=None), \
+         patch("classify_job.get_models", return_value=[]):
+        result = run_classify_job(job, runner, db_path, ws, params)
+
     assert result["total"] == 0
     assert result["predictions_stored"] == 0
 

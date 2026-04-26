@@ -1284,76 +1284,19 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         job["_start_time"] = time.time()
 
         runner.set_steps(job["id"], [
-            {"id": "load_taxonomy", "label": "Load taxonomy"},
             {"id": "load_photos", "label": "Load photos"},
+            {"id": "load_taxonomy", "label": "Load taxonomy"},
             {"id": "load_model", "label": "Load model"},
             {"id": "detect", "label": "Detect subjects"},
             {"id": "classify", "label": "Classify species"},
             {"id": "finalize", "label": "Finalize results"},
         ])
 
-        # Resolve model
-        if params.model_id:
-            all_models = get_models()
-            active_model = next(
-                (m for m in all_models if m["id"] == params.model_id and m["downloaded"]),
-                None,
-            )
-            if not active_model:
-                raise RuntimeError(
-                    f"Model '{params.model_id}' not found or not downloaded."
-                )
-        else:
-            active_model = get_active_model()
-        if not active_model:
-            raise RuntimeError("No model available. Download one in Settings.")
-
-        model_str = active_model["model_str"]
-        weights_path = active_model["weights_path"]
-        effective_name = active_model["name"]
-        model_type = active_model.get("model_type", "bioclip")
-        model_name = params.model_name or effective_name
-
-        # Phase 1: Load taxonomy
-        runner.update_step(job["id"], "load_taxonomy", status="running")
-        runner.push_event(
-            job["id"],
-            "progress",
-            {
-                "current": 0,
-                "total": 0,
-                "current_file": "Loading taxonomy...",
-                "rate": 0,
-                "phase": "Step 1/5: Loading taxonomy",
-            },
-        )
-        from taxonomy import load_local_taxonomy
-        tax = load_local_taxonomy()
-
-        # Phase 2: Load labels
-        labels, use_tol = _load_labels(
-            model_type=model_type,
-            model_str=model_str,
-            labels_file=params.labels_file,
-            labels_files=params.labels_files,
-            db=thread_db,
-        )
-        # Compute a content-addressable fingerprint for the active label set.
-        # Kept in scope so downstream classifier_runs writes can record the
-        # exact (classifier_model, labels_fingerprint) that produced a result.
-        from labels_fingerprint import compute_fingerprint
-        fp = compute_fingerprint(labels)
-        label_sources = _resolve_label_sources(params, thread_db)
-        _record_labels_fingerprint(thread_db, fp, labels, sources=label_sources)
-
-        tax_summary = "Taxonomy loaded" if tax else "No taxonomy"
-        labels_summary = f"{len(labels)} labels" if labels else ("Tree of Life" if use_tol else "no labels")
-        runner.update_step(
-            job["id"], "load_taxonomy", status="completed",
-            summary=f"{tax_summary}, {labels_summary}",
-        )
-
-        # Phase 3: Get photos from collection
+        # Phase 1: Get photos from collection — runs before model resolution
+        # so that a collection fully filtered out by the subject-skip gate
+        # short-circuits without ever attempting to load (or fail to load)
+        # a classifier model. Otherwise users with no model downloaded would
+        # see "No model available" for jobs that have zero work to do.
         runner.update_step(job["id"], "load_photos", status="running")
         runner.push_event(
             job["id"],
@@ -1363,11 +1306,10 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                 "total": 0,
                 "current_file": "Loading collection photos...",
                 "rate": 0,
-                "phase": "Step 2/5: Loading photos",
+                "phase": "Step 1/5: Loading photos",
             },
         )
         photos = thread_db.get_collection_photos(params.collection_id, per_page=999999)
-        folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
 
         # Skip photos already tagged with a 'subject' keyword (per workspace
         # config). reclassify=True bypasses so users can verify existing tags.
@@ -1395,7 +1337,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                                 f"photo(s)"
                             ),
                             "rate": 0,
-                            "phase": "Step 2/5: Loading photos",
+                            "phase": "Step 1/5: Loading photos",
                             "skipped_subject": skipped_subject,
                         },
                     )
@@ -1408,12 +1350,13 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         )
 
         # If the subject-skip filter (or an empty source collection) left
-        # nothing to classify, short-circuit before model load. Loading the
-        # model is expensive (and can fail) and there is no work to do.
+        # nothing to classify, short-circuit before model resolution. Model
+        # resolution can fail with RuntimeError when no model is downloaded,
+        # which would surface as a hard error for a job that has no work.
         if total == 0:
             log.info(
                 "Classify job: no photos to process after filtering; "
-                "skipping model load and detection",
+                "skipping model resolution and detection",
             )
             runner.push_event(
                 job["id"], "progress",
@@ -1422,7 +1365,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                     "total": 0,
                     "current_file": "No photos to classify",
                     "rate": 0,
-                    "phase": "Step 2/5: Loading photos",
+                    "phase": "Step 1/5: Loading photos",
                 },
             )
             return {
@@ -1434,6 +1377,69 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                 "detected": 0,
                 "failed": 0,
             }
+
+        # Resolve model (deferred until we know there is work to do)
+        if params.model_id:
+            all_models = get_models()
+            active_model = next(
+                (m for m in all_models if m["id"] == params.model_id and m["downloaded"]),
+                None,
+            )
+            if not active_model:
+                raise RuntimeError(
+                    f"Model '{params.model_id}' not found or not downloaded."
+                )
+        else:
+            active_model = get_active_model()
+        if not active_model:
+            raise RuntimeError("No model available. Download one in Settings.")
+
+        model_str = active_model["model_str"]
+        weights_path = active_model["weights_path"]
+        effective_name = active_model["name"]
+        model_type = active_model.get("model_type", "bioclip")
+        model_name = params.model_name or effective_name
+
+        folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+
+        # Phase 2: Load taxonomy
+        runner.update_step(job["id"], "load_taxonomy", status="running")
+        runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": 0,
+                "total": total,
+                "current_file": "Loading taxonomy...",
+                "rate": 0,
+                "phase": "Step 2/5: Loading taxonomy",
+            },
+        )
+        from taxonomy import load_local_taxonomy
+        tax = load_local_taxonomy()
+
+        # Phase 3: Load labels (uses model_type/model_str from above)
+        labels, use_tol = _load_labels(
+            model_type=model_type,
+            model_str=model_str,
+            labels_file=params.labels_file,
+            labels_files=params.labels_files,
+            db=thread_db,
+        )
+        # Compute a content-addressable fingerprint for the active label set.
+        # Kept in scope so downstream classifier_runs writes can record the
+        # exact (classifier_model, labels_fingerprint) that produced a result.
+        from labels_fingerprint import compute_fingerprint
+        fp = compute_fingerprint(labels)
+        label_sources = _resolve_label_sources(params, thread_db)
+        _record_labels_fingerprint(thread_db, fp, labels, sources=label_sources)
+
+        tax_summary = "Taxonomy loaded" if tax else "No taxonomy"
+        labels_summary = f"{len(labels)} labels" if labels else ("Tree of Life" if use_tol else "no labels")
+        runner.update_step(
+            job["id"], "load_taxonomy", status="completed",
+            summary=f"{tax_summary}, {labels_summary}",
+        )
 
         log.info(
             "Classifying %d photos with '%s' (%s)", total, effective_name, model_str
