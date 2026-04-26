@@ -6755,3 +6755,72 @@ def test_upsert_place_chain_raises_on_cross_type_collision(db):
     # UNIQUE(name, parent_id) blows up; we must surface a clear RuntimeError.
     with pytest.raises(RuntimeError, match="Manhattan"):
         db.upsert_place_chain(_central_park_details())
+
+
+# --- Task 7: reverse-geocode cache get/put -----------------------------------
+
+
+def test_reverse_geocode_cache_round_trips_put_then_get(db):
+    """Putting a value and then getting it back returns matching fields."""
+    response_json = '{"place_id": "ChIJN1t_tDeuEmsRUsoyG83frY4", "name": "Sydney"}'
+    db.reverse_geocode_cache_put(
+        -33.8688, 151.2093, "ChIJN1t_tDeuEmsRUsoyG83frY4", response_json,
+    )
+    hit = db.reverse_geocode_cache_get(-33.8688, 151.2093)
+    assert hit is not None
+    assert hit["place_id"] == "ChIJN1t_tDeuEmsRUsoyG83frY4"
+    assert hit["response"] == response_json
+
+
+def test_reverse_geocode_cache_returns_none_on_miss(db):
+    """Getting a never-put coord returns None (distinct from cached negative)."""
+    assert db.reverse_geocode_cache_get(40.0, -73.0) is None
+
+
+def test_reverse_geocode_cache_grid_collapses_nearby_coords(db):
+    """Coords that round to the same ~110m grid cell share a cache entry,
+    while coords that round to a different cell are kept separate."""
+    db.reverse_geocode_cache_put(
+        40.7820, -73.9650, "ChIJ_central_park", '{"name":"Central Park"}',
+    )
+    # 40.7821, -73.9648 → both round to the same int(round(x*1000)) cell
+    hit = db.reverse_geocode_cache_get(40.7821, -73.9648)
+    assert hit is not None
+    assert hit["place_id"] == "ChIJ_central_park"
+    assert hit["response"] == '{"name":"Central Park"}'
+
+    # 40.7830, -73.9650 → different lat_grid (40783 vs 40782)
+    db.reverse_geocode_cache_put(
+        40.7830, -73.9650, "ChIJ_other", '{"name":"Other"}',
+    )
+    other_hit = db.reverse_geocode_cache_get(40.7830, -73.9650)
+    assert other_hit is not None
+    assert other_hit["place_id"] == "ChIJ_other"
+    # Original cell unchanged.
+    orig_hit = db.reverse_geocode_cache_get(40.7820, -73.9650)
+    assert orig_hit["place_id"] == "ChIJ_central_park"
+
+
+def test_reverse_geocode_cache_caches_negative_result(db):
+    """A null place_id (Google returned no match) is still cached. The
+    cache must distinguish 'we asked Google and got no match' from 'we
+    never asked' — get returns the row, not None."""
+    db.reverse_geocode_cache_put(0.0, 0.0, None, "{}")
+    hit = db.reverse_geocode_cache_get(0.0, 0.0)
+    assert hit is not None
+    assert hit["place_id"] is None
+    assert hit["response"] == "{}"
+
+
+def test_reverse_geocode_cache_put_overwrites_existing(db):
+    """Re-putting at the same grid cell overwrites the prior value."""
+    db.reverse_geocode_cache_put(
+        12.345, 67.890, "ChIJ_first", '{"v":1}',
+    )
+    db.reverse_geocode_cache_put(
+        12.345, 67.890, "ChIJ_second", '{"v":2}',
+    )
+    hit = db.reverse_geocode_cache_get(12.345, 67.890)
+    assert hit is not None
+    assert hit["place_id"] == "ChIJ_second"
+    assert hit["response"] == '{"v":2}'

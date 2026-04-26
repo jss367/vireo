@@ -3539,6 +3539,55 @@ class Database:
                 )
                 return {"keyword_id": canonical_id, "merged": True}
 
+    @staticmethod
+    def _reverse_geocode_grid(lat, lng):
+        """Round (lat, lng) to a ~110m grid cell.
+
+        Used as the cache key for reverse-geocode lookups so two coords from
+        the same neighborhood share one Google call.
+        """
+        return int(round(lat * 1000)), int(round(lng * 1000))
+
+    def reverse_geocode_cache_get(self, lat, lng):
+        """Look up cached reverse-geocode response for (lat, lng).
+
+        Returns ``{"place_id": <str|None>, "response": <str>}`` on hit
+        (``response`` is the raw JSON string the put-side stashed). A row
+        with ``place_id=None`` is a cached negative result — Google was
+        asked and returned no match — and is still a hit. Returns ``None``
+        only on a true miss (the cell was never populated).
+        """
+        lat_grid, lng_grid = self._reverse_geocode_grid(lat, lng)
+        row = self.conn.execute(
+            "SELECT place_id, response FROM place_reverse_geocode_cache "
+            "WHERE lat_grid = ? AND lng_grid = ?",
+            (lat_grid, lng_grid),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"place_id": row["place_id"], "response": row["response"]}
+
+    def reverse_geocode_cache_put(self, lat, lng, place_id, response_json):
+        """Upsert reverse-geocode result at the (lat, lng) grid cell.
+
+        ``place_id`` may be ``None`` to cache a negative result (Google
+        returned no match). ``response_json`` is already a JSON string —
+        the caller serializes; we don't re-encode.
+        """
+        lat_grid, lng_grid = self._reverse_geocode_grid(lat, lng)
+        fetched_at = int(time.time())
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO place_reverse_geocode_cache "
+                "  (lat_grid, lng_grid, place_id, response, fetched_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(lat_grid, lng_grid) DO UPDATE SET "
+                "  place_id   = excluded.place_id, "
+                "  response   = excluded.response, "
+                "  fetched_at = excluded.fetched_at",
+                (lat_grid, lng_grid, place_id, response_json, fetched_at),
+            )
+
     def merge_duplicate_keywords(self):
         """Find and merge case-insensitive duplicate keywords in active workspace.
 
