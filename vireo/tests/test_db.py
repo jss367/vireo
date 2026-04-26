@@ -1096,6 +1096,39 @@ def test_migration_skips_user_customized_collection(tmp_path):
     assert cols["Needs Classification"] == custom
 
 
+def test_upgrade_path_no_duplicate_collection(tmp_path):
+    """Regression: on an upgraded DB with the legacy 'Needs Classification'
+    default, running the startup sequence (migrate-then-seed) leaves a
+    single 'Needs Identification' collection — not a duplicate alongside
+    the legacy one."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    # Force-create the legacy state that an upgraded DB would have.
+    db.add_collection(
+        "Needs Classification",
+        json.dumps([{"field": "has_species", "op": "equals", "value": 0}]),
+    )
+
+    # Mirror the create_app order: migrate first, then seed defaults.
+    db.migrate_default_subject_collection()
+    db.create_default_collections()
+
+    cols = {c["name"]: json.loads(c["rules"]) for c in db.get_collections()}
+    assert "Needs Classification" not in cols
+    assert "Needs Identification" in cols
+    assert cols["Needs Identification"] == [
+        {"field": "has_subject", "op": "equals", "value": 0}
+    ]
+    # Sanity: total default-collection count is 5, not 6 (no duplicate).
+    default_names = {"All Photos", "Needs Identification", "Untagged",
+                     "Flagged", "Recent Import"}
+    assert default_names.issubset(cols.keys())
+
+
 def test_default_genre_keywords_inserted(tmp_path):
     """Database init populates the default genre keywords."""
     from db import Database

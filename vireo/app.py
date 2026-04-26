@@ -638,8 +638,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     init_db = Database(db_path)
     log.info("Database init took %.2fs (workspace: %s)", time.time() - _t0,
              init_db.get_workspace(init_db._active_workspace_id)["name"])
-    init_db.create_default_collections()
+    # Migrate the legacy 'Needs Classification' default collection BEFORE
+    # seeding defaults — otherwise create_default_collections inserts
+    # 'Needs Identification' first, then the migration skips renaming
+    # because the target name already exists, leaving a duplicate.
     init_db.migrate_default_subject_collection()
+    init_db.create_default_collections()
     # One-shot keyword migrations / backfills. Hoisted out of Database.__init__
     # so they don't re-run on every request (each request gets a fresh
     # Database instance via _get_db()).
