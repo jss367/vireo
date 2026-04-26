@@ -2263,21 +2263,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         body = request.get_json(silent=True) or {}
         # Only allow workspace-overridable keys
         allowed = {"classification_threshold", "grouping_window_seconds", "similarity_threshold", "detector_confidence", "review_min_confidence"}
-        # Merge into existing overrides to preserve non-whitelisted keys
-        ws = db.get_workspace(db._active_workspace_id)
-        existing = {}
-        if ws and ws["config_overrides"]:
-            try:
-                existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-            except Exception:
-                pass
-        for k, v in body.items():
-            if k in allowed:
-                if v is None:
-                    existing.pop(k, None)
-                else:
-                    existing[k] = v
-        db.update_workspace(db._active_workspace_id, config_overrides=existing if existing else None)
+        # Share the schema-driven settings write lock so an autosave in the
+        # All-settings region can't race with a curated workspace-form save
+        # and silently drop a recent override.
+        with _settings_write_lock:
+            ws = db.get_workspace(db._active_workspace_id)
+            existing = {}
+            if ws and ws["config_overrides"]:
+                try:
+                    existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+                except Exception:
+                    pass
+            if not isinstance(existing, dict):
+                existing = {}
+            for k, v in body.items():
+                if k in allowed:
+                    if v is None:
+                        existing.pop(k, None)
+                    else:
+                        existing[k] = v
+            db.update_workspace(db._active_workspace_id, config_overrides=existing if existing else None)
         return jsonify({"ok": True, "overrides": existing})
 
     @app.route("/api/workspaces/active/nav-order", methods=["PUT"])
@@ -2288,15 +2293,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         nav_order = body.get("nav_order")
         if not isinstance(nav_order, list):
             return json_error("nav_order must be a list")
-        ws = db.get_workspace(db._active_workspace_id)
-        existing = {}
-        if ws and ws["config_overrides"]:
-            try:
-                existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-            except Exception:
-                pass
-        existing["nav_order"] = nav_order
-        db.update_workspace(db._active_workspace_id, config_overrides=existing)
+        # Share the schema-driven settings write lock so a concurrent schema
+        # autosave can't read this same overrides snapshot and overwrite the
+        # nav-order change with stale data.
+        with _settings_write_lock:
+            ws = db.get_workspace(db._active_workspace_id)
+            existing = {}
+            if ws and ws["config_overrides"]:
+                try:
+                    existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+                except Exception:
+                    pass
+            if not isinstance(existing, dict):
+                existing = {}
+            existing["nav_order"] = nav_order
+            db.update_workspace(db._active_workspace_id, config_overrides=existing)
         return jsonify({"ok": True, "nav_order": nav_order})
 
     @app.route("/api/workspace/tabs/open", methods=["POST"])
@@ -3126,41 +3137,397 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
 
         body = request.get_json(silent=True) or {}
-        current = cfg.load()
+        # Share the schema-driven settings write lock so an autosave in the
+        # All-settings region can't race with the curated form's full-snapshot
+        # save and silently overwrite a recently-saved schema value.
+        with _settings_write_lock:
+            current = cfg.load()
 
-        # Handle keyboard_shortcuts with validation
-        if "keyboard_shortcuts" in body:
-            shortcuts = body["keyboard_shortcuts"]
-            if isinstance(shortcuts, dict):
-                valid_contexts = cfg.DEFAULTS["keyboard_shortcuts"]
-                validated = {}
-                for ctx_name, actions in shortcuts.items():
-                    if ctx_name in valid_contexts and isinstance(actions, dict):
-                        validated[ctx_name] = {}
-                        for action, key_str in actions.items():
-                            if action in valid_contexts[ctx_name] and isinstance(key_str, str):
-                                validated[ctx_name][action] = key_str.strip().lower()
-                current["keyboard_shortcuts"] = cfg._deep_merge(
-                    cfg.DEFAULTS["keyboard_shortcuts"], validated
+            # Handle keyboard_shortcuts with validation
+            if "keyboard_shortcuts" in body:
+                shortcuts = body["keyboard_shortcuts"]
+                if isinstance(shortcuts, dict):
+                    valid_contexts = cfg.DEFAULTS["keyboard_shortcuts"]
+                    validated = {}
+                    for ctx_name, actions in shortcuts.items():
+                        if ctx_name in valid_contexts and isinstance(actions, dict):
+                            validated[ctx_name] = {}
+                            for action, key_str in actions.items():
+                                if action in valid_contexts[ctx_name] and isinstance(key_str, str):
+                                    validated[ctx_name][action] = key_str.strip().lower()
+                    current["keyboard_shortcuts"] = cfg._deep_merge(
+                        cfg.DEFAULTS["keyboard_shortcuts"], validated
+                    )
+
+            for key in body:
+                if key == "keyboard_shortcuts":
+                    continue
+                if key in cfg.DEFAULTS:
+                    current[key] = body[key]
+            # Apply HF token to environment immediately
+            hf_token = current.get("hf_token", "")
+            if hf_token:
+                os.environ["HF_TOKEN"] = hf_token
+            elif "HF_TOKEN" in os.environ:
+                del os.environ["HF_TOKEN"]
+            cfg.save(current)
+            # If the user shrunk the preview cache quota, evict immediately to the
+            # new size rather than waiting for the next cache write. No-op when
+            # already under quota, so always safe to call.
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+            evict_preview_cache_if_over_quota(_get_db(), vireo_dir)
+        return jsonify({"ok": True})
+
+    @app.route("/api/settings/schema")
+    def api_settings_schema():
+        """Return the SCHEMA dict and the ordered category list.
+
+        Consumed by the schema-rendered settings UI to generate widgets.
+        """
+        import config_schema as schema
+
+        return jsonify({
+            "schema": schema.SCHEMA,
+            "categories": list(schema.CATEGORIES),
+        })
+
+    @app.route("/api/settings/values")
+    def api_settings_values():
+        """Return values across all four layers (default / global / workspace / effective).
+
+        Each layer is a dotted-flat dict, restricted to keys present in SCHEMA.
+        Keys hand-edited into config.json or stored as workspace metadata
+        (e.g. active_labels) that are not declared in SCHEMA are intentionally
+        omitted from the response so they don't show up as "overridden" in
+        the UI; they are preserved on disk and visible in the raw-JSON tab.
+        """
+        import config as cfg
+        import config_schema as schema
+
+        schema_keys = set(schema.SCHEMA.keys())
+
+        # Default layer: flatten DEFAULTS, restrict to schema keys.
+        default_flat = schema.flatten(cfg.DEFAULTS)
+        default_layer = {k: default_flat[k] for k in schema_keys if k in default_flat}
+
+        # Global layer: read the raw file (not cfg.load(), which deep-merges
+        # with DEFAULTS — we want only what the user explicitly set). Also
+        # filter out keys whose value equals the default: legacy save paths
+        # write the entire deep-merged config, but a value matching the
+        # default is not really a user override and should not show as one.
+        global_flat = schema.flatten(_read_raw_config_file())
+        global_layer = {
+            k: v for k, v in global_flat.items()
+            if k in schema_keys and default_layer.get(k) != v
+        }
+
+        # Workspace layer: parse config_overrides for the active workspace.
+        workspace_layer = {}
+        db = _get_db()
+        ws = db.get_workspace(db._active_workspace_id)
+        if ws and ws["config_overrides"]:
+            try:
+                overrides = (
+                    json.loads(ws["config_overrides"])
+                    if isinstance(ws["config_overrides"], str)
+                    else ws["config_overrides"]
                 )
+                ws_flat = schema.flatten(overrides if isinstance(overrides, dict) else {})
+                # Filter out global-only schema keys: workspace create/update
+                # APIs can persist arbitrary override payloads, so a workspace
+                # may contain entries for keys whose scope is "global".
+                # Runtime paths for those keys read global config only, so
+                # surfacing the workspace value here would mislead the UI
+                # into showing a workspace-effective value that is never
+                # actually applied.
+                workspace_layer = {
+                    k: v for k, v in ws_flat.items()
+                    if k in schema_keys
+                    and schema.SCHEMA[k].get("scope") != "global"
+                }
+            except (json.JSONDecodeError, TypeError):
+                workspace_layer = {}
 
-        for key in body:
-            if key == "keyboard_shortcuts":
-                continue
-            if key in cfg.DEFAULTS:
-                current[key] = body[key]
-        # Apply HF token to environment immediately
+        # Effective layer: workspace > global > default for every schema key.
+        effective_layer = {}
+        for k in schema_keys:
+            if k in workspace_layer:
+                effective_layer[k] = workspace_layer[k]
+            elif k in global_layer:
+                effective_layer[k] = global_layer[k]
+            elif k in default_layer:
+                effective_layer[k] = default_layer[k]
+
+        return jsonify({
+            "default": default_layer,
+            "global": global_layer,
+            "workspace": workspace_layer,
+            "effective": effective_layer,
+        })
+
+    def _settings_post_save_side_effects(current):
+        """Side effects mirrored from the legacy /api/config POST handler.
+
+        Keeps the new schema-driven write path behaviorally identical to the
+        old curated-form save: HF_TOKEN env var is kept in sync, and the
+        preview cache is evicted if its budget shrunk.
+        """
         hf_token = current.get("hf_token", "")
         if hf_token:
             os.environ["HF_TOKEN"] = hf_token
         elif "HF_TOKEN" in os.environ:
             del os.environ["HF_TOKEN"]
-        cfg.save(current)
-        # If the user shrunk the preview cache quota, evict immediately to the
-        # new size rather than waiting for the next cache write. No-op when
-        # already under quota, so always safe to call.
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         evict_preview_cache_if_over_quota(_get_db(), vireo_dir)
+
+    def _read_raw_config_file():
+        """Return the parsed contents of ~/.vireo/config.json, or {}.
+
+        Unlike cfg.load(), this does NOT merge DEFAULTS — so it contains
+        only the keys the user has actually set. Used by write paths so the
+        on-disk file stays minimal.
+        """
+        import config as cfg
+
+        if not os.path.exists(cfg.CONFIG_PATH):
+            return {}
+        try:
+            with open(cfg.CONFIG_PATH) as f:
+                raw = json.load(f)
+            return raw if isinstance(raw, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    # Serializes read-modify-write of ~/.vireo/config.json and the active
+    # workspace's config_overrides across the schema-driven settings
+    # endpoints (PATCH/DELETE/import). Without this, with per-field autosave
+    # and `app.run(threaded=True)` two concurrent requests can read the same
+    # snapshot and the later writer drops the earlier change.
+    _settings_write_lock = threading.Lock()
+
+    @app.route("/api/settings/global", methods=["PATCH"])
+    def api_settings_global_patch():
+        """Set a single global config value (validated against SCHEMA)."""
+        import config as cfg
+        import config_schema as schema
+
+        body = request.get_json(silent=True) or {}
+        key = body.get("key")
+        if not isinstance(key, str) or key not in schema.SCHEMA:
+            return json_error(f"unknown setting {key!r}", status=400)
+        try:
+            value = schema.validate_value(key, body.get("value"))
+        except schema.ValidationError as e:
+            return json_error(str(e), status=400)
+
+        with _settings_write_lock:
+            raw = _read_raw_config_file()
+            schema.set_dotted(raw, key, value)
+            cfg.save(raw)
+            _settings_post_save_side_effects(cfg.load())
+        return jsonify({"ok": True, "key": key, "value": value})
+
+    @app.route("/api/settings/global/<path:key>", methods=["DELETE"])
+    def api_settings_global_delete(key):
+        """Remove a key from the global config file (reverts to default)."""
+        import config as cfg
+        import config_schema as schema
+
+        if key not in schema.SCHEMA:
+            return json_error(f"unknown setting {key!r}", status=400)
+
+        with _settings_write_lock:
+            raw = _read_raw_config_file()
+            schema.delete_dotted(raw, key)
+            cfg.save(raw)
+            _settings_post_save_side_effects(cfg.load())
+        return jsonify({"ok": True, "key": key})
+
+    def _read_workspace_overrides(db):
+        """Return the active workspace's config_overrides as a dict (or {}).
+
+        Coerces non-dict payloads (possible via legacy workspace
+        create/update APIs) to ``{}`` so dotted-key mutation in the schema
+        write paths can't crash on a malformed override.
+        """
+        ws = db.get_workspace(db._active_workspace_id)
+        if not ws or not ws["config_overrides"]:
+            return {}
+        try:
+            raw = ws["config_overrides"]
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _write_workspace_overrides(db, overrides):
+        db.update_workspace(
+            db._active_workspace_id,
+            config_overrides=overrides if overrides else None,
+        )
+
+    @app.route("/api/settings/workspace", methods=["PATCH"])
+    def api_settings_workspace_patch():
+        """Set a single per-workspace override (validated against SCHEMA)."""
+        import config_schema as schema
+
+        body = request.get_json(silent=True) or {}
+        key = body.get("key")
+        if not isinstance(key, str) or key not in schema.SCHEMA:
+            return json_error(f"unknown setting {key!r}", status=400)
+        if schema.SCHEMA[key].get("scope") == "global":
+            return json_error(
+                f"{key!r} is global-only and cannot be overridden per workspace",
+                status=400,
+            )
+        try:
+            value = schema.validate_value(key, body.get("value"))
+        except schema.ValidationError as e:
+            return json_error(str(e), status=400)
+
+        db = _get_db()
+        with _settings_write_lock:
+            overrides = _read_workspace_overrides(db)
+            schema.set_dotted(overrides, key, value)
+            _write_workspace_overrides(db, overrides)
+        return jsonify({"ok": True, "key": key, "value": value})
+
+    @app.route("/api/settings/workspace/<path:key>", methods=["DELETE"])
+    def api_settings_workspace_delete(key):
+        """Remove a per-workspace override (the key falls back to global/default)."""
+        import config_schema as schema
+
+        if key not in schema.SCHEMA:
+            return json_error(f"unknown setting {key!r}", status=400)
+        db = _get_db()
+        with _settings_write_lock:
+            overrides = _read_workspace_overrides(db)
+            schema.delete_dotted(overrides, key)
+            _write_workspace_overrides(db, overrides)
+        return jsonify({"ok": True, "key": key})
+
+    @app.route("/api/settings/export")
+    def api_settings_export():
+        """Download ~/.vireo/config.json as an attachment.
+
+        Returns the raw user-overrides file (or "{}" if absent), pretty-printed.
+        Workspace overrides are not included — they're per-workspace state, not
+        global config.
+        """
+        import datetime as _datetime
+
+        raw = _read_raw_config_file()
+        body = json.dumps(raw, indent=2)
+        today = _datetime.date.today().isoformat()
+        resp = make_response(body)
+        resp.headers["Content-Type"] = "application/json"
+        resp.headers["Content-Disposition"] = (
+            f'attachment; filename="vireo-config-{today}.json"'
+        )
+        return resp
+
+    @app.route("/api/settings/import", methods=["POST"])
+    def api_settings_import():
+        """Replace ~/.vireo/config.json with the supplied JSON payload.
+
+        Validates every schema-known leaf key in the payload before writing;
+        on any validation failure, returns 400 with a per-key error map and
+        leaves the file untouched. Non-schema keys (setup_complete, the
+        keyboard_shortcuts subtree, etc.) pass through unchanged so that
+        backups round-trip cleanly. Workspace overrides are untouched —
+        backups capture global state only.
+        """
+        import config as cfg
+        import config_schema as schema
+
+        body = request.get_json(silent=True) or {}
+        raw_text = body.get("json", "")
+        if not isinstance(raw_text, str):
+            return json_error("body.json must be a string", status=400)
+        try:
+            payload = json.loads(raw_text)
+        except json.JSONDecodeError as e:
+            return json_error(f"invalid JSON: {e}", status=400)
+        if not isinstance(payload, dict):
+            return json_error("payload must be a JSON object", status=400)
+
+        # Iterate the schema directly rather than relying on flatten() — empty
+        # objects at schema leaves (e.g. {"classification_threshold": {}}) flatten
+        # to nothing and would otherwise be written as-is, replacing a numeric
+        # leaf with {} on disk and breaking downstream consumers.
+        _MISSING = object()
+        errors = {}
+
+        # 1. Reject scalars where a schema-backed object subtree is expected
+        #    (e.g. {"pipeline": 5}).
+        for prefix in schema.schema_parent_prefixes():
+            val = schema.get_dotted(payload, prefix, default=_MISSING)
+            if val is _MISSING or isinstance(val, dict):
+                continue
+            errors[prefix] = f"{prefix} must be a JSON object"
+
+        # 2. For every schema leaf actually present in the payload, reject any
+        #    object (empty or otherwise) and run the usual value validation.
+        for schema_key in schema.SCHEMA:
+            val = schema.get_dotted(payload, schema_key, default=_MISSING)
+            if val is _MISSING:
+                continue
+            if isinstance(val, dict):
+                errors[schema_key] = f"{schema_key} must be a JSON scalar, not an object"
+                continue
+            try:
+                coerced = schema.validate_value(schema_key, val)
+                schema.set_dotted(payload, schema_key, coerced)
+            except schema.ValidationError as e:
+                errors[schema_key] = str(e)
+
+        # Structured non-schema keys still need shape validation, otherwise a
+        # malformed payload would write through to the file and crash
+        # downstream UI consumers that assume a specific shape.
+        if "keyboard_shortcuts" in payload:
+            # shortcuts.html dereferences `cfg.keyboard_shortcuts.<ctx>.<action>`
+            # and assumes a dict tree.
+            ks = payload["keyboard_shortcuts"]
+            if not isinstance(ks, dict):
+                errors["keyboard_shortcuts"] = "keyboard_shortcuts must be a JSON object"
+            else:
+                for ctx_name, actions in ks.items():
+                    if not isinstance(actions, dict):
+                        errors[f"keyboard_shortcuts.{ctx_name}"] = (
+                            f"keyboard_shortcuts.{ctx_name} must be a JSON object"
+                        )
+                        continue
+                    for action, key_str in actions.items():
+                        if not isinstance(key_str, str):
+                            errors[f"keyboard_shortcuts.{ctx_name}.{action}"] = (
+                                "must be a string"
+                            )
+
+        # ingest.recent_destinations is also EXCLUDED from SCHEMA but is a
+        # structured value (list[str]). pipeline.html calls
+        # `recents.forEach(...)` on it, so a non-list value would crash the
+        # pipeline page after a bad import.
+        ingest_section = payload.get("ingest")
+        if isinstance(ingest_section, dict) and "recent_destinations" in ingest_section:
+            recents = ingest_section["recent_destinations"]
+            if not isinstance(recents, list):
+                errors["ingest.recent_destinations"] = (
+                    "ingest.recent_destinations must be a JSON array"
+                )
+            else:
+                for i, item in enumerate(recents):
+                    if not isinstance(item, str):
+                        errors[f"ingest.recent_destinations[{i}]"] = (
+                            "must be a string"
+                        )
+                        break
+
+        if errors:
+            return jsonify({"error": "validation failed", "errors": errors}), 400
+
+        with _settings_write_lock:
+            cfg.save(payload)
+            _settings_post_save_side_effects(cfg.load())
         return jsonify({"ok": True})
 
     @app.route("/api/darktable/status")
@@ -8563,20 +8930,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not pipeline_updates:
             return json_error("No valid pipeline config keys provided")
 
-        # Load current overrides, merge pipeline updates
-        ws = db.get_workspace(db._active_workspace_id)
-        current_overrides = {}
-        if ws and ws["config_overrides"]:
-            try:
-                current_overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-            except (json.JSONDecodeError, TypeError):
-                pass
+        # Share the schema-driven settings write lock so a concurrent schema
+        # autosave can't read this same overrides snapshot and overwrite the
+        # pipeline change with stale data.
+        with _settings_write_lock:
+            ws = db.get_workspace(db._active_workspace_id)
+            current_overrides = {}
+            if ws and ws["config_overrides"]:
+                try:
+                    current_overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if not isinstance(current_overrides, dict):
+                current_overrides = {}
 
-        pipeline_section = current_overrides.get("pipeline", {})
-        pipeline_section.update(pipeline_updates)
-        current_overrides["pipeline"] = pipeline_section
+            pipeline_section = current_overrides.get("pipeline", {})
+            if not isinstance(pipeline_section, dict):
+                pipeline_section = {}
+            pipeline_section.update(pipeline_updates)
+            current_overrides["pipeline"] = pipeline_section
 
-        db.update_workspace(db._active_workspace_id, config_overrides=current_overrides)
+            db.update_workspace(db._active_workspace_id, config_overrides=current_overrides)
 
         return jsonify({"pipeline": pipeline_section, "status": "saved"})
 

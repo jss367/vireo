@@ -1,0 +1,944 @@
+"""Tests for /api/settings/* endpoints (schema-driven settings UI)."""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+# ---------------------------------------------------------------------------
+# GET /api/settings/schema
+# ---------------------------------------------------------------------------
+
+
+def test_get_schema_returns_schema_and_categories(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/settings/schema")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "schema" in data
+    assert "categories" in data
+    assert isinstance(data["schema"], dict)
+    assert isinstance(data["categories"], list)
+    # Sample-check a couple of well-known keys.
+    assert "classification_threshold" in data["schema"]
+    assert "pipeline.w_focus" in data["schema"]
+
+
+def test_get_schema_entries_have_required_fields(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/settings/schema")
+    schema = resp.get_json()["schema"]
+    for key, spec in schema.items():
+        for required in ("type", "category", "scope", "label", "desc"):
+            assert required in spec, f"{key} missing {required!r} in API response"
+
+
+# ---------------------------------------------------------------------------
+# GET /api/settings/values
+# ---------------------------------------------------------------------------
+
+
+def test_get_values_returns_four_layers(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/settings/values")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    for layer in ("default", "global", "workspace", "effective"):
+        assert layer in data, f"missing layer {layer!r}"
+
+
+def test_get_values_default_layer_covers_schema(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    schema = client.get("/api/settings/schema").get_json()["schema"]
+    values = client.get("/api/settings/values").get_json()
+    # Every schema key has a default value.
+    assert set(schema.keys()) <= set(values["default"].keys())
+
+
+def test_get_values_global_layer_empty_when_no_overrides(app_and_db):
+    """With no config.json written, the global layer is empty (only DEFAULTS apply)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    values = client.get("/api/settings/values").get_json()
+    assert values["global"] == {}
+
+
+def test_get_values_global_reflects_written_file(app_and_db, tmp_path):
+    """After writing a value to the config file, it appears in the global layer."""
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.7)
+    client = app.test_client()
+    values = client.get("/api/settings/values").get_json()
+    assert values["global"].get("classification_threshold") == 0.7
+    # Effective reflects the override too.
+    assert values["effective"].get("classification_threshold") == 0.7
+
+
+def test_get_values_global_only_includes_schema_known_keys(app_and_db):
+    """Hand-edited unknown keys in the file are not surfaced in the global layer."""
+    app, _ = app_and_db
+    import config as cfg
+
+    raw = cfg.load()
+    raw["bogus_legacy_key"] = "should-not-leak-into-global-layer"
+    cfg.save(raw)
+
+    client = app.test_client()
+    values = client.get("/api/settings/values").get_json()
+    assert "bogus_legacy_key" not in values["global"]
+
+
+def test_get_values_workspace_empty_when_no_overrides(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    values = client.get("/api/settings/values").get_json()
+    assert values["workspace"] == {}
+
+
+def test_get_values_workspace_reflects_overrides(app_and_db):
+    app, db = app_and_db
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"classification_threshold": 0.9},
+    )
+    client = app.test_client()
+    values = client.get("/api/settings/values").get_json()
+    assert values["workspace"].get("classification_threshold") == 0.9
+    assert values["effective"].get("classification_threshold") == 0.9
+
+
+def test_get_values_effective_falls_through_layers(app_and_db):
+    """Effective = workspace > global > default."""
+    app, db = app_and_db
+    import config as cfg
+
+    # default for similarity_threshold is 0.85
+    values = client_get(app, "/api/settings/values")
+    assert values["effective"]["similarity_threshold"] == 0.85
+
+    # Override globally.
+    cfg.set("similarity_threshold", 0.5)
+    values = client_get(app, "/api/settings/values")
+    assert values["effective"]["similarity_threshold"] == 0.5
+    assert values["global"]["similarity_threshold"] == 0.5
+
+    # Override per-workspace — wins over global.
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"similarity_threshold": 0.95},
+    )
+    values = client_get(app, "/api/settings/values")
+    assert values["effective"]["similarity_threshold"] == 0.95
+
+
+def test_get_values_global_excludes_keys_equal_to_default(app_and_db):
+    """Legacy save paths write the entire DEFAULTS dict to disk; a value matching
+    the default must not appear as a "globally set" override."""
+    app, _ = app_and_db
+    import config as cfg
+
+    # cfg.save(cfg.load()) is what the legacy POST /api/config does — it
+    # produces a file containing every default key.
+    cfg.save(cfg.load())
+    client = app.test_client()
+    values = client.get("/api/settings/values").get_json()
+    assert values["global"] == {}
+
+
+def test_get_values_workspace_layer_filters_global_only_keys(app_and_db):
+    """Workspace create/update APIs can persist arbitrary override payloads,
+    so a workspace may contain entries for global-only schema keys (e.g.
+    hf_token, max_edit_history). Runtime never reads those from the workspace
+    layer, so the values endpoint must not surface them as workspace-effective
+    or the UI will mislead the user."""
+    app, db = app_and_db
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={
+            "hf_token": "leaked-from-bad-payload",          # scope=global
+            "max_edit_history": 9999,                       # scope=global
+            "classification_threshold": 0.55,               # scope=both — keep
+        },
+    )
+    client = app.test_client()
+    values = client.get("/api/settings/values").get_json()
+    assert "hf_token" not in values["workspace"]
+    assert "max_edit_history" not in values["workspace"]
+    assert values["workspace"].get("classification_threshold") == 0.55
+    # Effective for global-only keys should fall through to global/default,
+    # not the (now filtered-out) workspace value.
+    assert values["effective"].get("hf_token") != "leaked-from-bad-payload"
+
+
+def test_get_values_workspace_excludes_non_schema_keys(app_and_db):
+    """Internal keys stored in config_overrides (e.g. active_labels) are not exposed."""
+    app, db = app_and_db
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"active_labels": ["birds.txt"], "classification_threshold": 0.6},
+    )
+    client = app.test_client()
+    values = client.get("/api/settings/values").get_json()
+    assert "active_labels" not in values["workspace"]
+    assert values["workspace"].get("classification_threshold") == 0.6
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def client_get(app, path):
+    return app.test_client().get(path).get_json()
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/settings/global
+# ---------------------------------------------------------------------------
+
+
+def test_patch_global_persists_value(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "classification_threshold", "value": 0.65},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["value"] == 0.65
+    # Persisted to disk.
+    assert cfg.load()["classification_threshold"] == 0.65
+
+
+def test_patch_global_coerces_string_to_float(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "classification_threshold", "value": "0.42"},
+    )
+    assert resp.status_code == 200
+    assert cfg.load()["classification_threshold"] == 0.42
+
+
+def test_patch_global_writes_nested_key(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "pipeline.w_focus", "value": 0.5},
+    )
+    assert resp.status_code == 200
+    assert cfg.load()["pipeline"]["w_focus"] == 0.5
+
+
+def test_patch_global_rejects_unknown_key(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "no_such_key", "value": 1},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_global_rejects_out_of_range(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "classification_threshold", "value": 5.0},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_global_rejects_unknown_enum(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "keyword_case", "value": "screaming-snake"},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_global_rejects_type_mismatch(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "photos_per_page", "value": "not-a-number"},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_global_updates_hf_token_env(app_and_db, monkeypatch):
+    """Setting hf_token also pushes it into HF_TOKEN env var (legacy POST behavior)."""
+    app, _ = app_and_db
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    client = app.test_client()
+    client.patch(
+        "/api/settings/global",
+        json={"key": "hf_token", "value": "hf_test_xyz"},
+    )
+    assert os.environ.get("HF_TOKEN") == "hf_test_xyz"
+
+
+def test_patch_global_clears_hf_token_env(app_and_db, monkeypatch):
+    app, _ = app_and_db
+    monkeypatch.setenv("HF_TOKEN", "previous")
+    import config as cfg
+
+    cfg.set("hf_token", "previous")
+    client = app.test_client()
+    client.patch(
+        "/api/settings/global",
+        json={"key": "hf_token", "value": ""},
+    )
+    assert "HF_TOKEN" not in os.environ
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/settings/global/<dotted-key>
+# ---------------------------------------------------------------------------
+
+
+def test_delete_global_reverts_to_default(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.65)
+    assert cfg.load()["classification_threshold"] == 0.65
+
+    client = app.test_client()
+    resp = client.delete("/api/settings/global/classification_threshold")
+    assert resp.status_code == 200
+    # Reverted to the DEFAULTS value (deep-merge fills it back in).
+    assert cfg.load()["classification_threshold"] == cfg.DEFAULTS["classification_threshold"]
+
+
+def test_delete_global_nested_key(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    client = app.test_client()
+    client.patch("/api/settings/global", json={"key": "pipeline.w_focus", "value": 0.99})
+    assert cfg.load()["pipeline"]["w_focus"] == 0.99
+
+    resp = client.delete("/api/settings/global/pipeline.w_focus")
+    assert resp.status_code == 200
+    assert cfg.load()["pipeline"]["w_focus"] == cfg.DEFAULTS["pipeline"]["w_focus"]
+
+
+def test_delete_global_idempotent(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    # Delete a key that has no override — should not error.
+    resp = client.delete("/api/settings/global/classification_threshold")
+    assert resp.status_code == 200
+
+
+def test_delete_global_rejects_unknown_key(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.delete("/api/settings/global/no_such_key")
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/settings/workspace
+# ---------------------------------------------------------------------------
+
+
+def _ws_overrides(db):
+    """Return the active workspace's config_overrides as a dict."""
+    import json as _json
+
+    ws = db.get_workspace(db._active_workspace_id)
+    if not ws or not ws["config_overrides"]:
+        return {}
+    raw = ws["config_overrides"]
+    return _json.loads(raw) if isinstance(raw, str) else raw
+
+
+def test_patch_workspace_persists_value(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/workspace",
+        json={"key": "classification_threshold", "value": 0.55},
+    )
+    assert resp.status_code == 200
+    overrides = _ws_overrides(db)
+    assert overrides.get("classification_threshold") == 0.55
+
+
+def test_patch_workspace_writes_nested_key(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/workspace",
+        json={"key": "pipeline.w_focus", "value": 0.7},
+    )
+    assert resp.status_code == 200
+    overrides = _ws_overrides(db)
+    assert overrides.get("pipeline", {}).get("w_focus") == 0.7
+
+
+def test_patch_workspace_rejects_global_scope_key(app_and_db):
+    """hf_token has scope='global' — cannot be overridden per-workspace."""
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/workspace",
+        json={"key": "hf_token", "value": "hf_xxx"},
+    )
+    assert resp.status_code == 400
+    assert "hf_token" not in _ws_overrides(db)
+
+
+def test_patch_workspace_rejects_unknown_key(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/workspace",
+        json={"key": "no_such", "value": 1},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_workspace_rejects_out_of_range(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/workspace",
+        json={"key": "classification_threshold", "value": 99},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_workspace_preserves_active_labels(app_and_db):
+    """Existing non-schema keys (e.g. active_labels) survive a schema-driven write."""
+    app, db = app_and_db
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"active_labels": ["birds.txt"]},
+    )
+    client = app.test_client()
+    client.patch(
+        "/api/settings/workspace",
+        json={"key": "classification_threshold", "value": 0.55},
+    )
+    overrides = _ws_overrides(db)
+    assert overrides.get("active_labels") == ["birds.txt"]
+    assert overrides.get("classification_threshold") == 0.55
+
+
+def test_patch_workspace_does_not_affect_other_workspaces(app_and_db):
+    app, db = app_and_db
+    other_ws = db.create_workspace("other")
+    client = app.test_client()
+    client.patch(
+        "/api/settings/workspace",
+        json={"key": "classification_threshold", "value": 0.55},
+    )
+    other = db.get_workspace(other_ws)
+    assert not other["config_overrides"]
+
+
+def test_patch_workspace_value_beats_global_in_effective(app_and_db):
+    app, db = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)  # global
+    client = app.test_client()
+    client.patch(
+        "/api/settings/workspace",
+        json={"key": "classification_threshold", "value": 0.95},
+    )
+    values = client.get("/api/settings/values").get_json()
+    assert values["effective"]["classification_threshold"] == 0.95
+    assert values["workspace"]["classification_threshold"] == 0.95
+    assert values["global"]["classification_threshold"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/settings/workspace/<dotted-key>
+# ---------------------------------------------------------------------------
+
+
+def test_delete_workspace_removes_override(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    client.patch(
+        "/api/settings/workspace",
+        json={"key": "classification_threshold", "value": 0.55},
+    )
+    assert "classification_threshold" in _ws_overrides(db)
+    resp = client.delete("/api/settings/workspace/classification_threshold")
+    assert resp.status_code == 200
+    assert "classification_threshold" not in _ws_overrides(db)
+
+
+def test_delete_workspace_nested_key(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    client.patch(
+        "/api/settings/workspace",
+        json={"key": "pipeline.w_focus", "value": 0.99},
+    )
+    assert _ws_overrides(db).get("pipeline", {}).get("w_focus") == 0.99
+    resp = client.delete("/api/settings/workspace/pipeline.w_focus")
+    assert resp.status_code == 200
+    assert "w_focus" not in _ws_overrides(db).get("pipeline", {})
+
+
+def test_delete_workspace_idempotent(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.delete("/api/settings/workspace/classification_threshold")
+    assert resp.status_code == 200
+
+
+def test_delete_workspace_rejects_unknown_key(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.delete("/api/settings/workspace/no_such_key")
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# GET /api/settings/export
+# ---------------------------------------------------------------------------
+
+
+def test_export_returns_attachment_when_file_exists(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.7)
+    client = app.test_client()
+    resp = client.get("/api/settings/export")
+    assert resp.status_code == 200
+    assert "attachment" in resp.headers.get("Content-Disposition", "")
+    body = json.loads(resp.get_data())
+    assert body.get("classification_threshold") == 0.7
+
+
+def test_export_returns_empty_object_when_file_missing(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/settings/export")
+    assert resp.status_code == 200
+    body = json.loads(resp.get_data())
+    assert body == {}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/settings/import
+# ---------------------------------------------------------------------------
+
+
+def test_import_replaces_global_file(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)
+    client = app.test_client()
+    payload = {"classification_threshold": 0.95, "photos_per_page": 100}
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    raw = cfg.load()
+    assert raw["classification_threshold"] == 0.95
+    assert raw["photos_per_page"] == 100
+
+
+def test_import_rejects_invalid_json(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": "{ this is not json"},
+    )
+    assert resp.status_code == 400
+
+
+def test_import_rejects_invalid_value_for_known_key(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"classification_threshold": 99})},
+    )
+    assert resp.status_code == 400
+    # File untouched — atomic replace happens only after full validation.
+    assert cfg.load()["classification_threshold"] == 0.5
+
+
+def test_import_passes_through_non_schema_keys(app_and_db):
+    """Keys not in SCHEMA (e.g. setup_complete, keyboard_shortcuts) survive an import."""
+    app, _ = app_and_db
+    import config as cfg
+
+    payload = {
+        "classification_threshold": 0.6,
+        "setup_complete": True,
+        "keyboard_shortcuts": cfg.DEFAULTS["keyboard_shortcuts"],
+    }
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    raw = cfg.load()
+    assert raw["setup_complete"] is True
+    assert raw["classification_threshold"] == 0.6
+
+
+def test_import_preserves_workspace_overrides(app_and_db):
+    """Workspace overrides survive a global-config import."""
+    app, db = app_and_db
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"classification_threshold": 0.9},
+    )
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"classification_threshold": 0.3})},
+    )
+    assert resp.status_code == 200
+    overrides = _ws_overrides(db)
+    assert overrides.get("classification_threshold") == 0.9
+
+
+def test_import_empty_object_is_ok(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/settings/import", json={"json": "{}"})
+    assert resp.status_code == 200
+
+
+def test_import_rejects_non_object_for_schema_subtree(app_and_db):
+    """A scalar where a schema-backed subtree (e.g. ``pipeline``) is expected
+    must be rejected — otherwise downstream code that assumes ``pipeline`` is a
+    mapping will crash on the next ``.get(...)`` call."""
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"pipeline": 5})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "errors" in body
+    assert "pipeline" in body["errors"]
+    # File untouched.
+    assert cfg.load()["classification_threshold"] == 0.5
+
+
+def test_import_rejects_list_for_schema_subtree(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"ingest": ["folder_template"]})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "ingest" in body["errors"]
+
+
+def test_import_rejects_null_for_schema_subtree(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"pipeline": None})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "pipeline" in body["errors"]
+
+
+def test_import_allows_empty_object_for_schema_subtree(app_and_db):
+    """An empty object for a schema-backed subtree is fine — every leaf falls
+    back to defaults."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"pipeline": {}})},
+    )
+    assert resp.status_code == 200
+
+
+def test_import_rejects_object_at_schema_leaf(app_and_db):
+    """A nested object where a scalar schema leaf is expected must be rejected.
+
+    ``flatten`` only emits leaf paths, so ``{"classification_threshold": {"x": 1}}``
+    becomes ``classification_threshold.x`` which is neither a SCHEMA entry nor a
+    parent-prefix; without an extra check it would slip through and persist a
+    malformed value.
+    """
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"classification_threshold": {"x": 1}})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "errors" in body
+    assert "classification_threshold" in body["errors"]
+    # File untouched.
+    assert cfg.load()["classification_threshold"] == 0.5
+
+
+def test_import_rejects_object_at_nested_schema_leaf(app_and_db):
+    """Same guard, but for a leaf that lives inside a schema subtree
+    (e.g. ``pipeline.w_focus`` — a numeric leaf under the ``pipeline`` parent).
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"pipeline": {"w_focus": {"x": 1}}})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "errors" in body
+    assert "pipeline.w_focus" in body["errors"]
+
+
+def test_import_rejects_empty_object_at_schema_leaf(app_and_db):
+    """``flatten`` emits nothing for empty dicts, so a leaf set to ``{}`` would
+    bypass the flatten-based loop and replace a numeric value with ``{}`` on
+    disk. The schema-iteration validator must still catch it."""
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"classification_threshold": {}})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "errors" in body
+    assert "classification_threshold" in body["errors"]
+    # File untouched.
+    assert cfg.load()["classification_threshold"] == 0.5
+
+
+def test_import_rejects_non_dict_keyboard_shortcuts(app_and_db):
+    """A malformed keyboard_shortcuts value would slip past the schema-only
+    validator (since the key is in EXCLUDED) and crash shortcuts.html, which
+    indexes cfg.keyboard_shortcuts.<ctx>.<action>."""
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"keyboard_shortcuts": 5})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "keyboard_shortcuts" in body["errors"]
+    # File untouched.
+    assert cfg.load()["classification_threshold"] == 0.5
+
+
+def test_import_rejects_non_dict_keyboard_shortcut_context(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"keyboard_shortcuts": {"navigation": "not-a-dict"}})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "keyboard_shortcuts.navigation" in body["errors"]
+
+
+def test_import_rejects_non_list_recent_destinations(app_and_db):
+    """ingest.recent_destinations is in EXCLUDED but pipeline.html iterates it
+    with .forEach. A non-list value would crash the page after import."""
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"ingest": {"recent_destinations": "/tmp/out"}})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "ingest.recent_destinations" in body["errors"]
+    assert cfg.load()["classification_threshold"] == 0.5
+
+
+def test_import_rejects_non_string_inside_recent_destinations(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"ingest": {"recent_destinations": ["/a", 5]}})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert any(k.startswith("ingest.recent_destinations") for k in body["errors"])
+
+
+def test_import_accepts_well_formed_keyboard_shortcuts(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    payload = {"keyboard_shortcuts": cfg.DEFAULTS["keyboard_shortcuts"]}
+    client = app.test_client()
+    resp = client.post("/api/settings/import", json={"json": json.dumps(payload)})
+    assert resp.status_code == 200
+
+
+def test_import_rejects_empty_object_at_nested_schema_leaf(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"pipeline": {"w_focus": {}}})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "errors" in body
+    assert "pipeline.w_focus" in body["errors"]
+
+
+def test_delete_workspace_preserves_active_labels(app_and_db):
+    app, db = app_and_db
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={
+            "active_labels": ["birds.txt"],
+            "classification_threshold": 0.55,
+        },
+    )
+    client = app.test_client()
+    resp = client.delete("/api/settings/workspace/classification_threshold")
+    assert resp.status_code == 200
+    overrides = _ws_overrides(db)
+    assert overrides.get("active_labels") == ["birds.txt"]
+    assert "classification_threshold" not in overrides
+
+
+# ---------------------------------------------------------------------------
+# Workspace override payload coercion (defensive: non-dict on disk)
+# ---------------------------------------------------------------------------
+
+
+def test_patch_workspace_recovers_from_non_dict_overrides(app_and_db):
+    """A scalar payload in config_overrides must not crash the schema PATCH."""
+    app, db = app_and_db
+    # Simulate a malformed override row (e.g. from a hand-edited DB or a
+    # legacy code path) by writing a non-object JSON value.
+    db.update_workspace(db._active_workspace_id, config_overrides=5)
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/workspace",
+        json={"key": "classification_threshold", "value": 0.55},
+    )
+    assert resp.status_code == 200
+    overrides = _ws_overrides(db)
+    assert overrides == {"classification_threshold": 0.55}
+
+
+def test_delete_workspace_recovers_from_non_dict_overrides(app_and_db):
+    """A list payload in config_overrides must not crash the schema DELETE."""
+    app, db = app_and_db
+    db.update_workspace(db._active_workspace_id, config_overrides=["junk"])
+    client = app.test_client()
+    resp = client.delete("/api/settings/workspace/classification_threshold")
+    assert resp.status_code == 200
+    # No prior key existed; nothing to remove. Override coerces to {} → cleared.
+    assert _ws_overrides(db) == {}
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: per-key autosave race
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_global_patch_does_not_drop_writes(app_and_db):
+    """Two concurrent PATCHes for different keys must both persist.
+
+    Without a write lock, the read-modify-write (`_read_raw_config_file`
+    → `set_dotted` → `cfg.save`) lets a slow writer overwrite a fast
+    writer's change.
+    """
+    import threading as _threading
+    import time as _time
+
+    app, _ = app_and_db
+    client = app.test_client()
+
+    barrier = _threading.Barrier(2)
+    results = {}
+
+    def patch(key, value, slot):
+        barrier.wait()
+        # Stagger reads slightly so without the lock the second writer
+        # would deterministically clobber the first.
+        if slot == "slow":
+            _time.sleep(0.05)
+        results[slot] = client.patch(
+            "/api/settings/global",
+            json={"key": key, "value": value},
+        ).status_code
+
+    t1 = _threading.Thread(
+        target=patch, args=("classification_threshold", 0.31, "fast"),
+    )
+    t2 = _threading.Thread(
+        target=patch, args=("similarity_threshold", 0.77, "slow"),
+    )
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    assert results == {"fast": 200, "slow": 200}
+
+    values = client.get("/api/settings/values").get_json()
+    assert values["global"]["classification_threshold"] == 0.31
+    assert values["global"]["similarity_threshold"] == 0.77

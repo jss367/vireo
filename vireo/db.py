@@ -617,16 +617,20 @@ class Database:
         Args:
             global_config: dict from config.load()
         Returns:
-            dict with workspace overrides merged on top of global config
+            dict with workspace overrides deep-merged on top of global config
+            so a nested override (e.g. ``{"pipeline": {"w_focus": 0.5}}``)
+            replaces only the named leaf, not the whole parent dict.
         """
+        from config import _deep_merge
+
         ws = self.get_workspace(self._active_workspace_id)
         if not ws or not ws["config_overrides"]:
             return global_config
         try:
             overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-            result = dict(global_config)
-            result.update(overrides)
-            return result
+            if not isinstance(overrides, dict):
+                return global_config
+            return _deep_merge(global_config, overrides)
         except (json.JSONDecodeError, TypeError):
             return global_config
 

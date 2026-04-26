@@ -31,6 +31,23 @@
   .collapsible-header.open .toggle-icon { transform: rotate(90deg); }
   .collapsible-body { display: none; }
   .collapsible-body.open { display: block; }
+
+  /* All-settings (schema-rendered) */
+  .provenance-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    flex-shrink: 0; margin-top: 6px;
+  }
+  .dot-default { background: var(--border-secondary); }
+  .dot-global { background: var(--accent); }
+  .dot-workspace { background: #a855f7; }
+  .setting-row-card:last-child { border-bottom: none !important; }
+  .scope-tab {
+    background: transparent; border: none; color: var(--text-secondary);
+    padding: 6px 14px; font-size: 13px; cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .scope-tab:hover { color: var(--text-primary); }
+  .scope-tab.active { color: var(--text-primary); border-bottom-color: var(--accent); font-weight: 500; }
 </style>
 </head>
 <body>
@@ -994,6 +1011,35 @@
     </div>
   </div>
 
+  <!-- All settings (schema-driven) -->
+  <div class="section" id="allSettingsSection">
+    <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+      <span>All settings</span>
+      <input type="search" id="allSettingsSearch" placeholder="Search settings…" autocomplete="off"
+             oninput="filterAllSettings()"
+             style="flex:1;min-width:200px;max-width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 10px;font-size:13px;">
+    </div>
+    <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
+      Every Vireo setting, including ones not surfaced by the curated sections above. Edits save automatically; click Reset to revert.
+    </div>
+    <div style="display:flex;align-items:center;border-bottom:1px solid var(--border-primary);margin-bottom:14px;">
+      <button class="scope-tab active" data-scope="global" onclick="setSettingsScope('global')">Global</button>
+      <button class="scope-tab" data-scope="workspace" onclick="setSettingsScope('workspace')">Workspace</button>
+      <span style="flex:1;"></span>
+      <a href="/api/settings/export" class="btn-sm" style="margin-bottom:6px;text-decoration:none;display:inline-block;">Export…</a>
+      <button class="btn-sm" onclick="document.getElementById('settingsImportInput').click()" style="margin-bottom:6px;">Import…</button>
+      <input type="file" id="settingsImportInput" accept=".json,application/json" style="display:none;" onchange="importSettingsFile(this.files[0]); this.value='';">
+    </div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:14px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;" id="allSettingsLegend">
+      <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-default" style="margin-top:0;"></span> default</span>
+      <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-global" style="margin-top:0;"></span> set globally</span>
+      <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-workspace" style="margin-top:0;"></span> set for this workspace</span>
+    </div>
+    <div id="allSettingsCategories">
+      <span style="color:var(--text-ghost);font-size:13px;">Loading…</span>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -1008,6 +1054,7 @@ loadVersion();
 loadThemePicker();
 loadPreviewCacheStatus();
 loadDetectionCacheStats();
+loadAllSettings();
 
 function toggleSection(header) {
   header.classList.toggle('open');
@@ -1038,6 +1085,12 @@ async function loadWsOverrides() {
           input.value = overrides[key];
         }
         updateWsLabel(key);
+      } else {
+        // Sync removal too — when re-called after a schema-row reset, an
+        // override may have been deleted server-side. Leaving the checkbox
+        // checked would cause the next saveWsConfig to re-add it.
+        checkbox.checked = false;
+        ctrl.style.display = 'none';
       }
     });
     _wsOverridesLoaded = true;
@@ -2476,6 +2529,457 @@ async function doInstallUpdate() {
     btn.disabled = false;
     status.textContent = 'Install failed. Check logs for details.';
   }
+}
+
+// --- All settings (schema-rendered, editable) ------------------------------
+
+var ALL_SETTINGS_CACHE = { schema: null, categories: null, values: null };
+// Keyed by `<key>|<scope>` so a quick edit to the same key in a different
+// scope tab can't clear the pending write of the first scope's edit.
+var ALL_SETTINGS_DEBOUNCE = {};
+var ALL_SETTINGS_SCOPE = 'global';  // 'global' | 'workspace'
+
+function setSettingsScope(scope) {
+  if (scope !== 'global' && scope !== 'workspace') return;
+  if (ALL_SETTINGS_SCOPE === scope) return;
+  ALL_SETTINGS_SCOPE = scope;
+  document.querySelectorAll('.scope-tab').forEach(function(b) {
+    b.classList.toggle('active', b.dataset.scope === scope);
+  });
+  renderAllSettings(document.getElementById('allSettingsCategories'));
+  filterAllSettings();
+}
+
+async function loadAllSettings() {
+  var container = document.getElementById('allSettingsCategories');
+  try {
+    var [schemaRes, valuesRes] = await Promise.all([
+      fetch('/api/settings/schema'),
+      fetch('/api/settings/values'),
+    ]);
+    if (!schemaRes.ok || !valuesRes.ok) throw new Error('HTTP error');
+    var schemaData = await schemaRes.json();
+    var values = await valuesRes.json();
+    ALL_SETTINGS_CACHE.schema = schemaData.schema;
+    ALL_SETTINGS_CACHE.categories = schemaData.categories;
+    ALL_SETTINGS_CACHE.values = values;
+    renderAllSettings(container);
+    filterAllSettings();
+  } catch (err) {
+    container.innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load settings: '
+      + escapeHtml(err && err.message || String(err)) + '</span>';
+  }
+}
+
+async function refreshAllSettingsValues() {
+  var r = await fetch('/api/settings/values');
+  if (!r.ok) return;
+  ALL_SETTINGS_CACHE.values = await r.json();
+}
+
+function renderAllSettings(container) {
+  var schema = ALL_SETTINGS_CACHE.schema;
+  var categories = ALL_SETTINGS_CACHE.categories;
+  var values = ALL_SETTINGS_CACHE.values;
+  if (!schema || !categories || !values) return;
+
+  var byCategory = {};
+  categories.forEach(function(c) { byCategory[c] = []; });
+  Object.keys(schema).sort().forEach(function(key) {
+    var cat = schema[key].category || 'Other';
+    if (!byCategory[cat]) byCategory[cat] = [];
+    byCategory[cat].push(key);
+  });
+
+  var parts = [];
+  categories.forEach(function(cat) {
+    var keys = byCategory[cat];
+    if (!keys || !keys.length) return;
+    parts.push('<div class="setting-category" data-category="' + escapeAttr(cat) + '" style="margin-top:14px;">');
+    parts.push('<div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;border-bottom:1px solid var(--border-primary);padding-bottom:4px;">'
+      + escapeHtml(cat) + '</div>');
+    keys.forEach(function(key) {
+      parts.push(renderSettingRow(key));
+    });
+    parts.push('</div>');
+  });
+  container.innerHTML = parts.join('');
+}
+
+function rerenderSettingRow(key) {
+  var row = document.querySelector('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]');
+  if (!row) return;
+  var tmp = document.createElement('div');
+  tmp.innerHTML = renderSettingRow(key);
+  var fresh = tmp.firstElementChild;
+  if (fresh) row.replaceWith(fresh);
+}
+
+function cssEscape(s) {
+  if (window.CSS && window.CSS.escape) return window.CSS.escape(s);
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+}
+
+function renderSettingRow(key) {
+  var spec = ALL_SETTINGS_CACHE.schema[key];
+  var values = ALL_SETTINGS_CACHE.values;
+  var hasWs = Object.prototype.hasOwnProperty.call(values.workspace, key);
+  var hasGlobal = Object.prototype.hasOwnProperty.call(values['global'], key);
+  var globalOnly = (spec.scope === 'global');
+  var workspaceTab = (ALL_SETTINGS_SCOPE === 'workspace');
+
+  var dotClass, dotTitle;
+  if (workspaceTab) {
+    if (hasWs) {
+      dotClass = 'dot-workspace';
+      dotTitle = 'Set for this workspace';
+    } else if (globalOnly) {
+      dotClass = hasGlobal ? 'dot-global' : 'dot-default';
+      dotTitle = hasGlobal ? 'Global setting (not workspace-overridable)' : 'Global default';
+    } else {
+      dotClass = 'dot-default';
+      dotTitle = hasGlobal ? 'Inheriting global value' : 'Using default';
+    }
+  } else if (hasGlobal) {
+    dotClass = 'dot-global';
+    dotTitle = 'Set globally';
+  } else {
+    dotClass = 'dot-default';
+    dotTitle = 'Using default';
+  }
+
+  // Effective value for the widget on this tab.
+  var rowValue;
+  if (workspaceTab) {
+    if (hasWs) rowValue = values.workspace[key];
+    else if (hasGlobal) rowValue = values['global'][key];
+    else rowValue = values['default'][key];
+  } else {
+    rowValue = hasGlobal ? values['global'][key] : values['default'][key];
+  }
+
+  var defaultVal = values['default'][key];
+  var widget;
+  if (workspaceTab && globalOnly) {
+    widget = '<span style="font-size:11px;color:var(--text-ghost);font-style:italic;">'
+           + 'Global only — switch to Global tab</span>';
+  } else {
+    widget = renderSettingWidget(key, spec, rowValue);
+  }
+
+  var hasOverride = workspaceTab ? hasWs : hasGlobal;
+  var resetBtn = '';
+  if (hasOverride) {
+    var resetTitle = workspaceTab
+      ? 'Remove workspace override (inherit global / default)'
+      : 'Reset to default: ' + formatSettingValue(defaultVal, spec, true);
+    resetBtn = '<button type="button" onclick="resetSchemaSetting(\'' + escapeAttr(key) + '\')" '
+             +    'title="' + escapeAttr(resetTitle) + '" '
+             +    'style="background:transparent;border:1px solid var(--border-secondary);color:var(--text-dim);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;flex-shrink:0;">'
+             +  'Reset</button>';
+  }
+
+  var meta = escapeHtml(key);
+  if (workspaceTab && hasWs) {
+    var inheritedVal = hasGlobal ? values['global'][key] : defaultVal;
+    var inheritLabel = hasGlobal ? 'inherits global' : 'inherits default';
+    meta += ' · ' + inheritLabel + ': ' + escapeHtml(formatSettingValue(inheritedVal, spec, true));
+  } else if (!workspaceTab && hasGlobal) {
+    meta += ' · default: ' + escapeHtml(formatSettingValue(defaultVal, spec, true));
+  }
+  var search = (key + ' ' + spec.label + ' ' + spec.desc + ' ' + spec.category).toLowerCase();
+  return '<div class="setting-row-card" data-search="' + escapeAttr(search) + '" data-key="' + escapeAttr(key) + '" '
+       +    'style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border-primary);">'
+       +   '<span class="provenance-dot ' + dotClass + '" title="' + escapeAttr(dotTitle) + '"></span>'
+       +   '<div style="flex:1;min-width:0;">'
+       +     '<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;">'
+       +       '<div style="font-size:13px;color:var(--text-primary);font-weight:500;flex:1;min-width:140px;">' + escapeHtml(spec.label) + '</div>'
+       +       '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">'
+       +         widget
+       +         resetBtn
+       +       '</div>'
+       +     '</div>'
+       +     '<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">' + escapeHtml(spec.desc) + '</div>'
+       +     '<div style="display:flex;justify-content:space-between;gap:8px;margin-top:2px;">'
+       +       '<div style="font-size:11px;color:var(--text-ghost);font-family:monospace;">' + meta + '</div>'
+       +       '<div class="setting-row-status" style="font-size:11px;color:var(--text-dim);min-height:14px;"></div>'
+       +     '</div>'
+       +   '</div>'
+       + '</div>';
+}
+
+function renderSettingWidget(key, spec, effective) {
+  var inputStyle = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:12px;';
+  var keyAttr = 'data-input-key="' + escapeAttr(key) + '"';
+  if (spec.type === 'bool') {
+    return '<input type="checkbox" ' + keyAttr + ' '
+         +     (effective ? 'checked ' : '')
+         +     'onchange="onSchemaInputChange(this, true)" '
+         +     'style="accent-color:var(--accent);transform:scale(1.1);">';
+  }
+  if (spec.type === 'enum') {
+    var opts = (spec.enum || []).map(function(opt) {
+      var label = (spec.enum_labels && spec.enum_labels[opt]) ? spec.enum_labels[opt] : opt;
+      var sel = (opt === effective) ? ' selected' : '';
+      return '<option value="' + escapeAttr(opt) + '"' + sel + '>' + escapeHtml(label) + '</option>';
+    }).join('');
+    return '<select ' + keyAttr + ' onchange="onSchemaInputChange(this, true)" '
+         +    'style="' + inputStyle + 'min-width:120px;">'
+         +   opts + '</select>';
+  }
+  if (spec.type === 'int' || spec.type === 'float') {
+    var step = spec.step != null ? spec.step : (spec.type === 'int' ? 1 : 0.01);
+    var min = spec.min != null ? ' min="' + spec.min + '"' : '';
+    var max = spec.max != null ? ' max="' + spec.max + '"' : '';
+    var val = (effective != null) ? effective : '';
+    return '<input type="number" ' + keyAttr + ' value="' + escapeAttr(String(val)) + '" '
+         +     'step="' + step + '"' + min + max + ' '
+         +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
+     +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
+         +     'style="' + inputStyle + 'width:100px;text-align:right;">';
+  }
+  if (spec.type === 'secret') {
+    var sval = (effective != null) ? String(effective) : '';
+    return '<input type="password" ' + keyAttr + ' value="' + escapeAttr(sval) + '" '
+         +     'placeholder="(unset)" autocomplete="off" '
+         +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
+     +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
+         +     'style="' + inputStyle + 'width:200px;font-family:monospace;">';
+  }
+  if (spec.type === 'list_string') {
+    if (Array.isArray(spec.items_enum)) {
+      var current = Array.isArray(effective) ? effective : [];
+      var checks = spec.items_enum.map(function(item) {
+        var checked = current.indexOf(item) !== -1 ? ' checked' : '';
+        return '<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text-secondary);cursor:pointer;">'
+             +   '<input type="checkbox" data-list-item="' + escapeAttr(item) + '" data-list-key="' + escapeAttr(key) + '"' + checked
+             +     ' onchange="onSchemaListChange(\'' + escapeAttr(key) + '\')" style="accent-color:var(--accent);">'
+             +   escapeHtml(item)
+             + '</label>';
+      }).join(' ');
+      return '<div style="display:flex;flex-wrap:wrap;gap:6px;max-width:380px;justify-content:flex-end;">' + checks + '</div>';
+    }
+    // Read-only fallback for list_string without items_enum (e.g. scan_roots).
+    var asText = (Array.isArray(effective) && effective.length) ? effective.join(', ') : '(empty)';
+    return '<span style="font-size:12px;color:var(--text-secondary);font-family:monospace;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;" title="' + escapeAttr(asText) + '">'
+         +   escapeHtml(asText)
+         + '</span>'
+         + '<span style="font-size:10px;color:var(--text-ghost);margin-left:6px;">(edit above)</span>';
+  }
+  // string / path / fallback
+  var tval = (effective != null) ? String(effective) : '';
+  return '<input type="text" ' + keyAttr + ' value="' + escapeAttr(tval) + '" '
+       +     'placeholder="(empty)" '
+       +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
+     +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
+       +     'style="' + inputStyle + 'width:240px;font-family:monospace;">';
+}
+
+function onSchemaInputChange(el, immediate) {
+  var key = el.getAttribute('data-input-key');
+  if (!key) return;
+  var spec = ALL_SETTINGS_CACHE.schema[key];
+  var raw;
+  if (spec.type === 'bool') {
+    raw = el.checked;
+  } else if (spec.type === 'int' || spec.type === 'float') {
+    raw = el.value;     // server coerces strings to numbers
+  } else {
+    raw = el.value;
+  }
+  scheduleSchemaSave(key, raw, immediate);
+}
+
+function onSchemaListChange(key) {
+  var checked = [];
+  document.querySelectorAll('input[type="checkbox"][data-list-key="' + cssEscape(key) + '"]:checked').forEach(function(cb) {
+    checked.push(cb.getAttribute('data-list-item'));
+  });
+  scheduleSchemaSave(key, checked, true);
+}
+
+function scheduleSchemaSave(key, value, immediate) {
+  // Capture the scope at edit time so a tab switch during the debounce window
+  // doesn't redirect the pending write to the wrong layer.
+  var scope = ALL_SETTINGS_SCOPE;
+  var token = key + '|' + scope;
+  if (ALL_SETTINGS_DEBOUNCE[token]) {
+    clearTimeout(ALL_SETTINGS_DEBOUNCE[token]);
+  }
+  var delay = immediate ? 0 : 300;
+  ALL_SETTINGS_DEBOUNCE[token] = setTimeout(function() {
+    ALL_SETTINGS_DEBOUNCE[token] = null;
+    saveSchemaSetting(key, value, scope);
+  }, delay);
+}
+
+function _settingsScopeBaseFor(scope) {
+  return (scope === 'workspace') ? '/api/settings/workspace' : '/api/settings/global';
+}
+
+async function saveSchemaSetting(key, value, scope) {
+  if (!scope) scope = ALL_SETTINGS_SCOPE;
+  setRowStatus(key, 'Saving…', false);
+  try {
+    var resp = await fetch(_settingsScopeBaseFor(scope), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: key, value: value }),
+    });
+    if (!resp.ok) {
+      var err = await resp.json().catch(function() { return { error: resp.statusText }; });
+      setRowStatus(key, err.error || 'Save failed', true);
+      return;
+    }
+    await refreshAllSettingsValues();
+    rerenderSettingRow(key);
+    // The curated forms above this panel post full snapshots from their own
+    // inputs. Repopulate those inputs from the server so a later curated
+    // edit doesn't overwrite the value we just saved with a stale snapshot —
+    // both the global form (`saveConfig`) and the workspace-overrides form
+    // (`saveWsConfig`, which sends `null` for unchecked rows and would clear
+    // a freshly-saved override).
+    if (scope === 'global') await loadConfig();
+    else if (scope === 'workspace') await loadWsOverrides();
+    setRowStatus(key, '✓ Saved', false);
+    setTimeout(function() { setRowStatus(key, '', false); }, 1500);
+  } catch (err) {
+    setRowStatus(key, 'Network error', true);
+  }
+}
+
+async function resetSchemaSetting(key) {
+  setRowStatus(key, 'Resetting…', false);
+  try {
+    var scope = ALL_SETTINGS_SCOPE;
+    // Cancel any pending debounced autosave for this key+scope. Without
+    // this, a still-queued PATCH from a recent edit would fire 300ms after
+    // the DELETE and re-create the override, making Reset appear to "not
+    // stick" depending on click timing.
+    var token = key + '|' + scope;
+    if (ALL_SETTINGS_DEBOUNCE[token]) {
+      clearTimeout(ALL_SETTINGS_DEBOUNCE[token]);
+      ALL_SETTINGS_DEBOUNCE[token] = null;
+    }
+    var resp = await fetch(_settingsScopeBaseFor(scope) + '/' + encodeURIComponent(key), {
+      method: 'DELETE',
+    });
+    if (!resp.ok) {
+      var err = await resp.json().catch(function() { return { error: resp.statusText }; });
+      setRowStatus(key, err.error || 'Reset failed', true);
+      return;
+    }
+    await refreshAllSettingsValues();
+    rerenderSettingRow(key);
+    if (scope === 'global') await loadConfig();
+    else if (scope === 'workspace') await loadWsOverrides();
+  } catch (err) {
+    setRowStatus(key, 'Network error', true);
+  }
+}
+
+function setRowStatus(key, msg, isError) {
+  var row = document.querySelector('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]');
+  if (!row) return;
+  var status = row.querySelector('.setting-row-status');
+  if (!status) return;
+  status.textContent = msg;
+  status.style.color = isError ? 'var(--danger)' : 'var(--text-dim)';
+}
+
+function formatSettingValue(v, spec, mask) {
+  if (v === undefined || v === null) return '';
+  if (spec.type === 'bool') return v ? 'true' : 'false';
+  if (spec.type === 'secret') {
+    if (!v) return '(unset)';
+    return mask ? '••••••••' : String(v);
+  }
+  if (spec.type === 'enum') {
+    if (spec.enum_labels && spec.enum_labels[v]) return spec.enum_labels[v];
+    return String(v);
+  }
+  if (spec.type === 'list_string') {
+    if (!Array.isArray(v) || v.length === 0) return '(empty)';
+    return v.join(', ');
+  }
+  if (spec.type === 'string' || spec.type === 'path') {
+    if (v === '') return '(empty)';
+    return String(v);
+  }
+  return String(v);
+}
+
+async function importSettingsFile(file) {
+  if (!file) return;
+  if (!confirm('Replace your global Vireo config with "' + file.name + '"?\n\nWorkspace overrides are not affected.')) {
+    return;
+  }
+  var text;
+  try {
+    text = await file.text();
+  } catch (err) {
+    alert('Could not read file: ' + (err && err.message || err));
+    return;
+  }
+  // Cancel any queued debounced autosaves first — a PATCH or a curated
+  // /api/config / /api/workspaces/active/config snapshot save that fires
+  // mid-import would clobber part of the just-restored config.
+  Object.keys(ALL_SETTINGS_DEBOUNCE).forEach(function(token) {
+    if (ALL_SETTINGS_DEBOUNCE[token]) {
+      clearTimeout(ALL_SETTINGS_DEBOUNCE[token]);
+      ALL_SETTINGS_DEBOUNCE[token] = null;
+    }
+  });
+  if (typeof _saveTimer !== 'undefined' && _saveTimer) {
+    clearTimeout(_saveTimer);
+    _saveTimer = null;
+  }
+  if (typeof _wsSaveTimer !== 'undefined' && _wsSaveTimer) {
+    clearTimeout(_wsSaveTimer);
+    _wsSaveTimer = null;
+  }
+  try {
+    var resp = await fetch('/api/settings/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ json: text }),
+    });
+    var data = await resp.json().catch(function() { return {}; });
+    if (!resp.ok) {
+      var msg = data.error || resp.statusText || 'Import failed';
+      if (data.errors) {
+        msg += '\n\nFailed keys:\n' + Object.keys(data.errors).map(function(k) {
+          return '  ' + k + ': ' + data.errors[k];
+        }).join('\n');
+      }
+      alert(msg);
+      return;
+    }
+    await refreshAllSettingsValues();
+    renderAllSettings(document.getElementById('allSettingsCategories'));
+    filterAllSettings();
+    // Curated form posts its own snapshot — repull so a later edit doesn't
+    // overwrite imported global values with stale form state.
+    await loadConfig();
+    alert('Settings imported. Workspace overrides preserved.');
+  } catch (err) {
+    alert('Network error: ' + (err && err.message || err));
+  }
+}
+
+function filterAllSettings() {
+  var q = (document.getElementById('allSettingsSearch').value || '').trim().toLowerCase();
+  var rows = document.querySelectorAll('#allSettingsCategories .setting-row-card');
+  rows.forEach(function(row) {
+    row.style.display = (!q || row.getAttribute('data-search').indexOf(q) !== -1) ? '' : 'none';
+  });
+  document.querySelectorAll('#allSettingsCategories .setting-category').forEach(function(cat) {
+    var anyVisible = false;
+    cat.querySelectorAll('.setting-row-card').forEach(function(r) {
+      if (r.style.display !== 'none') anyVisible = true;
+    });
+    cat.style.display = anyVisible ? '' : 'none';
+  });
 }
 </script>
 </body>
