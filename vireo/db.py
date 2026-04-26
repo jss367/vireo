@@ -657,13 +657,21 @@ class Database:
             return global_config
 
     def get_subject_types(self) -> set[str]:
-        """Return the keyword types that count as 'identified' for the active workspace."""
+        """Return the keyword types that count as 'identified' for the active
+        workspace.
+
+        config_overrides is arbitrary JSON (api_update_workspace persists
+        whatever the client sends), so subject_types entries may not be
+        strings — guard the membership test against unhashable values
+        (nested lists/objects) to avoid TypeError downstream in callers
+        like collection filtering and the classify skip-gate.
+        """
         import config as cfg
         effective = self.get_effective_config(cfg.load())
         raw = effective.get("subject_types", list(SUBJECT_TYPES_DEFAULT))
         if not isinstance(raw, list):
             return set(SUBJECT_TYPES_DEFAULT)
-        return {t for t in raw if t in KEYWORD_TYPES}
+        return {t for t in raw if isinstance(t, str) and t in KEYWORD_TYPES}
 
     # Conservative chunk size for filter_out_subject_tagged. Most modern
     # SQLite builds default to SQLITE_MAX_VARIABLE_NUMBER=32766, but older
@@ -3770,8 +3778,15 @@ class Database:
         'location', 'individual') are preserved. Explicit type/taxon_id
         kwargs always win over auto-detection.
         """
-        if 'type' in kwargs and kwargs['type'] not in KEYWORD_TYPES:
-            raise ValueError(f"Invalid keyword type: {kwargs['type']}")
+        if 'type' in kwargs:
+            kt = kwargs['type']
+            # Guard the membership test against non-hashable JSON values —
+            # api_update_keyword passes the request body through, and
+            # `x in frozenset` raises TypeError on unhashable input. Treat
+            # any non-string as invalid (raise ValueError so the route's
+            # existing catch yields the documented 400).
+            if not isinstance(kt, str) or kt not in KEYWORD_TYPES:
+                raise ValueError(f"Invalid keyword type: {kt!r}")
         allowed = {'type', 'taxon_id', 'latitude', 'longitude', 'name'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:

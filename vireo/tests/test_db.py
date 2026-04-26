@@ -6679,6 +6679,43 @@ def test_filter_out_subject_tagged_preserves_input_order(tmp_path):
     assert db.filter_out_subject_tagged(ordered, {"genre"}) == ordered
 
 
+def test_get_subject_types_drops_non_string_entries(tmp_path, monkeypatch):
+    """Regression: config_overrides may contain malformed JSON entries since
+    api_update_workspace persists arbitrary values. Membership against a
+    frozenset raises TypeError on unhashable input; the helper must filter
+    non-strings before testing membership."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    # Persist deliberately-malformed subject_types via the workspace
+    # config (mirrors what api_update_workspace would let through).
+    db.update_workspace(ws_id, config_overrides={
+        "subject_types": ["taxonomy", ["nested"], {"obj": 1}, 42, None, "genre"],
+    })
+    # Must not raise. Returns the string-and-valid subset.
+    assert db.get_subject_types() == {"taxonomy", "genre"}
+
+
+def test_update_keyword_rejects_non_string_type(tmp_path):
+    """Regression: update_keyword(type=...) must raise ValueError (not
+    TypeError) on non-hashable JSON values, so api_update_keyword's
+    existing ValueError catch still translates to 400 instead of 500."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    kid = db.add_keyword("Tag", kw_type="general")
+    with pytest.raises(ValueError, match="Invalid keyword type"):
+        db.update_keyword(kid, type=[])
+    with pytest.raises(ValueError, match="Invalid keyword type"):
+        db.update_keyword(kid, type={"x": 1})
+    with pytest.raises(ValueError, match="Invalid keyword type"):
+        db.update_keyword(kid, type=42)
+
+
 def test_filter_out_subject_tagged_chunks_large_input(tmp_path, monkeypatch):
     """Regression: photo_ids larger than the SQLite bind-var limit must be
     chunked, not passed as a single oversized IN clause. The classify job
