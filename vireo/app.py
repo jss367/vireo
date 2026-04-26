@@ -2293,6 +2293,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db.update_workspace(db._active_workspace_id, config_overrides=existing)
         return jsonify({"ok": True, "nav_order": nav_order})
 
+    @app.route("/api/workspaces/active/subject-types", methods=["GET"])
+    def api_get_active_subject_types():
+        """Return the active workspace's effective subject_types — global
+        defaults merged with workspace overrides. The workspace settings UI
+        needs this rather than just the override JSON, so checkboxes render
+        the actual current state when the user has only customized at the
+        global config layer."""
+        db = _get_db()
+        types = sorted(db.get_subject_types())
+        return jsonify({"types": types})
+
     @app.route("/api/workspaces/<int:ws_id>/subject-types", methods=["PUT"])
     def api_set_subject_types(ws_id):
         """Set the subject_types config override for a workspace.

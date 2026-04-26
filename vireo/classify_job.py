@@ -1407,6 +1407,34 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             summary=f"{total} photos",
         )
 
+        # If the subject-skip filter (or an empty source collection) left
+        # nothing to classify, short-circuit before model load. Loading the
+        # model is expensive (and can fail) and there is no work to do.
+        if total == 0:
+            log.info(
+                "Classify job: no photos to process after filtering; "
+                "skipping model load and detection",
+            )
+            runner.push_event(
+                job["id"], "progress",
+                {
+                    "current": 0,
+                    "total": 0,
+                    "current_file": "No photos to classify",
+                    "rate": 0,
+                    "phase": "Step 2/5: Loading photos",
+                },
+            )
+            return {
+                "total": 0,
+                "predictions_stored": 0,
+                "burst_groups": 0,
+                "already_classified": 0,
+                "already_labeled": 0,
+                "detected": 0,
+                "failed": 0,
+            }
+
         log.info(
             "Classifying %d photos with '%s' (%s)", total, effective_name, model_str
         )

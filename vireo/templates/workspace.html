@@ -100,14 +100,14 @@ loadWorkspaces();
 loadSubjectTypes();
 
 /* ---------- Subject Types ---------- */
-const SUBJECT_TYPES_DEFAULT = ['taxonomy', 'individual', 'genre'];
-
 async function loadSubjectTypes() {
+  // Read the effective subject_types (global defaults merged with workspace
+  // overrides) so checkboxes match the actual current behavior. Reading
+  // overrides-only with a hardcoded fallback would lie when the user has
+  // customized only the global config.
   try {
-    var overrides = await safeFetch('/api/workspaces/active/config', {}, { toast: false });
-    var current = (overrides && Array.isArray(overrides.subject_types))
-      ? overrides.subject_types
-      : SUBJECT_TYPES_DEFAULT;
+    var resp = await safeFetch('/api/workspaces/active/subject-types', {}, { toast: false });
+    var current = (resp && Array.isArray(resp.types)) ? resp.types : [];
     document.querySelectorAll('input[data-subject-type]').forEach(function(cb) {
       cb.checked = current.indexOf(cb.dataset.subjectType) !== -1;
     });

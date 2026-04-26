@@ -1913,6 +1913,82 @@ def test_classify_job_reclassify_true_bypasses_subject_skip(tmp_path):
     )
 
 
+def test_classify_job_short_circuits_when_all_photos_skipped(tmp_path):
+    """Regression: when the subject-skip filter empties the photo set, the
+    job must short-circuit before model load. Loading a model is expensive
+    and can fail; doing it for zero photos undermines the skip behavior."""
+    from unittest.mock import patch
+
+    from classify_job import ClassifyParams, run_classify_job
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    db.add_workspace_folder(ws, folder_id)
+    p1 = db.add_photo(
+        folder_id, "p1.jpg", extension=".jpg", file_size=100, file_mtime=1.0,
+    )
+    # Tag p1 with a genre keyword so the skip-gate filters it out.
+    scene_kid = db.add_keyword("Landscape", kw_type="genre")
+    db.tag_photo(p1, scene_kid)
+    col_id = db.add_collection(
+        "static-only-tagged",
+        json.dumps([{"field": "photo_ids", "value": [p1]}]),
+    )
+    db.conn.close()
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    fake_model = {
+        "id": "test-model",
+        "name": "TestModel",
+        "model_str": "hf-hub:imageomics/bioclip",
+        "weights_path": "/tmp/weights.bin",
+        "model_type": "bioclip",
+        "downloaded": True,
+    }
+
+    classifier_init_calls = []
+
+    def _record_classifier_init(*args, **kwargs):
+        classifier_init_calls.append((args, kwargs))
+        raise AssertionError(
+            "Classifier should NOT be initialized when no photos remain "
+            "after subject-skip filtering."
+        )
+
+    params = ClassifyParams(
+        collection_id=col_id,
+        labels_file=None,
+        labels_files=None,
+        model_id=None,
+        model_name="TestModel",
+        grouping_window=10,
+        similarity_threshold=0.85,
+        reclassify=False,
+    )
+
+    with patch("classify_job.get_active_model", return_value=fake_model), \
+         patch("classify_job.get_models", return_value=[fake_model]), \
+         patch("classify_job._load_taxonomy", return_value=None), \
+         patch(
+            "classify_job._load_labels", return_value=(["Northern Cardinal"], False),
+         ), \
+         patch("classify_job.Classifier", side_effect=_record_classifier_init):
+        result = run_classify_job(job, runner, db_path, ws, params)
+
+    assert classifier_init_calls == [], (
+        "Classifier was initialized despite zero photos to process. "
+        "The early-return short-circuit was not taken."
+    )
+    assert result["total"] == 0
+    assert result["predictions_stored"] == 0
+
+
 def test_run_classifier_retries_on_database_is_locked(tmp_path):
     """Per-detection prediction commit must retry transient 'database is locked'.
 

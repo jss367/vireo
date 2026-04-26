@@ -2271,6 +2271,44 @@ def test_put_subject_types_preserves_other_overrides(app_and_db):
     assert overrides.get("classification_threshold") == 0.42
 
 
+def test_get_active_subject_types_returns_effective_config(app_and_db, tmp_path, monkeypatch):
+    """Regression: GET /api/workspaces/active/subject-types returns the
+    EFFECTIVE config (global merged with workspace overrides), not just
+    the override JSON. The settings UI needs this so checkboxes match
+    actual behavior even when only the global config has been customized."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "global-config.json"))
+    # Customize ONLY the global config (no workspace override). The
+    # endpoint must return ["taxonomy"], not the hardcoded default
+    # ["taxonomy", "individual", "genre"].
+    cfg.set("subject_types", ["taxonomy"])
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/workspaces/active/subject-types")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["types"] == ["taxonomy"], (
+        "Endpoint must merge global config — workspace settings UI would "
+        "otherwise render wrong checkbox state when only global is set."
+    )
+
+
+def test_get_active_subject_types_workspace_override_wins(app_and_db, tmp_path, monkeypatch):
+    """When a workspace override is set, it overrides the global default."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "global-config.json"))
+    cfg.set("subject_types", ["taxonomy"])  # global = wildlife only
+    app, db = app_and_db
+    # Override the active workspace to include genre too
+    ws_id = db._active_workspace_id
+    db.update_workspace(ws_id, config_overrides={"subject_types": ["taxonomy", "genre"]})
+    client = app.test_client()
+    resp = client.get("/api/workspaces/active/subject-types")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert set(body["types"]) == {"taxonomy", "genre"}
+
+
 def test_workspace_page_no_scan_button(app_and_db):
     """Workspace page should not have a Scan & Add button — folders are added via Pipeline."""
     app, _ = app_and_db
