@@ -2266,6 +2266,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db.update_workspace(db._active_workspace_id, config_overrides=existing)
         return jsonify({"ok": True, "nav_order": nav_order})
 
+    @app.route("/api/workspaces/<int:ws_id>/subject-types", methods=["PUT"])
+    def api_set_subject_types(ws_id):
+        """Set the subject_types config override for a workspace.
+
+        Unknown type values are dropped (logged). An empty list is allowed
+        (logged warning) and effectively disables the 'identified' filter.
+        """
+        from db import KEYWORD_TYPES
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        raw_types = body.get("types")
+        if not isinstance(raw_types, list):
+            return json_error("types must be a list")
+        cleaned = [t for t in raw_types if t in KEYWORD_TYPES]
+        dropped = [t for t in raw_types if t not in KEYWORD_TYPES]
+        if dropped:
+            log.warning(
+                "subject-types: dropped unknown values %s for ws=%s",
+                dropped, ws_id,
+            )
+        if not cleaned:
+            log.warning("subject-types: empty list set for workspace %s", ws_id)
+        ws = db.get_workspace(ws_id)
+        if not ws:
+            return json_error("workspace not found", 404)
+        existing = {}
+        if ws["config_overrides"]:
+            try:
+                existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+            except Exception:
+                existing = {}
+        existing["subject_types"] = cleaned
+        db.update_workspace(ws_id, config_overrides=existing)
+        return jsonify({"types": cleaned})
+
     @app.route("/api/workspaces/active/new-images")
     def api_workspace_new_images():
         db = _get_db()

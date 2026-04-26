@@ -2180,6 +2180,97 @@ def test_nav_order_rejects_non_list(app_and_db):
     assert resp.status_code == 400
 
 
+def _read_workspace_overrides(db, ws_id):
+    """Helper: read and JSON-decode the config_overrides column for ws_id."""
+    import json
+    ws = db.get_workspace(ws_id)
+    raw = ws["config_overrides"] if ws else None
+    if not raw:
+        return {}
+    return json.loads(raw) if isinstance(raw, str) else raw
+
+
+def test_put_subject_types_persists_valid_values(app_and_db):
+    """PUT /api/workspaces/<id>/subject-types persists requested types."""
+    app, db = app_and_db
+    ws_id = db.create_workspace("ws-subject-1")
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}/subject-types",
+        json={"types": ["taxonomy", "scene"]},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert set(body["types"]) == {"taxonomy", "scene"}
+    overrides = _read_workspace_overrides(db, ws_id)
+    assert set(overrides.get("subject_types", [])) == {"taxonomy", "scene"}
+
+
+def test_put_subject_types_drops_unknown_values(app_and_db):
+    """Unknown type values are dropped silently (logged)."""
+    app, db = app_and_db
+    ws_id = db.create_workspace("ws-subject-2")
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}/subject-types",
+        json={"types": ["taxonomy", "bogus"]},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["types"] == ["taxonomy"]
+    overrides = _read_workspace_overrides(db, ws_id)
+    assert overrides.get("subject_types") == ["taxonomy"]
+
+
+def test_put_subject_types_empty_list_allowed(app_and_db):
+    """Empty list is allowed (effectively disables the queue's filter)."""
+    app, db = app_and_db
+    ws_id = db.create_workspace("ws-subject-3")
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}/subject-types",
+        json={"types": []},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["types"] == []
+    overrides = _read_workspace_overrides(db, ws_id)
+    assert overrides.get("subject_types") == []
+
+
+def test_put_subject_types_rejects_non_list(app_and_db):
+    """Non-list 'types' value returns 400."""
+    app, db = app_and_db
+    ws_id = db.create_workspace("ws-subject-4")
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}/subject-types",
+        json={"types": "not-a-list"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+
+
+def test_put_subject_types_preserves_other_overrides(app_and_db):
+    """Setting subject_types must not clobber other config_overrides keys."""
+    app, db = app_and_db
+    ws_id = db.create_workspace("ws-subject-5")
+    db.update_workspace(ws_id, config_overrides={"classification_threshold": 0.42})
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}/subject-types",
+        json={"types": ["taxonomy"]},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    overrides = _read_workspace_overrides(db, ws_id)
+    assert overrides.get("subject_types") == ["taxonomy"]
+    assert overrides.get("classification_threshold") == 0.42
+
+
 def test_workspace_page_no_scan_button(app_and_db):
     """Workspace page should not have a Scan & Add button — folders are added via Pipeline."""
     app, _ = app_and_db
