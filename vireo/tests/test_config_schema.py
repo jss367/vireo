@@ -149,16 +149,27 @@ def test_is_excluded_matches_prefixes():
 # ---------------------------------------------------------------------------
 
 
-def test_cull_thresholds_remain_global_until_consumers_wired():
-    """The cull workflow (cull.html init, culling.analyze_for_culling) reads
-    only the global cfg.load(), so a workspace override of these keys would
-    be silently ignored. Pin the scope so a future re-promotion to ``both``
-    has to reckon with the consumer side first.
+def test_keys_with_global_only_consumers_remain_global():
+    """These keys' runtime consumers read only the global ``cfg.load()`` /
+    ``cfg.get(...)`` — they don't go through ``db.get_effective_config``.
+    A workspace override would therefore be silently ignored, which is worse
+    than not offering the option at all. Pin the scope so a future
+    re-promotion to ``both`` has to reckon with the consumer side first.
     """
     from config_schema import SCHEMA
 
+    # Cull workflow: cull.html reads /api/config; culling.analyze_for_culling
+    # falls back to cfg.load().
     assert SCHEMA["cull_time_window"]["scope"] == "global"
     assert SCHEMA["cull_phash_threshold"]["scope"] == "global"
+    # culling.analyze_for_culling consumes redundancy_threshold from cfg.load().
+    assert SCHEMA["redundancy_threshold"]["scope"] == "global"
+    # Detection-padding consumers in app.py use cfg.load().get(...) directly.
+    assert SCHEMA["detection_padding"]["scope"] == "global"
+    # Database._prune_edit_history reads cfg.get('max_edit_history').
+    assert SCHEMA["max_edit_history"]["scope"] == "global"
+    # Database.add_keyword reads cfg.get('keyword_case').
+    assert SCHEMA["keyword_case"]["scope"] == "global"
 
 
 def test_validate_unknown_key_raises():

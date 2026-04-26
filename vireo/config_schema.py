@@ -46,8 +46,11 @@ SCHEMA = {
         "desc": "Minimum confidence for a wildlife detection bounding box.",
     },
     "detection_padding": {
+        # scope=global: only consumers are cfg.load().get(...) in app.py;
+        # promote to "both" only after wiring those reads to
+        # db.get_effective_config(cfg.load()).
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
-        "category": "Detection", "scope": "both",
+        "category": "Detection", "scope": "global",
         "label": "Detection padding",
         "desc": "Padding around detected bounding boxes before classification (fraction of bbox size).",
     },
@@ -58,8 +61,11 @@ SCHEMA = {
         "desc": "Number of top species predictions to keep per detection.",
     },
     "redundancy_threshold": {
+        # scope=global: culling.analyze_for_culling reads cfg.load() (not
+        # db.get_effective_config), so a workspace override here would be
+        # silently ignored.
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
-        "category": "Detection", "scope": "both",
+        "category": "Detection", "scope": "global",
         "label": "Redundancy threshold",
         "desc": "Cosine-similarity threshold for collapsing near-duplicate detections.",
     },
@@ -78,12 +84,16 @@ SCHEMA = {
         "desc": "Cosine-similarity threshold above which two photos are visual duplicates.",
     },
     "max_edit_history": {
+        # scope=global: Database._prune_edit_history reads cfg.get(...) so a
+        # workspace override would not change actual pruning behavior.
         "type": "int", "min": 0, "max": 100000,
-        "category": "Behavior", "scope": "both",
+        "category": "Behavior", "scope": "global",
         "label": "Edit history limit",
         "desc": "Maximum number of undo-able edits kept per workspace.",
     },
     "keyword_case": {
+        # scope=global: Database.add_keyword reads cfg.get("keyword_case"), so
+        # a workspace override would not change keyword capitalization.
         "type": "enum",
         "enum": ["auto", "title", "lower"],
         "enum_labels": {
@@ -91,7 +101,7 @@ SCHEMA = {
             "title": "Title Case (House Finch)",
             "lower": "Sentence case (House finch)",
         },
-        "category": "Behavior", "scope": "both",
+        "category": "Behavior", "scope": "global",
         "label": "Keyword case",
         "desc": "Capitalization convention for species keywords.",
     },
