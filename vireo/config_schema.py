@@ -6,6 +6,7 @@ widgets and validate values. Drift between ``DEFAULTS`` and ``SCHEMA`` is
 enforced by ``vireo/tests/test_config_schema.py``.
 """
 
+import math
 
 # Prefixes whose leaf keys are intentionally NOT covered by SCHEMA.
 #   - setup_complete: internal state flag (not a user-facing setting)
@@ -601,6 +602,14 @@ def _coerce(raw, kind):
     if kind == "int":
         if isinstance(raw, bool):
             return int(raw)
+        # JSON numeric values arrive as float when they have a decimal point.
+        # Reject non-integral floats so {"key": 1.9} doesn't silently become 1.
+        if isinstance(raw, float):
+            if not math.isfinite(raw) or not raw.is_integer():
+                raise ValidationError(
+                    f"cannot coerce {raw!r} to int: not an integral value"
+                )
+            return int(raw)
         try:
             if isinstance(raw, str):
                 return int(raw.strip())
@@ -611,9 +620,15 @@ def _coerce(raw, kind):
         if isinstance(raw, bool):
             return float(raw)
         try:
-            return float(raw)
+            value = float(raw)
         except (TypeError, ValueError) as e:
             raise ValidationError(f"cannot coerce {raw!r} to float: {e}") from e
+        # Reject NaN and ±Inf — bound checks (`< min`, `> max`) skip NaN, so
+        # a payload like {"value": "nan"} would otherwise pass validation and
+        # poison downstream comparisons.
+        if not math.isfinite(value):
+            raise ValidationError(f"cannot coerce {raw!r} to float: not a finite number")
+        return value
     if kind in ("string", "secret", "path", "enum"):
         if raw is None:
             return ""

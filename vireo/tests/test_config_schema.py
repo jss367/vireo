@@ -180,6 +180,31 @@ def test_validate_int_enforces_range():
         validate_value("photos_per_page", 5000)
 
 
+def test_validate_int_rejects_fractional_float():
+    from config_schema import ValidationError, validate_value
+
+    # JSON numerics with a decimal point arrive as float — reject non-integral
+    # values so {"photos_per_page": 1.9} doesn't silently truncate to 1.
+    with pytest.raises(ValidationError):
+        validate_value("photos_per_page", 99.5)
+
+
+def test_validate_int_accepts_integral_float():
+    from config_schema import validate_value
+
+    # JSON numbers like 100.0 are still legitimate ints.
+    assert validate_value("photos_per_page", 100.0) == 100
+
+
+def test_validate_int_rejects_nan_and_inf():
+    from config_schema import ValidationError, validate_value
+
+    with pytest.raises(ValidationError):
+        validate_value("photos_per_page", float("nan"))
+    with pytest.raises(ValidationError):
+        validate_value("photos_per_page", float("inf"))
+
+
 def test_validate_float_coerces_string():
     from config_schema import validate_value
 
@@ -193,6 +218,30 @@ def test_validate_float_enforces_range():
         validate_value("classification_threshold", -0.1)
     with pytest.raises(ValidationError):
         validate_value("classification_threshold", 1.5)
+
+
+def test_validate_float_rejects_nan():
+    from config_schema import ValidationError, validate_value
+
+    # NaN sneaks past min/max checks (`< min` / `> max` are both False) so
+    # we must explicitly reject non-finite floats.
+    with pytest.raises(ValidationError):
+        validate_value("classification_threshold", float("nan"))
+    with pytest.raises(ValidationError):
+        validate_value("classification_threshold", "nan")
+    with pytest.raises(ValidationError):
+        validate_value("classification_threshold", "NaN")
+
+
+def test_validate_float_rejects_inf():
+    from config_schema import ValidationError, validate_value
+
+    with pytest.raises(ValidationError):
+        validate_value("classification_threshold", float("inf"))
+    with pytest.raises(ValidationError):
+        validate_value("classification_threshold", float("-inf"))
+    with pytest.raises(ValidationError):
+        validate_value("classification_threshold", "Infinity")
 
 
 def test_validate_bool_coerces_strings():
