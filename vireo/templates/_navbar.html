@@ -1734,7 +1734,7 @@ function sendReport() {
   for (var action in NAV_ROUTES) hrefToAction[NAV_ROUTES[action]] = action;
 
   function applyHotkeyHints(navShortcuts) {
-    var navLinks = document.querySelectorAll('.navbar > a[href]:not(.brand):not(.nav-icon)');
+    var navLinks = document.querySelectorAll('.navbar > a[href]:not(.brand):not(.nav-icon):not([data-tab])');
     for (var i = 0; i < navLinks.length; i++) {
       var link = navLinks[i];
       var href = link.getAttribute('href');
