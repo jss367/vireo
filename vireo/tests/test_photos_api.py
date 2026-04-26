@@ -1898,3 +1898,210 @@ def test_post_photo_location_text_records_edit(app_and_db):
     entry = post_history[0]
     assert entry["action_type"] == "location_set"
     assert "the meadow" in entry["description"]
+
+
+# --- GET /api/places/reverse-geocode ----------------------------------------
+#
+# Server-side proxy for the Google Geocoding API with a SQLite cache layer
+# keyed on the (lat, lng) ~110m grid. The route exists so the API key never
+# leaves the server (the autocomplete JS library is the one client-facing
+# Google call we make). Tests monkeypatch ``places.reverse_geocode`` so no
+# HTTP traffic happens.
+
+def _central_park_geocode_response():
+    """Canned reverse-geocode response stored in the cache for hit tests.
+
+    Same shape as ``places.reverse_geocode`` returns — i.e. the value the
+    route serializes via ``json.dumps(details)`` before stashing. Reusing the
+    Central Park place_id for symmetry with the autocomplete tests above.
+    """
+    return {
+        "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+        "name": "Central Park",
+        "lat": 40.7828,
+        "lng": -73.9654,
+        "address_components": [
+            {"name": "New York", "short_name": "New York", "types": ["locality"]},
+            {"name": "New York", "short_name": "NY", "types": ["administrative_area_level_1"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+
+def test_reverse_geocode_cache_hit_returns_summary(app_and_db, monkeypatch):
+    """Pre-populated cache: route serves from SQLite, no Google call."""
+    import json
+
+    import places
+    app, db = app_and_db
+
+    lat, lng = 40.7828, -73.9654
+    db.reverse_geocode_cache_put(
+        lat, lng,
+        place_id="ChIJ4zGFAZpYwokRGUGph3Mf37k",
+        response_json=json.dumps(_central_park_geocode_response()),
+    )
+
+    # Counter-mock proves we never reached out to Google.
+    calls = {"n": 0}
+
+    def fake_reverse_geocode(lat_, lng_, key):
+        calls["n"] += 1
+        raise AssertionError("places.reverse_geocode should not be called on cache hit")
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+
+    client = app.test_client()
+    resp = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert data["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+    # Summary: leaf + the 1-2 broadest parents (end-of-list components).
+    assert "Central Park" in data["summary"]
+    assert "United States" in data["summary"]
+    assert calls["n"] == 0
+
+
+def test_reverse_geocode_cache_negative_hit_returns_null(app_and_db, monkeypatch):
+    """Cached negative (place_id=None): route returns null without calling Google."""
+    import places
+    app, db = app_and_db
+
+    lat, lng = 12.345, 67.890
+    # Negative cache entry — Google was previously asked and returned no match.
+    db.reverse_geocode_cache_put(lat, lng, place_id=None, response_json="{}")
+
+    calls = {"n": 0}
+
+    def fake_reverse_geocode(lat_, lng_, key):
+        calls["n"] += 1
+        raise AssertionError("places.reverse_geocode should not be called on negative cache hit")
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+
+    client = app.test_client()
+    resp = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json() == {"place_id": None, "summary": None}
+    assert calls["n"] == 0
+
+
+def test_reverse_geocode_cache_miss_calls_google_and_caches(app_and_db, monkeypatch):
+    """Empty cache: hit Google, cache the result, second call hits cache."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+
+    calls = {"n": 0}
+
+    def fake_reverse_geocode(lat_, lng_, key):
+        calls["n"] += 1
+        return _central_park_geocode_response()
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+
+    client = app.test_client()
+    lat, lng = 40.7828, -73.9654
+
+    r1 = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert r1.status_code == 200, r1.get_json()
+    data1 = r1.get_json()
+    assert data1["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+    assert "Central Park" in data1["summary"]
+    assert calls["n"] == 1
+
+    # Second call against the same coords should hit the cache, NOT Google.
+    r2 = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert r2.status_code == 200
+    data2 = r2.get_json()
+    assert data2["place_id"] == data1["place_id"]
+    assert data2["summary"] == data1["summary"]
+    assert calls["n"] == 1  # unchanged — second call was served from cache
+
+
+def test_reverse_geocode_cache_miss_caches_negative_when_google_returns_none(
+    app_and_db, monkeypatch,
+):
+    """Google returns None: cache the negative so future calls don't hit the API."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+
+    calls = {"n": 0}
+
+    def fake_reverse_geocode(lat_, lng_, key):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+
+    client = app.test_client()
+    lat, lng = 0.123, 0.456
+
+    r1 = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert r1.status_code == 200, r1.get_json()
+    assert r1.get_json() == {"place_id": None, "summary": None}
+    assert calls["n"] == 1
+
+    # Negative was cached — second call must NOT re-ask Google.
+    r2 = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert r2.status_code == 200
+    assert r2.get_json() == {"place_id": None, "summary": None}
+    assert calls["n"] == 1
+
+
+def test_reverse_geocode_returns_null_when_no_api_key_and_does_not_cache(
+    app_and_db, monkeypatch,
+):
+    """No API key: degrade to ``{place_id: null}`` AND don't pollute the cache.
+
+    Caching a negative when the user has no key would mean that once they add
+    a key, already-asked grid cells would forever return null. So we skip the
+    cache write entirely and just return the null shape.
+    """
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+
+    calls = {"n": 0}
+
+    def fake_reverse_geocode(lat_, lng_, key):
+        calls["n"] += 1
+        raise AssertionError("places.reverse_geocode should not be called when no API key")
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+
+    lat, lng = 51.5074, -0.1278  # somewhere in London — fresh coords
+
+    client = app.test_client()
+    resp = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"place_id": None, "summary": None}
+    assert calls["n"] == 0
+
+    # Critically: the cache must be empty for this grid, so once the user
+    # eventually adds a key, the next call will actually reach Google.
+    cached = db.reverse_geocode_cache_get(lat, lng)
+    assert cached is None
+
+
+def test_reverse_geocode_400_on_invalid_coords(app_and_db):
+    """Missing or unparseable lat/lng is a 400."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    # No query params at all.
+    r1 = client.get("/api/places/reverse-geocode")
+    assert r1.status_code == 400
+    assert r1.get_json()["error"] == "invalid coords"
+
+    # Garbage lat.
+    r2 = client.get("/api/places/reverse-geocode?lat=foo&lng=1.0")
+    assert r2.status_code == 400
+    assert r2.get_json()["error"] == "invalid coords"

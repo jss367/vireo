@@ -1511,6 +1511,44 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db.conn.commit()
         return jsonify({"ok": True})
 
+    def _summarize_details(details):
+        """Build a short human-friendly summary string from a Place Details dict.
+
+        Format: ``"<leaf name> · <broadest 1-2 parents>"``. Google's
+        ``address_components`` are ordered narrowest-first, so the broadest
+        parents (country, state) sit at the END of the list. We pick at most
+        the last two, dedupe against the leaf name, and join with " · ".
+
+        Examples::
+
+            "Central Park · New York · United States"
+            "Some Lighthouse · Iceland"
+            "JustALeaf"  # if no usable parent components
+        """
+        leaf = (details or {}).get("name", "") or ""
+        components = (details or {}).get("address_components") or []
+
+        # Broadest 1-2 parents = last two components (Google orders broad-last).
+        tail = components[-2:] if len(components) >= 2 else components[-1:]
+        # Walk in reverse so we render broadest-first to broader-second
+        # ("New York · United States" reads better than "United States · New York"
+        # given the leaf comes first; iNaturalist uses leaf-then-narrowest-up).
+        # Actually: leaf · narrowest-parent · ... · broadest-parent reads most
+        # naturally for breadcrumbs. So reverse the tail so the closest parent
+        # is first.
+        parts = [leaf] if leaf else []
+        for comp in reversed(tail):
+            name = (comp or {}).get("name") or (comp or {}).get("long_name") or ""
+            if not name:
+                continue
+            if name == leaf or name in parts:
+                continue
+            parts.append(name)
+
+        if not parts:
+            return ""
+        return " · ".join(parts)
+
     def _serialize_photo_location(db, photo_id):
         """Return a summary dict for the photo's current location keyword.
 
@@ -1645,6 +1683,64 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             [{'photo_id': photo_id, 'old_value': '', 'new_value': ''}],
         )
         return jsonify({"ok": True})
+
+    @app.route("/api/places/reverse-geocode", methods=["GET"])
+    def api_reverse_geocode():
+        """Reverse-geocode (lat, lng) via Google, with a SQLite grid cache.
+
+        Query params: ``lat``, ``lng`` (floats). Returns
+        ``{"place_id": <str|null>, "summary": <str|null>}``.
+
+        Cache layer is keyed on ~110m grid (see ``Database._reverse_geocode_grid``).
+        A row with ``place_id=None`` is a cached negative — Google was previously
+        asked and had no match, and we serve null without re-asking.
+
+        When no ``google_maps_api_key`` is configured we degrade to ``null``
+        WITHOUT writing to the cache. Caching null in that branch would make
+        already-asked grids stay null forever once the user finally adds a
+        key, which is exactly the wrong UX.
+        """
+        try:
+            lat = float(request.args.get("lat", ""))
+            lng = float(request.args.get("lng", ""))
+        except (TypeError, ValueError):
+            return json_error("invalid coords", 400)
+
+        db = _get_db()
+        cached = db.reverse_geocode_cache_get(lat, lng)
+        if cached is not None:
+            if cached["place_id"] is None:
+                # Cached negative — Google previously had no match here.
+                return jsonify({"place_id": None, "summary": None})
+            try:
+                details = json.loads(cached["response"])
+            except (ValueError, TypeError):
+                details = {}
+            return jsonify({
+                "place_id": cached["place_id"],
+                "summary": _summarize_details(details),
+            })
+
+        # Cache miss.
+        import config as cfg
+        key = cfg.load().get("google_maps_api_key", "")
+        if not key:
+            # Don't cache here — see docstring.
+            return jsonify({"place_id": None, "summary": None})
+
+        details = places.reverse_geocode(lat, lng, key)
+        cache_place_id = details.get("place_id") if details else None
+        db.reverse_geocode_cache_put(
+            lat, lng,
+            place_id=cache_place_id,
+            response_json=json.dumps(details or {}),
+        )
+        if details is None:
+            return jsonify({"place_id": None, "summary": None})
+        return jsonify({
+            "place_id": cache_place_id,
+            "summary": _summarize_details(details),
+        })
 
     # -- Batch operations --
 
