@@ -4,9 +4,65 @@ These tests exercise the section in the no-Google-API-key branch (the live_serve
 fixture starts with an empty config), so they cover the free-text Enter path
 and the server-side initial render. They do NOT test Google Places autocomplete
 itself — that requires a real key and a network round-trip we don't want in CI.
+
+The EXIF-suggestion tests below seed `place_reverse_geocode_cache` directly so
+the server's `/api/places/reverse-geocode` proxy serves a hit without ever
+calling Google. The Accept-button test additionally monkeypatches
+`places.place_details` so the POST /api/photos/<id>/location call returns canned
+data without a live API call.
 """
 
+import json
+
 from playwright.sync_api import expect
+
+# Canned reverse-geocode response: shape matches what `places.reverse_geocode`
+# produces (see vireo/places.py). `_summarize_details` reads `name` plus the
+# last 1-2 entries of `address_components`.
+_CANNED_PLACE_ID = "ChIJTestCentralPark"
+_CANNED_DETAILS = {
+    "place_id": _CANNED_PLACE_ID,
+    "name": "Central Park, New York, NY, USA",
+    "lat": 40.785091,
+    "lng": -73.968285,
+    "address_components": [
+        {"name": "Central Park", "types": ["park"]},
+        {"name": "New York", "types": ["locality"]},
+        {"name": "United States", "types": ["country"]},
+    ],
+}
+
+
+def _seed_exif_photo(live_server, lat=40.785091, lng=-73.968285):
+    """Set lat/lng on the first seeded photo and return its id."""
+    db = live_server["db"]
+    photo_id = live_server["data"]["photos"][0]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+            (lat, lng, photo_id),
+        )
+    return photo_id
+
+
+def _seed_reverse_geocode_cache(live_server, lat, lng, place_id, details):
+    """Pre-populate `place_reverse_geocode_cache` so the proxy serves a hit."""
+    live_server["db"].reverse_geocode_cache_put(
+        lat, lng, place_id=place_id, response_json=json.dumps(details),
+    )
+
+
+def _set_api_key(key="test-key"):
+    """Write a Google Maps key into the (monkeypatched) config.json so:
+      - browse.html's _cfgPromise sees `window.GOOGLE_MAPS_API_KEY` set,
+        which gates the `maybeShowExifSuggestion` fetch path; AND
+      - the server's reverse-geocode + set-location routes accept the request.
+    """
+    import config as cfg
+
+    current = cfg.load()
+    current["google_maps_api_key"] = key
+    cfg.save(current)
 
 
 def test_location_section_renders_empty(live_server, page):
@@ -125,3 +181,107 @@ def test_no_gmaps_script_when_key_empty(live_server, page):
         "document.querySelectorAll('script[src*=\"maps.googleapis.com\"]').length"
     )
     assert count == 0
+
+
+def test_exif_suggestion_appears_when_photo_has_gps_and_no_location(live_server, page):
+    """A photo with EXIF GPS + no location keyword + a configured API key
+    should trigger the reverse-geocode proxy and render the suggestion line.
+
+    We pre-populate `place_reverse_geocode_cache` so the proxy serves a hit
+    without ever calling Google.
+    """
+    photo_id = _seed_exif_photo(live_server)
+    _seed_reverse_geocode_cache(
+        live_server, 40.785091, -73.968285, _CANNED_PLACE_ID, _CANNED_DETAILS,
+    )
+    _set_api_key()
+
+    page.goto(f"{live_server['url']}/browse")
+    card = page.locator(f".grid-card[data-id='{photo_id}']")
+    card.wait_for(state="visible")
+    card.click()
+
+    sugg = page.locator("#locationExifSuggestion")
+    expect(sugg).to_be_visible()
+    expect(sugg).to_contain_text("EXIF says:")
+    expect(sugg).to_contain_text("Central Park")
+    expect(sugg.locator("button.accept-btn")).to_have_text("Accept")
+
+
+def test_exif_suggestion_hidden_when_no_gps(live_server, page):
+    """A photo with no lat/lng must NOT trigger the suggestion line, even if
+    a key is configured."""
+    _set_api_key()
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.locator(".grid-card").first.click()
+
+    page.locator("#locationInput").wait_for(state="visible")
+    # Give the no-op JS path a moment in case anything would fire.
+    page.wait_for_timeout(150)
+
+    expect(page.locator("#locationExifSuggestion")).to_be_hidden()
+
+
+def test_exif_suggestion_hidden_when_already_has_location(live_server, page):
+    """Photos that already have a location keyword render the filled state,
+    so the empty container (and the suggestion line within it) stays hidden."""
+    db = live_server["db"]
+    photo_id = _seed_exif_photo(live_server)
+    # Pre-tag with a free-text location.
+    leaf_id = db.get_or_create_text_location("Pre-existing Location")
+    db.set_photo_location(photo_id, leaf_id)
+    _seed_reverse_geocode_cache(
+        live_server, 40.785091, -73.968285, _CANNED_PLACE_ID, _CANNED_DETAILS,
+    )
+    _set_api_key()
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.locator(".grid-card").first.click()
+
+    expect(page.locator("#locationFilled")).to_be_visible()
+    expect(page.locator("#locationExifSuggestion")).to_be_hidden()
+
+
+def test_exif_accept_button_attaches_location(live_server, page, monkeypatch):
+    """Clicking Accept POSTs the place_id and switches to the filled state.
+
+    POST /api/photos/<id>/location calls `places.place_details` (Google), so we
+    monkeypatch that to return our canned details.
+    """
+    photo_id = _seed_exif_photo(live_server)
+    _seed_reverse_geocode_cache(
+        live_server, 40.785091, -73.968285, _CANNED_PLACE_ID, _CANNED_DETAILS,
+    )
+    _set_api_key()
+
+    import places
+    monkeypatch.setattr(
+        places, "place_details", lambda pid, key: _CANNED_DETAILS,
+    )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.locator(".grid-card").first.click()
+
+    accept = page.locator("#locationExifSuggestion button.accept-btn")
+    expect(accept).to_be_visible()
+    accept.click()
+
+    filled = page.locator("#locationFilled")
+    expect(filled).to_be_visible()
+    expect(page.locator("#locationFilled .filled-place")).to_have_text(
+        _CANNED_DETAILS["name"]
+    )
+    expect(page.locator("#locationExifSuggestion")).to_be_hidden()
+
+    # Sanity-check server state: the leaf keyword is now linked.
+    row = live_server["db"].conn.execute(
+        "SELECT 1 FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location' AND k.place_id = ?",
+        (photo_id, _CANNED_PLACE_ID),
+    ).fetchone()
+    assert row is not None

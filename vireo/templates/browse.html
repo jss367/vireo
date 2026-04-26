@@ -447,6 +447,10 @@ body {
   align-items: center;
   gap: 6px;
 }
+/* Specificity-match the rule above so the `hidden` attribute actually
+   hides the element. Without this, `display: flex` wins over the UA's
+   `[hidden] { display: none }` rule. */
+.location-section .location-suggestion[hidden] { display: none; }
 .location-section .location-suggestion .accept-btn {
   background: var(--accent);
   color: var(--bg-primary);
@@ -2424,6 +2428,7 @@ function renderDetail(photo) {
     renderLocationFilled(photo.location);
   } else {
     renderLocationEmpty();
+    maybeShowExifSuggestion(photo);
   }
 
   // XMP sidecar
@@ -2945,6 +2950,86 @@ function renderLocationEmpty() {
   empty.hidden = false;
   var input = document.getElementById('locationInput');
   if (input) input.value = '';
+  // Reset any prior EXIF suggestion. The caller (renderDetail) re-runs
+  // maybeShowExifSuggestion(photo) after this, which decides whether to
+  // populate the line for the new photo.
+  var sugg = document.getElementById('locationExifSuggestion');
+  if (sugg) {
+    sugg.hidden = true;
+    sugg.innerHTML = '';
+  }
+}
+
+/* When a photo with EXIF GPS but no location keyword is opened, fetch a
+   reverse-geocode suggestion and offer it as an inline Accept line. Bails
+   silently when there's no key or no coords; the proxy returns null when
+   Google has no match for the cell. */
+async function maybeShowExifSuggestion(photo) {
+  var sugg = document.getElementById('locationExifSuggestion');
+  if (!sugg) return;
+  sugg.hidden = true;
+  sugg.innerHTML = '';
+
+  if (!photo) return;
+  if (photo.location) return;
+  if (photo.latitude == null || photo.longitude == null) return;
+
+  await _cfgPromise;
+  var apiKey = (window.GOOGLE_MAPS_API_KEY || '').trim();
+  if (!apiKey) return;
+
+  // Capture the photo id at request time so a slow reverse-geocode for an
+  // older photo doesn't paint into the suggestion line for a newer one.
+  var requestPhotoId = photo.id;
+  try {
+    var params = new URLSearchParams({lat: photo.latitude, lng: photo.longitude});
+    var r = await fetch('/api/places/reverse-geocode?' + params.toString());
+    if (!r.ok) return;
+    var data = await r.json();
+    if (!data || !data.place_id || !data.summary) return;
+    if (window._detailPhotoId !== requestPhotoId) return;
+
+    sugg.innerHTML = '';
+    var text = document.createElement('span');
+    text.textContent = '💡 EXIF says: ' + data.summary + '  ';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'accept-btn';
+    btn.textContent = 'Accept';
+    btn.dataset.placeId = data.place_id;
+    btn.addEventListener('click', function() {
+      acceptExifSuggestion(data.place_id);
+    });
+    sugg.appendChild(text);
+    sugg.appendChild(btn);
+    sugg.hidden = false;
+  } catch (e) {
+    console.warn('reverse-geocode suggestion failed:', e);
+  }
+}
+
+async function acceptExifSuggestion(placeId) {
+  var photoId = window._detailPhotoId;
+  if (!photoId || !placeId) return;
+  _hideLocationError();
+  try {
+    var resp = await safeFetch('/api/photos/' + photoId + '/location', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ place_id: placeId }),
+    });
+    if (resp && resp.location) {
+      renderLocationFilled(resp.location);
+      loadDetail(photoId);
+    }
+    var sugg = document.getElementById('locationExifSuggestion');
+    if (sugg) {
+      sugg.hidden = true;
+      sugg.innerHTML = '';
+    }
+  } catch(e) {
+    _showLocationError('Could not save location.');
+  }
 }
 
 function _onLocationInputFocus() {
