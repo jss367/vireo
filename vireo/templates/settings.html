@@ -1022,9 +1022,13 @@
     <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
       Every Vireo setting, including ones not surfaced by the curated sections above. Edits save automatically; click Reset to revert.
     </div>
-    <div style="display:flex;border-bottom:1px solid var(--border-primary);margin-bottom:14px;">
+    <div style="display:flex;align-items:center;border-bottom:1px solid var(--border-primary);margin-bottom:14px;">
       <button class="scope-tab active" data-scope="global" onclick="setSettingsScope('global')">Global</button>
       <button class="scope-tab" data-scope="workspace" onclick="setSettingsScope('workspace')">Workspace</button>
+      <span style="flex:1;"></span>
+      <a href="/api/settings/export" class="btn-sm" style="margin-bottom:6px;text-decoration:none;display:inline-block;">Export…</a>
+      <button class="btn-sm" onclick="document.getElementById('settingsImportInput').click()" style="margin-bottom:6px;">Import…</button>
+      <input type="file" id="settingsImportInput" accept=".json,application/json" style="display:none;" onchange="importSettingsFile(this.files[0]); this.value='';">
     </div>
     <div style="font-size:11px;color:var(--text-dim);margin-bottom:14px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;" id="allSettingsLegend">
       <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-default" style="margin-top:0;"></span> default</span>
@@ -2870,6 +2874,44 @@ function formatSettingValue(v, spec, mask) {
     return String(v);
   }
   return String(v);
+}
+
+async function importSettingsFile(file) {
+  if (!file) return;
+  if (!confirm('Replace your global Vireo config with "' + file.name + '"?\n\nWorkspace overrides are not affected.')) {
+    return;
+  }
+  var text;
+  try {
+    text = await file.text();
+  } catch (err) {
+    alert('Could not read file: ' + (err && err.message || err));
+    return;
+  }
+  try {
+    var resp = await fetch('/api/settings/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ json: text }),
+    });
+    var data = await resp.json().catch(function() { return {}; });
+    if (!resp.ok) {
+      var msg = data.error || resp.statusText || 'Import failed';
+      if (data.errors) {
+        msg += '\n\nFailed keys:\n' + Object.keys(data.errors).map(function(k) {
+          return '  ' + k + ': ' + data.errors[k];
+        }).join('\n');
+      }
+      alert(msg);
+      return;
+    }
+    await refreshAllSettingsValues();
+    renderAllSettings(document.getElementById('allSettingsCategories'));
+    filterAllSettings();
+    alert('Settings imported. Workspace overrides preserved.');
+  } catch (err) {
+    alert('Network error: ' + (err && err.message || err));
+  }
 }
 
 function filterAllSettings() {

@@ -1,5 +1,6 @@
 """Tests for /api/settings/* endpoints (schema-driven settings UI)."""
 
+import json
 import os
 import sys
 
@@ -495,6 +496,125 @@ def test_delete_workspace_rejects_unknown_key(app_and_db):
     client = app.test_client()
     resp = client.delete("/api/settings/workspace/no_such_key")
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# GET /api/settings/export
+# ---------------------------------------------------------------------------
+
+
+def test_export_returns_attachment_when_file_exists(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.7)
+    client = app.test_client()
+    resp = client.get("/api/settings/export")
+    assert resp.status_code == 200
+    assert "attachment" in resp.headers.get("Content-Disposition", "")
+    body = json.loads(resp.get_data())
+    assert body.get("classification_threshold") == 0.7
+
+
+def test_export_returns_empty_object_when_file_missing(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/settings/export")
+    assert resp.status_code == 200
+    body = json.loads(resp.get_data())
+    assert body == {}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/settings/import
+# ---------------------------------------------------------------------------
+
+
+def test_import_replaces_global_file(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)
+    client = app.test_client()
+    payload = {"classification_threshold": 0.95, "photos_per_page": 100}
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    raw = cfg.load()
+    assert raw["classification_threshold"] == 0.95
+    assert raw["photos_per_page"] == 100
+
+
+def test_import_rejects_invalid_json(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": "{ this is not json"},
+    )
+    assert resp.status_code == 400
+
+
+def test_import_rejects_invalid_value_for_known_key(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"classification_threshold": 99})},
+    )
+    assert resp.status_code == 400
+    # File untouched — atomic replace happens only after full validation.
+    assert cfg.load()["classification_threshold"] == 0.5
+
+
+def test_import_passes_through_non_schema_keys(app_and_db):
+    """Keys not in SCHEMA (e.g. setup_complete, keyboard_shortcuts) survive an import."""
+    app, _ = app_and_db
+    import config as cfg
+
+    payload = {
+        "classification_threshold": 0.6,
+        "setup_complete": True,
+        "keyboard_shortcuts": cfg.DEFAULTS["keyboard_shortcuts"],
+    }
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    raw = cfg.load()
+    assert raw["setup_complete"] is True
+    assert raw["classification_threshold"] == 0.6
+
+
+def test_import_preserves_workspace_overrides(app_and_db):
+    """Workspace overrides survive a global-config import."""
+    app, db = app_and_db
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"classification_threshold": 0.9},
+    )
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"classification_threshold": 0.3})},
+    )
+    assert resp.status_code == 200
+    overrides = _ws_overrides(db)
+    assert overrides.get("classification_threshold") == 0.9
+
+
+def test_import_empty_object_is_ok(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/settings/import", json={"json": "{}"})
+    assert resp.status_code == 200
 
 
 def test_delete_workspace_preserves_active_labels(app_and_db):

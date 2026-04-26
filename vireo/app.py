@@ -3218,6 +3218,67 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         _write_workspace_overrides(db, overrides)
         return jsonify({"ok": True, "key": key})
 
+    @app.route("/api/settings/export")
+    def api_settings_export():
+        """Download ~/.vireo/config.json as an attachment.
+
+        Returns the raw user-overrides file (or "{}" if absent), pretty-printed.
+        Workspace overrides are not included — they're per-workspace state, not
+        global config.
+        """
+        import datetime as _datetime
+
+        raw = _read_raw_config_file()
+        body = json.dumps(raw, indent=2)
+        today = _datetime.date.today().isoformat()
+        resp = make_response(body)
+        resp.headers["Content-Type"] = "application/json"
+        resp.headers["Content-Disposition"] = (
+            f'attachment; filename="vireo-config-{today}.json"'
+        )
+        return resp
+
+    @app.route("/api/settings/import", methods=["POST"])
+    def api_settings_import():
+        """Replace ~/.vireo/config.json with the supplied JSON payload.
+
+        Validates every schema-known leaf key in the payload before writing;
+        on any validation failure, returns 400 with a per-key error map and
+        leaves the file untouched. Non-schema keys (setup_complete, the
+        keyboard_shortcuts subtree, etc.) pass through unchanged so that
+        backups round-trip cleanly. Workspace overrides are untouched —
+        backups capture global state only.
+        """
+        import config as cfg
+        import config_schema as schema
+
+        body = request.get_json(silent=True) or {}
+        raw_text = body.get("json", "")
+        if not isinstance(raw_text, str):
+            return json_error("body.json must be a string", status=400)
+        try:
+            payload = json.loads(raw_text)
+        except json.JSONDecodeError as e:
+            return json_error(f"invalid JSON: {e}", status=400)
+        if not isinstance(payload, dict):
+            return json_error("payload must be a JSON object", status=400)
+
+        errors = {}
+        flat = schema.flatten(payload)
+        for k, v in flat.items():
+            if k in schema.SCHEMA:
+                try:
+                    coerced = schema.validate_value(k, v)
+                    schema.set_dotted(payload, k, coerced)
+                except schema.ValidationError as e:
+                    errors[k] = str(e)
+        if errors:
+            return jsonify({"error": "validation failed", "errors": errors}), 400
+
+        cfg.save(payload)
+        _settings_post_save_side_effects(cfg.load())
+        return jsonify({"ok": True})
+
     @app.route("/api/darktable/status")
     def api_darktable_status():
         import config as cfg
