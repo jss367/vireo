@@ -633,6 +633,31 @@ class Database:
             return set(SUBJECT_TYPES_DEFAULT)
         return {t for t in raw if t in KEYWORD_TYPES}
 
+    def filter_out_subject_tagged(self, photo_ids, subject_types):
+        """Return the subset of photo_ids whose photos do NOT have any keyword
+        of a type in subject_types. Empty subject_types or empty photo_ids
+        returns photo_ids unchanged (preserving input order)."""
+        if not subject_types or not photo_ids:
+            return list(photo_ids)
+        types = [t for t in subject_types if t in KEYWORD_TYPES]
+        if not types:
+            return list(photo_ids)
+        pid_placeholders = ",".join("?" * len(photo_ids))
+        type_placeholders = ",".join("?" * len(types))
+        rows = self.conn.execute(
+            f"""SELECT id FROM photos
+                WHERE id IN ({pid_placeholders})
+                  AND id NOT IN (
+                    SELECT pk.photo_id FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id
+                    WHERE k.type IN ({type_placeholders})
+                  )""",
+            list(photo_ids) + types,
+        ).fetchall()
+        kept_set = {r["id"] for r in rows}
+        # Preserve original input order for kept rows.
+        return [pid for pid in photo_ids if pid in kept_set]
+
     def get_workspace_active_labels(self):
         """Return the active_labels list from workspace config_overrides, or None."""
         ws = self.get_workspace(self._ws_id())

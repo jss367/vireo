@@ -6388,3 +6388,66 @@ def test_get_subject_types_drops_unknown_values(tmp_path, monkeypatch):
     db.set_active_workspace(ws_id)
     db.update_workspace(ws_id, config_overrides={"subject_types": ["taxonomy", "alien"]})
     assert db.get_subject_types() == {"taxonomy"}
+
+
+def test_filter_out_subject_tagged_excludes_tagged_photos(tmp_path):
+    """filter_out_subject_tagged drops photos that have any keyword whose
+    type is in the supplied set."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    scene_kid = db.add_keyword("Landscape", kw_type="scene")
+    gen_kid = db.add_keyword("note", kw_type="general")
+    db.tag_photo(p1, scene_kid)
+    db.tag_photo(p2, gen_kid)
+
+    kept = db.filter_out_subject_tagged([p1, p2], {"scene"})
+    assert kept == [p2]
+
+
+def test_filter_out_subject_tagged_empty_set_returns_all(tmp_path):
+    """An empty subject_types set means no type counts as 'identifying',
+    so every input photo is kept."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    assert db.filter_out_subject_tagged([p1], set()) == [p1]
+
+
+def test_filter_out_subject_tagged_empty_photo_ids_returns_empty(tmp_path):
+    """An empty photo_ids list short-circuits to an empty result."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    assert db.filter_out_subject_tagged([], {"scene"}) == []
+
+
+def test_filter_out_subject_tagged_preserves_input_order(tmp_path):
+    """Output preserves the input order of photo_ids for the kept rows."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+
+    fid = db.add_folder('/photos', name='photos')
+    # Insert several photos; we'll then ask filter_out_subject_tagged
+    # to keep them all (no subject tags) but in a specific input order.
+    p_a = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    p_b = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    p_c = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+
+    # No subject-tagged photos here — all three should be kept.
+    # Provide ids in non-sorted order to confirm the helper preserves input order.
+    ordered = [p_c, p_a, p_b]
+    assert db.filter_out_subject_tagged(ordered, {"scene"}) == ordered
