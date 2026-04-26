@@ -1096,6 +1096,28 @@ def test_migration_skips_user_customized_collection(tmp_path):
     assert cols["Needs Classification"] == custom
 
 
+def test_default_scene_keywords_inserted(tmp_path):
+    """Database init populates the four default scene keywords."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    rows = db.conn.execute(
+        "SELECT name FROM keywords WHERE type = 'scene' ORDER BY name"
+    ).fetchall()
+    assert [r["name"] for r in rows] == ["Abstract", "Architecture", "Landscape", "Sunset"]
+
+
+def test_default_scene_keywords_idempotent(tmp_path):
+    """Calling ensure_default_scene_keywords multiple times doesn't duplicate."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.ensure_default_scene_keywords()
+    db.ensure_default_scene_keywords()
+    n = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM keywords WHERE type = 'scene'"
+    ).fetchone()["n"]
+    assert n == 4
+
+
 def test_all_photos_collection_returns_all_photos(tmp_path):
     """The default 'All Photos' collection matches every photo in the workspace."""
     from db import Database
@@ -2856,7 +2878,8 @@ def test_photo_keywords_includes_type(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
-    kid = db.add_keyword('Sunset')
+    # Use a name that isn't pre-seeded as a default scene keyword.
+    kid = db.add_keyword('MyTag')
     db.tag_photo(pid, kid)
 
     keywords = db.get_photo_keywords(pid)
@@ -6472,11 +6495,12 @@ def test_add_keyword_existing_general_upgrades_to_requested_type(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
-    kid1 = db.add_keyword("Landscape")
+    # Use a name that isn't pre-seeded as a default scene keyword.
+    kid1 = db.add_keyword("Cityscape")
     row1 = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid1,)).fetchone()
     assert row1["type"] == "general"
 
-    kid2 = db.add_keyword("Landscape", kw_type="scene")
+    kid2 = db.add_keyword("Cityscape", kw_type="scene")
     assert kid2 == kid1
     row2 = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid2,)).fetchone()
     assert row2["type"] == "scene"

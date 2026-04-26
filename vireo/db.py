@@ -103,6 +103,7 @@ class Database:
         self._new_images_cache = get_shared_cache()
         self._create_tables()
         self.ensure_default_workspace()
+        self.ensure_default_scene_keywords()
         # Restore last-used workspace, or fall back to Default
         last = self.conn.execute(
             "SELECT id FROM workspaces ORDER BY CASE WHEN last_opened_at IS NULL THEN 0 ELSE 1 END DESC, last_opened_at DESC, id ASC LIMIT 1"
@@ -844,6 +845,25 @@ class Database:
         if row:
             return row[0]
         return self.create_workspace("Default")
+
+    def ensure_default_scene_keywords(self):
+        """Insert the default scene keywords if none exist of type='scene'.
+
+        Idempotent: a single existing scene keyword (user-created or otherwise)
+        short-circuits the insert. Keywords are global, so this runs once per
+        database (not per workspace).
+        """
+        existing = self.conn.execute(
+            "SELECT 1 FROM keywords WHERE type = 'scene' LIMIT 1"
+        ).fetchone()
+        if existing:
+            return
+        for name in ("Landscape", "Sunset", "Architecture", "Abstract"):
+            self.conn.execute(
+                "INSERT OR IGNORE INTO keywords (name, type, is_species) VALUES (?, 'scene', 0)",
+                (name,),
+            )
+        self.conn.commit()
 
     # -- Folders --
 
