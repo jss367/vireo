@@ -1452,9 +1452,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not name:
             return json_error("name required")
         kid = db.add_keyword(name)
-        # Override type if explicitly provided
+        # Override type if explicitly provided. Guard against non-string
+        # JSON values (e.g. {"type": []} or {"type": {}}) — `x in frozenset`
+        # raises TypeError on unhashable input, which would 500 the request.
         kw_type = body.get("type")
-        if kw_type and kw_type in KEYWORD_TYPES:
+        if isinstance(kw_type, str) and kw_type in KEYWORD_TYPES:
             db.conn.execute("UPDATE keywords SET type = ? WHERE id = ?", (kw_type, kid))
             db.conn.commit()
         db.tag_photo(photo_id, kid)
@@ -1613,8 +1615,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not photo_ids or not name:
             return json_error("photo_ids and name required")
         kid = db.add_keyword(name)
+        # Guard against non-string JSON values — see api_add_keyword note.
         kw_type = body.get("type")
-        if kw_type and kw_type in KEYWORD_TYPES:
+        if isinstance(kw_type, str) and kw_type in KEYWORD_TYPES:
             db.conn.execute("UPDATE keywords SET type = ? WHERE id = ?", (kw_type, kid))
             db.conn.commit()
         for pid in photo_ids:
@@ -2317,8 +2320,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         raw_types = body.get("types")
         if not isinstance(raw_types, list):
             return json_error("types must be a list")
-        cleaned = [t for t in raw_types if t in KEYWORD_TYPES]
-        dropped = [t for t in raw_types if t not in KEYWORD_TYPES]
+        # Guard the membership test against non-string entries (e.g. nested
+        # lists or objects). `x in frozenset` raises TypeError on unhashable
+        # input — that would 500 the request instead of dropping the bad
+        # element per the documented "unknown values are dropped" contract.
+        cleaned = [t for t in raw_types if isinstance(t, str) and t in KEYWORD_TYPES]
+        dropped = [t for t in raw_types if not isinstance(t, str) or t not in KEYWORD_TYPES]
         if dropped:
             log.warning(
                 "subject-types: dropped unknown values %s for ws=%s",

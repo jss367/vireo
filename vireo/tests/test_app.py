@@ -2293,6 +2293,74 @@ def test_get_active_subject_types_returns_effective_config(app_and_db, tmp_path,
     )
 
 
+def test_put_subject_types_drops_non_string_entries(app_and_db):
+    """Regression: non-string JSON entries (e.g. nested lists/objects) must
+    be dropped, not crash with TypeError on `x in frozenset`."""
+    app, db = app_and_db
+    ws_id = db.create_workspace("ws-subject-malformed")
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}/subject-types",
+        json={"types": ["taxonomy", ["nested"], {"obj": 1}, 42, None, "genre"]},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200, (
+        f"Expected non-string entries to be dropped, got {resp.status_code}: "
+        f"{resp.get_data(as_text=True)}"
+    )
+    body = resp.get_json()
+    assert set(body["types"]) == {"taxonomy", "genre"}
+
+
+def test_add_keyword_route_handles_non_string_type(app_and_db):
+    """Regression: POST /api/photos/<id>/keywords with a non-string `type`
+    JSON value must not 500 — the bad value should be ignored and the
+    keyword still created with its default type."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/p")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "p.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{photo_id}/keywords",
+        json={"name": "MaybeWildlife", "type": []},  # bogus list value
+        content_type="application/json",
+    )
+    assert resp.status_code == 200, (
+        f"Non-string type must not 500 the route: "
+        f"{resp.status_code} {resp.get_data(as_text=True)}"
+    )
+    # The keyword should exist; its type wasn't overridden by the bad value.
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE name = 'MaybeWildlife'"
+    ).fetchone()
+    assert row is not None
+    # add_keyword's auto-detect runs in the absence of a valid override.
+    # Anything other than a crash is acceptable here; the point is no 500.
+
+
+def test_batch_keyword_route_handles_non_string_type(app_and_db):
+    """Same regression for the batch endpoint."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/q")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "q.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": [photo_id], "name": "BatchTag", "type": {"x": 1}},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200, (
+        f"Non-string type must not 500 the batch route: "
+        f"{resp.status_code} {resp.get_data(as_text=True)}"
+    )
+
+
 def test_get_active_subject_types_workspace_override_wins(app_and_db, tmp_path, monkeypatch):
     """When a workspace override is set, it overrides the global default."""
     import config as cfg
