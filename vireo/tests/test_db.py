@@ -6354,3 +6354,37 @@ def test_add_keyword_existing_general_upgrades_to_taxonomy_sets_is_species(tmp_p
     ).fetchone()
     assert row2["type"] == "taxonomy"
     assert row2["is_species"] == 1
+
+
+def test_get_subject_types_returns_default(tmp_path, monkeypatch):
+    """A fresh workspace with no overrides falls back to the global default."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    assert db.get_subject_types() == {"taxonomy", "individual", "scene"}
+
+
+def test_get_subject_types_honors_workspace_override(tmp_path, monkeypatch):
+    """Workspace config_overrides for subject_types take precedence over the default."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": ["taxonomy"]})
+    assert db.get_subject_types() == {"taxonomy"}
+
+
+def test_get_subject_types_drops_unknown_values(tmp_path, monkeypatch):
+    """Unknown type strings in the workspace override are silently dropped."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": ["taxonomy", "alien"]})
+    assert db.get_subject_types() == {"taxonomy"}

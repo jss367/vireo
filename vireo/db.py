@@ -624,6 +624,15 @@ class Database:
         except (json.JSONDecodeError, TypeError):
             return global_config
 
+    def get_subject_types(self) -> set[str]:
+        """Return the keyword types that count as 'identified' for the active workspace."""
+        import config as cfg
+        effective = self.get_effective_config(cfg.load())
+        raw = effective.get("subject_types", list(SUBJECT_TYPES_DEFAULT))
+        if not isinstance(raw, list):
+            return set(SUBJECT_TYPES_DEFAULT)
+        return {t for t in raw if t in KEYWORD_TYPES}
+
     def get_workspace_active_labels(self):
         """Return the active_labels list from workspace config_overrides, or None."""
         ws = self.get_workspace(self._ws_id())
