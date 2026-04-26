@@ -82,6 +82,22 @@ class _QuietRequestFilter(logging.Filter):
 logging.getLogger("werkzeug").addFilter(_QuietRequestFilter())
 
 
+# Maximum number of bound parameters per SQL statement. SQLite's
+# ``SQLITE_MAX_VARIABLE_NUMBER`` defaults to 32766 on builds since 3.32 but
+# remains 999 on older builds (and on some packagers' default builds). Bulk
+# duplicate-cleanup actions can hand us thousands of photo ids at once, so
+# we chunk every IN-clause query under this cap to stay portable across
+# SQLite versions. Sized below 999 to leave headroom for additional bound
+# parameters in joined statements.
+_SQL_PARAM_CHUNK = 900
+
+
+def _chunked(seq, size=_SQL_PARAM_CHUNK):
+    """Yield ``seq`` in successive lists of at most ``size`` items."""
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
 def _trash_via_finder(filepath):
     """Trash a file via Finder using AppleScript.
 
@@ -5780,10 +5796,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Start a background duplicate-detection job.
 
         Returns immediately with the job id. The job walks every file_hash
-        group with >=2 non-rejected rows and proposes a winner/losers per
-        group (without applying). The UI polls /api/jobs/<id> to fetch the
-        proposals from job.result and lets the user apply them via
-        /api/duplicates/apply.
+        group with 2+ rows (both unresolved AND already-auto-resolved
+        groups) and proposes a winner/losers per group. Resolved groups
+        are flagged ``status='resolved'`` so the UI can surface them in a
+        separate section for disk cleanup.
+
+        The UI polls /api/jobs/<id> to fetch the proposals from job.result
+        and lets the user apply unresolved groups via /api/duplicates/apply
+        or trash already-resolved loser files via
+        /api/duplicates/delete-loser-files.
         """
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
@@ -5794,7 +5815,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if active_ws is not None:
                 thread_db.set_active_workspace(active_ws)
             try:
-                return run_duplicate_scan(job, thread_db)
+                return run_duplicate_scan(job, thread_db, include_resolved=True)
             finally:
                 thread_db.conn.close()
 
@@ -5835,6 +5856,201 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             result = db.apply_duplicate_resolution([r["id"] for r in rows])
             total_rejected += result.get("rejected", 0)
         return jsonify({"rejected_count": total_rejected})
+
+    @app.route("/api/duplicates/delete-loser-files", methods=["POST"])
+    def api_duplicates_delete_loser_files():
+        """Move duplicate loser files to OS Trash and remove their DB rows.
+
+        Body: {"photo_ids": [int, ...]}. For each id we require:
+          - the row's flag is 'rejected' (already auto-resolved or
+            user-applied), AND
+          - at least one OTHER photo with the same ``file_hash`` is NOT
+            rejected (the kept "winner" anchor that makes this row a
+            duplicate-loser rather than an unrelated rejection).
+
+        Validating both conditions prevents this endpoint from being misused
+        to trash files for arbitrary rejected photos (e.g. a photo the user
+        manually rejected for non-duplicate reasons).
+
+        After a successful trash we also delete the loser's photo row (and
+        its cached thumbnail / preview / working-copy files). Without that,
+        ``/api/duplicates/disk-cleanup-summary`` would keep reporting the
+        same count forever — the summary predicate can't cheaply tell that
+        the on-disk file has been removed (stat'ing every loser path on a
+        slow network volume would make the banner poll expensive). Deleting
+        the row makes the count correct without a stat. The keywords/rating
+        were merged onto the winner during ``apply_duplicate_resolution``,
+        so nothing of value is lost. If the user later restores the file
+        from Trash and re-scans, the auto-resolve hook re-creates the row
+        and the cycle is idempotent.
+
+        Returns ``{trashed: N, skipped: [{id, reason}, ...],
+        failed: [{id, path, error}, ...]}``.
+        """
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("photo_ids required")
+        photo_ids = body.get("photo_ids")
+        if not isinstance(photo_ids, list) or not photo_ids:
+            return json_error("photo_ids required")
+        for pid in photo_ids:
+            # ``bool`` is a subclass of ``int`` in Python, so a bare
+            # ``isinstance(pid, int)`` would accept ``True``/``False`` as
+            # valid ids — and ``True`` would then be treated as photo id 1.
+            # Reject booleans explicitly so ``{"photo_ids": [true]}`` can't
+            # trick the endpoint into trashing whichever rejected row
+            # happens to have id 1.
+            if isinstance(pid, bool) or not isinstance(pid, int):
+                return json_error("photo_ids must be a list of integers")
+
+        db = _get_db()
+        # Chunk the lookup SELECT — bulk cleanup actions may hand us thousands
+        # of ids at once, and SQLite builds with the legacy 999-parameter cap
+        # would otherwise fail before any cleanup runs.
+        rows_by_id = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" * len(chunk))
+            chunk_rows = db.conn.execute(
+                f"""SELECT p.id, p.flag, p.file_hash, p.filename,
+                           f.path AS folder_path
+                    FROM photos p
+                    LEFT JOIN folders f ON f.id = p.folder_id
+                    WHERE p.id IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            for r in chunk_rows:
+                rows_by_id[r["id"]] = r
+
+        # One query per distinct hash to find kept-row anchors. Cheap because
+        # the hash column is indexed and a typical bulk action shares hashes
+        # across many photo_ids only when the user clicks "trash all losers"
+        # for one library — still a small number of distinct hashes.
+        hashes = {r["file_hash"] for r in rows_by_id.values() if r["file_hash"]}
+        anchored_hashes = set()
+        for h in hashes:
+            anchor = db.conn.execute(
+                "SELECT 1 FROM photos "
+                "WHERE file_hash = ? AND flag != 'rejected' LIMIT 1",
+                (h,),
+            ).fetchone()
+            if anchor is not None:
+                anchored_hashes.add(h)
+
+        trashed = 0
+        trashed_pids = []
+        skipped = []
+        failed = []
+        for pid in photo_ids:
+            row = rows_by_id.get(pid)
+            if row is None:
+                skipped.append({"id": pid, "reason": "photo not found"})
+                continue
+            if row["flag"] != "rejected":
+                skipped.append({"id": pid, "reason": "photo is not rejected"})
+                continue
+            if not row["file_hash"] or row["file_hash"] not in anchored_hashes:
+                # No kept row shares this hash — refuse to trash. Treat as
+                # "not a duplicate loser" so the user can't accidentally use
+                # this endpoint to delete files for unrelated rejected rows.
+                skipped.append({"id": pid, "reason": "no duplicate winner exists"})
+                continue
+            filepath = os.path.join(row["folder_path"] or "", row["filename"] or "")
+            file_existed = os.path.isfile(filepath)
+            if not file_existed:
+                # File was removed outside Vireo (e.g. user trashed in Finder).
+                # Drop the orphan DB row anyway so the summary count drops —
+                # without this, manually-cleaned losers would also "report
+                # forever". The "skipped" status still surfaces the no-op to
+                # the caller for accurate reporting.
+                skipped.append({"id": pid, "reason": "file already missing"})
+                trashed_pids.append(pid)
+                continue
+            try:
+                from send2trash import send2trash as _trash
+                _trash(filepath)
+                trashed += 1
+                trashed_pids.append(pid)
+            except Exception:
+                log.debug("send2trash failed for %s, trying Finder", filepath)
+                try:
+                    _trash_via_finder(filepath)
+                    trashed += 1
+                    trashed_pids.append(pid)
+                except Exception as e:
+                    log.warning("Trash failed for %s", filepath, exc_info=True)
+                    failed.append({"id": pid, "path": filepath, "error": str(e)})
+
+        # Drop DB rows + cached derivatives for every photo whose file is now
+        # gone. Chunked so ``delete_photos``' five internal IN-clause queries
+        # can't trip the SQLite parameter cap on large bulk actions; without
+        # chunking, a 1000+ id request would raise OperationalError on legacy
+        # builds AFTER files were already trashed, leaving the DB inconsistent.
+        if trashed_pids:
+            try:
+                all_files = []
+                for chunk in _chunked(trashed_pids):
+                    result = db.delete_photos(chunk)
+                    all_files.extend(result.get("files", []))
+                _cleanup_cached_files_for_deleted_photos(all_files)
+            except Exception:
+                # Files are already in Trash; if the row delete fails we
+                # surface a 500 so the caller knows reconciliation is
+                # incomplete. Without raising, the summary count would stay
+                # inflated and the caller would have no signal that the
+                # cleanup is half-done.
+                log.exception(
+                    "DB row delete failed after trashing %d files", len(trashed_pids),
+                )
+                return jsonify({
+                    "ok": False,
+                    "error": "trashed files but failed to clean up DB rows",
+                    "trashed": trashed,
+                    "skipped": skipped,
+                    "failed": failed,
+                }), 500
+
+        return jsonify({
+            "ok": True,
+            "trashed": trashed,
+            "skipped": skipped,
+            "failed": failed,
+        })
+
+    @app.route("/api/duplicates/disk-cleanup-summary", methods=["GET"])
+    def api_duplicates_disk_cleanup_summary():
+        """Return counts of duplicate-loser files that may still be on disk.
+
+        Body: ``{count: int, total_size: int, file_hashes: [str, ...]}``.
+
+        Powers the navbar banner that surfaces the volume of cleanup
+        available — without it, auto-resolved duplicates from scan are
+        invisible to the user.
+
+        ``count`` is the number of rejected photo rows whose hash is also
+        held by a non-rejected row (i.e. duplicate losers, not unrelated
+        rejections). ``total_size`` is the sum of their stored ``file_size``
+        — a best-effort estimate; we do NOT stat each path here because
+        slow network volumes (e.g. SMB) would make this endpoint expensive
+        on every banner poll. The bulk-trash endpoint validates each file
+        exists before trashing.
+        """
+        db = _get_db()
+        row = db.conn.execute(
+            """
+            SELECT COUNT(*) AS n, COALESCE(SUM(file_size), 0) AS total_bytes
+            FROM photos p
+            WHERE p.flag = 'rejected'
+              AND p.file_hash IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM photos q
+                  WHERE q.file_hash = p.file_hash AND q.flag != 'rejected'
+              )
+            """
+        ).fetchone()
+        return jsonify({
+            "count": row["n"],
+            "total_size": row["total_bytes"],
+        })
 
     @app.route("/api/jobs/previews", methods=["POST"])
     def api_job_previews():
