@@ -3248,6 +3248,16 @@ class Database:
           whose ``place_id`` is also NULL. SELECT-then-INSERT (rather than
           ``INSERT OR IGNORE``) so we never collide a coordless parent row
           with a place_id-bearing leaf that happens to share a name+parent.
+
+        TODO(task-6): Cross-type (name, parent_id) collision. The table-level
+        UNIQUE(name, parent_id) constraint doesn't filter by `type`, so the
+        narrow SELECT here (which only matches type='location' rows) can miss
+        a row of a different type, then the INSERT fails. Realistically rare
+        (general/people/event keywords don't usually collide with country/
+        city/admin names), but Task 6's get_or_create_text_location faces the
+        same issue and should fix both — likely by replacing the table-level
+        UNIQUE with partial unique indexes scoped by type, or by catching the
+        IntegrityError and re-SELECTing without the type filter.
         """
         if place_id is not None:
             cur = self.conn.execute(
@@ -3305,6 +3315,13 @@ class Database:
         Idempotent: calling twice with the same ``details`` returns the same
         leaf id and does not create duplicate rows.
         """
+        if not details.get("place_id"):
+            raise ValueError("upsert_place_chain requires details['place_id']")
+
+        name = details.get("name", "")
+        lat = details.get("lat")
+        lng = details.get("lng")
+
         # Reverse Google's narrowest-first list to walk broadest → narrowest.
         # Don't sort by type — trust Google's ordering (per plan).
         components = list(reversed(details.get("address_components") or []))
@@ -3312,6 +3329,8 @@ class Database:
         with self.conn:
             parent_id = None
             for comp in components:
+                if not comp.get("name"):
+                    continue
                 parent_id = self._upsert_one_keyword(
                     name=comp["name"],
                     parent_id=parent_id,
@@ -3321,11 +3340,11 @@ class Database:
                 )
 
             leaf_id = self._upsert_one_keyword(
-                name=details["name"],
+                name=name,
                 parent_id=parent_id,
                 place_id=details["place_id"],
-                latitude=details.get("lat"),
-                longitude=details.get("lng"),
+                latitude=lat,
+                longitude=lng,
             )
         return leaf_id
 
