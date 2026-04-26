@@ -1034,6 +1034,26 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 /* When the missing-folders banner is visible above, new-images stacks
    naturally in document flow — both are non-fixed block-level elements. */
 
+.dup-cleanup-banner {
+  background: var(--bg-tertiary, #153D55);
+  color: var(--text-primary, #E6F1F5);
+  padding: 6px 16px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+}
+.dup-cleanup-banner a {
+  color: var(--accent, #24E5CA);
+  font-weight: 600;
+  text-decoration: underline;
+}
+.dup-cleanup-banner a:hover { opacity: 0.85; }
+.dup-cleanup-banner .banner-dismiss {
+  color: var(--text-secondary, #9fb3bd);
+}
+
 /* Shared right-click context menu */
 .vireo-ctx-menu {
   position: fixed; z-index: 99999;
@@ -1390,6 +1410,13 @@ function sendReport() {
   <span id="newImagesMsg"></span>
   <button type="button" class="banner-cta" onclick="createPipelineFromNewImages()">Create a pipeline</button>
   <button class="banner-dismiss" onclick="dismissNewImagesBanner()">&times;</button>
+</div>
+
+<!-- Duplicate Cleanup Banner -->
+<div class="dup-cleanup-banner" id="dupCleanupBanner" style="display:none;">
+  <span id="dupCleanupMsg"></span>
+  <a href="/duplicates?show=resolved">Review</a>
+  <button class="banner-dismiss" onclick="dismissDupCleanupBanner()">&times;</button>
 </div>
 
 <!-- Missing Folders Modal -->
@@ -4368,6 +4395,75 @@ async function createPipelineFromNewImages() {
 // reducing it, or new imports increasing it).
 checkNewImages();
 setInterval(checkNewImages, 60000);
+
+/* ---------- Duplicate-Cleanup Banner ---------- */
+// Surfaces auto-resolved duplicate losers whose files may still be on disk.
+// The duplicates page hides them in a collapsed section by default — without
+// this banner the user has no way to discover that cleanup is available.
+// Library-wide (not workspace-scoped) because photos & file_hash are global.
+
+function _dupCleanupDismissKey() {
+  return 'dup_cleanup_dismissed';
+}
+
+function _isDupCleanupDismissed(count) {
+  var v = sessionStorage.getItem(_dupCleanupDismissKey());
+  return v != null && Number(v) === count;
+}
+
+let _dupCleanupInFlight = false;
+async function checkDupCleanup() {
+  if (_dupCleanupInFlight) return;
+  _dupCleanupInFlight = true;
+  try {
+    const resp = await fetch('/api/duplicates/disk-cleanup-summary');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const banner = document.getElementById('dupCleanupBanner');
+    const msg = document.getElementById('dupCleanupMsg');
+    if (!banner || !msg) return;
+
+    const count = data.count || 0;
+    // Re-arm dismissal when the count drops to zero so a future non-zero
+    // count is treated as fresh news (mirrors the new-images banner pattern).
+    if (count === 0) {
+      sessionStorage.removeItem(_dupCleanupDismissKey());
+    }
+
+    if (count > 0 && !_isDupCleanupDismissed(count)) {
+      const s = count === 1 ? '' : 's';
+      const sizeStr = formatBytesNav(data.total_size || 0);
+      msg.textContent = count + ' duplicate file copy' + (count === 1 ? '' : ' copies') +
+        ' could be cleaned up from disk (' + sizeStr + ').';
+      banner.dataset.count = String(count);
+      banner.style.display = 'flex';
+    } else {
+      banner.style.display = 'none';
+    }
+  } catch (e) { /* ignore */ }
+  finally { _dupCleanupInFlight = false; }
+}
+
+function dismissDupCleanupBanner() {
+  const banner = document.getElementById('dupCleanupBanner');
+  if (!banner) return;
+  const count = Number(banner.dataset.count || 0);
+  banner.style.display = 'none';
+  sessionStorage.setItem(_dupCleanupDismissKey(), String(count));
+}
+
+// Local byte formatter — _navbar.html ships before page-specific JS that
+// might define one, and a banner can't depend on per-page utilities.
+function formatBytesNav(n) {
+  if (n == null) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+checkDupCleanup();
+setInterval(checkDupCleanup, 60000);
 
 /* ---------- Missing Folders Modal ---------- */
 let _relocatingFolderId = null;

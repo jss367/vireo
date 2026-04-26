@@ -5780,10 +5780,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Start a background duplicate-detection job.
 
         Returns immediately with the job id. The job walks every file_hash
-        group with >=2 non-rejected rows and proposes a winner/losers per
-        group (without applying). The UI polls /api/jobs/<id> to fetch the
-        proposals from job.result and lets the user apply them via
-        /api/duplicates/apply.
+        group with 2+ rows (both unresolved AND already-auto-resolved
+        groups) and proposes a winner/losers per group. Resolved groups
+        are flagged ``status='resolved'`` so the UI can surface them in a
+        separate section for disk cleanup.
+
+        The UI polls /api/jobs/<id> to fetch the proposals from job.result
+        and lets the user apply unresolved groups via /api/duplicates/apply
+        or trash already-resolved loser files via
+        /api/duplicates/delete-loser-files.
         """
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
@@ -5794,7 +5799,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if active_ws is not None:
                 thread_db.set_active_workspace(active_ws)
             try:
-                return run_duplicate_scan(job, thread_db)
+                return run_duplicate_scan(job, thread_db, include_resolved=True)
             finally:
                 thread_db.conn.close()
 
@@ -5835,6 +5840,141 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             result = db.apply_duplicate_resolution([r["id"] for r in rows])
             total_rejected += result.get("rejected", 0)
         return jsonify({"rejected_count": total_rejected})
+
+    @app.route("/api/duplicates/delete-loser-files", methods=["POST"])
+    def api_duplicates_delete_loser_files():
+        """Move duplicate loser files to OS Trash.
+
+        Body: {"photo_ids": [int, ...]}. For each id we require:
+          - the row's flag is 'rejected' (already auto-resolved or
+            user-applied), AND
+          - at least one OTHER photo with the same ``file_hash`` is NOT
+            rejected (the kept "winner" anchor that makes this row a
+            duplicate-loser rather than an unrelated rejection).
+
+        Validating both conditions prevents this endpoint from being misused
+        to trash files for arbitrary rejected photos (e.g. a photo the user
+        manually rejected for non-duplicate reasons). The DB row stays —
+        rejection already hides it from the UI and its keywords/rating were
+        merged onto the winner during apply_duplicate_resolution. Only the
+        on-disk file moves to Trash.
+
+        Returns ``{trashed: N, skipped: [{id, reason}, ...],
+        failed: [{id, path, error}, ...]}``.
+        """
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("photo_ids required")
+        photo_ids = body.get("photo_ids")
+        if not isinstance(photo_ids, list) or not photo_ids:
+            return json_error("photo_ids required")
+        for pid in photo_ids:
+            if not isinstance(pid, int):
+                return json_error("photo_ids must be a list of integers")
+
+        db = _get_db()
+        placeholders = ",".join("?" * len(photo_ids))
+        rows = db.conn.execute(
+            f"""SELECT p.id, p.flag, p.file_hash, p.filename,
+                       f.path AS folder_path
+                FROM photos p
+                LEFT JOIN folders f ON f.id = p.folder_id
+                WHERE p.id IN ({placeholders})""",
+            photo_ids,
+        ).fetchall()
+        rows_by_id = {r["id"]: r for r in rows}
+
+        # One query per distinct hash to find kept-row anchors. Cheap because
+        # the hash column is indexed and a typical bulk action shares hashes
+        # across many photo_ids only when the user clicks "trash all losers"
+        # for one library — still a small number of distinct hashes.
+        hashes = {r["file_hash"] for r in rows if r["file_hash"]}
+        anchored_hashes = set()
+        for h in hashes:
+            anchor = db.conn.execute(
+                "SELECT 1 FROM photos "
+                "WHERE file_hash = ? AND flag != 'rejected' LIMIT 1",
+                (h,),
+            ).fetchone()
+            if anchor is not None:
+                anchored_hashes.add(h)
+
+        trashed = 0
+        skipped = []
+        failed = []
+        for pid in photo_ids:
+            row = rows_by_id.get(pid)
+            if row is None:
+                skipped.append({"id": pid, "reason": "photo not found"})
+                continue
+            if row["flag"] != "rejected":
+                skipped.append({"id": pid, "reason": "photo is not rejected"})
+                continue
+            if not row["file_hash"] or row["file_hash"] not in anchored_hashes:
+                # No kept row shares this hash — refuse to trash. Treat as
+                # "not a duplicate loser" so the user can't accidentally use
+                # this endpoint to delete files for unrelated rejected rows.
+                skipped.append({"id": pid, "reason": "no duplicate winner exists"})
+                continue
+            filepath = os.path.join(row["folder_path"] or "", row["filename"] or "")
+            if not os.path.isfile(filepath):
+                skipped.append({"id": pid, "reason": "file already missing"})
+                continue
+            try:
+                from send2trash import send2trash as _trash
+                _trash(filepath)
+                trashed += 1
+            except Exception:
+                log.debug("send2trash failed for %s, trying Finder", filepath)
+                try:
+                    _trash_via_finder(filepath)
+                    trashed += 1
+                except Exception as e:
+                    log.warning("Trash failed for %s", filepath, exc_info=True)
+                    failed.append({"id": pid, "path": filepath, "error": str(e)})
+
+        return jsonify({
+            "ok": True,
+            "trashed": trashed,
+            "skipped": skipped,
+            "failed": failed,
+        })
+
+    @app.route("/api/duplicates/disk-cleanup-summary", methods=["GET"])
+    def api_duplicates_disk_cleanup_summary():
+        """Return counts of duplicate-loser files that may still be on disk.
+
+        Body: ``{count: int, total_size: int, file_hashes: [str, ...]}``.
+
+        Powers the navbar banner that surfaces the volume of cleanup
+        available — without it, auto-resolved duplicates from scan are
+        invisible to the user.
+
+        ``count`` is the number of rejected photo rows whose hash is also
+        held by a non-rejected row (i.e. duplicate losers, not unrelated
+        rejections). ``total_size`` is the sum of their stored ``file_size``
+        — a best-effort estimate; we do NOT stat each path here because
+        slow network volumes (e.g. SMB) would make this endpoint expensive
+        on every banner poll. The bulk-trash endpoint validates each file
+        exists before trashing.
+        """
+        db = _get_db()
+        row = db.conn.execute(
+            """
+            SELECT COUNT(*) AS n, COALESCE(SUM(file_size), 0) AS total_bytes
+            FROM photos p
+            WHERE p.flag = 'rejected'
+              AND p.file_hash IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM photos q
+                  WHERE q.file_hash = p.file_hash AND q.flag != 'rejected'
+              )
+            """
+        ).fetchone()
+        return jsonify({
+            "count": row["n"],
+            "total_size": row["total_bytes"],
+        })
 
     @app.route("/api/jobs/previews", methods=["POST"])
     def api_job_previews():
