@@ -35,6 +35,23 @@
     </div>
   </div>
 
+  <!-- Subject Types -->
+  <div class="section">
+    <div class="section-title">What counts as identified?</div>
+    <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">
+      Photos with at least one keyword of these types drop out of "Needs Identification" and are skipped by the classifier.
+    </div>
+    <div id="subjectTypesContent" style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;">
+      <label style="font-size:13px;cursor:pointer;"><input type="checkbox" data-subject-type="taxonomy" style="accent-color:var(--accent);margin-right:4px;">Taxonomy <span style="color:var(--text-dim);font-size:11px;">(species)</span></label>
+      <label style="font-size:13px;cursor:pointer;"><input type="checkbox" data-subject-type="individual" style="accent-color:var(--accent);margin-right:4px;">Individual <span style="color:var(--text-dim);font-size:11px;">(people, pets)</span></label>
+      <label style="font-size:13px;cursor:pointer;"><input type="checkbox" data-subject-type="location" style="accent-color:var(--accent);margin-right:4px;">Location</label>
+      <label style="font-size:13px;cursor:pointer;"><input type="checkbox" data-subject-type="genre" style="accent-color:var(--accent);margin-right:4px;">Genre <span style="color:var(--text-dim);font-size:11px;">(landscape, sunset, …)</span></label>
+      <label style="font-size:13px;cursor:pointer;"><input type="checkbox" data-subject-type="general" style="accent-color:var(--accent);margin-right:4px;">General</label>
+      <button id="saveSubjectTypesBtn" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:500;">Save</button>
+      <span id="subjectTypesStatus" style="font-size:12px;color:var(--text-dim);"></span>
+    </div>
+  </div>
+
   <!-- Recent Jobs -->
   <div class="section">
     <div class="section-title">Recent Jobs</div>
@@ -80,6 +97,44 @@
 loadWsFolders();
 loadHistory();
 loadWorkspaces();
+loadSubjectTypes();
+
+/* ---------- Subject Types ---------- */
+const SUBJECT_TYPES_DEFAULT = ['taxonomy', 'individual', 'genre'];
+
+async function loadSubjectTypes() {
+  try {
+    var overrides = await safeFetch('/api/workspaces/active/config', {}, { toast: false });
+    var current = (overrides && Array.isArray(overrides.subject_types))
+      ? overrides.subject_types
+      : SUBJECT_TYPES_DEFAULT;
+    document.querySelectorAll('input[data-subject-type]').forEach(function(cb) {
+      cb.checked = current.indexOf(cb.dataset.subjectType) !== -1;
+    });
+  } catch (e) {
+    /* leave checkboxes unchecked on error; user can save to set */
+  }
+}
+
+document.getElementById('saveSubjectTypesBtn').addEventListener('click', async function() {
+  var types = Array.from(document.querySelectorAll('input[data-subject-type]'))
+    .filter(function(cb) { return cb.checked; })
+    .map(function(cb) { return cb.dataset.subjectType; });
+  var status = document.getElementById('subjectTypesStatus');
+  status.textContent = 'Saving...';
+  try {
+    var ws = await safeFetch('/api/workspaces/active', {}, { toast: false });
+    await safeFetch('/api/workspaces/' + ws.id + '/subject-types', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ types: types }),
+    });
+    status.textContent = 'Saved.';
+    setTimeout(function() { status.textContent = ''; }, 2000);
+  } catch (e) {
+    status.textContent = 'Save failed: ' + (e && e.message ? e.message : 'unknown');
+  }
+});
 
 /* Set workspace name in page heading */
 safeFetch('/api/workspaces/active', {}, { toast: false }).then(function(ws) {
