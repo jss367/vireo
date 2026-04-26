@@ -1068,6 +1068,68 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .vireo-ctx-chip:hover { background: var(--bg-tertiary); }
 .vireo-ctx-chip.is-active { background: var(--accent); color: white; }
+
+/* ---------- Openable tabs ---------- */
+.navbar .nav-tab { position: relative; }
+.navbar .nav-tab-close {
+  display: none;
+  margin-left: 6px;
+  padding: 0 4px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--muted, #999);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.navbar .nav-tab:hover .nav-tab-close,
+.navbar .nav-tab.active .nav-tab-close { display: inline-block; }
+.navbar .nav-tab-close:hover { background: var(--hover, rgba(255,255,255,0.1)); color: var(--text); }
+.navbar .nav-tab-divider {
+  display: inline-block;
+  width: 1px;
+  height: 18px;
+  margin: 0 8px;
+  background: var(--border, rgba(255,255,255,0.15));
+  vertical-align: middle;
+}
+.navbar .nav-tools-btn {
+  background: none;
+  border: 1px dashed var(--border, rgba(255,255,255,0.2));
+  color: var(--muted, #999);
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  margin-left: 4px;
+}
+.navbar .nav-tools-btn:hover { color: var(--text); border-color: var(--text); }
+.nav-tools-menu {
+  position: absolute;
+  top: 36px;
+  background: var(--bg-elev, #2a2a2a);
+  border: 1px solid var(--border, rgba(255,255,255,0.15));
+  border-radius: 6px;
+  padding: 4px;
+  z-index: 1000;
+  min-width: 160px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+}
+.nav-tools-menu[hidden] { display: none; }
+.nav-tools-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  background: none;
+  border: 0;
+  color: var(--text);
+  text-align: left;
+  padding: 6px 8px;
+  font: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.nav-tools-item:hover { background: var(--hover, rgba(255,255,255,0.08)); }
+.nav-tools-check { display: inline-block; width: 16px; color: var(--accent); }
 </style>
 
 <nav class="navbar">
@@ -1085,7 +1147,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     </div>
   </div>
   <a href="/pipeline" data-nav-id="pipeline" data-testid="nav-pipeline">Pipeline</a>
-  <a href="/lightroom" data-nav-id="lightroom">Lightroom</a>
   <a href="/jobs" data-nav-id="jobs" data-testid="nav-jobs">Jobs<span class="nav-job-badge" id="navJobBadge" data-testid="job-badge"></span></a>
   <a href="/pipeline/review" data-nav-id="pipeline-review">Pipeline Review</a>
   <a href="/review" data-nav-id="review" data-testid="nav-review">Review</a>
@@ -1098,11 +1159,36 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   <a href="/dashboard" data-nav-id="dashboard">Dashboard</a>
   <a href="/audit" data-nav-id="audit">Audit</a>
   <a href="/compare" data-nav-id="compare">Compare</a>
-  <a href="/workspace" data-nav-id="workspace">Workspace</a>
-  <a href="/keywords" data-nav-id="keywords">Keywords</a>
-  <a href="/shortcuts" data-nav-id="shortcuts">Shortcuts</a>
-  <a href="/duplicates" data-nav-id="duplicates">Duplicates</a>
-  <a href="/settings" data-nav-id="settings">Settings</a>
+  <span class="nav-tab-divider" aria-hidden="true"></span>
+  {% for tab_id in open_tabs %}
+    {% if tab_id in tab_labels %}
+    <a href="{{ tab_hrefs[tab_id] }}"
+       data-nav-id="{{ tab_id }}"
+       data-tab="1"
+       class="nav-tab">
+      {{ tab_labels[tab_id] }}
+      <span class="nav-tab-close"
+            title="Close tab"
+            onclick="event.preventDefault(); event.stopPropagation(); closeTab('{{ tab_id }}'); return false;">&times;</span>
+    </a>
+    {% endif %}
+  {% endfor %}
+  <button type="button"
+          class="nav-tools-btn"
+          data-testid="nav-tools-btn"
+          onclick="toggleToolsMenu(event)">+ Tools &#9662;</button>
+  <div class="nav-tools-menu" id="navToolsMenu" hidden>
+    {% for tab_id in tools_order %}
+      <button type="button"
+              class="nav-tools-item"
+              data-nav-id="{{ tab_id }}"
+              data-open="{{ '1' if tab_id in open_tabs else '0' }}"
+              onclick="toggleTabFromMenu('{{ tab_id }}')">
+        <span class="nav-tools-check">{% if tab_id in open_tabs %}&check;{% else %}&nbsp;{% endif %}</span>
+        {{ tab_labels[tab_id] }}
+      </button>
+    {% endfor %}
+  </div>
   <span class="nav-spacer"></span>
   <span class="nav-icon" onclick="openReportModal()" title="Report Issue" id="reportToggle">&#9888;</span>
   <span class="nav-icon" onclick="openHelpModal()" title="Help (F1)" id="helpToggle">&#63;</span>
