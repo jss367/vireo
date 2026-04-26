@@ -537,6 +537,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         variant, e,
                     )
 
+    @app.context_processor
+    def _inject_navbar_state():
+        """Make open-tabs state available to every rendered template."""
+        from db import OPENABLE_NAV_IDS
+        try:
+            tabs = _get_db().get_open_tabs()
+        except Exception:
+            tabs = []
+        # Canonical display order for the Tools dropdown
+        TOOLS_ORDER = ["settings", "workspace", "lightroom",
+                       "shortcuts", "keywords", "duplicates", "logs"]
+        TAB_LABELS = {
+            "settings": "Settings",
+            "workspace": "Workspace",
+            "lightroom": "Lightroom",
+            "shortcuts": "Shortcuts",
+            "keywords": "Keywords",
+            "duplicates": "Duplicates",
+            "logs": "Logs",
+        }
+        TAB_HREFS = {
+            "settings": "/settings",
+            "workspace": "/workspace",
+            "lightroom": "/lightroom",
+            "shortcuts": "/shortcuts",
+            "keywords": "/keywords",
+            "duplicates": "/duplicates",
+            "logs": "/logs",
+        }
+        return {
+            "open_tabs": tabs,
+            "openable_nav_ids": list(OPENABLE_NAV_IDS),
+            "tools_order": TOOLS_ORDER,
+            "tab_labels": TAB_LABELS,
+            "tab_hrefs": TAB_HREFS,
+        }
+
     @app.before_request
     def _enforce_api_v1_token():
         if not request.path.startswith("/api/v1/"):
