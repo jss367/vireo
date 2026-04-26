@@ -413,6 +413,16 @@ def test_delete_loser_files_validates_input(app_and_db):
     assert client.post(
         "/api/duplicates/delete-loser-files", json={"photo_ids": ["abc"]},
     ).status_code == 400
+    # Booleans must be rejected: ``isinstance(True, int)`` is True in Python,
+    # so a naive int-only check would silently accept ``[true]`` and treat
+    # it as photo id 1 — which could trash whichever rejected row happens
+    # to live at that id.
+    assert client.post(
+        "/api/duplicates/delete-loser-files", json={"photo_ids": [True]},
+    ).status_code == 400
+    assert client.post(
+        "/api/duplicates/delete-loser-files", json={"photo_ids": [False]},
+    ).status_code == 400
 
 
 # ---------------------------------------------------------------------------

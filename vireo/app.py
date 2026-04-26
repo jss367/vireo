@@ -5894,7 +5894,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(photo_ids, list) or not photo_ids:
             return json_error("photo_ids required")
         for pid in photo_ids:
-            if not isinstance(pid, int):
+            # ``bool`` is a subclass of ``int`` in Python, so a bare
+            # ``isinstance(pid, int)`` would accept ``True``/``False`` as
+            # valid ids — and ``True`` would then be treated as photo id 1.
+            # Reject booleans explicitly so ``{"photo_ids": [true]}`` can't
+            # trick the endpoint into trashing whichever rejected row
+            # happens to have id 1.
+            if isinstance(pid, bool) or not isinstance(pid, int):
                 return json_error("photo_ids must be a list of integers")
 
         db = _get_db()
