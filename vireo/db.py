@@ -5584,6 +5584,34 @@ class Database:
                         JOIN keywords k3 ON k3.id = pk3.keyword_id
                         WHERE pk3.photo_id = p.id AND k3.is_species = 1)"""
                     )
+            elif field == "has_subject":
+                # Match the has_species pattern, but resolve "subject" via
+                # the workspace's configured subject_types (a set of keyword
+                # types). Sorted for deterministic SQL parameter order.
+                subject_types = sorted(self.get_subject_types())
+                if not subject_types:
+                    if op == "equals" and (value is True or value == 1):
+                        conditions.append("0")  # nothing matches
+                    # value==0 with empty subject_types is a no-op (every
+                    # photo is "not identified" by the empty set)
+                    continue
+                type_placeholders = ",".join("?" * len(subject_types))
+                if op == "equals" and (value is False or value == 0):
+                    conditions.append(
+                        f"""NOT EXISTS (
+                        SELECT 1 FROM photo_keywords pk5
+                        JOIN keywords k5 ON k5.id = pk5.keyword_id
+                        WHERE pk5.photo_id = p.id AND k5.type IN ({type_placeholders}))"""
+                    )
+                    params.extend(subject_types)
+                elif op == "equals" and (value is True or value == 1):
+                    conditions.append(
+                        f"""EXISTS (
+                        SELECT 1 FROM photo_keywords pk5
+                        JOIN keywords k5 ON k5.id = pk5.keyword_id
+                        WHERE pk5.photo_id = p.id AND k5.type IN ({type_placeholders}))"""
+                    )
+                    params.extend(subject_types)
             elif field == "keyword_count":
                 if op == "equals":
                     conditions.append(

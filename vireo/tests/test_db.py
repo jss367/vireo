@@ -695,6 +695,92 @@ def test_collection_has_species_rule(tmp_path):
     assert 'classified.jpg' not in filenames
 
 
+def test_has_subject_rule_matches_photos_without_subject_keywords(tmp_path, monkeypatch):
+    """has_subject==0 returns photos that have no keyword whose type is in
+    the workspace's subject_types set."""
+    import json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    scene_kid = db.add_keyword("Landscape", kw_type="scene")
+    db.tag_photo(p1, scene_kid)  # p1 is identified, p2 is not
+
+    cid = db.add_collection(
+        "Needs Subject",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
+    )
+    photos = db.get_collection_photos(cid, per_page=999)
+    pids = {p["id"] for p in photos}
+    assert pids == {p2}
+
+
+def test_has_subject_rule_value_one_matches_identified_photos(tmp_path, monkeypatch):
+    """has_subject==1 is the inverse — only identified photos match."""
+    import json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    scene_kid = db.add_keyword("Landscape", kw_type="scene")
+    db.tag_photo(p1, scene_kid)
+
+    cid = db.add_collection(
+        "Has Subject",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 1}]),
+    )
+    photos = db.get_collection_photos(cid, per_page=999)
+    pids = {p["id"] for p in photos}
+    assert pids == {p1}
+
+
+def test_has_subject_rule_empty_subject_types_value_one_matches_no_photos(tmp_path, monkeypatch):
+    """When subject_types is empty, has_subject==1 should match no photos
+    (no type counts as 'identifying')."""
+    import json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": []})
+
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    # Tag with a scene keyword anyway — but with empty subject_types, no
+    # type counts as identifying, so this photo still does not match.
+    scene_kid = db.add_keyword("Landscape", kw_type="scene")
+    db.tag_photo(p1, scene_kid)
+
+    cid = db.add_collection(
+        "Has Subject (empty types)",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 1}]),
+    )
+    photos = db.get_collection_photos(cid, per_page=999)
+    assert photos == []
+
+
 def test_add_keyword_is_species(tmp_path):
     """add_keyword with is_species=True marks the keyword."""
     from db import Database
