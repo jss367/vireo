@@ -2461,6 +2461,99 @@ def test_get_geolocated_photos_species_filter_multi_species(tmp_path):
     assert db.get_geolocated_photos(species='Cardinal') == []
 
 
+def test_get_geolocated_photos_falls_back_to_keyword_coords(tmp_path):
+    """Photos without EXIF GPS but tagged with a location keyword that has
+    coords are returned with the keyword's coords and coord_source='keyword'."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    pid = db.add_photo(folder_id=fid, filename='no_gps.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    # No EXIF GPS — leave latitude/longitude as NULL.
+
+    # Create a type='location' keyword with coords.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) VALUES (?, 'location', ?, ?)",
+        ('Central Park', 40.7829, -73.9654),
+    )
+    kid = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+
+    rows = db.get_geolocated_photos()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r['filename'] == 'no_gps.jpg'
+    assert r['latitude'] == 40.7829
+    assert r['longitude'] == -73.9654
+    assert r['coord_source'] == 'keyword'
+    assert r['keyword_location_name'] == 'Central Park'
+
+
+def test_get_geolocated_photos_prefers_exif_over_keyword(tmp_path):
+    """When a photo has both EXIF coords AND a location keyword, EXIF wins."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    pid = db.add_photo(folder_id=fid, filename='both.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET latitude=?, longitude=? WHERE id=?",
+                    (37.7749, -122.4194, pid))
+
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) VALUES (?, 'location', ?, ?)",
+        ('New York', 40.7128, -74.0060),
+    )
+    kid = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+
+    rows = db.get_geolocated_photos()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r['latitude'] == 37.7749
+    assert r['longitude'] == -122.4194
+    assert r['coord_source'] == 'exif'
+    assert r['keyword_location_name'] is None
+
+
+def test_get_geolocated_photos_excludes_photos_with_neither(tmp_path):
+    """Photos with neither EXIF coords nor a coord-bearing location keyword
+    should not appear in results."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    # Photo 1: no GPS, no keyword link at all.
+    p1 = db.add_photo(folder_id=fid, filename='lonely.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    # Photo 2: no GPS, has a location keyword but the keyword has no coords
+    # (free-text fallback).
+    p2 = db.add_photo(folder_id=fid, filename='free_text.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'location')",
+        ('the dog park',),
+    )
+    kid = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p2, kid),
+    )
+    db.conn.commit()
+
+    rows = db.get_geolocated_photos()
+    assert rows == []
+
+
 def test_get_accepted_species(tmp_path):
     """get_accepted_species returns distinct marker species from geolocated photos."""
     from db import Database

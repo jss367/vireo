@@ -2400,14 +2400,21 @@ class Database:
     ):
         """Return all geolocated photos with optional species, scoped to active workspace.
 
-        Returns photos that have non-null latitude and longitude. No pagination —
-        returns all matching photos for map rendering. Includes the photo's
-        species keyword (or NULL if none), derived from photo_keywords joined to
-        keywords where is_species = 1.
+        Returns photos that have either non-null EXIF latitude/longitude OR a
+        ``type='location'`` keyword link whose keyword has non-null coords. No
+        pagination — returns all matching photos for map rendering. Includes
+        the photo's species keyword (or NULL if none), derived from
+        photo_keywords joined to keywords where is_species = 1.
+
+        Output columns include ``coord_source`` (``'exif'`` or ``'keyword'``)
+        and ``keyword_location_name`` (the location keyword's name when EXIF is
+        absent, NULL otherwise) so the map can show provenance.
         """
-        conditions = ["wf.workspace_id = ?",
-                      "p.latitude IS NOT NULL",
-                      "p.longitude IS NOT NULL"]
+        conditions = [
+            "wf.workspace_id = ?",
+            "COALESCE(p.latitude, kl.latitude) IS NOT NULL",
+            "COALESCE(p.longitude, kl.longitude) IS NOT NULL",
+        ]
         params = [self._ws_id()]
 
         if folder_id is not None:
@@ -2425,8 +2432,30 @@ class Database:
             conditions.append("p.timestamp <= ?")
             params.append(_inclusive_date_to(date_to))
 
-        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
-                       "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
+        # Pick one location keyword per photo. Ordering: prefer the deepest-
+        # in-chain row (parent_id NOT NULL ranks before parent_id IS NULL),
+        # tie-break by largest id (most recently inserted, typically the leaf).
+        location_subquery = """
+            LEFT JOIN (
+                SELECT pk_loc.photo_id, k_loc.id AS id, k_loc.name AS name,
+                       k_loc.latitude AS latitude, k_loc.longitude AS longitude,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY pk_loc.photo_id
+                         ORDER BY (k_loc.parent_id IS NULL) ASC, k_loc.id DESC
+                       ) AS rn
+                FROM photo_keywords pk_loc
+                JOIN keywords k_loc ON k_loc.id = pk_loc.keyword_id
+                WHERE k_loc.type = 'location'
+                  AND k_loc.latitude IS NOT NULL
+                  AND k_loc.longitude IS NOT NULL
+            ) kl ON kl.photo_id = p.id AND kl.rn = 1
+        """
+
+        join_clause = (
+            "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+            "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
+            f"\n{location_subquery}"
+        )
         if keyword is not None:
             join_clause += """
                 LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
@@ -2467,7 +2496,14 @@ class Database:
             species_col_params = []
 
         query = f"""
-            SELECT p.id, p.latitude, p.longitude, p.thumb_path, p.filename,
+            SELECT p.id,
+                   COALESCE(p.latitude, kl.latitude) AS latitude,
+                   COALESCE(p.longitude, kl.longitude) AS longitude,
+                   CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+                        THEN 'exif' ELSE 'keyword' END AS coord_source,
+                   CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+                        THEN NULL ELSE kl.name END AS keyword_location_name,
+                   p.thumb_path, p.filename,
                    p.timestamp, p.rating, p.folder_id,
                    {species_col_sql}
             FROM photos p
