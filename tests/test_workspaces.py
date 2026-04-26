@@ -807,3 +807,38 @@ def test_move_folders_empty_list(db):
     ws2 = db.create_workspace("B")
     result = db.move_folders_to_workspace(ws1, ws2, [])
     assert result["folders_moved"] == 0
+
+
+def test_workspaces_has_open_tabs_column(db):
+    cols = [r[1] for r in db.conn.execute("PRAGMA table_info(workspaces)").fetchall()]
+    assert "open_tabs" in cols
+
+
+def test_existing_workspaces_get_default_open_tabs_on_migration(tmp_path):
+    """A pre-existing workspaces table without open_tabs should be backfilled."""
+    import json as _json
+    import sqlite3
+    db_path = tmp_path / "legacy.db"
+    # Hand-craft a legacy DB without the open_tabs column
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, "
+        "config_overrides TEXT, ui_state TEXT, created_at TEXT, last_opened_at TEXT)"
+    )
+    conn.execute("INSERT INTO workspaces (name) VALUES ('Legacy')")
+    conn.commit()
+    conn.close()
+
+    # Open via Database — migration should run
+    from db import Database
+    d = Database(str(db_path))
+
+    cols = [r[1] for r in d.conn.execute("PRAGMA table_info(workspaces)").fetchall()]
+    assert "open_tabs" in cols
+
+    # Existing rows should be backfilled with the defaults
+    row = d.conn.execute(
+        "SELECT open_tabs FROM workspaces WHERE name = 'Legacy'"
+    ).fetchone()
+    assert row[0] is not None
+    assert _json.loads(row[0]) == ["settings", "workspace", "lightroom"]

@@ -195,6 +195,7 @@ class Database:
                 name            TEXT NOT NULL UNIQUE,
                 config_overrides TEXT,
                 ui_state        TEXT,
+                open_tabs       TEXT,
                 created_at      TEXT DEFAULT (datetime('now')),
                 last_opened_at  TEXT
             );
@@ -460,6 +461,15 @@ class Database:
                 )
                 self.conn.execute("ALTER TABLE photos DROP COLUMN embedding_model")
             self.conn.execute("ALTER TABLE photos DROP COLUMN embedding")
+        # Migration: add open_tabs column to existing workspaces tables, with defaults
+        try:
+            self.conn.execute("SELECT open_tabs FROM workspaces LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE workspaces ADD COLUMN open_tabs TEXT")
+            self.conn.execute(
+                "UPDATE workspaces SET open_tabs = ? WHERE open_tabs IS NULL",
+                (json.dumps(["settings", "workspace", "lightroom"]),),
+            )
         self.conn.commit()
 
     # -- Workspaces --
