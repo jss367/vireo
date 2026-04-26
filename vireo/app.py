@@ -3265,6 +3265,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         errors = {}
         flat = schema.flatten(payload)
+        parent_prefixes = schema.schema_parent_prefixes()
         for k, v in flat.items():
             if k in schema.SCHEMA:
                 try:
@@ -3272,6 +3273,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     schema.set_dotted(payload, k, coerced)
                 except schema.ValidationError as e:
                     errors[k] = str(e)
+            elif k in parent_prefixes:
+                # ``flatten`` only emits ``k`` as a leaf when payload[k] is not
+                # a dict. Since k is a parent of schema-backed leaves (e.g.
+                # ``pipeline``), the user replaced a required object subtree
+                # with a scalar — reject before it corrupts the on-disk file.
+                errors[k] = f"{k} must be a JSON object"
         if errors:
             return jsonify({"error": "validation failed", "errors": errors}), 400
 

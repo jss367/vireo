@@ -510,6 +510,21 @@ def is_excluded(dotted_key):
     return any(dotted_key == p or dotted_key.startswith(p + ".") for p in EXCLUDED)
 
 
+def schema_parent_prefixes():
+    """Return the set of dotted prefixes that are parents of any SCHEMA key.
+
+    For example, with ``pipeline.w_focus`` and ``ingest.folder_template`` in
+    SCHEMA, this returns ``{"pipeline", "ingest"}``. Used to detect malformed
+    imports that replace a schema-backed subtree with a non-object value.
+    """
+    out = set()
+    for k in SCHEMA:
+        parts = k.split(".")
+        for i in range(1, len(parts)):
+            out.add(".".join(parts[:i]))
+    return out
+
+
 def flatten(d, prefix=""):
     """Flatten a nested dict to a single dict keyed by dotted paths."""
     out = {}

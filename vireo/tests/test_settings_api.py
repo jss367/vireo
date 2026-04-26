@@ -617,6 +617,63 @@ def test_import_empty_object_is_ok(app_and_db):
     assert resp.status_code == 200
 
 
+def test_import_rejects_non_object_for_schema_subtree(app_and_db):
+    """A scalar where a schema-backed subtree (e.g. ``pipeline``) is expected
+    must be rejected — otherwise downstream code that assumes ``pipeline`` is a
+    mapping will crash on the next ``.get(...)`` call."""
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"pipeline": 5})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "errors" in body
+    assert "pipeline" in body["errors"]
+    # File untouched.
+    assert cfg.load()["classification_threshold"] == 0.5
+
+
+def test_import_rejects_list_for_schema_subtree(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"ingest": ["folder_template"]})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "ingest" in body["errors"]
+
+
+def test_import_rejects_null_for_schema_subtree(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"pipeline": None})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "pipeline" in body["errors"]
+
+
+def test_import_allows_empty_object_for_schema_subtree(app_and_db):
+    """An empty object for a schema-backed subtree is fine — every leaf falls
+    back to defaults."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"pipeline": {}})},
+    )
+    assert resp.status_code == 200
+
+
 def test_delete_workspace_preserves_active_labels(app_and_db):
     app, db = app_and_db
     db.update_workspace(

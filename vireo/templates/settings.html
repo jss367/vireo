@@ -2794,21 +2794,25 @@ function scheduleSchemaSave(key, value, immediate) {
   if (ALL_SETTINGS_DEBOUNCE[key]) {
     clearTimeout(ALL_SETTINGS_DEBOUNCE[key]);
   }
+  // Capture the scope at edit time so a tab switch during the debounce window
+  // doesn't redirect the pending write to the wrong layer.
+  var scope = ALL_SETTINGS_SCOPE;
   var delay = immediate ? 0 : 300;
   ALL_SETTINGS_DEBOUNCE[key] = setTimeout(function() {
     ALL_SETTINGS_DEBOUNCE[key] = null;
-    saveSchemaSetting(key, value);
+    saveSchemaSetting(key, value, scope);
   }, delay);
 }
 
-function _settingsScopeBase() {
-  return (ALL_SETTINGS_SCOPE === 'workspace') ? '/api/settings/workspace' : '/api/settings/global';
+function _settingsScopeBaseFor(scope) {
+  return (scope === 'workspace') ? '/api/settings/workspace' : '/api/settings/global';
 }
 
-async function saveSchemaSetting(key, value) {
+async function saveSchemaSetting(key, value, scope) {
+  if (!scope) scope = ALL_SETTINGS_SCOPE;
   setRowStatus(key, 'Saving…', false);
   try {
-    var resp = await fetch(_settingsScopeBase(), {
+    var resp = await fetch(_settingsScopeBaseFor(scope), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key: key, value: value }),
@@ -2830,7 +2834,7 @@ async function saveSchemaSetting(key, value) {
 async function resetSchemaSetting(key) {
   setRowStatus(key, 'Resetting…', false);
   try {
-    var resp = await fetch(_settingsScopeBase() + '/' + encodeURIComponent(key), {
+    var resp = await fetch(_settingsScopeBaseFor(ALL_SETTINGS_SCOPE) + '/' + encodeURIComponent(key), {
       method: 'DELETE',
     });
     if (!resp.ok) {

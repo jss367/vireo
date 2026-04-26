@@ -259,3 +259,20 @@ def test_validate_list_string_with_items_enum_accepts_subset():
 
     out = validate_value("browse_card_fields", ["filename", "rating"])
     assert out == ["filename", "rating"]
+
+
+def test_schema_parent_prefixes_covers_dotted_namespaces():
+    from config_schema import SCHEMA, schema_parent_prefixes
+
+    prefixes = schema_parent_prefixes()
+    # Every dotted SCHEMA key contributes its non-leaf prefixes.
+    for k in SCHEMA:
+        parts = k.split(".")
+        for i in range(1, len(parts)):
+            assert ".".join(parts[:i]) in prefixes
+    # Top-level (no-dot) keys do not contribute prefixes.
+    assert "classification_threshold" not in prefixes
+    # Known dotted namespaces in DEFAULTS show up.
+    assert "pipeline" in prefixes
+    assert "ingest" in prefixes
+
