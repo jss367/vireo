@@ -1082,6 +1082,14 @@ var activeFilter = 'all';
 var minConfidence = 40;
 var speciesFilter = '';
 var hideConfirmed = false;
+// Survives re-renders so confirming/filtering doesn't re-expand collapsed
+// encounters. Keyed by first photo_id; stale keys after server-side
+// regrouping just don't match anything.
+var collapsedEncounters = new Set();
+
+function encounterKey(enc) {
+  return enc && enc.photo_ids && enc.photo_ids.length ? String(enc.photo_ids[0]) : null;
+}
 
 // GRM resolution slider — index into GRM_RES_STOPS. Persists across photos within a session.
 var GRM_RES_STOPS = [
@@ -1248,16 +1256,18 @@ function renderResults() {
     });
     if (!hasVisible) return;
 
+    var encKey = encounterKey(enc);
+    var isCollapsed = encKey != null && collapsedEncounters.has(encKey);
     html += '<div class="encounter-card">';
     html += '<div class="encounter-header">';
-    html += '<span class="encounter-chevron" id="encChev' + ei + '" onclick="toggleEncounter(' + ei + ')">&#9660;</span>';
+    html += '<span class="encounter-chevron' + (isCollapsed ? ' collapsed' : '') + '" id="encChev' + ei + '" onclick="toggleEncounter(' + ei + ')">&#9660;</span>';
     html += renderSpeciesWidget(enc, ei, 'encounter', null);
     html += '<span class="encounter-meta" onclick="toggleEncounter(' + ei + ')" style="cursor:pointer;flex:1;">';
     html += '<span>' + enc.photo_count + ' photos</span>';
     if (enc.burst_count) html += '<span>' + enc.burst_count + ' bursts</span>';
     if (timeRange) html += '<span>' + timeRange + '</span>';
     html += '</span></div>';
-    html += '<div class="encounter-body" id="encBody' + ei + '">';
+    html += '<div class="encounter-body" id="encBody' + ei + '"' + (isCollapsed ? ' style="display:none;"' : '') + '>';
 
     if (enc.bursts && enc.bursts.length > 0) {
       enc.bursts.forEach(function(burst, bi) {
@@ -1327,6 +1337,12 @@ function toggleEncounter(idx) {
   body.style.display = collapsed ? 'none' : '';
   var chev = document.getElementById('encChev' + idx);
   if (chev) chev.classList.toggle('collapsed', collapsed);
+  var enc = pipelineResults && pipelineResults.encounters && pipelineResults.encounters[idx];
+  var key = encounterKey(enc);
+  if (key != null) {
+    if (collapsed) collapsedEncounters.add(key);
+    else collapsedEncounters.delete(key);
+  }
 }
 
 function setFilter(f) {
@@ -1751,6 +1767,7 @@ function initPipelineReviewPage() {
     if (empty) empty.style.display = 'none';
 
     pipelineResults = data.results;
+    collapsedEncounters = new Set();
 
     if (data.workspace_overrides && data.workspace_overrides.review_min_confidence != null) {
       minConfidence = data.workspace_overrides.review_min_confidence;
