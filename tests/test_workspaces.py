@@ -866,3 +866,34 @@ def test_get_open_tabs_returns_empty_list_when_null(db):
     db.conn.commit()
     db.set_active_workspace(ws_id)
     assert db.get_open_tabs() == []
+
+
+def test_openable_nav_ids_constant():
+    from db import OPENABLE_NAV_IDS
+    assert frozenset({
+        "settings", "workspace", "lightroom",
+        "shortcuts", "keywords", "duplicates", "logs",
+    }) == OPENABLE_NAV_IDS
+
+
+def test_open_tab_appends_to_end(db):
+    ws_id = db.create_workspace("WS")
+    db.set_active_workspace(ws_id)
+    # Start from defaults: ["settings", "workspace", "lightroom"]
+    db.open_tab("keywords")
+    assert db.get_open_tabs() == ["settings", "workspace", "lightroom", "keywords"]
+
+
+def test_open_tab_is_idempotent(db):
+    ws_id = db.create_workspace("WS")
+    db.set_active_workspace(ws_id)
+    db.open_tab("keywords")
+    db.open_tab("keywords")
+    assert db.get_open_tabs().count("keywords") == 1
+
+
+def test_open_tab_rejects_non_openable_navid(db):
+    ws_id = db.create_workspace("WS")
+    db.set_active_workspace(ws_id)
+    with pytest.raises(ValueError):
+        db.open_tab("browse")  # browse is a linger page, not openable

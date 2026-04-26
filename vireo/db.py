@@ -13,6 +13,11 @@ log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
 
+OPENABLE_NAV_IDS = frozenset({
+    "settings", "workspace", "lightroom",
+    "shortcuts", "keywords", "duplicates", "logs",
+})
+
 
 def commit_with_retry(conn, max_retries=5, base_delay=0.1):
     """Commit ``conn`` with retry on transient "locked"/"busy" errors.
@@ -647,6 +652,24 @@ class Database:
             return value if isinstance(value, list) else []
         except (json.JSONDecodeError, TypeError):
             return []
+
+    def open_tab(self, nav_id):
+        """Append nav_id to the active workspace's open_tabs if not present.
+
+        Raises ValueError if nav_id is not in OPENABLE_NAV_IDS.
+        Returns the new list.
+        """
+        if nav_id not in OPENABLE_NAV_IDS:
+            raise ValueError(f"{nav_id!r} is not an openable nav id")
+        tabs = self.get_open_tabs()
+        if nav_id not in tabs:
+            tabs.append(nav_id)
+            self.conn.execute(
+                "UPDATE workspaces SET open_tabs = ? WHERE id = ?",
+                (json.dumps(tabs), self._ws_id()),
+            )
+            self.conn.commit()
+        return tabs
 
     def set_workspace_active_labels(self, labels_files):
         """Store active_labels in the workspace's config_overrides."""
