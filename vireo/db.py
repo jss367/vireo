@@ -3166,6 +3166,14 @@ class Database:
         """
         if kw_type is not None and kw_type not in KEYWORD_TYPES:
             raise ValueError(f"invalid keyword type: {kw_type!r}")
+        # Reconcile is_species and kw_type to keep the legacy column coherent
+        # with the type enum.
+        if is_species and kw_type is not None and kw_type != 'taxonomy':
+            raise ValueError(
+                f"is_species=True requires kw_type='taxonomy', got {kw_type!r}"
+            )
+        if kw_type == 'taxonomy':
+            is_species = True
         # Case-insensitive lookup
         if parent_id is None:
             existing = self.conn.execute(
@@ -3184,6 +3192,21 @@ class Database:
                     "UPDATE keywords SET is_species = 1, type = 'taxonomy' WHERE id = ? AND is_species = 0",
                     (existing["id"],),
                 )
+                if _commit:
+                    self.conn.commit()
+            # Upgrade an existing 'general' row to the explicitly requested type.
+            # Without this, callers like the "Not Wildlife" button would hit the
+            # case-insensitive fast path and silently get back a wrong-typed row.
+            if kw_type and kw_type != 'general':
+                self.conn.execute(
+                    "UPDATE keywords SET type = ? WHERE id = ? AND type = 'general'",
+                    (kw_type, existing["id"]),
+                )
+                if kw_type == 'taxonomy':
+                    self.conn.execute(
+                        "UPDATE keywords SET is_species = 1 WHERE id = ?",
+                        (existing["id"],),
+                    )
                 if _commit:
                     self.conn.commit()
             return existing["id"]

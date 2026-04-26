@@ -6276,3 +6276,81 @@ def test_add_keyword_rejects_unknown_type(tmp_path):
     db.set_active_workspace(db.create_workspace("ws"))
     with pytest.raises(ValueError, match="invalid keyword type"):
         db.add_keyword("BadType", kw_type="alien")
+
+
+def test_add_keyword_explicit_taxonomy_for_unknown_name_skips_taxa_lookup(tmp_path):
+    """Explicit kw_type='taxonomy' bypasses taxa-table lookup; taxon_id stays NULL.
+    is_species is auto-corrected to 1 to match the type."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    kid = db.add_keyword("DefinitelyNotASpecies42", kw_type="taxonomy")
+    row = db.conn.execute(
+        "SELECT type, taxon_id, is_species FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] is None
+    assert row["is_species"] == 1  # auto-set by the new reconciliation
+
+
+def test_add_keyword_is_species_with_non_taxonomy_type_raises(tmp_path):
+    """is_species=True paired with a non-'taxonomy' kw_type is inconsistent and
+    must raise ValueError rather than silently producing a mismatched row."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    with pytest.raises(ValueError, match="is_species=True requires kw_type='taxonomy'"):
+        db.add_keyword("Mismatch", is_species=True, kw_type="general")
+
+
+def test_add_keyword_explicit_taxonomy_sets_is_species(tmp_path):
+    """Explicit kw_type='taxonomy' (without is_species) auto-sets is_species=1
+    so the legacy column stays in sync with the type."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    kid = db.add_keyword("Some Bird", kw_type="taxonomy")
+    row = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+
+
+def test_add_keyword_existing_general_upgrades_to_requested_type(tmp_path):
+    """An existing 'general' keyword should be upgraded to the requested type
+    when add_keyword is called again with an explicit kw_type."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    kid1 = db.add_keyword("Landscape")
+    row1 = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid1,)).fetchone()
+    assert row1["type"] == "general"
+
+    kid2 = db.add_keyword("Landscape", kw_type="scene")
+    assert kid2 == kid1
+    row2 = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid2,)).fetchone()
+    assert row2["type"] == "scene"
+
+
+def test_add_keyword_existing_general_upgrades_to_taxonomy_sets_is_species(tmp_path):
+    """Upgrading an existing 'general' keyword to 'taxonomy' should also
+    flip is_species to 1 so the legacy column stays consistent."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    kid1 = db.add_keyword("Mystery Bird")
+    row1 = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid1,)
+    ).fetchone()
+    assert row1["type"] == "general"
+    assert row1["is_species"] == 0
+
+    kid2 = db.add_keyword("Mystery Bird", kw_type="taxonomy")
+    assert kid2 == kid1
+    row2 = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid2,)
+    ).fetchone()
+    assert row2["type"] == "taxonomy"
+    assert row2["is_species"] == 1
