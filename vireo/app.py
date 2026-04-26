@@ -1542,7 +1542,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         parents = []
         current_parent_id = leaf["parent_id"]
-        while current_parent_id is not None:
+        # Depth cap of 10 — chains are bounded ~5 in practice, but guard
+        # against pathological/malformed cycles (link_keyword_to_place
+        # already prevents creating cycles, but a corrupted DB could).
+        for _ in range(10):
+            if current_parent_id is None:
+                break
             row = db.conn.execute(
                 "SELECT id, name, parent_id FROM keywords WHERE id = ?",
                 (current_parent_id,),
@@ -1563,6 +1568,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "parent_chain": parents,
         }
 
+    # Location keywords don't propagate to dc:subject sidecars — structured XMP (exif:GPS*, Iptc4xmpCore:Location) is a future feature.
     @app.route("/api/photos/<int:photo_id>/location", methods=["POST"])
     def api_set_photo_location(photo_id):
         """Attach a Google place to ``photo_id`` via the autocomplete flow.
@@ -1589,6 +1595,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         leaf_id = db.upsert_place_chain(details)
         db.set_photo_location(photo_id, leaf_id)
+        db.record_edit(
+            'location_set',
+            f"set location: {details.get('name', 'unknown')}",
+            str(leaf_id),
+            [{'photo_id': photo_id, 'old_value': '', 'new_value': str(leaf_id)}],
+        )
         return jsonify({"location": _serialize_photo_location(db, photo_id)})
 
     @app.route("/api/photos/<int:photo_id>/location", methods=["DELETE"])
@@ -1596,6 +1608,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Remove all ``type='location'`` keyword links for ``photo_id``."""
         db = _get_db()
         db.clear_photo_location(photo_id)
+        db.record_edit(
+            'location_clear',
+            "cleared location",
+            '',
+            [{'photo_id': photo_id, 'old_value': '', 'new_value': ''}],
+        )
         return jsonify({"ok": True})
 
     # -- Batch operations --

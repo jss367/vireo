@@ -1706,3 +1706,55 @@ def test_delete_photo_location_clears_links(app_and_db):
     ).fetchone()
     assert leaf_row is not None
     assert leaf_row["name"] == "Central Park"
+def test_post_photo_location_records_edit(app_and_db, monkeypatch):
+    """POST adds an entry to the audit log so the action is undoable/visible."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    pre_history = db.get_edit_history()
+    pre_count = len(pre_history)
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+
+    post_history = db.get_edit_history()
+    assert len(post_history) == pre_count + 1
+    # Most recent first.
+    entry = post_history[0]
+    assert entry["action_type"] == "location_set"
+    assert "Central Park" in entry["description"]
+
+
+def test_delete_photo_location_records_edit(app_and_db):
+    """DELETE adds an entry to the audit log even though it doesn't write a sidecar."""
+    app, db = app_and_db
+
+    leaf_id = db.upsert_place_chain(_central_park_details())
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+    db.set_photo_location(pid, leaf_id)
+
+    pre_history = db.get_edit_history()
+    pre_count = len(pre_history)
+
+    client = app.test_client()
+    resp = client.delete(f"/api/photos/{pid}/location")
+    assert resp.status_code == 200
+
+    post_history = db.get_edit_history()
+    assert len(post_history) == pre_count + 1
+    entry = post_history[0]
+    assert entry["action_type"] == "location_clear"
+    assert entry["description"] == "cleared location"
