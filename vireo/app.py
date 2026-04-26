@@ -82,6 +82,22 @@ class _QuietRequestFilter(logging.Filter):
 logging.getLogger("werkzeug").addFilter(_QuietRequestFilter())
 
 
+# Maximum number of bound parameters per SQL statement. SQLite's
+# ``SQLITE_MAX_VARIABLE_NUMBER`` defaults to 32766 on builds since 3.32 but
+# remains 999 on older builds (and on some packagers' default builds). Bulk
+# duplicate-cleanup actions can hand us thousands of photo ids at once, so
+# we chunk every IN-clause query under this cap to stay portable across
+# SQLite versions. Sized below 999 to leave headroom for additional bound
+# parameters in joined statements.
+_SQL_PARAM_CHUNK = 900
+
+
+def _chunked(seq, size=_SQL_PARAM_CHUNK):
+    """Yield ``seq`` in successive lists of at most ``size`` items."""
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
 def _trash_via_finder(filepath):
     """Trash a file via Finder using AppleScript.
 
@@ -5882,22 +5898,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error("photo_ids must be a list of integers")
 
         db = _get_db()
-        placeholders = ",".join("?" * len(photo_ids))
-        rows = db.conn.execute(
-            f"""SELECT p.id, p.flag, p.file_hash, p.filename,
-                       f.path AS folder_path
-                FROM photos p
-                LEFT JOIN folders f ON f.id = p.folder_id
-                WHERE p.id IN ({placeholders})""",
-            photo_ids,
-        ).fetchall()
-        rows_by_id = {r["id"]: r for r in rows}
+        # Chunk the lookup SELECT — bulk cleanup actions may hand us thousands
+        # of ids at once, and SQLite builds with the legacy 999-parameter cap
+        # would otherwise fail before any cleanup runs.
+        rows_by_id = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" * len(chunk))
+            chunk_rows = db.conn.execute(
+                f"""SELECT p.id, p.flag, p.file_hash, p.filename,
+                           f.path AS folder_path
+                    FROM photos p
+                    LEFT JOIN folders f ON f.id = p.folder_id
+                    WHERE p.id IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            for r in chunk_rows:
+                rows_by_id[r["id"]] = r
 
         # One query per distinct hash to find kept-row anchors. Cheap because
         # the hash column is indexed and a typical bulk action shares hashes
         # across many photo_ids only when the user clicks "trash all losers"
         # for one library — still a small number of distinct hashes.
-        hashes = {r["file_hash"] for r in rows if r["file_hash"]}
+        hashes = {r["file_hash"] for r in rows_by_id.values() if r["file_hash"]}
         anchored_hashes = set()
         for h in hashes:
             anchor = db.conn.execute(
@@ -5953,12 +5975,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     failed.append({"id": pid, "path": filepath, "error": str(e)})
 
         # Drop DB rows + cached derivatives for every photo whose file is now
-        # gone. Batched into a single delete_photos call so we hit the row-
-        # count update path once per request, not once per photo.
+        # gone. Chunked so ``delete_photos``' five internal IN-clause queries
+        # can't trip the SQLite parameter cap on large bulk actions; without
+        # chunking, a 1000+ id request would raise OperationalError on legacy
+        # builds AFTER files were already trashed, leaving the DB inconsistent.
         if trashed_pids:
             try:
-                result = db.delete_photos(trashed_pids)
-                _cleanup_cached_files_for_deleted_photos(result.get("files", []))
+                all_files = []
+                for chunk in _chunked(trashed_pids):
+                    result = db.delete_photos(chunk)
+                    all_files.extend(result.get("files", []))
+                _cleanup_cached_files_for_deleted_photos(all_files)
             except Exception:
                 # Files are already in Trash; if the row delete fails we
                 # surface a 500 so the caller knows reconciliation is

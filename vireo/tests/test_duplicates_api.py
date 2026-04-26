@@ -348,6 +348,53 @@ def test_delete_loser_files_handles_already_missing_file(app_and_db, tmp_path):
     assert loser_row is None
 
 
+def test_delete_loser_files_chunks_large_id_lists(app_and_db, tmp_path, monkeypatch):
+    """Bulk cleanup with id counts above ``_SQL_PARAM_CHUNK`` must not raise.
+
+    SQLite's legacy ``SQLITE_MAX_VARIABLE_NUMBER`` cap is 999, so packaging
+    the entire id list into a single IN clause would fail on those builds
+    before any file gets trashed. We patch the cap down to 2 to cover the
+    chunking path without seeding 1000 photos: the test still proves the
+    endpoint splits the query.
+    """
+    import os
+
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "_SQL_PARAM_CHUNK", 2)
+
+    app, db = app_and_db
+    loser_ids = []
+    loser_paths = []
+    # 5 dup pairs > chunk size of 2, so the lookup SELECT and the
+    # delete_photos call both have to iterate.
+    for i in range(5):
+        _w, l, _wp, lp = _seed_pair_with_real_files(db, tmp_path, f"CHUNK{i}")
+        loser_ids.append(l)
+        loser_paths.append(lp)
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/duplicates/delete-loser-files",
+        json={"photo_ids": loser_ids},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["trashed"] == 5
+    assert body["failed"] == []
+    # All loser files trashed and all rows gone — proving each chunk got
+    # processed end-to-end (lookup + trash + delete) rather than only the
+    # first 2 succeeding.
+    for p in loser_paths:
+        assert not os.path.isfile(p)
+    placeholders = ",".join("?" * len(loser_ids))
+    remaining = db.conn.execute(
+        f"SELECT COUNT(*) FROM photos WHERE id IN ({placeholders})",
+        loser_ids,
+    ).fetchone()[0]
+    assert remaining == 0
+
+
 def test_delete_loser_files_validates_input(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
