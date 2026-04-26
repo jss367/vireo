@@ -1560,6 +1560,11 @@ def test_run_classify_job_full_pipeline(tmp_path):
     ]
     mock_db_instance.get_existing_prediction_photo_ids.return_value = set()
     mock_db_instance.get_photo_embedding.return_value = None
+    # Subject-skip gate: with no subject types configured the gate is a no-op.
+    mock_db_instance.get_subject_types.return_value = set()
+    mock_db_instance.filter_out_subject_tagged.side_effect = (
+        lambda pids, _types: list(pids)
+    )
 
     fake_model = {
         "id": "test-model",
@@ -1771,3 +1776,138 @@ def test_prepare_image_no_vireo_dir_uses_original(tmp_path):
     )
 
     assert img is not None
+
+
+# ── Task 9: Subject-tagged skip-gate ──────────────────────────────────────────
+
+
+def _setup_two_photo_classify_workspace(tmp_path):
+    """Create a real DB with two photos in a static collection.
+    p1 is tagged with a 'scene' keyword (Landscape); p2 is untagged.
+    Returns (db_path, ws_id, col_id, p1, p2)."""
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    db.add_workspace_folder(ws, folder_id)
+    p1 = db.add_photo(
+        folder_id, "p1.jpg", extension=".jpg", file_size=100, file_mtime=1.0,
+    )
+    p2 = db.add_photo(
+        folder_id, "p2.jpg", extension=".jpg", file_size=100, file_mtime=2.0,
+    )
+
+    # Tag p1 with a scene keyword so it should be filtered out by the skip-gate.
+    scene_kid = db.add_keyword("Landscape", kw_type="scene")
+    db.tag_photo(p1, scene_kid)
+
+    col_id = db.add_collection(
+        "static",
+        json.dumps([{"field": "photo_ids", "value": [p1, p2]}]),
+    )
+    db.conn.close()
+    return db_path, ws, col_id, p1, p2
+
+
+def _run_classify_capturing_photos(db_path, ws, col_id, reclassify):
+    """Run run_classify_job with all heavy dependencies stubbed and return
+    the list of photo IDs that flowed into _detect_subjects + the events
+    pushed by the runner."""
+    from unittest.mock import patch
+
+    from classify_job import ClassifyParams, run_classify_job
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    fake_model = {
+        "id": "test-model",
+        "name": "TestModel",
+        "model_str": "hf-hub:imageomics/bioclip",
+        "weights_path": "/tmp/weights.bin",
+        "model_type": "bioclip",
+        "downloaded": True,
+    }
+
+    captured_photos = []
+
+    def _fake_detect_subjects(photos, folders, runner, job, reclassify, db):
+        captured_photos.extend([p["id"] for p in photos])
+        return ({}, 0)
+
+    params = ClassifyParams(
+        collection_id=col_id,
+        labels_file=None,
+        labels_files=None,
+        model_id=None,
+        model_name="TestModel",
+        grouping_window=10,
+        similarity_threshold=0.85,
+        reclassify=reclassify,
+    )
+
+    with patch("classify_job.get_active_model", return_value=fake_model), \
+         patch("classify_job.get_models", return_value=[fake_model]), \
+         patch("classify_job._load_taxonomy", return_value=None), \
+         patch(
+            "classify_job._load_labels", return_value=(["Northern Cardinal"], False),
+         ), \
+         patch("classify_job.Classifier"), \
+         patch("classify_job._detect_subjects", side_effect=_fake_detect_subjects):
+        result = run_classify_job(job, runner, db_path, ws, params)
+
+    return captured_photos, runner.events, result
+
+
+def test_classify_job_skips_photos_with_subject_keywords(tmp_path):
+    """When a photo has a keyword whose type is in the workspace's
+    subject_types, the classifier doesn't include it in the run.
+
+    Verified by capturing the photo IDs passed into the (stubbed)
+    _detect_subjects step. Only p2 (untagged) should reach detection;
+    p1 (tagged 'Landscape', type='scene') is skipped at the load step.
+    """
+    db_path, ws, col_id, p1, p2 = _setup_two_photo_classify_workspace(tmp_path)
+
+    seen, events, _ = _run_classify_capturing_photos(
+        db_path, ws, col_id, reclassify=False,
+    )
+
+    assert seen == [p2], (
+        f"Expected only p2 ({p2}) to reach the detector, got {seen}"
+    )
+
+    # The skip-count should be surfaced in a progress event.
+    progress_events = [
+        d for (_jid, kind, d) in events
+        if kind == "progress" and d.get("skipped_subject")
+    ]
+    assert progress_events, "Expected a progress event with skipped_subject"
+    assert progress_events[0]["skipped_subject"] == 1
+    assert progress_events[0]["phase"] == "Step 2/5: Loading photos"
+
+
+def test_classify_job_reclassify_true_bypasses_subject_skip(tmp_path):
+    """With reclassify=True, even subject-tagged photos are reprocessed,
+    so users can verify or refresh existing tags."""
+    db_path, ws, col_id, p1, p2 = _setup_two_photo_classify_workspace(tmp_path)
+
+    seen, events, _ = _run_classify_capturing_photos(
+        db_path, ws, col_id, reclassify=True,
+    )
+
+    assert sorted(seen) == sorted([p1, p2]), (
+        f"reclassify=True should bypass the skip-gate; got {seen}"
+    )
+    skip_events = [
+        d for (_jid, kind, d) in events
+        if kind == "progress" and d.get("skipped_subject")
+    ]
+    assert not skip_events, (
+        f"reclassify=True should not surface a skipped_subject event, got "
+        f"{skip_events}"
+    )

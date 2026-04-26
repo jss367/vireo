@@ -1368,6 +1368,38 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         )
         photos = thread_db.get_collection_photos(params.collection_id, per_page=999999)
         folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+
+        # Skip photos already tagged with a 'subject' keyword (per workspace
+        # config). reclassify=True bypasses so users can verify existing tags.
+        if not params.reclassify:
+            subject_types = thread_db.get_subject_types()
+            if subject_types:
+                pre_count = len(photos)
+                kept_ids = set(thread_db.filter_out_subject_tagged(
+                    [p["id"] for p in photos], subject_types,
+                ))
+                photos = [p for p in photos if p["id"] in kept_ids]
+                skipped_subject = pre_count - len(photos)
+                if skipped_subject:
+                    log.info(
+                        "Skipping %d photo(s) with subject keywords (types=%s)",
+                        skipped_subject, sorted(subject_types),
+                    )
+                    runner.push_event(
+                        job["id"], "progress",
+                        {
+                            "current": 0,
+                            "total": len(photos),
+                            "current_file": (
+                                f"Skipped {skipped_subject} already-identified "
+                                f"photo(s)"
+                            ),
+                            "rate": 0,
+                            "phase": "Step 2/5: Loading photos",
+                            "skipped_subject": skipped_subject,
+                        },
+                    )
+
         total = len(photos)
         job["progress"]["total"] = total
         runner.update_step(
