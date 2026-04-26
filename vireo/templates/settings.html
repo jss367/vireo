@@ -32,7 +32,7 @@
   .collapsible-body { display: none; }
   .collapsible-body.open { display: block; }
 
-  /* All-settings (schema-rendered, read-only) */
+  /* All-settings (schema-rendered) */
   .provenance-dot {
     display: inline-block; width: 8px; height: 8px; border-radius: 50%;
     flex-shrink: 0; margin-top: 6px;
@@ -41,6 +41,13 @@
   .dot-global { background: var(--accent); }
   .dot-workspace { background: #a855f7; }
   .setting-row-card:last-child { border-bottom: none !important; }
+  .scope-tab {
+    background: transparent; border: none; color: var(--text-secondary);
+    padding: 6px 14px; font-size: 13px; cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .scope-tab:hover { color: var(--text-primary); }
+  .scope-tab.active { color: var(--text-primary); border-bottom-color: var(--accent); font-weight: 500; }
 </style>
 </head>
 <body>
@@ -1004,7 +1011,7 @@
     </div>
   </div>
 
-  <!-- All settings (schema-driven, read-only) -->
+  <!-- All settings (schema-driven) -->
   <div class="section" id="allSettingsSection">
     <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
       <span>All settings</span>
@@ -1013,9 +1020,13 @@
              style="flex:1;min-width:200px;max-width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 10px;font-size:13px;">
     </div>
     <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
-      Every Vireo setting, including ones not surfaced by the curated sections above. Edits save automatically; click Reset to revert to the default.
+      Every Vireo setting, including ones not surfaced by the curated sections above. Edits save automatically; click Reset to revert.
     </div>
-    <div style="font-size:11px;color:var(--text-dim);margin-bottom:14px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
+    <div style="display:flex;border-bottom:1px solid var(--border-primary);margin-bottom:14px;">
+      <button class="scope-tab active" data-scope="global" onclick="setSettingsScope('global')">Global</button>
+      <button class="scope-tab" data-scope="workspace" onclick="setSettingsScope('workspace')">Workspace</button>
+    </div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:14px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;" id="allSettingsLegend">
       <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-default" style="margin-top:0;"></span> default</span>
       <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-global" style="margin-top:0;"></span> set globally</span>
       <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-workspace" style="margin-top:0;"></span> set for this workspace</span>
@@ -2514,6 +2525,18 @@ async function doInstallUpdate() {
 
 var ALL_SETTINGS_CACHE = { schema: null, categories: null, values: null };
 var ALL_SETTINGS_DEBOUNCE = {};   // key -> setTimeout id
+var ALL_SETTINGS_SCOPE = 'global';  // 'global' | 'workspace'
+
+function setSettingsScope(scope) {
+  if (scope !== 'global' && scope !== 'workspace') return;
+  if (ALL_SETTINGS_SCOPE === scope) return;
+  ALL_SETTINGS_SCOPE = scope;
+  document.querySelectorAll('.scope-tab').forEach(function(b) {
+    b.classList.toggle('active', b.dataset.scope === scope);
+  });
+  renderAllSettings(document.getElementById('allSettingsCategories'));
+  filterAllSettings();
+}
 
 async function loadAllSettings() {
   var container = document.getElementById('allSettingsCategories');
@@ -2590,10 +2613,21 @@ function renderSettingRow(key) {
   var values = ALL_SETTINGS_CACHE.values;
   var hasWs = Object.prototype.hasOwnProperty.call(values.workspace, key);
   var hasGlobal = Object.prototype.hasOwnProperty.call(values['global'], key);
+  var globalOnly = (spec.scope === 'global');
+  var workspaceTab = (ALL_SETTINGS_SCOPE === 'workspace');
+
   var dotClass, dotTitle;
-  if (hasWs) {
-    dotClass = 'dot-workspace';
-    dotTitle = 'Set for this workspace';
+  if (workspaceTab) {
+    if (hasWs) {
+      dotClass = 'dot-workspace';
+      dotTitle = 'Set for this workspace';
+    } else if (globalOnly) {
+      dotClass = hasGlobal ? 'dot-global' : 'dot-default';
+      dotTitle = hasGlobal ? 'Global setting (not workspace-overridable)' : 'Global default';
+    } else {
+      dotClass = 'dot-default';
+      dotTitle = hasGlobal ? 'Inheriting global value' : 'Using default';
+    }
   } else if (hasGlobal) {
     dotClass = 'dot-global';
     dotTitle = 'Set globally';
@@ -2601,18 +2635,44 @@ function renderSettingRow(key) {
     dotClass = 'dot-default';
     dotTitle = 'Using default';
   }
-  var effective = values.effective[key];
+
+  // Effective value for the widget on this tab.
+  var rowValue;
+  if (workspaceTab) {
+    if (hasWs) rowValue = values.workspace[key];
+    else if (hasGlobal) rowValue = values['global'][key];
+    else rowValue = values['default'][key];
+  } else {
+    rowValue = hasGlobal ? values['global'][key] : values['default'][key];
+  }
+
   var defaultVal = values['default'][key];
-  var widget = renderSettingWidget(key, spec, effective);
+  var widget;
+  if (workspaceTab && globalOnly) {
+    widget = '<span style="font-size:11px;color:var(--text-ghost);font-style:italic;">'
+           + 'Global only — switch to Global tab</span>';
+  } else {
+    widget = renderSettingWidget(key, spec, rowValue);
+  }
+
+  var hasOverride = workspaceTab ? hasWs : hasGlobal;
   var resetBtn = '';
-  if (hasGlobal) {
+  if (hasOverride) {
+    var resetTitle = workspaceTab
+      ? 'Remove workspace override (inherit global / default)'
+      : 'Reset to default: ' + formatSettingValue(defaultVal, spec, true);
     resetBtn = '<button type="button" onclick="resetSchemaSetting(\'' + escapeHtml(key) + '\')" '
-             +    'title="Reset to default: ' + escapeHtml(formatSettingValue(defaultVal, spec, true)) + '" '
+             +    'title="' + escapeHtml(resetTitle) + '" '
              +    'style="background:transparent;border:1px solid var(--border-secondary);color:var(--text-dim);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;flex-shrink:0;">'
              +  'Reset</button>';
   }
+
   var meta = escapeHtml(key);
-  if (hasGlobal) {
+  if (workspaceTab && hasWs) {
+    var inheritedVal = hasGlobal ? values['global'][key] : defaultVal;
+    var inheritLabel = hasGlobal ? 'inherits global' : 'inherits default';
+    meta += ' · ' + inheritLabel + ': ' + escapeHtml(formatSettingValue(inheritedVal, spec, true));
+  } else if (!workspaceTab && hasGlobal) {
     meta += ' · default: ' + escapeHtml(formatSettingValue(defaultVal, spec, true));
   }
   var search = (key + ' ' + spec.label + ' ' + spec.desc + ' ' + spec.category).toLowerCase();
@@ -2737,10 +2797,14 @@ function scheduleSchemaSave(key, value, immediate) {
   }, delay);
 }
 
+function _settingsScopeBase() {
+  return (ALL_SETTINGS_SCOPE === 'workspace') ? '/api/settings/workspace' : '/api/settings/global';
+}
+
 async function saveSchemaSetting(key, value) {
   setRowStatus(key, 'Saving…', false);
   try {
-    var resp = await fetch('/api/settings/global', {
+    var resp = await fetch(_settingsScopeBase(), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key: key, value: value }),
@@ -2762,7 +2826,7 @@ async function saveSchemaSetting(key, value) {
 async function resetSchemaSetting(key) {
   setRowStatus(key, 'Resetting…', false);
   try {
-    var resp = await fetch('/api/settings/global/' + encodeURIComponent(key), {
+    var resp = await fetch(_settingsScopeBase() + '/' + encodeURIComponent(key), {
       method: 'DELETE',
     });
     if (!resp.ok) {

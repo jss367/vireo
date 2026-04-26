@@ -3163,6 +3163,61 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         _settings_post_save_side_effects(cfg.load())
         return jsonify({"ok": True, "key": key})
 
+    def _read_workspace_overrides(db):
+        """Return the active workspace's config_overrides as a dict (or {})."""
+        ws = db.get_workspace(db._active_workspace_id)
+        if not ws or not ws["config_overrides"]:
+            return {}
+        try:
+            raw = ws["config_overrides"]
+            return json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    def _write_workspace_overrides(db, overrides):
+        db.update_workspace(
+            db._active_workspace_id,
+            config_overrides=overrides if overrides else None,
+        )
+
+    @app.route("/api/settings/workspace", methods=["PATCH"])
+    def api_settings_workspace_patch():
+        """Set a single per-workspace override (validated against SCHEMA)."""
+        import config_schema as schema
+
+        body = request.get_json(silent=True) or {}
+        key = body.get("key")
+        if not isinstance(key, str) or key not in schema.SCHEMA:
+            return json_error(f"unknown setting {key!r}", status=400)
+        if schema.SCHEMA[key].get("scope") == "global":
+            return json_error(
+                f"{key!r} is global-only and cannot be overridden per workspace",
+                status=400,
+            )
+        try:
+            value = schema.validate_value(key, body.get("value"))
+        except schema.ValidationError as e:
+            return json_error(str(e), status=400)
+
+        db = _get_db()
+        overrides = _read_workspace_overrides(db)
+        schema.set_dotted(overrides, key, value)
+        _write_workspace_overrides(db, overrides)
+        return jsonify({"ok": True, "key": key, "value": value})
+
+    @app.route("/api/settings/workspace/<path:key>", methods=["DELETE"])
+    def api_settings_workspace_delete(key):
+        """Remove a per-workspace override (the key falls back to global/default)."""
+        import config_schema as schema
+
+        if key not in schema.SCHEMA:
+            return json_error(f"unknown setting {key!r}", status=400)
+        db = _get_db()
+        overrides = _read_workspace_overrides(db)
+        schema.delete_dotted(overrides, key)
+        _write_workspace_overrides(db, overrides)
+        return jsonify({"ok": True, "key": key})
+
     @app.route("/api/darktable/status")
     def api_darktable_status():
         import config as cfg

@@ -333,3 +333,182 @@ def test_delete_global_rejects_unknown_key(app_and_db):
     client = app.test_client()
     resp = client.delete("/api/settings/global/no_such_key")
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/settings/workspace
+# ---------------------------------------------------------------------------
+
+
+def _ws_overrides(db):
+    """Return the active workspace's config_overrides as a dict."""
+    import json as _json
+
+    ws = db.get_workspace(db._active_workspace_id)
+    if not ws or not ws["config_overrides"]:
+        return {}
+    raw = ws["config_overrides"]
+    return _json.loads(raw) if isinstance(raw, str) else raw
+
+
+def test_patch_workspace_persists_value(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/workspace",
+        json={"key": "classification_threshold", "value": 0.55},
+    )
+    assert resp.status_code == 200
+    overrides = _ws_overrides(db)
+    assert overrides.get("classification_threshold") == 0.55
+
+
+def test_patch_workspace_writes_nested_key(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/workspace",
+        json={"key": "pipeline.w_focus", "value": 0.7},
+    )
+    assert resp.status_code == 200
+    overrides = _ws_overrides(db)
+    assert overrides.get("pipeline", {}).get("w_focus") == 0.7
+
+
+def test_patch_workspace_rejects_global_scope_key(app_and_db):
+    """hf_token has scope='global' — cannot be overridden per-workspace."""
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/workspace",
+        json={"key": "hf_token", "value": "hf_xxx"},
+    )
+    assert resp.status_code == 400
+    assert "hf_token" not in _ws_overrides(db)
+
+
+def test_patch_workspace_rejects_unknown_key(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/workspace",
+        json={"key": "no_such", "value": 1},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_workspace_rejects_out_of_range(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/workspace",
+        json={"key": "classification_threshold", "value": 99},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_workspace_preserves_active_labels(app_and_db):
+    """Existing non-schema keys (e.g. active_labels) survive a schema-driven write."""
+    app, db = app_and_db
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"active_labels": ["birds.txt"]},
+    )
+    client = app.test_client()
+    client.patch(
+        "/api/settings/workspace",
+        json={"key": "classification_threshold", "value": 0.55},
+    )
+    overrides = _ws_overrides(db)
+    assert overrides.get("active_labels") == ["birds.txt"]
+    assert overrides.get("classification_threshold") == 0.55
+
+
+def test_patch_workspace_does_not_affect_other_workspaces(app_and_db):
+    app, db = app_and_db
+    other_ws = db.create_workspace("other")
+    client = app.test_client()
+    client.patch(
+        "/api/settings/workspace",
+        json={"key": "classification_threshold", "value": 0.55},
+    )
+    other = db.get_workspace(other_ws)
+    assert not other["config_overrides"]
+
+
+def test_patch_workspace_value_beats_global_in_effective(app_and_db):
+    app, db = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)  # global
+    client = app.test_client()
+    client.patch(
+        "/api/settings/workspace",
+        json={"key": "classification_threshold", "value": 0.95},
+    )
+    values = client.get("/api/settings/values").get_json()
+    assert values["effective"]["classification_threshold"] == 0.95
+    assert values["workspace"]["classification_threshold"] == 0.95
+    assert values["global"]["classification_threshold"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/settings/workspace/<dotted-key>
+# ---------------------------------------------------------------------------
+
+
+def test_delete_workspace_removes_override(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    client.patch(
+        "/api/settings/workspace",
+        json={"key": "classification_threshold", "value": 0.55},
+    )
+    assert "classification_threshold" in _ws_overrides(db)
+    resp = client.delete("/api/settings/workspace/classification_threshold")
+    assert resp.status_code == 200
+    assert "classification_threshold" not in _ws_overrides(db)
+
+
+def test_delete_workspace_nested_key(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    client.patch(
+        "/api/settings/workspace",
+        json={"key": "pipeline.w_focus", "value": 0.99},
+    )
+    assert _ws_overrides(db).get("pipeline", {}).get("w_focus") == 0.99
+    resp = client.delete("/api/settings/workspace/pipeline.w_focus")
+    assert resp.status_code == 200
+    assert "w_focus" not in _ws_overrides(db).get("pipeline", {})
+
+
+def test_delete_workspace_idempotent(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.delete("/api/settings/workspace/classification_threshold")
+    assert resp.status_code == 200
+
+
+def test_delete_workspace_rejects_unknown_key(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.delete("/api/settings/workspace/no_such_key")
+    assert resp.status_code == 400
+
+
+def test_delete_workspace_preserves_active_labels(app_and_db):
+    app, db = app_and_db
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={
+            "active_labels": ["birds.txt"],
+            "classification_threshold": 0.55,
+        },
+    )
+    client = app.test_client()
+    resp = client.delete("/api/settings/workspace/classification_threshold")
+    assert resp.status_code == 200
+    overrides = _ws_overrides(db)
+    assert overrides.get("active_labels") == ["birds.txt"]
+    assert "classification_threshold" not in overrides
