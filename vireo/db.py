@@ -214,6 +214,15 @@ class Database:
                 PRIMARY KEY (photo_id, keyword_id)
             );
 
+            -- Singleton key/value table for one-shot migration markers.
+            -- Used to gate non-idempotent backfills (where re-running would
+            -- overwrite user intent — e.g. Wildlife genre backfill that
+            -- would clobber sticky-removed Wildlife rows).
+            CREATE TABLE IF NOT EXISTS db_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS workspaces (
                 id              INTEGER PRIMARY KEY,
                 name            TEXT NOT NULL UNIQUE,
@@ -921,13 +930,37 @@ class Database:
         Idempotent: a single existing genre keyword (user-created or otherwise)
         short-circuits the insert. Keywords are global, so this runs once per
         database (not per workspace).
+
+        Upgrade path: if a same-name top-level keyword exists with type='general'
+        (legacy free-form tag with the same name as a default genre), promote
+        it to type='genre' rather than silently leaving it as 'general'. The
+        UNIQUE(name, parent_id) constraint would block INSERT OR IGNORE in
+        that case, leaving e.g. an existing 'Wildlife' general keyword to
+        defeat _maybe_apply_auto_wildlife and backfill_wildlife_genre. Other
+        explicit user types (individual, location) are preserved — the user
+        meant something specific.
         """
+        defaults = ("Landscape", "Sunset", "Architecture", "Abstract", "Wildlife")
+        # Warm-path short-circuit: if any genre row already exists, the
+        # database has already been seeded — nothing to do. Cheap (single
+        # SELECT 1 LIMIT 1).
         existing = self.conn.execute(
             "SELECT 1 FROM keywords WHERE type = 'genre' LIMIT 1"
         ).fetchone()
         if existing:
             return
-        for name in ("Landscape", "Sunset", "Architecture", "Abstract", "Wildlife"):
+        # Cold / upgrade path: promote any same-name top-level 'general'
+        # rows to 'genre' first, so an upgraded DB with a hand-tagged
+        # 'general' Wildlife (or other default name) ends up with a
+        # canonical genre row instead of being blocked by the
+        # UNIQUE(name, parent_id) constraint on the subsequent INSERT.
+        for name in defaults:
+            self.conn.execute(
+                """UPDATE keywords SET type = 'genre'
+                   WHERE name = ? AND parent_id IS NULL AND type = 'general'""",
+                (name,),
+            )
+        for name in defaults:
             self.conn.execute(
                 "INSERT OR IGNORE INTO keywords (name, type, is_species) VALUES (?, 'genre', 0)",
                 (name,),
@@ -3465,16 +3498,17 @@ class Database:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
-        self.conn.execute(
+        cur = self.conn.execute(
             "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
             (photo_id, keyword_id),
         )
-        # If we just attached a taxonomy keyword AND this is the first
-        # taxonomy keyword on the photo, auto-add the Wildlife genre keyword.
-        # The "first species" check makes sticky-removal work: a user-removed
-        # Wildlife isn't re-added on subsequent species tags as long as at
-        # least one species remains.
-        self._maybe_apply_auto_wildlife(photo_id, keyword_id)
+        # Only fire auto-Wildlife when we actually inserted a new association.
+        # A no-op INSERT OR IGNORE (re-tag of an already-tagged keyword) must
+        # not retrigger the rule — otherwise removing Wildlife and re-tagging
+        # the same species would silently re-add Wildlife and break sticky
+        # removal.
+        if cur.rowcount > 0:
+            self._maybe_apply_auto_wildlife(photo_id, keyword_id)
         if _commit:
             self.conn.commit()
 
@@ -3507,9 +3541,40 @@ class Database:
             (photo_id, wildlife_row["id"]),
         )
 
-    def backfill_wildlife_genre(self):
+    def get_meta(self, key):
+        """Return the db_meta value for `key`, or None if unset."""
+        row = self.conn.execute(
+            "SELECT value FROM db_meta WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key, value, _commit=True):
+        """Upsert a db_meta row."""
+        self.conn.execute(
+            "INSERT INTO db_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, str(value)),
+        )
+        if _commit:
+            self.conn.commit()
+
+    _WILDLIFE_BACKFILL_DONE_KEY = "wildlife_backfill_done"
+
+    def backfill_wildlife_genre(self, force=False):
         """One-shot backfill: every photo that has at least one taxonomy
-        keyword AND no Wildlife genre keyword gets Wildlife added. Idempotent."""
+        keyword AND no Wildlife genre keyword gets Wildlife added.
+
+        Gated by a db_meta marker so it runs at most once per database.
+        Re-running unconditionally would clobber sticky-removed Wildlife rows
+        (a user who intentionally removed Wildlife from a species-tagged
+        photo would see it re-added on the next app restart).
+
+        Args:
+            force: re-run even if the marker is set. Used by tests; not for
+                   normal startup.
+        """
+        if not force and self.get_meta(self._WILDLIFE_BACKFILL_DONE_KEY) == "1":
+            return
         wildlife_row = self.conn.execute(
             "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre' LIMIT 1"
         ).fetchone()
@@ -3524,6 +3589,7 @@ class Database:
                WHERE k.type = 'taxonomy'""",
             (wildlife_id,),
         )
+        self.set_meta(self._WILDLIFE_BACKFILL_DONE_KEY, "1", _commit=False)
         self.conn.commit()
 
     def untag_photo(self, photo_id, keyword_id, _commit=True):
@@ -6043,12 +6109,15 @@ class Database:
 
     def migrate_default_subject_collection(self):
         """Rename legacy 'Needs Classification' (with rule has_species==0)
-        to 'Needs Identification' (rule has_subject==0). Skips collections
-        the user has customized. Idempotent."""
+        to 'Needs Identification' (rule has_subject==0) across ALL workspaces.
+
+        Workspace activation does not re-run startup migrations, so an
+        upgraded multi-workspace database would otherwise leave non-active
+        workspaces stuck on the legacy rule. Skips collections the user has
+        customized. Idempotent."""
         rows = self.conn.execute(
-            "SELECT id, rules FROM collections "
-            "WHERE workspace_id = ? AND name = ?",
-            (self._ws_id(), "Needs Classification"),
+            "SELECT id, workspace_id, rules FROM collections WHERE name = ?",
+            ("Needs Classification",),
         ).fetchall()
         legacy_rule = [{"field": "has_species", "op": "equals", "value": 0}]
         for row in rows:
@@ -6058,10 +6127,11 @@ class Database:
                 continue
             if current != legacy_rule:
                 continue
-            # Don't clobber an existing "Needs Identification"
+            # Don't clobber an existing "Needs Identification" in the SAME
+            # workspace (each workspace has its own default collections).
             existing = self.conn.execute(
                 "SELECT 1 FROM collections WHERE workspace_id = ? AND name = ?",
-                (self._ws_id(), "Needs Identification"),
+                (row["workspace_id"], "Needs Identification"),
             ).fetchone()
             if existing:
                 continue

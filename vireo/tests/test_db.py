@@ -6828,6 +6828,191 @@ def test_backfill_auto_wildlife_for_existing_species_tagged_photos(tmp_path):
     assert has_wildlife(p3) is False
 
 
+def test_tag_photo_no_op_re_tag_does_not_re_add_removed_wildlife(tmp_path):
+    """Regression: re-tagging an already-tagged species (a no-op INSERT OR
+    IGNORE) must NOT re-fire the auto-Wildlife rule, so user-removed
+    Wildlife stays removed."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    sp = db.add_keyword("Robin", is_species=True)
+
+    db.tag_photo(p1, sp)  # First species tag — Wildlife auto-added.
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    db.untag_photo(p1, wildlife_id)  # User removes Wildlife.
+
+    # Re-tag the same species (e.g. user clicks the keyword chip twice).
+    # INSERT OR IGNORE is a no-op; auto-Wildlife must NOT fire.
+    db.tag_photo(p1, sp)
+
+    has_wildlife = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is False, (
+        "Re-tagging an already-attached species must not undo a user's "
+        "Wildlife removal."
+    )
+
+
+def test_ensure_default_genre_keywords_upgrades_existing_general_wildlife(tmp_path):
+    """Regression: an upgraded DB with an existing 'Wildlife' general keyword
+    must have it promoted to type='genre' so auto-tagging finds it."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Wipe the genre defaults that __init__ seeded (simulate a DB that
+    # never went through this code path) and force-create a 'general'
+    # Wildlife row, mirroring an upgraded DB where the user hand-tagged.
+    db.conn.execute("DELETE FROM keywords WHERE type = 'genre'")
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 0)",
+        ("Wildlife",),
+    )
+    db.conn.commit()
+
+    db.ensure_default_genre_keywords()
+
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE name = 'Wildlife' AND parent_id IS NULL"
+    ).fetchone()
+    assert row["type"] == "genre", (
+        "An existing 'general' Wildlife should be promoted to 'genre' so "
+        "auto-Wildlife and the backfill find a canonical genre row."
+    )
+    # Other defaults should also be present (the seed loop still runs).
+    n = db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE type = 'genre'"
+    ).fetchone()[0]
+    assert n >= 5  # Wildlife + Landscape + Sunset + Architecture + Abstract
+
+
+def test_ensure_default_genre_keywords_preserves_non_general_user_types(tmp_path):
+    """If a user deliberately created e.g. an 'individual' Wildlife (a pet
+    named Wildlife), ensure_default_genre_keywords must NOT clobber that."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute("DELETE FROM keywords WHERE type = 'genre'")
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'individual', 0)",
+        ("Wildlife",),
+    )
+    db.conn.commit()
+
+    db.ensure_default_genre_keywords()
+
+    rows = db.conn.execute(
+        "SELECT type FROM keywords WHERE name = 'Wildlife' ORDER BY type"
+    ).fetchall()
+    types = [r["type"] for r in rows]
+    # The user's 'individual' row stays. Because the existing Wildlife
+    # row blocks INSERT OR IGNORE on (name='Wildlife', parent_id NULL),
+    # no genre row is created — but no clobber either. The early-return
+    # check sees other genre defaults and skips.
+    assert "individual" in types
+    # Other genre defaults still seeded
+    n_other = db.conn.execute(
+        """SELECT COUNT(*) FROM keywords
+           WHERE type = 'genre' AND name IN
+                ('Landscape', 'Sunset', 'Architecture', 'Abstract')"""
+    ).fetchone()[0]
+    assert n_other == 4
+
+
+def test_migrate_default_subject_collection_covers_all_workspaces(tmp_path):
+    """Regression: the migration must rename the legacy collection in EVERY
+    workspace, not just the currently-active one. Multi-workspace upgrades
+    otherwise leave non-active workspaces stuck on has_species."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws1 = db.ensure_default_workspace()
+    ws2 = db.create_workspace("ws-b")
+
+    legacy_rule = json.dumps([{"field": "has_species", "op": "equals", "value": 0}])
+    # Force-create the legacy collection in BOTH workspaces by direct SQL,
+    # bypassing the active-workspace gating in add_collection.
+    for ws in (ws1, ws2):
+        db.conn.execute(
+            "INSERT INTO collections (workspace_id, name, rules) VALUES (?, ?, ?)",
+            (ws, "Needs Classification", legacy_rule),
+        )
+    db.conn.commit()
+
+    # Active workspace is ws1; migration should cover ws2 as well.
+    db.set_active_workspace(ws1)
+    db.migrate_default_subject_collection()
+
+    for ws in (ws1, ws2):
+        row = db.conn.execute(
+            "SELECT name, rules FROM collections "
+            "WHERE workspace_id = ? AND name IN ('Needs Classification', 'Needs Identification')",
+            (ws,),
+        ).fetchone()
+        assert row is not None, f"workspace {ws} lost its default collection"
+        assert row["name"] == "Needs Identification", (
+            f"workspace {ws} still has legacy 'Needs Classification' name"
+        )
+        assert json.loads(row["rules"]) == [
+            {"field": "has_subject", "op": "equals", "value": 0}
+        ]
+
+
+def test_backfill_wildlife_genre_runs_only_once(tmp_path):
+    """Regression: backfill must be gated by a db_meta marker so subsequent
+    startups don't re-add user-removed Wildlife."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    sp = db.add_keyword("Robin", is_species=True)
+    # Direct-SQL tag so auto-Wildlife doesn't fire — simulates a
+    # pre-auto-Wildlife DB where this photo had only Robin.
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, sp),
+    )
+    db.conn.commit()
+
+    db.backfill_wildlife_genre()  # First run: adds Wildlife to p1.
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    # Marker should now be set
+    assert db.get_meta("wildlife_backfill_done") == "1"
+
+    # User removes Wildlife (sticky-removal intent).
+    db.untag_photo(p1, wildlife_id)
+
+    # Subsequent backfill calls (simulating subsequent app starts) must
+    # short-circuit without re-adding Wildlife.
+    db.backfill_wildlife_genre()
+    db.backfill_wildlife_genre()
+    has_wildlife = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is False, (
+        "Backfill must not re-add Wildlife on subsequent startups; the "
+        "user's sticky removal would be silently undone."
+    )
+
+    # Force flag exists for tests.
+    db.backfill_wildlife_genre(force=True)
+    has_wildlife = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is True, "force=True must override the marker gate."
+
+
 # -- update_keyword: rename re-runs taxonomy auto-detection --
 #
 # Regression tests for: when a keyword name is changed (e.g. fixing a typo
