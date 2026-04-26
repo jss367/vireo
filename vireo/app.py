@@ -2260,15 +2260,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         nav_order = body.get("nav_order")
         if not isinstance(nav_order, list):
             return json_error("nav_order must be a list")
-        ws = db.get_workspace(db._active_workspace_id)
-        existing = {}
-        if ws and ws["config_overrides"]:
-            try:
-                existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-            except Exception:
-                pass
-        existing["nav_order"] = nav_order
-        db.update_workspace(db._active_workspace_id, config_overrides=existing)
+        # Share the schema-driven settings write lock so a concurrent schema
+        # autosave can't read this same overrides snapshot and overwrite the
+        # nav-order change with stale data.
+        with _settings_write_lock:
+            ws = db.get_workspace(db._active_workspace_id)
+            existing = {}
+            if ws and ws["config_overrides"]:
+                try:
+                    existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+                except Exception:
+                    pass
+            if not isinstance(existing, dict):
+                existing = {}
+            existing["nav_order"] = nav_order
+            db.update_workspace(db._active_workspace_id, config_overrides=existing)
         return jsonify({"ok": True, "nav_order": nav_order})
 
     @app.route("/api/workspaces/active/new-images")
@@ -8527,20 +8533,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not pipeline_updates:
             return json_error("No valid pipeline config keys provided")
 
-        # Load current overrides, merge pipeline updates
-        ws = db.get_workspace(db._active_workspace_id)
-        current_overrides = {}
-        if ws and ws["config_overrides"]:
-            try:
-                current_overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-            except (json.JSONDecodeError, TypeError):
-                pass
+        # Share the schema-driven settings write lock so a concurrent schema
+        # autosave can't read this same overrides snapshot and overwrite the
+        # pipeline change with stale data.
+        with _settings_write_lock:
+            ws = db.get_workspace(db._active_workspace_id)
+            current_overrides = {}
+            if ws and ws["config_overrides"]:
+                try:
+                    current_overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if not isinstance(current_overrides, dict):
+                current_overrides = {}
 
-        pipeline_section = current_overrides.get("pipeline", {})
-        pipeline_section.update(pipeline_updates)
-        current_overrides["pipeline"] = pipeline_section
+            pipeline_section = current_overrides.get("pipeline", {})
+            if not isinstance(pipeline_section, dict):
+                pipeline_section = {}
+            pipeline_section.update(pipeline_updates)
+            current_overrides["pipeline"] = pipeline_section
 
-        db.update_workspace(db._active_workspace_id, config_overrides=current_overrides)
+            db.update_workspace(db._active_workspace_id, config_overrides=current_overrides)
 
         return jsonify({"pipeline": pipeline_section, "status": "saved"})
 
