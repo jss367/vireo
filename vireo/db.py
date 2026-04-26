@@ -3331,10 +3331,13 @@ class Database:
     def _upsert_location_parent_chain(self, components):
         """Upsert a chain of parent location keywords from ``address_components``.
 
-        Walks broadest → narrowest, returning the deepest parent's id (or
-        ``None`` if ``components`` is empty / all entries lack a name).
-        Caller is responsible for the surrounding transaction.
+        Walks broadest → narrowest, returning the list of visited keyword ids
+        in broadest → narrowest order. Returns an empty list if ``components``
+        is empty / all entries lack a name. The deepest (narrowest) parent is
+        ``chain[-1]`` if non-empty. Caller is responsible for the surrounding
+        transaction.
         """
+        chain: list[int] = []
         parent_id = None
         # Reverse Google's narrowest-first list to walk broadest → narrowest.
         for comp in reversed(components or []):
@@ -3347,7 +3350,8 @@ class Database:
                 latitude=None,
                 longitude=None,
             )
-        return parent_id
+            chain.append(parent_id)
+        return chain
 
     def upsert_place_chain(self, details):
         """Upsert a Google Place + its parent chain. Returns the leaf id.
@@ -3374,7 +3378,8 @@ class Database:
         components = details.get("address_components") or []
 
         with self.conn:
-            parent_id = self._upsert_location_parent_chain(components)
+            chain = self._upsert_location_parent_chain(components)
+            parent_id = chain[-1] if chain else None
             leaf_id = self._upsert_one_keyword(
                 name=name,
                 parent_id=parent_id,
@@ -3389,7 +3394,22 @@ class Database:
 
         Removes any existing ``type='location'`` keyword links for the photo,
         then inserts the new link. Atomic.
+
+        Raises ``ValueError`` if ``leaf_keyword_id`` does not exist or its
+        keyword type is not ``'location'`` — otherwise the DELETE would strip
+        real location links and replace them with a non-location link that
+        :meth:`clear_photo_location` could not clean up.
         """
+        row = self.conn.execute(
+            "SELECT type FROM keywords WHERE id = ?", (leaf_keyword_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"keyword id {leaf_keyword_id} does not exist")
+        if row["type"] != "location":
+            raise ValueError(
+                f"keyword {leaf_keyword_id} has type={row['type']!r}, "
+                f"not 'location'"
+            )
         with self.conn:
             self.conn.execute(
                 "DELETE FROM photo_keywords WHERE photo_id = ? "
@@ -3454,6 +3474,12 @@ class Database:
         if not details.get("place_id"):
             raise ValueError("link_keyword_to_place requires details['place_id']")
 
+        row = self.conn.execute(
+            "SELECT 1 FROM keywords WHERE id = ?", (keyword_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"keyword id {keyword_id} does not exist")
+
         place_id = details["place_id"]
         new_name = details.get("name", "")
         lat = details.get("lat")
@@ -3461,17 +3487,19 @@ class Database:
         components = details.get("address_components") or []
 
         with self.conn:
-            parent_id = self._upsert_location_parent_chain(components)
+            chain = self._upsert_location_parent_chain(components)
+            parent_id = chain[-1] if chain else None
 
-            # If the chain itself ended up choosing this very keyword (e.g.,
-            # a free-text "United States" keyword that we just promoted to
-            # the country parent), the UPDATE below would reparent it onto
-            # itself or a descendant. Guard against that by treating it the
-            # same as the merge case — the chain row is the canonical one.
-            if parent_id == keyword_id:
-                # The keyword we were asked to "link" got reused as a parent
-                # in the chain. Nothing to merge from photo_keywords (it is
-                # already the canonical row for its slot), so just return it.
+            # If the chain itself reused this very keyword anywhere — as the
+            # deepest parent OR as a non-leaf ancestor (e.g. a free-text
+            # "United States" promoted into the country slot while deeper
+            # levels like NY/Manhattan were also discovered) — the UPDATE
+            # below would create a cycle by reparenting the row onto a
+            # descendant of itself. Guard by checking the full visited chain.
+            if keyword_id in chain:
+                # The keyword we were asked to "link" got reused inside the
+                # chain. Nothing to merge from photo_keywords (it is already
+                # the canonical row for its slot), so just return it.
                 return {"keyword_id": keyword_id, "merged": False}
 
             try:

@@ -6640,6 +6640,83 @@ def test_link_keyword_to_place_merges_on_existing_place_id(db):
     assert stale is None
 
 
+def test_link_keyword_to_place_self_merge_via_non_leaf_parent(db):
+    """If the chain reuses the target keyword as a non-leaf ancestor, the
+    link must be a no-op (returning ``merged=False``) rather than reparenting
+    the keyword onto one of its own descendants and creating a cycle.
+
+    Scenario: user has a free-text "United States" keyword and tries to link
+    it to Central Park. The chain walk discovers and reuses the user's
+    "United States" row at the country (broadest) level, then walks deeper
+    through NY-state, NY-city, Manhattan. Without the full-chain self-merge
+    guard, the UPDATE would set the user's row to ``name='Central Park',
+    parent_id=Manhattan_id`` — making the user's row a child of its own
+    great-grandchild.
+    """
+    pid = _make_photo(db)
+    free_us_id = db.get_or_create_text_location("United States")
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, free_us_id),
+    )
+    db.conn.commit()
+
+    details = _central_park_details()
+    result = db.link_keyword_to_place(free_us_id, details)
+
+    # No-op result.
+    assert result == {"keyword_id": free_us_id, "merged": False}
+
+    # Original keyword unchanged: still "United States", no place_id, no parent.
+    row = db.conn.execute(
+        "SELECT name, type, place_id, parent_id FROM keywords WHERE id = ?",
+        (free_us_id,),
+    ).fetchone()
+    assert row is not None
+    assert row["name"] == "United States"
+    assert row["type"] == "location"
+    assert row["place_id"] is None
+    assert row["parent_id"] is None
+
+    # Photo still tagged with the original keyword.
+    pk = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (pid, free_us_id),
+    ).fetchone()
+    assert pk is not None
+
+
+def test_link_keyword_to_place_raises_on_missing_id(db):
+    """A non-existent keyword id must raise ValueError, not silently no-op
+    while leaving orphan parent rows behind."""
+    import pytest
+
+    details = _central_park_details()
+    with pytest.raises(ValueError, match="999999"):
+        db.link_keyword_to_place(999999, details)
+
+
+def test_set_photo_location_rejects_non_location_keyword(db):
+    """Passing a non-'location' keyword must raise ValueError; otherwise the
+    DELETE would strip real location links and the INSERT would add a
+    keyword that clear_photo_location can't clean up."""
+    import pytest
+
+    pid = _make_photo(db)
+    general_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'general')",
+        ("Bird",),
+    ).lastrowid
+    db.conn.commit()
+
+    with pytest.raises(ValueError, match="not 'location'"):
+        db.set_photo_location(pid, general_id)
+
+    # Also a missing id must raise.
+    with pytest.raises(ValueError, match="does not exist"):
+        db.set_photo_location(pid, 999999)
+
+
 def test_upsert_place_chain_raises_on_cross_type_collision(db):
     """A pre-existing non-location keyword on the same (name, parent_id) must
     raise a clear error rather than silently merging or surfacing a raw
