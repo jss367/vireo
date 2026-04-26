@@ -5843,7 +5843,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/duplicates/delete-loser-files", methods=["POST"])
     def api_duplicates_delete_loser_files():
-        """Move duplicate loser files to OS Trash.
+        """Move duplicate loser files to OS Trash and remove their DB rows.
 
         Body: {"photo_ids": [int, ...]}. For each id we require:
           - the row's flag is 'rejected' (already auto-resolved or
@@ -5854,10 +5854,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         Validating both conditions prevents this endpoint from being misused
         to trash files for arbitrary rejected photos (e.g. a photo the user
-        manually rejected for non-duplicate reasons). The DB row stays —
-        rejection already hides it from the UI and its keywords/rating were
-        merged onto the winner during apply_duplicate_resolution. Only the
-        on-disk file moves to Trash.
+        manually rejected for non-duplicate reasons).
+
+        After a successful trash we also delete the loser's photo row (and
+        its cached thumbnail / preview / working-copy files). Without that,
+        ``/api/duplicates/disk-cleanup-summary`` would keep reporting the
+        same count forever — the summary predicate can't cheaply tell that
+        the on-disk file has been removed (stat'ing every loser path on a
+        slow network volume would make the banner poll expensive). Deleting
+        the row makes the count correct without a stat. The keywords/rating
+        were merged onto the winner during ``apply_duplicate_resolution``,
+        so nothing of value is lost. If the user later restores the file
+        from Trash and re-scans, the auto-resolve hook re-creates the row
+        and the cycle is idempotent.
 
         Returns ``{trashed: N, skipped: [{id, reason}, ...],
         failed: [{id, path, error}, ...]}``.
@@ -5900,6 +5909,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 anchored_hashes.add(h)
 
         trashed = 0
+        trashed_pids = []
         skipped = []
         failed = []
         for pid in photo_ids:
@@ -5917,21 +5927,54 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 skipped.append({"id": pid, "reason": "no duplicate winner exists"})
                 continue
             filepath = os.path.join(row["folder_path"] or "", row["filename"] or "")
-            if not os.path.isfile(filepath):
+            file_existed = os.path.isfile(filepath)
+            if not file_existed:
+                # File was removed outside Vireo (e.g. user trashed in Finder).
+                # Drop the orphan DB row anyway so the summary count drops —
+                # without this, manually-cleaned losers would also "report
+                # forever". The "skipped" status still surfaces the no-op to
+                # the caller for accurate reporting.
                 skipped.append({"id": pid, "reason": "file already missing"})
+                trashed_pids.append(pid)
                 continue
             try:
                 from send2trash import send2trash as _trash
                 _trash(filepath)
                 trashed += 1
+                trashed_pids.append(pid)
             except Exception:
                 log.debug("send2trash failed for %s, trying Finder", filepath)
                 try:
                     _trash_via_finder(filepath)
                     trashed += 1
+                    trashed_pids.append(pid)
                 except Exception as e:
                     log.warning("Trash failed for %s", filepath, exc_info=True)
                     failed.append({"id": pid, "path": filepath, "error": str(e)})
+
+        # Drop DB rows + cached derivatives for every photo whose file is now
+        # gone. Batched into a single delete_photos call so we hit the row-
+        # count update path once per request, not once per photo.
+        if trashed_pids:
+            try:
+                result = db.delete_photos(trashed_pids)
+                _cleanup_cached_files_for_deleted_photos(result.get("files", []))
+            except Exception:
+                # Files are already in Trash; if the row delete fails we
+                # surface a 500 so the caller knows reconciliation is
+                # incomplete. Without raising, the summary count would stay
+                # inflated and the caller would have no signal that the
+                # cleanup is half-done.
+                log.exception(
+                    "DB row delete failed after trashing %d files", len(trashed_pids),
+                )
+                return jsonify({
+                    "ok": False,
+                    "error": "trashed files but failed to clean up DB rows",
+                    "trashed": trashed,
+                    "skipped": skipped,
+                    "failed": failed,
+                }), 500
 
         return jsonify({
             "ok": True,

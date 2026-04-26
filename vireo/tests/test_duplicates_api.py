@@ -209,7 +209,7 @@ def _seed_pair_with_real_files(db, tmp_path, file_hash):
 def test_delete_loser_files_trashes_loser_and_keeps_winner(app_and_db, tmp_path):
     """The endpoint trashes the rejected loser's file but leaves the kept winner."""
     app, db = app_and_db
-    _w, l, winner_path, loser_path = _seed_pair_with_real_files(db, tmp_path, "TRASH1")
+    w, l, winner_path, loser_path = _seed_pair_with_real_files(db, tmp_path, "TRASH1")
 
     import os
     assert os.path.isfile(loser_path)
@@ -228,6 +228,41 @@ def test_delete_loser_files_trashes_loser_and_keeps_winner(app_and_db, tmp_path)
     assert not os.path.isfile(loser_path)
     # Winner file is untouched.
     assert os.path.isfile(winner_path)
+    # Loser DB row is gone — without this the disk-cleanup-summary count
+    # would keep counting it forever and the navbar banner would re-show
+    # on every page load. Winner row stays so existing photo_id references
+    # (collections, edits) keep resolving.
+    loser_row = db.conn.execute(
+        "SELECT 1 FROM photos WHERE id=?", (l,),
+    ).fetchone()
+    assert loser_row is None
+    winner_row = db.conn.execute(
+        "SELECT 1 FROM photos WHERE id=?", (w,),
+    ).fetchone()
+    assert winner_row is not None
+
+
+def test_delete_loser_files_drops_summary_count_after_trash(app_and_db, tmp_path):
+    """After a successful trash, /disk-cleanup-summary count must drop.
+
+    Locks in the bug-fix contract: counting all anchored rejected rows
+    without a presence check would inflate the count forever — even after
+    Vireo's own trash endpoint cleaned the files. The endpoint compensates
+    by deleting the row after trash so the next summary call reflects
+    reality.
+    """
+    app, db = app_and_db
+    _w, l, _wp, _lp = _seed_pair_with_real_files(db, tmp_path, "TRASH4")
+
+    client = app.test_client()
+    pre = client.get("/api/duplicates/disk-cleanup-summary").get_json()
+    assert pre["count"] == 1
+
+    client.post("/api/duplicates/delete-loser-files", json={"photo_ids": [l]})
+
+    post = client.get("/api/duplicates/disk-cleanup-summary").get_json()
+    assert post["count"] == 0
+    assert post["total_size"] == 0
 
 
 def test_delete_loser_files_refuses_non_rejected_photo(app_and_db, tmp_path):
@@ -284,7 +319,9 @@ def test_delete_loser_files_refuses_when_no_kept_anchor(app_and_db, tmp_path):
 
 def test_delete_loser_files_handles_already_missing_file(app_and_db, tmp_path):
     """If the on-disk file was already removed (e.g. user trashed it manually),
-    the endpoint reports 'file already missing' instead of failing."""
+    the endpoint reports 'file already missing' but still drops the orphan
+    DB row so the disk-cleanup-summary stops re-counting it.
+    """
     app, db = app_and_db
     _w, l, _wp, loser_path = _seed_pair_with_real_files(db, tmp_path, "TRASH3")
 
@@ -304,6 +341,11 @@ def test_delete_loser_files_handles_already_missing_file(app_and_db, tmp_path):
         s["id"] == l and s["reason"] == "file already missing"
         for s in body["skipped"]
     )
+    # Orphan row is gone so the next summary poll won't keep re-counting it.
+    loser_row = db.conn.execute(
+        "SELECT 1 FROM photos WHERE id=?", (l,),
+    ).fetchone()
+    assert loser_row is None
 
 
 def test_delete_loser_files_validates_input(app_and_db):
