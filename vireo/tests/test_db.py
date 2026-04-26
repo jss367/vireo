@@ -6278,3 +6278,13 @@ def test_keywords_has_place_id_column_and_unique_index(db):
         "INSERT INTO keywords (name, type, place_id) VALUES (?, ?, NULL)",
         ("free text 2", "location"),
     )
+
+
+def test_place_reverse_geocode_cache_table_exists(db):
+    cols = {
+        row[1]
+        for row in db.conn.execute(
+            "PRAGMA table_info(place_reverse_geocode_cache)"
+        ).fetchall()
+    }
+    assert cols >= {"lat_grid", "lng_grid", "place_id", "response", "fetched_at"}

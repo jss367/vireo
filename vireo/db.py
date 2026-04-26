@@ -384,6 +384,15 @@ class Database:
               PRIMARY KEY (snapshot_id, file_path)
             );
 
+            CREATE TABLE IF NOT EXISTS place_reverse_geocode_cache (
+                lat_grid    INTEGER NOT NULL,
+                lng_grid    INTEGER NOT NULL,
+                place_id    TEXT,
+                response    TEXT NOT NULL,
+                fetched_at  INTEGER NOT NULL,
+                PRIMARY KEY (lat_grid, lng_grid)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_taxa_parent ON taxa(parent_id);
             CREATE INDEX IF NOT EXISTS idx_taxa_rank ON taxa(rank);
             CREATE INDEX IF NOT EXISTS idx_taxa_name ON taxa(name);
