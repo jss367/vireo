@@ -3681,6 +3681,7 @@ function formatDuration(seconds) {
       panel.style.height = savedH + 'px';
       document.getElementById('bottomToggle').classList.add('open');
       document.body.style.paddingBottom = (savedH + 28) + 'px';
+      document.body.style.setProperty('--bottom-offset', (savedH + 28) + 'px');
     }
     var savedTab = localStorage.getItem('vireo_panel_tab') || 'jobs';
     switchBpTab(savedTab);
@@ -3913,7 +3914,9 @@ function formatDuration(seconds) {
     localStorage.setItem('vireo_panel_open', isOpen);
     var h = isOpen ? (parseInt(localStorage.getItem('vireo_panel_height')) || 240) : 0;
     panel.style.height = h + 'px';
-    document.body.style.paddingBottom = isOpen ? (h + 28) + 'px' : '28px';
+    var newPad = isOpen ? (h + 28) + 'px' : '28px';
+    document.body.style.paddingBottom = newPad;
+    document.body.style.setProperty('--bottom-offset', newPad);
     // Start/stop SSE and polling based on panel visibility
     if (isOpen) {
       startLogStream();
@@ -3950,6 +3953,7 @@ function formatDuration(seconds) {
       var newH = Math.max(100, Math.min(window.innerHeight - 100, startH + (startY - e.clientY)));
       panel.style.height = newH + 'px';
       document.body.style.paddingBottom = (newH + 28) + 'px';
+      document.body.style.setProperty('--bottom-offset', (newH + 28) + 'px');
     });
 
     document.addEventListener('mouseup', function() {
