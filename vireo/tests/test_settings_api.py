@@ -153,6 +153,31 @@ def test_get_values_global_excludes_keys_equal_to_default(app_and_db):
     assert values["global"] == {}
 
 
+def test_get_values_workspace_layer_filters_global_only_keys(app_and_db):
+    """Workspace create/update APIs can persist arbitrary override payloads,
+    so a workspace may contain entries for global-only schema keys (e.g.
+    hf_token, max_edit_history). Runtime never reads those from the workspace
+    layer, so the values endpoint must not surface them as workspace-effective
+    or the UI will mislead the user."""
+    app, db = app_and_db
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={
+            "hf_token": "leaked-from-bad-payload",          # scope=global
+            "max_edit_history": 9999,                       # scope=global
+            "classification_threshold": 0.55,               # scope=both — keep
+        },
+    )
+    client = app.test_client()
+    values = client.get("/api/settings/values").get_json()
+    assert "hf_token" not in values["workspace"]
+    assert "max_edit_history" not in values["workspace"]
+    assert values["workspace"].get("classification_threshold") == 0.55
+    # Effective for global-only keys should fall through to global/default,
+    # not the (now filtered-out) workspace value.
+    assert values["effective"].get("hf_token") != "leaked-from-bad-payload"
+
+
 def test_get_values_workspace_excludes_non_schema_keys(app_and_db):
     """Internal keys stored in config_overrides (e.g. active_labels) are not exposed."""
     app, db = app_and_db

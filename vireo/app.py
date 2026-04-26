@@ -3088,7 +3088,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     else ws["config_overrides"]
                 )
                 ws_flat = schema.flatten(overrides if isinstance(overrides, dict) else {})
-                workspace_layer = {k: v for k, v in ws_flat.items() if k in schema_keys}
+                # Filter out global-only schema keys: workspace create/update
+                # APIs can persist arbitrary override payloads, so a workspace
+                # may contain entries for keys whose scope is "global".
+                # Runtime paths for those keys read global config only, so
+                # surfacing the workspace value here would mislead the UI
+                # into showing a workspace-effective value that is never
+                # actually applied.
+                workspace_layer = {
+                    k: v for k, v in ws_flat.items()
+                    if k in schema_keys
+                    and schema.SCHEMA[k].get("scope") != "global"
+                }
             except (json.JSONDecodeError, TypeError):
                 workspace_layer = {}
 

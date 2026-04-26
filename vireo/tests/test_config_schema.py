@@ -234,6 +234,27 @@ def test_validate_int_rejects_nan_and_inf():
         validate_value("photos_per_page", float("inf"))
 
 
+def test_validate_int_rejects_bool():
+    """Python bool is a subclass of int, but JSON booleans arriving on a
+    numeric field are a client-side type error — accept them silently and
+    you persist 1/0 instead of flagging the bug."""
+    from config_schema import ValidationError, validate_value
+
+    with pytest.raises(ValidationError):
+        validate_value("photos_per_page", True)
+    with pytest.raises(ValidationError):
+        validate_value("photos_per_page", False)
+
+
+def test_validate_float_rejects_bool():
+    from config_schema import ValidationError, validate_value
+
+    with pytest.raises(ValidationError):
+        validate_value("classification_threshold", True)
+    with pytest.raises(ValidationError):
+        validate_value("classification_threshold", False)
+
+
 def test_validate_float_coerces_string():
     from config_schema import validate_value
 

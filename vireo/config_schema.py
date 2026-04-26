@@ -622,8 +622,11 @@ def _coerce(raw, kind):
                 return False
         raise ValidationError(f"cannot coerce {raw!r} to bool")
     if kind == "int":
+        # bool is a subclass of int in Python, so this check must come before
+        # any int(...) call. JSON booleans arriving for a numeric field are a
+        # client-side type error; silently converting True → 1 masks bugs.
         if isinstance(raw, bool):
-            return int(raw)
+            raise ValidationError(f"cannot coerce {raw!r} to int: bool is not a number")
         # JSON numeric values arrive as float when they have a decimal point.
         # Reject non-integral floats so {"key": 1.9} doesn't silently become 1.
         if isinstance(raw, float):
@@ -639,8 +642,10 @@ def _coerce(raw, kind):
         except (TypeError, ValueError) as e:
             raise ValidationError(f"cannot coerce {raw!r} to int: {e}") from e
     if kind == "float":
+        # Same reasoning as int: bool subclasses int and must be rejected
+        # before float(True) silently produces 1.0.
         if isinstance(raw, bool):
-            return float(raw)
+            raise ValidationError(f"cannot coerce {raw!r} to float: bool is not a number")
         try:
             value = float(raw)
         except (TypeError, ValueError) as e:
