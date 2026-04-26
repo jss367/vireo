@@ -1913,6 +1913,9 @@ async function createWorkspace() {
     <button id="lightboxToggleBoxes" onclick="event.stopPropagation(); toggleLightboxBoxes();" style="background:rgba(0,0,0,0.6);color:var(--text-secondary);border:1px solid var(--text-faint);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Toggle detection boxes (b)">
       Hide Boxes
     </button>
+    <button id="lightboxNotWildlife" onclick="event.stopPropagation(); lightboxNotWildlife();" style="background:rgba(0,0,0,0.6);color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Mark as Landscape — drops out of Needs Identification and stops the classifier">
+      Not Wildlife
+    </button>
     <button id="lightboxInat" onclick="" style="background:rgba(0,0,0,0.6);color:#74ac00;border:1px solid #74ac00;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
       iNaturalist
     </button>
@@ -2481,6 +2484,27 @@ async function confirmDelete() {
   showToast(msg, 'success');
 
   if (savedCallback) savedCallback(data);
+}
+
+async function lightboxNotWildlife() {
+  if (!_lightboxCurrentId) return;
+  var currentId = _lightboxCurrentId;
+  try {
+    await safeFetch('/api/photos/' + currentId + '/keywords', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Landscape', type: 'genre' }),
+    }, { toast: false });
+    // Advance to next photo if more remain
+    var idx = _lightboxPhotoList.findIndex(function(x) { return x.id === currentId; });
+    if (idx >= 0 && _lightboxPhotoList.length > 1) {
+      var nextIdx = (idx + 1) % _lightboxPhotoList.length;
+      var next = _lightboxPhotoList[nextIdx];
+      openLightbox(next.id, next.filename, _lightboxPhotoList);
+    }
+  } catch (e) {
+    if (window.toast) window.toast('Tag failed: ' + (e && e.message ? e.message : 'unknown'), 'error');
+  }
 }
 
 function lightboxDelete() {
