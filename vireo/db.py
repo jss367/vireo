@@ -3470,14 +3470,18 @@ class Database:
         if not updates:
             return
 
-        # Auto-retype on rename: same logic as add_keyword.
+        # Auto-retype on rename: same logic as add_keyword. Only fires
+        # on an actual name change so idempotent PUT-style updates
+        # (client re-sending the existing name) don't unexpectedly
+        # reclassify a 'general' keyword once the taxa table is
+        # populated.
         if 'name' in updates:
             new_name = updates['name']
             current = self.conn.execute(
-                "SELECT type, taxon_id FROM keywords WHERE id = ?",
+                "SELECT name, type, taxon_id FROM keywords WHERE id = ?",
                 (keyword_id,),
             ).fetchone()
-            if current is not None:
+            if current is not None and new_name != current["name"]:
                 cur_type = current["type"]
                 taxon = self.conn.execute(
                     """SELECT t.id FROM taxa t

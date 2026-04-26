@@ -6563,3 +6563,39 @@ def test_update_keyword_rename_with_empty_taxa_table_no_op(tmp_path):
     assert row["name"] == "Lesser Scaup"
     assert row["type"] == "general"
     assert row["taxon_id"] is None
+
+
+def test_update_keyword_idempotent_name_update_does_not_auto_retype(tmp_path):
+    """Sending the same name (idempotent PUT) must NOT trigger
+    auto-detection. A pre-existing 'general' keyword whose name happens
+    to match a taxon stays 'general' when a client re-sends the full
+    keyword object with no actual rename — auto-detection only fires on
+    a real name change."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+
+    # Add a 'general' keyword BEFORE the taxa table is populated so it
+    # doesn't get auto-typed on insert. This mirrors a realistic
+    # scenario: user added "Lesser Scaup" as a freeform tag before
+    # downloading taxonomy.
+    kid = db.add_keyword("Lesser Scaup")
+    pre = db.conn.execute(
+        "SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert pre["type"] == "general"
+    assert pre["taxon_id"] is None
+
+    # Now populate taxonomy.
+    _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
+
+    # Idempotent update: same name. Must NOT auto-promote to 'taxonomy'.
+    db.update_keyword(kid, name="Lesser Scaup")
+
+    row = db.conn.execute(
+        "SELECT name, type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Lesser Scaup"
+    assert row["type"] == "general", (
+        "no actual name change — auto-detection must not fire"
+    )
+    assert row["taxon_id"] is None
