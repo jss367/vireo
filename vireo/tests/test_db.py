@@ -6483,6 +6483,70 @@ def test_update_keyword_explicit_type_and_taxon_id_kwargs_win(tmp_path):
     assert row["taxon_id"] == taxa["Greater Scaup"]
 
 
+def test_update_keyword_rename_with_explicit_non_taxonomy_type_skips_taxon_link(tmp_path):
+    """Combined rename + explicit non-taxonomy type must not auto-fill
+    taxon_id. Otherwise the row ends up as type='location' with a
+    taxonomy link, which violates the docstring's precedence ('explicit
+    kwargs win') and creates inconsistent state for callers that send
+    combined name/type updates from the API."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
+
+    kid = db.add_keyword("Lesser scaub")  # general, no taxon match
+    pre = db.conn.execute(
+        "SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert pre["type"] == "general"
+    assert pre["taxon_id"] is None
+
+    # Caller renames AND explicitly types as 'location'. Even though
+    # "Lesser Scaup" matches a taxon, the effective type is 'location',
+    # so taxon_id MUST NOT be auto-filled.
+    db.update_keyword(kid, name="Lesser Scaup", type="location")
+
+    row = db.conn.execute(
+        "SELECT name, type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Lesser Scaup"
+    assert row["type"] == "location"
+    assert row["taxon_id"] is None, (
+        "explicit non-taxonomy type must suppress taxon_id auto-fill"
+    )
+
+
+def test_update_keyword_rename_taxonomy_to_explicit_non_taxonomy_type_does_not_relink(tmp_path):
+    """When changing a 'taxonomy' keyword's type to something else AND
+    renaming, do not auto-refresh taxon_id to the new name's match.
+    The existing taxon_id is left untouched (no auto-fill, no auto-clear)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (7000, "Aythya affinis", "Lesser Scaup"),
+        (7001, "Aythya marila", "Greater Scaup"),
+    ])
+
+    kid = db.add_keyword("Lesser Scaup")
+    pre_taxon_id = taxa["Lesser Scaup"]
+    assert db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()["taxon_id"] == pre_taxon_id
+
+    # Rename to a name that matches a different taxon, but explicitly
+    # demote type to 'location'. taxon_id should NOT auto-refresh to
+    # taxa["Greater Scaup"] because the effective type isn't 'taxonomy'.
+    db.update_keyword(kid, name="Greater Scaup", type="location")
+
+    row = db.conn.execute(
+        "SELECT name, type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Greater Scaup"
+    assert row["type"] == "location"
+    assert row["taxon_id"] == pre_taxon_id, (
+        "explicit non-taxonomy type must suppress taxon_id auto-refresh"
+    )
+
+
 def test_update_keyword_rename_with_empty_taxa_table_no_op(tmp_path):
     """If the taxa table is empty (user hasn't downloaded taxonomy yet),
     rename succeeds without error and without auto-reclassification."""

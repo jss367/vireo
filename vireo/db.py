@@ -3499,18 +3499,22 @@ class Database:
                     # leave type/taxon_id alone.
                     if taxon:
                         updates.setdefault('type', 'taxonomy')
-                        updates.setdefault('taxon_id', taxon["id"])
-                        # Mirror add_keyword's invariant: a taxonomy
-                        # keyword backed by a matched taxon is is_species=1,
-                        # so species-only queries (filtering on
-                        # is_species=1, e.g. get_species_keywords_for_photos)
-                        # include the auto-promoted keyword.
+                        # Gate taxon_id on the EFFECTIVE type so an
+                        # explicit non-taxonomy type kwarg (e.g.
+                        # type='location') doesn't end up with a
+                        # taxonomy link. Mirror add_keyword's invariant
+                        # for the auto-promoted case: type='taxonomy'
+                        # backed by a matched taxon implies is_species=1.
                         if updates.get('type') == 'taxonomy':
+                            updates.setdefault('taxon_id', taxon["id"])
                             updates['is_species'] = 1
-                elif cur_type == 'taxonomy' and taxon:
+                elif (cur_type == 'taxonomy' and taxon
+                      and updates.get('type', 'taxonomy') == 'taxonomy'):
                     # Already taxonomy: refresh taxon_id only if the new
-                    # name matches a (possibly different) taxon. If no
-                    # match, leave the existing link in place.
+                    # name matches a (possibly different) taxon AND the
+                    # effective type stays 'taxonomy' (caller may demote
+                    # to 'location' etc.). If no match, leave the existing
+                    # link in place.
                     updates.setdefault('taxon_id', taxon["id"])
                 # Other manual types ('location', 'people', etc.) are
                 # preserved — user intent wins.
