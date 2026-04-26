@@ -90,15 +90,19 @@ safeFetch('/api/workspaces/active', {}, { toast: false }).then(function(ws) {
 }).catch(function() {});
 
 /* ---------- Folders ---------- */
+var _wsFoldersById = {};
+
 async function loadWsFolders() {
   try {
     var ws = await safeFetch('/api/workspaces/active', {}, { toast: false });
     var container = document.getElementById('wsFoldersContent');
+    _wsFoldersById = {};
     if (!ws.folders || ws.folders.length === 0) {
       container.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No folders in this workspace.</span>';
     } else {
       var html = '';
       ws.folders.forEach(function(f) {
+        _wsFoldersById[f.id] = f;
         html += '<div class="setting-row">';
         html += '<label style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;">';
         html += '<input type="checkbox" class="folder-move-cb" value="' + f.id + '" onchange="updateMoveBtn()" style="accent-color:var(--accent);">';
@@ -116,6 +120,14 @@ async function loadWsFolders() {
 }
 
 async function removeFolderFromWs(wsId, folderId) {
+  var f = _wsFoldersById[folderId];
+  var path = f ? f.path : '';
+  var n = f ? (f.photo_count || 0) : 0;
+  var msg = 'Remove "' + path + '" from this workspace?\n\n' +
+            n + ' photo' + (n === 1 ? '' : 's') + ' in this folder will no longer appear in this workspace, ' +
+            'and predictions, collections, and pending changes referencing them will be hidden here too.\n\n' +
+            'Photos and the folder are not deleted. You can re-add the folder later to restore visibility.';
+  if (!confirm(msg)) return;
   try { await safeFetch('/api/workspaces/' + wsId + '/folders/' + folderId, { method: 'DELETE' }); } catch(e) {}
   loadWsFolders();
 }
