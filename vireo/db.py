@@ -13,6 +13,11 @@ log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
 
+OPENABLE_NAV_IDS = frozenset({
+    "settings", "workspace", "lightroom",
+    "shortcuts", "keywords", "duplicates", "logs",
+})
+
 
 def commit_with_retry(conn, max_retries=5, base_delay=0.1):
     """Commit ``conn`` with retry on transient "locked"/"busy" errors.
@@ -68,6 +73,8 @@ class Database:
     Args:
         db_path: path to the SQLite database file (created if missing)
     """
+
+    DEFAULT_OPEN_TABS = ["settings", "workspace", "lightroom"]
 
     def __init__(self, db_path):
         db_dir = os.path.dirname(db_path)
@@ -195,6 +202,7 @@ class Database:
                 name            TEXT NOT NULL UNIQUE,
                 config_overrides TEXT,
                 ui_state        TEXT,
+                open_tabs       TEXT,
                 created_at      TEXT DEFAULT (datetime('now')),
                 last_opened_at  TEXT
             );
@@ -460,6 +468,15 @@ class Database:
                 )
                 self.conn.execute("ALTER TABLE photos DROP COLUMN embedding_model")
             self.conn.execute("ALTER TABLE photos DROP COLUMN embedding")
+        # Migration: add open_tabs column to existing workspaces tables, with defaults
+        try:
+            self.conn.execute("SELECT open_tabs FROM workspaces LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE workspaces ADD COLUMN open_tabs TEXT")
+            self.conn.execute(
+                "UPDATE workspaces SET open_tabs = ? WHERE open_tabs IS NULL",
+                (json.dumps(["settings", "workspace", "lightroom"]),),
+            )
         self.conn.commit()
 
     # -- Workspaces --
@@ -537,11 +554,12 @@ class Database:
     def create_workspace(self, name, config_overrides=None, ui_state=None):
         """Create a new workspace. Returns the workspace id."""
         cur = self.conn.execute(
-            """INSERT INTO workspaces (name, config_overrides, ui_state)
-               VALUES (?, ?, ?)""",
+            """INSERT INTO workspaces (name, config_overrides, ui_state, open_tabs)
+               VALUES (?, ?, ?, ?)""",
             (name,
              json.dumps(config_overrides) if config_overrides else None,
-             json.dumps(ui_state) if ui_state else None),
+             json.dumps(ui_state) if ui_state else None,
+             json.dumps(self.DEFAULT_OPEN_TABS)),
         )
         self.conn.commit()
         workspace_id = cur.lastrowid
@@ -623,6 +641,53 @@ class Database:
             return labels if isinstance(labels, list) else None
         except (json.JSONDecodeError, TypeError):
             return None
+
+    def get_open_tabs(self):
+        """Return the active workspace's list of open tab nav-ids in display order."""
+        ws = self.get_workspace(self._ws_id())
+        if not ws or not ws["open_tabs"]:
+            return []
+        try:
+            value = json.loads(ws["open_tabs"]) if isinstance(ws["open_tabs"], str) else ws["open_tabs"]
+            return value if isinstance(value, list) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    def open_tab(self, nav_id):
+        """Append nav_id to the active workspace's open_tabs if not present.
+
+        Raises ValueError if nav_id is not in OPENABLE_NAV_IDS.
+        Returns the new list.
+        """
+        if nav_id not in OPENABLE_NAV_IDS:
+            raise ValueError(f"{nav_id!r} is not an openable nav id")
+        tabs = self.get_open_tabs()
+        if nav_id not in tabs:
+            tabs.append(nav_id)
+            self.conn.execute(
+                "UPDATE workspaces SET open_tabs = ? WHERE id = ?",
+                (json.dumps(tabs), self._ws_id()),
+            )
+            self.conn.commit()
+        return tabs
+
+    def close_tab(self, nav_id):
+        """Remove nav_id from the active workspace's open_tabs if present.
+
+        Raises ValueError if nav_id is not in OPENABLE_NAV_IDS.
+        Returns the new list.
+        """
+        if nav_id not in OPENABLE_NAV_IDS:
+            raise ValueError(f"{nav_id!r} is not an openable nav id")
+        tabs = self.get_open_tabs()
+        if nav_id in tabs:
+            tabs = [t for t in tabs if t != nav_id]
+            self.conn.execute(
+                "UPDATE workspaces SET open_tabs = ? WHERE id = ?",
+                (json.dumps(tabs), self._ws_id()),
+            )
+            self.conn.commit()
+        return tabs
 
     def set_workspace_active_labels(self, labels_files):
         """Store active_labels in the workspace's config_overrides."""
