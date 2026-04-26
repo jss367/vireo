@@ -1083,12 +1083,15 @@ var minConfidence = 40;
 var speciesFilter = '';
 var hideConfirmed = false;
 // Survives re-renders so confirming/filtering doesn't re-expand collapsed
-// encounters. Keyed by first photo_id; stale keys after server-side
-// regrouping just don't match anything.
+// encounters. Keyed by the encounter's full sorted photo_id set so that
+// detach/regroup (which change composition) naturally invalidate the key
+// instead of letting it migrate to a sibling encounter that happens to
+// share the original first photo_id.
 var collapsedEncounters = new Set();
 
 function encounterKey(enc) {
-  return enc && enc.photo_ids && enc.photo_ids.length ? String(enc.photo_ids[0]) : null;
+  if (!enc || !enc.photo_ids || !enc.photo_ids.length) return null;
+  return enc.photo_ids.slice().sort(function(a, b) { return a - b; }).join(',');
 }
 
 // GRM resolution slider — index into GRM_RES_STOPS. Persists across photos within a session.
