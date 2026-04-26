@@ -2307,7 +2307,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/workspace/tabs", methods=["GET"])
     def api_get_tabs():
-        from db import OPENABLE_NAV_IDS  # noqa: F401  (kept for future use/symmetry)
         db = _get_db()
         try:
             open_tabs = db.get_open_tabs()
