@@ -3295,36 +3295,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(payload, dict):
             return json_error("payload must be a JSON object", status=400)
 
+        # Iterate the schema directly rather than relying on flatten() — empty
+        # objects at schema leaves (e.g. {"classification_threshold": {}}) flatten
+        # to nothing and would otherwise be written as-is, replacing a numeric
+        # leaf with {} on disk and breaking downstream consumers.
+        _MISSING = object()
         errors = {}
-        flat = schema.flatten(payload)
-        parent_prefixes = schema.schema_parent_prefixes()
-        for k, v in flat.items():
-            if k in schema.SCHEMA:
-                try:
-                    coerced = schema.validate_value(k, v)
-                    schema.set_dotted(payload, k, coerced)
-                except schema.ValidationError as e:
-                    errors[k] = str(e)
-            elif k in parent_prefixes:
-                # ``flatten`` only emits ``k`` as a leaf when payload[k] is not
-                # a dict. Since k is a parent of schema-backed leaves (e.g.
-                # ``pipeline``), the user replaced a required object subtree
-                # with a scalar — reject before it corrupts the on-disk file.
-                errors[k] = f"{k} must be a JSON object"
-            else:
-                # ``flat`` only contains leaves, so if ``k`` descends from a
-                # schema entry (e.g. ``classification_threshold.x`` under leaf
-                # ``classification_threshold``), the user supplied an object
-                # where a scalar was expected — flag the schema leaf so the
-                # malformed payload doesn't slip through unvalidated.
-                parts = k.split(".")
-                for i in range(1, len(parts)):
-                    ancestor = ".".join(parts[:i])
-                    if ancestor in schema.SCHEMA:
-                        errors[ancestor] = (
-                            f"{ancestor} must be a JSON scalar, not an object"
-                        )
-                        break
+
+        # 1. Reject scalars where a schema-backed object subtree is expected
+        #    (e.g. {"pipeline": 5}).
+        for prefix in schema.schema_parent_prefixes():
+            val = schema.get_dotted(payload, prefix, default=_MISSING)
+            if val is _MISSING or isinstance(val, dict):
+                continue
+            errors[prefix] = f"{prefix} must be a JSON object"
+
+        # 2. For every schema leaf actually present in the payload, reject any
+        #    object (empty or otherwise) and run the usual value validation.
+        for schema_key in schema.SCHEMA:
+            val = schema.get_dotted(payload, schema_key, default=_MISSING)
+            if val is _MISSING:
+                continue
+            if isinstance(val, dict):
+                errors[schema_key] = f"{schema_key} must be a JSON scalar, not an object"
+                continue
+            try:
+                coerced = schema.validate_value(schema_key, val)
+                schema.set_dotted(payload, schema_key, coerced)
+            except schema.ValidationError as e:
+                errors[schema_key] = str(e)
+
         if errors:
             return jsonify({"error": "validation failed", "errors": errors}), 400
 

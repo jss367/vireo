@@ -715,6 +715,40 @@ def test_import_rejects_object_at_nested_schema_leaf(app_and_db):
     assert "pipeline.w_focus" in body["errors"]
 
 
+def test_import_rejects_empty_object_at_schema_leaf(app_and_db):
+    """``flatten`` emits nothing for empty dicts, so a leaf set to ``{}`` would
+    bypass the flatten-based loop and replace a numeric value with ``{}`` on
+    disk. The schema-iteration validator must still catch it."""
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"classification_threshold": {}})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "errors" in body
+    assert "classification_threshold" in body["errors"]
+    # File untouched.
+    assert cfg.load()["classification_threshold"] == 0.5
+
+
+def test_import_rejects_empty_object_at_nested_schema_leaf(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"pipeline": {"w_focus": {}}})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "errors" in body
+    assert "pipeline.w_focus" in body["errors"]
+
+
 def test_delete_workspace_preserves_active_labels(app_and_db):
     app, db = app_and_db
     db.update_workspace(
