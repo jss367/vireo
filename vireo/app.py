@@ -3296,6 +3296,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # ``pipeline``), the user replaced a required object subtree
                 # with a scalar — reject before it corrupts the on-disk file.
                 errors[k] = f"{k} must be a JSON object"
+            else:
+                # ``flat`` only contains leaves, so if ``k`` descends from a
+                # schema entry (e.g. ``classification_threshold.x`` under leaf
+                # ``classification_threshold``), the user supplied an object
+                # where a scalar was expected — flag the schema leaf so the
+                # malformed payload doesn't slip through unvalidated.
+                parts = k.split(".")
+                for i in range(1, len(parts)):
+                    ancestor = ".".join(parts[:i])
+                    if ancestor in schema.SCHEMA:
+                        errors[ancestor] = (
+                            f"{ancestor} must be a JSON scalar, not an object"
+                        )
+                        break
         if errors:
             return jsonify({"error": "validation failed", "errors": errors}), 400
 

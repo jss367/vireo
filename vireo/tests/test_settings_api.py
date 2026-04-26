@@ -674,6 +674,47 @@ def test_import_allows_empty_object_for_schema_subtree(app_and_db):
     assert resp.status_code == 200
 
 
+def test_import_rejects_object_at_schema_leaf(app_and_db):
+    """A nested object where a scalar schema leaf is expected must be rejected.
+
+    ``flatten`` only emits leaf paths, so ``{"classification_threshold": {"x": 1}}``
+    becomes ``classification_threshold.x`` which is neither a SCHEMA entry nor a
+    parent-prefix; without an extra check it would slip through and persist a
+    malformed value.
+    """
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"classification_threshold": {"x": 1}})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "errors" in body
+    assert "classification_threshold" in body["errors"]
+    # File untouched.
+    assert cfg.load()["classification_threshold"] == 0.5
+
+
+def test_import_rejects_object_at_nested_schema_leaf(app_and_db):
+    """Same guard, but for a leaf that lives inside a schema subtree
+    (e.g. ``pipeline.w_focus`` — a numeric leaf under the ``pipeline`` parent).
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"pipeline": {"w_focus": {"x": 1}}})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "errors" in body
+    assert "pipeline.w_focus" in body["errors"]
+
+
 def test_delete_workspace_preserves_active_labels(app_and_db):
     app, db = app_and_db
     db.update_workspace(
