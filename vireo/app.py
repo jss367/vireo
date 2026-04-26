@@ -3336,6 +3336,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except schema.ValidationError as e:
                 errors[schema_key] = str(e)
 
+        # Structured non-schema keys still need shape validation, otherwise a
+        # malformed payload like {"keyboard_shortcuts": 5} would write through
+        # to the file and crash downstream UI (shortcuts.html dereferences
+        # `cfg.keyboard_shortcuts.<ctx>.<action>` and assumes a dict tree).
+        if "keyboard_shortcuts" in payload:
+            ks = payload["keyboard_shortcuts"]
+            if not isinstance(ks, dict):
+                errors["keyboard_shortcuts"] = "keyboard_shortcuts must be a JSON object"
+            else:
+                for ctx_name, actions in ks.items():
+                    if not isinstance(actions, dict):
+                        errors[f"keyboard_shortcuts.{ctx_name}"] = (
+                            f"keyboard_shortcuts.{ctx_name} must be a JSON object"
+                        )
+                        continue
+                    for action, key_str in actions.items():
+                        if not isinstance(key_str, str):
+                            errors[f"keyboard_shortcuts.{ctx_name}.{action}"] = (
+                                "must be a string"
+                            )
+
         if errors:
             return jsonify({"error": "validation failed", "errors": errors}), 400
 

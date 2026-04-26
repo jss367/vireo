@@ -761,6 +761,48 @@ def test_import_rejects_empty_object_at_schema_leaf(app_and_db):
     assert cfg.load()["classification_threshold"] == 0.5
 
 
+def test_import_rejects_non_dict_keyboard_shortcuts(app_and_db):
+    """A malformed keyboard_shortcuts value would slip past the schema-only
+    validator (since the key is in EXCLUDED) and crash shortcuts.html, which
+    indexes cfg.keyboard_shortcuts.<ctx>.<action>."""
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"keyboard_shortcuts": 5})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "keyboard_shortcuts" in body["errors"]
+    # File untouched.
+    assert cfg.load()["classification_threshold"] == 0.5
+
+
+def test_import_rejects_non_dict_keyboard_shortcut_context(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"keyboard_shortcuts": {"navigation": "not-a-dict"}})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "keyboard_shortcuts.navigation" in body["errors"]
+
+
+def test_import_accepts_well_formed_keyboard_shortcuts(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    payload = {"keyboard_shortcuts": cfg.DEFAULTS["keyboard_shortcuts"]}
+    client = app.test_client()
+    resp = client.post("/api/settings/import", json={"json": json.dumps(payload)})
+    assert resp.status_code == 200
+
+
 def test_import_rejects_empty_object_at_nested_schema_leaf(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
