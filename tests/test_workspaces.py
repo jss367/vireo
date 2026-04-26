@@ -897,3 +897,24 @@ def test_open_tab_rejects_non_openable_navid(db):
     db.set_active_workspace(ws_id)
     with pytest.raises(ValueError):
         db.open_tab("browse")  # browse is a linger page, not openable
+
+
+def test_close_tab_removes_from_list(db):
+    ws_id = db.create_workspace("WS")
+    db.set_active_workspace(ws_id)
+    db.close_tab("settings")
+    assert db.get_open_tabs() == ["workspace", "lightroom"]
+
+
+def test_close_tab_idempotent_when_not_open(db):
+    ws_id = db.create_workspace("WS")
+    db.set_active_workspace(ws_id)
+    db.close_tab("keywords")  # not open — should be no-op
+    assert db.get_open_tabs() == ["settings", "workspace", "lightroom"]
+
+
+def test_close_tab_rejects_non_openable_navid(db):
+    ws_id = db.create_workspace("WS")
+    db.set_active_workspace(ws_id)
+    with pytest.raises(ValueError):
+        db.close_tab("browse")

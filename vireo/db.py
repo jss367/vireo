@@ -671,6 +671,24 @@ class Database:
             self.conn.commit()
         return tabs
 
+    def close_tab(self, nav_id):
+        """Remove nav_id from the active workspace's open_tabs if present.
+
+        Raises ValueError if nav_id is not in OPENABLE_NAV_IDS.
+        Returns the new list.
+        """
+        if nav_id not in OPENABLE_NAV_IDS:
+            raise ValueError(f"{nav_id!r} is not an openable nav id")
+        tabs = self.get_open_tabs()
+        if nav_id in tabs:
+            tabs = [t for t in tabs if t != nav_id]
+            self.conn.execute(
+                "UPDATE workspaces SET open_tabs = ? WHERE id = ?",
+                (json.dumps(tabs), self._ws_id()),
+            )
+            self.conn.commit()
+        return tabs
+
     def set_workspace_active_labels(self, labels_files):
         """Store active_labels in the workspace's config_overrides."""
         ws = self.get_workspace(self._ws_id())
