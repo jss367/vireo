@@ -138,6 +138,50 @@
     padding: 12px 0; border-top: 1px solid var(--border-primary);
     margin-top: 16px; display: flex; gap: 12px; align-items: center;
   }
+
+  .section-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin: 24px 0 8px; padding-bottom: 6px;
+    border-bottom: 1px solid var(--border-primary);
+  }
+  .section-header h2 {
+    margin: 0; font-size: 14px; font-weight: 600;
+    color: var(--text-primary);
+  }
+  .section-header .section-sub {
+    font-size: 11px; color: var(--text-dim); margin-top: 2px;
+  }
+  .section-header .section-actions {
+    display: flex; gap: 8px; align-items: center;
+  }
+
+  .resolved-toggle {
+    cursor: pointer; user-select: none; color: var(--text-secondary);
+    font-size: 13px; display: flex; align-items: center; gap: 6px;
+  }
+  .resolved-toggle:hover { color: var(--text-primary); }
+  .resolved-toggle .chev { display: inline-block; transition: transform 0.15s; }
+  .resolved-toggle.expanded .chev { transform: rotate(90deg); }
+
+  .resolved-list { display: none; }
+  .resolved-list.expanded { display: block; }
+
+  .dup-card .trash-btn {
+    margin-top: 6px; padding: 4px 8px;
+    background: var(--bg-primary); color: var(--danger);
+    border: 1px solid var(--danger); border-radius: 3px;
+    font-size: 11px; cursor: pointer;
+  }
+  .dup-card .trash-btn:hover {
+    background: var(--danger); color: var(--text-primary);
+  }
+  .dup-card .trash-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .dup-card.trashed { opacity: 0.4; }
+  .dup-card.trashed .trash-btn { display: none; }
+  .dup-card .trash-status {
+    margin-top: 4px; font-size: 10px; color: var(--text-dim);
+    font-style: italic;
+  }
 </style>
 </head>
 <body>
@@ -265,8 +309,18 @@
     document.getElementById('scanBtn').disabled = false;
 
     _proposals = result.proposals || [];
-    var groupCount = result.group_count != null ? result.group_count : _proposals.length;
-    var loserCount = result.loser_count || 0;
+
+    // Split proposals so the two sections render independently. Unresolved
+    // groups still need a user decision (the apply flow); resolved groups
+    // are already auto-handled and just need on-disk cleanup. Mixing them
+    // would mislead the apply count and confuse the action affordances.
+    var unresolved = [];
+    var resolved = [];
+    _proposals.forEach(function(p, gi) {
+      p._gi = gi;  // stable index back into _proposals for checkbox lookup
+      if (p.status === 'resolved') resolved.push(p);
+      else unresolved.push(p);
+    });
 
     if (_proposals.length === 0) {
       setEmptyVisible(false);
@@ -278,49 +332,137 @@
     setEmptyVisible(false);
 
     // Summary
+    var unresolvedGroupCount = unresolved.length;
+    var unresolvedLoserCount = result.loser_count || 0;
+    var resolvedGroupCount = result.resolved_group_count || resolved.length;
+    var resolvedLoserCount = result.resolved_loser_count ||
+      resolved.reduce(function(n, p) { return n + (p.losers || []).length; }, 0);
+    var resolvedBytes = 0;
+    resolved.forEach(function(p) {
+      (p.losers || []).forEach(function(l) {
+        if (l.file_size) resolvedBytes += l.file_size;
+      });
+    });
+
     var summary = document.getElementById('summary');
     summary.style.display = '';
-    summary.innerHTML =
-      '<div class="summary-bar">' +
-        '<div class="summary-stat"><div class="num">' + groupCount + '</div>' +
-          '<div class="label">Duplicate groups</div></div>' +
-        '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + loserCount + '</div>' +
-          '<div class="label">Losers to reject</div></div>' +
-      '</div>';
+    var summaryHtml = '<div class="summary-bar">' +
+      '<div class="summary-stat"><div class="num">' + unresolvedGroupCount + '</div>' +
+        '<div class="label">Need review</div></div>' +
+      '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + unresolvedLoserCount + '</div>' +
+        '<div class="label">Losers to reject</div></div>';
+    if (resolvedGroupCount > 0) {
+      summaryHtml +=
+        '<div class="summary-stat"><div class="num">' + resolvedGroupCount + '</div>' +
+          '<div class="label">Already resolved</div></div>' +
+        '<div class="summary-stat"><div class="num">' + formatBytes(resolvedBytes) + '</div>' +
+          '<div class="label">Loser files on disk</div></div>';
+    }
+    summaryHtml += '</div>';
+    summary.innerHTML = summaryHtml;
 
-    // Groups
+    // Render each section.
     var html = '';
-    _proposals.forEach(function(group, gi) {
-      var winner = group.winner || {};
-      var losers = group.losers || [];
-      var hash = group.file_hash || '';
+    if (unresolvedGroupCount > 0) {
+      html += '<div class="section-header"><div>' +
+        '<h2>Needs review</h2>' +
+        '<div class="section-sub">' + unresolvedGroupCount +
+        ' duplicate group' + (unresolvedGroupCount === 1 ? '' : 's') +
+        ' awaiting your decision.</div></div></div>';
+      unresolved.forEach(function(group) {
+        html += renderUnresolvedGroup(group);
+      });
+    }
 
-      html += '<div class="dup-group" data-hash="' + escapeHtml(hash) + '">';
-      html += '<div class="dup-group-header">';
-      html += '<label><input type="checkbox" class="group-check" data-gi="' + gi + '" checked onchange="updateApplyCount()"> ' +
-              'Include this group (' + losers.length + ' to reject)</label>';
-      html += '<span class="hash">' + escapeHtml(hash.substring(0, 16)) + '...</span>';
-      html += '</div>';
-
-      html += '<div class="dup-row">';
-      html += renderCard(winner, true, null);
-      losers.forEach(function(loser) {
-        html += renderCard(loser, false, loser.reason);
+    if (resolvedGroupCount > 0) {
+      // Auto-expand if the user came from the disk-cleanup banner. Detection
+      // is intentionally simple \u2014 query string is the most direct way to
+      // pass intent through a hard navigation without needing storage state.
+      var autoExpand = window.location.search.indexOf('show=resolved') !== -1;
+      var listClass = 'resolved-list' + (autoExpand ? ' expanded' : '');
+      var toggleClass = 'resolved-toggle' + (autoExpand ? ' expanded' : '');
+      html += '<div class="section-header">' +
+        '<div>' +
+          '<h2 class="' + toggleClass + '" id="resolvedToggle" onclick="toggleResolvedSection()">' +
+            '<span class="chev">&#9656;</span> Already resolved' +
+          '</h2>' +
+          '<div class="section-sub">' + resolvedGroupCount +
+          ' group' + (resolvedGroupCount === 1 ? '' : 's') +
+          ' auto-handled during scan. Loser files (' + formatBytes(resolvedBytes) +
+          ') may still be on disk.</div>' +
+        '</div>' +
+        '<div class="section-actions">' +
+          '<button class="btn-secondary" onclick="trashAllLoserFiles()" id="trashAllBtn">' +
+            'Move ' + resolvedLoserCount + ' loser file' +
+            (resolvedLoserCount === 1 ? '' : 's') + ' to Trash' +
+          '</button>' +
+        '</div>' +
+      '</div>';
+      html += '<div class="' + listClass + '" id="resolvedList">';
+      resolved.forEach(function(group) {
+        html += renderResolvedGroup(group);
       });
       html += '</div>';
-      html += '</div>';
-    });
+    }
+
     document.getElementById('results').innerHTML = html;
 
-    document.getElementById('applyBar').style.display = '';
-    updateApplyCount();
+    if (unresolvedGroupCount > 0) {
+      document.getElementById('applyBar').style.display = '';
+      updateApplyCount();
+    } else {
+      document.getElementById('applyBar').style.display = 'none';
+    }
   }
 
-  function renderCard(photo, isWinner, reason) {
+  function renderUnresolvedGroup(group) {
+    var winner = group.winner || {};
+    var losers = group.losers || [];
+    var hash = group.file_hash || '';
+    var gi = group._gi;
+
+    var html = '<div class="dup-group" data-hash="' + escapeHtml(hash) + '">';
+    html += '<div class="dup-group-header">';
+    html += '<label><input type="checkbox" class="group-check" data-gi="' + gi + '" checked onchange="updateApplyCount()"> ' +
+            'Include this group (' + losers.length + ' to reject)</label>';
+    html += '<span class="hash">' + escapeHtml(hash.substring(0, 16)) + '...</span>';
+    html += '</div>';
+    html += '<div class="dup-row">';
+    html += renderCard(winner, true, null, false);
+    losers.forEach(function(loser) {
+      html += renderCard(loser, false, loser.reason, false);
+    });
+    html += '</div></div>';
+    return html;
+  }
+
+  function renderResolvedGroup(group) {
+    var winner = group.winner || {};
+    var losers = group.losers || [];
+    var hash = group.file_hash || '';
+
+    var html = '<div class="dup-group" data-hash="' + escapeHtml(hash) + '">';
+    html += '<div class="dup-group-header">';
+    html += '<label style="cursor:default;">' +
+            losers.length + ' loser' + (losers.length === 1 ? '' : 's') +
+            ' rejected during scan</label>';
+    html += '<span class="hash">' + escapeHtml(hash.substring(0, 16)) + '...</span>';
+    html += '</div>';
+    html += '<div class="dup-row">';
+    html += renderCard(winner, true, null, false);
+    losers.forEach(function(loser) {
+      html += renderCard(loser, false, loser.reason, true);
+    });
+    html += '</div></div>';
+    return html;
+  }
+
+  function renderCard(photo, isWinner, reason, isResolvedLoser) {
     var cls = isWinner ? 'winner' : 'loser';
-    var badge = isWinner ? 'KEEP' : 'WILL REJECT';
+    var badge = isWinner ? 'KEEP' : (isResolvedLoser ? 'REJECTED' : 'WILL REJECT');
     var thumbUrl = photo.id != null ? ('/thumbnails/' + photo.id + '.jpg') : null;
-    var html = '<div class="dup-card ' + cls + '">';
+    var html = '<div class="dup-card ' + cls + '" data-photo-id="' +
+               (photo.id != null ? photo.id : '') + '">';
     if (thumbUrl) {
       html += '<img class="thumb" src="' + escapeHtml(thumbUrl) +
               '" alt="' + escapeHtml(photo.filename || '') +
@@ -336,8 +478,161 @@
     if (photo.file_size != null) meta.push(formatBytes(photo.file_size));
     if (meta.length) html += '<div class="meta">' + meta.join(' \u00b7 ') + '</div>';
     if (reason) html += '<div class="reason">' + escapeHtml(reason) + '</div>';
+    if (isResolvedLoser && photo.id != null) {
+      html += '<button type="button" class="trash-btn" onclick="trashOneLoserFile(' +
+              photo.id + ')">Move file to Trash</button>';
+      html += '<div class="trash-status" data-trash-status></div>';
+    }
     html += '</div>';
     return html;
+  }
+
+  function toggleResolvedSection() {
+    var toggle = document.getElementById('resolvedToggle');
+    var list = document.getElementById('resolvedList');
+    if (!toggle || !list) return;
+    var expanded = list.classList.toggle('expanded');
+    if (expanded) toggle.classList.add('expanded');
+    else toggle.classList.remove('expanded');
+  }
+
+  async function trashOneLoserFile(photoId) {
+    var card = document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
+    if (!card) return;
+    var btn = card.querySelector('.trash-btn');
+    var status = card.querySelector('[data-trash-status]');
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = 'Moving to Trash...';
+
+    try {
+      var data = await safeFetch('/api/duplicates/delete-loser-files', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ photo_ids: [photoId] }),
+      });
+      if (data.trashed === 1) {
+        card.classList.add('trashed');
+        if (status) status.textContent = 'Moved to Trash';
+        showToast('Moved 1 file to Trash', 'success');
+      } else if ((data.skipped || []).length) {
+        var reason = data.skipped[0].reason || 'skipped';
+        // "file already missing" still drops the orphan DB row server-side,
+        // so the row + on-disk file are both gone — treat as terminal-done
+        // rather than re-offering the button.
+        if (reason === 'file already missing') {
+          card.classList.add('trashed');
+          if (status) status.textContent = 'Cleaned up (file was already gone)';
+        } else {
+          if (status) status.textContent = 'Skipped: ' + reason;
+          if (btn) btn.disabled = false;
+        }
+      } else if ((data.failed || []).length) {
+        var err = data.failed[0].error || 'failed';
+        if (status) status.textContent = 'Failed: ' + err;
+        if (btn) btn.disabled = false;
+        showToast('Trash failed: ' + err, 'error');
+      }
+    } catch (e) {
+      if (status) status.textContent = 'Failed';
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function trashAllLoserFiles() {
+    var resolved = _proposals.filter(function(p) { return p.status === 'resolved'; });
+    var ids = [];
+    resolved.forEach(function(p) {
+      (p.losers || []).forEach(function(l) {
+        // Skip ones already trashed in this session.
+        var card = document.querySelector('.dup-card[data-photo-id="' + l.id + '"]');
+        if (card && card.classList.contains('trashed')) return;
+        if (l.id != null) ids.push(l.id);
+      });
+    });
+    if (ids.length === 0) {
+      showToast('Nothing to trash', 'success');
+      return;
+    }
+    if (!confirm('Move ' + ids.length + ' file' + (ids.length === 1 ? '' : 's') +
+                 ' to Trash and remove their entries from Vireo?\n\n' +
+                 'Files go to your OS Trash (recoverable from there). The ' +
+                 'corresponding loser records (and their thumbnails/previews) ' +
+                 'are deleted from Vireo. Winners keep all merged keywords ' +
+                 'and ratings.')) {
+      return;
+    }
+
+    var btn = document.getElementById('trashAllBtn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Moving to Trash...'; }
+
+    try {
+      var data = await safeFetch('/api/duplicates/delete-loser-files', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ photo_ids: ids }),
+      });
+      var trashed = data.trashed || 0;
+      var skipped = (data.skipped || []).length;
+      var failed = (data.failed || []).length;
+
+      // Mark trashed cards. The API also deletes DB rows for "file already
+      // missing" skips (the file is gone, the row would otherwise be orphaned
+      // and re-counted forever), so we treat those as terminal completions
+      // here too — without this, the bulk button keeps re-offering files
+      // that don't exist and repeat clicks degrade into "photo not found".
+      var TERMINAL_SKIPS = new Set(['file already missing']);
+      var trashedSet = new Set(ids);
+      (data.skipped || []).forEach(function(s) {
+        if (!TERMINAL_SKIPS.has(s.reason)) trashedSet.delete(s.id);
+      });
+      (data.failed || []).forEach(function(f) { trashedSet.delete(f.id); });
+      trashedSet.forEach(function(pid) {
+        var card = document.querySelector('.dup-card[data-photo-id="' + pid + '"]');
+        if (card) {
+          card.classList.add('trashed');
+          var s = card.querySelector('[data-trash-status]');
+          if (s) s.textContent = 'Cleaned up';
+        }
+      });
+      (data.skipped || []).forEach(function(s) {
+        // Terminal skips were already handled in trashedSet above.
+        if (TERMINAL_SKIPS.has(s.reason)) return;
+        var card = document.querySelector('.dup-card[data-photo-id="' + s.id + '"]');
+        if (card) {
+          var st = card.querySelector('[data-trash-status]');
+          if (st) st.textContent = 'Skipped: ' + (s.reason || '');
+        }
+      });
+      (data.failed || []).forEach(function(f) {
+        var card = document.querySelector('.dup-card[data-photo-id="' + f.id + '"]');
+        if (card) {
+          var st = card.querySelector('[data-trash-status]');
+          if (st) st.textContent = 'Failed: ' + (f.error || '');
+        }
+      });
+
+      var actionableSkips = (data.skipped || []).filter(function(s) {
+        return !TERMINAL_SKIPS.has(s.reason);
+      }).length;
+      var msg = 'Moved ' + trashed + ' file' + (trashed === 1 ? '' : 's') + ' to Trash';
+      if (actionableSkips) msg += ', ' + actionableSkips + ' skipped';
+      if (failed) msg += ', ' + failed + ' failed';
+      showToast(msg, failed ? 'error' : 'success');
+
+      if (btn) {
+        btn.disabled = false;
+        // Recompute remaining count for the bulk button label.
+        var remaining = 0;
+        document.querySelectorAll('.resolved-list .dup-card.loser').forEach(function(c) {
+          if (!c.classList.contains('trashed')) remaining++;
+        });
+        btn.textContent = 'Move ' + remaining + ' loser file' +
+                          (remaining === 1 ? '' : 's') + ' to Trash';
+        if (remaining === 0) btn.disabled = true;
+      }
+    } catch (e) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Move loser files to Trash'; }
+    }
   }
 
   function formatBytes(n) {
