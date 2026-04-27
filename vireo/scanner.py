@@ -499,6 +499,15 @@ def _subtree_like_pattern(path, sep=None):
     return _escape(path) + _escape(sep) + "%"
 
 
+# How long a recorded extraction failure suppresses retries when the file's
+# mtime hasn't changed. Without an upper bound, a transient failure (e.g. an
+# external drive briefly unavailable at startup) would block backfill forever
+# for unchanged files — undermining the self-healing intent. With it, a truly
+# broken file is retried at most once per ``_FAILURE_RETRY_AFTER`` hours
+# instead of every restart, and a recovered environment heals on its own.
+_FAILURE_RETRY_AFTER = "-24 hours"
+
+
 def _working_copy_candidate_predicate(wc_max_size, alias=""):
     """Build the WHERE-clause fragment selecting photos eligible for working-copy
     extraction, plus its bind parameters.
@@ -509,6 +518,13 @@ def _working_copy_candidate_predicate(wc_max_size, alias=""):
     (which the extractor intentionally skips) would still satisfy a naive
     ``working_copy_path IS NULL`` check and trigger a no-op backfill on every
     restart.
+
+    Failure suppression has two escape hatches: a content change (mtime
+    differs from the recorded ``working_copy_failed_mtime``) and a stale
+    timestamp (the failure was recorded more than ``_FAILURE_RETRY_AFTER``
+    ago). The latter prevents transient I/O / environment failures (e.g.
+    external drive temporarily disconnected at startup) from gating retries
+    forever for files whose source bytes haven't moved.
 
     ``alias`` is the table alias (e.g. ``"p"``) when the caller's query joins
     other tables; pass ``""`` when ``photos`` is unaliased.
@@ -529,8 +545,11 @@ def _working_copy_candidate_predicate(wc_max_size, alias=""):
         f" AND ({p}working_copy_failed_at IS NULL"
         f"      OR {p}working_copy_failed_mtime IS NULL"
         f"      OR {p}file_mtime IS NULL"
-        f"      OR {p}working_copy_failed_mtime != {p}file_mtime)"
+        f"      OR {p}working_copy_failed_mtime != {p}file_mtime"
+        f"      OR datetime({p}working_copy_failed_at)"
+        f"         < datetime('now', ?))"
     )
+    params.append(_FAILURE_RETRY_AFTER)
     return where, params
 
 
@@ -677,12 +696,16 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
             )
         else:
             # Mark failure gated on current file_mtime so a future content
-            # change (mtime bump) clears the gate and we retry. Logged at
-            # warning so the user sees that a specific file is the cause.
+            # change (mtime bump) clears the gate and we retry. The
+            # ``working_copy_failed_at`` timestamp also expires the gate
+            # after ``_FAILURE_RETRY_AFTER`` so transient I/O / environment
+            # failures recover even if the file itself is unchanged.
+            # Logged at warning so the user sees that a specific file is
+            # the cause.
             log.warning(
                 "Working copy extraction failed for photo %s (%s); "
-                "marked as failed and will not retry until the file changes",
-                row["id"], source,
+                "marked as failed and will retry on file change or after %s",
+                row["id"], source, _FAILURE_RETRY_AFTER.lstrip("-"),
             )
             db.conn.execute(
                 "UPDATE photos SET working_copy_failed_at=datetime('now'),"
@@ -1225,6 +1248,14 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # Match-mode mirrors what scan() actually traversed: restrict_dirs and
         # non-recursive scans only touch direct children, so the scope uses an
         # exact-folder match; a recursive walk from `root` matches the subtree.
+        #
+        # Deliberately do NOT forward ``progress_callback`` here: callers
+        # like app.py's import job feed the scan callback into a shared
+        # ``job["progress"]`` slot that gates downstream phase totals
+        # (``scan_count = job["progress"]["total"]``). Emitting working-copy
+        # (current, total) through the same callback would overwrite the
+        # scan total with the working-copy total and visually jump the bar
+        # backward. ``status_callback`` still announces the phase.
         if vireo_dir:
             if restrict_dirs is not None:
                 wc_scope = [(str(d), "exact") for d in restrict_dirs]
@@ -1233,7 +1264,10 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             else:
                 wc_scope = [str(root_path)]
             _extract_working_copies(
-                db, vireo_dir, progress_callback, status_callback, scope=wc_scope,
+                db, vireo_dir,
+                progress_callback=None,
+                status_callback=status_callback,
+                scope=wc_scope,
             )
 
         # Batched untracked-preview sweep. One os.listdir(previews/) for

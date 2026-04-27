@@ -659,6 +659,111 @@ def test_backfill_failure_retries_when_mtime_changes(tmp_path, monkeypatch):
     assert calls["n"] == 2, "mtime change must clear the failure gate"
 
 
+def test_backfill_failure_retries_after_grace_period_elapses(tmp_path, monkeypatch):
+    """A stale failure marker is bypassed even when the file mtime is unchanged.
+
+    Regression: gating retries solely on ``working_copy_failed_mtime ==
+    file_mtime`` permanently suppressed retries for transient failures
+    (external drive temporarily disconnected at startup, brief I/O
+    blip, etc.). Files whose source bytes never change would never get a
+    second chance once that first failure was recorded — undermining the
+    self-healing intent. The predicate now also bypasses the gate when the
+    failure timestamp is older than the configured grace period.
+    """
+    import config as cfg
+    from db import Database
+    from scanner import backfill_working_copies
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 1000, "working_copy_quality": 90})
+
+    folder = tmp_path / "a"
+    folder.mkdir()
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "test.db"))
+
+    pid = _seed_large_jpeg(db, folder, "a.jpg")
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+
+    # Pretend the previous failure was recorded 48 hours ago against the
+    # SAME file_mtime. Mtime equality alone would suppress the retry
+    # forever; the time-based escape should override it.
+    db.conn.execute(
+        "UPDATE photos SET working_copy_failed_at = datetime('now', '-48 hours'),"
+        " working_copy_failed_mtime = ?"
+        " WHERE id = ?",
+        (file_mtime, pid),
+    )
+    db.conn.commit()
+
+    backfill_working_copies(db, str(vireo_dir))
+
+    row = db.conn.execute(
+        "SELECT working_copy_path, working_copy_failed_at,"
+        " working_copy_failed_mtime FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert row["working_copy_path"] == f"working/{pid}.jpg"
+    assert row["working_copy_failed_at"] is None
+    assert row["working_copy_failed_mtime"] is None
+    assert (vireo_dir / "working" / f"{pid}.jpg").exists()
+
+
+def test_backfill_failure_does_not_retry_within_grace_period(tmp_path, monkeypatch):
+    """A recent failure with unchanged mtime is still suppressed.
+
+    Counterpart to ``test_backfill_failure_retries_after_grace_period_elapses``:
+    the time-based escape must only trigger once enough time has passed —
+    otherwise we'd be back to the original retry-loop problem on every
+    restart.
+    """
+    import config as cfg
+    from db import Database
+    from scanner import backfill_working_copies
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 1000, "working_copy_quality": 90})
+
+    folder = tmp_path / "a"
+    folder.mkdir()
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "test.db"))
+    folder_id = db.add_folder(str(folder))
+    pid = db.add_photo(
+        folder_id, "missing.jpg", ".jpg",
+        file_size=1000, file_mtime=42.0,
+        width=2000, height=1500,
+    )
+    # Record a very recent failure (~1 minute ago) against the same mtime.
+    db.conn.execute(
+        "UPDATE photos SET working_copy_failed_at = datetime('now', '-1 minute'),"
+        " working_copy_failed_mtime = ?"
+        " WHERE id = ?",
+        (42.0, pid),
+    )
+    db.conn.commit()
+
+    calls = {"n": 0}
+
+    import scanner as _scanner_mod
+
+    def counting_extract(*args, **kwargs):
+        calls["n"] += 1
+        return False
+
+    monkeypatch.setattr(_scanner_mod, "extract_working_copy", counting_extract)
+
+    backfill_working_copies(db, str(vireo_dir))
+
+    assert calls["n"] == 0, (
+        "fresh failure marker (within grace period) must suppress retry"
+    )
+
+
 def test_backfill_success_clears_prior_failure_marker(tmp_path, monkeypatch):
     """After a successful extraction, failure columns are reset."""
     import config as cfg
@@ -800,6 +905,64 @@ def test_scan_records_failure_marker_for_unreadable_file(tmp_path, monkeypatch):
     assert row["working_copy_failed_at"] is not None
     assert row["working_copy_failed_mtime"] == row["file_mtime"]
 
+
+def test_scan_progress_callback_not_clobbered_by_working_copy_phase(tmp_path, monkeypatch):
+    """The post-scan WC phase must not overwrite scan totals via progress_callback.
+
+    Regression: ``_extract_working_copies`` was called with the same
+    ``progress_callback`` the scan loop used to report per-file totals. In
+    callers like the import job (vireo/app.py) the callback writes
+    ``current``/``total`` into a shared ``job["progress"]`` dict that
+    downstream phases read for the scan count. Passing the callback in
+    again caused the WC phase to overwrite that total with the
+    working-copy total — visually jumping the bar backward and feeding
+    the wrong scan_count to later phases.
+    """
+    import config as cfg
+    from db import Database
+    from scanner import scan
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 1000, "working_copy_quality": 90})
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "test.db"))
+
+    root = tmp_path / "scan"
+    root.mkdir()
+    # Two scanned files; only one is large enough to need a working copy.
+    # Without the fix, the WC phase emits (1, 1) and would clobber the
+    # scan's final (2, 2).
+    _make_jpeg(str(root / "small.jpg"), 600, 400)
+    _make_jpeg(str(root / "big.jpg"), 2000, 1500)
+
+    events = []
+
+    def progress_cb(current, total):
+        events.append((current, total))
+
+    scan(str(root), db, progress_callback=progress_cb, vireo_dir=str(vireo_dir))
+
+    assert events, "scan should report progress for the scan loop"
+    # The last reported total must be the SCAN total (2 files), not the
+    # working-copy total (1 file). Any (_, 1) appearing after a (_, 2)
+    # would mean the WC phase overwrote the scan totals.
+    seen_scan_total = False
+    for _current, total in events:
+        if total == 2:
+            seen_scan_total = True
+        elif seen_scan_total and total == 1:
+            raise AssertionError(
+                f"Working-copy phase clobbered scan totals: {events}"
+            )
+    assert seen_scan_total, f"never observed scan total of 2: {events}"
+
+    # Sanity check: the working copy itself was still produced.
+    big_row = db.conn.execute(
+        "SELECT id, working_copy_path FROM photos WHERE filename='big.jpg'"
+    ).fetchone()
+    assert big_row["working_copy_path"] == f"working/{big_row['id']}.jpg"
 
 
 # ---------------------------------------------------------------------------
