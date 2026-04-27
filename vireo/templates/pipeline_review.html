@@ -583,6 +583,9 @@ input[type="range"]::-moz-range-thumb {
   display: none;
 }
 .species-dropdown.open { display: block; }
+/* Bottom-bar widget: open upward so the dropdown stays inside the
+   encounter card, which has overflow:hidden. */
+.species-dropdown.up { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 4px; }
 .species-dropdown-item {
   padding: 8px 12px;
   cursor: pointer;
@@ -1912,8 +1915,9 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
     html += '<button class="species-confirm-btn" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',null)" title="Confirm as ' + escapeHtml(displayName) + '">&#10003;</button>';
   }
 
-  // Dropdown
-  html += '<div class="species-dropdown" id="spDrop_' + encIdx + '_' + idKey + '">';
+  // Dropdown — bottom-bar widget opens upward to stay inside the card
+  var dropdownCls = 'species-dropdown' + (pos === 'bot' ? ' up' : '');
+  html += '<div class="' + dropdownCls + '" id="spDrop_' + encIdx + '_' + idKey + '">';
   html += '<div class="species-dropdown-search"><input type="text" placeholder="Search species..." oninput="searchSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')"></div>';
 
   // "Use encounter label" option for burst level
