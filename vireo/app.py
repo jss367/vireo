@@ -8,6 +8,7 @@ import argparse
 import json
 import logging
 import logging.handlers
+import math
 import os
 import queue
 import subprocess
@@ -1783,6 +1784,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lat = float(request.args.get("lat", ""))
             lng = float(request.args.get("lng", ""))
         except (TypeError, ValueError):
+            return json_error("invalid coords", 400)
+        # float() accepts "nan" and "inf"; both blow up downstream in
+        # _reverse_geocode_grid's int(round(...)). Reject explicitly.
+        if not (math.isfinite(lat) and math.isfinite(lng)):
             return json_error("invalid coords", 400)
 
         db = _get_db()

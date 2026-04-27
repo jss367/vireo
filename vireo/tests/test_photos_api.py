@@ -2171,6 +2171,22 @@ def test_reverse_geocode_does_not_cache_transient_errors(app_and_db, monkeypatch
     )
 
 
+def test_reverse_geocode_400_on_non_finite_coords(app_and_db):
+    """float() accepts 'nan' and 'inf' but they blow up downstream when
+    we round to the grid (int(round(NaN)) raises ValueError). Reject them
+    at the boundary as 400, same as other invalid coords."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    for bad in ["nan", "NaN", "inf", "-inf", "Infinity"]:
+        r = client.get(f"/api/places/reverse-geocode?lat={bad}&lng=0")
+        assert r.status_code == 400, f"lat={bad} should be rejected"
+        assert r.get_json()["error"] == "invalid coords"
+
+        r = client.get(f"/api/places/reverse-geocode?lat=0&lng={bad}")
+        assert r.status_code == 400, f"lng={bad} should be rejected"
+
+
 def test_reverse_geocode_400_on_invalid_coords(app_and_db):
     """Missing or unparseable lat/lng is a 400."""
     app, _ = app_and_db
