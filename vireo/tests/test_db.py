@@ -2776,6 +2776,59 @@ def test_count_photos_without_gps(tmp_path):
     assert db.count_photos_without_gps() == 2
 
 
+def test_count_photos_without_gps_excludes_keyword_coord_photos(tmp_path):
+    """A photo with no EXIF GPS but a coord-bearing location keyword IS
+    plottable on the map — count_photos_without_gps must not count it,
+    so total_with_gps stays >= len(get_geolocated_photos())."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
+
+    # Photo 1: full EXIF GPS — definitely plottable.
+    db.add_photo(folder_id=fid, filename='exif.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE filename='exif.jpg'"
+    )
+    # Photo 2: no EXIF, but tagged with a coord-bearing location keyword.
+    p2 = db.add_photo(folder_id=fid, filename='via_keyword.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES ('Central Park', 'location', 40.78, -73.96)",
+    )
+    kid = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p2, kid),
+    )
+    # Photo 3: no EXIF, tagged with a free-text (coordless) location keyword.
+    p3 = db.add_photo(folder_id=fid, filename='free_text.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES ('the dog park', 'location')",
+    )
+    free_kid = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p3, free_kid),
+    )
+    # Photo 4: nothing — truly without GPS.
+    db.add_photo(folder_id=fid, filename='lonely.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.conn.commit()
+
+    # Photos 3 and 4 are not plottable (no EXIF, no coord-bearing keyword).
+    assert db.count_photos_without_gps() == 2
+
+    # Sanity: get_geolocated_photos returns the two plottable photos
+    # (Photo 1 via EXIF, Photo 2 via keyword fallback). Total of plottable
+    # (= 4 photos - 2 without_gps = 2) matches len(get_geolocated_photos).
+    geo = db.get_geolocated_photos()
+    assert len(geo) == 2
+
+
 def test_taxa_table_exists(tmp_path):
     """The taxa table is created with expected columns."""
     from db import Database

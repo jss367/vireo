@@ -2675,7 +2675,17 @@ class Database:
         ]
 
     def count_photos_without_gps(self):
-        """Count photos in active workspace that lack GPS coordinates."""
+        """Count photos in the active workspace that the map can't plot.
+
+        A photo IS plottable when either its EXIF lat/lng are both present
+        OR it carries a ``type='location'`` keyword whose lat/lng are both
+        present (matches :meth:`get_geolocated_photos`'s paired-fallback
+        semantics). This counter excludes those.
+
+        Used by the ``/api/photos/geo`` response to drive the map's
+        "Showing N of M geolocated photos" label — keeping the two
+        definitions in lockstep so M is never less than N.
+        """
         row = self.conn.execute(
             """
             SELECT COUNT(*) FROM photos p
@@ -2683,6 +2693,14 @@ class Database:
             JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ?
               AND (p.latitude IS NULL OR p.longitude IS NULL)
+              AND NOT EXISTS (
+                SELECT 1 FROM photo_keywords pk
+                JOIN keywords k ON k.id = pk.keyword_id
+                WHERE pk.photo_id = p.id
+                  AND k.type = 'location'
+                  AND k.latitude IS NOT NULL
+                  AND k.longitude IS NOT NULL
+              )
             """,
             (self._ws_id(),),
         ).fetchone()
