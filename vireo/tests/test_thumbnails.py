@@ -163,3 +163,177 @@ def test_generate_all_creates_missing(tmp_path):
     assert len(progress) == 2
     assert os.path.exists(os.path.join(cache_dir, "1.jpg"))
     assert os.path.exists(os.path.join(cache_dir, "2.jpg"))
+
+
+def test_generate_all_records_thumb_path_in_db(tmp_path):
+    """After generate_all, photos.thumb_path must reflect the generated file
+    so the dashboard's coverage query (`thumb_path IS NOT NULL`) shows the
+    thumbnail as produced. The on-disk JPEG alone is not enough."""
+    from db import Database
+    from thumbnails import generate_all
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name='root')
+    for name in ['a.jpg', 'b.jpg']:
+        Image.new('RGB', (300, 200)).save(str(tmp_path / name))
+        db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+
+    cache_dir = str(tmp_path / "thumbs")
+    os.makedirs(cache_dir)
+    generate_all(db, cache_dir)
+
+    rows = db.conn.execute(
+        "SELECT id, thumb_path FROM photos ORDER BY id"
+    ).fetchall()
+    assert all(r["thumb_path"] is not None for r in rows), (
+        f"All photos should have thumb_path set; got {[dict(r) for r in rows]}"
+    )
+    # Stored value should identify the file by photo id, not as a brittle
+    # absolute path that breaks if cache_dir moves.
+    assert rows[0]["thumb_path"] == "1.jpg"
+    assert rows[1]["thumb_path"] == "2.jpg"
+
+
+def test_generate_all_does_not_record_thumb_path_on_failure(tmp_path, monkeypatch):
+    """If generate_thumbnail returns None (failure), thumb_path stays NULL —
+    we don't want the dashboard to falsely report coverage."""
+    import thumbnails as thumbnails_mod
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name='root')
+    Image.new('RGB', (300, 200)).save(str(tmp_path / "a.jpg"))
+    db.add_photo(folder_id=fid, filename="a.jpg", extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+
+    monkeypatch.setattr(
+        thumbnails_mod, "generate_thumbnail",
+        lambda photo_id, src, cache_dir, size=400, quality=85: None,
+    )
+
+    cache_dir = str(tmp_path / "thumbs")
+    os.makedirs(cache_dir)
+    thumbnails_mod.generate_all(db, cache_dir)
+
+    row = db.conn.execute("SELECT thumb_path FROM photos").fetchone()
+    assert row["thumb_path"] is None
+
+
+def test_backfill_thumb_paths_sets_path_for_existing_files(tmp_path):
+    """Library-wide backfill should mark photos whose thumbnail JPEG exists on
+    disk but whose thumb_path is NULL (the dashboard-coverage repair pass)."""
+    from db import Database
+    from thumbnails import backfill_thumb_paths
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name='root')
+    for name in ['a.jpg', 'b.jpg', 'c.jpg']:
+        db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+
+    cache_dir = str(tmp_path / "thumbs")
+    os.makedirs(cache_dir)
+    # Only photos 1 and 3 have on-disk thumbnails.
+    Image.new('RGB', (50, 50)).save(str(tmp_path / "thumbs" / "1.jpg"))
+    Image.new('RGB', (50, 50)).save(str(tmp_path / "thumbs" / "3.jpg"))
+
+    result = backfill_thumb_paths(db, cache_dir)
+
+    rows = {r["id"]: r["thumb_path"] for r in db.conn.execute(
+        "SELECT id, thumb_path FROM photos"
+    ).fetchall()}
+    assert rows[1] == "1.jpg"
+    assert rows[2] is None
+    assert rows[3] == "3.jpg"
+    assert result["set"] == 2
+
+
+def test_backfill_thumb_paths_clears_path_for_missing_files(tmp_path):
+    """If a photo has thumb_path set but the file is gone (user wiped the
+    cache), the backfill should clear the column so the dashboard reflects
+    on-disk reality. Otherwise drift persists between disk and DB."""
+    from db import Database
+    from thumbnails import backfill_thumb_paths
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name='root')
+    db.add_photo(folder_id=fid, filename="a.jpg", extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    # Pretend a previous run set this; the file no longer exists on disk.
+    db.conn.execute("UPDATE photos SET thumb_path='1.jpg' WHERE id=1")
+    db.conn.commit()
+
+    cache_dir = str(tmp_path / "thumbs")
+    os.makedirs(cache_dir)
+
+    result = backfill_thumb_paths(db, cache_dir)
+
+    row = db.conn.execute("SELECT thumb_path FROM photos").fetchone()
+    assert row["thumb_path"] is None
+    assert result["cleared"] == 1
+
+
+def test_backfill_thumb_paths_skips_when_already_synced(tmp_path):
+    """No-op when every photo's thumb_path matches disk — the steady-state
+    case after the first backfill run."""
+    from db import Database
+    from thumbnails import backfill_thumb_paths
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name='root')
+    db.add_photo(folder_id=fid, filename="a.jpg", extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET thumb_path='1.jpg' WHERE id=1")
+    db.conn.commit()
+
+    cache_dir = str(tmp_path / "thumbs")
+    os.makedirs(cache_dir)
+    Image.new('RGB', (50, 50)).save(str(tmp_path / "thumbs" / "1.jpg"))
+
+    result = backfill_thumb_paths(db, cache_dir)
+    assert result["set"] == 0
+    assert result["cleared"] == 0
+
+
+def test_thumb_path_backfill_candidate_count_zero_when_synced(tmp_path):
+    """Startup gate count: returns 0 when nothing needs work, so the kickoff
+    can skip spawning a job entirely."""
+    from db import Database
+    from thumbnails import thumb_path_backfill_candidate_count
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name='root')
+    db.add_photo(folder_id=fid, filename="a.jpg", extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET thumb_path='1.jpg' WHERE id=1")
+    db.conn.commit()
+
+    cache_dir = str(tmp_path / "thumbs")
+    os.makedirs(cache_dir)
+    Image.new('RGB', (50, 50)).save(str(tmp_path / "thumbs" / "1.jpg"))
+
+    assert thumb_path_backfill_candidate_count(db, cache_dir) == 0
+
+
+def test_thumb_path_backfill_candidate_count_counts_unsynced(tmp_path):
+    """Both stale-NULL (file exists but column empty) and stale-NOT-NULL
+    (column set but file missing) photos count as candidates."""
+    from db import Database
+    from thumbnails import thumb_path_backfill_candidate_count
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name='root')
+    for name in ['a.jpg', 'b.jpg']:
+        db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+
+    cache_dir = str(tmp_path / "thumbs")
+    os.makedirs(cache_dir)
+    # Photo 1: file exists, column NULL  -> needs setting.
+    Image.new('RGB', (50, 50)).save(str(tmp_path / "thumbs" / "1.jpg"))
+    # Photo 2: column set, file missing  -> needs clearing.
+    db.conn.execute("UPDATE photos SET thumb_path='2.jpg' WHERE id=2")
+    db.conn.commit()
+
+    assert thumb_path_backfill_candidate_count(db, cache_dir) == 2
