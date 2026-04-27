@@ -791,7 +791,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # Defer the kickoff slightly so the app finishes booting before the
     # first DB-heavy background pass starts churning. Mirrors the folder
     # health loop's grace period.
-    threading.Timer(5.0, _kickoff_working_copy_backfill).start()
+    #
+    # Daemon=True so short-lived ``create_app`` callers (tests, scripts,
+    # one-shot tooling) don't get pinned waiting on the 5-second delay
+    # only to fire DB work after their real work is already done.
+    _wc_backfill_timer = threading.Timer(5.0, _kickoff_working_copy_backfill)
+    _wc_backfill_timer.daemon = True
+    _wc_backfill_timer.start()
 
     # -- Page routes --
 
