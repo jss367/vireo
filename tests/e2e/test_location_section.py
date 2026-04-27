@@ -52,6 +52,16 @@ def _seed_reverse_geocode_cache(live_server, lat, lng, place_id, details):
     )
 
 
+def _wait_for_detail_loaded(page):
+    """Wait until the detail panel's photo id is set on `window`.
+
+    `_submitLocationText` (browse.html) bails silently if `_detailPhotoId` is
+    falsy, so pressing Enter before the detail finishes loading races and the
+    free-text POST is dropped. Tests must wait for this before pressing Enter.
+    """
+    page.wait_for_function("() => !!window._detailPhotoId")
+
+
 def _set_api_key(key="test-key"):
     """Write a Google Maps key into the (monkeypatched) config.json so:
       - browse.html's _cfgPromise sees `window.GOOGLE_MAPS_API_KEY` set,
@@ -88,6 +98,7 @@ def test_freetext_enter_creates_location(live_server, page):
     first = page.locator(".grid-card").first
     first.wait_for(state="visible")
     first.click()
+    _wait_for_detail_loaded(page)
 
     inp = page.locator("#locationInput")
     inp.wait_for(state="visible")
@@ -120,6 +131,7 @@ def test_enter_after_place_changed_does_not_submit_freetext(live_server, page):
     first = page.locator(".grid-card").first
     first.wait_for(state="visible")
     first.click()
+    _wait_for_detail_loaded(page)
 
     inp = page.locator("#locationInput")
     inp.wait_for(state="visible")
@@ -157,6 +169,7 @@ def test_clear_button_returns_to_empty(live_server, page):
     first = page.locator(".grid-card").first
     first.wait_for(state="visible")
     first.click()
+    _wait_for_detail_loaded(page)
 
     # Set a location first.
     inp = page.locator("#locationInput")
@@ -182,6 +195,7 @@ def test_location_persists_across_reload(live_server, page):
     first = page.locator(".grid-card").first
     first.wait_for(state="visible")
     first.click()
+    _wait_for_detail_loaded(page)
 
     inp = page.locator("#locationInput")
     inp.wait_for(state="visible")
