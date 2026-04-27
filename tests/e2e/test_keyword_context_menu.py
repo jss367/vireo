@@ -5,7 +5,7 @@ Menu items (simplified per task prompt — the plan listed two redundant
 only "Show Photos with this Keyword"):
 
 - Rename                          (single only)
-- Set Type chip row (6 types)
+- Set Type chip row (5 types)
 - separator
 - Show Photos with this Keyword   (single only)
 - separator
@@ -35,9 +35,9 @@ def test_keyword_right_click_opens_menu(live_server, page):
             menu.locator(".vireo-ctx-item", has_text=label)
         ).to_be_visible()
 
-    # Six type chips for the Set Type chip row.
+    # Five type chips for the Set Type chip row (KEYWORD_TYPES in db.py).
     chips = menu.locator(".vireo-ctx-chip")
-    assert chips.count() == 6
+    assert chips.count() == 5
 
 
 def test_keyword_right_click_set_type_chip_fires_put(live_server, page):
@@ -57,7 +57,7 @@ def test_keyword_right_click_set_type_chip_fires_put(live_server, page):
         and r.request.method == "PUT"
         and r.status == 200
     ):
-        # The 'location' chip: position 3 of the 6-type chip row.
+        # The 'location' chip: one of the 5 type chips.
         menu.locator(".vireo-ctx-chip", has_text="location").click()
 
 
