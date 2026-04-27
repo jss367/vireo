@@ -1715,6 +1715,49 @@ def test_post_photo_location_returns_409_on_name_conflict(app_and_db, monkeypatc
     assert "New York County" in body["error_detail"]
 
 
+def test_post_photo_location_returns_404_on_missing_photo(app_and_db, monkeypatch):
+    """A stale client (e.g. tab open after the photo was deleted) hitting
+    POST /api/photos/<id>/location must get a clean 404, not a 500 from
+    set_photo_location's FK violation on photo_keywords."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/photos/999999/location",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "photo_not_found"
+
+
+def test_post_photo_location_text_returns_404_on_missing_photo(app_and_db):
+    """Same FK guard for the free-text fallback path."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/photos/999999/location/text",
+        json={"name": "the meadow"},
+    )
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "photo_not_found"
+
+
+def test_delete_photo_location_returns_404_on_missing_photo(app_and_db):
+    """DELETE on a missing photo returns 404 for consistency with the
+    POST routes (was previously a silent 200 because the underlying
+    DELETE matched nothing)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.delete("/api/photos/999999/location")
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "photo_not_found"
+
+
 def test_delete_photo_location_clears_links(app_and_db):
     """DELETE removes location keyword links but leaves the keyword row intact."""
     app, db = app_and_db
@@ -2327,6 +2370,37 @@ def test_post_keyword_link_place_returns_404_on_missing_keyword(
     )
     assert resp.status_code == 404
     assert resp.get_json()["error"] == "keyword_not_found"
+
+
+def test_post_keyword_link_place_returns_400_on_wrong_keyword_type(
+    app_and_db, monkeypatch,
+):
+    """Linking a non-'location' keyword should be a 400 wrong_keyword_type
+    (the id exists, but it's the wrong kind), not a 404 keyword_not_found
+    that misleadingly tells callers the id doesn't exist."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    # Create a 'general' keyword (not 'location').
+    kw_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES ('Bird', 'general')",
+    ).lastrowid
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["error"] == "wrong_keyword_type"
+    assert "general" in body["error_detail"]
 
 
 def test_post_keyword_link_place_returns_400_on_missing_place_id(app_and_db):

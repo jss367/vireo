@@ -1697,11 +1697,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not key:
             return json_error("no_api_key", 400)
 
+        db = _get_db()
+        # Guard against stale clients (e.g. tab open after photo deleted).
+        # Without this, set_photo_location's INSERT into photo_keywords
+        # raises a FK IntegrityError that surfaces as a 500.
+        if db.conn.execute(
+            "SELECT 1 FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone() is None:
+            return json_error("photo_not_found", 404)
+
         details = places.place_details(place_id, key)
         if details is None:
             return json_error("place_not_found", 404)
 
-        db = _get_db()
         try:
             leaf_id = db.upsert_place_chain(details)
         except RuntimeError as err:
@@ -1737,6 +1745,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         stripped = name.strip()
 
         db = _get_db()
+        if db.conn.execute(
+            "SELECT 1 FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone() is None:
+            return json_error("photo_not_found", 404)
         try:
             leaf_id = db.get_or_create_text_location(stripped)
         except ValueError:
@@ -1755,6 +1767,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_clear_photo_location(photo_id):
         """Remove all ``type='location'`` keyword links for ``photo_id``."""
         db = _get_db()
+        if db.conn.execute(
+            "SELECT 1 FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone() is None:
+            return json_error("photo_not_found", 404)
         db.clear_photo_location(photo_id)
         db.record_edit(
             'location_clear',
@@ -1880,8 +1896,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         try:
             result = db.link_keyword_to_place(keyword_id, details)
-        except ValueError:
-            # Database raises ValueError when the keyword id doesn't exist.
+        except ValueError as err:
+            # Database raises ValueError both for "missing id" and "wrong
+            # type". Distinguish so callers can tell a 404 from a 400.
+            msg = str(err)
+            if "is type" in msg:
+                return jsonify({
+                    "error": "wrong_keyword_type",
+                    "error_detail": msg,
+                }), 400
             return json_error("keyword_not_found", 404)
         except RuntimeError as err:
             # _upsert_one_keyword raises RuntimeError when the parent-chain
