@@ -2387,6 +2387,64 @@ def test_batch_keyword_route_handles_non_string_type(app_and_db):
     )
 
 
+def test_create_app_runs_wildlife_backfill_synchronously_on_first_boot(tmp_path, monkeypatch):
+    """Regression: on first boot after upgrade (wildlife_backfill_done
+    marker unset), create_app must complete the species-marking +
+    Wildlife-backfill pipeline synchronously before returning, so user
+    edits via the served HTTP API can't race with the one-shot backfill
+    overwriting their Wildlife removals."""
+    from unittest.mock import MagicMock, patch
+
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    # Pre-create the DB with the marker UNSET (simulates first boot
+    # post-upgrade).
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    assert db.get_meta(Database._WILDLIFE_BACKFILL_DONE_KEY) != "1", (
+        "Pre-condition: marker should be unset before create_app"
+    )
+    db.close()
+
+    # Stub taxonomy loading to return a non-None object so the sync path
+    # runs mark_species + backfill. mark_species_keywords gets a real DB
+    # call but the stub taxonomy returns None for every lookup, so no
+    # rows are actually changed — we just need it to complete without
+    # raising so the marker gets set.
+    fake_tax = MagicMock()
+    fake_tax.lookup.return_value = None
+
+    with patch("taxonomy.load_local_taxonomy", return_value=fake_tax):
+        app = create_app(
+            db_path=db_path, thumb_cache_dir=thumb_dir, api_token="test",
+        )
+        assert app is not None
+
+    # After create_app returns, the marker MUST be set — the synchronous
+    # path ran. (If it had been async, we'd be racing the background
+    # thread here and the marker might or might not be set yet.)
+    db2 = Database(db_path)
+    assert db2.get_meta(Database._WILDLIFE_BACKFILL_DONE_KEY) == "1", (
+        "Wildlife backfill marker must be set synchronously by create_app "
+        "on first boot — otherwise user edits race the backfill."
+    )
+    db2.close()
+
+
 def test_add_keyword_route_does_not_clobber_existing_individual_type(app_and_db):
     """Regression: POST /api/photos/<id>/keywords with type='taxonomy' for a
     keyword that already exists as 'individual' must not silently rewrite

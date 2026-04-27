@@ -7401,6 +7401,67 @@ def test_ensure_default_genre_keywords_preserves_non_general_user_types(tmp_path
     assert n_other == 4
 
 
+def test_add_keyword_no_kw_type_prefers_canonical_genre_over_location(tmp_path):
+    """Regression: when kw_type is omitted, the case-insensitive lookup
+    must prefer the most structured interpretation. A user with both a
+    hand-tagged 'location' Landscape and a canonical 'genre' Landscape
+    should get the genre row when calling add_keyword('Landscape')
+    with no kw_type — otherwise the photo would be tagged with the
+    location row and stay stuck in 'Needs Identification' under the
+    default subject_types."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    # Wipe the genre defaults; force-create a 'location' Landscape FIRST,
+    # then a 'genre' Landscape — so id-ASC alone would pick location.
+    db.conn.execute("DELETE FROM keywords WHERE type = 'genre'")
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'location', 0)",
+        ("Landscape",),
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'genre', 0)",
+        ("Landscape",),
+    )
+    db.conn.commit()
+
+    # No kw_type supplied. Must deterministically return the 'genre' row.
+    kid = db.add_keyword("Landscape")
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "genre", (
+        f"add_keyword('Landscape') without kw_type must prefer 'genre' "
+        f"over 'location'; got {row['type']!r}"
+    )
+
+
+def test_add_keyword_no_kw_type_prefers_taxonomy_over_general(tmp_path):
+    """The type-priority order picks taxonomy first when present. A
+    species keyword that was once tagged plain-text and later promoted
+    via mark_species_keywords (creating a parallel 'general' row that
+    stuck around) should still be picked as the taxonomy row."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    # 'general' Robin first (older id), 'taxonomy' Robin second.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 0)",
+        ("Robin",),
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+        ("Robin",),
+    )
+    db.conn.commit()
+
+    kid = db.add_keyword("Robin")
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+
+
 def test_ensure_default_genre_keywords_seeds_canonical_row_despite_typed_collision(tmp_path):
     """Regression: the seed must guarantee a canonical genre row for each
     default name even when a user has previously tagged a same-name

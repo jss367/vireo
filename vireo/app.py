@@ -661,42 +661,66 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     init_db.migrate_default_subject_collection()
     init_db.create_default_collections()
 
-    # Mark species keywords from taxonomy in background (avoids slow startup),
-    # then run the Wildlife backfill. Order matters: the backfill is one-shot
-    # via a db_meta marker, and it only matches rows where
-    # ``type='taxonomy' OR is_species=1``. Plain-text species tags on upgraded
-    # DBs start as ``is_species=0`` / non-taxonomy and only get retyped by
-    # ``mark_species_keywords``. Running the backfill before that pass would
-    # match zero rows on first boot and set the marker, permanently leaving
-    # those photos un-Wildlife'd.
+    # Wildlife backfill timing:
+    # - Subsequent boots: marker is set, nothing to do, fast.
+    # - First boot after upgrade (marker unset): run species marking +
+    #   backfill SYNCHRONOUSLY before accepting requests. Otherwise a
+    #   user could remove Wildlife from a species-tagged photo during
+    #   the few-second window before the background thread completes,
+    #   and the backfill would silently re-add it (clobbering user
+    #   intent before the marker gets set).
+    # - mark_species runs in the background regardless, to catch new
+    #   species keywords added between boots. The backfill won't re-run
+    #   from the background path (marker check inside backfill).
     import threading
 
-    def _mark_species():
+    from db import Database as _Database  # avoid shadowing in nested fn
+
+    _WILDLIFE_BACKFILL_DONE_KEY = _Database._WILDLIFE_BACKFILL_DONE_KEY
+
+    def _mark_species_and_maybe_backfill(db, log_label):
+        """Load taxonomy, mark species keywords, and run the one-shot
+        Wildlife backfill. Returns silently on any failure so callers
+        can choose between sync (block startup) and async (log only)."""
         from taxonomy import load_local_taxonomy
 
+        tax = load_local_taxonomy()
+        if tax is None:
+            # No taxonomy yet — leave the marker unset so the backfill
+            # retries on a future boot once taxonomy is downloaded.
+            log.debug("[%s] taxonomy not loaded; deferring species marking", log_label)
+            return
+        try:
+            updated = db.mark_species_keywords(tax)
+            if updated:
+                log.info("[%s] Marked %d keywords as species from taxonomy",
+                         log_label, updated)
+        except Exception:
+            log.debug("[%s] mark_species_keywords failed", log_label, exc_info=True)
+            return
+        try:
+            db.backfill_wildlife_genre()
+        except Exception:
+            log.debug("[%s] backfill_wildlife_genre failed", log_label, exc_info=True)
+
+    if init_db.get_meta(_WILDLIFE_BACKFILL_DONE_KEY) != "1":
+        # First boot after upgrade. Block startup until the one-shot
+        # backfill completes so concurrent user edits in that window
+        # can't be overwritten.
+        log.info("Wildlife backfill marker unset; running species marking "
+                 "+ backfill synchronously before serving requests")
+        _t1 = time.time()
+        _mark_species_and_maybe_backfill(init_db, "sync-startup")
+        log.info("Synchronous species marking + backfill took %.2fs",
+                 time.time() - _t1)
+
+    def _mark_species():
         try:
             bg_db = Database(db_path)
         except Exception:
             log.debug("Could not open background db for species marking", exc_info=True)
             return
-        tax = load_local_taxonomy()
-        if tax is None:
-            # Skip the backfill too: it's one-shot via wildlife_backfill_done,
-            # so on an upgraded DB without taxonomy yet, running it would
-            # match zero plain-text species rows AND set the marker, leaving
-            # those photos un-Wildlife'd even after taxonomy is later loaded.
-            return
-        try:
-            updated = bg_db.mark_species_keywords(tax)
-            if updated:
-                log.info("Marked %d keywords as species from taxonomy", updated)
-        except Exception:
-            log.debug("Could not mark species from taxonomy", exc_info=True)
-            return
-        try:
-            bg_db.backfill_wildlife_genre()
-        except Exception:
-            log.debug("Wildlife backfill failed", exc_info=True)
+        _mark_species_and_maybe_backfill(bg_db, "background")
 
     threading.Thread(target=_mark_species, daemon=True).start()
 

@@ -3545,36 +3545,55 @@ class Database:
         if kw_type == 'taxonomy':
             is_species = True
         # Case-insensitive lookup. When kw_type is supplied, prefer a
-        # same-typed match — duplicates by name across different types are
-        # permitted (e.g. a user-tagged 'location' Landscape coexisting
-        # with a default 'genre' Landscape), and callers who explicitly
-        # ask for kw_type='genre' must deterministically get the genre
-        # row rather than an arbitrary same-name row of another type.
-        type_preference = "ORDER BY (type = ?) DESC, id ASC LIMIT 1"
+        # same-typed match — duplicates by name across different types
+        # are permitted (e.g. a user-tagged 'location' Landscape
+        # coexisting with a default 'genre' Landscape), and callers who
+        # explicitly ask for kw_type='genre' must deterministically get
+        # the genre row.
+        #
+        # When kw_type is None, prefer the most "structured"
+        # interpretation in a fixed priority — taxonomy > genre >
+        # individual > location > general — so a type-agnostic caller
+        # (e.g. typing into a generic keyword input) doesn't silently
+        # bind to a hand-tagged 'general' duplicate when a canonical
+        # typed row exists. Tie-break by id for determinism.
+        # NB: SQL literals here are constants, not parameter bindings.
+        type_priority_case = (
+            "CASE type "
+            "WHEN 'taxonomy' THEN 0 "
+            "WHEN 'genre' THEN 1 "
+            "WHEN 'individual' THEN 2 "
+            "WHEN 'location' THEN 3 "
+            "ELSE 4 END"
+        )
         if parent_id is None:
             if kw_type is None:
                 existing = self.conn.execute(
-                    "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
-                    "AND parent_id IS NULL ORDER BY id ASC LIMIT 1",
+                    f"SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    f"AND parent_id IS NULL "
+                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
                     (name,),
                 ).fetchone()
             else:
                 existing = self.conn.execute(
-                    f"SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
-                    f"AND parent_id IS NULL {type_preference}",
+                    "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    "AND parent_id IS NULL "
+                    "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
                     (name, kw_type),
                 ).fetchone()
         else:
             if kw_type is None:
                 existing = self.conn.execute(
-                    "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
-                    "AND parent_id = ? ORDER BY id ASC LIMIT 1",
+                    f"SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    f"AND parent_id = ? "
+                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
                     (name, parent_id),
                 ).fetchone()
             else:
                 existing = self.conn.execute(
-                    f"SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
-                    f"AND parent_id = ? {type_preference}",
+                    "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    "AND parent_id = ? "
+                    "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
                     (name, parent_id, kw_type),
                 ).fetchone()
         if existing:
