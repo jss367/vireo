@@ -2525,10 +2525,13 @@ class Database:
         and ``keyword_location_name`` (the location keyword's name when EXIF is
         absent, NULL otherwise) so the map can show provenance.
         """
+        # Paired fallback: either BOTH EXIF axes win, or BOTH keyword axes win.
+        # Per-axis COALESCE would let a photo with partial EXIF (only one axis
+        # populated) emit a mixed pair, producing wrong markers.
         conditions = [
             "wf.workspace_id = ?",
-            "COALESCE(p.latitude, kl.latitude) IS NOT NULL",
-            "COALESCE(p.longitude, kl.longitude) IS NOT NULL",
+            "((p.latitude IS NOT NULL AND p.longitude IS NOT NULL) "
+            " OR (kl.latitude IS NOT NULL AND kl.longitude IS NOT NULL))",
         ]
         params = [self._ws_id()]
 
@@ -2612,8 +2615,10 @@ class Database:
 
         query = f"""
             SELECT p.id,
-                   COALESCE(p.latitude, kl.latitude) AS latitude,
-                   COALESCE(p.longitude, kl.longitude) AS longitude,
+                   CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+                        THEN p.latitude ELSE kl.latitude END AS latitude,
+                   CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+                        THEN p.longitude ELSE kl.longitude END AS longitude,
                    CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
                         THEN 'exif' ELSE 'keyword' END AS coord_source,
                    CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL

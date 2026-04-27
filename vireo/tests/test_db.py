@@ -2554,6 +2554,46 @@ def test_get_geolocated_photos_excludes_photos_with_neither(tmp_path):
     assert rows == []
 
 
+def test_get_geolocated_photos_with_partial_exif_uses_keyword_pair(tmp_path):
+    """A photo with only one EXIF axis populated must NOT mix EXIF lat with
+    keyword lng (or vice versa) — that produces a wrong marker location.
+    The fallback decision is paired: either both EXIF axes win, or both
+    keyword axes win."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    pid = db.add_photo(folder_id=fid, filename='partial.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    # Partial EXIF: latitude present, longitude missing (sometimes seen on
+    # corrupt EXIF or when only one half of GPS lat/lng was decoded).
+    db.conn.execute(
+        "UPDATE photos SET latitude=?, longitude=NULL WHERE id=?",
+        (37.7749, pid),
+    )
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?)",
+        ('Central Park', 40.7829, -73.9654),
+    )
+    kid = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+
+    rows = db.get_geolocated_photos()
+    assert len(rows) == 1
+    r = rows[0]
+    # Coords must come as a pair from the keyword (not 37.7749 + -73.9654,
+    # which would put the marker in the middle of the Pacific).
+    assert r['latitude'] == 40.7829, "expected paired keyword lat, got mixed"
+    assert r['longitude'] == -73.9654, "expected paired keyword lng, got mixed"
+    assert r['coord_source'] == 'keyword'
+    assert r['keyword_location_name'] == 'Central Park'
+
+
 def test_get_accepted_species(tmp_path):
     """get_accepted_species returns distinct marker species from geolocated photos."""
     from db import Database
