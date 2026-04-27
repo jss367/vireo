@@ -279,3 +279,9 @@ def test_default_subject_types_includes_taxonomy_individual_genre(tmp_path, monk
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
     loaded = cfg.load()
     assert set(loaded.get("subject_types", [])) == {"taxonomy", "individual", "genre"}
+
+
+def test_google_maps_api_key_default_is_empty(tmp_path, monkeypatch):
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    assert cfg.load().get("google_maps_api_key") == ""

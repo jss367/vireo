@@ -23,6 +23,7 @@ DEFAULTS = {
     "max_edit_history": 1000,
     "inat_token": "",
     "hf_token": "",
+    "google_maps_api_key": "",
     "scan_roots": [],
     "scan_workers": 0,
     "setup_complete": False,

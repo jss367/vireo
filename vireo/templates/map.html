@@ -199,6 +199,14 @@ body { padding-bottom: 36px; }
 }
 .photo-popup .popup-link:hover { text-decoration: underline; }
 
+.photo-popup .popup-provenance {
+  font-size: 10px;
+  color: var(--text-dim, #888);
+  margin-top: 4px;
+  border-top: 1px solid var(--border, #1a4a5a);
+  padding-top: 4px;
+}
+
 .popup-stars { color: var(--warning); font-size: 11px; }
 
 /* Species legend control */
@@ -574,12 +582,21 @@ async function loadPhotos() {
         ? '<div class="popup-species">' + escapeHtml(p.species) + '</div>'
         : '';
 
+      var provenanceLine = '';
+      if (p.coord_source === 'keyword' && p.keyword_location_name) {
+        provenanceLine = '<div class="popup-provenance">\u{1F4CD} from location: '
+          + escapeHtml(p.keyword_location_name) + '</div>';
+      } else if (p.coord_source === 'exif') {
+        provenanceLine = '<div class="popup-provenance">\u{1F4CD} from EXIF GPS</div>';
+      }
+
       var popup = '<div class="photo-popup">'
         + imgTag
         + '<div class="popup-title">' + escapeHtml(p.filename) + '</div>'
         + '<div class="popup-meta">' + escapeHtml(formatDate(p.timestamp)) + ' ' + buildStars(p.rating) + '</div>'
         + speciesLine
         + '<a class="popup-link" href="/browse?photo_id=' + p.id + '">View in Browse &rarr;</a>'
+        + provenanceLine
         + '</div>';
 
       var color = getSpeciesColor(p.species);
