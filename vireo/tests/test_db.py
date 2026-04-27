@@ -7115,6 +7115,54 @@ def test_backfill_wildlife_genre_matches_legacy_is_species_rows(tmp_path):
     )
 
 
+def test_backfill_wildlife_genre_after_mark_picks_up_plaintext_species(tmp_path):
+    """Regression: plain-text species tags on upgraded DBs start as
+    ``is_species=0`` and ``type != 'taxonomy'``; only ``mark_species_keywords``
+    can retype them via taxonomy lookup. The Wildlife backfill is one-shot via
+    ``wildlife_backfill_done`` and only matches ``type='taxonomy' OR is_species=1``,
+    so it MUST run after ``mark_species_keywords`` — otherwise it sets the
+    marker on a zero-row scan and never retries.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    # Plain-text species tag: type='general', is_species=0 — neither flag set.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 0)",
+        ("Robin",),
+    )
+    sp = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, sp),
+    )
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        def lookup(self, name):
+            return {"taxon_id": 1} if name == "Robin" else None
+
+    # Order matches startup: mark first, then backfill.
+    db.mark_species_keywords(FakeTaxonomy())
+    db.backfill_wildlife_genre()
+
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    has_wildlife = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is True, (
+        "Plain-text species tags must be retyped by mark_species_keywords "
+        "before backfill_wildlife_genre runs, so the backfill scan sees them."
+    )
+
+
 def test_tag_photo_legacy_is_species_keyword_adds_wildlife_genre(tmp_path):
     """Regression: auto-Wildlife must fire for legacy species rows whose
     ``type`` hasn't been retyped to ``taxonomy`` yet (is_species=1 with

@@ -3729,12 +3729,12 @@ class Database:
         (a user who intentionally removed Wildlife from a species-tagged
         photo would see it re-added on the next app restart).
 
-        Matches keywords by ``type='taxonomy' OR is_species=1`` so the backfill
-        works on upgraded databases whose species rows still carry legacy
-        ``is_species=1`` but have not yet been retyped to ``taxonomy`` by the
-        background ``mark_species_keywords`` pass. Without that, the backfill
-        could write the one-shot marker after matching zero rows and never
-        run again, leaving species photos un-Wildlife'd.
+        Matches keywords by ``type='taxonomy' OR is_species=1``. Plain-text
+        species tags on upgraded DBs start as ``is_species=0`` /
+        non-taxonomy and won't be matched until ``mark_species_keywords``
+        retypes them — so callers must run that pass *before* this backfill
+        on upgraded databases, otherwise the one-shot marker gets set on a
+        zero-row scan and species photos are permanently missed.
 
         Args:
             force: re-run even if the marker is set. Used by tests; not for

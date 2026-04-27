@@ -660,30 +660,38 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # because the target name already exists, leaving a duplicate.
     init_db.migrate_default_subject_collection()
     init_db.create_default_collections()
-    # Wildlife backfill: gated by a db_meta marker so it runs at most once
-    # per database. Kept in create_app rather than __init__ because (unlike
-    # migrate_legacy_keyword_types) the warm-path still requires a write to
-    # set the marker on first run, and we don't want that on every _get_db().
-    # migrate_legacy_keyword_types runs in Database.__init__ now (before
-    # ensure_default_genre_keywords) so the seed sees normalized types.
-    init_db.backfill_wildlife_genre()
 
-    # Mark species keywords from taxonomy in background (avoids slow startup)
+    # Mark species keywords from taxonomy in background (avoids slow startup),
+    # then run the Wildlife backfill. Order matters: the backfill is one-shot
+    # via a db_meta marker, and it only matches rows where
+    # ``type='taxonomy' OR is_species=1``. Plain-text species tags on upgraded
+    # DBs start as ``is_species=0`` / non-taxonomy and only get retyped by
+    # ``mark_species_keywords``. Running the backfill before that pass would
+    # match zero rows on first boot and set the marker, permanently leaving
+    # those photos un-Wildlife'd.
     import threading
 
     def _mark_species():
         from taxonomy import load_local_taxonomy
 
-        tax = load_local_taxonomy()
-        if tax is None:
-            return
         try:
             bg_db = Database(db_path)
-            updated = bg_db.mark_species_keywords(tax)
-            if updated:
-                log.info("Marked %d keywords as species from taxonomy", updated)
         except Exception:
-            log.debug("Could not mark species from taxonomy", exc_info=True)
+            log.debug("Could not open background db for species marking", exc_info=True)
+            return
+        tax = load_local_taxonomy()
+        if tax is not None:
+            try:
+                updated = bg_db.mark_species_keywords(tax)
+                if updated:
+                    log.info("Marked %d keywords as species from taxonomy", updated)
+            except Exception:
+                log.debug("Could not mark species from taxonomy", exc_info=True)
+                return
+        try:
+            bg_db.backfill_wildlife_genre()
+        except Exception:
+            log.debug("Wildlife backfill failed", exc_info=True)
 
     threading.Thread(target=_mark_species, daemon=True).start()
 
