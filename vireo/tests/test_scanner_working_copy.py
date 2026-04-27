@@ -393,6 +393,94 @@ def test_no_working_copy_for_small_jpeg(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Candidate-count helper (drives the startup gate + before/after totals)
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_count_excludes_small_jpegs(tmp_path, monkeypatch):
+    """A row that the extractor would skip must not show up as a candidate.
+
+    Small JPEGs (under ``working_copy_max_size``) are intentionally left
+    without working copies, so a library of only small JPEGs has zero
+    backfill work to do.
+    """
+    import config as cfg
+    from db import Database
+    from scanner import working_copy_backfill_candidate_count
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 1000, "working_copy_quality": 90})
+
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    src = folder / "small.jpg"
+    _make_jpeg(str(src), 800, 600)
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(folder))
+    db.add_photo(
+        folder_id, "small.jpg", ".jpg",
+        file_size=os.path.getsize(str(src)),
+        file_mtime=os.path.getmtime(str(src)),
+        width=800, height=600,
+    )
+
+    assert working_copy_backfill_candidate_count(db) == 0
+
+
+def test_candidate_count_includes_large_jpeg(tmp_path, monkeypatch):
+    """An oversized JPEG is a real backfill candidate."""
+    import config as cfg
+    from db import Database
+    from scanner import working_copy_backfill_candidate_count
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 1000, "working_copy_quality": 90})
+
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    src = folder / "big.jpg"
+    _make_jpeg(str(src), 2000, 1500)
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(folder))
+    db.add_photo(
+        folder_id, "big.jpg", ".jpg",
+        file_size=os.path.getsize(str(src)),
+        file_mtime=os.path.getmtime(str(src)),
+        width=2000, height=1500,
+    )
+
+    assert working_copy_backfill_candidate_count(db) == 1
+
+
+def test_candidate_count_includes_raw(tmp_path, monkeypatch):
+    """RAW photos are always candidates regardless of recorded dimensions."""
+    import config as cfg
+    from db import Database
+    from scanner import working_copy_backfill_candidate_count
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 1000, "working_copy_quality": 90})
+
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    raw = folder / "shot.nef"
+    raw.write_bytes(b"\x00" * 16)  # contents irrelevant for the SELECT
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(folder))
+    db.add_photo(
+        folder_id, "shot.nef", ".nef",
+        file_size=os.path.getsize(str(raw)),
+        file_mtime=os.path.getmtime(str(raw)),
+        width=None, height=None,
+    )
+
+    assert working_copy_backfill_candidate_count(db) == 1
+
+
+# ---------------------------------------------------------------------------
 # Library-wide backfill (used by the startup self-healing job)
 # ---------------------------------------------------------------------------
 
@@ -748,6 +836,59 @@ def test_startup_backfill_skips_when_no_candidates(tmp_path, monkeypatch):
         if j["type"] == "working_copy_backfill"
     ]
     assert backfill_jobs == []
+
+
+def test_startup_backfill_skips_for_small_jpeg_only_library(tmp_path, monkeypatch):
+    """Small JPEGs (under working_copy_max_size) are intentionally not extracted.
+
+    The startup gate must skip them rather than launching a no-op backfill on
+    every restart. Regression test for a library that contains only small
+    JPEGs — naive ``working_copy_path IS NULL`` check would fire forever.
+    """
+    import os
+
+    import config as cfg
+    import models
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 1000, "working_copy_quality": 90})
+
+    from app import create_app
+    from db import Database
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir()
+    db_path = str(vireo_dir / "test.db")
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src = photos_dir / "small.jpg"
+    _make_jpeg(str(src), 800, 600)  # below the 1000 cap
+
+    db = Database(db_path)
+    folder_id = db.add_folder(str(photos_dir))
+    db.add_photo(
+        folder_id, "small.jpg", ".jpg",
+        file_size=os.path.getsize(str(src)),
+        file_mtime=os.path.getmtime(str(src)),
+        width=800, height=600,
+    )
+    db.conn.close()
+
+    app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir), api_token="t")
+    app._kickoff_working_copy_backfill()
+
+    backfill_jobs = [
+        j for j in app._job_runner.list_jobs()
+        if j["type"] == "working_copy_backfill"
+    ]
+    assert backfill_jobs == [], (
+        "small-JPEG-only library should not trigger working_copy_backfill"
+    )
 
 
 def test_startup_backfill_runs_when_candidates_exist(tmp_path, monkeypatch):

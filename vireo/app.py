@@ -709,23 +709,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # persisting would be noise). Skipped entirely when a fast EXISTS check
     # confirms no candidates remain, so steady-state restarts pay nothing.
     def _kickoff_working_copy_backfill():
-        from scanner import backfill_working_copies
+        from scanner import (
+            backfill_working_copies,
+            working_copy_backfill_candidate_count,
+        )
 
         try:
             wcdb = Database(db_path)
-            has_candidates = wcdb.conn.execute(
-                "SELECT 1 FROM photos"
-                " WHERE working_copy_path IS NULL"
-                "   AND (working_copy_failed_at IS NULL"
-                "        OR working_copy_failed_mtime IS NULL"
-                "        OR file_mtime IS NULL"
-                "        OR working_copy_failed_mtime != file_mtime)"
-                " LIMIT 1"
-            ).fetchone()
+            # Defer to scanner's own predicate so the gate matches what
+            # ``_extract_working_copies`` will actually process. A naive
+            # ``working_copy_path IS NULL`` check would also fire on
+            # libraries of only small JPEGs (which the extractor
+            # intentionally skips), launching a no-op backfill on every
+            # restart.
+            candidate_count = working_copy_backfill_candidate_count(wcdb)
         except Exception:
             log.exception("Working-copy backfill: candidate check failed")
             return
-        if not has_candidates:
+        if candidate_count == 0:
             log.debug("Working-copy backfill: no candidates, skipping")
             return
 

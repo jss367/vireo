@@ -499,6 +499,57 @@ def _subtree_like_pattern(path, sep=None):
     return _escape(path) + _escape(sep) + "%"
 
 
+def _working_copy_candidate_predicate(wc_max_size, alias=""):
+    """Build the WHERE-clause fragment selecting photos eligible for working-copy
+    extraction, plus its bind parameters.
+
+    Mirrors the candidate criteria inside ``_extract_working_copies`` so the
+    startup self-healing gate and the backfill summary counts don't drift from
+    the extractor's actual SELECT — otherwise a library of only small JPEGs
+    (which the extractor intentionally skips) would still satisfy a naive
+    ``working_copy_path IS NULL`` check and trigger a no-op backfill on every
+    restart.
+
+    ``alias`` is the table alias (e.g. ``"p"``) when the caller's query joins
+    other tables; pass ``""`` when ``photos`` is unaliased.
+    """
+    p = (alias + ".") if alias else ""
+    placeholders = ",".join("?" for _ in RAW_EXTENSIONS)
+    params = list(RAW_EXTENSIONS)
+    jpeg_clause = ""
+    if wc_max_size and wc_max_size > 0:
+        jpeg_clause = (
+            f" OR (LOWER({p}extension) IN ('.jpg', '.jpeg', 'jpg', 'jpeg')"
+            f"     AND ({p}width > ? OR {p}height > ?))"
+        )
+        params.extend([wc_max_size, wc_max_size])
+    where = (
+        f"{p}working_copy_path IS NULL"
+        f" AND ({p}extension IN ({placeholders}){jpeg_clause})"
+        f" AND ({p}working_copy_failed_at IS NULL"
+        f"      OR {p}working_copy_failed_mtime IS NULL"
+        f"      OR {p}file_mtime IS NULL"
+        f"      OR {p}working_copy_failed_mtime != {p}file_mtime)"
+    )
+    return where, params
+
+
+def working_copy_backfill_candidate_count(db):
+    """Count photos that ``_extract_working_copies`` would actually process.
+
+    Used by the startup gate (skip the backfill job entirely when zero) and
+    by ``backfill_working_copies`` for accurate before/after reporting.
+    """
+    import config as cfg
+
+    user_cfg = cfg.load()
+    wc_max_size = user_cfg.get("working_copy_max_size", 4096)
+    where, params = _working_copy_candidate_predicate(wc_max_size)
+    return db.conn.execute(
+        f"SELECT COUNT(*) FROM photos WHERE {where}", params
+    ).fetchone()[0]
+
+
 def _extract_working_copies(db, vireo_dir, progress_callback=None,
                             status_callback=None, scope=None,
                             cancel_check=None):
@@ -540,22 +591,12 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
     wc_max_size = user_cfg.get("working_copy_max_size", 4096)
     wc_quality = user_cfg.get("working_copy_quality", 92)
 
-    # Select photos that need a working copy:
-    #   - All RAW files without one.
-    #   - Large JPEGs (width or height exceeds working_copy_max_size)
-    #     without one — these get a downsized working copy so every
-    #     derivative (thumbnail, preview) reads from the same canonical
-    #     image. Skipped when wc_max_size <= 0 (the "full resolution"
-    #     sentinel), where there is no cap to enforce.
-    placeholders = ",".join("?" for _ in RAW_EXTENSIONS)
-    params = list(RAW_EXTENSIONS)
-    jpeg_clause = ""
-    if wc_max_size and wc_max_size > 0:
-        jpeg_clause = (
-            " OR (LOWER(p.extension) IN ('.jpg', '.jpeg', 'jpg', 'jpeg')"
-            "     AND (p.width > ? OR p.height > ?))"
-        )
-        params.extend([wc_max_size, wc_max_size])
+    # Candidate criteria (NULL working_copy_path + RAW or oversized JPEG +
+    # not blocked by a stale failure marker) is shared with the startup gate
+    # via ``_working_copy_candidate_predicate`` so the two stay in sync.
+    candidate_where, params = _working_copy_candidate_predicate(
+        wc_max_size, alias="p"
+    )
 
     scope_clause = ""
     if scope is not None:
@@ -580,18 +621,6 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
                 params.extend([path, _subtree_like_pattern(path)])
         scope_clause = " AND (" + " OR ".join(scope_terms) + ")"
 
-    # Skip rows whose previous extraction failed at the same file_mtime.
-    # NULL marker (never tried, or content changed via _invalidate_derived_caches)
-    # means "eligible". The IS NOT NULL on file_mtime guards the comparison
-    # itself: a row with no recorded mtime should not be permanently locked
-    # out by a stale failure marker.
-    failure_skip = (
-        " AND (p.working_copy_failed_at IS NULL"
-        "      OR p.working_copy_failed_mtime IS NULL"
-        "      OR p.file_mtime IS NULL"
-        "      OR p.working_copy_failed_mtime != p.file_mtime)"
-    )
-
     rows = db.conn.execute(
         f"""
         SELECT p.id, p.filename, p.companion_path, p.working_copy_path,
@@ -599,13 +628,8 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
                f.path AS folder_path
           FROM photos p
           JOIN folders f ON f.id = p.folder_id
-         WHERE p.working_copy_path IS NULL
-           AND (
-               p.extension IN ({placeholders})
-               {jpeg_clause}
-           )
+         WHERE {candidate_where}
            {scope_clause}
-           {failure_skip}
         """,
         params,
     ).fetchall()
@@ -691,14 +715,7 @@ def backfill_working_copies(db, vireo_dir, progress_callback=None,
     design: the bottleneck is a slow external disk where parallel reads
     thrash. If profiling later disagrees, swap in a worker pool here.
     """
-    before_pending = db.conn.execute(
-        "SELECT COUNT(*) FROM photos"
-        " WHERE working_copy_path IS NULL"
-        "   AND (working_copy_failed_at IS NULL"
-        "        OR working_copy_failed_mtime IS NULL"
-        "        OR file_mtime IS NULL"
-        "        OR working_copy_failed_mtime != file_mtime)"
-    ).fetchone()[0]
+    before_pending = working_copy_backfill_candidate_count(db)
 
     _extract_working_copies(
         db, vireo_dir,
@@ -708,14 +725,7 @@ def backfill_working_copies(db, vireo_dir, progress_callback=None,
         cancel_check=cancel_check,
     )
 
-    after_pending = db.conn.execute(
-        "SELECT COUNT(*) FROM photos"
-        " WHERE working_copy_path IS NULL"
-        "   AND (working_copy_failed_at IS NULL"
-        "        OR working_copy_failed_mtime IS NULL"
-        "        OR file_mtime IS NULL"
-        "        OR working_copy_failed_mtime != file_mtime)"
-    ).fetchone()[0]
+    after_pending = working_copy_backfill_candidate_count(db)
 
     succeeded = db.conn.execute(
         "SELECT COUNT(*) FROM photos WHERE working_copy_path IS NOT NULL"
