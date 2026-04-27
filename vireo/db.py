@@ -3417,7 +3417,7 @@ class Database:
         id.
         """
         if place_id is not None:
-            cur = self.conn.execute(
+            insert_sql = (
                 "INSERT INTO keywords "
                 "(name, parent_id, type, place_id, latitude, longitude) "
                 "VALUES (?, ?, 'location', ?, ?, ?) "
@@ -3426,10 +3426,35 @@ class Database:
                 "  parent_id = excluded.parent_id, "
                 "  latitude = excluded.latitude, "
                 "  longitude = excluded.longitude "
-                "RETURNING id",
-                (name, parent_id, place_id, latitude, longitude),
+                "RETURNING id"
             )
-            return cur.fetchone()["id"]
+            try:
+                cur = self.conn.execute(
+                    insert_sql, (name, parent_id, place_id, latitude, longitude),
+                )
+                return cur.fetchone()["id"]
+            except sqlite3.IntegrityError:
+                # ON CONFLICT(place_id) handles same-place-id re-picks. The
+                # remaining failure mode is the table-level UNIQUE(name,
+                # parent_id): a *different* keyword (different place_id, or
+                # NULL place_id) already occupies this slot. Disambiguate the
+                # new row's name by appending a short place_id suffix and
+                # retry. Realistic case: two distinct Google places with the
+                # same name under the same parent (e.g. two parks named
+                # "Riverside Park" in the same state).
+                suffix = place_id[-8:]
+                disambiguated = f"{name} ({suffix})"
+                try:
+                    cur = self.conn.execute(
+                        insert_sql,
+                        (disambiguated, parent_id, place_id, latitude, longitude),
+                    )
+                    return cur.fetchone()["id"]
+                except sqlite3.IntegrityError as inner_err:
+                    raise RuntimeError(
+                        f"keyword '{name}' (parent_id={parent_id}) collides "
+                        f"with an existing row even after disambiguation"
+                    ) from inner_err
 
         if parent_id is None:
             existing = self.conn.execute(

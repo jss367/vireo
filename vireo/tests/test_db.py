@@ -6890,6 +6890,84 @@ def test_upsert_place_chain_raises_on_cross_type_collision(db):
         db.upsert_place_chain(_central_park_details())
 
 
+def test_upsert_one_keyword_handles_homonymous_places(db):
+    """Two distinct Google places with different place_ids that share the
+    same (name, parent_id) chain slot must both succeed. The current
+    ON CONFLICT(place_id) handler doesn't catch the (name, parent_id)
+    UNIQUE constraint, so the second insert previously surfaced as a 500
+    from the API. Disambiguate by appending a short place_id suffix to
+    the second row's name.
+    """
+    # Realistic-ish setup: two Google places that share the same name AND
+    # the same parent. Rare in practice (parents usually disambiguate), but
+    # Google can return the same address_components for distinct points.
+    state_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES (?, 'location', NULL)",
+        ("New York",),
+    ).lastrowid
+    db.conn.commit()
+
+    first_id = db._upsert_one_keyword(
+        name="Riverside Park",
+        parent_id=state_id,
+        place_id="ChIJ_Riverside_A",
+        latitude=40.80,
+        longitude=-73.97,
+    )
+    second_id = db._upsert_one_keyword(
+        name="Riverside Park",
+        parent_id=state_id,
+        place_id="ChIJ_Riverside_B",
+        latitude=40.85,
+        longitude=-73.95,
+    )
+    assert first_id != second_id, "homonymous places must be distinct rows"
+    rows = db.conn.execute(
+        "SELECT id, name, place_id FROM keywords "
+        "WHERE place_id IN ('ChIJ_Riverside_A', 'ChIJ_Riverside_B') "
+        "ORDER BY id"
+    ).fetchall()
+    assert len(rows) == 2
+    # First row keeps its plain name; second is disambiguated.
+    assert rows[0]["name"] == "Riverside Park"
+    assert rows[0]["place_id"] == "ChIJ_Riverside_A"
+    assert rows[1]["place_id"] == "ChIJ_Riverside_B"
+    # Disambiguated name should be different from the first; format is an
+    # implementation detail, but it must contain enough of the place_id to
+    # make collisions astronomically unlikely.
+    assert rows[1]["name"] != "Riverside Park"
+    assert "Riverside Park" in rows[1]["name"]
+
+
+def test_upsert_one_keyword_homonymous_idempotent(db):
+    """Re-upserting the SAME (place_id) after disambiguation still hits
+    the ON CONFLICT(place_id) path and returns the same id (no extra rows)."""
+    state_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES (?, 'location', NULL)",
+        ("New York",),
+    ).lastrowid
+    db.conn.commit()
+    db._upsert_one_keyword(
+        name="Riverside Park", parent_id=state_id,
+        place_id="ChIJ_Riverside_A", latitude=40.80, longitude=-73.97,
+    )
+    second_id = db._upsert_one_keyword(
+        name="Riverside Park", parent_id=state_id,
+        place_id="ChIJ_Riverside_B", latitude=40.85, longitude=-73.95,
+    )
+    # Re-upsert with the same place_id (B) — should hit ON CONFLICT(place_id)
+    # and return the SAME id without trying the disambiguation path again.
+    second_id_again = db._upsert_one_keyword(
+        name="Riverside Park", parent_id=state_id,
+        place_id="ChIJ_Riverside_B", latitude=40.85, longitude=-73.95,
+    )
+    assert second_id == second_id_again
+    n_rows = db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE place_id LIKE 'ChIJ_Riverside_%'"
+    ).fetchone()[0]
+    assert n_rows == 2, "no extra rows from idempotent re-upsert"
+
+
 # --- Task 7: reverse-geocode cache get/put -----------------------------------
 
 
