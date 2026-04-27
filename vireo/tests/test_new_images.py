@@ -130,6 +130,81 @@ def test_mapped_roots_excludes_folder_with_any_linked_ancestor(db_with_workspace
     )
 
 
+def test_progress_callback_fires_during_walk_and_on_completion(db_with_workspace):
+    """count_new_images_for_workspace must invoke an optional progress_callback
+    while walking and once at the end, so the new-images job entry can stream
+    a live ``files checked / new found`` counter.
+
+    We disable throttling (``progress_every=1``) so the test sees a callback per
+    file and can assert monotonic counts; the production caller passes a larger
+    interval to keep event volume bounded.
+    """
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    for i in range(3):
+        _touch_image(str(root / f"IMG_{i:03d}.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    events = []
+
+    def cb(files_checked, new_found):
+        events.append((files_checked, new_found))
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(
+        db, ws_id, progress_callback=cb, progress_every=1,
+    )
+
+    assert result["new_count"] == 3
+    assert events, "progress_callback was never invoked"
+    # Counters must be monotonic non-decreasing.
+    for prev, nxt in zip(events, events[1:], strict=False):
+        assert nxt[0] >= prev[0]
+        assert nxt[1] >= prev[1]
+    # Final event reflects the totals so the UI can show a clean end state.
+    assert events[-1] == (3, 3)
+
+
+def test_progress_callback_throttled_by_progress_every(db_with_workspace):
+    """With progress_every=N, the callback fires every N files plus one final
+    call. Keeps event volume sane on 25k-file libraries.
+    """
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    for i in range(5):
+        _touch_image(str(root / f"IMG_{i:03d}.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    events = []
+    from new_images import count_new_images_for_workspace
+    count_new_images_for_workspace(
+        db, ws_id,
+        progress_callback=lambda c, n: events.append((c, n)),
+        progress_every=2,
+    )
+
+    # 5 files at every-2 throttling => mid-walk events at ~2,4 plus a final
+    # event with totals (5, 5). We don't pin the exact mid-walk count list
+    # because filesystem ordering is platform-dependent; the contract is
+    # "at most one event per progress_every files, plus one final".
+    assert events, "progress_callback was never invoked"
+    assert events[-1] == (5, 5)
+    # No more than ceil(5/2) intermediate + 1 final = 4 total events.
+    assert len(events) <= 4
+
+
+def test_count_new_images_works_without_progress_callback(db_with_workspace):
+    """Backwards-compatible: callers that don't pass progress_callback still work."""
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG_001.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+    assert result["new_count"] == 1
+
+
 def test_count_new_images_basename_collision_across_subdirs(db_with_workspace):
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"

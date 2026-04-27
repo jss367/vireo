@@ -192,6 +192,180 @@ def test_api_new_images_returns_error_when_compute_fails(app_and_db, monkeypatch
     assert data["workspace_id"] == ws_id
 
 
+def test_api_new_images_registers_ephemeral_job_on_cache_cold(app_and_db, monkeypatch):
+    """When the new-images walk has to actually run (cache cold, no error
+    backoff), an ephemeral ``new_images_walk`` job appears in the active jobs
+    list while it runs, and is *not* persisted to job_history when it
+    finishes. This is the transparency hook: the user can see the walk
+    happening in the bottom panel rather than the silent background thread.
+    """
+    import threading
+    import time
+
+    import new_images as new_images_module
+
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    release = threading.Event()
+    started = threading.Event()
+    real_count = new_images_module.count_new_images_for_workspace
+
+    def slow_count(*args, **kwargs):
+        started.set()
+        release.wait(timeout=5)
+        return real_count(*args, **kwargs)
+
+    monkeypatch.setattr(
+        new_images_module, "count_new_images_for_workspace", slow_count,
+    )
+
+    client = app.test_client()
+    try:
+        resp = client.get("/api/workspaces/active/new-images")
+        assert resp.status_code == 200
+        # While the walk is blocked, /api/jobs must show our ephemeral job.
+        deadline = time.monotonic() + 2.0
+        walk_jobs = []
+        while time.monotonic() < deadline:
+            jobs_resp = client.get("/api/jobs")
+            jobs_data = jobs_resp.get_json()
+            walk_jobs = [
+                j for j in jobs_data["active"]
+                if j["type"] == "new_images_walk"
+            ]
+            if walk_jobs:
+                break
+            time.sleep(0.02)
+        assert walk_jobs, (
+            "expected a new_images_walk job in /api/jobs while walk is in flight"
+        )
+        job = walk_jobs[0]
+        assert job["status"] == "running"
+        assert job["workspace_id"] == ws_id
+        # Job is tied to the workspace via config.workspace_name for the UI label.
+        assert "workspace_name" in job["config"]
+    finally:
+        release.set()
+
+    # After the walk finishes, no row was written to job_history — ephemeral.
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        jobs_data = client.get("/api/jobs").get_json()
+        if not any(j["type"] == "new_images_walk" and j["status"] == "running"
+                   for j in jobs_data["active"]):
+            break
+        time.sleep(0.02)
+    history_rows = db.conn.execute(
+        "SELECT id FROM job_history WHERE type = 'new_images_walk'"
+    ).fetchall()
+    assert history_rows == [], (
+        f"new_images_walk must not persist to job_history, got {history_rows}"
+    )
+
+
+def test_api_new_images_job_marked_failed_when_walk_raises(app_and_db, monkeypatch):
+    """If the cache worker raises (unreadable volume, DB error, etc.) the
+    ephemeral job must be reported as ``failed`` rather than ``completed``.
+
+    Without this, /api/jobs and /api/workspaces/active/new-images disagree:
+    the endpoint surfaces an error via get_recent_error but the job entry
+    still says it succeeded — misleading the user about what actually
+    happened.
+    """
+    import time
+
+    import new_images as new_images_module
+
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk unreachable")
+
+    monkeypatch.setattr(
+        new_images_module, "count_new_images_for_workspace", boom,
+    )
+
+    client = app.test_client()
+    client.get("/api/workspaces/active/new-images")
+
+    deadline = time.monotonic() + 2.0
+    walk_job = None
+    while time.monotonic() < deadline:
+        active = client.get("/api/jobs").get_json()["active"]
+        candidates = [j for j in active if j["type"] == "new_images_walk"]
+        if candidates and candidates[0]["status"] in ("failed", "completed"):
+            walk_job = candidates[0]
+            break
+        time.sleep(0.02)
+
+    assert walk_job is not None, "ephemeral new_images_walk job never finished"
+    assert walk_job["status"] == "failed", (
+        f"job should be 'failed' when walk raised, got {walk_job['status']}; "
+        f"errors={walk_job.get('errors')}"
+    )
+    # The walker's exception message is preserved on the job so the user can
+    # see WHY it failed in the bottom panel, not just that something failed.
+    assert any("disk unreachable" in e for e in walk_job["errors"]), (
+        f"job errors should include the walker's failure message; "
+        f"got {walk_job['errors']}"
+    )
+
+
+def test_api_new_images_no_extra_job_on_cache_hit(app_and_db):
+    """A second request that hits the cache must NOT spawn another job entry —
+    only the cache-cold path surfaces a job, otherwise every navbar poll
+    would clutter the jobs list.
+    """
+    import time
+
+    from new_images import get_shared_cache
+
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    client = app.test_client()
+    # Prime the cache.
+    client.get("/api/workspaces/active/new-images")
+    cache = get_shared_cache()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if cache.get(db._db_path, ws_id) is not None:
+            break
+        time.sleep(0.01)
+    assert cache.get(db._db_path, ws_id) is not None
+
+    # Wait for any prior job to leave the running state, then count.
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        active = client.get("/api/jobs").get_json()["active"]
+        if not any(j["type"] == "new_images_walk" and j["status"] == "running"
+                   for j in active):
+            break
+        time.sleep(0.02)
+
+    before = sum(
+        1 for j in client.get("/api/jobs").get_json()["active"]
+        if j["type"] == "new_images_walk"
+    )
+    # Cache hit — should not spawn anything new.
+    client.get("/api/workspaces/active/new-images")
+    after = sum(
+        1 for j in client.get("/api/jobs").get_json()["active"]
+        if j["type"] == "new_images_walk"
+    )
+    assert after == before, (
+        f"cache hits must not spawn new jobs (before={before}, after={after})"
+    )
+
+
 def test_api_new_images_does_not_hot_loop_on_persistent_failure(app_and_db, monkeypatch):
     """Repeated requests within the error backoff window must not spawn a
     fresh compute every time — otherwise a broken volume gets hammered by

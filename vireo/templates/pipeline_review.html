@@ -8,12 +8,11 @@
 <link rel="stylesheet" href="/static/vireo-base.css">
 <title>Vireo - Pipeline Review</title>
 <style>
-body { padding-bottom: 36px; }
-
 /* Layout: sidebar + main */
 .pipeline-layout {
   display: flex;
-  min-height: calc(100vh - 44px);
+  height: calc(100vh - 48px - var(--bottom-offset, 28px));
+  overflow: hidden;
 }
 
 /* -- Sidebar -- */
@@ -727,13 +726,43 @@ input[type="range"]::-moz-range-thumb {
   background: var(--bg-tertiary);
   border-radius: 6px;
   overflow: hidden;
-  cursor: pointer;
+  cursor: grab;
   border: 2px solid transparent;
   transition: border-color 0.15s;
+  position: relative;
 }
 .grm-card:hover { border-color: var(--text-ghost); }
 .grm-card.selected { border-color: var(--accent); }
 .grm-card.ai-best { border-color: var(--warning); }
+.grm-card.dragging { cursor: grabbing; }
+.grm-card.dragging img { pointer-events: none; }
+.grm-card.has-offset::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  z-index: 3;
+}
+.grm-reset-offsets-btn {
+  display: none;
+  margin: 6px 12px 0;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  align-self: center;
+}
+.grm-reset-offsets-btn.visible { display: inline-block; }
+.grm-reset-offsets-btn:hover { color: var(--text-primary); }
 .grm-card img {
   width: 100%;
   aspect-ratio: 3/2;
@@ -1059,6 +1088,7 @@ input[type="range"]::-moz-range-thumb {
         <div class="grm-loupe-crosshair-v" id="grmCrosshairV"></div>
       </div>
       <div class="grm-loupe-info" id="grmLoupeInfo">Select a photo to preview. Hover to compare sharpness across all frames.</div>
+      <button type="button" class="grm-reset-offsets-btn" id="grmResetAllOffsets" onclick="grmResetAllOffsets()">Reset pan offsets</button>
       <div class="grm-loupe-detail" id="grmLoupeDetail"></div>
     </div>
   </div>
@@ -1071,7 +1101,7 @@ input[type="range"]::-moz-range-thumb {
       <input type="range" id="grmResSlider" min="0" max="3" step="1" value="0" oninput="grmSetResolution(this.value)">
       <span id="grmResLabel" style="font-size:11px;color:var(--text-dim);min-width:140px;">1920 · preview</span>
     </div>
-    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom</span>
+    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <button onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);">Apply & Close</button>
   </div>
 </div>
@@ -1082,6 +1112,17 @@ var activeFilter = 'all';
 var minConfidence = 40;
 var speciesFilter = '';
 var hideConfirmed = false;
+// Survives re-renders so confirming/filtering doesn't re-expand collapsed
+// encounters. Keyed by the encounter's full sorted photo_id set so that
+// detach/regroup (which change composition) naturally invalidate the key
+// instead of letting it migrate to a sibling encounter that happens to
+// share the original first photo_id.
+var collapsedEncounters = new Set();
+
+function encounterKey(enc) {
+  if (!enc || !enc.photo_ids || !enc.photo_ids.length) return null;
+  return enc.photo_ids.slice().sort(function(a, b) { return a - b; }).join(',');
+}
 
 // GRM resolution slider — index into GRM_RES_STOPS. Persists across photos within a session.
 var GRM_RES_STOPS = [
@@ -1248,16 +1289,18 @@ function renderResults() {
     });
     if (!hasVisible) return;
 
+    var encKey = encounterKey(enc);
+    var isCollapsed = encKey != null && collapsedEncounters.has(encKey);
     html += '<div class="encounter-card">';
     html += '<div class="encounter-header">';
-    html += '<span class="encounter-chevron" id="encChev' + ei + '" onclick="toggleEncounter(' + ei + ')">&#9660;</span>';
+    html += '<span class="encounter-chevron' + (isCollapsed ? ' collapsed' : '') + '" id="encChev' + ei + '" onclick="toggleEncounter(' + ei + ')">&#9660;</span>';
     html += renderSpeciesWidget(enc, ei, 'encounter', null);
     html += '<span class="encounter-meta" onclick="toggleEncounter(' + ei + ')" style="cursor:pointer;flex:1;">';
     html += '<span>' + enc.photo_count + ' photos</span>';
     if (enc.burst_count) html += '<span>' + enc.burst_count + ' bursts</span>';
     if (timeRange) html += '<span>' + timeRange + '</span>';
     html += '</span></div>';
-    html += '<div class="encounter-body" id="encBody' + ei + '">';
+    html += '<div class="encounter-body" id="encBody' + ei + '"' + (isCollapsed ? ' style="display:none;"' : '') + '>';
 
     if (enc.bursts && enc.bursts.length > 0) {
       enc.bursts.forEach(function(burst, bi) {
@@ -1327,6 +1370,12 @@ function toggleEncounter(idx) {
   body.style.display = collapsed ? 'none' : '';
   var chev = document.getElementById('encChev' + idx);
   if (chev) chev.classList.toggle('collapsed', collapsed);
+  var enc = pipelineResults && pipelineResults.encounters && pipelineResults.encounters[idx];
+  var key = encounterKey(enc);
+  if (key != null) {
+    if (collapsed) collapsedEncounters.add(key);
+    else collapsedEncounters.delete(key);
+  }
 }
 
 function setFilter(f) {
@@ -1751,6 +1800,7 @@ function initPipelineReviewPage() {
     if (empty) empty.style.display = 'none';
 
     pipelineResults = data.results;
+    collapsedEncounters = new Set();
 
     if (data.workspace_overrides && data.workspace_overrides.review_min_confidence != null) {
       minConfidence = data.workspace_overrides.review_min_confidence;
@@ -2138,6 +2188,10 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   _grmZoomMultiplier = 1;
   _grmLastHoverX = null;
   _grmLastHoverY = null;
+  _grmOffsets = {};
+  _grmDragging = null;
+  _grmSuppressNextClick = false;
+  grmRefreshResetAllVisibility();
 
   // Auto-pick the AI best (highest quality_composite)
   var best = null;
@@ -2180,6 +2234,9 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
 
 function closeGroupReview() {
   document.getElementById('grmOverlay').classList.remove('open');
+  _grmOffsets = {};
+  _grmDragging = null;
+  grmRefreshResetAllVisibility();
 }
 
 function renderGroupModal() {
@@ -2203,9 +2260,12 @@ function renderGroupModal() {
     if (p.flag === 'flagged') flagHtml = '<span class="photo-flag-badge flag-flagged" style="bottom:auto;top:4px;left:4px;">P</span>';
     else if (p.flag === 'rejected') flagHtml = '<span class="photo-flag-badge flag-rejected" style="bottom:auto;top:4px;left:4px;">X</span>';
 
-    return '<div class="' + cls + '" data-photo-id="' + p.id + '" onclick="grmSelect(' + p.id + ')">' +
+    return '<div class="' + cls + '" data-photo-id="' + p.id + '"' +
+        ' onmousedown="grmCardMouseDown(event)"' +
+        ' onclick="grmCardClick(event, ' + p.id + ')"' +
+        ' ondblclick="grmCardDblClick(event)">' +
       '<div style="position:relative;">' +
-        '<img src="' + grmPhotoUrl(p.id) + '" loading="lazy">' +
+        '<img src="' + grmPhotoUrl(p.id) + '" loading="lazy" draggable="false">' +
         flagHtml +
       '</div>' +
       '<div class="grm-card-info">' +
@@ -2231,6 +2291,16 @@ function renderGroupModal() {
   }
 
   document.getElementById('grmCount').textContent = pickItems.length + ' picks, ' + rejectItems.length + ' rejects, ' + candidateItems.length + ' unsorted';
+
+  // Re-apply offset indicators and — if the loupe is currently zoomed — the
+  // per-card transforms, since innerHTML wipes them on every re-render.
+  document.querySelectorAll('#grmOverlay .grm-card').forEach(function(card) {
+    _grmUpdateIndicator(card);
+  });
+  if (_grmLastHoverX != null) {
+    grmApplyCardTransforms();
+  }
+  grmRefreshResetAllVisibility();
 }
 
 function grmSelect(photoId) {
@@ -2362,6 +2432,12 @@ var _grmZoomMultiplier = 1;   // wheel fine-tune on top of the 1:1 base scale
 var _grmLoupeLocked = false;
 var _grmLastHoverX = null;    // last cursor x% on the loupe (null = no hover yet)
 var _grmLastHoverY = null;
+// Per-photo pan offsets, in pre-scale CSS pixels. Because the transform is
+// `scale(s) translate(tx, ty)`, the translate lives in the unscaled coordinate
+// space — so offsets stay correct as the shared zoom changes between frames.
+var _grmOffsets = {};
+var _grmDragging = null;
+var _grmSuppressNextClick = false;
 
 function grmBaseScale() {
   // 1:1 source-to-display scale for the current resolution stop, assuming
@@ -2388,12 +2464,27 @@ function grmApplyCardTransforms() {
   if (_grmLastHoverX == null) return;
   var scale = grmBaseScale() * _grmZoomMultiplier;
   var origin = _grmLastHoverX + '% ' + _grmLastHoverY + '%';
-  var xf = 'scale(' + scale + ')';
-  document.querySelectorAll('#grmOverlay .grm-card img').forEach(function(img) {
+  document.querySelectorAll('#grmOverlay .grm-card').forEach(function(card) {
+    var img = card.querySelector('img');
+    if (!img) return;
+    var off = _grmOffsets[card.dataset.photoId] || { tx: 0, ty: 0 };
     img.style.transformOrigin = origin;
-    img.style.transform = xf;
+    // scale × translate: translate is in pre-scale CSS pixels, so per-photo
+    // pan offsets stay correct as the shared zoom changes.
+    img.style.transform = 'scale(' + scale + ') translate(' + off.tx + 'px, ' + off.ty + 'px)';
     img.parentElement.classList.add('zoomed');
   });
+}
+
+function _grmApplyCardTransform(card) {
+  if (_grmLastHoverX == null) return;
+  var img = card.querySelector('img');
+  if (!img) return;
+  var off = _grmOffsets[card.dataset.photoId] || { tx: 0, ty: 0 };
+  var scale = grmBaseScale() * _grmZoomMultiplier;
+  img.style.transformOrigin = _grmLastHoverX + '% ' + _grmLastHoverY + '%';
+  img.style.transform = 'scale(' + scale + ') translate(' + off.tx + 'px, ' + off.ty + 'px)';
+  img.parentElement.classList.add('zoomed');
 }
 
 function grmLoupeToggleLock(e) {
@@ -2437,6 +2528,7 @@ function grmLoupeZoom(e) {
 
 function grmLoupeReset() {
   if (_grmLoupeLocked) return;
+  if (_grmDragging) return;
   _grmLastHoverX = null;
   _grmLastHoverY = null;
   document.querySelectorAll('#grmOverlay .grm-card img').forEach(function(img) {
@@ -2444,6 +2536,119 @@ function grmLoupeReset() {
     img.style.transformOrigin = '';
     img.parentElement.classList.remove('zoomed');
   });
+}
+
+/* --- Per-photo pan (drag a thumbnail to nudge it within its panel) --- */
+
+function grmCardMouseDown(e) {
+  if (e.button !== 0) return;
+  var card = e.currentTarget;
+  var photoId = card.dataset.photoId;
+  var cur = _grmOffsets[photoId] || { tx: 0, ty: 0 };
+  _grmDragging = {
+    card: card,
+    photoId: photoId,
+    startX: e.clientX,
+    startY: e.clientY,
+    origTx: cur.tx,
+    origTy: cur.ty,
+    moved: false,
+  };
+  document.addEventListener('mousemove', grmCardMouseMove);
+  document.addEventListener('mouseup', grmCardMouseUp);
+  e.preventDefault();
+}
+
+function grmCardMouseMove(e) {
+  if (!_grmDragging) return;
+  // If the primary button is no longer held (e.g. mouseup fired outside the
+  // window and was missed), end the drag instead of continuing to mutate
+  // offsets from passive cursor motion.
+  if ((e.buttons & 1) === 0) {
+    grmCardMouseUp(e);
+    return;
+  }
+  var dx = e.clientX - _grmDragging.startX;
+  var dy = e.clientY - _grmDragging.startY;
+  if (!_grmDragging.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+    _grmDragging.moved = true;
+    _grmDragging.card.classList.add('dragging');
+  }
+  if (!_grmDragging.moved) return;
+  // Use the actual displayed scale so dx/dy in screen pixels translate to
+  // pre-scale offset units that, when re-scaled, follow the cursor 1:1.
+  var scale = grmBaseScale() * _grmZoomMultiplier;
+  var z = scale > 0.01 ? scale : 1;
+  var newTx = _grmDragging.origTx + dx / z;
+  var newTy = _grmDragging.origTy + dy / z;
+  _grmOffsets[_grmDragging.photoId] = { tx: newTx, ty: newTy };
+  _grmApplyCardTransform(_grmDragging.card);
+  _grmUpdateIndicator(_grmDragging.card);
+}
+
+function grmCardMouseUp(e) {
+  if (!_grmDragging) return;
+  var moved = _grmDragging.moved;
+  var card = _grmDragging.card;
+  card.classList.remove('dragging');
+  document.removeEventListener('mousemove', grmCardMouseMove);
+  document.removeEventListener('mouseup', grmCardMouseUp);
+  _grmDragging = null;
+  // Only suppress the trailing click when the release is inside the dragged
+  // card — that's the only case where a `click` fires on the card and needs
+  // swallowing. Off-card releases produce no card click, so the flag would
+  // otherwise eat the user's next real selection.
+  if (moved && e && e.target && card.contains(e.target)) {
+    _grmSuppressNextClick = true;
+  }
+  grmRefreshResetAllVisibility();
+}
+
+function grmCardClick(e, photoId) {
+  if (_grmSuppressNextClick) {
+    _grmSuppressNextClick = false;
+    return;
+  }
+  grmSelect(photoId);
+}
+
+function grmCardDblClick(e) {
+  var card = e.currentTarget;
+  var photoId = card.dataset.photoId;
+  if (!_grmOffsets[photoId]) return;
+  delete _grmOffsets[photoId];
+  _grmUpdateIndicator(card);
+  _grmApplyCardTransform(card);
+  grmRefreshResetAllVisibility();
+  e.stopPropagation();
+}
+
+function grmResetAllOffsets() {
+  _grmOffsets = {};
+  document.querySelectorAll('#grmOverlay .grm-card').forEach(function(card) {
+    _grmUpdateIndicator(card);
+    _grmApplyCardTransform(card);
+  });
+  grmRefreshResetAllVisibility();
+}
+
+function _grmUpdateIndicator(card) {
+  var off = _grmOffsets[card.dataset.photoId];
+  if (off && (off.tx !== 0 || off.ty !== 0)) {
+    card.classList.add('has-offset');
+  } else {
+    card.classList.remove('has-offset');
+  }
+}
+
+function grmRefreshResetAllVisibility() {
+  var hasAny = false;
+  for (var k in _grmOffsets) {
+    var o = _grmOffsets[k];
+    if (o && (o.tx !== 0 || o.ty !== 0)) { hasAny = true; break; }
+  }
+  var btn = document.getElementById('grmResetAllOffsets');
+  if (btn) btn.classList.toggle('visible', hasAny);
 }
 
 /* --- Zone movement --- */

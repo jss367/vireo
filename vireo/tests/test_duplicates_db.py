@@ -311,6 +311,155 @@ def test_find_duplicate_groups_empty(tmp_path):
     assert db.find_duplicate_groups() == []
 
 
+def test_find_duplicate_groups_default_excludes_resolved(tmp_path):
+    """Auto-resolved pairs (1 kept + N rejected) must NOT appear by default.
+
+    Locks in the legacy contract: callers that don't opt in to
+    ``include_resolved=True`` get only actionable (still-needs-a-decision)
+    groups. Without this guard, the duplicates page's apply flow would
+    re-process pairs that already have a winner.
+    """
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    # add_photo hook auto-resolves: clean name wins, "-2" loses.
+    _add(db, fid, "owl.jpg", file_hash="HRES")
+    _add(db, fid, "owl-2.jpg", file_hash="HRES")
+    groups = db.find_duplicate_groups()
+    assert groups == []
+
+
+def test_find_duplicate_groups_with_resolved_returns_both_statuses(tmp_path):
+    """``include_resolved=True`` surfaces both unresolved and resolved groups
+    with a ``status`` discriminator."""
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    # Resolved group: hook auto-rejects "-2".
+    _add(db, fid, "a.jpg", file_hash="HA")
+    _add(db, fid, "a-2.jpg", file_hash="HA")
+    # Unresolved group: undo the hook so both rows are non-rejected.
+    _add(db, fid, "b.jpg", file_hash="HB")
+    _add(db, fid, "b copy.jpg", file_hash="HB")
+    _reset_flags(db, "HB")
+
+    groups = db.find_duplicate_groups(include_resolved=True)
+    by_hash = {g["file_hash"]: g for g in groups}
+    assert by_hash["HA"]["status"] == "resolved"
+    assert by_hash["HB"]["status"] == "unresolved"
+    # Resolved group's photo_ids must include BOTH the kept and rejected row;
+    # downstream code reads p.flag to disambiguate, but needs both ids to do so.
+    assert len(by_hash["HA"]["photo_ids"]) == 2
+
+
+def test_find_duplicate_groups_skips_purely_rejected_hashes(tmp_path):
+    """A hash with zero kept rows is NOT a duplicate cleanup target.
+
+    Example: user manually rejected the only copy of a unique photo for
+    non-duplicate reasons. With no kept "winner" anchor, there's nothing for
+    the duplicates page to do. Including these would mislead the UI into
+    treating the user's unrelated reject as a duplicate-loser cleanup task.
+    """
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    pid = _add(db, fid, "lonely.jpg", file_hash="HONLY")
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (pid,))
+    db.conn.commit()
+
+    groups = db.find_duplicate_groups(include_resolved=True)
+    assert all(g["file_hash"] != "HONLY" for g in groups)
+
+
+def test_find_duplicate_groups_skips_resolved_with_multiple_kept(tmp_path):
+    """3-way group with 2 kept + 1 rejected is still 'unresolved', not resolved.
+
+    The "resolved" status means exactly one survivor. If two kept rows share
+    the hash, the user still has a decision to make — that's the unresolved
+    code path.
+    """
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    p1 = _add(db, fid, "x.jpg", file_hash="HX")
+    p2 = _add(db, fid, "x copy.jpg", file_hash="HX")
+    p3 = _add(db, fid, "x-2.jpg", file_hash="HX")
+    # Reject only p3; p1 and p2 remain non-rejected.
+    db.conn.execute(
+        "UPDATE photos SET flag = CASE WHEN id = ? THEN 'rejected' ELSE 'none' END "
+        "WHERE id IN (?, ?, ?)",
+        (p3, p1, p2, p3),
+    )
+    db.conn.commit()
+
+    groups = db.find_duplicate_groups(include_resolved=True)
+    by_hash = {g["file_hash"]: g for g in groups}
+    assert by_hash["HX"]["status"] == "unresolved"
+
+
+def test_run_duplicate_scan_emits_resolved_proposal(tmp_path):
+    """Resolved groups appear in the scan result with status='resolved' and
+    rejected losers carrying the resolver reason."""
+    from duplicate_scan import run_duplicate_scan
+
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    _add(db, fid, "owl.jpg", file_hash="HRES2")
+    _add(db, fid, "owl-2.jpg", file_hash="HRES2")
+    # Hook auto-rejected owl-2.
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=True)
+    resolved = [p for p in result["proposals"] if p["status"] == "resolved"]
+    assert len(resolved) == 1
+    prop = resolved[0]
+    assert prop["winner"]["filename"] == "owl.jpg"
+    assert len(prop["losers"]) == 1
+    assert prop["losers"][0]["filename"] == "owl-2.jpg"
+    assert prop["losers"][0]["rejected"] is True
+    assert prop["losers"][0]["reason"]
+    assert result["resolved_group_count"] == 1
+    assert result["resolved_loser_count"] == 1
+    # Loser count (the apply-able count) must NOT include resolved losers.
+    assert result["loser_count"] == 0
+
+
+def test_run_duplicate_scan_excludes_resolved_when_opt_out(tmp_path):
+    """``include_resolved=False`` preserves the legacy unresolved-only output."""
+    from duplicate_scan import run_duplicate_scan
+
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    _add(db, fid, "p.jpg", file_hash="HEX")
+    _add(db, fid, "p-2.jpg", file_hash="HEX")
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=False)
+    assert result["proposals"] == []
+    assert result["resolved_group_count"] == 0
+
+
+def test_run_duplicate_scan_chunks_large_groups(tmp_path, monkeypatch):
+    """A single resolved group with more than ``_SQL_PARAM_CHUNK`` photo_ids
+    must not raise ``OperationalError`` on SQLite builds with the legacy
+    999-parameter cap. Patch the cap down to 2 and seed 5 rows in one group
+    so the chunked SELECT path has to run multiple iterations.
+    """
+    import duplicate_scan as ds
+    from duplicate_scan import run_duplicate_scan
+
+    monkeypatch.setattr(ds, "_SQL_PARAM_CHUNK", 2)
+
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    # 1 winner + 4 rejected siblings sharing a hash. The hook auto-rejects
+    # everything but the cleanest filename, so we end up with 1 kept + 4
+    # rejected — a "resolved" group with 5 photo_ids in scope.
+    _add(db, fid, "owl.jpg", file_hash="HBIG")
+    for i in range(2, 6):
+        _add(db, fid, f"owl-{i}.jpg", file_hash="HBIG")
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=True)
+    resolved = [p for p in result["proposals"] if p["status"] == "resolved"]
+    assert len(resolved) == 1
+    # All 4 losers surface even though each chunked SELECT only saw 2 ids.
+    assert len(resolved[0]["losers"]) == 4
+
+
 # -----------------------------------------------------------------------------
 # Scanner-order regression: XMP import must land BEFORE auto-resolve so a
 # loser's keywords are merged onto the winner (Codex review fix #1).
@@ -420,12 +569,15 @@ def test_run_duplicate_scan_skips_rows_rejected_after_find_groups(
     )
     db.conn.commit()
 
-    def _stale_find_groups():
+    def _stale_find_groups(include_resolved=False):
         return [{"file_hash": "HRACE", "photo_ids": ids}]
 
     monkeypatch.setattr(db, "find_duplicate_groups", _stale_find_groups)
 
-    result = run_duplicate_scan({"progress": {}}, db)
+    # include_resolved=False to keep the legacy unresolved-only race contract
+    # in scope: the resolved-group code path has its own sanity checks and
+    # this test is specifically about the unresolved race window.
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=False)
     # Only one non-rejected row; the per-group SELECT must filter to 1 and
     # the `< 2` guard must drop it.
     assert result["proposals"] == []
@@ -456,12 +608,12 @@ def test_run_duplicate_scan_positive_case_with_one_rejected(
     )
     db.conn.commit()
 
-    def _stale_find_groups():
+    def _stale_find_groups(include_resolved=False):
         return [{"file_hash": "HPOS", "photo_ids": ids}]
 
     monkeypatch.setattr(db, "find_duplicate_groups", _stale_find_groups)
 
-    result = run_duplicate_scan({"progress": {}}, db)
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=False)
     assert len(result["proposals"]) == 1
     prop = result["proposals"][0]
     # 1 winner + 1 loser after filtering the rejected row.

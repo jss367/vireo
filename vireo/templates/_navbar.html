@@ -1034,6 +1034,26 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 /* When the missing-folders banner is visible above, new-images stacks
    naturally in document flow — both are non-fixed block-level elements. */
 
+.dup-cleanup-banner {
+  background: var(--bg-tertiary, #153D55);
+  color: var(--text-primary, #E6F1F5);
+  padding: 6px 16px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+}
+.dup-cleanup-banner a {
+  color: var(--accent, #24E5CA);
+  font-weight: 600;
+  text-decoration: underline;
+}
+.dup-cleanup-banner a:hover { opacity: 0.85; }
+.dup-cleanup-banner .banner-dismiss {
+  color: var(--text-secondary, #9fb3bd);
+}
+
 /* Shared right-click context menu */
 .vireo-ctx-menu {
   position: fixed; z-index: 99999;
@@ -1068,6 +1088,68 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .vireo-ctx-chip:hover { background: var(--bg-tertiary); }
 .vireo-ctx-chip.is-active { background: var(--accent); color: white; }
+
+/* ---------- Openable tabs ---------- */
+.navbar .nav-tab { position: relative; }
+.navbar .nav-tab-close {
+  display: none;
+  margin-left: 6px;
+  padding: 0 4px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-muted, #999);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.navbar .nav-tab:hover .nav-tab-close,
+.navbar .nav-tab.active .nav-tab-close { display: inline-block; }
+.navbar .nav-tab-close:hover { background: var(--bg-tertiary, rgba(255,255,255,0.1)); color: var(--text-primary); }
+.navbar .nav-tab-divider {
+  display: inline-block;
+  width: 1px;
+  height: 18px;
+  margin: 0 8px;
+  background: var(--border-primary, rgba(255,255,255,0.15));
+  vertical-align: middle;
+}
+.navbar .nav-tools-btn {
+  background: none;
+  border: 1px dashed var(--border-primary, rgba(255,255,255,0.2));
+  color: var(--text-muted, #999);
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  margin-left: 4px;
+}
+.navbar .nav-tools-btn:hover { color: var(--text-primary); border-color: var(--text-primary); }
+.nav-tools-menu {
+  position: absolute;
+  top: 36px;
+  background: var(--bg-secondary, #2a2a2a);
+  border: 1px solid var(--border-primary, rgba(255,255,255,0.15));
+  border-radius: 6px;
+  padding: 4px;
+  z-index: 1000;
+  min-width: 160px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+}
+.nav-tools-menu[hidden] { display: none; }
+.nav-tools-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  background: none;
+  border: 0;
+  color: var(--text-primary);
+  text-align: left;
+  padding: 6px 8px;
+  font: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.nav-tools-item:hover { background: var(--bg-tertiary, rgba(255,255,255,0.08)); }
+.nav-tools-check { display: inline-block; width: 16px; color: var(--accent); }
 </style>
 
 <nav class="navbar">
@@ -1085,7 +1167,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     </div>
   </div>
   <a href="/pipeline" data-nav-id="pipeline" data-testid="nav-pipeline">Pipeline</a>
-  <a href="/lightroom" data-nav-id="lightroom">Lightroom</a>
   <a href="/jobs" data-nav-id="jobs" data-testid="nav-jobs">Jobs<span class="nav-job-badge" id="navJobBadge" data-testid="job-badge"></span></a>
   <a href="/pipeline/review" data-nav-id="pipeline-review">Pipeline Review</a>
   <a href="/review" data-nav-id="review" data-testid="nav-review">Review</a>
@@ -1098,11 +1179,13 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   <a href="/dashboard" data-nav-id="dashboard">Dashboard</a>
   <a href="/audit" data-nav-id="audit">Audit</a>
   <a href="/compare" data-nav-id="compare">Compare</a>
-  <a href="/workspace" data-nav-id="workspace">Workspace</a>
-  <a href="/keywords" data-nav-id="keywords">Keywords</a>
-  <a href="/shortcuts" data-nav-id="shortcuts">Shortcuts</a>
-  <a href="/duplicates" data-nav-id="duplicates">Duplicates</a>
-  <a href="/settings" data-nav-id="settings">Settings</a>
+  <span class="nav-tab-divider" aria-hidden="true"></span>
+  <span id="navOpenTabs"></span>
+  <button type="button"
+          class="nav-tools-btn"
+          data-testid="nav-tools-btn"
+          onclick="toggleToolsMenu(event)">+ Tools &#9662;</button>
+  <div class="nav-tools-menu" id="navToolsMenu" hidden></div>
   <span class="nav-spacer"></span>
   <span class="nav-icon" onclick="openReportModal()" title="Report Issue" id="reportToggle">&#9888;</span>
   <span class="nav-icon" onclick="openHelpModal()" title="Help (F1)" id="helpToggle">&#63;</span>
@@ -1329,6 +1412,13 @@ function sendReport() {
   <button class="banner-dismiss" onclick="dismissNewImagesBanner()">&times;</button>
 </div>
 
+<!-- Duplicate Cleanup Banner -->
+<div class="dup-cleanup-banner" id="dupCleanupBanner" style="display:none;">
+  <span id="dupCleanupMsg"></span>
+  <a href="/duplicates?show=resolved">Review</a>
+  <button class="banner-dismiss" onclick="dismissDupCleanupBanner()">&times;</button>
+</div>
+
 <!-- Missing Folders Modal -->
 <div class="modal-overlay" id="missingFoldersModal">
   <div class="modal" style="max-width:700px;width:90%;">
@@ -1397,26 +1487,211 @@ function sendReport() {
 </div>
 
 <script>
+/* ---------- Openable tabs: open/close + Tools dropdown ---------- */
+(function() {
+  function postJSON(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body || {}),
+    }).then(function(r) { return r.json(); });
+  }
+
+  // Compute current page nav-id from the URL path
+  function currentNavId() {
+    var p = window.location.pathname;
+    if (p.startsWith('/pipeline/review')) return 'pipeline-review';
+    if (p === '/' || p.startsWith('/browse')) return 'browse';
+    var seg = p.split('/')[1] || '';
+    return seg;
+  }
+
+  // Render open tabs into #navOpenTabs and Tools dropdown items into #navToolsMenu
+  // based on the {open_tabs, openable_pages} state returned by /api/workspace/tabs.
+  function renderTabs(state) {
+    var openTabs = (state && state.open_tabs) || [];
+    var pages = (state && state.openable_pages) || [];
+
+    // Build a label/href lookup from openable_pages for the open tabs strip
+    var pageById = {};
+    pages.forEach(function(p) { pageById[p.id] = p; });
+
+    // ---- Open tabs strip ----
+    var tabsHost = document.getElementById('navOpenTabs');
+    if (tabsHost) {
+      tabsHost.textContent = '';  // clear
+      var path = window.location.pathname;
+      openTabs.forEach(function(tabId) {
+        var page = pageById[tabId];
+        if (!page) return;  // unknown id — skip
+        var a = document.createElement('a');
+        a.href = page.href;
+        a.className = 'nav-tab';
+        a.dataset.navId = page.id;
+        a.dataset.tab = '1';
+        // Active-state: linger-page highlighting runs before tabs are rendered,
+        // so apply it here for tabs matching the current path.
+        if (path === page.href || (page.href !== '/' && path.startsWith(page.href + '/'))) {
+          a.classList.add('active');
+        }
+        a.appendChild(document.createTextNode(page.label));
+        var close = document.createElement('span');
+        close.className = 'nav-tab-close';
+        close.title = 'Close tab';
+        close.innerHTML = '&times;';
+        close.addEventListener('click', function(ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          window.closeTab(page.id);
+        });
+        a.appendChild(close);
+        tabsHost.appendChild(a);
+      });
+    }
+
+    // ---- Tools dropdown items ----
+    var menu = document.getElementById('navToolsMenu');
+    if (menu) {
+      var wasOpen = !menu.hasAttribute('hidden');
+      menu.textContent = '';  // clear
+      pages.forEach(function(page) {
+        var isOpen = openTabs.indexOf(page.id) !== -1;
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'nav-tools-item';
+        btn.dataset.navId = page.id;
+        btn.dataset.open = isOpen ? '1' : '0';
+        btn.addEventListener('click', function() {
+          window.toggleTabFromMenu(page.id);
+        });
+        var check = document.createElement('span');
+        check.className = 'nav-tools-check';
+        check.innerHTML = isOpen ? '&check;' : '&nbsp;';
+        btn.appendChild(check);
+        btn.appendChild(document.createTextNode(page.label));
+        menu.appendChild(btn);
+      });
+      if (!wasOpen) menu.setAttribute('hidden', '');
+    }
+  }
+
+  function fetchAndRender() {
+    return fetch('/api/workspace/tabs')
+      .then(function(r) { return r.json(); })
+      .then(function(state) {
+        renderTabs(state);
+        return state;
+      })
+      .catch(function() { /* silently ignore — empty containers are fine */ });
+  }
+
+  // Find the tab adjacent to navId in the rendered tab strip — prefer the
+  // next sibling so closing feels like advancing through the strip, fall back
+  // to the previous sibling if navId is the last tab.
+  function adjacentTabId(navId) {
+    var hostEl = document.getElementById('navOpenTabs');
+    if (!hostEl) return null;
+    var anchors = Array.prototype.slice.call(hostEl.querySelectorAll('a[data-nav-id]'));
+    var idx = -1;
+    for (var i = 0; i < anchors.length; i++) {
+      if (anchors[i].dataset.navId === navId) { idx = i; break; }
+    }
+    if (idx === -1) return null;
+    if (idx + 1 < anchors.length) return anchors[idx + 1].dataset.navId;
+    if (idx - 1 >= 0) return anchors[idx - 1].dataset.navId;
+    return null;
+  }
+
+  window.closeTab = function(navId) {
+    // Compute the destination BEFORE the close so we can pick the tab
+    // adjacent to the one being closed, not just the new tabs[0].
+    var isOnTab = currentNavId() === navId;
+    var nextNavId = isOnTab ? adjacentTabId(navId) : null;
+    postJSON('/api/workspace/tabs/close', {nav_id: navId}).then(function(res) {
+      if (isOnTab) {
+        window.location.href = nextNavId ? ('/' + nextNavId) : '/browse';
+      } else {
+        // Update DOM in place — no full reload needed
+        fetchAndRender();
+      }
+    });
+  };
+
+  window.openTab = function(navId) {
+    postJSON('/api/workspace/tabs/open', {nav_id: navId}).then(function() {
+      window.location.href = '/' + navId;
+    });
+  };
+
+  window.toggleTabFromMenu = function(navId) {
+    var item = document.querySelector('.nav-tools-item[data-nav-id="' + navId + '"]');
+    var isOpen = item && item.dataset.open === '1';
+    if (isOpen) {
+      // Toggle off — remove tab. If user is currently on it, navigate away first.
+      window.closeTab(navId);
+    } else {
+      window.openTab(navId);
+    }
+  };
+
+  window.toggleToolsMenu = function(ev) {
+    if (ev) ev.stopPropagation();
+    var menu = document.getElementById('navToolsMenu');
+    if (!menu) return;
+    if (menu.hasAttribute('hidden')) {
+      menu.removeAttribute('hidden');
+      // Position it under the button
+      var btn = document.querySelector('.nav-tools-btn');
+      var rect = btn.getBoundingClientRect();
+      menu.style.left = rect.left + 'px';
+      // Close on outside click
+      setTimeout(function() {
+        document.addEventListener('click', closeMenuOnOutside, {once: true});
+      }, 0);
+    } else {
+      menu.setAttribute('hidden', '');
+    }
+  };
+
+  function closeMenuOnOutside(e) {
+    var menu = document.getElementById('navToolsMenu');
+    if (!menu) return;
+    if (e.target.closest('.nav-tools-menu, .nav-tools-btn')) {
+      // re-arm the listener
+      document.addEventListener('click', closeMenuOnOutside, {once: true});
+      return;
+    }
+    menu.setAttribute('hidden', '');
+  }
+
+  // Initial population from server state
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', fetchAndRender);
+  } else {
+    fetchAndRender();
+  }
+})();
+</script>
+
+<script>
 /* ---------- Nav reorder + Active page highlighting ---------- */
 (function() {
   // Reorder nav links from workspace config
   function reorderNavLinks(order) {
     var navbar = document.querySelector('.navbar');
-    var spacer = navbar.querySelector('.nav-spacer');
+    var divider = navbar.querySelector('.nav-tab-divider') || navbar.querySelector('.nav-spacer');
     var links = {};
-    navbar.querySelectorAll('a[data-nav-id]').forEach(function(a) {
+    navbar.querySelectorAll('a[data-nav-id]:not([data-tab])').forEach(function(a) {
       links[a.dataset.navId] = a;
     });
-    // Move ordered links before the spacer
     order.forEach(function(id) {
       if (links[id]) {
-        navbar.insertBefore(links[id], spacer);
+        navbar.insertBefore(links[id], divider);
         delete links[id];
       }
     });
-    // Append any remaining links not in the saved order (new pages)
     Object.keys(links).forEach(function(id) {
-      navbar.insertBefore(links[id], spacer);
+      navbar.insertBefore(links[id], divider);
     });
   }
 
@@ -1436,7 +1711,8 @@ function sendReport() {
     var indicator = null;
 
     function getNavLinks() {
-      return Array.from(navbar.querySelectorAll('a[data-nav-id]'));
+      // Linger pages only — exclude openable tabs (which are governed by open_tabs).
+      return Array.from(navbar.querySelectorAll('a[data-nav-id]:not([data-tab])'));
     }
 
     function createIndicator() {
@@ -1564,7 +1840,7 @@ function sendReport() {
   for (var action in NAV_ROUTES) hrefToAction[NAV_ROUTES[action]] = action;
 
   function applyHotkeyHints(navShortcuts) {
-    var navLinks = document.querySelectorAll('.navbar > a[href]:not(.brand):not(.nav-icon)');
+    var navLinks = document.querySelectorAll('.navbar > a[href]:not(.brand):not(.nav-icon):not([data-tab])');
     for (var i = 0; i < navLinks.length; i++) {
       var link = navLinks[i];
       var href = link.getAttribute('href');
@@ -3432,6 +3708,7 @@ function formatDuration(seconds) {
       panel.style.height = savedH + 'px';
       document.getElementById('bottomToggle').classList.add('open');
       document.body.style.paddingBottom = (savedH + 28) + 'px';
+      document.body.style.setProperty('--bottom-offset', (savedH + 28) + 'px');
     }
     var savedTab = localStorage.getItem('vireo_panel_tab') || 'jobs';
     switchBpTab(savedTab);
@@ -3664,7 +3941,9 @@ function formatDuration(seconds) {
     localStorage.setItem('vireo_panel_open', isOpen);
     var h = isOpen ? (parseInt(localStorage.getItem('vireo_panel_height')) || 240) : 0;
     panel.style.height = h + 'px';
-    document.body.style.paddingBottom = isOpen ? (h + 28) + 'px' : '28px';
+    var newPad = isOpen ? (h + 28) + 'px' : '28px';
+    document.body.style.paddingBottom = newPad;
+    document.body.style.setProperty('--bottom-offset', newPad);
     // Start/stop SSE and polling based on panel visibility
     if (isOpen) {
       startLogStream();
@@ -3701,6 +3980,7 @@ function formatDuration(seconds) {
       var newH = Math.max(100, Math.min(window.innerHeight - 100, startH + (startY - e.clientY)));
       panel.style.height = newH + 'px';
       document.body.style.paddingBottom = (newH + 28) + 'px';
+      document.body.style.setProperty('--bottom-offset', (newH + 28) + 'px');
     });
 
     document.addEventListener('mouseup', function() {
@@ -4119,6 +4399,75 @@ async function createPipelineFromNewImages() {
 // reducing it, or new imports increasing it).
 checkNewImages();
 setInterval(checkNewImages, 60000);
+
+/* ---------- Duplicate-Cleanup Banner ---------- */
+// Surfaces auto-resolved duplicate losers whose files may still be on disk.
+// The duplicates page hides them in a collapsed section by default — without
+// this banner the user has no way to discover that cleanup is available.
+// Library-wide (not workspace-scoped) because photos & file_hash are global.
+
+function _dupCleanupDismissKey() {
+  return 'dup_cleanup_dismissed';
+}
+
+function _isDupCleanupDismissed(count) {
+  var v = sessionStorage.getItem(_dupCleanupDismissKey());
+  return v != null && Number(v) === count;
+}
+
+let _dupCleanupInFlight = false;
+async function checkDupCleanup() {
+  if (_dupCleanupInFlight) return;
+  _dupCleanupInFlight = true;
+  try {
+    const resp = await fetch('/api/duplicates/disk-cleanup-summary');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const banner = document.getElementById('dupCleanupBanner');
+    const msg = document.getElementById('dupCleanupMsg');
+    if (!banner || !msg) return;
+
+    const count = data.count || 0;
+    // Re-arm dismissal when the count drops to zero so a future non-zero
+    // count is treated as fresh news (mirrors the new-images banner pattern).
+    if (count === 0) {
+      sessionStorage.removeItem(_dupCleanupDismissKey());
+    }
+
+    if (count > 0 && !_isDupCleanupDismissed(count)) {
+      const s = count === 1 ? '' : 's';
+      const sizeStr = formatBytesNav(data.total_size || 0);
+      msg.textContent = count + ' duplicate file copy' + (count === 1 ? '' : ' copies') +
+        ' could be cleaned up from disk (' + sizeStr + ').';
+      banner.dataset.count = String(count);
+      banner.style.display = 'flex';
+    } else {
+      banner.style.display = 'none';
+    }
+  } catch (e) { /* ignore */ }
+  finally { _dupCleanupInFlight = false; }
+}
+
+function dismissDupCleanupBanner() {
+  const banner = document.getElementById('dupCleanupBanner');
+  if (!banner) return;
+  const count = Number(banner.dataset.count || 0);
+  banner.style.display = 'none';
+  sessionStorage.setItem(_dupCleanupDismissKey(), String(count));
+}
+
+// Local byte formatter — _navbar.html ships before page-specific JS that
+// might define one, and a banner can't depend on per-page utilities.
+function formatBytesNav(n) {
+  if (n == null) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+checkDupCleanup();
+setInterval(checkDupCleanup, 60000);
 
 /* ---------- Missing Folders Modal ---------- */
 let _relocatingFolderId = null;
