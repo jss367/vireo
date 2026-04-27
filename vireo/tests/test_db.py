@@ -7383,11 +7383,13 @@ def test_ensure_default_genre_keywords_preserves_non_general_user_types(tmp_path
         "SELECT type FROM keywords WHERE name = 'Wildlife' ORDER BY type"
     ).fetchall()
     types = [r["type"] for r in rows]
-    # The user's 'individual' row stays. Because the existing Wildlife
-    # row blocks INSERT OR IGNORE on (name='Wildlife', parent_id NULL),
-    # no genre row is created — but no clobber either. The early-return
-    # check sees other genre defaults and skips.
-    assert "individual" in types
+    # The user's 'individual' row stays. Case-insensitive existence check
+    # in ensure_default_genre_keywords sees it and skips inserting a
+    # duplicate genre row.
+    assert types == ["individual"], (
+        f"Expected only the user's 'individual' Wildlife to remain; "
+        f"got types={types}"
+    )
     # Other genre defaults still seeded
     n_other = db.conn.execute(
         """SELECT COUNT(*) FROM keywords
@@ -7395,6 +7397,59 @@ def test_ensure_default_genre_keywords_preserves_non_general_user_types(tmp_path
                 ('Landscape', 'Sunset', 'Architecture', 'Abstract')"""
     ).fetchone()[0]
     assert n_other == 4
+
+
+def test_ensure_default_genre_keywords_does_not_duplicate_existing_top_level(tmp_path):
+    """Regression: SQLite UNIQUE(name, parent_id) treats NULL as distinct
+    per SQL standard, so plain INSERT OR IGNORE against a same-name
+    top-level row does NOT actually prevent duplicates. The seed must
+    explicitly check by case-insensitive name first."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Wipe the genre defaults and force-create same-name top-level rows
+    # with various existing types — simulates upgraded DBs where users
+    # hand-tagged before the genre feature existed.
+    db.conn.execute("DELETE FROM keywords WHERE type = 'genre'")
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 0)",
+        ("landscape",),  # lowercase — exercises COLLATE NOCASE path
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'location', 0)",
+        ("Sunset",),  # legitimately user-typed as location (a place)
+    )
+    db.conn.commit()
+
+    db.ensure_default_genre_keywords()
+    db.ensure_default_genre_keywords()  # idempotent re-run
+
+    # 'landscape' (general) should be PROMOTED to 'genre' (case-insensitive
+    # match in the promotion query) — no duplicate inserted.
+    rows = db.conn.execute(
+        "SELECT id, name, type FROM keywords WHERE name = 'landscape' COLLATE NOCASE"
+    ).fetchall()
+    assert len(rows) == 1, (
+        f"Expected exactly one 'landscape' row after seed; got {len(rows)}: "
+        f"{[(r['name'], r['type']) for r in rows]}"
+    )
+    assert rows[0]["type"] == "genre"
+
+    # 'Sunset' (location) should be PRESERVED — no duplicate genre Sunset.
+    rows = db.conn.execute(
+        "SELECT id, name, type FROM keywords WHERE name = 'Sunset' COLLATE NOCASE"
+    ).fetchall()
+    assert len(rows) == 1, (
+        f"Expected exactly one 'Sunset' row after seed; got {len(rows)}"
+    )
+    assert rows[0]["type"] == "location"
+
+    # And the OTHER defaults should still be created exactly once.
+    for name in ("Architecture", "Abstract", "Wildlife"):
+        n = db.conn.execute(
+            "SELECT COUNT(*) FROM keywords WHERE name = ? COLLATE NOCASE",
+            (name,),
+        ).fetchone()[0]
+        assert n == 1, f"Expected exactly one '{name}' row; got {n}"
 
 
 def test_migrate_default_subject_collection_covers_all_workspaces(tmp_path):

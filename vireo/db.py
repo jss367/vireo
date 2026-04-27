@@ -1077,17 +1077,31 @@ class Database:
         # Cold / upgrade path: promote any same-name top-level 'general'
         # rows to 'genre' first, so an upgraded DB with a hand-tagged
         # 'general' Wildlife (or other default name) ends up with a
-        # canonical genre row instead of being blocked by the
-        # UNIQUE(name, parent_id) constraint on the subsequent INSERT.
+        # canonical genre row.
         for name in defaults:
             self.conn.execute(
                 """UPDATE keywords SET type = 'genre'
-                   WHERE name = ? AND parent_id IS NULL AND type = 'general'""",
+                   WHERE name = ? COLLATE NOCASE
+                     AND parent_id IS NULL AND type = 'general'""",
                 (name,),
             )
+        # Insert each default only if no top-level row with that name (any
+        # type, any case) exists. Cannot rely on INSERT OR IGNORE against
+        # UNIQUE(name, parent_id) here — SQLite treats NULL parent_id as
+        # distinct (per SQL standard), so a same-name top-level row would
+        # not actually block the insert and we'd silently produce
+        # duplicates that split add_keyword's case-insensitive lookup.
         for name in defaults:
+            existing_row = self.conn.execute(
+                """SELECT id FROM keywords
+                   WHERE name = ? COLLATE NOCASE AND parent_id IS NULL
+                   LIMIT 1""",
+                (name,),
+            ).fetchone()
+            if existing_row:
+                continue
             self.conn.execute(
-                "INSERT OR IGNORE INTO keywords (name, type, is_species) VALUES (?, 'genre', 0)",
+                "INSERT INTO keywords (name, type, is_species) VALUES (?, 'genre', 0)",
                 (name,),
             )
         self.conn.commit()
