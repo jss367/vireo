@@ -104,6 +104,51 @@ def test_freetext_enter_creates_location(live_server, page):
     expect(page.locator("#locationEmpty")).to_be_hidden()
 
 
+def test_enter_after_place_changed_does_not_submit_freetext(live_server, page):
+    """Regression for the keyboard-selected-autocomplete race: when the
+    user presses Enter to pick a highlighted Google suggestion, the
+    keydown event fires SYNCHRONOUSLY before place_changed. Without the
+    deferred-cancel logic, the keydown handler would POST a free-text
+    submit before place_changed could route the place_id POST.
+
+    We simulate place_changed firing (by bumping _locationLastPickedAt
+    just before pressing Enter) and verify NO free-text POST is sent.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.click()
+
+    inp = page.locator("#locationInput")
+    inp.wait_for(state="visible")
+    inp.fill("Central Park")
+
+    # Track network calls so we can assert the text endpoint never fires.
+    text_posts = []
+    page.on("request", lambda req: text_posts.append(req.url) if (
+        req.method == "POST" and "/location/text" in req.url
+    ) else None)
+
+    # Simulate place_changed having just fired — like a keyboard pick.
+    page.evaluate("window._locationLastPickedAt = Date.now();")
+    inp.press("Enter")
+
+    # Wait past the 300ms defer window plus margin.
+    page.wait_for_timeout(600)
+
+    # No free-text POST should have happened. (We didn't simulate a real
+    # place_id submit either, so the input remains in the empty state —
+    # that's expected for this regression test.)
+    assert text_posts == [], (
+        f"keydown handler must defer to place_changed when "
+        f"_locationLastPickedAt is recent; got POSTs: {text_posts}"
+    )
+    # Sanity: we should still be in the empty state (no submit happened).
+    expect(page.locator("#locationEmpty")).to_be_visible()
+
+
 def test_clear_button_returns_to_empty(live_server, page):
     """The × button on the filled state clears the location server-side."""
     url = live_server["url"]

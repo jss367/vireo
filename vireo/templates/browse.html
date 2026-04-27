@@ -2818,6 +2818,10 @@ function loadGoogleMapsJs() {
 var _locationAutocomplete = null;
 var _locationLastPickedAt = 0;
 var _locationAutocompleteBound = false;
+// Pending free-text submit triggered by Enter. Held for ~300ms so a
+// keyboard-selected autocomplete suggestion (where place_changed fires
+// AFTER the keydown event) gets a chance to cancel the text path.
+var _locationPendingTextSubmit = null;
 
 function _showLocationError(msg) {
   var el = document.getElementById('locationError');
@@ -2855,6 +2859,13 @@ async function bindLocationAutocomplete() {
       var place = _locationAutocomplete.getPlace();
       if (!place || !place.place_id) return;
       _locationLastPickedAt = Date.now();
+      // Cancel any pending free-text submit from the Enter that triggered
+      // this place_changed event — keydown fires synchronously BEFORE
+      // place_changed, so the text path's setTimeout is still queued.
+      if (_locationPendingTextSubmit) {
+        clearTimeout(_locationPendingTextSubmit);
+        _locationPendingTextSubmit = null;
+      }
       _submitLocationPlace(place.place_id);
     });
   }).catch(function(err) {
@@ -3038,14 +3049,28 @@ function _onLocationInputFocus() {
 
 function _onLocationInputKeydown(e) {
   if (e.key !== 'Enter') return;
-  e.preventDefault();
-  // If a Google place was just picked (within ~500ms), the place_changed
-  // listener already submitted it; ignore the redundant Enter.
+  // DO NOT preventDefault — Google's autocomplete listens for Enter to
+  // pick the highlighted suggestion. Suppressing the event would block
+  // keyboard place selection. The input has no surrounding form, so
+  // letting Enter through has no native side effect.
+  // If a place was JUST picked (e.g. mouse click within ~500ms ago),
+  // skip outright.
   if (Date.now() - _locationLastPickedAt < 500) return;
   var input = e.target;
   var val = (input.value || '').trim();
   if (!val) return;
-  _submitLocationText(val);
+  // Defer the free-text submit. If a Google suggestion was highlighted
+  // and the user pressed Enter to pick it, place_changed will fire after
+  // this keydown (synchronously, but still after the event-loop tick) and
+  // cancel our pending timeout. If place_changed never fires (no
+  // suggestion highlighted), the text submit goes through after 300ms.
+  if (_locationPendingTextSubmit) clearTimeout(_locationPendingTextSubmit);
+  _locationPendingTextSubmit = setTimeout(function() {
+    _locationPendingTextSubmit = null;
+    // Final guard: place_changed may have raced in just before this fired.
+    if (Date.now() - _locationLastPickedAt < 1000) return;
+    _submitLocationText(val);
+  }, 300);
 }
 
 // Wire up listeners once on initial script load. The input element exists
