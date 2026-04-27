@@ -689,6 +689,58 @@ def test_run_duplicate_scan_marks_missing_files(tmp_path):
     assert prop["losers"][0]["reason"] == "file missing on disk"
 
 
+def test_run_duplicate_scan_resolved_winner_missing_keeps_kept_row(tmp_path):
+    """Resolved groups don't promote — the kept DB row stays the winner even
+    when its file is gone but a rejected sibling's file still exists.
+
+    Models the scenario where auto-resolve picked a winner earlier (when both
+    files were on disk) and then the kept file was later deleted out from
+    under Vireo. The UI guards against trashing the surviving loser via the
+    warning banner + disabled trash buttons; this test locks in the proposal
+    shape so the JS can rely on ``winner.exists === false`` to detect it.
+    """
+    from duplicate_scan import run_duplicate_scan
+
+    db = Database(str(tmp_path / "t.db"))
+    a_dir = tmp_path / "a"
+    b_dir = tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    a_fid = db.add_folder(str(a_dir))
+    b_fid = db.add_folder(str(b_dir))
+
+    # Both files exist when auto-resolve runs (so the hook resolves the group
+    # using Rule 1 — clean filename wins).
+    (a_dir / "owl.jpg").write_bytes(b"x")
+    (b_dir / "owl-2.jpg").write_bytes(b"x")
+    p_kept = _add(db, a_fid, "owl.jpg", file_hash="HRESM")
+    p_loser = _add(db, b_fid, "owl-2.jpg", file_hash="HRESM")
+
+    # Sanity: auto-resolve should have flagged p_loser as rejected.
+    flags = {
+        r["id"]: r["flag"]
+        for r in db.conn.execute(
+            "SELECT id, flag FROM photos WHERE id IN (?, ?)", (p_kept, p_loser)
+        ).fetchall()
+    }
+    assert flags == {p_kept: "none", p_loser: "rejected"}
+
+    # Now the kept file disappears from disk after auto-resolve.
+    (a_dir / "owl.jpg").unlink()
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=True)
+    resolved = [p for p in result["proposals"] if p["status"] == "resolved"]
+    assert len(resolved) == 1
+    prop = resolved[0]
+    # Winner is still the kept DB row — _build_resolved_proposal does not
+    # promote based on existence; it surfaces the row that flag != 'rejected'.
+    assert prop["winner"]["id"] == p_kept
+    assert prop["winner"]["exists"] is False
+    assert prop["losers"][0]["id"] == p_loser
+    assert prop["losers"][0]["exists"] is True
+    assert prop["all_missing"] is False
+
+
 def test_run_duplicate_scan_all_missing_flag(tmp_path):
     """When every candidate is missing on disk, the proposal flags it so the
     UI can tell the user there's nothing to trash — only DB rows to clean up."""

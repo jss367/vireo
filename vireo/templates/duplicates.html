@@ -441,8 +441,10 @@
   function renderGroupWarning(group) {
     // Three levels of severity:
     //  - all_missing: every file in the group is gone — nothing to keep.
-    //  - winner missing: the chosen-keep file is gone but a loser still exists,
-    //    so the user could lose the surviving copy if they trust the proposal.
+    //  - winner missing (status-dependent):
+    //      • unresolved: Rule 0 promoted a surviving twin into the KEEP slot.
+    //      • resolved: the kept row in the DB is fixed; if a loser file still
+    //        exists it's the only surviving copy. Trashing it = data loss.
     //  - any loser missing: informational; trash actions will be no-ops for it.
     var allMissing = group.all_missing === true;
     var winner = group.winner || {};
@@ -457,8 +459,18 @@
         '</div>';
     }
     if (winnerMissing) {
+      if (group.status === 'resolved') {
+        return '<div class="group-warning severe">' +
+          '<b>Heads up:</b> the kept file in this resolved group is missing on disk. ' +
+          'Any surviving loser file below may be the only remaining copy — ' +
+          'trash actions on those losers are disabled to prevent data loss. ' +
+          'Restore the kept file, or rescan the folder so Vireo can re-resolve.' +
+          '</div>';
+      }
+      // status === 'unresolved': Rule 0 promotes a present candidate, so the
+      // KEEP card here is genuinely a surviving copy that's been swapped in.
       return '<div class="group-warning severe">' +
-        '<b>Heads up:</b> the file Vireo picked to keep is missing on disk. ' +
+        '<b>Heads up:</b> the file Vireo originally picked to keep is missing on disk. ' +
         'A surviving copy was promoted instead — check the KEEP card before applying.' +
         '</div>';
     }
@@ -497,8 +509,13 @@
     var winner = group.winner || {};
     var losers = group.losers || [];
     var hash = group.file_hash || '';
+    // When the kept-file is missing, any surviving loser file is the only
+    // remaining copy. Drop trash affordances for that group entirely so the
+    // bulk and per-card paths stay consistent — both check ``data-protected``.
+    var winnerMissing = winner.exists === false;
 
-    var html = '<div class="dup-group" data-hash="' + escapeHtml(hash) + '">';
+    var html = '<div class="dup-group" data-hash="' + escapeHtml(hash) + '"' +
+               (winnerMissing ? ' data-protected="winner-missing"' : '') + '>';
     html += '<div class="dup-group-header">';
     html += '<label style="cursor:default;">' +
             losers.length + ' loser' + (losers.length === 1 ? '' : 's') +
@@ -509,13 +526,13 @@
     html += '<div class="dup-row">';
     html += renderCard(winner, true, null, false);
     losers.forEach(function(loser) {
-      html += renderCard(loser, false, loser.reason, true);
+      html += renderCard(loser, false, loser.reason, true, winnerMissing);
     });
     html += '</div></div>';
     return html;
   }
 
-  function renderCard(photo, isWinner, reason, isResolvedLoser) {
+  function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProtect) {
     var cls = isWinner ? 'winner' : 'loser';
     var missing = photo.exists === false;
     if (missing) cls += ' missing';
@@ -539,10 +556,16 @@
     if (photo.file_size != null) meta.push(formatBytes(photo.file_size));
     if (meta.length) html += '<div class="meta">' + meta.join(' \u00b7 ') + '</div>';
     if (reason) html += '<div class="reason">' + escapeHtml(reason) + '</div>';
-    if (isResolvedLoser && photo.id != null && !missing) {
+    if (isResolvedLoser && photo.id != null && !missing && !winnerMissingProtect) {
       html += '<button type="button" class="trash-btn" onclick="trashOneLoserFile(' +
               photo.id + ')">Move file to Trash</button>';
       html += '<div class="trash-status" data-trash-status></div>';
+    } else if (isResolvedLoser && !missing && winnerMissingProtect) {
+      // The kept-file is gone, so this loser file may be the only remaining
+      // copy. Suppress the trash button and explain why.
+      html += '<div class="trash-status" data-trash-status>' +
+              'Trash disabled \u2014 kept file is missing, this may be the only copy.' +
+              '</div>';
     }
     html += '</div>';
     return html;
@@ -603,6 +626,10 @@
     var resolved = _proposals.filter(function(p) { return p.status === 'resolved'; });
     var ids = [];
     resolved.forEach(function(p) {
+      // Protected: kept-file is missing on disk for this group, so any
+      // surviving loser file may be the only remaining copy. Skip the whole
+      // group rather than risk trashing it.
+      if (p.winner && p.winner.exists === false) return;
       (p.losers || []).forEach(function(l) {
         // Skip ones already trashed in this session.
         var card = document.querySelector('.dup-card[data-photo-id="' + l.id + '"]');
