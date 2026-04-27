@@ -6979,6 +6979,119 @@ def test_link_keyword_to_place_rejects_non_location_keyword(db):
     assert row["parent_id"] is None
 
 
+def test_link_keyword_to_place_disambiguates_name_collision(db):
+    """The UPDATE in link_keyword_to_place can fail on UNIQUE(name,
+    parent_id) — not just UNIQUE(place_id) — when a different row with the
+    same (name, parent_id) already exists (e.g., an earlier upsert created
+    one homonymous place at the slot). The handler must distinguish from
+    a place_id collision and disambiguate the new row's name rather than
+    re-raising as 500."""
+    # First, upsert a place chain that creates "Riverside Park" with
+    # place_id=A under "New York" (state).
+    details_a = {
+        "place_id": "ChIJ_Park_A",
+        "name": "Riverside Park",
+        "lat": 40.80, "lng": -73.97,
+        "address_components": [
+            {"name": "New York", "short_name": "NY",
+             "types": ["administrative_area_level_1", "political"]},
+        ],
+    }
+    leaf_a = db.upsert_place_chain(details_a)
+
+    # Now create a free-text "Riverside Park" with no parent (different
+    # slot, so the upsert above didn't touch it).
+    free_id = db.get_or_create_text_location("Riverside Park")
+    assert free_id != leaf_a
+
+    # Link the free-text row to a DIFFERENT Google place (B) whose chain
+    # ALSO lands under "New York" — the UPDATE will try to set the same
+    # (name="Riverside Park", parent_id=NY) as A and collide.
+    details_b = {
+        "place_id": "ChIJ_Park_B",
+        "name": "Riverside Park",
+        "lat": 40.85, "lng": -73.95,
+        "address_components": [
+            {"name": "New York", "short_name": "NY",
+             "types": ["administrative_area_level_1", "political"]},
+        ],
+    }
+    result = db.link_keyword_to_place(free_id, details_b)
+
+    # Should NOT have re-raised. Should NOT have merged (A and B are
+    # distinct places). free_id keeps its identity but with a
+    # disambiguated name.
+    assert result["merged"] is False
+    assert result["keyword_id"] == free_id
+
+    free_row = db.conn.execute(
+        "SELECT name, place_id FROM keywords WHERE id = ?", (free_id,),
+    ).fetchone()
+    assert free_row["place_id"] == "ChIJ_Park_B"
+    # Disambiguated name keeps the original name as a prefix.
+    assert "Riverside Park" in free_row["name"]
+    assert free_row["name"] != "Riverside Park", \
+        "name must have been disambiguated, not left as the colliding value"
+
+    # The original "Riverside Park" (place A) is untouched.
+    a_row = db.conn.execute(
+        "SELECT name, place_id FROM keywords WHERE id = ?", (leaf_a,),
+    ).fetchone()
+    assert a_row["name"] == "Riverside Park"
+    assert a_row["place_id"] == "ChIJ_Park_A"
+
+
+def test_link_keyword_to_place_merge_reparents_descendants(db):
+    """When the merge path fires (place_id already owned by a canonical
+    row), the old keyword may have descendants pointing to it via
+    parent_id. SQLite's self-referential FK on keywords.parent_id (with
+    foreign_keys=ON) blocks DELETE FROM keywords if any child still
+    references the old row. The merge must reparent descendants onto the
+    canonical row before deleting."""
+
+    # Step 1: pre-create a canonical place row Q with a known place_id.
+    q_details = {
+        "place_id": "ChIJ_Q",
+        "name": "Q Park",
+        "lat": 40.0, "lng": -73.0,
+        "address_components": [],
+    }
+    canonical_id = db.upsert_place_chain(q_details)
+
+    # Step 2: create a free-text keyword P (no place_id), and give it a
+    # child keyword C that points to P via parent_id.
+    p_id = db.get_or_create_text_location("Q Park")
+    c_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES (?, 'location', ?)",
+        ("Q Park West", p_id),
+    ).lastrowid
+    db.conn.commit()
+
+    # Step 3: link P to the same place_id as the canonical row Q.
+    # This triggers the merge path — P's photos (none here) move onto Q,
+    # and P must be deleted. With descendants still pointing to P, the
+    # naive DELETE fails on the self-FK. After the fix, C is reparented
+    # to Q first.
+    result = db.link_keyword_to_place(p_id, q_details)
+
+    assert result["merged"] is True
+    assert result["keyword_id"] == canonical_id
+
+    # P must be gone.
+    p_row = db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (p_id,),
+    ).fetchone()
+    assert p_row is None, "old keyword should have been deleted post-merge"
+
+    # C must still exist and now point to Q (the canonical row).
+    c_row = db.conn.execute(
+        "SELECT name, parent_id FROM keywords WHERE id = ?", (c_id,),
+    ).fetchone()
+    assert c_row is not None, "child keyword must survive the merge"
+    assert c_row["parent_id"] == canonical_id, \
+        "child must be reparented onto the canonical row"
+
+
 def test_set_photo_location_rejects_non_location_keyword(db):
     """Passing a non-'location' keyword must raise ValueError; otherwise the
     DELETE would strip real location links and the INSERT would add a

@@ -3723,42 +3723,93 @@ class Database:
                 # the canonical row for its slot), so just return it.
                 return {"keyword_id": keyword_id, "merged": False}
 
+            update_sql = (
+                "UPDATE keywords SET "
+                "  place_id = ?, "
+                "  latitude = ?, "
+                "  longitude = ?, "
+                "  name = ?, "
+                "  parent_id = ? "
+                "WHERE id = ?"
+            )
             try:
                 self.conn.execute(
-                    "UPDATE keywords SET "
-                    "  place_id = ?, "
-                    "  latitude = ?, "
-                    "  longitude = ?, "
-                    "  name = ?, "
-                    "  parent_id = ? "
-                    "WHERE id = ?",
+                    update_sql,
                     (place_id, lat, lng, new_name, parent_id, keyword_id),
                 )
                 return {"keyword_id": keyword_id, "merged": False}
             except sqlite3.IntegrityError:
-                # Another keyword already owns this place_id. Merge.
+                # Two distinct constraints can fail here:
+                #   (a) UNIQUE(place_id) — another row already has this
+                #       place_id → merge case.
+                #   (b) UNIQUE(name, parent_id) — another row already
+                #       owns this (name, parent_id) slot with a different
+                #       (or NULL) place_id → name-collision case.
+                # Disambiguate by checking which.
                 canonical = self.conn.execute(
                     "SELECT id FROM keywords WHERE place_id = ?", (place_id,),
                 ).fetchone()
-                if canonical is None:
-                    # Shouldn't happen — re-raise so we don't lose info.
+                if canonical is not None and canonical["id"] != keyword_id:
+                    # Case (a): merge.
+                    canonical_id = canonical["id"]
+                    # FK on keywords.parent_id is enforced (foreign_keys=ON),
+                    # so any descendants of the old keyword would block the
+                    # final DELETE FROM keywords. Reparent them onto the
+                    # canonical row first — the canonical row represents the
+                    # same place, so its descendants inherit cleanly.
+                    self.conn.execute(
+                        "UPDATE keywords SET parent_id = ? WHERE parent_id = ?",
+                        (canonical_id, keyword_id),
+                    )
+                    # Re-point photo_keywords from old → canonical.
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) "
+                        "SELECT photo_id, ? FROM photo_keywords WHERE keyword_id = ?",
+                        (canonical_id, keyword_id),
+                    )
+                    self.conn.execute(
+                        "DELETE FROM photo_keywords WHERE keyword_id = ?",
+                        (keyword_id,),
+                    )
+                    # Delete the now-empty old keyword row.
+                    self.conn.execute(
+                        "DELETE FROM keywords WHERE id = ?", (keyword_id,),
+                    )
+                    return {"keyword_id": canonical_id, "merged": True}
+
+                # Case (b): name collision — a *different* keyword already
+                # holds the (new_name, parent_id) slot. Disambiguate the
+                # name by appending a short place_id suffix and retry.
+                # Same approach as _upsert_one_keyword's leaf-collision path.
+                if parent_id is None:
+                    name_clash = self.conn.execute(
+                        "SELECT id FROM keywords "
+                        "WHERE name = ? AND parent_id IS NULL AND id != ?",
+                        (new_name, keyword_id),
+                    ).fetchone()
+                else:
+                    name_clash = self.conn.execute(
+                        "SELECT id FROM keywords "
+                        "WHERE name = ? AND parent_id = ? AND id != ?",
+                        (new_name, parent_id, keyword_id),
+                    ).fetchone()
+                if name_clash is None:
+                    # Neither place_id nor name conflict — shouldn't happen
+                    # but re-raise rather than swallow.
                     raise
-                canonical_id = canonical["id"]
-                # Re-point photo_keywords from old → canonical.
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) "
-                    "SELECT photo_id, ? FROM photo_keywords WHERE keyword_id = ?",
-                    (canonical_id, keyword_id),
-                )
-                self.conn.execute(
-                    "DELETE FROM photo_keywords WHERE keyword_id = ?",
-                    (keyword_id,),
-                )
-                # Delete the now-empty old keyword row.
-                self.conn.execute(
-                    "DELETE FROM keywords WHERE id = ?", (keyword_id,),
-                )
-                return {"keyword_id": canonical_id, "merged": True}
+                suffix = place_id[-8:]
+                disambiguated = f"{new_name} ({suffix})"
+                try:
+                    self.conn.execute(
+                        update_sql,
+                        (place_id, lat, lng, disambiguated, parent_id, keyword_id),
+                    )
+                    return {"keyword_id": keyword_id, "merged": False}
+                except sqlite3.IntegrityError as inner_err:
+                    raise RuntimeError(
+                        f"keyword '{new_name}' (parent_id={parent_id}) "
+                        f"collides with an existing row even after disambiguation"
+                    ) from inner_err
 
     @staticmethod
     def _reverse_geocode_grid(lat, lng):
