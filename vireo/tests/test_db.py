@@ -7382,13 +7382,15 @@ def test_ensure_default_genre_keywords_preserves_non_general_user_types(tmp_path
     rows = db.conn.execute(
         "SELECT type FROM keywords WHERE name = 'Wildlife' ORDER BY type"
     ).fetchall()
-    types = [r["type"] for r in rows]
-    # The user's 'individual' row stays. Case-insensitive existence check
-    # in ensure_default_genre_keywords sees it and skips inserting a
-    # duplicate genre row.
-    assert types == ["individual"], (
-        f"Expected only the user's 'individual' Wildlife to remain; "
-        f"got types={types}"
+    types = sorted(r["type"] for r in rows)
+    # The user's 'individual' row is preserved AND a canonical 'genre'
+    # row is created alongside it. Duplicates BY NAME across different
+    # types are intentional — disambiguation in add_keyword's lookup
+    # (ORDER BY (type=?) DESC) ensures kw_type-typed callers get the
+    # right row deterministically.
+    assert types == ["genre", "individual"], (
+        f"Expected both 'genre' (canonical) and 'individual' (user's) "
+        f"Wildlife rows; got types={types}"
     )
     # Other genre defaults still seeded
     n_other = db.conn.execute(
@@ -7399,51 +7401,68 @@ def test_ensure_default_genre_keywords_preserves_non_general_user_types(tmp_path
     assert n_other == 4
 
 
-def test_ensure_default_genre_keywords_does_not_duplicate_existing_top_level(tmp_path):
-    """Regression: SQLite UNIQUE(name, parent_id) treats NULL as distinct
-    per SQL standard, so plain INSERT OR IGNORE against a same-name
-    top-level row does NOT actually prevent duplicates. The seed must
-    explicitly check by case-insensitive name first."""
+def test_ensure_default_genre_keywords_seeds_canonical_row_despite_typed_collision(tmp_path):
+    """Regression: the seed must guarantee a canonical genre row for each
+    default name even when a user has previously tagged a same-name
+    keyword with a different type (e.g. 'Landscape' as 'location').
+
+    Otherwise the lightbox 'Not Wildlife' flow would call add_keyword(
+    name='Landscape', kw_type='genre'), find the existing 'location' row,
+    fail to upgrade it (only 'general' is upgraded), and tag the photo
+    with a non-genre keyword — leaving it stuck in 'Needs Identification'
+    under the default subject types.
+    """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    # Wipe the genre defaults and force-create same-name top-level rows
-    # with various existing types — simulates upgraded DBs where users
-    # hand-tagged before the genre feature existed.
+    # Wipe the genre defaults and force-create same-name rows with
+    # different types to simulate an upgraded user library.
     db.conn.execute("DELETE FROM keywords WHERE type = 'genre'")
     db.conn.execute(
         "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 0)",
-        ("landscape",),  # lowercase — exercises COLLATE NOCASE path
+        ("landscape",),  # lowercase — exercises COLLATE NOCASE
     )
     db.conn.execute(
         "INSERT INTO keywords (name, type, is_species) VALUES (?, 'location', 0)",
-        ("Sunset",),  # legitimately user-typed as location (a place)
+        ("Sunset",),  # user has a "Sunset" location they care about
     )
     db.conn.commit()
 
     db.ensure_default_genre_keywords()
     db.ensure_default_genre_keywords()  # idempotent re-run
 
-    # 'landscape' (general) should be PROMOTED to 'genre' (case-insensitive
-    # match in the promotion query) — no duplicate inserted.
+    # 'landscape' (general) is PROMOTED to 'genre' via the in-place
+    # UPDATE — no duplicate.
     rows = db.conn.execute(
-        "SELECT id, name, type FROM keywords WHERE name = 'landscape' COLLATE NOCASE"
+        "SELECT type FROM keywords WHERE name = 'landscape' COLLATE NOCASE"
     ).fetchall()
-    assert len(rows) == 1, (
-        f"Expected exactly one 'landscape' row after seed; got {len(rows)}: "
-        f"{[(r['name'], r['type']) for r in rows]}"
+    assert sorted(r["type"] for r in rows) == ["genre"], (
+        f"'general' Landscape should be promoted in place to 'genre'; "
+        f"got types={[r['type'] for r in rows]}"
     )
-    assert rows[0]["type"] == "genre"
 
-    # 'Sunset' (location) should be PRESERVED — no duplicate genre Sunset.
+    # 'Sunset' (location) is PRESERVED, AND a canonical 'genre' Sunset
+    # is created alongside it.
     rows = db.conn.execute(
-        "SELECT id, name, type FROM keywords WHERE name = 'Sunset' COLLATE NOCASE"
+        "SELECT type FROM keywords WHERE name = 'Sunset' COLLATE NOCASE"
     ).fetchall()
-    assert len(rows) == 1, (
-        f"Expected exactly one 'Sunset' row after seed; got {len(rows)}"
+    assert sorted(r["type"] for r in rows) == ["genre", "location"], (
+        f"Expected both 'genre' (canonical) and 'location' (user's) "
+        f"Sunset rows; got types={[r['type'] for r in rows]}"
     )
-    assert rows[0]["type"] == "location"
 
-    # And the OTHER defaults should still be created exactly once.
+    # add_keyword's lookup must deterministically pick the genre row
+    # when kw_type='genre' is supplied (otherwise the route flow gets
+    # the wrong-typed row non-deterministically).
+    sunset_id = db.add_keyword("Sunset", kw_type="genre")
+    sunset_type = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (sunset_id,)
+    ).fetchone()["type"]
+    assert sunset_type == "genre", (
+        f"add_keyword('Sunset', kw_type='genre') must return the genre "
+        f"row, got type={sunset_type!r}"
+    )
+
+    # Other defaults exist exactly once.
     for name in ("Architecture", "Abstract", "Wildlife"):
         n = db.conn.execute(
             "SELECT COUNT(*) FROM keywords WHERE name = ? COLLATE NOCASE",

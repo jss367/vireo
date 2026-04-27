@@ -1085,20 +1085,24 @@ class Database:
                      AND parent_id IS NULL AND type = 'general'""",
                 (name,),
             )
-        # Insert each default only if no top-level row with that name (any
-        # type, any case) exists. Cannot rely on INSERT OR IGNORE against
-        # UNIQUE(name, parent_id) here — SQLite treats NULL parent_id as
-        # distinct (per SQL standard), so a same-name top-level row would
-        # not actually block the insert and we'd silently produce
-        # duplicates that split add_keyword's case-insensitive lookup.
+        # Always guarantee a canonical genre row for each default. Skip
+        # only when a same-name + same-type ('genre') row already exists.
+        # If a user has previously tagged e.g. 'Landscape' as 'location'
+        # (a deliberate non-default type), we still create the genre
+        # 'Landscape' alongside it so the lightbox "Not Wildlife" flow
+        # (which tags with type='genre') has a canonical row to reuse.
+        # This intentionally permits duplicates BY NAME across different
+        # types — disambiguation is handled by add_keyword's lookup,
+        # which prefers same-typed matches when kw_type is supplied.
         for name in defaults:
-            existing_row = self.conn.execute(
+            existing_genre = self.conn.execute(
                 """SELECT id FROM keywords
-                   WHERE name = ? COLLATE NOCASE AND parent_id IS NULL
+                   WHERE name = ? COLLATE NOCASE
+                     AND parent_id IS NULL AND type = 'genre'
                    LIMIT 1""",
                 (name,),
             ).fetchone()
-            if existing_row:
+            if existing_genre:
                 continue
             self.conn.execute(
                 "INSERT INTO keywords (name, type, is_species) VALUES (?, 'genre', 0)",
@@ -3540,17 +3544,39 @@ class Database:
             )
         if kw_type == 'taxonomy':
             is_species = True
-        # Case-insensitive lookup
+        # Case-insensitive lookup. When kw_type is supplied, prefer a
+        # same-typed match — duplicates by name across different types are
+        # permitted (e.g. a user-tagged 'location' Landscape coexisting
+        # with a default 'genre' Landscape), and callers who explicitly
+        # ask for kw_type='genre' must deterministically get the genre
+        # row rather than an arbitrary same-name row of another type.
+        type_preference = "ORDER BY (type = ?) DESC, id ASC LIMIT 1"
         if parent_id is None:
-            existing = self.conn.execute(
-                "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE AND parent_id IS NULL",
-                (name,),
-            ).fetchone()
+            if kw_type is None:
+                existing = self.conn.execute(
+                    "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    "AND parent_id IS NULL ORDER BY id ASC LIMIT 1",
+                    (name,),
+                ).fetchone()
+            else:
+                existing = self.conn.execute(
+                    f"SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    f"AND parent_id IS NULL {type_preference}",
+                    (name, kw_type),
+                ).fetchone()
         else:
-            existing = self.conn.execute(
-                "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE AND parent_id = ?",
-                (name, parent_id),
-            ).fetchone()
+            if kw_type is None:
+                existing = self.conn.execute(
+                    "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    "AND parent_id = ? ORDER BY id ASC LIMIT 1",
+                    (name, parent_id),
+                ).fetchone()
+            else:
+                existing = self.conn.execute(
+                    f"SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    f"AND parent_id = ? {type_preference}",
+                    (name, parent_id, kw_type),
+                ).fetchone()
         if existing:
             # Promote an unset row to taxonomy when this call indicates a
             # species. Restrict to 'general' (the legacy default for unknown
