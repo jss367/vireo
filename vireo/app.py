@@ -9504,11 +9504,48 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
 
-        # Working copy is the canonical full-res asset — serve it if present.
+        # Working copy is the canonical asset *unless* it was deliberately
+        # capped below the original. The cheap signal is config + stored
+        # dims; the precise signal is the wc's actual dims on disk. Use
+        # the cheap signal first and only open the wc when capping is
+        # plausible — burst-review zoom fires this endpoint per card, so
+        # the common path must avoid PIL altogether.
+        #
+        # Cases:
+        #   - cap <= 0 (full-res config): wc is never downsized → serve it.
+        #   - cap > 0 and orig_long <= cap: wc reflects the full source
+        #     (e.g. RAW embedded-JPEG fallback whose dims are slightly
+        #     smaller than the sensor area) → serve it.
+        #   - orig dims unknown: can't detect capping; trust the wc rather
+        #     than pay 5–7s for a speculative RAW re-extract per request.
+        #   - cap > 0 and orig_long > cap: wc *might* be capped, but might
+        #     already have been upgraded in a previous request (the
+        #     extraction below overwrites wc at full-res). Read the wc's
+        #     actual long side via the JPEG header and trust it when close
+        #     to orig_long — this both detects post-upgrade wcs and avoids
+        #     re-extract loops for RAWs whose embedded-JPEG fallback is
+        #     slightly smaller than the sensor area.
         if photo["working_copy_path"]:
             wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
             if os.path.exists(wc_path):
-                return send_file(wc_path, mimetype="image/jpeg")
+                effective_cfg = db.get_effective_config(cfg.load())
+                wc_max_size = int(effective_cfg.get("working_copy_max_size", 4096) or 0)
+                orig_long = max(photo["width"] or 0, photo["height"] or 0)
+                wc_might_be_capped = wc_max_size > 0 and orig_long > wc_max_size
+                if not wc_might_be_capped:
+                    return send_file(wc_path, mimetype="image/jpeg")
+                # Capping is plausible — confirm with a JPEG header read.
+                # 1% tolerance covers RAW embedded-JPEG fallbacks (e.g.
+                # Nikon NEFs report sensor dims 8280×5520 but the embedded
+                # JPEG is 8256×5504).
+                try:
+                    from PIL import Image as _PILImage
+                    with _PILImage.open(wc_path) as _wc_img:
+                        wc_long = max(_wc_img.size)
+                    if wc_long >= orig_long * 0.99:
+                        return send_file(wc_path, mimetype="image/jpeg")
+                except Exception:
+                    pass  # unreadable wc — fall through to re-extract
 
         # Resolve original file path
         folder = db.conn.execute(

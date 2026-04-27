@@ -628,15 +628,22 @@ def test_original_serves_full_res_working_copy(app_and_db):
 
 
 def test_original_trusts_working_copy_even_when_smaller_than_stored_dims(app_and_db):
-    """Original endpoint trusts working copy as the canonical full-res asset.
+    """Original endpoint trusts working copy when stored dims slightly exceed wc.
 
-    The working copy is the full-res asset; stored RAW sensor dimensions can
-    legitimately exceed embedded-JPEG-derived working copy dimensions (Nikon
-    NEFs that fall back to the embedded JPEG are a known case). The endpoint
-    must serve the working copy directly without re-extracting from RAW.
+    Stored RAW sensor dimensions can legitimately exceed embedded-JPEG-derived
+    working copy dimensions (Nikon NEFs that fall back to the embedded JPEG
+    are a known case). When the configured cap is large enough that the wc
+    on disk reaches it, the endpoint must serve the working copy directly
+    without re-extracting from RAW.
     """
+    import config as cfg
+
     app, db = app_and_db
     client = app.test_client()
+
+    # Full-res working copies (NEF case implies the user has lifted the cap;
+    # otherwise the embedded JPEG of 8256 would have been thumbnailed to 4096).
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 0})
 
     photos = db.get_photos()
     pid = photos[0]["id"]
@@ -662,6 +669,101 @@ def test_original_trusts_working_copy_even_when_smaller_than_stored_dims(app_and
     assert resp.status_code == 200
 
     # Body must be exactly the working copy bytes — no re-extraction.
+    with open(wc_path, "rb") as f:
+        assert resp.data == f.read()
+
+
+def test_original_upgrades_capped_working_copy_to_full_res(app_and_db, tmp_path):
+    """Original endpoint re-extracts when working copy was capped below original.
+
+    With the default ``working_copy_max_size`` (4096), a 6000×4000 JPEG gets a
+    4096-px working copy. Serving that directly for /original would break 1:1
+    zoom — the endpoint must trigger the on-demand full-res upgrade.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    # Stored dimensions exceed the default cap (4096).
+    db.conn.execute("UPDATE photos SET width=6000, height=4000 WHERE id=?", (pid,))
+    db.conn.commit()
+
+    # Capped working copy: 4096-px long side.
+    from PIL import Image
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{pid}.jpg")
+    Image.new("RGB", (4096, 2731), color=(10, 20, 30)).save(wc_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{pid}.jpg", pid),
+    )
+    db.conn.commit()
+
+    # Real 6000×4000 source on disk so the on-demand upgrade can run.
+    photo_dir = tmp_path / "photo_files"
+    photo_dir.mkdir()
+    db.conn.execute(
+        "UPDATE folders SET path=? WHERE id=?",
+        (str(photo_dir), photos[0]["folder_id"]),
+    )
+    db.conn.commit()
+    img_path = os.path.join(str(photo_dir), photos[0]["filename"])
+    Image.new("RGB", (6000, 4000), color=(40, 50, 60)).save(img_path, "JPEG")
+
+    resp = client.get(f"/photos/{pid}/original")
+    assert resp.status_code == 200
+
+    # The served image must be full-res (6000×4000), not the capped 4096-px wc.
+    import io
+    with Image.open(io.BytesIO(resp.data)) as served:
+        assert max(served.size) == 6000
+
+
+def test_original_serves_post_upgrade_working_copy_without_reextracting(app_and_db, tmp_path):
+    """After the on-demand upgrade overwrites wc at full-res, subsequent
+    requests must serve the upgraded wc directly — not loop into another
+    re-extract on every burst-review zoom click.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    # Stored dims still exceed the default cap (4096), but the wc on disk
+    # has already been upgraded to full-res by an earlier request.
+    db.conn.execute("UPDATE photos SET width=6000, height=4000 WHERE id=?", (pid,))
+    db.conn.commit()
+
+    from PIL import Image
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{pid}.jpg")
+    # Upgraded wc: matches stored dims.
+    Image.new("RGB", (6000, 4000), color=(70, 80, 90)).save(wc_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{pid}.jpg", pid),
+    )
+    db.conn.commit()
+
+    # Source file does NOT exist — so if the endpoint tried to re-extract,
+    # the test would fail with a 5xx. Serving the wc directly succeeds.
+    photo_dir = tmp_path / "photo_files_missing"
+    photo_dir.mkdir()
+    db.conn.execute(
+        "UPDATE folders SET path=? WHERE id=?",
+        (str(photo_dir), photos[0]["folder_id"]),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/photos/{pid}/original")
+    assert resp.status_code == 200
     with open(wc_path, "rb") as f:
         assert resp.data == f.read()
 
