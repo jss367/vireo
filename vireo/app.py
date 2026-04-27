@@ -2342,6 +2342,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
             except Exception:
                 existing = {}
+        # `config_overrides` is JSON, so a previous PUT /api/workspaces/<id>
+        # could have stored a list/string/number. Coerce to {} before key
+        # assignment to keep this endpoint from 500-ing on malformed state.
+        if not isinstance(existing, dict):
+            existing = {}
         existing["subject_types"] = cleaned
         db.update_workspace(ws_id, config_overrides=existing)
         return jsonify({"types": cleaned})

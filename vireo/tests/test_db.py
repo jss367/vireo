@@ -6951,6 +6951,83 @@ def test_backfill_wildlife_genre_matches_legacy_is_species_rows(tmp_path):
     )
 
 
+def test_tag_photo_legacy_is_species_keyword_adds_wildlife_genre(tmp_path):
+    """Regression: auto-Wildlife must fire for legacy species rows whose
+    ``type`` hasn't been retyped to ``taxonomy`` yet (is_species=1 with
+    non-taxonomy ``type``). On upgraded databases ``mark_species_keywords``
+    runs in a background thread, so newly-tagged photos can briefly hit
+    keywords that satisfy ``is_species=1`` but not ``type='taxonomy'``."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    # Plant a legacy-shaped species keyword: is_species=1 but type='general'
+    # (the shape an upgraded DB has before mark_species_keywords retypes it).
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 1)",
+        ("Robin",),
+    )
+    sp = cur.lastrowid
+    db.conn.commit()
+
+    db.tag_photo(p1, sp)
+
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    has_wildlife = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is True, (
+        "Auto-Wildlife must trigger for legacy is_species=1 rows whose type "
+        "hasn't been normalized yet — otherwise photos tagged during the "
+        "background mark_species_keywords window permanently miss Wildlife."
+    )
+
+
+def test_tag_photo_legacy_species_sticky_removal_holds(tmp_path):
+    """Regression complement: sticky removal must still hold across the
+    mixed (legacy + retyped) species states. After removing Wildlife, a
+    second species tag — even one that uses the legacy is_species=1 shape
+    — must NOT re-add Wildlife as long as another species keyword is
+    already attached."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    sp_a = db.add_keyword("Robin", is_species=True)
+    db.tag_photo(p1, sp_a)  # First species — Wildlife auto-added.
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    db.untag_photo(p1, wildlife_id)  # User removes Wildlife.
+
+    # Plant a second species with the legacy shape.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 1)",
+        ("Sparrow",),
+    )
+    sp_b = cur.lastrowid
+    db.conn.commit()
+    db.tag_photo(p1, sp_b)
+
+    has_wildlife = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is False, (
+        "Adding a second (legacy-shaped) species must respect the user's "
+        "Wildlife removal — the count query must consider both 'taxonomy' "
+        "and is_species=1 rows so existing species are seen."
+    )
+
+
 def test_tag_photo_no_op_re_tag_does_not_re_add_removed_wildlife(tmp_path):
     """Regression: re-tagging an already-tagged species (a no-op INSERT OR
     IGNORE) must NOT re-fire the auto-Wildlife rule, so user-removed

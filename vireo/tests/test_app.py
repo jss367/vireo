@@ -2312,6 +2312,32 @@ def test_put_subject_types_drops_non_string_entries(app_and_db):
     assert set(body["types"]) == {"taxonomy", "genre"}
 
 
+def test_put_subject_types_normalizes_non_dict_config_overrides(app_and_db):
+    """Regression: PUT /api/workspaces/<id>/subject-types must not 500 when
+    `config_overrides` was previously persisted as a non-dict JSON value.
+    The column is arbitrary JSON (api_update_workspace stores whatever the
+    client sends), so a list/string/number can sit there from a prior PUT.
+    The endpoint must coerce it back to {} before assigning subject_types."""
+    app, db = app_and_db
+    ws_id = db.create_workspace("ws-subject-non-dict")
+    # Plant a list-shaped config_overrides directly via update_workspace,
+    # which json.dumps()es whatever it receives.
+    db.update_workspace(ws_id, config_overrides=["unexpected", "list"])
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}/subject-types",
+        json={"types": ["taxonomy"]},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200, (
+        f"Non-dict config_overrides must be normalized, not crash: "
+        f"{resp.status_code} {resp.get_data(as_text=True)}"
+    )
+    overrides = _read_workspace_overrides(db, ws_id)
+    assert isinstance(overrides, dict)
+    assert overrides.get("subject_types") == ["taxonomy"]
+
+
 def test_add_keyword_route_handles_non_string_type(app_and_db):
     """Regression: POST /api/photos/<id>/keywords with a non-string `type`
     JSON value must not 500 — the bad value should be ignored and the

@@ -3537,20 +3537,28 @@ class Database:
             self.conn.commit()
 
     def _maybe_apply_auto_wildlife(self, photo_id, just_added_keyword_id):
-        """If just_added_keyword_id is a taxonomy keyword AND it's the only
-        taxonomy keyword on this photo, also add the Wildlife genre."""
+        """If just_added_keyword_id is a species keyword (taxonomy type OR
+        legacy is_species=1) AND it's the only such keyword on this photo,
+        also add the Wildlife genre.
+
+        Treats ``is_species=1`` as a species candidate too: upgraded databases
+        carry legacy species rows whose ``type`` hasn't been retyped to
+        ``taxonomy`` yet by the background ``mark_species_keywords`` pass,
+        and the auto-Wildlife trigger needs to fire for those tags during
+        that window."""
         row = self.conn.execute(
-            "SELECT type FROM keywords WHERE id = ?",
+            "SELECT type, is_species FROM keywords WHERE id = ?",
             (just_added_keyword_id,),
         ).fetchone()
-        if not row or row["type"] != "taxonomy":
+        if not row or (row["type"] != "taxonomy" and not row["is_species"]):
             return
-        # Count taxonomy keywords on this photo. If > 1, this isn't the first
+        # Count species keywords on this photo. If > 1, this isn't the first
         # — skip (sticky removal).
         species_count = self.conn.execute(
             """SELECT COUNT(*) AS n FROM photo_keywords pk
                JOIN keywords k ON k.id = pk.keyword_id
-               WHERE pk.photo_id = ? AND k.type = 'taxonomy'""",
+               WHERE pk.photo_id = ?
+                 AND (k.type = 'taxonomy' OR k.is_species = 1)""",
             (photo_id,),
         ).fetchone()["n"]
         if species_count != 1:
