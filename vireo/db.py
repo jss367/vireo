@@ -158,6 +158,8 @@ class Database:
                 companion_path           TEXT,
                 exif_data                TEXT,
                 working_copy_path        TEXT,
+                working_copy_failed_at   TEXT,
+                working_copy_failed_mtime REAL,
                 eye_x                    REAL,
                 eye_y                    REAL,
                 eye_conf                 REAL,
@@ -476,6 +478,22 @@ class Database:
             self.conn.execute(
                 "UPDATE workspaces SET open_tabs = ? WHERE open_tabs IS NULL",
                 (json.dumps(["settings", "workspace", "lightroom"]),),
+            )
+        # Migration: working-copy failure markers. Backfill (and the inline
+        # scan extraction) record a failure here when extract_working_copy
+        # returns False, gated by file_mtime so a user-replaced file retries
+        # on the next pass instead of being permanently skipped.
+        try:
+            self.conn.execute("SELECT working_copy_failed_at FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos ADD COLUMN working_copy_failed_at TEXT"
+            )
+        try:
+            self.conn.execute("SELECT working_copy_failed_mtime FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos ADD COLUMN working_copy_failed_mtime REAL"
             )
         self.conn.commit()
 

@@ -368,8 +368,14 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
             os.remove(wc_file)
         except OSError:
             log.debug("Could not delete stale working copy %s", wc_file, exc_info=True)
+    # Also clear any failure markers: a content change is a meaningful
+    # input change so the next backfill / scan extraction pass should retry,
+    # not be permanently locked out by a stale failure record.
     db.conn.execute(
-        "UPDATE photos SET working_copy_path = NULL WHERE id = ?",
+        "UPDATE photos SET working_copy_path = NULL,"
+        " working_copy_failed_at = NULL,"
+        " working_copy_failed_mtime = NULL"
+        " WHERE id = ?",
         (photo_id,),
     )
 
@@ -493,7 +499,9 @@ def _subtree_like_pattern(path, sep=None):
     return _escape(path) + _escape(sep) + "%"
 
 
-def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callback=None, scope=None):
+def _extract_working_copies(db, vireo_dir, progress_callback=None,
+                            status_callback=None, scope=None,
+                            cancel_check=None):
     """Extract working copies for all RAW photos missing one.
 
     For each RAW photo without a working_copy_path, extract a JPEG working
@@ -501,6 +509,11 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
     companion JPEG (RAW+JPEG pair), the companion is used as the extraction
     source because the in-camera JPEG is higher quality than extracting from
     the RAW.
+
+    Rows that previously failed extraction (``working_copy_failed_at`` set)
+    are skipped unless ``file_mtime`` differs from the recorded
+    ``working_copy_failed_mtime`` — a user-replaced file gets a fresh
+    attempt; a permanently-broken file is not retried every pass.
 
     ``scope`` restricts which folders are considered:
       * ``None`` (default) — library-wide backfill (every missing WC).
@@ -511,6 +524,12 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
           - a ``(path, "subtree")`` tuple → explicit form of the string case.
       * empty list/tuple — no-op (used by callers that want an explicit
         "scan matched nothing" signal instead of backfilling everything).
+
+    ``progress_callback(current, total)`` is invoked once per processed row
+    so long-running backfills can stream progress to the UI.
+
+    ``cancel_check()`` is polled before each row; returning truthy aborts the
+    loop cleanly with whatever was already committed.
     """
     import config as cfg
 
@@ -561,10 +580,22 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
                 params.extend([path, _subtree_like_pattern(path)])
         scope_clause = " AND (" + " OR ".join(scope_terms) + ")"
 
+    # Skip rows whose previous extraction failed at the same file_mtime.
+    # NULL marker (never tried, or content changed via _invalidate_derived_caches)
+    # means "eligible". The IS NOT NULL on file_mtime guards the comparison
+    # itself: a row with no recorded mtime should not be permanently locked
+    # out by a stale failure marker.
+    failure_skip = (
+        " AND (p.working_copy_failed_at IS NULL"
+        "      OR p.working_copy_failed_mtime IS NULL"
+        "      OR p.file_mtime IS NULL"
+        "      OR p.working_copy_failed_mtime != p.file_mtime)"
+    )
+
     rows = db.conn.execute(
         f"""
         SELECT p.id, p.filename, p.companion_path, p.working_copy_path,
-               p.extension, p.width, p.height,
+               p.extension, p.width, p.height, p.file_mtime,
                f.path AS folder_path
           FROM photos p
           JOIN folders f ON f.id = p.folder_id
@@ -574,6 +605,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
                {jpeg_clause}
            )
            {scope_clause}
+           {failure_skip}
         """,
         params,
     ).fetchall()
@@ -581,10 +613,26 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
     if not rows:
         return
 
+    total = len(rows)
     if status_callback:
-        status_callback(f"Extracting {len(rows)} working copies...")
+        status_callback(f"Extracting {total} working copies...")
 
-    for _i, row in enumerate(rows):
+    # Commit in small batches so a long backfill streams progress out
+    # incrementally instead of holding a single transaction across 10k+ rows.
+    BATCH = 25
+    pending = 0
+
+    def _flush():
+        nonlocal pending
+        if pending:
+            commit_with_retry(db.conn)
+            pending = 0
+
+    for i, row in enumerate(rows, 1):
+        if cancel_check is not None and cancel_check():
+            log.info("Working-copy extraction cancelled after %d/%d rows", i - 1, total)
+            break
+
         wc_rel = f"working/{row['id']}.jpg"
         wc_abs = os.path.join(vireo_dir, wc_rel)
 
@@ -597,11 +645,87 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
 
         if extract_working_copy(source, wc_abs, max_size=wc_max_size, quality=wc_quality):
             db.conn.execute(
-                "UPDATE photos SET working_copy_path=? WHERE id=?",
+                "UPDATE photos SET working_copy_path=?,"
+                " working_copy_failed_at=NULL,"
+                " working_copy_failed_mtime=NULL"
+                " WHERE id=?",
                 (wc_rel, row["id"]),
             )
+        else:
+            # Mark failure gated on current file_mtime so a future content
+            # change (mtime bump) clears the gate and we retry. Logged at
+            # warning so the user sees that a specific file is the cause.
+            log.warning(
+                "Working copy extraction failed for photo %s (%s); "
+                "marked as failed and will not retry until the file changes",
+                row["id"], source,
+            )
+            db.conn.execute(
+                "UPDATE photos SET working_copy_failed_at=datetime('now'),"
+                " working_copy_failed_mtime=?"
+                " WHERE id=?",
+                (row["file_mtime"], row["id"]),
+            )
+        pending += 1
 
-    commit_with_retry(db.conn)
+        if pending >= BATCH:
+            _flush()
+        if progress_callback is not None:
+            progress_callback(i, total)
+
+    _flush()
+
+
+def backfill_working_copies(db, vireo_dir, progress_callback=None,
+                            status_callback=None, cancel_check=None):
+    """Library-wide backfill of missing working copies.
+
+    Convenience wrapper around ``_extract_working_copies`` with no folder
+    scope — used by the startup self-healing job to cover photos that
+    never went through ``scan(..., vireo_dir=...)`` (e.g. legacy rows from
+    before working-copy generation existed) or whose previous extraction
+    failed against an older mtime.
+
+    Returns a dict with ``processed`` (rows whose status changed,
+    success+failure) so callers can summarize the run. Sequential by
+    design: the bottleneck is a slow external disk where parallel reads
+    thrash. If profiling later disagrees, swap in a worker pool here.
+    """
+    before_pending = db.conn.execute(
+        "SELECT COUNT(*) FROM photos"
+        " WHERE working_copy_path IS NULL"
+        "   AND (working_copy_failed_at IS NULL"
+        "        OR working_copy_failed_mtime IS NULL"
+        "        OR file_mtime IS NULL"
+        "        OR working_copy_failed_mtime != file_mtime)"
+    ).fetchone()[0]
+
+    _extract_working_copies(
+        db, vireo_dir,
+        progress_callback=progress_callback,
+        status_callback=status_callback,
+        scope=None,
+        cancel_check=cancel_check,
+    )
+
+    after_pending = db.conn.execute(
+        "SELECT COUNT(*) FROM photos"
+        " WHERE working_copy_path IS NULL"
+        "   AND (working_copy_failed_at IS NULL"
+        "        OR working_copy_failed_mtime IS NULL"
+        "        OR file_mtime IS NULL"
+        "        OR working_copy_failed_mtime != file_mtime)"
+    ).fetchone()[0]
+
+    succeeded = db.conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE working_copy_path IS NOT NULL"
+    ).fetchone()[0]
+
+    return {
+        "candidates": int(before_pending),
+        "remaining": int(after_pending),
+        "with_working_copy": int(succeeded),
+    }
 
 
 def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None):
