@@ -690,6 +690,13 @@ class Database:
         photo ids from get_collection_photos(per_page=999999), which can
         exceed older SQLite builds' 999-variable cap and trip
         OperationalError: too many SQL variables.
+
+        When ``'taxonomy'`` is among the requested types, legacy species rows
+        (``is_species=1`` with a non-taxonomy ``type``) also count as
+        subject-tagged. Upgraded databases carry these rows until the
+        background ``mark_species_keywords`` pass retypes them; without this
+        guard, already-identified photos would still be classified and would
+        appear in 'Needs Identification' during that window.
         """
         if not subject_types or not photo_ids:
             return list(photo_ids)
@@ -697,6 +704,9 @@ class Database:
         if not types:
             return list(photo_ids)
         type_placeholders = ",".join("?" * len(types))
+        type_clause = f"k.type IN ({type_placeholders})"
+        if "taxonomy" in types:
+            type_clause = f"({type_clause} OR k.is_species = 1)"
         photo_ids_list = list(photo_ids)
         excluded = set()
         chunk_size = self._FILTER_SUBJECT_CHUNK
@@ -706,7 +716,7 @@ class Database:
             rows = self.conn.execute(
                 f"""SELECT DISTINCT pk.photo_id FROM photo_keywords pk
                     JOIN keywords k ON k.id = pk.keyword_id
-                    WHERE k.type IN ({type_placeholders})
+                    WHERE {type_clause}
                       AND pk.photo_id IN ({pid_placeholders})""",
                 types + chunk,
             ).fetchall()
@@ -5913,6 +5923,13 @@ class Database:
                 # Match the has_species pattern, but resolve "subject" via
                 # the workspace's configured subject_types (a set of keyword
                 # types). Sorted for deterministic SQL parameter order.
+                #
+                # When 'taxonomy' is among the subject types, also count
+                # legacy species rows (is_species=1 with a non-taxonomy
+                # type). Upgraded databases retain those rows until the
+                # background mark_species_keywords pass retypes them; the
+                # type-only predicate would otherwise place already-
+                # identified photos into 'Needs Identification'.
                 subject_types = sorted(self.get_subject_types())
                 if not subject_types:
                     if op == "equals" and (value is True or value == 1):
@@ -5921,12 +5938,15 @@ class Database:
                     # photo is "not identified" by the empty set)
                     continue
                 type_placeholders = ",".join("?" * len(subject_types))
+                type_clause = f"k5.type IN ({type_placeholders})"
+                if "taxonomy" in subject_types:
+                    type_clause = f"({type_clause} OR k5.is_species = 1)"
                 if op == "equals" and (value is False or value == 0):
                     conditions.append(
                         f"""NOT EXISTS (
                         SELECT 1 FROM photo_keywords pk5
                         JOIN keywords k5 ON k5.id = pk5.keyword_id
-                        WHERE pk5.photo_id = p.id AND k5.type IN ({type_placeholders}))"""
+                        WHERE pk5.photo_id = p.id AND {type_clause})"""
                     )
                     params.extend(subject_types)
                 elif op == "equals" and (value is True or value == 1):
@@ -5934,7 +5954,7 @@ class Database:
                         f"""EXISTS (
                         SELECT 1 FROM photo_keywords pk5
                         JOIN keywords k5 ON k5.id = pk5.keyword_id
-                        WHERE pk5.photo_id = p.id AND k5.type IN ({type_placeholders}))"""
+                        WHERE pk5.photo_id = p.id AND {type_clause})"""
                     )
                     params.extend(subject_types)
             elif field == "keyword_count":

@@ -781,6 +781,104 @@ def test_has_subject_rule_empty_subject_types_value_one_matches_no_photos(tmp_pa
     assert photos == []
 
 
+def test_has_subject_rule_counts_legacy_is_species_when_taxonomy_in_subject_types(tmp_path, monkeypatch):
+    """Regression: on upgraded DBs, species rows can briefly carry
+    ``is_species=1`` with a non-taxonomy ``type`` (e.g. 'general') until
+    the background ``mark_species_keywords`` pass retypes them. The
+    has_subject rule must treat those legacy rows as identifying when
+    'taxonomy' is in subject_types — otherwise already-identified photos
+    show up in 'Needs Identification' during that window.
+    """
+    import json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": ["taxonomy"]})
+
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    # Plant a legacy-shaped species keyword on p1: is_species=1, type='general'.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 1)",
+        ("Robin",),
+    )
+    legacy_sp = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, legacy_sp),
+    )
+    db.conn.commit()
+
+    # has_subject==0 must EXCLUDE p1 (it's identified by the legacy species
+    # row) and include only p2.
+    cid_unident = db.add_collection(
+        "Needs Identification",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
+    )
+    pids_unident = {p["id"] for p in db.get_collection_photos(cid_unident, per_page=999)}
+    assert pids_unident == {p2}, (
+        "has_subject==0 with 'taxonomy' in subject_types must exclude photos "
+        "tagged with legacy is_species=1 keywords whose type hasn't been "
+        "retyped to 'taxonomy' yet."
+    )
+
+    # has_subject==1 must INCLUDE p1.
+    cid_ident = db.add_collection(
+        "Identified",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 1}]),
+    )
+    pids_ident = {p["id"] for p in db.get_collection_photos(cid_ident, per_page=999)}
+    assert pids_ident == {p1}
+
+
+def test_has_subject_rule_ignores_legacy_is_species_when_taxonomy_excluded(tmp_path, monkeypatch):
+    """Counter-test: when 'taxonomy' is NOT in subject_types, the
+    legacy-species fallback must not fire — a photo with only an
+    is_species=1 keyword should still register as not-identified."""
+    import json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": ["genre"]})
+
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 1)",
+        ("Robin",),
+    )
+    legacy_sp = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, legacy_sp),
+    )
+    db.conn.commit()
+
+    cid = db.add_collection(
+        "Needs Identification",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
+    )
+    pids = {p["id"] for p in db.get_collection_photos(cid, per_page=999)}
+    assert pids == {p1}, (
+        "When 'taxonomy' is excluded from subject_types, an is_species=1 "
+        "keyword must not satisfy has_subject — only the configured types do."
+    )
+
+
 def test_add_keyword_is_species(tmp_path):
     """add_keyword with is_species=True marks the keyword."""
     from db import Database
@@ -6751,6 +6849,72 @@ def test_filter_out_subject_tagged_chunks_large_input(tmp_path, monkeypatch):
     expected = [p for i, p in enumerate(pids) if i % 2 == 1]
     assert kept == expected, (
         f"Chunking corrupted result. Expected odd-index photos, got {kept}"
+    )
+
+
+def test_filter_out_subject_tagged_excludes_legacy_is_species_when_taxonomy_requested(tmp_path):
+    """Regression: ``filter_out_subject_tagged`` must drop photos tagged
+    with a legacy species keyword (``is_species=1`` with non-taxonomy
+    ``type``) when 'taxonomy' is in the requested subject_types. Upgraded
+    DBs carry these rows until the background ``mark_species_keywords``
+    pass retypes them; without this guard, the classify job would
+    re-classify already-identified photos during that window.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    # Plant a legacy species keyword on p1 (is_species=1, type='general').
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 1)",
+        ("Robin",),
+    )
+    legacy_sp = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, legacy_sp),
+    )
+    db.conn.commit()
+
+    kept = db.filter_out_subject_tagged([p1, p2], {"taxonomy"})
+    assert kept == [p2], (
+        "Legacy is_species=1 rows must count as taxonomy-tagged so upgraded "
+        "DBs don't re-run classify on already-identified photos."
+    )
+
+
+def test_filter_out_subject_tagged_ignores_legacy_is_species_when_taxonomy_excluded(tmp_path):
+    """Counter-test: when 'taxonomy' is not in the requested subject_types,
+    is_species=1 must NOT exclude photos — only keywords whose type
+    matches the requested set count."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 1)",
+        ("Robin",),
+    )
+    legacy_sp = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, legacy_sp),
+    )
+    db.conn.commit()
+
+    kept = db.filter_out_subject_tagged([p1], {"genre"})
+    assert kept == [p1], (
+        "is_species=1 must only count when 'taxonomy' is one of the "
+        "requested subject_types; otherwise the legacy-species fallback "
+        "would over-filter."
     )
 
 
