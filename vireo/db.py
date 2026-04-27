@@ -53,6 +53,28 @@ def commit_with_retry(conn, max_retries=5, base_delay=0.1):
             time.sleep(base_delay * (2 ** attempt))
 
 
+def execute_with_retry(conn, sql, params=(), max_retries=5, base_delay=0.1):
+    """Run ``conn.execute(sql, params)`` with retry on transient
+    "locked"/"busy" errors. Returns the cursor.
+
+    The 30s ``busy_timeout`` PRAGMA covers both INSERT/UPDATE statements
+    and commits, but a single 30s wait isn't enough when another writer
+    holds the lock for longer (observed: a cull job's pHash backfill held
+    the writer lock for the entire backfill loop and an active scan's next
+    ``add_photo`` INSERT timed out, killing the scan stage). This helper
+    extends ``busy_timeout`` with bounded retry/backoff so brief contention
+    bursts don't abort callers mid-write.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return conn.execute(sql, params)
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            if ("locked" not in msg and "busy" not in msg) or attempt == max_retries:
+                raise
+            time.sleep(base_delay * (2 ** attempt))
+
+
 def _inclusive_date_to(date_to):
     """Pad a date_to bound so it includes sub-second timestamps.
 
@@ -216,6 +238,8 @@ class Database:
                 companion_path           TEXT,
                 exif_data                TEXT,
                 working_copy_path        TEXT,
+                working_copy_failed_at   TEXT,
+                working_copy_failed_mtime REAL,
                 eye_x                    REAL,
                 eye_y                    REAL,
                 eye_conf                 REAL,
@@ -549,6 +573,22 @@ class Database:
             self.conn.execute(
                 "UPDATE workspaces SET open_tabs = ? WHERE open_tabs IS NULL",
                 (json.dumps(["settings", "workspace", "lightroom"]),),
+            )
+        # Migration: working-copy failure markers. Backfill (and the inline
+        # scan extraction) record a failure here when extract_working_copy
+        # returns False, gated by file_mtime so a user-replaced file retries
+        # on the next pass instead of being permanently skipped.
+        try:
+            self.conn.execute("SELECT working_copy_failed_at FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos ADD COLUMN working_copy_failed_at TEXT"
+            )
+        try:
+            self.conn.execute("SELECT working_copy_failed_mtime FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos ADD COLUMN working_copy_failed_mtime REAL"
             )
         self.conn.commit()
 
@@ -1655,7 +1695,8 @@ class Database:
         The hook is wrapped in try/except so resolver bugs never break
         inserts.
         """
-        cur = self.conn.execute(
+        cur = execute_with_retry(
+            self.conn,
             """INSERT OR IGNORE INTO photos
                (folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
                 timestamp, width, height, file_hash)

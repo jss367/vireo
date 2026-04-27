@@ -7834,3 +7834,54 @@ def test_update_keyword_idempotent_name_update_does_not_auto_retype(tmp_path):
         "no actual name change — auto-detection must not fire"
     )
     assert row["taxon_id"] is None
+
+
+def test_add_photo_retries_on_database_is_locked(tmp_path):
+    """The INSERT inside add_photo must retry transient 'database is locked'.
+
+    Observed in production: a long-running cull held the writer lock for
+    minutes; the active scan's next ``add_photo`` call timed out at the
+    INSERT (not the commit), aborting the whole pipeline. ``commit_with_retry``
+    only protects the commit phase; statement-level retries cover the
+    INSERT itself.
+    """
+    import sqlite3
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos", name="photos")
+
+    real_conn = db.conn
+    fail_remaining = {"n": 2}
+
+    class _LockyExecuteConn:
+        """Proxy that injects 'database is locked' on the photos INSERT a few
+        times. sqlite3.Connection.execute is read-only at the instance level
+        so we must wrap the whole connection."""
+        def __init__(self, real):
+            self._real = real
+        def execute(self, sql, params=()):
+            if fail_remaining["n"] > 0 and "INSERT OR IGNORE INTO photos" in sql:
+                fail_remaining["n"] -= 1
+                raise sqlite3.OperationalError("database is locked")
+            return self._real.execute(sql, params)
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    db.conn = _LockyExecuteConn(real_conn)
+    try:
+        pid = db.add_photo(
+            folder_id=fid,
+            filename="DSC_0001.NEF",
+            extension=".nef",
+            file_size=1000,
+            file_mtime=1.0,
+        )
+    finally:
+        db.conn = real_conn
+
+    assert pid is not None, "add_photo must succeed after transient lock retries"
+    assert fail_remaining["n"] == 0, "the flaky executor should have been hit"
+    photo = db.get_photo(pid)
+    assert photo["filename"] == "DSC_0001.NEF"

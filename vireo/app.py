@@ -720,6 +720,110 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
 
+    # Self-healing background backfill of missing working copies. RAW (and
+    # oversized JPEG) imports need a JPEG working copy at
+    # ``~/.vireo/working/{photo_id}.jpg`` so /photos/<id>/original can serve
+    # a static file without on-demand RAW decode (5-7s per file). The
+    # scan() path already extracts these inline for newly-discovered photos,
+    # but legacy rows (imported before the feature, or with a previous
+    # extraction failure that has since been fixed) carry NULL
+    # working_copy_path forever without this pass.
+    #
+    # Surfaced as an ephemeral JobRunner job so the bottom panel shows
+    # progress, but never written to job_history (it runs every startup —
+    # persisting would be noise). Skipped entirely when a fast EXISTS check
+    # confirms no candidates remain, so steady-state restarts pay nothing.
+    def _kickoff_working_copy_backfill():
+        from scanner import (
+            backfill_working_copies,
+            working_copy_backfill_candidate_count,
+        )
+
+        try:
+            wcdb = Database(db_path)
+            # Defer to scanner's own predicate so the gate matches what
+            # ``_extract_working_copies`` will actually process. A naive
+            # ``working_copy_path IS NULL`` check would also fire on
+            # libraries of only small JPEGs (which the extractor
+            # intentionally skips), launching a no-op backfill on every
+            # restart.
+            candidate_count = working_copy_backfill_candidate_count(wcdb)
+        except Exception:
+            log.exception("Working-copy backfill: candidate check failed")
+            return
+        if candidate_count == 0:
+            log.debug("Working-copy backfill: no candidates, skipping")
+            return
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        runner = app._job_runner
+
+        def work(job):
+            thread_db = Database(db_path)
+            # Working-copy backfill is workspace-agnostic (photos are
+            # global), but the JobRunner path leans on having an active
+            # workspace for some bookkeeping. Mirror the active workspace
+            # of init_db so any incidental ws-scoped helpers stay valid.
+            active_ws = init_db._active_workspace_id
+            if active_ws is not None:
+                thread_db.set_active_workspace(active_ws)
+
+            def progress_cb(current, total):
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                runner.push_event(
+                    job["id"],
+                    "progress",
+                    {
+                        "current": current,
+                        "total": total,
+                        "phase": f"{current:,} / {total:,} working copies",
+                    },
+                )
+
+            def status_cb(message):
+                runner.push_event(job["id"], "progress", {
+                    "phase": message,
+                    "current": job["progress"].get("current", 0),
+                    "total": job["progress"].get("total", 0),
+                })
+
+            def cancel_check():
+                return runner.is_cancelled(job["id"])
+
+            return backfill_working_copies(
+                thread_db, vireo_dir,
+                progress_callback=progress_cb,
+                status_callback=status_cb,
+                cancel_check=cancel_check,
+            )
+
+        try:
+            runner.start(
+                "working_copy_backfill", work,
+                ephemeral=True,
+                config={"trigger": "startup"},
+            )
+        except Exception:
+            log.exception("Failed to start working-copy backfill job")
+
+    # Expose the kickoff so tests can drive it synchronously without
+    # waiting on the Timer. Production wiring uses threading.Timer below;
+    # tests call ``app._kickoff_working_copy_backfill()`` directly and
+    # then block on the resulting JobRunner job.
+    app._kickoff_working_copy_backfill = _kickoff_working_copy_backfill
+
+    # Defer the kickoff slightly so the app finishes booting before the
+    # first DB-heavy background pass starts churning. Mirrors the folder
+    # health loop's grace period.
+    #
+    # Daemon=True so short-lived ``create_app`` callers (tests, scripts,
+    # one-shot tooling) don't get pinned waiting on the 5-second delay
+    # only to fire DB work after their real work is already done.
+    _wc_backfill_timer = threading.Timer(5.0, _kickoff_working_copy_backfill)
+    _wc_backfill_timer.daemon = True
+    _wc_backfill_timer.start()
+
     # -- Page routes --
 
     @app.route("/")
@@ -9601,21 +9705,56 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
 
-        # Check if working copy is full-res
+        # Decide whether to trust the working copy as the full-res asset
+        # by reading its actual on-disk dimensions, NOT the current
+        # ``working_copy_max_size`` config — the cap may have changed
+        # since the wc was generated, leaving stale capped wcs that
+        # config-based logic would misclassify as full-res.
+        #
+        # PIL.Image.open is lazy: it reads the JPEG SOF marker for
+        # ``.size`` without decoding pixels (sub-millisecond), so this
+        # is safe to do per request even during burst-review zoom. The
+        # expensive path we must avoid is the RAW re-extract below
+        # (5–7s per photo), not the header read.
         if photo["working_copy_path"]:
             wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
             if os.path.exists(wc_path):
                 from PIL import Image as _PILImage
-                with _PILImage.open(wc_path) as wc_img:
-                    wc_w, wc_h = wc_img.size
-                orig_w = photo["width"]
-                orig_h = photo["height"]
-                # If working copy matches original dimensions, serve it directly.
-                # Skip shortcut when original dimensions are unknown (None) to
-                # avoid serving a capped working copy as full-res.
-                if orig_w and orig_h and wc_w >= orig_w and wc_h >= orig_h:
+                try:
+                    with _PILImage.open(wc_path) as _wc_img:
+                        wc_w, wc_h = _wc_img.size
+                except Exception:
+                    wc_w = wc_h = 0
+                orig_w = photo["width"] or 0
+                orig_h = photo["height"] or 0
+                # Trust the wc when it meets/exceeds the believed
+                # original dims, or when those dims are unknown (no
+                # basis to declare the wc stale and a speculative RAW
+                # re-extract would just thrash the disk).
+                if wc_w and wc_h and (
+                    (wc_w >= orig_w and wc_h >= orig_h)
+                    or not (orig_w and orig_h)
+                ):
                     return send_file(wc_path, mimetype="image/jpeg")
-                # Otherwise: need full-res extraction (on-demand upgrade)
+                # The wc is smaller than the believed original. For RAW
+                # sources this often means rawpy.postprocess() failed
+                # and we fell back to the embedded JPEG, which can be a
+                # few pixels shy of the full sensor area (e.g. Nikon
+                # NEFs report 8280×5520 but the embedded JPEG is
+                # 8256×5504). Re-extracting would yield the same
+                # fallback image, just slower — so trust the wc when
+                # it is within 1% of the believed dims. This tolerance
+                # is RAW-only: for JPEG/PNG/etc., the wc being smaller
+                # means the cap downsized it, and re-extracting WILL
+                # produce more pixels.
+                from image_loader import RAW_EXTENSIONS
+                ext = os.path.splitext(photo["filename"])[1].lower()
+                if ext in RAW_EXTENSIONS and wc_w and wc_h:
+                    wc_long = max(wc_w, wc_h)
+                    orig_long = max(orig_w, orig_h)
+                    if orig_long and wc_long >= orig_long * 0.99:
+                        return send_file(wc_path, mimetype="image/jpeg")
+                # Fall through to on-demand re-extract.
 
         # Resolve original file path
         folder = db.conn.execute(

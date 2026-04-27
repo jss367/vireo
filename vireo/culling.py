@@ -149,6 +149,12 @@ def analyze_for_culling(
             ).fetchone()
             if not row:
                 continue
+            # Scope the broad except narrowly to the image-loading + hash step:
+            # those have a legitimate "skip this photo" failure mode
+            # (corrupt RAW, missing working copy, decode error). DB errors on
+            # the UPDATE/commit below must propagate — masking them would
+            # silently drop pHash writes AND leave the writer transaction
+            # open, defeating the per-photo commit's lock-release purpose.
             try:
                 img = None
                 if vireo_dir:
@@ -163,14 +169,21 @@ def analyze_for_culling(
                 if img is None:
                     continue
                 h = imagehash.phash(img)
-                phashes[pid] = h
-                db.conn.execute(
-                    "UPDATE photos SET phash = ? WHERE id = ?",
-                    (str(h), pid),
-                )
             except Exception:
                 log.debug("Could not compute pHash for photo %d", pid, exc_info=True)
-        db.conn.commit()
+                continue
+            phashes[pid] = h
+            db.conn.execute(
+                "UPDATE photos SET phash = ? WHERE id = ?",
+                (str(h), pid),
+            )
+            # Commit per photo so the writer lock is released between
+            # iterations. Otherwise this loop holds the lock for the entire
+            # backfill (potentially many minutes on a fresh import where
+            # thousands of photos still need pHashes), starving any
+            # concurrent writer (e.g. a pipeline scan whose next
+            # ``add_photo`` INSERT will time out past the 30s busy_timeout).
+            db.conn.commit()
 
     # Classify extensions as RAW or non-RAW
     from image_loader import RAW_EXTENSIONS
