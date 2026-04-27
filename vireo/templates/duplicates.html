@@ -182,6 +182,29 @@
     margin-top: 4px; font-size: 10px; color: var(--text-dim);
     font-style: italic;
   }
+
+  /* Missing-file warning. Cards for rows whose file was deleted/moved on
+     disk get a yellow border + "MISSING" tag so the user doesn't trash
+     surviving twins based on a ghost row. */
+  .dup-card.missing { border-color: var(--warning, #d69e2e); }
+  .dup-card .missing-tag {
+    margin-top: 4px; padding: 2px 6px;
+    background: var(--warning, #d69e2e); color: var(--text-primary);
+    border-radius: 3px;
+    font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    align-self: flex-start;
+  }
+  .group-warning {
+    margin-bottom: 8px; padding: 8px 12px; border-radius: 4px;
+    background: var(--warning-bg, rgba(214, 158, 46, 0.15));
+    border-left: 3px solid var(--warning, #d69e2e);
+    font-size: 12px; color: var(--text-primary);
+  }
+  .group-warning.severe {
+    background: var(--danger-bg, rgba(220, 38, 38, 0.15));
+    border-left-color: var(--danger);
+  }
 </style>
 </head>
 <body>
@@ -415,6 +438,39 @@
     }
   }
 
+  function renderGroupWarning(group) {
+    // Three levels of severity:
+    //  - all_missing: every file in the group is gone — nothing to keep.
+    //  - winner missing: the chosen-keep file is gone but a loser still exists,
+    //    so the user could lose the surviving copy if they trust the proposal.
+    //  - any loser missing: informational; trash actions will be no-ops for it.
+    var allMissing = group.all_missing === true;
+    var winner = group.winner || {};
+    var losers = group.losers || [];
+    var winnerMissing = winner.exists === false;
+    var anyLoserMissing = losers.some(function(l) { return l.exists === false; });
+    if (allMissing) {
+      return '<div class="group-warning severe">' +
+        '<b>All files in this group are missing on disk.</b> ' +
+        'Nothing to delete — Vireo just needs to clean up the orphaned DB rows. ' +
+        'Re-scanning the affected folders will mark these as missing.' +
+        '</div>';
+    }
+    if (winnerMissing) {
+      return '<div class="group-warning severe">' +
+        '<b>Heads up:</b> the file Vireo picked to keep is missing on disk. ' +
+        'A surviving copy was promoted instead — check the KEEP card before applying.' +
+        '</div>';
+    }
+    if (anyLoserMissing) {
+      return '<div class="group-warning">' +
+        'One or more loser files are already missing on disk. They’ll be ' +
+        'rejected in the DB; trash actions will skip them.' +
+        '</div>';
+    }
+    return '';
+  }
+
   function renderUnresolvedGroup(group) {
     var winner = group.winner || {};
     var losers = group.losers || [];
@@ -427,6 +483,7 @@
             'Include this group (' + losers.length + ' to reject)</label>';
     html += '<span class="hash">' + escapeHtml(hash.substring(0, 16)) + '...</span>';
     html += '</div>';
+    html += renderGroupWarning(group);
     html += '<div class="dup-row">';
     html += renderCard(winner, true, null, false);
     losers.forEach(function(loser) {
@@ -448,6 +505,7 @@
             ' rejected during scan</label>';
     html += '<span class="hash">' + escapeHtml(hash.substring(0, 16)) + '...</span>';
     html += '</div>';
+    html += renderGroupWarning(group);
     html += '<div class="dup-row">';
     html += renderCard(winner, true, null, false);
     losers.forEach(function(loser) {
@@ -459,6 +517,8 @@
 
   function renderCard(photo, isWinner, reason, isResolvedLoser) {
     var cls = isWinner ? 'winner' : 'loser';
+    var missing = photo.exists === false;
+    if (missing) cls += ' missing';
     var badge = isWinner ? 'KEEP' : (isResolvedLoser ? 'REJECTED' : 'WILL REJECT');
     var thumbUrl = photo.id != null ? ('/thumbnails/' + photo.id + '.jpg') : null;
     var html = '<div class="dup-card ' + cls + '" data-photo-id="' +
@@ -471,6 +531,7 @@
       html += '<div class="thumb-placeholder">No thumbnail</div>';
     }
     html += '<span class="badge">' + badge + '</span>';
+    if (missing) html += '<span class="missing-tag" title="File is no longer at this path on disk">Missing on disk</span>';
     html += '<div class="filename">' + escapeHtml(photo.filename || '') + '</div>';
     html += '<div class="path">' + escapeHtml(photo.path || '') + '</div>';
     var meta = [];
@@ -478,7 +539,7 @@
     if (photo.file_size != null) meta.push(formatBytes(photo.file_size));
     if (meta.length) html += '<div class="meta">' + meta.join(' \u00b7 ') + '</div>';
     if (reason) html += '<div class="reason">' + escapeHtml(reason) + '</div>';
-    if (isResolvedLoser && photo.id != null) {
+    if (isResolvedLoser && photo.id != null && !missing) {
       html += '<button type="button" class="trash-btn" onclick="trashOneLoserFile(' +
               photo.id + ')">Move file to Trash</button>';
       html += '<div class="trash-status" data-trash-status></div>';

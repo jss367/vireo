@@ -194,6 +194,86 @@ def test_resolve_preserves_later_mtime_losers_when_rule3_still_tied():
     assert {c.id for c in [a, b, c, d] if c.id != winner} == set(reasons)
 
 
+# -----------------------------------------------------------------------------
+# Rule 0: existing files beat missing files. Without this, the resolver would
+# happily nominate a ghost row (file moved/deleted on disk but still in DB)
+# as the keeper, telling the user to trash actually-existing twins.
+# -----------------------------------------------------------------------------
+
+def test_resolve_rule0_missing_loses_to_present():
+    """A missing file loses outright to a present one even with the better path."""
+    missing_short = DupCandidate(id=1, path="/a/owl.jpg", mtime=100.0, exists=False)
+    present_long = DupCandidate(id=2, path="/archive/deep/owl.jpg", mtime=200.0, exists=True)
+    winner, losers = resolve_duplicates([missing_short, present_long])
+    assert winner == 2
+    assert losers == [(1, "file missing on disk")]
+
+
+def test_resolve_rule0_overrides_other_rules():
+    """The path-string heuristics never get to run when one side is missing."""
+    # Without rule 0: id=1 wins (clean filename + shorter path). With rule 0
+    # the missing id=1 loses and id=2 (which would otherwise lose by every
+    # later rule) takes the win.
+    missing_clean = DupCandidate(id=1, path="/a/owl.jpg", mtime=100.0, exists=False)
+    present_dirty = DupCandidate(id=2, path="/archive/deep/owl-2.jpg",
+                                  mtime=200.0, exists=True)
+    winner, losers = resolve_duplicates([missing_clean, present_dirty])
+    assert winner == 2
+    assert losers == [(1, "file missing on disk")]
+
+
+def test_resolve_rule0_three_way_user_bug_scenario():
+    """Reproduces the user-reported bug: the path-shorter winner is missing.
+
+    Pool: shorter-path missing, longer-path present, longer-path-with-dup-suffix
+    present. Without rule 0, id=1 wins on shortest path. With rule 0 the
+    missing id=1 loses; rule 1 then prefers the clean id=2 over the dup-suffix
+    id=3.
+    """
+    missing = DupCandidate(id=1, path="/usa/2026/04-04/x.NEF",
+                            mtime=100.0, exists=False)
+    present_clean = DupCandidate(id=2, path="/usa/2026/2026-04-04/x.NEF",
+                                  mtime=100.0, exists=True)
+    present_dirty = DupCandidate(id=3, path="/usa/2026/2026-04-04/x-2.NEF",
+                                  mtime=100.0, exists=True)
+    winner, losers = resolve_duplicates([missing, present_clean, present_dirty])
+    assert winner == 2
+    reasons = dict(losers)
+    assert reasons == {
+        1: "file missing on disk",
+        3: "filename has dup suffix",
+    }
+
+
+def test_resolve_rule0_all_missing_falls_through():
+    """When every candidate is missing, rule 0 is a no-op so the DB rows can
+    still be cleaned up via the standard tiebreakers. Callers should warn the
+    user — there's no on-disk file that will survive the resolution."""
+    a = DupCandidate(id=1, path="/a/owl.jpg", mtime=100.0, exists=False)
+    b = DupCandidate(id=2, path="/archive/deep/owl.jpg", mtime=200.0, exists=False)
+    winner, losers = resolve_duplicates([a, b])
+    assert winner == 1  # rule 2 — shorter path
+    assert losers == [(2, "longer path")]
+
+
+def test_resolve_rule0_all_present_no_op():
+    """When every candidate exists, rule 0 is a no-op and existing rules apply."""
+    a = DupCandidate(id=1, path="/a/owl.jpg", mtime=100.0, exists=True)
+    b = DupCandidate(id=2, path="/archive/deep/owl.jpg", mtime=200.0, exists=True)
+    winner, losers = resolve_duplicates([a, b])
+    assert winner == 1
+    assert losers == [(2, "longer path")]
+
+
+def test_resolve_dupcandidate_default_exists_true():
+    """Old call sites that don't pass ``exists`` get backwards-compatible behaviour."""
+    a = DupCandidate(id=1, path="/a/owl.jpg", mtime=100.0)
+    b = DupCandidate(id=2, path="/a/archive/owl.jpg", mtime=200.0)
+    winner, losers = resolve_duplicates([a, b])
+    assert winner == 1
+    assert losers == [(2, "longer path")]
+
+
 def test_merge_rating_takes_max():
     winner = PhotoMetadata(id=1, rating=0, keyword_ids=set(), collection_ids=set(), has_pending_edit=False)
     losers = [PhotoMetadata(id=2, rating=5, keyword_ids=set(), collection_ids=set(), has_pending_edit=False)]

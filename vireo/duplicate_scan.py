@@ -33,7 +33,12 @@ def _fetch_photo_rows(db, photo_ids, columns, where_extra=""):
 
 
 def _row_to_info(row, folder_path):
-    """Shape a photos row into the dict the UI consumes for a proposal entry."""
+    """Shape a photos row into the dict the UI consumes for a proposal entry.
+
+    ``exists`` is populated by stat-ing the path. The resolver uses it via
+    Rule 0 (present beats missing) and the UI surfaces it as a warning so the
+    user doesn't trash surviving copies of a row whose "winner" file is gone.
+    """
     filename = row["filename"] or ""
     full_path = os.path.join(folder_path or "", filename)
     return {
@@ -43,6 +48,7 @@ def _row_to_info(row, folder_path):
         "mtime": row["file_mtime"] or 0.0,
         "rating": row["rating"] if row["rating"] is not None else 0,
         "file_size": row["file_size"] if row["file_size"] is not None else 0,
+        "exists": os.path.exists(full_path),
     }
 
 
@@ -58,7 +64,8 @@ def _build_unresolved_proposal(db, group):
     info_by_id = {r["id"]: _row_to_info(r, r["folder_path"]) for r in rows}
     candidates = [
         DupCandidate(id=r["id"], path=info_by_id[r["id"]]["path"],
-                     mtime=r["file_mtime"] or 0.0)
+                     mtime=r["file_mtime"] or 0.0,
+                     exists=info_by_id[r["id"]]["exists"])
         for r in rows
     ]
     if len(candidates) < 2:
@@ -71,11 +78,13 @@ def _build_unresolved_proposal(db, group):
         linfo = dict(info_by_id[lid])
         linfo["reason"] = reason
         losers.append(linfo)
+    all_missing = not any(info["exists"] for info in info_by_id.values())
     return {
         "file_hash": group["file_hash"],
         "status": "unresolved",
         "winner": info_by_id[winner_id],
         "losers": losers,
+        "all_missing": all_missing,
     }
 
 
@@ -112,7 +121,8 @@ def _build_resolved_proposal(db, group):
 
     candidates = [
         DupCandidate(id=r["id"], path=info_by_id[r["id"]]["path"],
-                     mtime=r["file_mtime"] or 0.0)
+                     mtime=r["file_mtime"] or 0.0,
+                     exists=info_by_id[r["id"]]["exists"])
         for r in rows
     ]
     _winner_id, losers_with_reasons = resolve_duplicates(candidates)
@@ -124,11 +134,13 @@ def _build_resolved_proposal(db, group):
         linfo["reason"] = reasons.get(r["id"], "auto-resolved")
         linfo["rejected"] = True
         losers.append(linfo)
+    all_missing = not any(info["exists"] for info in info_by_id.values())
     return {
         "file_hash": group["file_hash"],
         "status": "resolved",
         "winner": info_by_id[kept[0]["id"]],
         "losers": losers,
+        "all_missing": all_missing,
     }
 
 
