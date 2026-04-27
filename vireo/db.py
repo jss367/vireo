@@ -2637,9 +2637,12 @@ class Database:
     def get_accepted_species(self):
         """Return distinct marker species from geolocated photos in the active workspace.
 
-        Uses the same derivation as get_geolocated_photos: species keywords
-        (is_species = 1) tagged on the photo.  Only considers photos that have
-        GPS coordinates, so every returned species can actually produce a map marker.
+        Uses the same "geolocated" definition as get_geolocated_photos: a
+        photo is included if it has EXIF coords OR a ``type='location'``
+        keyword with coords. That keeps the species filter dropdown in sync
+        with which photos can actually appear as markers — otherwise photos
+        placed via location-keyword coords would render on the map but their
+        species would be missing from the filter.
         """
         ws = self._ws_id()
         return [
@@ -2653,8 +2656,18 @@ class Database:
                 JOIN photo_keywords pk ON pk.photo_id = p.id
                 JOIN keywords k ON k.id = pk.keyword_id AND k.is_species = 1
                 WHERE wf.workspace_id = ?
-                  AND p.latitude IS NOT NULL
-                  AND p.longitude IS NOT NULL
+                  AND (
+                    (p.latitude IS NOT NULL AND p.longitude IS NOT NULL)
+                    OR EXISTS (
+                      SELECT 1
+                      FROM photo_keywords pk_loc
+                      JOIN keywords k_loc ON k_loc.id = pk_loc.keyword_id
+                      WHERE pk_loc.photo_id = p.id
+                        AND k_loc.type = 'location'
+                        AND k_loc.latitude IS NOT NULL
+                        AND k_loc.longitude IS NOT NULL
+                    )
+                  )
                 ORDER BY k.name ASC
                 """,
                 (ws,),
@@ -3656,10 +3669,19 @@ class Database:
             raise ValueError("link_keyword_to_place requires details['place_id']")
 
         row = self.conn.execute(
-            "SELECT 1 FROM keywords WHERE id = ?", (keyword_id,),
+            "SELECT type FROM keywords WHERE id = ?", (keyword_id,),
         ).fetchone()
         if row is None:
             raise ValueError(f"keyword id {keyword_id} does not exist")
+        # Reject non-location keywords. place_id is globally unique, so
+        # attaching one to (say) a species or general keyword would let later
+        # location upserts resolve to a non-location row, after which
+        # set_photo_location rejects it and the place is effectively unusable
+        # until the row is manually cleaned up.
+        if row["type"] != "location":
+            raise ValueError(
+                f"keyword id {keyword_id} is type '{row['type']}', not 'location'"
+            )
 
         place_id = details["place_id"]
         new_name = details.get("name", "")

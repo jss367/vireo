@@ -2694,6 +2694,71 @@ def test_get_accepted_species_multiple_species_per_photo(tmp_path):
     assert species == ["Cooper's Hawk", 'Red-tailed Hawk']
 
 
+def test_get_accepted_species_includes_keyword_coord_photos(tmp_path):
+    """A photo without EXIF GPS but with a 'location'-type keyword that has
+    coords must still surface its species in the dropdown — get_geolocated_photos
+    renders such photos as map markers, so the filter list has to match."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    # No EXIF GPS — only a location keyword with coords.
+    loc_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?)",
+        ("Central Park", 40.785091, -73.968285),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, loc_id),
+    )
+    db.conn.commit()
+
+    det_ids = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
+    preds = db.get_predictions(photo_ids=[p1])
+    for pr in preds:
+        db.accept_prediction(pr['id'])
+
+    assert db.get_accepted_species() == ['Red-tailed Hawk']
+
+
+def test_get_accepted_species_ignores_coordless_location_keywords(tmp_path):
+    """A 'location'-type keyword *without* coords (free-text "the meadow")
+    is not enough — get_geolocated_photos won't render the photo, so the
+    species filter shouldn't list it either."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    # Free-text location keyword: no coords.
+    loc_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'location')",
+        ("the meadow behind the cabin",),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, loc_id),
+    )
+    db.conn.commit()
+
+    det_ids = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
+    preds = db.get_predictions(photo_ids=[p1])
+    for pr in preds:
+        db.accept_prediction(pr['id'])
+
+    assert db.get_accepted_species() == []
+
+
 def test_count_photos_without_gps(tmp_path):
     """count_photos_without_gps counts photos missing GPS coordinates."""
     from db import Database
@@ -6827,6 +6892,38 @@ def test_link_keyword_to_place_raises_on_missing_id(db):
     details = _central_park_details()
     with pytest.raises(ValueError, match="999999"):
         db.link_keyword_to_place(999999, details)
+
+
+def test_link_keyword_to_place_rejects_non_location_keyword(db):
+    """Linking a place to a non-'location' keyword must raise ValueError.
+    Otherwise the globally-unique place_id would get attached to (say) a
+    species or general keyword, and later location upserts would resolve to
+    that non-location row, after which set_photo_location rejects it and
+    the place is stuck until manual cleanup."""
+    import pytest
+
+    general_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'general')",
+        ("Bird",),
+    ).lastrowid
+    db.conn.commit()
+
+    details = _central_park_details()
+    with pytest.raises(ValueError, match="not 'location'"):
+        db.link_keyword_to_place(general_id, details)
+
+    # The non-location keyword must be left untouched — no place_id, no
+    # coords, no reparenting onto a freshly-created chain.
+    row = db.conn.execute(
+        "SELECT type, place_id, latitude, longitude, parent_id "
+        "FROM keywords WHERE id = ?",
+        (general_id,),
+    ).fetchone()
+    assert row["type"] == "general"
+    assert row["place_id"] is None
+    assert row["latitude"] is None
+    assert row["longitude"] is None
+    assert row["parent_id"] is None
 
 
 def test_set_photo_location_rejects_non_location_keyword(db):
