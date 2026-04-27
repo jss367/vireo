@@ -11,7 +11,9 @@ from PIL import Image
 @pytest.fixture
 def db(tmp_path):
     """Return a Database backed by a temp file."""
-    return Database(str(tmp_path / "test.db"))
+    d = Database(str(tmp_path / "test.db"))
+    yield d
+    d.close()
 
 
 @pytest.fixture
@@ -64,7 +66,8 @@ def app_and_db(tmp_path, monkeypatch):
         Image.new('RGB', (100, 100)).save(os.path.join(thumb_dir, f"{pid}.jpg"))
 
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="test-token-123")
-    return app, db
+    yield app, db
+    db.close()
 
 
 @pytest.fixture
@@ -111,4 +114,5 @@ def client_with_photo(tmp_path, monkeypatch):
     )
 
     app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir), api_token="test-token-123")
-    return app, db, pid
+    yield app, db, pid
+    db.close()

@@ -1,5 +1,6 @@
 """SQLite database for Vireo photo browser metadata cache."""
 
+import contextlib
 import json
 import logging
 import os
@@ -97,6 +98,8 @@ class Database:
         # don't cross-read each other's cached results (workspace_id=1 is
         # reused across every database as the default workspace).
         self._db_path = db_path
+        # Pre-set so __del__ can run safely if sqlite3.connect raises.
+        self.conn = None
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -128,6 +131,36 @@ class Database:
             "SELECT id FROM workspaces ORDER BY CASE WHEN last_opened_at IS NULL THEN 0 ELSE 1 END DESC, last_opened_at DESC, id ASC LIMIT 1"
         ).fetchone()
         self.set_active_workspace(last[0])
+
+    def close(self):
+        """Close the underlying sqlite3 connection.
+
+        Safe to call multiple times. Without an explicit close, the
+        connection's file descriptors only release when CPython gc collects
+        the object — under Python 3.14's stricter ResourceWarning handling,
+        accumulating unclosed connections in long-running test suites
+        exhausts the per-process fd limit and breaks coverage's own
+        sqlite database.
+        """
+        conn = getattr(self, "conn", None)
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
+            self.conn = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        # Safety net for callers that don't use the context manager or call
+        # close() explicitly. __del__ may run during interpreter shutdown
+        # when sqlite3 is already torn down — swallow everything.
+        with contextlib.suppress(Exception):
+            self.close()
 
     def _create_tables(self):
         self.conn.executescript(

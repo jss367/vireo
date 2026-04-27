@@ -11,4 +11,6 @@ from db import Database
 @pytest.fixture
 def db(tmp_path):
     """Return a Database backed by a temp file."""
-    return Database(str(tmp_path / "test.db"))
+    d = Database(str(tmp_path / "test.db"))
+    yield d
+    d.close()
