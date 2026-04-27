@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import places
-from db import Database
+from db import KEYWORD_TYPES, Database
 from flask import (
     Flask,
     Response,
@@ -656,24 +656,73 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     init_db = Database(db_path)
     log.info("Database init took %.2fs (workspace: %s)", time.time() - _t0,
              init_db.get_workspace(init_db._active_workspace_id)["name"])
+    # Migrate the legacy 'Needs Classification' default collection BEFORE
+    # seeding defaults — otherwise create_default_collections inserts
+    # 'Needs Identification' first, then the migration skips renaming
+    # because the target name already exists, leaving a duplicate.
+    init_db.migrate_default_subject_collection()
     init_db.create_default_collections()
 
-    # Mark species keywords from taxonomy in background (avoids slow startup)
+    # Wildlife backfill timing:
+    # - Subsequent boots: marker is set, nothing to do, fast.
+    # - First boot after upgrade (marker unset): run species marking +
+    #   backfill SYNCHRONOUSLY before accepting requests. Otherwise a
+    #   user could remove Wildlife from a species-tagged photo during
+    #   the few-second window before the background thread completes,
+    #   and the backfill would silently re-add it (clobbering user
+    #   intent before the marker gets set).
+    # - mark_species runs in the background regardless, to catch new
+    #   species keywords added between boots. The backfill won't re-run
+    #   from the background path (marker check inside backfill).
     import threading
 
-    def _mark_species():
+    from db import Database as _Database  # avoid shadowing in nested fn
+
+    _WILDLIFE_BACKFILL_DONE_KEY = _Database._WILDLIFE_BACKFILL_DONE_KEY
+
+    def _mark_species_and_maybe_backfill(db, log_label):
+        """Load taxonomy, mark species keywords, and run the one-shot
+        Wildlife backfill. Returns silently on any failure so callers
+        can choose between sync (block startup) and async (log only)."""
         from taxonomy import load_local_taxonomy
 
         tax = load_local_taxonomy()
         if tax is None:
+            # No taxonomy yet — leave the marker unset so the backfill
+            # retries on a future boot once taxonomy is downloaded.
+            log.debug("[%s] taxonomy not loaded; deferring species marking", log_label)
             return
         try:
-            bg_db = Database(db_path)
-            updated = bg_db.mark_species_keywords(tax)
+            updated = db.mark_species_keywords(tax)
             if updated:
-                log.info("Marked %d keywords as species from taxonomy", updated)
+                log.info("[%s] Marked %d keywords as species from taxonomy",
+                         log_label, updated)
         except Exception:
-            log.debug("Could not mark species from taxonomy", exc_info=True)
+            log.debug("[%s] mark_species_keywords failed", log_label, exc_info=True)
+            return
+        try:
+            db.backfill_wildlife_genre()
+        except Exception:
+            log.debug("[%s] backfill_wildlife_genre failed", log_label, exc_info=True)
+
+    if init_db.get_meta(_WILDLIFE_BACKFILL_DONE_KEY) != "1":
+        # First boot after upgrade. Block startup until the one-shot
+        # backfill completes so concurrent user edits in that window
+        # can't be overwritten.
+        log.info("Wildlife backfill marker unset; running species marking "
+                 "+ backfill synchronously before serving requests")
+        _t1 = time.time()
+        _mark_species_and_maybe_backfill(init_db, "sync-startup")
+        log.info("Synchronous species marking + backfill took %.2fs",
+                 time.time() - _t1)
+
+    def _mark_species():
+        try:
+            bg_db = Database(db_path)
+        except Exception:
+            log.debug("Could not open background db for species marking", exc_info=True)
+            return
+        _mark_species_and_maybe_backfill(bg_db, "background")
 
     threading.Thread(target=_mark_species, daemon=True).start()
 
@@ -1650,12 +1699,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         name = body.get("name", "").strip()
         if not name:
             return json_error("name required")
-        kid = db.add_keyword(name)
-        # Override type if explicitly provided
-        kw_type = body.get("type")
-        if kw_type and kw_type in ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event'):
-            db.conn.execute("UPDATE keywords SET type = ? WHERE id = ?", (kw_type, kid))
-            db.conn.commit()
+        # Validate kw_type at the boundary (isinstance guard against
+        # non-hashable JSON; membership against the canonical enum).
+        # Pass it through to add_keyword so its type-reconciliation logic
+        # runs — a post-update SQL `UPDATE keywords SET type = ?` would
+        # silently rewrite an existing user-typed row (e.g. someone's
+        # 'individual' Charlie) and bypass the taxonomy/general upgrade
+        # rules in add_keyword.
+        kw_type_raw = body.get("type")
+        kw_type = (
+            kw_type_raw
+            if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
+            else None
+        )
+        kid = db.add_keyword(name, kw_type=kw_type)
         db.tag_photo(photo_id, kid)
         _queue_keyword_add(photo_id, name)
         db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
@@ -2200,11 +2257,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         name = body.get("name", "").strip()
         if not photo_ids or not name:
             return json_error("photo_ids and name required")
-        kid = db.add_keyword(name)
-        kw_type = body.get("type")
-        if kw_type and kw_type in ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event'):
-            db.conn.execute("UPDATE keywords SET type = ? WHERE id = ?", (kw_type, kid))
-            db.conn.commit()
+        # Route kw_type through add_keyword so its type-reconciliation logic
+        # runs (preserves existing user-typed rows; only upgrades 'general').
+        # See api_add_keyword for the rationale.
+        kw_type_raw = body.get("type")
+        kw_type = (
+            kw_type_raw
+            if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
+            else None
+        )
+        kid = db.add_keyword(name, kw_type=kw_type)
         for pid in photo_ids:
             db.tag_photo(pid, kid)
             _queue_keyword_add(pid, name)
@@ -2891,6 +2953,65 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             existing["nav_order"] = nav_order
             db.update_workspace(db._active_workspace_id, config_overrides=existing)
         return jsonify({"ok": True, "nav_order": nav_order})
+
+    @app.route("/api/workspaces/active/subject-types", methods=["GET"])
+    def api_get_active_subject_types():
+        """Return the active workspace's effective subject_types — global
+        defaults merged with workspace overrides. The workspace settings UI
+        needs this rather than just the override JSON, so checkboxes render
+        the actual current state when the user has only customized at the
+        global config layer."""
+        db = _get_db()
+        types = sorted(db.get_subject_types())
+        return jsonify({"types": types})
+
+    @app.route("/api/workspaces/<int:ws_id>/subject-types", methods=["PUT"])
+    def api_set_subject_types(ws_id):
+        """Set the subject_types config override for a workspace.
+
+        Unknown type values are dropped (logged). An empty list is allowed
+        (logged warning) and effectively disables the 'identified' filter.
+        """
+        from db import KEYWORD_TYPES
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        raw_types = body.get("types")
+        if not isinstance(raw_types, list):
+            return json_error("types must be a list")
+        # Guard the membership test against non-string entries (e.g. nested
+        # lists or objects). `x in frozenset` raises TypeError on unhashable
+        # input — that would 500 the request instead of dropping the bad
+        # element per the documented "unknown values are dropped" contract.
+        cleaned = [t for t in raw_types if isinstance(t, str) and t in KEYWORD_TYPES]
+        dropped = [t for t in raw_types if not isinstance(t, str) or t not in KEYWORD_TYPES]
+        if dropped:
+            log.warning(
+                "subject-types: dropped unknown values %s for ws=%s",
+                dropped, ws_id,
+            )
+        if not cleaned:
+            log.warning("subject-types: empty list set for workspace %s", ws_id)
+        # Share the schema-driven settings write lock so a concurrent
+        # autosave on the same workspace can't read this same overrides
+        # snapshot and overwrite our subject_types change with stale data.
+        with _settings_write_lock:
+            ws = db.get_workspace(ws_id)
+            if not ws:
+                return json_error("workspace not found", 404)
+            existing = {}
+            if ws["config_overrides"]:
+                try:
+                    existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+                except Exception:
+                    existing = {}
+            # `config_overrides` is JSON, so a previous PUT /api/workspaces/<id>
+            # could have stored a list/string/number. Coerce to {} before key
+            # assignment to keep this endpoint from 500-ing on malformed state.
+            if not isinstance(existing, dict):
+                existing = {}
+            existing["subject_types"] = cleaned
+            db.update_workspace(ws_id, config_overrides=existing)
+        return jsonify({"types": cleaned})
 
     @app.route("/api/workspace/tabs/open", methods=["POST"])
     def api_open_tab():

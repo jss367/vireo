@@ -114,10 +114,9 @@
 
   .kw-type-badge.type-general { background: rgba(176,204,204,0.1); color: var(--text-secondary); }
   .kw-type-badge.type-taxonomy { background: rgba(36,229,202,0.15); color: var(--accent); }
+  .kw-type-badge.type-individual { background: rgba(241,196,15,0.15); color: #f1c40f; }
   .kw-type-badge.type-location { background: rgba(52,152,219,0.15); color: #3498db; }
-  .kw-type-badge.type-descriptive { background: rgba(155,89,182,0.15); color: #9b59b6; }
-  .kw-type-badge.type-people { background: rgba(241,196,15,0.15); color: #f1c40f; }
-  .kw-type-badge.type-event { background: rgba(230,126,34,0.15); color: #e67e22; }
+  .kw-type-badge.type-genre { background: rgba(155,89,182,0.15); color: #9b59b6; }
 
   /* Type dropdown (floating) */
   .kw-type-dropdown {
@@ -182,10 +181,9 @@
       <button class="kw-filter-btn active" data-type="all">All</button>
       <button class="kw-filter-btn" data-type="general">General</button>
       <button class="kw-filter-btn" data-type="taxonomy">Taxonomy</button>
+      <button class="kw-filter-btn" data-type="individual">Individual</button>
       <button class="kw-filter-btn" data-type="location">Location</button>
-      <button class="kw-filter-btn" data-type="descriptive">Descriptive</button>
-      <button class="kw-filter-btn" data-type="people">People</button>
-      <button class="kw-filter-btn" data-type="event">Event</button>
+      <button class="kw-filter-btn" data-type="genre">Genre</button>
       <button class="kw-filter-btn" id="kwFilterUnlinked" data-type="unlinked-location"
               title="Show only location keywords without a Google place link">
         Unlinked locations <span id="kwUnlinkedCount">0</span>
@@ -200,10 +198,9 @@
         <option value="">Set type...</option>
         <option value="general">General</option>
         <option value="taxonomy">Taxonomy</option>
+        <option value="individual">Individual</option>
         <option value="location">Location</option>
-        <option value="descriptive">Descriptive</option>
-        <option value="people">People</option>
-        <option value="event">Event</option>
+        <option value="genre">Genre</option>
       </select>
       <button class="kw-bulk-btn" id="kwBulkApply">Apply</button>
       <span style="flex:1"></span>
@@ -252,8 +249,8 @@
 
 <script>
 (function() {
-  const TYPE_ICONS = {general:'\u25CF', taxonomy:'\uD83C\uDF3F', location:'\uD83D\uDCCD', descriptive:'\u25C6', people:'\uD83D\uDC64', event:'\uD83D\uDCC5'};
-  const TYPES = ['general','taxonomy','location','descriptive','people','event'];
+  const TYPE_ICONS = {general:'\u25CF', taxonomy:'\uD83C\uDF3F', individual:'\uD83D\uDC64', location:'\uD83D\uDCCD', genre:'\uD83C\uDFAD'};
+  const TYPES = ['general','taxonomy','individual','location','genre'];
 
   let allKeywords = [];
   let sortCol = 'name';

@@ -33,6 +33,11 @@ DEFAULTS = {
     "darktable_style": "",
     "darktable_output_format": "jpg",
     "darktable_output_dir": "",
+    # --- Subject identification ---
+    # Keyword types that count as "identifying" a photo for queue/classifier
+    # purposes. Photos with at least one keyword of one of these types drop
+    # out of "Needs Identification" and are skipped by the classifier.
+    "subject_types": ["taxonomy", "individual", "genre"],
     # --- Display ---
     "browse_card_fields": ["filename", "rating", "flag", "sharpness"],
     "photos_per_page": 50,

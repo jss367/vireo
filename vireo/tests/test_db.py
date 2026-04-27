@@ -695,6 +695,190 @@ def test_collection_has_species_rule(tmp_path):
     assert 'classified.jpg' not in filenames
 
 
+def test_has_subject_rule_matches_photos_without_subject_keywords(tmp_path, monkeypatch):
+    """has_subject==0 returns photos that have no keyword whose type is in
+    the workspace's subject_types set."""
+    import json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    scene_kid = db.add_keyword("Landscape", kw_type="genre")
+    db.tag_photo(p1, scene_kid)  # p1 is identified, p2 is not
+
+    cid = db.add_collection(
+        "Needs Subject",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
+    )
+    photos = db.get_collection_photos(cid, per_page=999)
+    pids = {p["id"] for p in photos}
+    assert pids == {p2}
+
+
+def test_has_subject_rule_value_one_matches_identified_photos(tmp_path, monkeypatch):
+    """has_subject==1 is the inverse — only identified photos match."""
+    import json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    scene_kid = db.add_keyword("Landscape", kw_type="genre")
+    db.tag_photo(p1, scene_kid)
+
+    cid = db.add_collection(
+        "Has Subject",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 1}]),
+    )
+    photos = db.get_collection_photos(cid, per_page=999)
+    pids = {p["id"] for p in photos}
+    assert pids == {p1}
+
+
+def test_has_subject_rule_empty_subject_types_value_one_matches_no_photos(tmp_path, monkeypatch):
+    """When subject_types is empty, has_subject==1 should match no photos
+    (no type counts as 'identifying')."""
+    import json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": []})
+
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    # Tag with a genre keyword anyway — but with empty subject_types, no
+    # type counts as identifying, so this photo still does not match.
+    scene_kid = db.add_keyword("Landscape", kw_type="genre")
+    db.tag_photo(p1, scene_kid)
+
+    cid = db.add_collection(
+        "Has Subject (empty types)",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 1}]),
+    )
+    photos = db.get_collection_photos(cid, per_page=999)
+    assert photos == []
+
+
+def test_has_subject_rule_counts_legacy_is_species_when_taxonomy_in_subject_types(tmp_path, monkeypatch):
+    """Regression: on upgraded DBs, species rows can briefly carry
+    ``is_species=1`` with a non-taxonomy ``type`` (e.g. 'general') until
+    the background ``mark_species_keywords`` pass retypes them. The
+    has_subject rule must treat those legacy rows as identifying when
+    'taxonomy' is in subject_types — otherwise already-identified photos
+    show up in 'Needs Identification' during that window.
+    """
+    import json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": ["taxonomy"]})
+
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    # Plant a legacy-shaped species keyword on p1: is_species=1, type='general'.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 1)",
+        ("Robin",),
+    )
+    legacy_sp = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, legacy_sp),
+    )
+    db.conn.commit()
+
+    # has_subject==0 must EXCLUDE p1 (it's identified by the legacy species
+    # row) and include only p2.
+    cid_unident = db.add_collection(
+        "Needs Identification",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
+    )
+    pids_unident = {p["id"] for p in db.get_collection_photos(cid_unident, per_page=999)}
+    assert pids_unident == {p2}, (
+        "has_subject==0 with 'taxonomy' in subject_types must exclude photos "
+        "tagged with legacy is_species=1 keywords whose type hasn't been "
+        "retyped to 'taxonomy' yet."
+    )
+
+    # has_subject==1 must INCLUDE p1.
+    cid_ident = db.add_collection(
+        "Identified",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 1}]),
+    )
+    pids_ident = {p["id"] for p in db.get_collection_photos(cid_ident, per_page=999)}
+    assert pids_ident == {p1}
+
+
+def test_has_subject_rule_ignores_legacy_is_species_when_taxonomy_excluded(tmp_path, monkeypatch):
+    """Counter-test: when 'taxonomy' is NOT in subject_types, the
+    legacy-species fallback must not fire — a photo with only an
+    is_species=1 keyword should still register as not-identified."""
+    import json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": ["genre"]})
+
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 1)",
+        ("Robin",),
+    )
+    legacy_sp = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, legacy_sp),
+    )
+    db.conn.commit()
+
+    cid = db.add_collection(
+        "Needs Identification",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
+    )
+    pids = {p["id"] for p in db.get_collection_photos(cid, per_page=999)}
+    assert pids == {p1}, (
+        "When 'taxonomy' is excluded from subject_types, an is_species=1 "
+        "keyword must not satisfy has_subject — only the configured types do."
+    )
+
+
 def test_add_keyword_is_species(tmp_path):
     """add_keyword with is_species=True marks the keyword."""
     from db import Database
@@ -908,7 +1092,7 @@ def test_default_collections_created(tmp_path):
     colls = db.get_collections()
     names = {c['name'] for c in colls}
     assert 'All Photos' in names
-    assert 'Needs Classification' in names
+    assert 'Needs Identification' in names
     assert 'Untagged' in names
     assert 'Flagged' in names
     assert 'Recent Import' in names
@@ -942,10 +1126,127 @@ def test_default_collections_adds_missing(tmp_path):
     colls = db.get_collections()
     names = {c['name'] for c in colls}
     assert 'All Photos' in names
-    assert 'Needs Classification' in names
+    assert 'Needs Identification' in names
     assert 'Untagged' in names
     assert 'Recent Import' in names
     assert len(colls) == 5  # no duplicate Flagged
+
+
+def test_default_collection_uses_has_subject_for_new_workspaces(tmp_path):
+    """A newly-created workspace gets 'Needs Identification' (not 'Needs
+    Classification') with the has_subject==0 rule."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    db.create_default_collections()
+
+    cols = {c["name"]: json.loads(c["rules"]) for c in db.get_collections()}
+    assert "Needs Identification" in cols
+    assert "Needs Classification" not in cols
+    assert cols["Needs Identification"] == [
+        {"field": "has_subject", "op": "equals", "value": 0}
+    ]
+
+
+def test_existing_needs_classification_collection_migrated_idempotently(tmp_path):
+    """A workspace pre-populated with the legacy default gets renamed; running
+    the migration again is a no-op."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    # Force-create the legacy state.
+    db.add_collection(
+        "Needs Classification",
+        json.dumps([{"field": "has_species", "op": "equals", "value": 0}]),
+    )
+    db.migrate_default_subject_collection()
+    db.migrate_default_subject_collection()  # idempotent
+
+    cols = {c["name"]: json.loads(c["rules"]) for c in db.get_collections()}
+    assert "Needs Identification" in cols
+    assert "Needs Classification" not in cols
+    assert cols["Needs Identification"] == [
+        {"field": "has_subject", "op": "equals", "value": 0}
+    ]
+
+
+def test_migration_skips_user_customized_collection(tmp_path):
+    """If 'Needs Classification' exists with a non-default rule (the user
+    edited it), leave it alone."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    custom = [{"field": "rating", "op": ">=", "value": 3}]
+    db.add_collection("Needs Classification", json.dumps(custom))
+    db.migrate_default_subject_collection()
+
+    cols = {c["name"]: json.loads(c["rules"]) for c in db.get_collections()}
+    assert "Needs Classification" in cols
+    assert cols["Needs Classification"] == custom
+
+
+def test_upgrade_path_no_duplicate_collection(tmp_path):
+    """Regression: on an upgraded DB with the legacy 'Needs Classification'
+    default, running the startup sequence (migrate-then-seed) leaves a
+    single 'Needs Identification' collection — not a duplicate alongside
+    the legacy one."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    # Force-create the legacy state that an upgraded DB would have.
+    db.add_collection(
+        "Needs Classification",
+        json.dumps([{"field": "has_species", "op": "equals", "value": 0}]),
+    )
+
+    # Mirror the create_app order: migrate first, then seed defaults.
+    db.migrate_default_subject_collection()
+    db.create_default_collections()
+
+    cols = {c["name"]: json.loads(c["rules"]) for c in db.get_collections()}
+    assert "Needs Classification" not in cols
+    assert "Needs Identification" in cols
+    assert cols["Needs Identification"] == [
+        {"field": "has_subject", "op": "equals", "value": 0}
+    ]
+    # Sanity: total default-collection count is 5, not 6 (no duplicate).
+    default_names = {"All Photos", "Needs Identification", "Untagged",
+                     "Flagged", "Recent Import"}
+    assert default_names.issubset(cols.keys())
+
+
+def test_default_genre_keywords_inserted(tmp_path):
+    """Database init populates the default genre keywords."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    rows = db.conn.execute(
+        "SELECT name FROM keywords WHERE type = 'genre' ORDER BY name"
+    ).fetchall()
+    assert [r["name"] for r in rows] == ["Abstract", "Architecture", "Landscape", "Sunset", "Wildlife"]
+
+
+def test_default_genre_keywords_idempotent(tmp_path):
+    """Calling ensure_default_genre_keywords multiple times doesn't duplicate."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.ensure_default_genre_keywords()
+    db.ensure_default_genre_keywords()
+    n = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM keywords WHERE type = 'genre'"
+    ).fetchone()["n"]
+    assert n == 5
 
 
 def test_all_photos_collection_returns_all_photos(tmp_path):
@@ -1097,10 +1398,11 @@ def test_get_dashboard_stats_with_data(tmp_path):
 
     stats = db.get_dashboard_stats()
 
-    # top_keywords: Robin with 2 photos
-    assert len(stats['top_keywords']) == 1
-    assert stats['top_keywords'][0]['name'] == 'Robin'
-    assert stats['top_keywords'][0]['photo_count'] == 2
+    # top_keywords: Robin with 2 photos. Wildlife is auto-added by the
+    # first-species rule, so it also appears with 2 photos.
+    by_name = {k['name']: k['photo_count'] for k in stats['top_keywords']}
+    assert by_name.get('Robin') == 2
+    assert by_name.get('Wildlife') == 2
 
     # photos_by_month: 2 in 2024-06, 1 in 2024-07
     months = {r['month']: r['count'] for r in stats['photos_by_month']}
@@ -2920,19 +3222,39 @@ def test_is_species_migrated_to_taxonomy_type(tmp_path):
     assert row["is_species"] == 1
 
 
-def test_add_keyword_people_type(tmp_path):
-    """A keyword can be created with type='people' via direct SQL update."""
+def test_add_keyword_individual_type(tmp_path):
+    """A keyword can be created with type='individual' via direct SQL update."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     kid = db.add_keyword("John Doe")
     db.conn.execute(
-        "UPDATE keywords SET type = 'people' WHERE id = ?", (kid,)
+        "UPDATE keywords SET type = 'individual' WHERE id = ?", (kid,)
     )
     db.conn.commit()
     row = db.conn.execute(
         "SELECT type FROM keywords WHERE id = ?", (kid,)
     ).fetchone()
-    assert row["type"] == "people"
+    assert row["type"] == "individual"
+
+
+def test_migrate_legacy_keyword_types_renames_people_descriptive_event(tmp_path):
+    """Pre-existing keywords of types 'people', 'descriptive', 'event' get
+    migrated to 'individual', 'general', 'general' respectively. Idempotent."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    # Force-create legacy rows via direct SQL (bypassing add_keyword's validation).
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES (?, 'people')", ("John",))
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES (?, 'descriptive')", ("blurry",))
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES (?, 'event')", ("wedding",))
+    db.conn.commit()
+    db.migrate_legacy_keyword_types()
+    db.migrate_legacy_keyword_types()  # idempotent
+    rows = db.conn.execute(
+        "SELECT name, type FROM keywords WHERE name IN ('John', 'blurry', 'wedding') ORDER BY name"
+    ).fetchall()
+    types = {r["name"]: r["type"] for r in rows}
+    assert types == {"John": "individual", "blurry": "general", "wedding": "general"}
 
 
 def test_keyword_tree_includes_type(tmp_path):
@@ -2959,7 +3281,8 @@ def test_photo_keywords_includes_type(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
-    kid = db.add_keyword('Sunset')
+    # Use a name that isn't pre-seeded as a default genre keyword.
+    kid = db.add_keyword('MyTag')
     db.tag_photo(pid, kid)
 
     keywords = db.get_photo_keywords(pid)
@@ -6501,6 +6824,1170 @@ def test_get_folder_tree_includes_partial_folders_with_status(tmp_path):
     assert missing_id not in rows, "missing folder must not appear in tree"
     assert rows[ok_id]["status"] == "ok"
     assert rows[partial_id]["status"] == "partial"
+
+
+def test_keyword_types_constant():
+    """KEYWORD_TYPES contains exactly the five valid enum values."""
+    from db import KEYWORD_TYPES
+    assert frozenset({"taxonomy", "individual", "location", "genre", "general"}) == KEYWORD_TYPES
+
+
+def test_add_keyword_accepts_valid_types(tmp_path):
+    """add_keyword stores the requested type when it's a valid enum value."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    kid = db.add_keyword("Charlie", kw_type="individual")
+    row = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid,)).fetchone()
+    assert row["type"] == "individual"
+
+
+def test_add_keyword_rejects_unknown_type(tmp_path):
+    """add_keyword raises ValueError for unknown type values."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    with pytest.raises(ValueError, match="invalid keyword type"):
+        db.add_keyword("BadType", kw_type="alien")
+
+
+def test_add_keyword_explicit_taxonomy_for_unknown_name_skips_taxa_lookup(tmp_path):
+    """Explicit kw_type='taxonomy' bypasses taxa-table lookup; taxon_id stays NULL.
+    is_species is auto-corrected to 1 to match the type."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    kid = db.add_keyword("DefinitelyNotASpecies42", kw_type="taxonomy")
+    row = db.conn.execute(
+        "SELECT type, taxon_id, is_species FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] is None
+    assert row["is_species"] == 1  # auto-set by the new reconciliation
+
+
+def test_add_keyword_is_species_with_non_taxonomy_type_raises(tmp_path):
+    """is_species=True paired with a non-'taxonomy' kw_type is inconsistent and
+    must raise ValueError rather than silently producing a mismatched row."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    with pytest.raises(ValueError, match="is_species=True requires kw_type='taxonomy'"):
+        db.add_keyword("Mismatch", is_species=True, kw_type="general")
+
+
+def test_add_keyword_explicit_taxonomy_sets_is_species(tmp_path):
+    """Explicit kw_type='taxonomy' (without is_species) auto-sets is_species=1
+    so the legacy column stays in sync with the type."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    kid = db.add_keyword("Some Bird", kw_type="taxonomy")
+    row = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+
+
+def test_add_keyword_existing_general_upgrades_to_requested_type(tmp_path):
+    """An existing 'general' keyword should be upgraded to the requested type
+    when add_keyword is called again with an explicit kw_type."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    # Use a name that isn't pre-seeded as a default genre keyword.
+    kid1 = db.add_keyword("Cityscape")
+    row1 = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid1,)).fetchone()
+    assert row1["type"] == "general"
+
+    kid2 = db.add_keyword("Cityscape", kw_type="genre")
+    assert kid2 == kid1
+    row2 = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid2,)).fetchone()
+    assert row2["type"] == "genre"
+
+
+def test_add_keyword_existing_general_upgrades_to_taxonomy_sets_is_species(tmp_path):
+    """Upgrading an existing 'general' keyword to 'taxonomy' should also
+    flip is_species to 1 so the legacy column stays consistent."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    kid1 = db.add_keyword("Mystery Bird")
+    row1 = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid1,)
+    ).fetchone()
+    assert row1["type"] == "general"
+    assert row1["is_species"] == 0
+
+    kid2 = db.add_keyword("Mystery Bird", kw_type="taxonomy")
+    assert kid2 == kid1
+    row2 = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid2,)
+    ).fetchone()
+    assert row2["type"] == "taxonomy"
+    assert row2["is_species"] == 1
+
+
+def test_add_keyword_taxonomy_preserves_individual_type_and_is_species(tmp_path):
+    """If an existing keyword has a deliberate non-general type (e.g.
+    'individual'), a later add_keyword(..., kw_type='taxonomy') must NOT
+    silently flip its type or stamp is_species=1. Otherwise auto-wildlife,
+    backfill, and subject filters that include `OR is_species=1` would
+    treat that individual row as a species.
+
+    The current contract: deliberate non-general rows are NOT candidates
+    for the typed-lookup. Caller asking for kw_type='taxonomy' on a name
+    that exists only as 'individual' falls through to INSERT, creating
+    a NEW taxonomy row alongside the preserved individual one
+    (duplicates by name across types are intentional; lookups
+    disambiguate by kw_type).
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+
+    kid_individual = db.add_keyword("Charlie", kw_type="individual")
+    row1 = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid_individual,)
+    ).fetchone()
+    assert row1["type"] == "individual"
+    assert row1["is_species"] == 0
+
+    kid_taxonomy = db.add_keyword("Charlie", kw_type="taxonomy")
+    # A new row is created — the original individual row was not a
+    # candidate for the typed lookup.
+    assert kid_taxonomy != kid_individual
+
+    # Original 'individual' row is unchanged.
+    row1_after = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid_individual,)
+    ).fetchone()
+    assert row1_after["type"] == "individual", "deliberate type must be preserved"
+    assert row1_after["is_species"] == 0, (
+        "is_species must NOT be set on a preserved non-taxonomy row"
+    )
+
+    # New row has the requested taxonomy type with is_species=1.
+    row2 = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid_taxonomy,)
+    ).fetchone()
+    assert row2["type"] == "taxonomy"
+    assert row2["is_species"] == 1
+
+
+def test_get_subject_types_returns_default(tmp_path, monkeypatch):
+    """A fresh workspace with no overrides falls back to the global default."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    assert db.get_subject_types() == {"taxonomy", "individual", "genre"}
+
+
+def test_get_subject_types_honors_workspace_override(tmp_path, monkeypatch):
+    """Workspace config_overrides for subject_types take precedence over the default."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": ["taxonomy"]})
+    assert db.get_subject_types() == {"taxonomy"}
+
+
+def test_get_subject_types_drops_unknown_values(tmp_path, monkeypatch):
+    """Unknown type strings in the workspace override are silently dropped."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": ["taxonomy", "alien"]})
+    assert db.get_subject_types() == {"taxonomy"}
+
+
+def test_filter_out_subject_tagged_excludes_tagged_photos(tmp_path):
+    """filter_out_subject_tagged drops photos that have any keyword whose
+    type is in the supplied set."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    scene_kid = db.add_keyword("Landscape", kw_type="genre")
+    gen_kid = db.add_keyword("note", kw_type="general")
+    db.tag_photo(p1, scene_kid)
+    db.tag_photo(p2, gen_kid)
+
+    kept = db.filter_out_subject_tagged([p1, p2], {"genre"})
+    assert kept == [p2]
+
+
+def test_filter_out_subject_tagged_empty_set_returns_all(tmp_path):
+    """An empty subject_types set means no type counts as 'identifying',
+    so every input photo is kept."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    assert db.filter_out_subject_tagged([p1], set()) == [p1]
+
+
+def test_filter_out_subject_tagged_empty_photo_ids_returns_empty(tmp_path):
+    """An empty photo_ids list short-circuits to an empty result."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    assert db.filter_out_subject_tagged([], {"genre"}) == []
+
+
+def test_filter_out_subject_tagged_preserves_input_order(tmp_path):
+    """Output preserves the input order of photo_ids for the kept rows."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+
+    fid = db.add_folder('/photos', name='photos')
+    # Insert several photos; we'll then ask filter_out_subject_tagged
+    # to keep them all (no subject tags) but in a specific input order.
+    p_a = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    p_b = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    p_c = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+
+    # No subject-tagged photos here — all three should be kept.
+    # Provide ids in non-sorted order to confirm the helper preserves input order.
+    ordered = [p_c, p_a, p_b]
+    assert db.filter_out_subject_tagged(ordered, {"genre"}) == ordered
+
+
+def test_get_subject_types_drops_non_string_entries(tmp_path, monkeypatch):
+    """Regression: config_overrides may contain malformed JSON entries since
+    api_update_workspace persists arbitrary values. Membership against a
+    frozenset raises TypeError on unhashable input; the helper must filter
+    non-strings before testing membership."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    # Persist deliberately-malformed subject_types via the workspace
+    # config (mirrors what api_update_workspace would let through).
+    db.update_workspace(ws_id, config_overrides={
+        "subject_types": ["taxonomy", ["nested"], {"obj": 1}, 42, None, "genre"],
+    })
+    # Must not raise. Returns the string-and-valid subset.
+    assert db.get_subject_types() == {"taxonomy", "genre"}
+
+
+def test_update_keyword_rejects_non_string_type(tmp_path):
+    """Regression: update_keyword(type=...) must raise ValueError (not
+    TypeError) on non-hashable JSON values, so api_update_keyword's
+    existing ValueError catch still translates to 400 instead of 500."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    kid = db.add_keyword("Tag", kw_type="general")
+    with pytest.raises(ValueError, match="Invalid keyword type"):
+        db.update_keyword(kid, type=[])
+    with pytest.raises(ValueError, match="Invalid keyword type"):
+        db.update_keyword(kid, type={"x": 1})
+    with pytest.raises(ValueError, match="Invalid keyword type"):
+        db.update_keyword(kid, type=42)
+
+
+def test_filter_out_subject_tagged_chunks_large_input(tmp_path, monkeypatch):
+    """Regression: photo_ids larger than the SQLite bind-var limit must be
+    chunked, not passed as a single oversized IN clause. The classify job
+    sources up to ~1M photos via get_collection_photos(per_page=999999),
+    which would trip 'too many SQL variables' on builds with the historical
+    999-var cap.
+
+    Force a tiny chunk size so we exercise the chunking path with a small
+    number of real photos, then assert filtering correctness across the
+    boundary.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+
+    # 25 photos, alternating tagged/untagged so the result spans multiple
+    # chunks under our forced chunk size of 10.
+    monkeypatch.setattr(Database, "_FILTER_SUBJECT_CHUNK", 10)
+    genre_kid = db.add_keyword("Landscape", kw_type="genre")
+    pids = []
+    for i in range(25):
+        p = db.add_photo(
+            folder_id=fid, filename=f"p{i}.jpg", extension=".jpg",
+            file_size=100, file_mtime=float(i),
+        )
+        pids.append(p)
+        # Tag every even-index photo with the genre keyword.
+        if i % 2 == 0:
+            db.tag_photo(p, genre_kid)
+
+    kept = db.filter_out_subject_tagged(pids, {"genre"})
+    expected = [p for i, p in enumerate(pids) if i % 2 == 1]
+    assert kept == expected, (
+        f"Chunking corrupted result. Expected odd-index photos, got {kept}"
+    )
+
+
+def test_filter_out_subject_tagged_excludes_legacy_is_species_when_taxonomy_requested(tmp_path):
+    """Regression: ``filter_out_subject_tagged`` must drop photos tagged
+    with a legacy species keyword (``is_species=1`` with non-taxonomy
+    ``type``) when 'taxonomy' is in the requested subject_types. Upgraded
+    DBs carry these rows until the background ``mark_species_keywords``
+    pass retypes them; without this guard, the classify job would
+    re-classify already-identified photos during that window.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    # Plant a legacy species keyword on p1 (is_species=1, type='general').
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 1)",
+        ("Robin",),
+    )
+    legacy_sp = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, legacy_sp),
+    )
+    db.conn.commit()
+
+    kept = db.filter_out_subject_tagged([p1, p2], {"taxonomy"})
+    assert kept == [p2], (
+        "Legacy is_species=1 rows must count as taxonomy-tagged so upgraded "
+        "DBs don't re-run classify on already-identified photos."
+    )
+
+
+def test_filter_out_subject_tagged_ignores_legacy_is_species_when_taxonomy_excluded(tmp_path):
+    """Counter-test: when 'taxonomy' is not in the requested subject_types,
+    is_species=1 must NOT exclude photos — only keywords whose type
+    matches the requested set count."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 1)",
+        ("Robin",),
+    )
+    legacy_sp = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, legacy_sp),
+    )
+    db.conn.commit()
+
+    kept = db.filter_out_subject_tagged([p1], {"genre"})
+    assert kept == [p1], (
+        "is_species=1 must only count when 'taxonomy' is one of the "
+        "requested subject_types; otherwise the legacy-species fallback "
+        "would over-filter."
+    )
+
+
+def test_tag_photo_with_first_taxonomy_keyword_adds_wildlife_genre(tmp_path):
+    """Tagging a photo with its first taxonomy keyword auto-adds the
+    Wildlife genre keyword."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    species_kid = db.add_keyword("Northern cardinal", is_species=True)
+
+    db.tag_photo(p1, species_kid)
+
+    # Photo should now have BOTH the species keyword AND Wildlife genre.
+    rows = db.conn.execute(
+        """SELECT k.name, k.type FROM photo_keywords pk
+           JOIN keywords k ON k.id = pk.keyword_id
+           WHERE pk.photo_id = ?
+           ORDER BY k.name""",
+        (p1,),
+    ).fetchall()
+    by_name = {r["name"]: r["type"] for r in rows}
+    assert by_name == {
+        "Northern cardinal": "taxonomy",
+        "Wildlife": "genre",
+    }
+
+
+def test_tag_photo_second_species_does_not_re_add_wildlife(tmp_path):
+    """If a photo already has at least one taxonomy keyword, tagging a
+    second species does NOT touch the Wildlife genre keyword (so user
+    removal sticks)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    sp_a = db.add_keyword("Robin", is_species=True)
+    sp_b = db.add_keyword("Sparrow", is_species=True)
+
+    db.tag_photo(p1, sp_a)  # Wildlife auto-added
+    # User manually removes Wildlife
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    db.untag_photo(p1, wildlife_id)
+
+    db.tag_photo(p1, sp_b)  # second species — should NOT re-add Wildlife
+
+    has_wildlife = db.conn.execute(
+        """SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?""",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is False
+
+
+def test_tag_photo_with_non_taxonomy_does_not_add_wildlife(tmp_path):
+    """Tagging with a non-species keyword (location, individual, etc.)
+    does NOT add Wildlife."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    loc_kid = db.add_keyword("Park", kw_type="location")
+
+    db.tag_photo(p1, loc_kid)
+
+    n = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.name = 'Wildlife'",
+        (p1,),
+    ).fetchone()["n"]
+    assert n == 0
+
+
+def test_tag_photo_re_adds_wildlife_after_all_species_removed_and_new_added(tmp_path):
+    """Sticky removal only sticks while at least one taxonomy keyword
+    exists. Removing all species and tagging a new one re-adds Wildlife."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    sp_a = db.add_keyword("Robin", is_species=True)
+    sp_b = db.add_keyword("Sparrow", is_species=True)
+    db.tag_photo(p1, sp_a)  # Wildlife added
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    db.untag_photo(p1, wildlife_id)
+    # Remove the only species
+    db.untag_photo(p1, sp_a)
+
+    # Tag a new species — this is the "first species again" case
+    db.tag_photo(p1, sp_b)
+
+    has_wildlife = db.conn.execute(
+        """SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?""",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is True
+
+
+def test_backfill_auto_wildlife_for_existing_species_tagged_photos(tmp_path):
+    """The one-shot backfill adds Wildlife to every photo with a species
+    keyword that doesn't already have Wildlife. Idempotent."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p3 = db.add_photo(folder_id=fid, filename='p3.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    sp_a = db.add_keyword("Robin", is_species=True)
+    # Bypass tag_photo so the auto-Wildlife rule does NOT fire — this
+    # simulates a pre-existing DB.
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, sp_a),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p2, sp_a),
+    )
+    db.conn.commit()
+
+    db.backfill_wildlife_genre()
+    db.backfill_wildlife_genre()  # idempotent
+
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+
+    # p1, p2 should have Wildlife. p3 (no species) should not.
+    def has_wildlife(pid):
+        return db.conn.execute(
+            "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+            (pid, wildlife_id),
+        ).fetchone() is not None
+    assert has_wildlife(p1) is True
+    assert has_wildlife(p2) is True
+    assert has_wildlife(p3) is False
+
+
+def test_backfill_wildlife_genre_matches_legacy_is_species_rows(tmp_path):
+    """Regression: on upgraded DBs, species rows can carry legacy
+    ``is_species=1`` but a non-taxonomy ``type`` (e.g. NULL, 'general')
+    until the background ``mark_species_keywords`` pass retypes them.
+
+    The backfill runs at startup before that pass, so a query that joined
+    only on ``type='taxonomy'`` matched zero rows yet still wrote the
+    one-shot marker — and never re-ran. The backfill must also match
+    ``is_species=1`` so upgraded photos get Wildlife on first startup,
+    independent of background normalization timing.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    # Force a legacy-shaped species keyword via direct SQL: is_species=1
+    # but type='general' (the shape an upgraded DB has before the
+    # background mark_species_keywords pass converts type to 'taxonomy').
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 1)",
+        ("Robin",),
+    )
+    sp = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, sp),
+    )
+    db.conn.commit()
+
+    db.backfill_wildlife_genre()
+
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    has_wildlife = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is True, (
+        "Backfill must match is_species=1 rows so upgraded DBs get Wildlife "
+        "added on first startup, even before mark_species_keywords retypes "
+        "legacy species keywords to type='taxonomy'."
+    )
+
+
+def test_backfill_wildlife_genre_after_mark_picks_up_plaintext_species(tmp_path):
+    """Regression: plain-text species tags on upgraded DBs start as
+    ``is_species=0`` and ``type != 'taxonomy'``; only ``mark_species_keywords``
+    can retype them via taxonomy lookup. The Wildlife backfill is one-shot via
+    ``wildlife_backfill_done`` and only matches ``type='taxonomy' OR is_species=1``,
+    so it MUST run after ``mark_species_keywords`` — otherwise it sets the
+    marker on a zero-row scan and never retries.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    # Plain-text species tag: type='general', is_species=0 — neither flag set.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 0)",
+        ("Robin",),
+    )
+    sp = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, sp),
+    )
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        def lookup(self, name):
+            return {"taxon_id": 1} if name == "Robin" else None
+
+    # Order matches startup: mark first, then backfill.
+    db.mark_species_keywords(FakeTaxonomy())
+    db.backfill_wildlife_genre()
+
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    has_wildlife = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is True, (
+        "Plain-text species tags must be retyped by mark_species_keywords "
+        "before backfill_wildlife_genre runs, so the backfill scan sees them."
+    )
+
+
+def test_tag_photo_legacy_is_species_keyword_adds_wildlife_genre(tmp_path):
+    """Regression: auto-Wildlife must fire for legacy species rows whose
+    ``type`` hasn't been retyped to ``taxonomy`` yet (is_species=1 with
+    non-taxonomy ``type``). On upgraded databases ``mark_species_keywords``
+    runs in a background thread, so newly-tagged photos can briefly hit
+    keywords that satisfy ``is_species=1`` but not ``type='taxonomy'``."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    # Plant a legacy-shaped species keyword: is_species=1 but type='general'
+    # (the shape an upgraded DB has before mark_species_keywords retypes it).
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 1)",
+        ("Robin",),
+    )
+    sp = cur.lastrowid
+    db.conn.commit()
+
+    db.tag_photo(p1, sp)
+
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    has_wildlife = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is True, (
+        "Auto-Wildlife must trigger for legacy is_species=1 rows whose type "
+        "hasn't been normalized yet — otherwise photos tagged during the "
+        "background mark_species_keywords window permanently miss Wildlife."
+    )
+
+
+def test_tag_photo_legacy_species_sticky_removal_holds(tmp_path):
+    """Regression complement: sticky removal must still hold across the
+    mixed (legacy + retyped) species states. After removing Wildlife, a
+    second species tag — even one that uses the legacy is_species=1 shape
+    — must NOT re-add Wildlife as long as another species keyword is
+    already attached."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    sp_a = db.add_keyword("Robin", is_species=True)
+    db.tag_photo(p1, sp_a)  # First species — Wildlife auto-added.
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    db.untag_photo(p1, wildlife_id)  # User removes Wildlife.
+
+    # Plant a second species with the legacy shape.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 1)",
+        ("Sparrow",),
+    )
+    sp_b = cur.lastrowid
+    db.conn.commit()
+    db.tag_photo(p1, sp_b)
+
+    has_wildlife = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is False, (
+        "Adding a second (legacy-shaped) species must respect the user's "
+        "Wildlife removal — the count query must consider both 'taxonomy' "
+        "and is_species=1 rows so existing species are seen."
+    )
+
+
+def test_tag_photo_no_op_re_tag_does_not_re_add_removed_wildlife(tmp_path):
+    """Regression: re-tagging an already-tagged species (a no-op INSERT OR
+    IGNORE) must NOT re-fire the auto-Wildlife rule, so user-removed
+    Wildlife stays removed."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    sp = db.add_keyword("Robin", is_species=True)
+
+    db.tag_photo(p1, sp)  # First species tag — Wildlife auto-added.
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    db.untag_photo(p1, wildlife_id)  # User removes Wildlife.
+
+    # Re-tag the same species (e.g. user clicks the keyword chip twice).
+    # INSERT OR IGNORE is a no-op; auto-Wildlife must NOT fire.
+    db.tag_photo(p1, sp)
+
+    has_wildlife = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is False, (
+        "Re-tagging an already-attached species must not undo a user's "
+        "Wildlife removal."
+    )
+
+
+def test_ensure_default_genre_keywords_upgrades_existing_general_wildlife(tmp_path):
+    """Regression: an upgraded DB with an existing 'Wildlife' general keyword
+    must have it promoted to type='genre' so auto-tagging finds it."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Wipe the genre defaults that __init__ seeded (simulate a DB that
+    # never went through this code path) and force-create a 'general'
+    # Wildlife row, mirroring an upgraded DB where the user hand-tagged.
+    db.conn.execute("DELETE FROM keywords WHERE type = 'genre'")
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 0)",
+        ("Wildlife",),
+    )
+    db.conn.commit()
+
+    db.ensure_default_genre_keywords()
+
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE name = 'Wildlife' AND parent_id IS NULL"
+    ).fetchone()
+    assert row["type"] == "genre", (
+        "An existing 'general' Wildlife should be promoted to 'genre' so "
+        "auto-Wildlife and the backfill find a canonical genre row."
+    )
+    # Other defaults should also be present (the seed loop still runs).
+    n = db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE type = 'genre'"
+    ).fetchone()[0]
+    assert n >= 5  # Wildlife + Landscape + Sunset + Architecture + Abstract
+
+
+def test_init_normalizes_legacy_wildlife_before_seeding_genres(tmp_path):
+    """Regression: an upgraded DB where 'Wildlife' has a legacy type like
+    'descriptive' must end up with type='genre' after Database.__init__,
+    not stuck on 'general' (which the auto-Wildlife / backfill queries
+    can't find via WHERE name='Wildlife' AND type='genre')."""
+    from db import Database
+    # First instantiation runs the schema setup AND the seeds. Tear that
+    # down to simulate a pre-genre-feature DB: re-create the Wildlife
+    # row as 'descriptive', clear all genre rows.
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    db.conn.execute("DELETE FROM keywords WHERE type = 'genre'")
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'descriptive', 0)",
+        ("Wildlife",),
+    )
+    db.conn.commit()
+    db.conn.close()
+
+    # Re-open: __init__ runs migrate_legacy_keyword_types BEFORE
+    # ensure_default_genre_keywords, so Wildlife should be normalized to
+    # 'genre' instead of getting stuck on 'general'.
+    db2 = Database(db_path)
+    rows = db2.conn.execute(
+        "SELECT type FROM keywords WHERE name = 'Wildlife' AND parent_id IS NULL"
+    ).fetchall()
+    types = {r["type"] for r in rows}
+    assert "genre" in types, (
+        f"Legacy 'descriptive' Wildlife must end up as 'genre' after "
+        f"__init__; got types={types}. The auto-Wildlife trigger and "
+        f"backfill query depend on this."
+    )
+
+
+def test_ensure_default_genre_keywords_preserves_non_general_user_types(tmp_path):
+    """If a user deliberately created e.g. an 'individual' Wildlife (a pet
+    named Wildlife), ensure_default_genre_keywords must NOT clobber that."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute("DELETE FROM keywords WHERE type = 'genre'")
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'individual', 0)",
+        ("Wildlife",),
+    )
+    db.conn.commit()
+
+    db.ensure_default_genre_keywords()
+
+    rows = db.conn.execute(
+        "SELECT type FROM keywords WHERE name = 'Wildlife' ORDER BY type"
+    ).fetchall()
+    types = sorted(r["type"] for r in rows)
+    # The user's 'individual' row is preserved AND a canonical 'genre'
+    # row is created alongside it. Duplicates BY NAME across different
+    # types are intentional — disambiguation in add_keyword's lookup
+    # (ORDER BY (type=?) DESC) ensures kw_type-typed callers get the
+    # right row deterministically.
+    assert types == ["genre", "individual"], (
+        f"Expected both 'genre' (canonical) and 'individual' (user's) "
+        f"Wildlife rows; got types={types}"
+    )
+    # Other genre defaults still seeded
+    n_other = db.conn.execute(
+        """SELECT COUNT(*) FROM keywords
+           WHERE type = 'genre' AND name IN
+                ('Landscape', 'Sunset', 'Architecture', 'Abstract')"""
+    ).fetchone()[0]
+    assert n_other == 4
+
+
+def test_add_keyword_is_species_with_no_kw_type_treats_as_taxonomy(tmp_path):
+    """Regression: species-accept flows (prediction accept, group apply)
+    call add_keyword(name, is_species=True) without kw_type. With a
+    same-name non-taxonomy row pre-existing (e.g. an 'individual' Robin
+    that's a person), the lookup must treat is_species=True as
+    kw_type='taxonomy' so the individual row isn't a candidate.
+
+    Otherwise the species accept would return the individual row id,
+    no taxonomy row is created, and the photo gets tagged with a
+    non-taxonomy keyword that breaks species-specific behavior (taxon
+    linkage, species workflows, subject_types semantics)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+
+    # User has 'Robin' typed as 'individual' (their kid).
+    kid_individual = db.add_keyword("Robin", kw_type="individual")
+
+    # Classifier accept-prediction flow calls add_keyword with
+    # is_species=True and no kw_type.
+    kid_taxonomy = db.add_keyword("Robin", is_species=True)
+
+    assert kid_taxonomy != kid_individual, (
+        "is_species=True must NOT return a same-name 'individual' row. "
+        "The species-accept flow needs a fresh taxonomy row."
+    )
+    row_taxonomy = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid_taxonomy,)
+    ).fetchone()
+    assert row_taxonomy["type"] == "taxonomy"
+    assert row_taxonomy["is_species"] == 1
+
+    # Original 'individual' Robin row is unchanged.
+    row_individual = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid_individual,)
+    ).fetchone()
+    assert row_individual["type"] == "individual"
+    assert row_individual["is_species"] == 0
+
+
+def test_add_keyword_is_species_promotes_general_row(tmp_path):
+    """A pre-existing 'general' Robin (legacy plain-text tag) is
+    promoted to taxonomy by is_species=True (with no kw_type) — the
+    typed-lookup includes 'general' as a promotable candidate."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+
+    kid = db.add_keyword("Robin", kw_type="general")
+    kid2 = db.add_keyword("Robin", is_species=True)
+    assert kid2 == kid, "general row should be promoted in place"
+    row = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+
+
+def test_add_keyword_kw_type_falls_through_when_only_other_types_exist(tmp_path):
+    """Regression: when kw_type is supplied but no same-type or 'general'
+    row exists, add_keyword must NOT silently return a non-promotable
+    other-typed row (e.g. 'location' or 'individual'). It must fall
+    through to INSERT a new row with the requested type, so callers
+    deterministically get back a row that matches kw_type.
+
+    Reachable via POST /api/photos/<id>/keywords and /api/batch/keyword
+    with an explicit type. Without this, the photo would be tagged with
+    a wrong-typed row and stay stuck in 'Needs Identification'."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+
+    # User has 'Backyard' typed as 'location' (a place they care about).
+    # No 'general' or 'genre' Backyard exists.
+    kid_location = db.add_keyword("Backyard", kw_type="location")
+
+    # Caller asks for genre Backyard (e.g. via the lightbox flow tagging
+    # a photo as a Backyard scene). The location row must NOT be returned.
+    kid_genre = db.add_keyword("Backyard", kw_type="genre")
+    assert kid_genre != kid_location, (
+        "add_keyword('Backyard', kw_type='genre') returned the existing "
+        "location row instead of creating a new genre row."
+    )
+
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (kid_genre,)
+    ).fetchone()
+    assert row["type"] == "genre", (
+        f"Expected the new row to have type='genre'; got {row['type']!r}"
+    )
+
+    # Original 'location' Backyard is unchanged.
+    row_loc = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (kid_location,)
+    ).fetchone()
+    assert row_loc["type"] == "location"
+
+
+def test_add_keyword_no_kw_type_prefers_canonical_genre_over_location(tmp_path):
+    """Regression: when kw_type is omitted, the case-insensitive lookup
+    must prefer the most structured interpretation. A user with both a
+    hand-tagged 'location' Landscape and a canonical 'genre' Landscape
+    should get the genre row when calling add_keyword('Landscape')
+    with no kw_type — otherwise the photo would be tagged with the
+    location row and stay stuck in 'Needs Identification' under the
+    default subject_types."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    # Wipe the genre defaults; force-create a 'location' Landscape FIRST,
+    # then a 'genre' Landscape — so id-ASC alone would pick location.
+    db.conn.execute("DELETE FROM keywords WHERE type = 'genre'")
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'location', 0)",
+        ("Landscape",),
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'genre', 0)",
+        ("Landscape",),
+    )
+    db.conn.commit()
+
+    # No kw_type supplied. Must deterministically return the 'genre' row.
+    kid = db.add_keyword("Landscape")
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "genre", (
+        f"add_keyword('Landscape') without kw_type must prefer 'genre' "
+        f"over 'location'; got {row['type']!r}"
+    )
+
+
+def test_add_keyword_no_kw_type_prefers_taxonomy_over_general(tmp_path):
+    """The type-priority order picks taxonomy first when present. A
+    species keyword that was once tagged plain-text and later promoted
+    via mark_species_keywords (creating a parallel 'general' row that
+    stuck around) should still be picked as the taxonomy row."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    # 'general' Robin first (older id), 'taxonomy' Robin second.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 0)",
+        ("Robin",),
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+        ("Robin",),
+    )
+    db.conn.commit()
+
+    kid = db.add_keyword("Robin")
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+
+
+def test_ensure_default_genre_keywords_seeds_canonical_row_despite_typed_collision(tmp_path):
+    """Regression: the seed must guarantee a canonical genre row for each
+    default name even when a user has previously tagged a same-name
+    keyword with a different type (e.g. 'Landscape' as 'location').
+
+    Otherwise the lightbox 'Not Wildlife' flow would call add_keyword(
+    name='Landscape', kw_type='genre'), find the existing 'location' row,
+    fail to upgrade it (only 'general' is upgraded), and tag the photo
+    with a non-genre keyword — leaving it stuck in 'Needs Identification'
+    under the default subject types.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Wipe the genre defaults and force-create same-name rows with
+    # different types to simulate an upgraded user library.
+    db.conn.execute("DELETE FROM keywords WHERE type = 'genre'")
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 0)",
+        ("landscape",),  # lowercase — exercises COLLATE NOCASE
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'location', 0)",
+        ("Sunset",),  # user has a "Sunset" location they care about
+    )
+    db.conn.commit()
+
+    db.ensure_default_genre_keywords()
+    db.ensure_default_genre_keywords()  # idempotent re-run
+
+    # 'landscape' (general) is PROMOTED to 'genre' via the in-place
+    # UPDATE — no duplicate.
+    rows = db.conn.execute(
+        "SELECT type FROM keywords WHERE name = 'landscape' COLLATE NOCASE"
+    ).fetchall()
+    assert sorted(r["type"] for r in rows) == ["genre"], (
+        f"'general' Landscape should be promoted in place to 'genre'; "
+        f"got types={[r['type'] for r in rows]}"
+    )
+
+    # 'Sunset' (location) is PRESERVED, AND a canonical 'genre' Sunset
+    # is created alongside it.
+    rows = db.conn.execute(
+        "SELECT type FROM keywords WHERE name = 'Sunset' COLLATE NOCASE"
+    ).fetchall()
+    assert sorted(r["type"] for r in rows) == ["genre", "location"], (
+        f"Expected both 'genre' (canonical) and 'location' (user's) "
+        f"Sunset rows; got types={[r['type'] for r in rows]}"
+    )
+
+    # add_keyword's lookup must deterministically pick the genre row
+    # when kw_type='genre' is supplied (otherwise the route flow gets
+    # the wrong-typed row non-deterministically).
+    sunset_id = db.add_keyword("Sunset", kw_type="genre")
+    sunset_type = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (sunset_id,)
+    ).fetchone()["type"]
+    assert sunset_type == "genre", (
+        f"add_keyword('Sunset', kw_type='genre') must return the genre "
+        f"row, got type={sunset_type!r}"
+    )
+
+    # Other defaults exist exactly once.
+    for name in ("Architecture", "Abstract", "Wildlife"):
+        n = db.conn.execute(
+            "SELECT COUNT(*) FROM keywords WHERE name = ? COLLATE NOCASE",
+            (name,),
+        ).fetchone()[0]
+        assert n == 1, f"Expected exactly one '{name}' row; got {n}"
+
+
+def test_migrate_default_subject_collection_covers_all_workspaces(tmp_path):
+    """Regression: the migration must rename the legacy collection in EVERY
+    workspace, not just the currently-active one. Multi-workspace upgrades
+    otherwise leave non-active workspaces stuck on has_species."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws1 = db.ensure_default_workspace()
+    ws2 = db.create_workspace("ws-b")
+
+    legacy_rule = json.dumps([{"field": "has_species", "op": "equals", "value": 0}])
+    # Force-create the legacy collection in BOTH workspaces by direct SQL,
+    # bypassing the active-workspace gating in add_collection.
+    for ws in (ws1, ws2):
+        db.conn.execute(
+            "INSERT INTO collections (workspace_id, name, rules) VALUES (?, ?, ?)",
+            (ws, "Needs Classification", legacy_rule),
+        )
+    db.conn.commit()
+
+    # Active workspace is ws1; migration should cover ws2 as well.
+    db.set_active_workspace(ws1)
+    db.migrate_default_subject_collection()
+
+    for ws in (ws1, ws2):
+        row = db.conn.execute(
+            "SELECT name, rules FROM collections "
+            "WHERE workspace_id = ? AND name IN ('Needs Classification', 'Needs Identification')",
+            (ws,),
+        ).fetchone()
+        assert row is not None, f"workspace {ws} lost its default collection"
+        assert row["name"] == "Needs Identification", (
+            f"workspace {ws} still has legacy 'Needs Classification' name"
+        )
+        assert json.loads(row["rules"]) == [
+            {"field": "has_subject", "op": "equals", "value": 0}
+        ]
+
+
+def test_backfill_wildlife_genre_runs_only_once(tmp_path):
+    """Regression: backfill must be gated by a db_meta marker so subsequent
+    startups don't re-add user-removed Wildlife."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    sp = db.add_keyword("Robin", is_species=True)
+    # Direct-SQL tag so auto-Wildlife doesn't fire — simulates a
+    # pre-auto-Wildlife DB where this photo had only Robin.
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, sp),
+    )
+    db.conn.commit()
+
+    db.backfill_wildlife_genre()  # First run: adds Wildlife to p1.
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    # Marker should now be set
+    assert db.get_meta("wildlife_backfill_done") == "1"
+
+    # User removes Wildlife (sticky-removal intent).
+    db.untag_photo(p1, wildlife_id)
+
+    # Subsequent backfill calls (simulating subsequent app starts) must
+    # short-circuit without re-adding Wildlife.
+    db.backfill_wildlife_genre()
+    db.backfill_wildlife_genre()
+    has_wildlife = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is False, (
+        "Backfill must not re-add Wildlife on subsequent startups; the "
+        "user's sticky removal would be silently undone."
+    )
+
+    # Force flag exists for tests.
+    db.backfill_wildlife_genre(force=True)
+    has_wildlife = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is True, "force=True must override the marker gate."
 
 
 def test_keywords_has_place_id_column_and_unique_index(db):

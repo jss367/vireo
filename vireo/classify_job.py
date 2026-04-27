@@ -1284,15 +1284,101 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         job["_start_time"] = time.time()
 
         runner.set_steps(job["id"], [
-            {"id": "load_taxonomy", "label": "Load taxonomy"},
             {"id": "load_photos", "label": "Load photos"},
+            {"id": "load_taxonomy", "label": "Load taxonomy"},
             {"id": "load_model", "label": "Load model"},
             {"id": "detect", "label": "Detect subjects"},
             {"id": "classify", "label": "Classify species"},
             {"id": "finalize", "label": "Finalize results"},
         ])
 
-        # Resolve model
+        # Phase 1: Get photos from collection — runs before model resolution
+        # so that a collection fully filtered out by the subject-skip gate
+        # short-circuits without ever attempting to load (or fail to load)
+        # a classifier model. Otherwise users with no model downloaded would
+        # see "No model available" for jobs that have zero work to do.
+        runner.update_step(job["id"], "load_photos", status="running")
+        runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": 0,
+                "total": 0,
+                "current_file": "Loading collection photos...",
+                "rate": 0,
+                "phase": "Step 1/5: Loading photos",
+            },
+        )
+        photos = thread_db.get_collection_photos(params.collection_id, per_page=999999)
+
+        # Skip photos already tagged with a 'subject' keyword (per workspace
+        # config). reclassify=True bypasses so users can verify existing tags.
+        if not params.reclassify:
+            subject_types = thread_db.get_subject_types()
+            if subject_types:
+                pre_count = len(photos)
+                kept_ids = set(thread_db.filter_out_subject_tagged(
+                    [p["id"] for p in photos], subject_types,
+                ))
+                photos = [p for p in photos if p["id"] in kept_ids]
+                skipped_subject = pre_count - len(photos)
+                if skipped_subject:
+                    log.info(
+                        "Skipping %d photo(s) with subject keywords (types=%s)",
+                        skipped_subject, sorted(subject_types),
+                    )
+                    runner.push_event(
+                        job["id"], "progress",
+                        {
+                            "current": 0,
+                            "total": len(photos),
+                            "current_file": (
+                                f"Skipped {skipped_subject} already-identified "
+                                f"photo(s)"
+                            ),
+                            "rate": 0,
+                            "phase": "Step 1/5: Loading photos",
+                            "skipped_subject": skipped_subject,
+                        },
+                    )
+
+        total = len(photos)
+        job["progress"]["total"] = total
+        runner.update_step(
+            job["id"], "load_photos", status="completed",
+            summary=f"{total} photos",
+        )
+
+        # If the subject-skip filter (or an empty source collection) left
+        # nothing to classify, short-circuit before model resolution. Model
+        # resolution can fail with RuntimeError when no model is downloaded,
+        # which would surface as a hard error for a job that has no work.
+        if total == 0:
+            log.info(
+                "Classify job: no photos to process after filtering; "
+                "skipping model resolution and detection",
+            )
+            runner.push_event(
+                job["id"], "progress",
+                {
+                    "current": 0,
+                    "total": 0,
+                    "current_file": "No photos to classify",
+                    "rate": 0,
+                    "phase": "Step 1/5: Loading photos",
+                },
+            )
+            return {
+                "total": 0,
+                "predictions_stored": 0,
+                "burst_groups": 0,
+                "already_classified": 0,
+                "already_labeled": 0,
+                "detected": 0,
+                "failed": 0,
+            }
+
+        # Resolve model (deferred until we know there is work to do)
         if params.model_id:
             all_models = get_models()
             active_model = next(
@@ -1314,23 +1400,25 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         model_type = active_model.get("model_type", "bioclip")
         model_name = params.model_name or effective_name
 
-        # Phase 1: Load taxonomy
+        folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+
+        # Phase 2: Load taxonomy
         runner.update_step(job["id"], "load_taxonomy", status="running")
         runner.push_event(
             job["id"],
             "progress",
             {
                 "current": 0,
-                "total": 0,
+                "total": total,
                 "current_file": "Loading taxonomy...",
                 "rate": 0,
-                "phase": "Step 1/5: Loading taxonomy",
+                "phase": "Step 2/5: Loading taxonomy",
             },
         )
         from taxonomy import load_local_taxonomy
         tax = load_local_taxonomy()
 
-        # Phase 2: Load labels
+        # Phase 3: Load labels (uses model_type/model_str from above)
         labels, use_tol = _load_labels(
             model_type=model_type,
             model_str=model_str,
@@ -1351,28 +1439,6 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         runner.update_step(
             job["id"], "load_taxonomy", status="completed",
             summary=f"{tax_summary}, {labels_summary}",
-        )
-
-        # Phase 3: Get photos from collection
-        runner.update_step(job["id"], "load_photos", status="running")
-        runner.push_event(
-            job["id"],
-            "progress",
-            {
-                "current": 0,
-                "total": 0,
-                "current_file": "Loading collection photos...",
-                "rate": 0,
-                "phase": "Step 2/5: Loading photos",
-            },
-        )
-        photos = thread_db.get_collection_photos(params.collection_id, per_page=999999)
-        folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
-        total = len(photos)
-        job["progress"]["total"] = total
-        runner.update_step(
-            job["id"], "load_photos", status="completed",
-            summary=f"{total} photos",
         )
 
         log.info(

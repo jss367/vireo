@@ -17,11 +17,11 @@ def run(session):
     has_search = session.eval("!!document.getElementById('kwSearch')")
     session.assert_that(has_search, "expected keyword search input")
 
-    # Filter pills should exist: All, General, Taxonomy, Location, Descriptive, People, Event
+    # Filter pills should exist: All, General, Taxonomy, Individual, Location, Genre
     filter_btns = session.eval(
         "Array.from(document.querySelectorAll('.kw-filter-btn')).map(b => b.dataset.type)"
     )
-    expected_types = ["all", "general", "taxonomy", "location", "descriptive", "people", "event"]
+    expected_types = ["all", "general", "taxonomy", "individual", "location", "genre"]
     for t in expected_types:
         session.assert_that(
             t in filter_btns,

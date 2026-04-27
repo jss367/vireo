@@ -1,5 +1,6 @@
 """SQLite database for Vireo photo browser metadata cache."""
 
+import contextlib
 import json
 import logging
 import os
@@ -12,6 +13,18 @@ from new_images import get_shared_cache
 log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
+
+# Canonical set of keyword type values stored in keywords.type.
+# - taxonomy: a species/genus/etc. (linked to taxa via taxon_id)
+# - individual: a named person, pet, or otherwise tracked individual
+# - location: a named location ("Yosemite", "backyard")
+# - genre: a non-subject visual category ("Landscape", "Sunset")
+# - general: catch-all/free-form tag (the legacy default)
+KEYWORD_TYPES = frozenset({"taxonomy", "individual", "location", "genre", "general"})
+
+# Default set of types that count as "identifying" a photo for queue
+# membership / classifier skip purposes. Workspaces can override.
+SUBJECT_TYPES_DEFAULT = frozenset({"taxonomy", "individual", "genre"})
 
 OPENABLE_NAV_IDS = frozenset({
     "settings", "workspace", "lightroom",
@@ -107,6 +120,8 @@ class Database:
         # don't cross-read each other's cached results (workspace_id=1 is
         # reused across every database as the default workspace).
         self._db_path = db_path
+        # Pre-set so __del__ can run safely if sqlite3.connect raises.
+        self.conn = None
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -120,11 +135,54 @@ class Database:
         self._new_images_cache = get_shared_cache()
         self._create_tables()
         self.ensure_default_workspace()
+        # Idempotent legacy-type migration. MUST run before genre seeding
+        # so an upgraded DB with e.g. 'descriptive'/'event'/'people' rows
+        # named 'Wildlife' gets normalized first. Otherwise the seed's
+        # UNIQUE(name, parent_id) INSERT OR IGNORE skips the Wildlife
+        # genre, then the migration converts that legacy row to 'general',
+        # leaving auto-Wildlife and backfill queries unable to find a
+        # canonical 'Wildlife' / type='genre' row. Cheap warm-path (single
+        # SELECT 1 LIMIT 1) once all legacy rows are gone.
+        self.migrate_legacy_keyword_types()
+        # Idempotent default-keyword seed. Cheap warm-path (single
+        # SELECT 1 LIMIT 1 short-circuit) — matches ensure_default_workspace
+        # above.
+        self.ensure_default_genre_keywords()
         # Restore last-used workspace, or fall back to Default
         last = self.conn.execute(
             "SELECT id FROM workspaces ORDER BY CASE WHEN last_opened_at IS NULL THEN 0 ELSE 1 END DESC, last_opened_at DESC, id ASC LIMIT 1"
         ).fetchone()
         self.set_active_workspace(last[0])
+
+    def close(self):
+        """Close the underlying sqlite3 connection.
+
+        Safe to call multiple times. Without an explicit close, the
+        connection's file descriptors only release when CPython gc collects
+        the object — under Python 3.14's stricter ResourceWarning handling,
+        accumulating unclosed connections in long-running test suites
+        exhausts the per-process fd limit and breaks coverage's own
+        sqlite database.
+        """
+        conn = getattr(self, "conn", None)
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
+            self.conn = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        # Safety net for callers that don't use the context manager or call
+        # close() explicitly. __del__ may run during interpreter shutdown
+        # when sqlite3 is already torn down — swallow everything.
+        with contextlib.suppress(Exception):
+            self.close()
 
     def _create_tables(self):
         self.conn.executescript(
@@ -219,6 +277,15 @@ class Database:
                 photo_id    INTEGER REFERENCES photos(id),
                 keyword_id  INTEGER REFERENCES keywords(id),
                 PRIMARY KEY (photo_id, keyword_id)
+            );
+
+            -- Singleton key/value table for one-shot migration markers.
+            -- Used to gate non-idempotent backfills (where re-running would
+            -- overwrite user intent — e.g. Wildlife genre backfill that
+            -- would clobber sticky-removed Wildlife rows).
+            CREATE TABLE IF NOT EXISTS db_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
             );
 
             CREATE TABLE IF NOT EXISTS workspaces (
@@ -436,6 +503,12 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_photos_file_hash ON photos(file_hash);
 
             CREATE INDEX IF NOT EXISTS idx_keywords_name ON keywords(name);
+            -- type is low-cardinality (5-value enum) but heavily filtered:
+            -- has_subject rule, filter_out_subject_tagged, backfill_wildlife,
+            -- and the warm-path migration probes all do WHERE type [IN/=] ...
+            -- Without an index those scan the full keywords table on every
+            -- _get_db()-per-request Database instantiation.
+            CREATE INDEX IF NOT EXISTS idx_keywords_type ON keywords(type);
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_photo ON photo_keywords(photo_id);
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_keyword ON photo_keywords(keyword_id);
             CREATE INDEX IF NOT EXISTS idx_photo_color_labels_ws
@@ -692,6 +765,74 @@ class Database:
         except (json.JSONDecodeError, TypeError):
             return global_config
 
+    def get_subject_types(self) -> set[str]:
+        """Return the keyword types that count as 'identified' for the active
+        workspace.
+
+        config_overrides is arbitrary JSON (api_update_workspace persists
+        whatever the client sends), so subject_types entries may not be
+        strings — guard the membership test against unhashable values
+        (nested lists/objects) to avoid TypeError downstream in callers
+        like collection filtering and the classify skip-gate.
+        """
+        import config as cfg
+        effective = self.get_effective_config(cfg.load())
+        raw = effective.get("subject_types", list(SUBJECT_TYPES_DEFAULT))
+        if not isinstance(raw, list):
+            return set(SUBJECT_TYPES_DEFAULT)
+        return {t for t in raw if isinstance(t, str) and t in KEYWORD_TYPES}
+
+    # Conservative chunk size for filter_out_subject_tagged. Most modern
+    # SQLite builds default to SQLITE_MAX_VARIABLE_NUMBER=32766, but older
+    # / Linux-distro builds still ship with the historical 999 cap. 800
+    # leaves comfortable headroom for the type binds (up to 5) plus a
+    # safety margin. Module-level constant so tests can monkeypatch.
+    _FILTER_SUBJECT_CHUNK = 800
+
+    def filter_out_subject_tagged(self, photo_ids, subject_types):
+        """Return the subset of photo_ids whose photos do NOT have any keyword
+        of a type in subject_types. Empty subject_types or empty photo_ids
+        returns photo_ids unchanged (preserving input order).
+
+        Photo ids are chunked under SQLite's bind-variable limit so callers
+        can safely pass arbitrarily large lists. The classify job sources
+        photo ids from get_collection_photos(per_page=999999), which can
+        exceed older SQLite builds' 999-variable cap and trip
+        OperationalError: too many SQL variables.
+
+        When ``'taxonomy'`` is among the requested types, legacy species rows
+        (``is_species=1`` with a non-taxonomy ``type``) also count as
+        subject-tagged. Upgraded databases carry these rows until the
+        background ``mark_species_keywords`` pass retypes them; without this
+        guard, already-identified photos would still be classified and would
+        appear in 'Needs Identification' during that window.
+        """
+        if not subject_types or not photo_ids:
+            return list(photo_ids)
+        types = [t for t in subject_types if t in KEYWORD_TYPES]
+        if not types:
+            return list(photo_ids)
+        type_placeholders = ",".join("?" * len(types))
+        type_clause = f"k.type IN ({type_placeholders})"
+        if "taxonomy" in types:
+            type_clause = f"({type_clause} OR k.is_species = 1)"
+        photo_ids_list = list(photo_ids)
+        excluded = set()
+        chunk_size = self._FILTER_SUBJECT_CHUNK
+        for i in range(0, len(photo_ids_list), chunk_size):
+            chunk = photo_ids_list[i:i + chunk_size]
+            pid_placeholders = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"""SELECT DISTINCT pk.photo_id FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id
+                    WHERE {type_clause}
+                      AND pk.photo_id IN ({pid_placeholders})""",
+                types + chunk,
+            ).fetchall()
+            for r in rows:
+                excluded.add(r["photo_id"])
+        return [pid for pid in photo_ids_list if pid not in excluded]
+
     def get_workspace_active_labels(self):
         """Return the active_labels list from workspace config_overrides, or None."""
         ws = self.get_workspace(self._ws_id())
@@ -925,6 +1066,91 @@ class Database:
         if row:
             return row[0]
         return self.create_workspace("Default")
+
+    def ensure_default_genre_keywords(self):
+        """Insert the default genre keywords if none exist of type='genre'.
+
+        Idempotent: a single existing genre keyword (user-created or otherwise)
+        short-circuits the insert. Keywords are global, so this runs once per
+        database (not per workspace).
+
+        Upgrade path: if a same-name top-level keyword exists with type='general'
+        (legacy free-form tag with the same name as a default genre), promote
+        it to type='genre' rather than silently leaving it as 'general'. The
+        UNIQUE(name, parent_id) constraint would block INSERT OR IGNORE in
+        that case, leaving e.g. an existing 'Wildlife' general keyword to
+        defeat _maybe_apply_auto_wildlife and backfill_wildlife_genre. Other
+        explicit user types (individual, location) are preserved — the user
+        meant something specific.
+        """
+        defaults = ("Landscape", "Sunset", "Architecture", "Abstract", "Wildlife")
+        # Warm-path short-circuit: if any genre row already exists, the
+        # database has already been seeded — nothing to do. Cheap (single
+        # SELECT 1 LIMIT 1).
+        existing = self.conn.execute(
+            "SELECT 1 FROM keywords WHERE type = 'genre' LIMIT 1"
+        ).fetchone()
+        if existing:
+            return
+        # Cold / upgrade path: promote any same-name top-level 'general'
+        # rows to 'genre' first, so an upgraded DB with a hand-tagged
+        # 'general' Wildlife (or other default name) ends up with a
+        # canonical genre row.
+        for name in defaults:
+            self.conn.execute(
+                """UPDATE keywords SET type = 'genre'
+                   WHERE name = ? COLLATE NOCASE
+                     AND parent_id IS NULL AND type = 'general'""",
+                (name,),
+            )
+        # Always guarantee a canonical genre row for each default. Skip
+        # only when a same-name + same-type ('genre') row already exists.
+        # If a user has previously tagged e.g. 'Landscape' as 'location'
+        # (a deliberate non-default type), we still create the genre
+        # 'Landscape' alongside it so the lightbox "Not Wildlife" flow
+        # (which tags with type='genre') has a canonical row to reuse.
+        # This intentionally permits duplicates BY NAME across different
+        # types — disambiguation is handled by add_keyword's lookup,
+        # which prefers same-typed matches when kw_type is supplied.
+        for name in defaults:
+            existing_genre = self.conn.execute(
+                """SELECT id FROM keywords
+                   WHERE name = ? COLLATE NOCASE
+                     AND parent_id IS NULL AND type = 'genre'
+                   LIMIT 1""",
+                (name,),
+            ).fetchone()
+            if existing_genre:
+                continue
+            self.conn.execute(
+                "INSERT INTO keywords (name, type, is_species) VALUES (?, 'genre', 0)",
+                (name,),
+            )
+        self.conn.commit()
+
+    def migrate_legacy_keyword_types(self):
+        """One-shot migration of legacy keyword type names to the canonical
+        enum. Idempotent — once all rows are migrated, the warm-path
+        short-circuits cheaply (single SELECT 1 LIMIT 1) so this is safe to
+        call from Database.__init__ on every instantiation.
+
+        Order matters: this runs BEFORE ensure_default_genre_keywords in
+        __init__ so a legacy 'descriptive'/'event'/'people'-typed Wildlife
+        gets normalized first. Otherwise the seed's UNIQUE(name, parent_id)
+        INSERT OR IGNORE would silently skip Wildlife, then this migration
+        would convert the legacy row to 'general', leaving the auto-Wildlife
+        and backfill queries (WHERE name='Wildlife' AND type='genre') with
+        no canonical row to find.
+        """
+        legacy = self.conn.execute(
+            "SELECT 1 FROM keywords WHERE type IN ('people', 'descriptive', 'event') LIMIT 1"
+        ).fetchone()
+        if not legacy:
+            return
+        self.conn.execute("UPDATE keywords SET type = 'individual' WHERE type = 'people'")
+        self.conn.execute("UPDATE keywords SET type = 'general' WHERE type = 'descriptive'")
+        self.conn.execute("UPDATE keywords SET type = 'general' WHERE type = 'event'")
+        self.conn.commit()
 
     # -- Folders --
 
@@ -3381,7 +3607,7 @@ class Database:
             return name.title()
         return name
 
-    def add_keyword(self, name, parent_id=None, is_species=False, _commit=True):
+    def add_keyword(self, name, parent_id=None, is_species=False, kw_type=None, _commit=True):
         """Insert a keyword. Returns existing id if duplicate (case-insensitive).
 
         If a keyword with the same name but different casing exists, reuses
@@ -3391,27 +3617,125 @@ class Database:
         from existing keywords and applies it (unless overridden by config).
 
         Args:
+            kw_type: Optional explicit keyword type. Must be one of
+                     ``KEYWORD_TYPES`` if provided. When ``None``, the type is
+                     auto-detected (``taxonomy`` for species or names matching
+                     a known taxon, otherwise ``general``).
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
-        # Case-insensitive lookup
+        if kw_type is not None and kw_type not in KEYWORD_TYPES:
+            raise ValueError(f"invalid keyword type: {kw_type!r}")
+        # Reconcile is_species and kw_type to keep the legacy column coherent
+        # with the type enum.
+        if is_species and kw_type is not None and kw_type != 'taxonomy':
+            raise ValueError(
+                f"is_species=True requires kw_type='taxonomy', got {kw_type!r}"
+            )
+        if kw_type == 'taxonomy':
+            is_species = True
+        # Symmetric reconciliation: callers like the prediction-accept and
+        # pipeline-apply flows pass is_species=True with no kw_type. Treat
+        # that as a typed taxonomy lookup so the candidate-filtering below
+        # correctly excludes a same-name 'individual'/'location'/'genre'
+        # row (e.g. a person tag named "Robin"). Without this, the
+        # untyped lookup would return the homonym row, the typed promotion
+        # would no-op (only 'general'/'taxonomy' get promoted), and the
+        # caller would get back a non-taxonomy id — silently mis-tagging
+        # the accepted species.
+        if is_species and kw_type is None:
+            kw_type = 'taxonomy'
+        # Case-insensitive lookup with type-aware matching:
+        #
+        # When kw_type is supplied, only same-type or 'general' rows are
+        # candidates. Same-type wins; 'general' is promotable to the
+        # requested type via the UPDATE below. Other deliberate types
+        # (location/individual/etc.) are intentionally NOT candidates —
+        # returning one and finding the upgrade no-op'd would leave the
+        # caller with a mismatched type. Falling through to INSERT
+        # creates a new row of the requested type alongside the
+        # deliberate one (duplicates by name across types are
+        # intentional in this PR).
+        #
+        # When kw_type is None, prefer the most "structured"
+        # interpretation in a fixed priority — taxonomy > genre >
+        # individual > location > general — so a type-agnostic caller
+        # (e.g. typing into a generic keyword input) doesn't silently
+        # bind to a hand-tagged 'general' duplicate when a canonical
+        # typed row exists. Tie-break by id for determinism.
+        # NB: SQL literals here are constants, not parameter bindings.
+        type_priority_case = (
+            "CASE type "
+            "WHEN 'taxonomy' THEN 0 "
+            "WHEN 'genre' THEN 1 "
+            "WHEN 'individual' THEN 2 "
+            "WHEN 'location' THEN 3 "
+            "ELSE 4 END"
+        )
         if parent_id is None:
-            existing = self.conn.execute(
-                "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE AND parent_id IS NULL",
-                (name,),
-            ).fetchone()
+            if kw_type is None:
+                existing = self.conn.execute(
+                    f"SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    f"AND parent_id IS NULL "
+                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
+                    (name,),
+                ).fetchone()
+            else:
+                existing = self.conn.execute(
+                    "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    "AND parent_id IS NULL AND type IN (?, 'general') "
+                    "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
+                    (name, kw_type, kw_type),
+                ).fetchone()
         else:
-            existing = self.conn.execute(
-                "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE AND parent_id = ?",
-                (name, parent_id),
-            ).fetchone()
+            if kw_type is None:
+                existing = self.conn.execute(
+                    f"SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    f"AND parent_id = ? "
+                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
+                    (name, parent_id),
+                ).fetchone()
+            else:
+                existing = self.conn.execute(
+                    "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    "AND parent_id = ? AND type IN (?, 'general') "
+                    "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
+                    (name, parent_id, kw_type, kw_type),
+                ).fetchone()
         if existing:
-            # Update is_species and type if it wasn't set before
+            # Promote an unset row to taxonomy when this call indicates a
+            # species. Restrict to 'general' (the legacy default for unknown
+            # rows) so a deliberate user type — 'individual', 'location',
+            # 'genre' — is preserved instead of silently rewritten when a
+            # later caller passes is_species=True or kw_type='taxonomy'.
             if is_species:
                 self.conn.execute(
-                    "UPDATE keywords SET is_species = 1, type = 'taxonomy' WHERE id = ? AND is_species = 0",
+                    "UPDATE keywords SET is_species = 1, type = 'taxonomy' "
+                    "WHERE id = ? AND is_species = 0 AND type IN ('general', 'taxonomy')",
                     (existing["id"],),
                 )
+                if _commit:
+                    self.conn.commit()
+            # Upgrade an existing 'general' row to the explicitly requested type.
+            # Without this, callers like the "Not Wildlife" button would hit the
+            # case-insensitive fast path and silently get back a wrong-typed row.
+            if kw_type and kw_type != 'general':
+                self.conn.execute(
+                    "UPDATE keywords SET type = ? WHERE id = ? AND type = 'general'",
+                    (kw_type, existing["id"]),
+                )
+                if kw_type == 'taxonomy':
+                    # Gate on type='taxonomy' so a preserved deliberate type
+                    # (e.g. 'individual') doesn't get is_species=1 stamped on
+                    # it when the type update above was a no-op. Otherwise
+                    # _maybe_apply_auto_wildlife / backfill_wildlife_genre /
+                    # subject filters with `OR is_species=1` would treat that
+                    # non-taxonomy row as a species.
+                    self.conn.execute(
+                        "UPDATE keywords SET is_species = 1 "
+                        "WHERE id = ? AND type = 'taxonomy'",
+                        (existing["id"],),
+                    )
                 if _commit:
                     self.conn.commit()
             return existing["id"]
@@ -3428,30 +3752,31 @@ class Database:
                 if convention:
                     name = self._apply_case_convention(name, convention)
 
-        # Auto-detect taxonomy type from taxa table
-        kw_type = 'general'
         taxon_id = None
-        if is_species:
-            kw_type = 'taxonomy'
-        else:
-            # Check if name matches a known taxon (common name or scientific name)
-            taxon = self.conn.execute(
-                """SELECT t.id FROM taxa t
-                   WHERE t.common_name = ? COLLATE NOCASE
-                      OR t.name = ? COLLATE NOCASE
-                   LIMIT 1""",
-                (name, name),
-            ).fetchone()
-            if not taxon:
-                taxon = self.conn.execute(
-                    """SELECT t.taxon_id AS id FROM taxa_common_names t
-                       WHERE t.name = ? COLLATE NOCASE
-                       LIMIT 1""",
-                    (name,),
-                ).fetchone()
-            if taxon:
+        if kw_type is None:
+            # Auto-detect taxonomy type from taxa table
+            kw_type = 'general'
+            if is_species:
                 kw_type = 'taxonomy'
-                taxon_id = taxon["id"]
+            else:
+                # Check if name matches a known taxon (common name or scientific name)
+                taxon = self.conn.execute(
+                    """SELECT t.id FROM taxa t
+                       WHERE t.common_name = ? COLLATE NOCASE
+                          OR t.name = ? COLLATE NOCASE
+                       LIMIT 1""",
+                    (name, name),
+                ).fetchone()
+                if not taxon:
+                    taxon = self.conn.execute(
+                        """SELECT t.taxon_id AS id FROM taxa_common_names t
+                           WHERE t.name = ? COLLATE NOCASE
+                           LIMIT 1""",
+                        (name,),
+                    ).fetchone()
+                if taxon:
+                    kw_type = 'taxonomy'
+                    taxon_id = taxon["id"]
 
         cur = self.conn.execute(
             "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES (?, ?, ?, ?, ?)",
@@ -4005,12 +4330,114 @@ class Database:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
-        self.conn.execute(
+        cur = self.conn.execute(
             "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
             (photo_id, keyword_id),
         )
+        # Only fire auto-Wildlife when we actually inserted a new association.
+        # A no-op INSERT OR IGNORE (re-tag of an already-tagged keyword) must
+        # not retrigger the rule — otherwise removing Wildlife and re-tagging
+        # the same species would silently re-add Wildlife and break sticky
+        # removal.
+        if cur.rowcount > 0:
+            self._maybe_apply_auto_wildlife(photo_id, keyword_id)
         if _commit:
             self.conn.commit()
+
+    def _maybe_apply_auto_wildlife(self, photo_id, just_added_keyword_id):
+        """If just_added_keyword_id is a species keyword (taxonomy type OR
+        legacy is_species=1) AND it's the only such keyword on this photo,
+        also add the Wildlife genre.
+
+        Treats ``is_species=1`` as a species candidate too: upgraded databases
+        carry legacy species rows whose ``type`` hasn't been retyped to
+        ``taxonomy`` yet by the background ``mark_species_keywords`` pass,
+        and the auto-Wildlife trigger needs to fire for those tags during
+        that window."""
+        row = self.conn.execute(
+            "SELECT type, is_species FROM keywords WHERE id = ?",
+            (just_added_keyword_id,),
+        ).fetchone()
+        if not row or (row["type"] != "taxonomy" and not row["is_species"]):
+            return
+        # Count species keywords on this photo. If > 1, this isn't the first
+        # — skip (sticky removal).
+        species_count = self.conn.execute(
+            """SELECT COUNT(*) AS n FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               WHERE pk.photo_id = ?
+                 AND (k.type = 'taxonomy' OR k.is_species = 1)""",
+            (photo_id,),
+        ).fetchone()["n"]
+        if species_count != 1:
+            return
+        wildlife_row = self.conn.execute(
+            "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre' LIMIT 1"
+        ).fetchone()
+        if not wildlife_row:
+            return
+        self.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (photo_id, wildlife_row["id"]),
+        )
+
+    def get_meta(self, key):
+        """Return the db_meta value for `key`, or None if unset."""
+        row = self.conn.execute(
+            "SELECT value FROM db_meta WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key, value, _commit=True):
+        """Upsert a db_meta row."""
+        self.conn.execute(
+            "INSERT INTO db_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, str(value)),
+        )
+        if _commit:
+            self.conn.commit()
+
+    _WILDLIFE_BACKFILL_DONE_KEY = "wildlife_backfill_done"
+
+    def backfill_wildlife_genre(self, force=False):
+        """One-shot backfill: every photo that has at least one species
+        keyword AND no Wildlife genre keyword gets Wildlife added.
+
+        Gated by a db_meta marker so it runs at most once per database.
+        Re-running unconditionally would clobber sticky-removed Wildlife rows
+        (a user who intentionally removed Wildlife from a species-tagged
+        photo would see it re-added on the next app restart).
+
+        Matches keywords by ``type='taxonomy' OR is_species=1``. Plain-text
+        species tags on upgraded DBs start as ``is_species=0`` /
+        non-taxonomy and won't be matched until ``mark_species_keywords``
+        retypes them — so callers must run that pass *before* this backfill
+        on upgraded databases, otherwise the one-shot marker gets set on a
+        zero-row scan and species photos are permanently missed.
+
+        Args:
+            force: re-run even if the marker is set. Used by tests; not for
+                   normal startup.
+        """
+        if not force and self.get_meta(self._WILDLIFE_BACKFILL_DONE_KEY) == "1":
+            return
+        wildlife_row = self.conn.execute(
+            "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre' LIMIT 1"
+        ).fetchone()
+        if not wildlife_row:
+            return  # No Wildlife keyword exists yet (very early init); nothing to do.
+        wildlife_id = wildlife_row["id"]
+        self.conn.execute(
+            """INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id)
+               SELECT DISTINCT pk.photo_id, ?
+               FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               WHERE k.type = 'taxonomy' OR k.is_species = 1""",
+            (wildlife_id,),
+        )
+        self.set_meta(self._WILDLIFE_BACKFILL_DONE_KEY, "1", _commit=False)
+        self.conn.commit()
 
     def untag_photo(self, photo_id, keyword_id, _commit=True):
         """Remove a keyword association from a photo.
@@ -4162,8 +4589,6 @@ class Database:
             (ws, ws, ws),
         ).fetchall()
 
-    VALID_KEYWORD_TYPES = ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event')
-
     def update_keyword(self, keyword_id, **kwargs):
         """Update keyword fields. Supports: type, taxon_id, latitude, longitude, name.
 
@@ -4173,11 +4598,18 @@ class Database:
         type='taxonomy' with the matching taxon_id. If the current type is
         already 'taxonomy' and the new name matches a different taxon,
         taxon_id is updated. Manually-set non-'general' types (e.g.
-        'location', 'people') are preserved. Explicit type/taxon_id
+        'location', 'individual') are preserved. Explicit type/taxon_id
         kwargs always win over auto-detection.
         """
-        if 'type' in kwargs and kwargs['type'] not in self.VALID_KEYWORD_TYPES:
-            raise ValueError(f"Invalid keyword type: {kwargs['type']}")
+        if 'type' in kwargs:
+            kt = kwargs['type']
+            # Guard the membership test against non-hashable JSON values —
+            # api_update_keyword passes the request body through, and
+            # `x in frozenset` raises TypeError on unhashable input. Treat
+            # any non-string as invalid (raise ValueError so the route's
+            # existing catch yields the documented 400).
+            if not isinstance(kt, str) or kt not in KEYWORD_TYPES:
+                raise ValueError(f"Invalid keyword type: {kt!r}")
         allowed = {'type', 'taxon_id', 'latitude', 'longitude', 'name'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
@@ -6292,6 +6724,44 @@ class Database:
                         JOIN keywords k3 ON k3.id = pk3.keyword_id
                         WHERE pk3.photo_id = p.id AND k3.is_species = 1)"""
                     )
+            elif field == "has_subject":
+                # Match the has_species pattern, but resolve "subject" via
+                # the workspace's configured subject_types (a set of keyword
+                # types). Sorted for deterministic SQL parameter order.
+                #
+                # When 'taxonomy' is among the subject types, also count
+                # legacy species rows (is_species=1 with a non-taxonomy
+                # type). Upgraded databases retain those rows until the
+                # background mark_species_keywords pass retypes them; the
+                # type-only predicate would otherwise place already-
+                # identified photos into 'Needs Identification'.
+                subject_types = sorted(self.get_subject_types())
+                if not subject_types:
+                    if op == "equals" and (value is True or value == 1):
+                        conditions.append("0")  # nothing matches
+                    # value==0 with empty subject_types is a no-op (every
+                    # photo is "not identified" by the empty set)
+                    continue
+                type_placeholders = ",".join("?" * len(subject_types))
+                type_clause = f"k5.type IN ({type_placeholders})"
+                if "taxonomy" in subject_types:
+                    type_clause = f"({type_clause} OR k5.is_species = 1)"
+                if op == "equals" and (value is False or value == 0):
+                    conditions.append(
+                        f"""NOT EXISTS (
+                        SELECT 1 FROM photo_keywords pk5
+                        JOIN keywords k5 ON k5.id = pk5.keyword_id
+                        WHERE pk5.photo_id = p.id AND {type_clause})"""
+                    )
+                    params.extend(subject_types)
+                elif op == "equals" and (value is True or value == 1):
+                    conditions.append(
+                        f"""EXISTS (
+                        SELECT 1 FROM photo_keywords pk5
+                        JOIN keywords k5 ON k5.id = pk5.keyword_id
+                        WHERE pk5.photo_id = p.id AND {type_clause})"""
+                    )
+                    params.extend(subject_types)
             elif field == "keyword_count":
                 if op == "equals":
                     conditions.append(
@@ -6494,8 +6964,8 @@ class Database:
         defaults = [
             ("All Photos", [{"field": "all"}]),
             (
-                "Needs Classification",
-                [{"field": "has_species", "op": "equals", "value": 0}],
+                "Needs Identification",
+                [{"field": "has_subject", "op": "equals", "value": 0}],
             ),
             ("Untagged", [{"field": "keyword_count", "op": "equals", "value": 0}]),
             ("Flagged", [{"field": "flag", "op": "equals", "value": "flagged"}]),
@@ -6507,6 +6977,46 @@ class Database:
         for name, rules in defaults:
             if name not in existing_names:
                 self.add_collection(name, json.dumps(rules))
+
+    def migrate_default_subject_collection(self):
+        """Rename legacy 'Needs Classification' (with rule has_species==0)
+        to 'Needs Identification' (rule has_subject==0) across ALL workspaces.
+
+        Workspace activation does not re-run startup migrations, so an
+        upgraded multi-workspace database would otherwise leave non-active
+        workspaces stuck on the legacy rule. Skips collections the user has
+        customized. Idempotent."""
+        rows = self.conn.execute(
+            "SELECT id, workspace_id, rules FROM collections WHERE name = ?",
+            ("Needs Classification",),
+        ).fetchall()
+        legacy_rule = [{"field": "has_species", "op": "equals", "value": 0}]
+        for row in rows:
+            try:
+                current = json.loads(row["rules"])
+            except (TypeError, ValueError):
+                continue
+            if current != legacy_rule:
+                continue
+            # Don't clobber an existing "Needs Identification" in the SAME
+            # workspace (each workspace has its own default collections).
+            existing = self.conn.execute(
+                "SELECT 1 FROM collections WHERE workspace_id = ? AND name = ?",
+                (row["workspace_id"], "Needs Identification"),
+            ).fetchone()
+            if existing:
+                continue
+            self.conn.execute(
+                "UPDATE collections SET name = ?, rules = ? WHERE id = ?",
+                (
+                    "Needs Identification",
+                    json.dumps(
+                        [{"field": "has_subject", "op": "equals", "value": 0}]
+                    ),
+                    row["id"],
+                ),
+            )
+        self.conn.commit()
 
     # ------ iNaturalist submissions ------
 

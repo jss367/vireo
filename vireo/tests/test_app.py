@@ -1746,12 +1746,12 @@ def test_update_keyword_type(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     kid = db.add_keyword("Tim")
-    resp = client.put(f"/api/keywords/{kid}", json={"type": "people"})
+    resp = client.put(f"/api/keywords/{kid}", json={"type": "individual"})
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["ok"] is True
     row = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid,)).fetchone()
-    assert row["type"] == "people"
+    assert row["type"] == "individual"
 
 
 def test_update_keyword_type_invalid(app_and_db):
@@ -2178,6 +2178,318 @@ def test_nav_order_rejects_non_list(app_and_db):
                       json={"nav_order": "not-a-list"},
                       content_type='application/json')
     assert resp.status_code == 400
+
+
+def _read_workspace_overrides(db, ws_id):
+    """Helper: read and JSON-decode the config_overrides column for ws_id."""
+    import json
+    ws = db.get_workspace(ws_id)
+    raw = ws["config_overrides"] if ws else None
+    if not raw:
+        return {}
+    return json.loads(raw) if isinstance(raw, str) else raw
+
+
+def test_put_subject_types_persists_valid_values(app_and_db):
+    """PUT /api/workspaces/<id>/subject-types persists requested types."""
+    app, db = app_and_db
+    ws_id = db.create_workspace("ws-subject-1")
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}/subject-types",
+        json={"types": ["taxonomy", "genre"]},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert set(body["types"]) == {"taxonomy", "genre"}
+    overrides = _read_workspace_overrides(db, ws_id)
+    assert set(overrides.get("subject_types", [])) == {"taxonomy", "genre"}
+
+
+def test_put_subject_types_drops_unknown_values(app_and_db):
+    """Unknown type values are dropped silently (logged)."""
+    app, db = app_and_db
+    ws_id = db.create_workspace("ws-subject-2")
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}/subject-types",
+        json={"types": ["taxonomy", "bogus"]},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["types"] == ["taxonomy"]
+    overrides = _read_workspace_overrides(db, ws_id)
+    assert overrides.get("subject_types") == ["taxonomy"]
+
+
+def test_put_subject_types_empty_list_allowed(app_and_db):
+    """Empty list is allowed (effectively disables the queue's filter)."""
+    app, db = app_and_db
+    ws_id = db.create_workspace("ws-subject-3")
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}/subject-types",
+        json={"types": []},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["types"] == []
+    overrides = _read_workspace_overrides(db, ws_id)
+    assert overrides.get("subject_types") == []
+
+
+def test_put_subject_types_rejects_non_list(app_and_db):
+    """Non-list 'types' value returns 400."""
+    app, db = app_and_db
+    ws_id = db.create_workspace("ws-subject-4")
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}/subject-types",
+        json={"types": "not-a-list"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+
+
+def test_put_subject_types_preserves_other_overrides(app_and_db):
+    """Setting subject_types must not clobber other config_overrides keys."""
+    app, db = app_and_db
+    ws_id = db.create_workspace("ws-subject-5")
+    db.update_workspace(ws_id, config_overrides={"classification_threshold": 0.42})
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}/subject-types",
+        json={"types": ["taxonomy"]},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    overrides = _read_workspace_overrides(db, ws_id)
+    assert overrides.get("subject_types") == ["taxonomy"]
+    assert overrides.get("classification_threshold") == 0.42
+
+
+def test_get_active_subject_types_returns_effective_config(app_and_db, tmp_path, monkeypatch):
+    """Regression: GET /api/workspaces/active/subject-types returns the
+    EFFECTIVE config (global merged with workspace overrides), not just
+    the override JSON. The settings UI needs this so checkboxes match
+    actual behavior even when only the global config has been customized."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "global-config.json"))
+    # Customize ONLY the global config (no workspace override). The
+    # endpoint must return ["taxonomy"], not the hardcoded default
+    # ["taxonomy", "individual", "genre"].
+    cfg.set("subject_types", ["taxonomy"])
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/workspaces/active/subject-types")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["types"] == ["taxonomy"], (
+        "Endpoint must merge global config — workspace settings UI would "
+        "otherwise render wrong checkbox state when only global is set."
+    )
+
+
+def test_put_subject_types_drops_non_string_entries(app_and_db):
+    """Regression: non-string JSON entries (e.g. nested lists/objects) must
+    be dropped, not crash with TypeError on `x in frozenset`."""
+    app, db = app_and_db
+    ws_id = db.create_workspace("ws-subject-malformed")
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}/subject-types",
+        json={"types": ["taxonomy", ["nested"], {"obj": 1}, 42, None, "genre"]},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200, (
+        f"Expected non-string entries to be dropped, got {resp.status_code}: "
+        f"{resp.get_data(as_text=True)}"
+    )
+    body = resp.get_json()
+    assert set(body["types"]) == {"taxonomy", "genre"}
+
+
+def test_put_subject_types_normalizes_non_dict_config_overrides(app_and_db):
+    """Regression: PUT /api/workspaces/<id>/subject-types must not 500 when
+    `config_overrides` was previously persisted as a non-dict JSON value.
+    The column is arbitrary JSON (api_update_workspace stores whatever the
+    client sends), so a list/string/number can sit there from a prior PUT.
+    The endpoint must coerce it back to {} before assigning subject_types."""
+    app, db = app_and_db
+    ws_id = db.create_workspace("ws-subject-non-dict")
+    # Plant a list-shaped config_overrides directly via update_workspace,
+    # which json.dumps()es whatever it receives.
+    db.update_workspace(ws_id, config_overrides=["unexpected", "list"])
+    client = app.test_client()
+    resp = client.put(
+        f"/api/workspaces/{ws_id}/subject-types",
+        json={"types": ["taxonomy"]},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200, (
+        f"Non-dict config_overrides must be normalized, not crash: "
+        f"{resp.status_code} {resp.get_data(as_text=True)}"
+    )
+    overrides = _read_workspace_overrides(db, ws_id)
+    assert isinstance(overrides, dict)
+    assert overrides.get("subject_types") == ["taxonomy"]
+
+
+def test_add_keyword_route_handles_non_string_type(app_and_db):
+    """Regression: POST /api/photos/<id>/keywords with a non-string `type`
+    JSON value must not 500 — the bad value should be ignored and the
+    keyword still created with its default type."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/p")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "p.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{photo_id}/keywords",
+        json={"name": "MaybeWildlife", "type": []},  # bogus list value
+        content_type="application/json",
+    )
+    assert resp.status_code == 200, (
+        f"Non-string type must not 500 the route: "
+        f"{resp.status_code} {resp.get_data(as_text=True)}"
+    )
+    # The keyword should exist; its type wasn't overridden by the bad value.
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE name = 'MaybeWildlife'"
+    ).fetchone()
+    assert row is not None
+    # add_keyword's auto-detect runs in the absence of a valid override.
+    # Anything other than a crash is acceptable here; the point is no 500.
+
+
+def test_batch_keyword_route_handles_non_string_type(app_and_db):
+    """Same regression for the batch endpoint."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/q")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "q.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": [photo_id], "name": "BatchTag", "type": {"x": 1}},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200, (
+        f"Non-string type must not 500 the batch route: "
+        f"{resp.status_code} {resp.get_data(as_text=True)}"
+    )
+
+
+def test_create_app_runs_wildlife_backfill_synchronously_on_first_boot(tmp_path, monkeypatch):
+    """Regression: on first boot after upgrade (wildlife_backfill_done
+    marker unset), create_app must complete the species-marking +
+    Wildlife-backfill pipeline synchronously before returning, so user
+    edits via the served HTTP API can't race with the one-shot backfill
+    overwriting their Wildlife removals."""
+    from unittest.mock import MagicMock, patch
+
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    # Pre-create the DB with the marker UNSET (simulates first boot
+    # post-upgrade).
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    assert db.get_meta(Database._WILDLIFE_BACKFILL_DONE_KEY) != "1", (
+        "Pre-condition: marker should be unset before create_app"
+    )
+    db.close()
+
+    # Stub taxonomy loading to return a non-None object so the sync path
+    # runs mark_species + backfill. mark_species_keywords gets a real DB
+    # call but the stub taxonomy returns None for every lookup, so no
+    # rows are actually changed — we just need it to complete without
+    # raising so the marker gets set.
+    fake_tax = MagicMock()
+    fake_tax.lookup.return_value = None
+
+    with patch("taxonomy.load_local_taxonomy", return_value=fake_tax):
+        app = create_app(
+            db_path=db_path, thumb_cache_dir=thumb_dir, api_token="test",
+        )
+        assert app is not None
+
+    # After create_app returns, the marker MUST be set — the synchronous
+    # path ran. (If it had been async, we'd be racing the background
+    # thread here and the marker might or might not be set yet.)
+    db2 = Database(db_path)
+    assert db2.get_meta(Database._WILDLIFE_BACKFILL_DONE_KEY) == "1", (
+        "Wildlife backfill marker must be set synchronously by create_app "
+        "on first boot — otherwise user edits race the backfill."
+    )
+    db2.close()
+
+
+def test_add_keyword_route_does_not_clobber_existing_individual_type(app_and_db):
+    """Regression: POST /api/photos/<id>/keywords with type='taxonomy' for a
+    keyword that already exists as 'individual' must not silently rewrite
+    the existing row's type. add_keyword's reconciliation logic (only
+    upgrades 'general') must run instead of a force-UPDATE."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/p")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "p.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    # Pre-create an 'individual' keyword named "Charlie" (e.g. user's pet).
+    existing_kid = db.add_keyword("Charlie", kw_type="individual")
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{photo_id}/keywords",
+        json={"name": "Charlie", "type": "taxonomy"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    # The existing row's type must remain 'individual' (not silently
+    # rewritten to 'taxonomy' by a force-UPDATE).
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (existing_kid,),
+    ).fetchone()
+    assert row["type"] == "individual", (
+        f"Force-UPDATE silently rewrote a user-typed keyword. "
+        f"Expected type='individual', got {row['type']!r}"
+    )
+
+
+def test_get_active_subject_types_workspace_override_wins(app_and_db, tmp_path, monkeypatch):
+    """When a workspace override is set, it overrides the global default."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "global-config.json"))
+    cfg.set("subject_types", ["taxonomy"])  # global = wildlife only
+    app, db = app_and_db
+    # Override the active workspace to include genre too
+    ws_id = db._active_workspace_id
+    db.update_workspace(ws_id, config_overrides={"subject_types": ["taxonomy", "genre"]})
+    client = app.test_client()
+    resp = client.get("/api/workspaces/active/subject-types")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert set(body["types"]) == {"taxonomy", "genre"}
 
 
 def test_workspace_page_no_scan_button(app_and_db):
