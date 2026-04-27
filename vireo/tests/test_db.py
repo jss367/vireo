@@ -7041,7 +7041,82 @@ def test_link_keyword_to_place_disambiguates_name_collision(db):
     assert a_row["place_id"] == "ChIJ_Park_A"
 
 
-def test_link_keyword_to_place_merge_reparents_descendants(db):
+def test_link_keyword_to_place_merge_reparents_with_child_name_collision(db):
+    """During the merge path's reparent of children onto the canonical row,
+    a child whose (name) collides with an existing child of the canonical
+    would violate UNIQUE(name, parent_id) on a bulk UPDATE. Disambiguate
+    the migrating child's name on clash rather than 500ing."""
+    # Canonical place row Q, with an existing child "Boathouse".
+    q_details = {
+        "place_id": "ChIJ_Q",
+        "name": "Q Park",
+        "lat": 40.0, "lng": -73.0,
+        "address_components": [],
+    }
+    canonical_id = db.upsert_place_chain(q_details)
+    canonical_child_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES ('Boathouse', 'location', ?)",
+        (canonical_id,),
+    ).lastrowid
+
+    # Old keyword P (free-text), with its own "Boathouse" child.
+    p_id = db.get_or_create_text_location("Q Park")
+    p_child_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES ('Boathouse', 'location', ?)",
+        (p_id,),
+    ).lastrowid
+    db.conn.commit()
+
+    # Link P → triggers merge. The reparent step would naively try to set
+    # both Boathouse rows' parent_id = canonical_id, colliding on
+    # UNIQUE(name, parent_id). Fix: per-child loop with disambiguation.
+    result = db.link_keyword_to_place(p_id, q_details)
+    assert result["merged"] is True
+    assert result["keyword_id"] == canonical_id
+
+    # The original canonical child keeps its name; the migrating child got
+    # disambiguated.
+    canonical_child = db.conn.execute(
+        "SELECT name, parent_id FROM keywords WHERE id = ?", (canonical_child_id,),
+    ).fetchone()
+    assert canonical_child["name"] == "Boathouse"
+    assert canonical_child["parent_id"] == canonical_id
+
+    migrated_child = db.conn.execute(
+        "SELECT name, parent_id FROM keywords WHERE id = ?", (p_child_id,),
+    ).fetchone()
+    assert migrated_child is not None, "migrating child must survive"
+    assert migrated_child["parent_id"] == canonical_id
+    assert migrated_child["name"] != "Boathouse", \
+        "migrating child must have been disambiguated, not left to clash"
+    assert "Boathouse" in migrated_child["name"]
+
+
+def test_location_edits_are_non_undoable(db):
+    """location_set / location_clear / location_link entries land in the
+    edit history (auditable) but are skipped by undo so the user doesn't
+    click Undo and see no state change while older edits become the next
+    undo target."""
+    # Pre-record one undoable edit so the undo cursor can be tested.
+    pid = _make_photo(db)
+    db.record_edit('rating', 'First edit', '1',
+                   [{'photo_id': pid, 'old_value': '0', 'new_value': '1'}])
+
+    # Now record location_set / clear / link audit entries (newest = link).
+    db.record_edit('location_set', 'set location: Test', '1',
+                   [{'photo_id': pid, 'old_value': '', 'new_value': '1'}])
+    db.record_edit('location_clear', 'cleared location', '',
+                   [{'photo_id': pid, 'old_value': '', 'new_value': ''}])
+    db.record_edit('location_link', 'linked', '1', [])
+
+    # Undo MUST step over the three location_* entries straight to the
+    # rating edit, even though they're newer.
+    entry = db.undo_last_edit()
+    assert entry is not None
+    assert entry['action_type'] == 'rating', (
+        "undo must skip location_* entries; "
+        f"got action_type={entry['action_type']!r} instead"
+    )
     """When the merge path fires (place_id already owned by a canonical
     row), the old keyword may have descendants pointing to it via
     parent_id. SQLite's self-referential FK on keywords.parent_id (with

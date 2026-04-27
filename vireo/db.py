@@ -3757,10 +3757,37 @@ class Database:
                     # final DELETE FROM keywords. Reparent them onto the
                     # canonical row first — the canonical row represents the
                     # same place, so its descendants inherit cleanly.
-                    self.conn.execute(
-                        "UPDATE keywords SET parent_id = ? WHERE parent_id = ?",
-                        (canonical_id, keyword_id),
-                    )
+                    # Per-child reparent so a UNIQUE(name, parent_id) clash
+                    # in the canonical's existing subtree (a child with the
+                    # same name) doesn't blow up the bulk UPDATE. On clash,
+                    # disambiguate the migrating child's name with a short
+                    # id suffix — preserves both rows' photo links rather
+                    # than losing data.
+                    children = self.conn.execute(
+                        "SELECT id, name FROM keywords WHERE parent_id = ?",
+                        (keyword_id,),
+                    ).fetchall()
+                    for child in children:
+                        try:
+                            self.conn.execute(
+                                "UPDATE keywords SET parent_id = ? WHERE id = ?",
+                                (canonical_id, child["id"]),
+                            )
+                        except sqlite3.IntegrityError:
+                            disambiguated = f"{child['name']} (id-{child['id']})"
+                            try:
+                                self.conn.execute(
+                                    "UPDATE keywords SET parent_id = ?, name = ? "
+                                    "WHERE id = ?",
+                                    (canonical_id, disambiguated, child["id"]),
+                                )
+                            except sqlite3.IntegrityError as inner_err:
+                                raise RuntimeError(
+                                    f"child keyword '{child['name']}' "
+                                    f"(id={child['id']}) collides with the "
+                                    f"canonical row's subtree even after "
+                                    f"disambiguation"
+                                ) from inner_err
                     # Re-point photo_keywords from old → canonical.
                     self.conn.execute(
                         "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) "
@@ -5678,7 +5705,14 @@ class Database:
         return [dict(r) for r in rows]
 
     # Action types that appear in history but cannot be reversed
-    _NON_UNDOABLE = ('prediction_reject', 'discard')
+    _NON_UNDOABLE = (
+        'prediction_reject', 'discard',
+        # Location edits (set/clear/link) are auditable but not undoable
+        # in v1 — _apply_undo has no handlers for them, so including them
+        # would silently advance the undo cursor without reverting state.
+        # Adding undo support is a follow-up if it becomes important.
+        'location_set', 'location_clear', 'location_link',
+    )
 
     def undo_last_edit(self):
         """Undo the most recent undoable edit. Returns the undone entry dict, or None.
