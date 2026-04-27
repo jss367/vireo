@@ -168,9 +168,15 @@ def analyze_for_culling(
                     "UPDATE photos SET phash = ? WHERE id = ?",
                     (str(h), pid),
                 )
+                # Commit per photo so the writer lock is released between
+                # iterations. Otherwise this loop holds the lock for the entire
+                # backfill (potentially many minutes on a fresh import where
+                # thousands of photos still need pHashes), starving any
+                # concurrent writer (e.g. a pipeline scan whose next
+                # ``add_photo`` INSERT will time out past the 30s busy_timeout).
+                db.conn.commit()
             except Exception:
                 log.debug("Could not compute pHash for photo %d", pid, exc_info=True)
-        db.conn.commit()
 
     # Classify extensions as RAW or non-RAW
     from image_loader import RAW_EXTENSIONS

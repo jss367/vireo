@@ -719,3 +719,76 @@ def test_analyze_for_culling_falls_back_to_source_when_working_copy_corrupt(tmp_
     assert result["photos_missing_phash"] == 0
     row = db.conn.execute("SELECT phash FROM photos WHERE id = ?", (pid,)).fetchone()
     assert row["phash"], "phash should fall back to the valid source JPEG"
+
+
+def test_phash_backfill_commits_per_photo(tmp_path):
+    """The pHash backfill must commit per-photo so its writer lock doesn't
+    starve concurrent jobs (e.g. an in-progress scan).
+
+    Observed in production: a cull run held the writer lock for the entire
+    backfill loop (one commit at the end) and an active pipeline scan timed
+    out on its next ``add_photo`` INSERT past the 30s ``busy_timeout``.
+    """
+    from culling import analyze_for_culling
+    from db import Database
+    from PIL import Image
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    fid = db.add_folder(folder_path, name="photos")
+
+    pids = []
+    for i in range(3):
+        fname = f"bird{i}.jpg"
+        Image.new("RGB", (50, 50), color=(50 + i * 30, 120, 80)).save(
+            os.path.join(folder_path, fname)
+        )
+        pid = db.add_photo(
+            fid, fname, ".jpg", 1000, 1.0,
+            timestamp=f"2024-01-01T10:00:0{i}",
+        )
+        det_ids = db.save_detections(pid, [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+             "confidence": 0.9, "category": "animal"},
+        ], detector_model="MDV6")
+        db.add_prediction(det_ids[0], "Robin", 0.95, "test-model")
+        pids.append(pid)
+    db.conn.commit()
+
+    # Wrap the connection so we can count commits. A single commit at the
+    # end of the backfill loop means the writer lock was held the whole time;
+    # per-photo commits release it between iterations so other writers can
+    # interleave.
+    real_conn = db.conn
+    commit_count = {"n": 0}
+
+    class _CountingConn:
+        def __init__(self, real):
+            self._real = real
+        def commit(self):
+            commit_count["n"] += 1
+            return self._real.commit()
+        def __enter__(self):
+            return self._real.__enter__()
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return self._real.__exit__(exc_type, exc_val, exc_tb)
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    db.conn = _CountingConn(real_conn)
+    pre_count = commit_count["n"]
+    try:
+        analyze_for_culling(db, vireo_dir=str(tmp_path))
+    finally:
+        db.conn = real_conn
+
+    backfill_commits = commit_count["n"] - pre_count
+    assert backfill_commits >= len(pids), (
+        f"phash backfill must commit per-photo to release the writer lock "
+        f"between iterations; got {backfill_commits} commits for "
+        f"{len(pids)} photos"
+    )
