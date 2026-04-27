@@ -14,6 +14,7 @@ import sys
 from datetime import datetime
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -792,3 +793,63 @@ def test_phash_backfill_commits_per_photo(tmp_path):
         f"between iterations; got {backfill_commits} commits for "
         f"{len(pids)} photos"
     )
+
+
+def test_phash_backfill_does_not_swallow_commit_errors(tmp_path):
+    """Commit failures during the pHash backfill must propagate, not be
+    silently swallowed.
+
+    Codex review on PR #690: with the commit inside ``try/except Exception``,
+    a transient SQLite lock or I/O failure on commit gets logged as
+    "could not compute pHash" and the loop continues against an open
+    transaction — defeating the very lock-release fix this PR introduced.
+    """
+    import sqlite3
+
+    from culling import analyze_for_culling
+    from db import Database
+    from PIL import Image
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    fid = db.add_folder(folder_path, name="photos")
+
+    fname = "bird.jpg"
+    Image.new("RGB", (50, 50), color=(50, 120, 80)).save(
+        os.path.join(folder_path, fname)
+    )
+    pid = db.add_photo(fid, fname, ".jpg", 1000, 1.0,
+                       timestamp="2024-01-01T10:00:00")
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "test-model")
+    db.conn.commit()
+
+    real_conn = db.conn
+
+    class _BrokenCommitConn:
+        """Proxy that raises on every commit. Mirrors a sustained writer-lock
+        contention scenario where commit times out past busy_timeout."""
+        def __init__(self, real):
+            self._real = real
+        def commit(self):
+            raise sqlite3.OperationalError("database is locked")
+        def __enter__(self):
+            return self._real.__enter__()
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return self._real.__exit__(exc_type, exc_val, exc_tb)
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    db.conn = _BrokenCommitConn(real_conn)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            analyze_for_culling(db, vireo_dir=str(tmp_path))
+    finally:
+        db.conn = real_conn
