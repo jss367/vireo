@@ -144,6 +144,27 @@
   .kw-coords { font-size: 11px; color: var(--text-dim); font-family: monospace; }
   .kw-taxon { font-size: 12px; color: var(--text-muted); font-style: italic; }
   .kw-parent { font-size: 12px; color: var(--text-dim); }
+
+  /* Link-to-Google button on unlinked location keywords */
+  .kw-link-btn {
+    padding: 2px 8px; border-radius: 10px; font-size: 11px;
+    border: 1px solid var(--border-secondary);
+    background: transparent; color: var(--text-secondary);
+    cursor: pointer; white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .kw-link-btn:hover {
+    background: var(--accent-dim); border-color: var(--accent); color: var(--accent);
+  }
+  .kw-linked-badge {
+    display: inline-block; font-size: 11px; color: var(--accent);
+    margin-left: 4px;
+  }
+
+  /* Link-place modal: reuses .modal-overlay/.modal classes from _navbar.html */
+  #linkPlaceModal .modal-help {
+    font-size: 12px; color: var(--text-muted); margin-bottom: 12px;
+  }
 </style>
 </head>
 <body>
@@ -165,6 +186,10 @@
       <button class="kw-filter-btn" data-type="descriptive">Descriptive</button>
       <button class="kw-filter-btn" data-type="people">People</button>
       <button class="kw-filter-btn" data-type="event">Event</button>
+      <button class="kw-filter-btn" id="kwFilterUnlinked" data-type="unlinked-location"
+              title="Show only location keywords without a Google place link">
+        Unlinked locations <span id="kwUnlinkedCount">0</span>
+      </button>
       <span class="kw-stats" id="kwStats">Loading...</span>
     </div>
 
@@ -197,6 +222,7 @@
             <th data-col="taxon">Taxon <span class="sort-arrow">&#9650;</span></th>
             <th data-col="photo_count">Photos <span class="sort-arrow">&#9650;</span></th>
             <th data-col="coords">Coords <span class="sort-arrow">&#9650;</span></th>
+            <th data-col="link">Link</th>
           </tr>
         </thead>
         <tbody id="kwBody"></tbody>
@@ -205,6 +231,23 @@
     </div>
   </div>
 
+</div>
+
+<!-- Link-to-Google-place modal -->
+<div class="modal-overlay" id="linkPlaceModal">
+  <div class="modal">
+    <h3>Link keyword to Google place</h3>
+    <p class="modal-help">
+      Pick the Google place this location keyword represents.
+      Coordinates and the parent chain (city, state, country) will be attached.
+    </p>
+    <input type="text" id="linkPlaceInput" class="modal-input"
+           placeholder="Type a place name..." autocomplete="off" />
+    <div id="linkPlaceError" class="modal-error"></div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-cancel" id="linkPlaceCancel" type="button">Cancel</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -237,7 +280,9 @@
 
   function getFiltered() {
     let list = allKeywords;
-    if (filterType !== 'all') {
+    if (filterType === 'unlinked-location') {
+      list = list.filter(k => (k.type || 'general') === 'location' && !k.place_id);
+    } else if (filterType !== 'all') {
       list = list.filter(k => (k.type || 'general') === filterType);
     }
     if (searchTerm) {
@@ -245,6 +290,12 @@
       list = list.filter(k => k.name.toLowerCase().includes(s));
     }
     return list;
+  }
+
+  function unlinkedLocationCount() {
+    return allKeywords.reduce(function(n, k) {
+      return n + (((k.type || 'general') === 'location' && !k.place_id) ? 1 : 0);
+    }, 0);
   }
 
   function sortList(list) {
@@ -280,6 +331,8 @@
     const stats = document.getElementById('kwStats');
 
     stats.textContent = filtered.length + ' of ' + allKeywords.length + ' keywords';
+    const unlinkedEl = document.getElementById('kwUnlinkedCount');
+    if (unlinkedEl) unlinkedEl.textContent = unlinkedLocationCount();
 
     if (!filtered.length) {
       tbody.innerHTML = '';
@@ -299,6 +352,20 @@
       const coordStr = (k.latitude != null && k.longitude != null)
                        ? k.latitude.toFixed(4) + ', ' + k.longitude.toFixed(4) : '';
 
+      // Per-row Link cell:
+      //   * type='location' AND no place_id  -> 📍 Link... button
+      //   * type='location' AND has place_id -> 📍 linked badge
+      //   * other types                      -> empty
+      let linkCell = '';
+      if (t === 'location') {
+        if (k.place_id) {
+          linkCell = '<span class="kw-linked-badge" title="Linked to Google place">📍 linked</span>';
+        } else {
+          linkCell = '<button class="kw-link-btn" data-link-id="' + k.id + '" type="button">' +
+            '📍 Link…</button>';
+        }
+      }
+
       return '<tr data-id="' + k.id + '">' +
         '<td class="cb-cell"><input type="checkbox" class="kw-cb" data-id="' + k.id + '" ' + checked + '></td>' +
         '<td class="kw-name-cell"><span class="name-text" data-id="' + k.id + '">' + escapeHtml(k.name) + '</span></td>' +
@@ -307,6 +374,7 @@
         '<td><span class="kw-taxon">' + escapeHtml(taxonStr) + '</span></td>' +
         '<td>' + (k.photo_count || 0) + '</td>' +
         '<td><span class="kw-coords">' + coordStr + '</span></td>' +
+        '<td>' + linkCell + '</td>' +
         '</tr>';
     });
     tbody.innerHTML = rows.join('');
@@ -587,6 +655,184 @@
     render();
     openContextMenu(e, buildKeywordContextMenu(ids));
   });
+
+  // -- Link-to-Google-place flow ---------------------------------------------
+
+  // Cached promise for the Google Maps JS loader (memoized).
+  let _gmapsLoadPromise = null;
+  function loadGoogleMapsJs() {
+    if (_gmapsLoadPromise) return _gmapsLoadPromise;
+    const apiKey = window.GOOGLE_MAPS_API_KEY || '';
+    if (!apiKey) {
+      _gmapsLoadPromise = Promise.reject(new Error('no_api_key'));
+      return _gmapsLoadPromise;
+    }
+    _gmapsLoadPromise = new Promise(function(resolve, reject) {
+      window._gmapsCallback = function() { resolve(window.google); };
+      const s = document.createElement('script');
+      s.src = 'https://maps.googleapis.com/maps/api/js?key=' +
+        encodeURIComponent(apiKey) +
+        '&libraries=places&loading=async&callback=_gmapsCallback';
+      s.async = true;
+      s.onerror = function() { reject(new Error('gmaps_load_failed')); };
+      document.head.appendChild(s);
+    });
+    return _gmapsLoadPromise;
+  }
+
+  // Fetch /api/config once on page load to populate window.GOOGLE_MAPS_API_KEY.
+  // Mirrors browse.html's _cfgPromise pattern. The modal awaits this promise
+  // before deciding whether to bind autocomplete vs. show the empty-key error.
+  const _cfgPromise = (async function() {
+    try {
+      const r = await fetch('/api/config');
+      const cfg = await r.json();
+      window.GOOGLE_MAPS_API_KEY = cfg.google_maps_api_key || '';
+      return cfg;
+    } catch(e) {
+      window.GOOGLE_MAPS_API_KEY = '';
+      return null;
+    }
+  })();
+
+  let _activeLinkAutocomplete = null;
+  let _activeLinkKeywordId = null;
+
+  function _showLinkError(msg) {
+    const el = document.getElementById('linkPlaceError');
+    if (!el) return;
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+
+  function _hideLinkError() {
+    const el = document.getElementById('linkPlaceError');
+    if (el) el.style.display = 'none';
+  }
+
+  async function openLinkPlaceModal(keywordId, currentName) {
+    const modal = document.getElementById('linkPlaceModal');
+    const input = document.getElementById('linkPlaceInput');
+    if (!modal || !input) return;
+
+    _hideLinkError();
+    _activeLinkKeywordId = keywordId;
+    input.value = currentName || '';
+    modal.classList.add('open');
+    // Defer focus so the modal is laid out first.
+    setTimeout(function() { input.focus(); input.select(); }, 0);
+
+    // Wait for /api/config so window.GOOGLE_MAPS_API_KEY is populated even
+    // on a slow first paint.
+    try { await _cfgPromise; } catch(e) {}
+
+    if (!window.GOOGLE_MAPS_API_KEY) {
+      _showLinkError(
+        'Google Maps API key not configured. Add one in Settings to enable autocomplete.'
+      );
+      return;
+    }
+
+    try {
+      const google = await loadGoogleMapsJs();
+      if (!google || !google.maps || !google.maps.places) {
+        _showLinkError('Google Maps unavailable.');
+        return;
+      }
+      // Detach any previous listener by replacing the autocomplete instance
+      // (Google's API doesn't expose a clean detach for the binding to
+      // `input`; binding twice triggers two `place_changed` events).
+      _activeLinkAutocomplete = new google.maps.places.Autocomplete(input, {
+        types: ['geocode', 'establishment'],
+        fields: ['place_id', 'name', 'formatted_address'],
+      });
+      _activeLinkAutocomplete.addListener('place_changed', function() {
+        const place = _activeLinkAutocomplete.getPlace();
+        if (place && place.place_id && _activeLinkKeywordId) {
+          submitLinkPlace(_activeLinkKeywordId, place.place_id);
+        }
+      });
+    } catch(err) {
+      _showLinkError('Failed to load Google Maps: ' + (err && err.message || err));
+    }
+  }
+
+  function closeLinkPlaceModal() {
+    const modal = document.getElementById('linkPlaceModal');
+    if (modal) modal.classList.remove('open');
+    _activeLinkKeywordId = null;
+    _activeLinkAutocomplete = null;
+    _hideLinkError();
+  }
+
+  async function submitLinkPlace(keywordId, placeId) {
+    _hideLinkError();
+    let resp;
+    try {
+      resp = await fetch('/api/keywords/' + keywordId + '/link-place', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({place_id: placeId}),
+      });
+    } catch(err) {
+      _showLinkError('Network error: ' + (err && err.message || err));
+      return;
+    }
+    if (!resp.ok) {
+      let body = {};
+      try { body = await resp.json(); } catch(e) {}
+      _showLinkError(body.error || ('Failed (HTTP ' + resp.status + ')'));
+      return;
+    }
+    let data = {};
+    try { data = await resp.json(); } catch(e) {}
+
+    closeLinkPlaceModal();
+
+    if (data.merged && typeof showToast === 'function') {
+      const mergedName = (data.keyword && data.keyword.name) || 'existing keyword';
+      showToast('Merged into existing "' + mergedName + '"', 'success');
+    } else if (typeof showToast === 'function') {
+      const linkedName = (data.keyword && data.keyword.name) || 'place';
+      showToast('Linked to ' + linkedName, 'success');
+    }
+
+    // Re-fetch to pick up new place_id / coords / parent_id, and so the
+    // unlinked-locations chip count updates.
+    await loadKeywords();
+  }
+
+  // Per-row "Link..." button click handler. Bound on the body via delegation
+  // because rows are re-rendered by render().
+  document.getElementById('kwBody').addEventListener('click', function(e) {
+    const btn = e.target.closest('.kw-link-btn');
+    if (!btn) return;
+    e.stopPropagation();
+    const kwId = parseInt(btn.dataset.linkId, 10);
+    if (!kwId) return;
+    const kw = allKeywords.find(k => k.id === kwId);
+    openLinkPlaceModal(kwId, kw ? kw.name : '');
+  });
+
+  // Modal: cancel button + click-on-overlay + Escape key.
+  document.getElementById('linkPlaceCancel').addEventListener(
+    'click', closeLinkPlaceModal
+  );
+  document.getElementById('linkPlaceModal').addEventListener('click', function(e) {
+    // Click on the overlay (outside .modal) closes it.
+    if (e.target === this) closeLinkPlaceModal();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+      const modal = document.getElementById('linkPlaceModal');
+      if (modal && modal.classList.contains('open')) closeLinkPlaceModal();
+    }
+  });
+
+  // Test hook: lets e2e tests trigger the API path without driving the
+  // Google Places UI (which Playwright can't reasonably exercise without a
+  // live network round-trip).
+  window.__linkPlaceForTest = submitLinkPlace;
 
   // -- Init --
   loadKeywords();

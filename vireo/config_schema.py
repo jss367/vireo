@@ -255,6 +255,12 @@ SCHEMA = {
         "label": "Hugging Face token",
         "desc": "API token for Hugging Face (used for model downloads).",
     },
+    "google_maps_api_key": {
+        "type": "secret",
+        "category": "Integrations", "scope": "global",
+        "label": "Google Maps API key",
+        "desc": "Used for location autocomplete on photo keywords. Add an HTTP referrer restriction in the Google Cloud console (e.g. localhost:8080/*).",
+    },
     "report_url": {
         "type": "string",
         "category": "Integrations", "scope": "global",

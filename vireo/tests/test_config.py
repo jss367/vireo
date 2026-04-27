@@ -270,3 +270,9 @@ def test_miss_defaults_present():
     assert d["miss_bbox_area_min"] == 0.005
     assert d["miss_bbox_area_min_singleton"] == 0.002
     assert d["miss_oof_ratio"] == 0.5
+
+
+def test_google_maps_api_key_default_is_empty(tmp_path, monkeypatch):
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    assert cfg.load().get("google_maps_api_key") == ""

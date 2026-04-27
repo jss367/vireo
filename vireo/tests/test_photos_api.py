@@ -1738,3 +1738,1004 @@ def test_zero_byte_cache_file_is_regenerated(client_with_photo):
     row = db.preview_cache_get(photo_id, 1920)
     assert row is not None
     assert row["bytes"] > 0
+
+
+# --- POST/DELETE /api/photos/<id>/location ----------------------------------
+#
+# The autocomplete pick path: client sends a Google ``place_id``, server
+# looks it up via the Places HTTP wrapper and writes a leaf+parent-chain of
+# ``type='location'`` keywords. ``places.place_details`` is monkeypatched
+# so no HTTP traffic happens during tests.
+
+def _central_park_details():
+    """Canned Place Details dict shaped like ``vireo.places.place_details``.
+
+    Mirrors what Google would return for Central Park, NYC: a leaf with
+    coords + a four-level parent chain (city -> county -> state -> country).
+    Google's ``address_components`` order is narrowest-first, which the
+    upsert logic in ``Database._upsert_location_parent_chain`` reverses
+    when chaining ``parent_id`` upward.
+    """
+    return {
+        "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+        "name": "Central Park",
+        "lat": 40.7828,
+        "lng": -73.9654,
+        "address_components": [
+            {"name": "New York", "short_name": "New York", "types": ["locality"]},
+            {"name": "New York County", "short_name": "New York County",
+             "types": ["administrative_area_level_2"]},
+            {"name": "New York", "short_name": "NY", "types": ["administrative_area_level_1"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+
+def test_post_photo_location_with_valid_place_id(app_and_db, monkeypatch):
+    """Valid pick: route stores leaf + parents and returns the serialized location."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    # API key must be present or the route short-circuits with no_api_key.
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+
+    captured = {}
+
+    def fake_place_details(place_id, key):
+        captured["place_id"] = place_id
+        captured["key"] = key
+        return _central_park_details()
+
+    # The route imports ``places`` at module level via ``import places``.
+    monkeypatch.setattr(places, "place_details", fake_place_details)
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+
+    # Response shape — leaf fields + parent chain (broadest -> narrowest, no leaf).
+    loc = data["location"]
+    assert loc["name"] == "Central Park"
+    assert loc["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+    assert loc["latitude"] == 40.7828
+    assert loc["longitude"] == -73.9654
+    assert [p["name"] for p in loc["parent_chain"]] == [
+        "United States", "New York", "New York County", "New York",
+    ]
+
+    # And the route actually called Google with the body's place_id + config key.
+    assert captured == {"place_id": "ChIJ_x", "key": "FAKE-KEY"}
+
+    # Photo now has exactly one type='location' keyword link, pointing at the
+    # leaf row that carries the place_id.
+    rows = db.conn.execute(
+        "SELECT k.id, k.name, k.place_id FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+    assert rows[0]["name"] == "Central Park"
+
+
+def test_post_photo_location_returns_400_on_missing_place_id(app_and_db):
+    """Empty body / missing place_id is a 400 — never reaches Google."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(f"/api/photos/{pid}/location", json={})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "missing place_id"
+
+
+def test_post_photo_location_returns_400_on_empty_api_key(app_and_db):
+    """No configured API key: degrade to a 400 ``no_api_key`` error."""
+    import config as cfg
+    app, db = app_and_db
+    # Explicitly clear the key so the route hits the empty-key branch even
+    # if a previous test left one behind in the same temp config file.
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "no_api_key"
+
+
+def test_post_photo_location_returns_404_when_google_returns_none(app_and_db, monkeypatch):
+    """Google returns ZERO_RESULTS / NOT_FOUND -> wrapper returns None -> 404."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details", lambda place_id, key: None)
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={"place_id": "ChIJ_unknown"},
+    )
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "place_not_found"
+
+
+def test_post_photo_location_returns_409_on_name_conflict(app_and_db, monkeypatch):
+    """When upsert_place_chain raises RuntimeError (cross-type collision in
+    the parent chain), the route must return 409 with name_conflict — same
+    contract as /api/keywords/<id>/link-place. Previously the RuntimeError
+    propagated and surfaced as a 500."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+
+    # Pre-build the location parent chain through the state level, then
+    # plant a 'general' keyword whose (name, parent_id) collides with one of
+    # the components in _central_park_details (which uses New York / New
+    # York County / New York / United States). Planting 'general'
+    # "New York County" under the state row triggers the cross-type
+    # collision when the chain walk tries to INSERT 'location' "New York
+    # County" at the same slot.
+    us_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES ('United States', 'location', NULL)",
+    ).lastrowid
+    state_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES ('New York', 'location', ?)",
+        (us_id,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES ('New York County', 'general', ?)",
+        (state_id,),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={"place_id": "ChIJ_anything"},
+    )
+    assert resp.status_code == 409
+    body = resp.get_json()
+    assert body["error"] == "name_conflict"
+    assert "New York County" in body["error_detail"]
+
+
+def test_post_photo_location_returns_404_on_missing_photo(app_and_db, monkeypatch):
+    """A stale client (e.g. tab open after the photo was deleted) hitting
+    POST /api/photos/<id>/location must get a clean 404, not a 500 from
+    set_photo_location's FK violation on photo_keywords."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/photos/999999/location",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "photo_not_found"
+
+
+def test_post_photo_location_text_returns_404_on_missing_photo(app_and_db):
+    """Same FK guard for the free-text fallback path."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/photos/999999/location/text",
+        json={"name": "the meadow"},
+    )
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "photo_not_found"
+
+
+def test_delete_photo_location_returns_404_on_missing_photo(app_and_db):
+    """DELETE on a missing photo returns 404 for consistency with the
+    POST routes (was previously a silent 200 because the underlying
+    DELETE matched nothing)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.delete("/api/photos/999999/location")
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "photo_not_found"
+
+
+def test_delete_photo_location_clears_links(app_and_db):
+    """DELETE removes location keyword links but leaves the keyword row intact."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    # Set up an existing location link directly via DB methods (no Google
+    # round-trip needed for the delete path).
+    leaf_id = db.upsert_place_chain(_central_park_details())
+    db.set_photo_location(pid, leaf_id)
+    # Sanity: the link exists before DELETE.
+    pre_links = db.conn.execute(
+        "SELECT 1 FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchall()
+    assert len(pre_links) == 1
+
+    client = app.test_client()
+    resp = client.delete(f"/api/photos/{pid}/location")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"ok": True}
+
+    # No location links remain on the photo.
+    post_links = db.conn.execute(
+        "SELECT 1 FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchall()
+    assert post_links == []
+
+    # The keyword row itself is preserved — other photos / future links may
+    # still reference it.
+    leaf_row = db.conn.execute(
+        "SELECT id, name FROM keywords WHERE id = ?", (leaf_id,),
+    ).fetchone()
+    assert leaf_row is not None
+    assert leaf_row["name"] == "Central Park"
+def test_post_photo_location_records_edit(app_and_db, monkeypatch):
+    """POST adds an entry to the audit log so the action is undoable/visible."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    pre_history = db.get_edit_history()
+    pre_count = len(pre_history)
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+
+    post_history = db.get_edit_history()
+    assert len(post_history) == pre_count + 1
+    # Most recent first.
+    entry = post_history[0]
+    assert entry["action_type"] == "location_set"
+    assert "Central Park" in entry["description"]
+
+
+def test_delete_photo_location_records_edit(app_and_db):
+    """DELETE adds an entry to the audit log even though it doesn't write a sidecar."""
+    app, db = app_and_db
+
+    leaf_id = db.upsert_place_chain(_central_park_details())
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+    db.set_photo_location(pid, leaf_id)
+
+    pre_history = db.get_edit_history()
+    pre_count = len(pre_history)
+
+    client = app.test_client()
+    resp = client.delete(f"/api/photos/{pid}/location")
+    assert resp.status_code == 200
+
+    post_history = db.get_edit_history()
+    assert len(post_history) == pre_count + 1
+    entry = post_history[0]
+    assert entry["action_type"] == "location_clear"
+    assert entry["description"] == "cleared location"
+
+
+# --- POST /api/photos/<id>/location/text ------------------------------------
+#
+# Free-text fallback path: user types a name and hits Enter without picking a
+# Google suggestion (or no API key is configured). No Google round-trip.
+
+def test_post_photo_location_text_creates_keyword_and_links(app_and_db):
+    """Free-text POST creates a no-place_id keyword and links it to the photo."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "the meadow"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+
+    loc = data["location"]
+    assert loc["name"] == "the meadow"
+    assert loc["place_id"] is None
+    assert loc["parent_chain"] == []
+
+    # DB-level: photo has exactly one type='location' keyword link, on a row
+    # with no place_id (free-text).
+    rows = db.conn.execute(
+        "SELECT k.id, k.name, k.place_id FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["name"] == "the meadow"
+    assert rows[0]["place_id"] is None
+
+
+def test_post_photo_location_text_strips_whitespace(app_and_db):
+    """Surrounding whitespace is stripped before the keyword is created."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "  the meadow  "},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert data["location"]["name"] == "the meadow"
+
+    rows = db.conn.execute(
+        "SELECT k.name FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["name"] == "the meadow"
+
+
+def test_post_photo_location_text_400_on_missing_name(app_and_db):
+    """Empty body / missing name is a 400."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(f"/api/photos/{pid}/location/text", json={})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "missing name"
+
+
+def test_post_photo_location_text_400_on_empty_name(app_and_db):
+    """Whitespace-only name is rejected as 400."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "   "},
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "missing name"
+
+
+def test_post_photo_location_text_replaces_existing_location(app_and_db):
+    """A second free-text POST replaces (not adds to) the existing location link."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    r1 = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "first place"},
+    )
+    assert r1.status_code == 200
+    r2 = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "second place"},
+    )
+    assert r2.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT k.name FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["name"] == "second place"
+
+
+def test_post_photo_location_text_records_edit(app_and_db):
+    """Free-text POST adds an audit-log entry under the same 'location_set' type."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    pre_history = db.get_edit_history()
+    pre_count = len(pre_history)
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "the meadow"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+
+    post_history = db.get_edit_history()
+    assert len(post_history) == pre_count + 1
+    entry = post_history[0]
+    assert entry["action_type"] == "location_set"
+    assert "the meadow" in entry["description"]
+
+
+# --- GET /api/places/reverse-geocode ----------------------------------------
+#
+# Server-side proxy for the Google Geocoding API with a SQLite cache layer
+# keyed on the (lat, lng) ~110m grid. The route exists so the API key never
+# leaves the server (the autocomplete JS library is the one client-facing
+# Google call we make). Tests monkeypatch ``places.reverse_geocode`` so no
+# HTTP traffic happens.
+
+def _central_park_geocode_response():
+    """Canned reverse-geocode response stored in the cache for hit tests.
+
+    Same shape as ``places.reverse_geocode`` returns — i.e. the value the
+    route serializes via ``json.dumps(details)`` before stashing. Reusing the
+    Central Park place_id for symmetry with the autocomplete tests above.
+    """
+    return {
+        "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+        "name": "Central Park",
+        "lat": 40.7828,
+        "lng": -73.9654,
+        "address_components": [
+            {"name": "New York", "short_name": "New York", "types": ["locality"]},
+            {"name": "New York", "short_name": "NY", "types": ["administrative_area_level_1"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+
+def test_reverse_geocode_cache_hit_returns_summary(app_and_db, monkeypatch):
+    """Pre-populated cache: route serves from SQLite, no Google call."""
+    import json
+
+    import places
+    app, db = app_and_db
+
+    lat, lng = 40.7828, -73.9654
+    db.reverse_geocode_cache_put(
+        lat, lng,
+        place_id="ChIJ4zGFAZpYwokRGUGph3Mf37k",
+        response_json=json.dumps(_central_park_geocode_response()),
+    )
+
+    # Counter-mock proves we never reached out to Google.
+    calls = {"n": 0}
+
+    def fake_reverse_geocode(lat_, lng_, key):
+        calls["n"] += 1
+        raise AssertionError("places.reverse_geocode should not be called on cache hit")
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+
+    client = app.test_client()
+    resp = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert data["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+    # Summary: leaf + the 1-2 broadest parents (end-of-list components).
+    assert "Central Park" in data["summary"]
+    assert "United States" in data["summary"]
+    assert calls["n"] == 0
+
+
+def test_reverse_geocode_cache_negative_hit_returns_null(app_and_db, monkeypatch):
+    """Cached negative (place_id=None): route returns null without calling Google."""
+    import places
+    app, db = app_and_db
+
+    lat, lng = 12.345, 67.890
+    # Negative cache entry — Google was previously asked and returned no match.
+    db.reverse_geocode_cache_put(lat, lng, place_id=None, response_json="{}")
+
+    calls = {"n": 0}
+
+    def fake_reverse_geocode(lat_, lng_, key):
+        calls["n"] += 1
+        raise AssertionError("places.reverse_geocode should not be called on negative cache hit")
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+
+    client = app.test_client()
+    resp = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json() == {"place_id": None, "summary": None}
+    assert calls["n"] == 0
+
+
+def test_reverse_geocode_cache_miss_calls_google_and_caches(app_and_db, monkeypatch):
+    """Empty cache: hit Google, cache the result, second call hits cache."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+
+    calls = {"n": 0}
+
+    def fake_reverse_geocode(lat_, lng_, key):
+        calls["n"] += 1
+        return _central_park_geocode_response()
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+
+    client = app.test_client()
+    lat, lng = 40.7828, -73.9654
+
+    r1 = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert r1.status_code == 200, r1.get_json()
+    data1 = r1.get_json()
+    assert data1["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+    assert "Central Park" in data1["summary"]
+    assert calls["n"] == 1
+
+    # Second call against the same coords should hit the cache, NOT Google.
+    r2 = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert r2.status_code == 200
+    data2 = r2.get_json()
+    assert data2["place_id"] == data1["place_id"]
+    assert data2["summary"] == data1["summary"]
+    assert calls["n"] == 1  # unchanged — second call was served from cache
+
+
+def test_reverse_geocode_cache_miss_caches_negative_when_google_returns_none(
+    app_and_db, monkeypatch,
+):
+    """Google returns None: cache the negative so future calls don't hit the API."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+
+    calls = {"n": 0}
+
+    def fake_reverse_geocode(lat_, lng_, key):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+
+    client = app.test_client()
+    lat, lng = 0.123, 0.456
+
+    r1 = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert r1.status_code == 200, r1.get_json()
+    assert r1.get_json() == {"place_id": None, "summary": None}
+    assert calls["n"] == 1
+
+    # Negative was cached — second call must NOT re-ask Google.
+    r2 = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert r2.status_code == 200
+    assert r2.get_json() == {"place_id": None, "summary": None}
+    assert calls["n"] == 1
+
+
+def test_reverse_geocode_returns_null_when_no_api_key_and_does_not_cache(
+    app_and_db, monkeypatch,
+):
+    """No API key: degrade to ``{place_id: null}`` AND don't pollute the cache.
+
+    Caching a negative when the user has no key would mean that once they add
+    a key, already-asked grid cells would forever return null. So we skip the
+    cache write entirely and just return the null shape.
+    """
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+
+    calls = {"n": 0}
+
+    def fake_reverse_geocode(lat_, lng_, key):
+        calls["n"] += 1
+        raise AssertionError("places.reverse_geocode should not be called when no API key")
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+
+    lat, lng = 51.5074, -0.1278  # somewhere in London — fresh coords
+
+    client = app.test_client()
+    resp = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"place_id": None, "summary": None}
+    assert calls["n"] == 0
+
+    # Critically: the cache must be empty for this grid, so once the user
+    # eventually adds a key, the next call will actually reach Google.
+    cached = db.reverse_geocode_cache_get(lat, lng)
+    assert cached is None
+
+
+def test_reverse_geocode_does_not_cache_transient_errors(app_and_db, monkeypatch):
+    """When ``places.reverse_geocode`` raises ``PlacesTransientError``
+    (rate limit, network blip, etc.), the route MUST return null without
+    writing to the cache. Otherwise the next request for the same grid
+    would hit a stale negative-cache entry and silently suppress the EXIF
+    suggestion until manual cache cleanup."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+
+    def transient(lat_, lng_, key):
+        raise places.PlacesTransientError("simulated OVER_QUERY_LIMIT")
+
+    monkeypatch.setattr(places, "reverse_geocode", transient)
+
+    lat, lng = 35.6762, 139.6503  # Tokyo — fresh coords
+
+    client = app.test_client()
+    resp = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"place_id": None, "summary": None}
+
+    # The cache MUST NOT have been written. A subsequent request will
+    # retry Google.
+    cached = db.reverse_geocode_cache_get(lat, lng)
+    assert cached is None, (
+        "transient failures must not be cached — the cache row must "
+        "stay absent so the next request retries Google"
+    )
+
+
+def test_reverse_geocode_400_on_non_finite_coords(app_and_db):
+    """float() accepts 'nan' and 'inf' but they blow up downstream when
+    we round to the grid (int(round(NaN)) raises ValueError). Reject them
+    at the boundary as 400, same as other invalid coords."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    for bad in ["nan", "NaN", "inf", "-inf", "Infinity"]:
+        r = client.get(f"/api/places/reverse-geocode?lat={bad}&lng=0")
+        assert r.status_code == 400, f"lat={bad} should be rejected"
+        assert r.get_json()["error"] == "invalid coords"
+
+        r = client.get(f"/api/places/reverse-geocode?lat=0&lng={bad}")
+        assert r.status_code == 400, f"lng={bad} should be rejected"
+
+
+def test_reverse_geocode_400_on_invalid_coords(app_and_db):
+    """Missing or unparseable lat/lng is a 400."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    # No query params at all.
+    r1 = client.get("/api/places/reverse-geocode")
+    assert r1.status_code == 400
+    assert r1.get_json()["error"] == "invalid coords"
+
+    # Garbage lat.
+    r2 = client.get("/api/places/reverse-geocode?lat=foo&lng=1.0")
+    assert r2.status_code == 400
+    assert r2.get_json()["error"] == "invalid coords"
+
+
+# --- POST /api/keywords/<id>/link-place -------------------------------------
+#
+# Attach Google place data to an existing free-text location keyword. Builds
+# the parent chain server-side and either UPDATEs the target row or merges it
+# into a pre-existing canonical place_id-bearing row. ``places.place_details``
+# is monkeypatched so no HTTP traffic happens.
+
+def test_post_keyword_link_place_attaches_metadata(app_and_db, monkeypatch):
+    """Successful link: target keyword gains place_id + coords + parent chain."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    # Pre-create a free-text "Central Park" keyword and tag a photo with it.
+    kw_id = db.get_or_create_text_location("Central Park")
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+    db.set_photo_location(pid, kw_id)
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+
+    assert data["merged"] is False
+    kw = data["keyword"]
+    assert kw["keyword_id"] == kw_id  # canonical row is the original
+    assert kw["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+    assert kw["latitude"] == 40.7828
+    assert kw["longitude"] == -73.9654
+    assert kw["name"] == "Central Park"
+    # Parent chain: broadest -> narrowest, EXCLUDES leaf.
+    assert [p["name"] for p in kw["parent_chain"]] == [
+        "United States", "New York", "New York County", "New York",
+    ]
+
+    # DB-level: original keyword row now has place_id + coords.
+    row = db.conn.execute(
+        "SELECT name, place_id, latitude, longitude FROM keywords WHERE id = ?",
+        (kw_id,),
+    ).fetchone()
+    assert row["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+    assert row["latitude"] == 40.7828
+    assert row["longitude"] == -73.9654
+
+    # Photo is still tagged with the same row.
+    rows = db.conn.execute(
+        "SELECT k.id FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == kw_id
+
+
+def test_post_keyword_link_place_merges_when_place_id_already_taken(
+    app_and_db, monkeypatch,
+):
+    """Second link to the same Google place merges into the canonical row."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    # Distinct names so they're separate rows in keywords.
+    kw_a = db.get_or_create_text_location("Central Park A")
+    kw_b = db.get_or_create_text_location("Central Park B")
+
+    client = app.test_client()
+    # First link -> kw_a becomes the place_id-bearing canonical row.
+    r1 = client.post(
+        f"/api/keywords/{kw_a}/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert r1.status_code == 200, r1.get_json()
+    assert r1.get_json()["merged"] is False
+
+    # Second link to the SAME place_id -> kw_b should be absorbed by kw_a.
+    r2 = client.post(
+        f"/api/keywords/{kw_b}/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert r2.status_code == 200, r2.get_json()
+    data = r2.get_json()
+    assert data["merged"] is True
+    assert data["keyword"]["keyword_id"] == kw_a  # canonical wins
+
+    # kw_b is gone from the DB after the merge.
+    row = db.conn.execute(
+        "SELECT 1 FROM keywords WHERE id = ?", (kw_b,),
+    ).fetchone()
+    assert row is None
+
+
+def test_post_keyword_link_place_returns_404_on_missing_keyword(
+    app_and_db, monkeypatch,
+):
+    """Unknown keyword id -> 404 keyword_not_found."""
+    import config as cfg
+    import places
+    app, _ = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/keywords/999999/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "keyword_not_found"
+
+
+def test_post_keyword_link_place_returns_400_on_wrong_keyword_type(
+    app_and_db, monkeypatch,
+):
+    """Linking a non-'location' keyword should be a 400 wrong_keyword_type
+    (the id exists, but it's the wrong kind), not a 404 keyword_not_found
+    that misleadingly tells callers the id doesn't exist."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    # Create a 'general' keyword (not 'location').
+    kw_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES ('Bird', 'general')",
+    ).lastrowid
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["error"] == "wrong_keyword_type"
+    assert "general" in body["error_detail"]
+
+
+def test_post_keyword_link_place_returns_400_on_missing_place_id(app_and_db):
+    """Empty body / missing place_id -> 400 (never reaches Google)."""
+    app, db = app_and_db
+    kw_id = db.get_or_create_text_location("Central Park")
+
+    client = app.test_client()
+    resp = client.post(f"/api/keywords/{kw_id}/link-place", json={})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "missing place_id"
+
+
+def test_post_keyword_link_place_returns_400_on_empty_api_key(app_and_db):
+    """No API key configured -> 400 no_api_key."""
+    import config as cfg
+    app, db = app_and_db
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+    kw_id = db.get_or_create_text_location("Central Park")
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "no_api_key"
+
+
+def test_post_keyword_link_place_returns_404_when_google_returns_none(
+    app_and_db, monkeypatch,
+):
+    """Google returns None -> 404 place_not_found."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details", lambda place_id, key: None)
+
+    kw_id = db.get_or_create_text_location("Central Park")
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={"place_id": "ChIJ_unknown"},
+    )
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "place_not_found"
+
+
+def test_post_keyword_link_place_returns_409_on_cross_type_collision(
+    app_and_db, monkeypatch,
+):
+    """Pre-existing non-location keyword in a non-root chain slot -> 409.
+
+    SQLite's UNIQUE(name, parent_id) doesn't fire when ``parent_id`` is NULL
+    (NULL != NULL), so collisions can only occur on non-root chain levels.
+    We pre-build a ``location`` chain ``United States -> New York`` directly,
+    then plant a ``general`` ``"New York County"`` under the state. The
+    chain walk will try to INSERT a ``location`` ``"New York County"`` in
+    the same slot, hitting UNIQUE(name, parent_id) and surfacing as 409.
+    """
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    us_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES (?, 'location', NULL)",
+        ("United States",),
+    ).lastrowid
+    state_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES (?, 'location', ?)",
+        ("New York", us_id),
+    ).lastrowid
+    # Plant a 'general' "New York County" under the state — the chain walk
+    # wants a 'location' row in this exact slot.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES (?, 'general', ?)",
+        ("New York County", state_id),
+    )
+    db.conn.commit()
+
+    kw_id = db.get_or_create_text_location("Central Park")
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 409, resp.get_json()
+    body = resp.get_json()
+    assert body["error"] == "name_conflict"
+    # The exception detail should mention the offending name for debugging.
+    assert "New York County" in body.get("error_detail", "")
+
+
+def test_post_keyword_link_place_records_edit(app_and_db, monkeypatch):
+    """Successful link adds an audit-log entry under action_type='location_link'."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    kw_id = db.get_or_create_text_location("Central Park")
+
+    pre_history = db.get_edit_history()
+    pre_count = len(pre_history)
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+
+    post_history = db.get_edit_history()
+    assert len(post_history) == pre_count + 1
+    entry = post_history[0]
+    assert entry["action_type"] == "location_link"
+    assert "Central Park" in entry["description"]
