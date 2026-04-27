@@ -9504,21 +9504,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
 
-        # Check if working copy is full-res
+        # Working copy is the canonical full-res asset — serve it if present.
         if photo["working_copy_path"]:
             wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
             if os.path.exists(wc_path):
-                from PIL import Image as _PILImage
-                with _PILImage.open(wc_path) as wc_img:
-                    wc_w, wc_h = wc_img.size
-                orig_w = photo["width"]
-                orig_h = photo["height"]
-                # If working copy matches original dimensions, serve it directly.
-                # Skip shortcut when original dimensions are unknown (None) to
-                # avoid serving a capped working copy as full-res.
-                if orig_w and orig_h and wc_w >= orig_w and wc_h >= orig_h:
-                    return send_file(wc_path, mimetype="image/jpeg")
-                # Otherwise: need full-res extraction (on-demand upgrade)
+                return send_file(wc_path, mimetype="image/jpeg")
 
         # Resolve original file path
         folder = db.conn.execute(

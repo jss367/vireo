@@ -627,44 +627,43 @@ def test_original_serves_full_res_working_copy(app_and_db):
     assert resp.status_code == 200
 
 
-def test_original_endpoint_upgrades_working_copy_to_full_res(app_and_db, tmp_path):
-    """Original endpoint extracts full-res when working copy is capped."""
+def test_original_trusts_working_copy_even_when_smaller_than_stored_dims(app_and_db):
+    """Original endpoint trusts working copy as the canonical full-res asset.
+
+    The working copy is the full-res asset; stored RAW sensor dimensions can
+    legitimately exceed embedded-JPEG-derived working copy dimensions (Nikon
+    NEFs that fall back to the embedded JPEG are a known case). The endpoint
+    must serve the working copy directly without re-extracting from RAW.
+    """
     app, db = app_and_db
     client = app.test_client()
 
     photos = db.get_photos()
     pid = photos[0]["id"]
 
-    # Set dimensions larger than working copy
-    db.conn.execute("UPDATE photos SET width=6000, height=4000 WHERE id=?", (pid,))
+    # Stored dimensions are larger than the working copy on disk.
+    db.conn.execute("UPDATE photos SET width=8280, height=5520 WHERE id=?", (pid,))
     db.conn.commit()
 
-    # Create a capped working copy (smaller than original dimensions)
+    # Working copy is slightly smaller (e.g. embedded-JPEG fallback).
     from PIL import Image
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     working_dir = os.path.join(vireo_dir, "working")
     os.makedirs(working_dir, exist_ok=True)
     wc_path = os.path.join(working_dir, f"{pid}.jpg")
-    Image.new("RGB", (4096, 2731)).save(wc_path, "JPEG")
+    Image.new("RGB", (8256, 5504), color=(123, 45, 67)).save(wc_path, "JPEG")
     db.conn.execute(
         "UPDATE photos SET working_copy_path=? WHERE id=?",
         (f"working/{pid}.jpg", pid),
     )
     db.conn.commit()
 
-    # Point folder to a writable tmp location and create a real source image
-    photo_dir = tmp_path / "photo_files"
-    photo_dir.mkdir()
-    db.conn.execute(
-        "UPDATE folders SET path=? WHERE id=?",
-        (str(photo_dir), photos[0]["folder_id"]),
-    )
-    db.conn.commit()
-    img_path = os.path.join(str(photo_dir), photos[0]["filename"])
-    Image.new("RGB", (6000, 4000)).save(img_path, "JPEG")
-
     resp = client.get(f"/photos/{pid}/original")
     assert resp.status_code == 200
+
+    # Body must be exactly the working copy bytes — no re-extraction.
+    with open(wc_path, "rb") as f:
+        assert resp.data == f.read()
 
 
 def test_original_serves_native_jpeg_directly(app_and_db, tmp_path):
