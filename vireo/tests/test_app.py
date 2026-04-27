@@ -2387,6 +2387,37 @@ def test_batch_keyword_route_handles_non_string_type(app_and_db):
     )
 
 
+def test_add_keyword_route_does_not_clobber_existing_individual_type(app_and_db):
+    """Regression: POST /api/photos/<id>/keywords with type='taxonomy' for a
+    keyword that already exists as 'individual' must not silently rewrite
+    the existing row's type. add_keyword's reconciliation logic (only
+    upgrades 'general') must run instead of a force-UPDATE."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/p")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "p.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    # Pre-create an 'individual' keyword named "Charlie" (e.g. user's pet).
+    existing_kid = db.add_keyword("Charlie", kw_type="individual")
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{photo_id}/keywords",
+        json={"name": "Charlie", "type": "taxonomy"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    # The existing row's type must remain 'individual' (not silently
+    # rewritten to 'taxonomy' by a force-UPDATE).
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (existing_kid,),
+    ).fetchone()
+    assert row["type"] == "individual", (
+        f"Force-UPDATE silently rewrote a user-typed keyword. "
+        f"Expected type='individual', got {row['type']!r}"
+    )
+
+
 def test_get_active_subject_types_workspace_override_wins(app_and_db, tmp_path, monkeypatch):
     """When a workspace override is set, it overrides the global default."""
     import config as cfg

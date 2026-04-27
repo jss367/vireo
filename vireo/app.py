@@ -660,10 +660,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # because the target name already exists, leaving a duplicate.
     init_db.migrate_default_subject_collection()
     init_db.create_default_collections()
-    # One-shot keyword migrations / backfills. Hoisted out of Database.__init__
-    # so they don't re-run on every request (each request gets a fresh
-    # Database instance via _get_db()).
-    init_db.migrate_legacy_keyword_types()
+    # Wildlife backfill: gated by a db_meta marker so it runs at most once
+    # per database. Kept in create_app rather than __init__ because (unlike
+    # migrate_legacy_keyword_types) the warm-path still requires a write to
+    # set the marker on first run, and we don't want that on every _get_db().
+    # migrate_legacy_keyword_types runs in Database.__init__ now (before
+    # ensure_default_genre_keywords) so the seed sees normalized types.
     init_db.backfill_wildlife_genre()
 
     # Mark species keywords from taxonomy in background (avoids slow startup)
@@ -1467,14 +1469,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         name = body.get("name", "").strip()
         if not name:
             return json_error("name required")
-        kid = db.add_keyword(name)
-        # Override type if explicitly provided. Guard against non-string
-        # JSON values (e.g. {"type": []} or {"type": {}}) — `x in frozenset`
-        # raises TypeError on unhashable input, which would 500 the request.
-        kw_type = body.get("type")
-        if isinstance(kw_type, str) and kw_type in KEYWORD_TYPES:
-            db.conn.execute("UPDATE keywords SET type = ? WHERE id = ?", (kw_type, kid))
-            db.conn.commit()
+        # Validate kw_type at the boundary (isinstance guard against
+        # non-hashable JSON; membership against the canonical enum).
+        # Pass it through to add_keyword so its type-reconciliation logic
+        # runs — a post-update SQL `UPDATE keywords SET type = ?` would
+        # silently rewrite an existing user-typed row (e.g. someone's
+        # 'individual' Charlie) and bypass the taxonomy/general upgrade
+        # rules in add_keyword.
+        kw_type_raw = body.get("type")
+        kw_type = (
+            kw_type_raw
+            if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
+            else None
+        )
+        kid = db.add_keyword(name, kw_type=kw_type)
         db.tag_photo(photo_id, kid)
         _queue_keyword_add(photo_id, name)
         db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
@@ -1630,12 +1638,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         name = body.get("name", "").strip()
         if not photo_ids or not name:
             return json_error("photo_ids and name required")
-        kid = db.add_keyword(name)
-        # Guard against non-string JSON values — see api_add_keyword note.
-        kw_type = body.get("type")
-        if isinstance(kw_type, str) and kw_type in KEYWORD_TYPES:
-            db.conn.execute("UPDATE keywords SET type = ? WHERE id = ?", (kw_type, kid))
-            db.conn.commit()
+        # Route kw_type through add_keyword so its type-reconciliation logic
+        # runs (preserves existing user-typed rows; only upgrades 'general').
+        # See api_add_keyword for the rationale.
+        kw_type_raw = body.get("type")
+        kw_type = (
+            kw_type_raw
+            if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
+            else None
+        )
+        kid = db.add_keyword(name, kw_type=kw_type)
         for pid in photo_ids:
             db.tag_photo(pid, kid)
             _queue_keyword_add(pid, name)

@@ -7255,6 +7255,40 @@ def test_ensure_default_genre_keywords_upgrades_existing_general_wildlife(tmp_pa
     assert n >= 5  # Wildlife + Landscape + Sunset + Architecture + Abstract
 
 
+def test_init_normalizes_legacy_wildlife_before_seeding_genres(tmp_path):
+    """Regression: an upgraded DB where 'Wildlife' has a legacy type like
+    'descriptive' must end up with type='genre' after Database.__init__,
+    not stuck on 'general' (which the auto-Wildlife / backfill queries
+    can't find via WHERE name='Wildlife' AND type='genre')."""
+    from db import Database
+    # First instantiation runs the schema setup AND the seeds. Tear that
+    # down to simulate a pre-genre-feature DB: re-create the Wildlife
+    # row as 'descriptive', clear all genre rows.
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    db.conn.execute("DELETE FROM keywords WHERE type = 'genre'")
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'descriptive', 0)",
+        ("Wildlife",),
+    )
+    db.conn.commit()
+    db.conn.close()
+
+    # Re-open: __init__ runs migrate_legacy_keyword_types BEFORE
+    # ensure_default_genre_keywords, so Wildlife should be normalized to
+    # 'genre' instead of getting stuck on 'general'.
+    db2 = Database(db_path)
+    rows = db2.conn.execute(
+        "SELECT type FROM keywords WHERE name = 'Wildlife' AND parent_id IS NULL"
+    ).fetchall()
+    types = {r["type"] for r in rows}
+    assert "genre" in types, (
+        f"Legacy 'descriptive' Wildlife must end up as 'genre' after "
+        f"__init__; got types={types}. The auto-Wildlife trigger and "
+        f"backfill query depend on this."
+    )
+
+
 def test_ensure_default_genre_keywords_preserves_non_general_user_types(tmp_path):
     """If a user deliberately created e.g. an 'individual' Wildlife (a pet
     named Wildlife), ensure_default_genre_keywords must NOT clobber that."""

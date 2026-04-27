@@ -168,6 +168,19 @@ SCHEMA = {
         "desc": "Which metadata badges appear on each photo card in browse.",
     },
 
+    # --- Subject identification -------------------------------------------
+    # Workspace-overridable. Photos with at least one keyword of one of
+    # these types drop out of "Needs Identification" and are skipped by
+    # the classifier. PUT /api/workspaces/<id>/subject-types persists the
+    # override into config_overrides.
+    "subject_types": {
+        "type": "list_string",
+        "items_enum": ["taxonomy", "individual", "location", "genre", "general"],
+        "category": "Behavior", "scope": "both",
+        "label": "What counts as identified",
+        "desc": "Keyword types that mark a photo as 'identified' for queue and classifier purposes.",
+    },
+
     # --- Working copy -----------------------------------------------------
     "working_copy_max_size": {
         "type": "int", "min": 512, "max": 16384,

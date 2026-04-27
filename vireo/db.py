@@ -110,10 +110,18 @@ class Database:
         self._new_images_cache = get_shared_cache()
         self._create_tables()
         self.ensure_default_workspace()
+        # Idempotent legacy-type migration. MUST run before genre seeding
+        # so an upgraded DB with e.g. 'descriptive'/'event'/'people' rows
+        # named 'Wildlife' gets normalized first. Otherwise the seed's
+        # UNIQUE(name, parent_id) INSERT OR IGNORE skips the Wildlife
+        # genre, then the migration converts that legacy row to 'general',
+        # leaving auto-Wildlife and backfill queries unable to find a
+        # canonical 'Wildlife' / type='genre' row. Cheap warm-path (single
+        # SELECT 1 LIMIT 1) once all legacy rows are gone.
+        self.migrate_legacy_keyword_types()
         # Idempotent default-keyword seed. Cheap warm-path (single
         # SELECT 1 LIMIT 1 short-circuit) — matches ensure_default_workspace
-        # above. One-shot migrations and backfills are hoisted to create_app
-        # so they don't run on every request via _get_db().
+        # above.
         self.ensure_default_genre_keywords()
         # Restore last-used workspace, or fall back to Default
         last = self.conn.execute(
@@ -1006,8 +1014,24 @@ class Database:
         self.conn.commit()
 
     def migrate_legacy_keyword_types(self):
-        """One-shot migration of legacy keyword type names to the canonical enum.
-        Idempotent — running again is a no-op once all rows are migrated."""
+        """One-shot migration of legacy keyword type names to the canonical
+        enum. Idempotent — once all rows are migrated, the warm-path
+        short-circuits cheaply (single SELECT 1 LIMIT 1) so this is safe to
+        call from Database.__init__ on every instantiation.
+
+        Order matters: this runs BEFORE ensure_default_genre_keywords in
+        __init__ so a legacy 'descriptive'/'event'/'people'-typed Wildlife
+        gets normalized first. Otherwise the seed's UNIQUE(name, parent_id)
+        INSERT OR IGNORE would silently skip Wildlife, then this migration
+        would convert the legacy row to 'general', leaving the auto-Wildlife
+        and backfill queries (WHERE name='Wildlife' AND type='genre') with
+        no canonical row to find.
+        """
+        legacy = self.conn.execute(
+            "SELECT 1 FROM keywords WHERE type IN ('people', 'descriptive', 'event') LIMIT 1"
+        ).fetchone()
+        if not legacy:
+            return
         self.conn.execute("UPDATE keywords SET type = 'individual' WHERE type = 'people'")
         self.conn.execute("UPDATE keywords SET type = 'general' WHERE type = 'descriptive'")
         self.conn.execute("UPDATE keywords SET type = 'general' WHERE type = 'event'")
@@ -3434,10 +3458,15 @@ class Database:
                 (name, parent_id),
             ).fetchone()
         if existing:
-            # Update is_species and type if it wasn't set before
+            # Promote an unset row to taxonomy when this call indicates a
+            # species. Restrict to 'general' (the legacy default for unknown
+            # rows) so a deliberate user type — 'individual', 'location',
+            # 'genre' — is preserved instead of silently rewritten when a
+            # later caller passes is_species=True or kw_type='taxonomy'.
             if is_species:
                 self.conn.execute(
-                    "UPDATE keywords SET is_species = 1, type = 'taxonomy' WHERE id = ? AND is_species = 0",
+                    "UPDATE keywords SET is_species = 1, type = 'taxonomy' "
+                    "WHERE id = ? AND is_species = 0 AND type IN ('general', 'taxonomy')",
                     (existing["id"],),
                 )
                 if _commit:
