@@ -6680,6 +6680,34 @@ def test_add_keyword_existing_general_upgrades_to_taxonomy_sets_is_species(tmp_p
     assert row2["is_species"] == 1
 
 
+def test_add_keyword_taxonomy_preserves_individual_type_and_is_species(tmp_path):
+    """If an existing keyword has a deliberate non-general type (e.g. 'individual'),
+    a later add_keyword(..., kw_type='taxonomy') must NOT silently flip type or
+    stamp is_species=1. Otherwise auto-wildlife / backfill / subject filters
+    that include `OR is_species=1` would treat that individual row as a species.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+
+    kid1 = db.add_keyword("Charlie", kw_type="individual")
+    row1 = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid1,)
+    ).fetchone()
+    assert row1["type"] == "individual"
+    assert row1["is_species"] == 0
+
+    kid2 = db.add_keyword("Charlie", kw_type="taxonomy")
+    assert kid2 == kid1
+    row2 = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid2,)
+    ).fetchone()
+    assert row2["type"] == "individual", "deliberate type must be preserved"
+    assert row2["is_species"] == 0, (
+        "is_species must NOT be set on a non-taxonomy preserved row"
+    )
+
+
 def test_get_subject_types_returns_default(tmp_path, monkeypatch):
     """A fresh workspace with no overrides falls back to the global default."""
     import config as cfg

@@ -3519,8 +3519,15 @@ class Database:
                     (kw_type, existing["id"]),
                 )
                 if kw_type == 'taxonomy':
+                    # Gate on type='taxonomy' so a preserved deliberate type
+                    # (e.g. 'individual') doesn't get is_species=1 stamped on
+                    # it when the type update above was a no-op. Otherwise
+                    # _maybe_apply_auto_wildlife / backfill_wildlife_genre /
+                    # subject filters with `OR is_species=1` would treat that
+                    # non-taxonomy row as a species.
                     self.conn.execute(
-                        "UPDATE keywords SET is_species = 1 WHERE id = ?",
+                        "UPDATE keywords SET is_species = 1 "
+                        "WHERE id = ? AND type = 'taxonomy'",
                         (existing["id"],),
                     )
                 if _commit:
