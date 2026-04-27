@@ -170,6 +170,12 @@
   gap: 12px;
 }
 .encounter-body { padding: 12px 16px; }
+.encounter-footer {
+  margin: 8px -16px -12px;
+  border-top: 1px solid var(--border-primary);
+  cursor: default;
+}
+.encounter-footer:hover { background: var(--bg-tertiary); }
 
 /* Burst strip */
 .burst-strip {
@@ -577,6 +583,9 @@ input[type="range"]::-moz-range-thumb {
   display: none;
 }
 .species-dropdown.open { display: block; }
+/* Bottom-bar widget: open upward so the dropdown stays inside the
+   encounter card, which has overflow:hidden. */
+.species-dropdown.up { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 4px; }
 .species-dropdown-item {
   padding: 8px 12px;
   cursor: pointer;
@@ -1316,7 +1325,7 @@ function renderResults() {
           html += renderSpeciesWidget(enc, ei, 'burst', bi);
         }
         if (!burst.species_override && enc.bursts.length > 1) {
-          html += '<span class="burst-species-edit" onclick="toggleSpeciesDropdown(event,' + ei + ',' + bi + ')">&#9998;</span>';
+          html += '<span class="burst-species-edit" onclick="toggleSpeciesDropdown(event,' + ei + ',' + bi + ',\'top\')">&#9998;</span>';
         }
         html += '<button class="detach-btn" onclick="detachBurst(' + ei + ',' + bi + ')" title="Detach burst">&times;</button>';
         html += '</div>';
@@ -1337,6 +1346,16 @@ function renderResults() {
         html += renderPhotoCard(p, null, null);
       });
     }
+
+    // Bottom bar — same controls as the top header so confirming after
+    // scrolling through a long encounter doesn't require scrolling back up.
+    html += '<div class="encounter-header encounter-footer">';
+    html += renderSpeciesWidget(enc, ei, 'encounter', null, 'bot');
+    html += '<span class="encounter-meta" style="flex:1;">';
+    html += '<span>' + enc.photo_count + ' photos</span>';
+    if (enc.burst_count) html += '<span>' + enc.burst_count + ' bursts</span>';
+    if (timeRange) html += '<span>' + timeRange + '</span>';
+    html += '</span></div>';
 
     html += '</div></div>';
   });
@@ -1860,8 +1879,10 @@ function refreshMissesReviewBtn() {
 
 var activeDropdown = null;
 
-function renderSpeciesWidget(enc, encIdx, level, burstIdx) {
+function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
   // level: 'encounter' or 'burst'
+  // pos:   'top' (default) or 'bot' — disambiguates the duplicated bottom widget
+  pos = pos || 'top';
   var isConfirmed, displayName, predictions;
   if (level === 'burst') {
     var burst = enc.bursts[burstIdx];
@@ -1886,16 +1907,18 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx) {
   var badge = isConfirmed ? '&#10003;' : '?';
   var widgetCls = level === 'burst' ? 'burst-species-widget' : 'species-widget';
 
+  var idKey = (burstIdx != null ? burstIdx : 'enc') + '_' + pos;
   var html = '<span class="' + widgetCls + '" data-enc="' + encIdx + '" data-burst="' + (burstIdx != null ? burstIdx : '') + '">';
-  html += '<span class="species-name ' + cls + '" onclick="toggleSpeciesDropdown(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ')">' + escapeHtml(displayName) + '</span>';
+  html += '<span class="species-name ' + cls + '" onclick="toggleSpeciesDropdown(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')">' + escapeHtml(displayName) + '</span>';
   html += '<span class="species-badge ' + cls + '">' + badge + '</span>';
   if (!isConfirmed) {
     html += '<button class="species-confirm-btn" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',null)" title="Confirm as ' + escapeHtml(displayName) + '">&#10003;</button>';
   }
 
-  // Dropdown
-  html += '<div class="species-dropdown" id="spDrop_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc') + '">';
-  html += '<div class="species-dropdown-search"><input type="text" placeholder="Search species..." oninput="searchSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ')"></div>';
+  // Dropdown — bottom-bar widget opens upward to stay inside the card
+  var dropdownCls = 'species-dropdown' + (pos === 'bot' ? ' up' : '');
+  html += '<div class="' + dropdownCls + '" id="spDrop_' + encIdx + '_' + idKey + '">';
+  html += '<div class="species-dropdown-search"><input type="text" placeholder="Search species..." oninput="searchSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')"></div>';
 
   // "Use encounter label" option for burst level
   if (level === 'burst' && enc.species) {
@@ -1916,15 +1939,16 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx) {
   });
 
   // Search results container
-  html += '<div id="spSearch_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc') + '"></div>';
+  html += '<div id="spSearch_' + encIdx + '_' + idKey + '"></div>';
   html += '</div>';
   html += '</span>';
   return html;
 }
 
-function toggleSpeciesDropdown(event, encIdx, burstIdx) {
+function toggleSpeciesDropdown(event, encIdx, burstIdx, pos) {
   event.stopPropagation();
-  var id = 'spDrop_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc');
+  pos = pos || 'top';
+  var id = 'spDrop_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc') + '_' + pos;
   var el = document.getElementById(id);
   if (!el) return;
   var isOpen = el.classList.contains('open');
@@ -1954,9 +1978,10 @@ document.addEventListener('click', function(e) {
 });
 
 var _searchTimer = null;
-function searchSpecies(event, encIdx, burstIdx) {
+function searchSpecies(event, encIdx, burstIdx, pos) {
+  pos = pos || 'top';
   var q = event.target.value.trim();
-  var targetId = 'spSearch_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc');
+  var targetId = 'spSearch_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc') + '_' + pos;
   var container = document.getElementById(targetId);
   if (!container) return;
   if (q.length < 2) { container.innerHTML = ''; return; }
