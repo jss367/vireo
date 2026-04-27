@@ -366,6 +366,14 @@
         if (l.file_size) resolvedBytes += l.file_size;
       });
     });
+    // Bulk-trashable count must mirror ``isBulkTrashProtected`` so the button
+    // label never advertises files the action would skip. Without this the
+    // button claims N losers but ``trashAllLoserFiles`` returns "Nothing to
+    // trash" when every remaining group is protected.
+    var bulkTrashableLoserCount = resolved.reduce(function(n, p) {
+      if (isBulkTrashProtected(p)) return n;
+      return n + (p.losers || []).length;
+    }, 0);
 
     var summary = document.getElementById('summary');
     summary.style.display = '';
@@ -413,14 +421,18 @@
           ' group' + (resolvedGroupCount === 1 ? '' : 's') +
           ' auto-handled during scan. Loser files (' + formatBytes(resolvedBytes) +
           ') may still be on disk.</div>' +
-        '</div>' +
-        '<div class="section-actions">' +
-          '<button class="btn-secondary" onclick="trashAllLoserFiles()" id="trashAllBtn">' +
-            'Move ' + resolvedLoserCount + ' loser file' +
-            (resolvedLoserCount === 1 ? '' : 's') + ' to Trash' +
-          '</button>' +
-        '</div>' +
-      '</div>';
+        '</div>';
+      // Hide the bulk button entirely when every remaining resolved group is
+      // protected — otherwise it sticks around as a no-op that always toasts
+      // "Nothing to trash" and confuses users about what cleanup is left.
+      html += '<div class="section-actions">';
+      if (bulkTrashableLoserCount > 0) {
+        html += '<button class="btn-secondary" onclick="trashAllLoserFiles()" id="trashAllBtn">' +
+            'Move ' + bulkTrashableLoserCount + ' loser file' +
+            (bulkTrashableLoserCount === 1 ? '' : 's') + ' to Trash' +
+          '</button>';
+      }
+      html += '</div></div>';
       html += '<div class="' + listClass + '" id="resolvedList">';
       resolved.forEach(function(group) {
         html += renderResolvedGroup(group);
@@ -622,14 +634,19 @@
     }
   }
 
+  // Protected: kept-file is missing on disk for this group, so any surviving
+  // loser file may be the only remaining copy. The bulk-button label and the
+  // bulk action share this predicate so the count never advertises files
+  // ``trashAllLoserFiles`` would skip.
+  function isBulkTrashProtected(p) {
+    return !!(p && p.winner && p.winner.exists === false);
+  }
+
   async function trashAllLoserFiles() {
     var resolved = _proposals.filter(function(p) { return p.status === 'resolved'; });
     var ids = [];
     resolved.forEach(function(p) {
-      // Protected: kept-file is missing on disk for this group, so any
-      // surviving loser file may be the only remaining copy. Skip the whole
-      // group rather than risk trashing it.
-      if (p.winner && p.winner.exists === false) return;
+      if (isBulkTrashProtected(p)) return;
       (p.losers || []).forEach(function(l) {
         // Skip ones already trashed in this session.
         var card = document.querySelector('.dup-card[data-photo-id="' + l.id + '"]');
