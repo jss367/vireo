@@ -725,15 +725,32 @@
       showToast(msg, failed ? 'error' : 'success');
 
       if (btn) {
-        btn.disabled = false;
-        // Recompute remaining count for the bulk button label.
+        // Recompute remaining count using the same protection predicate as
+        // the action path, so the label never advertises files the next
+        // ``trashAllLoserFiles`` call would skip. Without this, a mixed scan
+        // (actionable groups + ``winner.exists === false`` groups) leaves the
+        // button re-enabled with a non-zero count after the first cleanup,
+        // and subsequent clicks become persistent no-ops ("Nothing to trash").
         var remaining = 0;
-        document.querySelectorAll('.resolved-list .dup-card.loser').forEach(function(c) {
-          if (!c.classList.contains('trashed')) remaining++;
+        _proposals.forEach(function(p) {
+          if (p.status !== 'resolved') return;
+          if (isBulkTrashProtected(p)) return;
+          (p.losers || []).forEach(function(l) {
+            var card = document.querySelector(
+              '.dup-card[data-photo-id="' + l.id + '"]');
+            if (card && !card.classList.contains('trashed')) remaining++;
+          });
         });
-        btn.textContent = 'Move ' + remaining + ' loser file' +
-                          (remaining === 1 ? '' : 's') + ' to Trash';
-        if (remaining === 0) btn.disabled = true;
+        if (remaining > 0) {
+          btn.disabled = false;
+          btn.textContent = 'Move ' + remaining + ' loser file' +
+                            (remaining === 1 ? '' : 's') + ' to Trash';
+        } else {
+          // Mirror the initial render: when there's nothing left that the
+          // bulk action would actually touch, drop the button rather than
+          // leaving a disabled "Move 0 ..." stub hanging around.
+          btn.remove();
+        }
       }
     } catch (e) {
       if (btn) { btn.disabled = false; btn.textContent = 'Move loser files to Trash'; }
