@@ -680,14 +680,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             log.debug("Could not open background db for species marking", exc_info=True)
             return
         tax = load_local_taxonomy()
-        if tax is not None:
-            try:
-                updated = bg_db.mark_species_keywords(tax)
-                if updated:
-                    log.info("Marked %d keywords as species from taxonomy", updated)
-            except Exception:
-                log.debug("Could not mark species from taxonomy", exc_info=True)
-                return
+        if tax is None:
+            # Skip the backfill too: it's one-shot via wildlife_backfill_done,
+            # so on an upgraded DB without taxonomy yet, running it would
+            # match zero plain-text species rows AND set the marker, leaving
+            # those photos un-Wildlife'd even after taxonomy is later loaded.
+            return
+        try:
+            updated = bg_db.mark_species_keywords(tax)
+            if updated:
+                log.info("Marked %d keywords as species from taxonomy", updated)
+        except Exception:
+            log.debug("Could not mark species from taxonomy", exc_info=True)
+            return
         try:
             bg_db.backfill_wildlife_genre()
         except Exception:
@@ -2380,22 +2385,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         if not cleaned:
             log.warning("subject-types: empty list set for workspace %s", ws_id)
-        ws = db.get_workspace(ws_id)
-        if not ws:
-            return json_error("workspace not found", 404)
-        existing = {}
-        if ws["config_overrides"]:
-            try:
-                existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-            except Exception:
-                existing = {}
-        # `config_overrides` is JSON, so a previous PUT /api/workspaces/<id>
-        # could have stored a list/string/number. Coerce to {} before key
-        # assignment to keep this endpoint from 500-ing on malformed state.
-        if not isinstance(existing, dict):
+        # Share the schema-driven settings write lock so a concurrent
+        # autosave on the same workspace can't read this same overrides
+        # snapshot and overwrite our subject_types change with stale data.
+        with _settings_write_lock:
+            ws = db.get_workspace(ws_id)
+            if not ws:
+                return json_error("workspace not found", 404)
             existing = {}
-        existing["subject_types"] = cleaned
-        db.update_workspace(ws_id, config_overrides=existing)
+            if ws["config_overrides"]:
+                try:
+                    existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+                except Exception:
+                    existing = {}
+            # `config_overrides` is JSON, so a previous PUT /api/workspaces/<id>
+            # could have stored a list/string/number. Coerce to {} before key
+            # assignment to keep this endpoint from 500-ing on malformed state.
+            if not isinstance(existing, dict):
+                existing = {}
+            existing["subject_types"] = cleaned
+            db.update_workspace(ws_id, config_overrides=existing)
         return jsonify({"types": cleaned})
 
     @app.route("/api/workspace/tabs/open", methods=["POST"])
