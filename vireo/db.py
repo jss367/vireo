@@ -3544,12 +3544,17 @@ class Database:
             )
         if kw_type == 'taxonomy':
             is_species = True
-        # Case-insensitive lookup. When kw_type is supplied, prefer a
-        # same-typed match — duplicates by name across different types
-        # are permitted (e.g. a user-tagged 'location' Landscape
-        # coexisting with a default 'genre' Landscape), and callers who
-        # explicitly ask for kw_type='genre' must deterministically get
-        # the genre row.
+        # Case-insensitive lookup with type-aware matching:
+        #
+        # When kw_type is supplied, only same-type or 'general' rows are
+        # candidates. Same-type wins; 'general' is promotable to the
+        # requested type via the UPDATE below. Other deliberate types
+        # (location/individual/etc.) are intentionally NOT candidates —
+        # returning one and finding the upgrade no-op'd would leave the
+        # caller with a mismatched type. Falling through to INSERT
+        # creates a new row of the requested type alongside the
+        # deliberate one (duplicates by name across types are
+        # intentional in this PR).
         #
         # When kw_type is None, prefer the most "structured"
         # interpretation in a fixed priority — taxonomy > genre >
@@ -3577,9 +3582,9 @@ class Database:
             else:
                 existing = self.conn.execute(
                     "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
-                    "AND parent_id IS NULL "
+                    "AND parent_id IS NULL AND type IN (?, 'general') "
                     "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
-                    (name, kw_type),
+                    (name, kw_type, kw_type),
                 ).fetchone()
         else:
             if kw_type is None:
@@ -3592,9 +3597,9 @@ class Database:
             else:
                 existing = self.conn.execute(
                     "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
-                    "AND parent_id = ? "
+                    "AND parent_id = ? AND type IN (?, 'general') "
                     "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
-                    (name, parent_id, kw_type),
+                    (name, parent_id, kw_type, kw_type),
                 ).fetchone()
         if existing:
             # Promote an unset row to taxonomy when this call indicates a

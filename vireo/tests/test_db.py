@@ -6681,31 +6681,50 @@ def test_add_keyword_existing_general_upgrades_to_taxonomy_sets_is_species(tmp_p
 
 
 def test_add_keyword_taxonomy_preserves_individual_type_and_is_species(tmp_path):
-    """If an existing keyword has a deliberate non-general type (e.g. 'individual'),
-    a later add_keyword(..., kw_type='taxonomy') must NOT silently flip type or
-    stamp is_species=1. Otherwise auto-wildlife / backfill / subject filters
-    that include `OR is_species=1` would treat that individual row as a species.
+    """If an existing keyword has a deliberate non-general type (e.g.
+    'individual'), a later add_keyword(..., kw_type='taxonomy') must NOT
+    silently flip its type or stamp is_species=1. Otherwise auto-wildlife,
+    backfill, and subject filters that include `OR is_species=1` would
+    treat that individual row as a species.
+
+    The current contract: deliberate non-general rows are NOT candidates
+    for the typed-lookup. Caller asking for kw_type='taxonomy' on a name
+    that exists only as 'individual' falls through to INSERT, creating
+    a NEW taxonomy row alongside the preserved individual one
+    (duplicates by name across types are intentional; lookups
+    disambiguate by kw_type).
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
 
-    kid1 = db.add_keyword("Charlie", kw_type="individual")
+    kid_individual = db.add_keyword("Charlie", kw_type="individual")
     row1 = db.conn.execute(
-        "SELECT type, is_species FROM keywords WHERE id = ?", (kid1,)
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid_individual,)
     ).fetchone()
     assert row1["type"] == "individual"
     assert row1["is_species"] == 0
 
-    kid2 = db.add_keyword("Charlie", kw_type="taxonomy")
-    assert kid2 == kid1
-    row2 = db.conn.execute(
-        "SELECT type, is_species FROM keywords WHERE id = ?", (kid2,)
+    kid_taxonomy = db.add_keyword("Charlie", kw_type="taxonomy")
+    # A new row is created — the original individual row was not a
+    # candidate for the typed lookup.
+    assert kid_taxonomy != kid_individual
+
+    # Original 'individual' row is unchanged.
+    row1_after = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid_individual,)
     ).fetchone()
-    assert row2["type"] == "individual", "deliberate type must be preserved"
-    assert row2["is_species"] == 0, (
-        "is_species must NOT be set on a non-taxonomy preserved row"
+    assert row1_after["type"] == "individual", "deliberate type must be preserved"
+    assert row1_after["is_species"] == 0, (
+        "is_species must NOT be set on a preserved non-taxonomy row"
     )
+
+    # New row has the requested taxonomy type with is_species=1.
+    row2 = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid_taxonomy,)
+    ).fetchone()
+    assert row2["type"] == "taxonomy"
+    assert row2["is_species"] == 1
 
 
 def test_get_subject_types_returns_default(tmp_path, monkeypatch):
@@ -7399,6 +7418,46 @@ def test_ensure_default_genre_keywords_preserves_non_general_user_types(tmp_path
                 ('Landscape', 'Sunset', 'Architecture', 'Abstract')"""
     ).fetchone()[0]
     assert n_other == 4
+
+
+def test_add_keyword_kw_type_falls_through_when_only_other_types_exist(tmp_path):
+    """Regression: when kw_type is supplied but no same-type or 'general'
+    row exists, add_keyword must NOT silently return a non-promotable
+    other-typed row (e.g. 'location' or 'individual'). It must fall
+    through to INSERT a new row with the requested type, so callers
+    deterministically get back a row that matches kw_type.
+
+    Reachable via POST /api/photos/<id>/keywords and /api/batch/keyword
+    with an explicit type. Without this, the photo would be tagged with
+    a wrong-typed row and stay stuck in 'Needs Identification'."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+
+    # User has 'Backyard' typed as 'location' (a place they care about).
+    # No 'general' or 'genre' Backyard exists.
+    kid_location = db.add_keyword("Backyard", kw_type="location")
+
+    # Caller asks for genre Backyard (e.g. via the lightbox flow tagging
+    # a photo as a Backyard scene). The location row must NOT be returned.
+    kid_genre = db.add_keyword("Backyard", kw_type="genre")
+    assert kid_genre != kid_location, (
+        "add_keyword('Backyard', kw_type='genre') returned the existing "
+        "location row instead of creating a new genre row."
+    )
+
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (kid_genre,)
+    ).fetchone()
+    assert row["type"] == "genre", (
+        f"Expected the new row to have type='genre'; got {row['type']!r}"
+    )
+
+    # Original 'location' Backyard is unchanged.
+    row_loc = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (kid_location,)
+    ).fetchone()
+    assert row_loc["type"] == "location"
 
 
 def test_add_keyword_no_kw_type_prefers_canonical_genre_over_location(tmp_path):
