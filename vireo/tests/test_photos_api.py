@@ -1668,6 +1668,53 @@ def test_post_photo_location_returns_404_when_google_returns_none(app_and_db, mo
     assert resp.get_json()["error"] == "place_not_found"
 
 
+def test_post_photo_location_returns_409_on_name_conflict(app_and_db, monkeypatch):
+    """When upsert_place_chain raises RuntimeError (cross-type collision in
+    the parent chain), the route must return 409 with name_conflict — same
+    contract as /api/keywords/<id>/link-place. Previously the RuntimeError
+    propagated and surfaced as a 500."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+
+    # Pre-build the location parent chain through the state level, then
+    # plant a 'general' keyword whose (name, parent_id) collides with one of
+    # the components in _central_park_details (which uses New York / New
+    # York County / New York / United States). Planting 'general'
+    # "New York County" under the state row triggers the cross-type
+    # collision when the chain walk tries to INSERT 'location' "New York
+    # County" at the same slot.
+    us_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES ('United States', 'location', NULL)",
+    ).lastrowid
+    state_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES ('New York', 'location', ?)",
+        (us_id,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES ('New York County', 'general', ?)",
+        (state_id,),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(places, "place_details",
+                        lambda place_id, key: _central_park_details())
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={"place_id": "ChIJ_anything"},
+    )
+    assert resp.status_code == 409
+    body = resp.get_json()
+    assert body["error"] == "name_conflict"
+    assert "New York County" in body["error_detail"]
+
+
 def test_delete_photo_location_clears_links(app_and_db):
     """DELETE removes location keyword links but leaves the keyword row intact."""
     app, db = app_and_db
@@ -2089,6 +2136,39 @@ def test_reverse_geocode_returns_null_when_no_api_key_and_does_not_cache(
     # eventually adds a key, the next call will actually reach Google.
     cached = db.reverse_geocode_cache_get(lat, lng)
     assert cached is None
+
+
+def test_reverse_geocode_does_not_cache_transient_errors(app_and_db, monkeypatch):
+    """When ``places.reverse_geocode`` raises ``PlacesTransientError``
+    (rate limit, network blip, etc.), the route MUST return null without
+    writing to the cache. Otherwise the next request for the same grid
+    would hit a stale negative-cache entry and silently suppress the EXIF
+    suggestion until manual cache cleanup."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+
+    def transient(lat_, lng_, key):
+        raise places.PlacesTransientError("simulated OVER_QUERY_LIMIT")
+
+    monkeypatch.setattr(places, "reverse_geocode", transient)
+
+    lat, lng = 35.6762, 139.6503  # Tokyo — fresh coords
+
+    client = app.test_client()
+    resp = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"place_id": None, "summary": None}
+
+    # The cache MUST NOT have been written. A subsequent request will
+    # retry Google.
+    cached = db.reverse_geocode_cache_get(lat, lng)
+    assert cached is None, (
+        "transient failures must not be cached — the cache row must "
+        "stay absent so the next request retries Google"
+    )
 
 
 def test_reverse_geocode_400_on_invalid_coords(app_and_db):

@@ -1701,7 +1701,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("place_not_found", 404)
 
         db = _get_db()
-        leaf_id = db.upsert_place_chain(details)
+        try:
+            leaf_id = db.upsert_place_chain(details)
+        except RuntimeError as err:
+            # _upsert_one_keyword raises RuntimeError when the parent-chain
+            # build hits an existing keyword of a different type at the same
+            # (name, parent_id). Mirror /api/keywords/<id>/link-place's 409.
+            return jsonify({
+                "error": "name_conflict",
+                "error_detail": str(err),
+            }), 409
         db.set_photo_location(photo_id, leaf_id)
         db.record_edit(
             'location_set',
@@ -1798,7 +1807,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Don't cache here — see docstring.
             return jsonify({"place_id": None, "summary": None})
 
-        details = places.reverse_geocode(lat, lng, key)
+        try:
+            details = places.reverse_geocode(lat, lng, key)
+        except places.PlacesTransientError:
+            # OVER_QUERY_LIMIT / REQUEST_DENIED / network blip — Google
+            # may answer this later, so do NOT cache. Returning null here
+            # just suppresses the EXIF suggestion for this request; the
+            # next request will retry Google.
+            app.logger.warning(
+                "reverse_geocode transient failure for lat=%s lng=%s — not caching",
+                lat, lng,
+            )
+            return jsonify({"place_id": None, "summary": None})
+
         cache_place_id = details.get("place_id") if details else None
         db.reverse_geocode_cache_put(
             lat, lng,

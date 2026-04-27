@@ -9,6 +9,7 @@ patch resolves to the fake.
 
 import io
 import json
+import urllib.error
 
 import pytest
 
@@ -178,3 +179,58 @@ def test_reverse_geocode_parses_response(monkeypatch):
         "latlng=40.7127753,-74.0059728" in url
     )
     assert "key=FAKE_KEY" in url
+
+
+def test_reverse_geocode_returns_none_on_zero_results(monkeypatch):
+    """ZERO_RESULTS is a true no-match — return ``None`` so callers may
+    cache the negative result."""
+    from vireo import places
+
+    monkeypatch.setattr(
+        "vireo.places.urllib.request.urlopen",
+        _make_fake_urlopen({"status": "ZERO_RESULTS"}),
+    )
+
+    assert places.reverse_geocode(0.0, 0.0, "FAKE_KEY") is None
+
+
+def test_reverse_geocode_raises_transient_on_over_query_limit(monkeypatch):
+    """OVER_QUERY_LIMIT is a transient API failure, not a real no-match.
+    Wrapper raises PlacesTransientError so callers can avoid caching."""
+    from vireo import places
+
+    monkeypatch.setattr(
+        "vireo.places.urllib.request.urlopen",
+        _make_fake_urlopen({"status": "OVER_QUERY_LIMIT"}),
+    )
+
+    with pytest.raises(places.PlacesTransientError):
+        places.reverse_geocode(40.0, -73.0, "FAKE_KEY")
+
+
+def test_reverse_geocode_raises_transient_on_request_denied(monkeypatch):
+    """REQUEST_DENIED (e.g. bad key, referrer mismatch) is also transient
+    from the cache's perspective — the user may fix it and retry."""
+    from vireo import places
+
+    monkeypatch.setattr(
+        "vireo.places.urllib.request.urlopen",
+        _make_fake_urlopen({"status": "REQUEST_DENIED"}),
+    )
+
+    with pytest.raises(places.PlacesTransientError):
+        places.reverse_geocode(40.0, -73.0, "FAKE_KEY")
+
+
+def test_reverse_geocode_raises_transient_on_network_failure(monkeypatch):
+    """Transport errors (URLError, socket timeout, malformed JSON) are
+    transient — wrapper raises PlacesTransientError chained from the cause."""
+    from vireo import places
+
+    def boom(url, timeout=10):
+        raise urllib.error.URLError("simulated network failure")
+
+    monkeypatch.setattr("vireo.places.urllib.request.urlopen", boom)
+
+    with pytest.raises(places.PlacesTransientError):
+        places.reverse_geocode(40.0, -73.0, "FAKE_KEY")

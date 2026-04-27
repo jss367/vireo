@@ -145,11 +145,25 @@ def place_details(place_id: str, api_key: str) -> dict | None:
     }
 
 
+class PlacesTransientError(Exception):
+    """Raised by :func:`reverse_geocode` on transient Google API failures
+    (rate limits, request denied, malformed response, network/JSON errors).
+
+    Distinguishes "Google said no match" (return ``None``) from "we couldn't
+    ask Google right now" (raise this) so callers that cache negative
+    results don't poison the cache with transient failures.
+    """
+
+
 def reverse_geocode(lat: float, lng: float, api_key: str) -> dict | None:
     """Reverse-geocode a (lat, lng) pair via the Geocoding API.
 
-    Returns the normalized dict for the first result, or ``None`` if Google
-    has no match / returned an error status.
+    - Returns the normalized dict on success.
+    - Returns ``None`` only when Google reports a true no-match
+      (``ZERO_RESULTS`` / ``NOT_FOUND`` / empty results list).
+    - Raises :class:`PlacesTransientError` on transient failures
+      (``OVER_QUERY_LIMIT``, ``REQUEST_DENIED``, network/JSON errors).
+      Callers that cache results MUST NOT cache when this is raised.
     """
     params = {
         "latlng": f"{lat},{lng}",
@@ -159,15 +173,20 @@ def reverse_geocode(lat: float, lng: float, api_key: str) -> dict | None:
 
     try:
         payload = _get_json(url)
-    except Exception:  # noqa: BLE001 — log + degrade
+    except Exception as e:  # noqa: BLE001 — log + raise transient
         logger.warning(
             "reverse_geocode: HTTP/JSON failure for latlng=%s,%s", lat, lng, exc_info=True
         )
-        return None
+        raise PlacesTransientError("HTTP/JSON failure") from e
 
     status = payload.get("status", "")
-    if not _check_status(status, "reverse_geocode"):
+    if status in _EMPTY_STATUSES:
         return None
+    if status != "OK":
+        # _ERROR_STATUSES (OVER_QUERY_LIMIT, REQUEST_DENIED, INVALID_REQUEST,
+        # UNKNOWN_ERROR) and any other unexpected status are transient.
+        logger.warning("reverse_geocode: Google API returned status=%s", status)
+        raise PlacesTransientError(f"Google API status={status}")
 
     results = payload.get("results") or []
     if not results:
