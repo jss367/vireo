@@ -470,6 +470,12 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_photos_file_hash ON photos(file_hash);
 
             CREATE INDEX IF NOT EXISTS idx_keywords_name ON keywords(name);
+            -- type is low-cardinality (5-value enum) but heavily filtered:
+            -- has_subject rule, filter_out_subject_tagged, backfill_wildlife,
+            -- and the warm-path migration probes all do WHERE type [IN/=] ...
+            -- Without an index those scan the full keywords table on every
+            -- _get_db()-per-request Database instantiation.
+            CREATE INDEX IF NOT EXISTS idx_keywords_type ON keywords(type);
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_photo ON photo_keywords(photo_id);
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_keyword ON photo_keywords(keyword_id);
             CREATE INDEX IF NOT EXISTS idx_photo_color_labels_ws
