@@ -5240,6 +5240,51 @@ def test_weighted_progress_monotonic_through_pipeline():
     assert last_pct == 100.0
 
 
+def test_pipeline_thumbnail_stage_records_thumb_path_in_db(tmp_path, monkeypatch):
+    """Each successful generate_thumbnail in the pipeline thumbnail_stage must
+    set photos.thumb_path so the dashboard's coverage query reflects it.
+    Without this, scanning produces JPEGs on disk but the column stays NULL
+    and "0 of N thumbnails made" is reported forever."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    photo_dir = _make_photo_dir(tmp_path, 3)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    job = _make_job()
+    runner = FakeRunner()
+
+    with contextlib.suppress(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Re-open the DB connection — the pipeline runs on a thread with its
+    # own connection and we want the committed view.
+    db2 = Database(db_path)
+    rows = db2.conn.execute(
+        "SELECT id, thumb_path FROM photos ORDER BY id"
+    ).fetchall()
+    assert len(rows) == 3
+    for r in rows:
+        assert r["thumb_path"] is not None, (
+            f"photo {r['id']} has thumb_path=NULL after pipeline ran"
+        )
+        assert r["thumb_path"] == f"{r['id']}.jpg", (
+            f"thumb_path should be the bare filename '{r['id']}.jpg', "
+            f"got {r['thumb_path']!r}"
+        )
+
+
 def test_update_stages_emits_weighted_current_total():
     """_update_stages must send the weighted overall to push_event instead
     of hardcoded 0/0. This is what makes the 'Overall %' visible in the UI."""

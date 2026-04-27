@@ -18,7 +18,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from db import Database
+from db import Database, commit_with_retry
 
 log = logging.getLogger(__name__)
 
@@ -952,6 +952,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             skipped = 0
             failed = 0
 
+            # Mark photos.thumb_path so the dashboard's coverage query
+            # (`thumb_path IS NOT NULL`) reflects each freshly-generated or
+            # already-cached thumbnail. Batched so the writer lock isn't held
+            # per-row under sustained scan throughput.
+            THUMB_PATH_BATCH = 25
+            pending_thumb_paths = []
+
+            def _flush_thumb_paths():
+                if pending_thumb_paths:
+                    thread_db.conn.executemany(
+                        "UPDATE photos SET thumb_path=? WHERE id=?",
+                        pending_thumb_paths,
+                    )
+                    commit_with_retry(thread_db.conn)
+                    pending_thumb_paths.clear()
+
             while True:
                 try:
                     item = scan_to_thumb.get(timeout=1.0)
@@ -972,8 +988,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         failed += 1
                     elif already_exists:
                         skipped += 1
+                        pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
                     else:
                         generated += 1
+                        pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
+                    if len(pending_thumb_paths) >= THUMB_PATH_BATCH:
+                        _flush_thumb_paths()
                 except Exception:
                     failed += 1
                     log.debug("Thumbnail failed for photo %s", photo_id)
@@ -1025,8 +1045,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             failed += 1
                         elif already_exists:
                             skipped += 1
+                            pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
                         else:
                             generated += 1
+                            pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
+                        if len(pending_thumb_paths) >= THUMB_PATH_BATCH:
+                            _flush_thumb_paths()
                     except Exception:
                         failed += 1
                         log.debug("Thumbnail failed for photo %s", photo_id)
@@ -1045,6 +1069,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         current_file=os.path.basename(photo_path),
                         rate=rate,
                     ))
+
+            # Flush any thumb_path updates from the final partial batch.
+            _flush_thumb_paths()
 
             from thumbnails import format_summary as thumb_summary
             thumb_result = {"generated": generated, "skipped": skipped, "failed": failed}

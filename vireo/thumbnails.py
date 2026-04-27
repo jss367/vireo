@@ -101,17 +101,131 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
             source_path = os.path.join(folder_path, photo["filename"])
         if generate_thumbnail(photo["id"], source_path, cache_dir, size=thumb_size, quality=thumb_quality) is not None:
             generated += 1
+            # Record on-disk presence in the photos table so the dashboard's
+            # coverage query (`thumb_path IS NOT NULL`) reflects this run.
+            # Stored value is the bare filename ({id}.jpg) so the column
+            # stays correct even if the thumbnail cache dir is later moved.
+            db.conn.execute(
+                "UPDATE photos SET thumb_path=? WHERE id=?",
+                (f"{photo['id']}.jpg", photo["id"]),
+            )
         else:
             failed += 1
 
         if progress_callback:
             progress_callback(i + 1, total)
 
+    db.conn.commit()
     if failed:
         log.warning("Thumbnail generation: %d of %d failed", failed, total)
     result = {"generated": generated, "skipped": skipped, "failed": failed}
     result["summary"] = format_summary(result)
     return result
+
+
+def thumb_path_backfill_candidate_count(db, cache_dir):
+    """Count photos that ``backfill_thumb_paths`` would actually update.
+
+    A photo is a candidate when its ``thumb_path`` does not match disk
+    reality:
+
+    * ``thumb_path IS NULL`` but ``<cache_dir>/<id>.jpg`` exists, or
+    * ``thumb_path IS NOT NULL`` but the file no longer exists (drift after
+      a manual cache wipe).
+
+    Used by the startup gate in ``app.py`` to skip spawning a backfill job
+    when nothing needs work, and after a backfill run for "remaining"
+    reporting.
+    """
+    rows = db.conn.execute(
+        "SELECT id, thumb_path FROM photos"
+    ).fetchall()
+    candidates = 0
+    for row in rows:
+        photo_id = row["id"]
+        on_disk = os.path.exists(os.path.join(cache_dir, f"{photo_id}.jpg"))
+        if row["thumb_path"] is None and on_disk or row["thumb_path"] is not None and not on_disk:
+            candidates += 1
+    return candidates
+
+
+def backfill_thumb_paths(db, cache_dir, progress_callback=None,
+                         status_callback=None, cancel_check=None):
+    """Library-wide self-healing pass that aligns ``photos.thumb_path`` with
+    on-disk reality.
+
+    Two corrections:
+
+    * For each photo with ``thumb_path IS NULL`` whose JPEG exists on disk,
+      set ``thumb_path = '<id>.jpg'`` so the dashboard's coverage query
+      reports it. This is the path that fired in production: thumbnails
+      generated before the column was wired up reported 0 forever.
+    * For each photo whose ``thumb_path`` is set but the file is gone,
+      clear the column — otherwise the dashboard claims coverage that no
+      longer exists after a manual cache wipe.
+
+    Returns a summary dict ``{"set": N, "cleared": M, "remaining": K}``.
+
+    Sequential by design — each row is a stat() plus at most one tiny
+    UPDATE, so single-threaded throughput is fine even on tens of
+    thousands of photos.
+    """
+    rows = db.conn.execute(
+        "SELECT id, thumb_path FROM photos"
+    ).fetchall()
+    total = len(rows)
+    if status_callback:
+        status_callback(f"Reconciling thumb_path for {total:,} photos")
+
+    set_count = 0
+    cleared_count = 0
+    BATCH = 500
+    pending_set = []
+    pending_clear = []
+
+    def _flush():
+        if pending_set:
+            db.conn.executemany(
+                "UPDATE photos SET thumb_path=? WHERE id=?",
+                pending_set,
+            )
+            pending_set.clear()
+        if pending_clear:
+            db.conn.executemany(
+                "UPDATE photos SET thumb_path=NULL WHERE id=?",
+                pending_clear,
+            )
+            pending_clear.clear()
+        db.conn.commit()
+
+    for i, row in enumerate(rows):
+        if cancel_check is not None and cancel_check():
+            break
+        photo_id = row["id"]
+        on_disk = os.path.exists(os.path.join(cache_dir, f"{photo_id}.jpg"))
+        if row["thumb_path"] is None and on_disk:
+            pending_set.append((f"{photo_id}.jpg", photo_id))
+            set_count += 1
+        elif row["thumb_path"] is not None and not on_disk:
+            pending_clear.append((photo_id,))
+            cleared_count += 1
+
+        if (len(pending_set) + len(pending_clear)) >= BATCH:
+            _flush()
+        if progress_callback is not None:
+            progress_callback(i + 1, total)
+
+    _flush()
+
+    log.info(
+        "thumb_path backfill: set=%d cleared=%d (of %d photos)",
+        set_count, cleared_count, total,
+    )
+    return {
+        "set": set_count,
+        "cleared": cleared_count,
+        "remaining": thumb_path_backfill_candidate_count(db, cache_dir),
+    }
 
 
 def format_summary(result):

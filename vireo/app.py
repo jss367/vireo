@@ -799,6 +799,89 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     _wc_backfill_timer.daemon = True
     _wc_backfill_timer.start()
 
+    # ----- thumb_path self-healing backfill -----
+    # The dashboard's coverage card counts thumbnails by ``thumb_path IS NOT
+    # NULL``, but for a long stretch the column was never populated by
+    # production code, so libraries with 40k JPEGs cached on disk reported
+    # "0 thumbnails" forever. This pass aligns the column with disk reality
+    # for legacy rows, and clears it for photos whose cached file has since
+    # been deleted (drift correction).
+    #
+    # Same shape as the working-copy backfill above: ephemeral JobRunner
+    # job (so it shows in the bottom panel), never written to job_history,
+    # skipped entirely when a fast count check finds nothing to do.
+    def _kickoff_thumb_path_backfill():
+        from thumbnails import (
+            backfill_thumb_paths,
+            thumb_path_backfill_candidate_count,
+        )
+
+        try:
+            tpdb = Database(db_path)
+            candidate_count = thumb_path_backfill_candidate_count(
+                tpdb, app.config["THUMB_CACHE_DIR"],
+            )
+        except Exception:
+            log.exception("thumb_path backfill: candidate check failed")
+            return
+        if candidate_count == 0:
+            log.debug("thumb_path backfill: no candidates, skipping")
+            return
+
+        runner = app._job_runner
+        cache_dir = app.config["THUMB_CACHE_DIR"]
+
+        def work(job):
+            thread_db = Database(db_path)
+            active_ws = init_db._active_workspace_id
+            if active_ws is not None:
+                thread_db.set_active_workspace(active_ws)
+
+            def progress_cb(current, total):
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                runner.push_event(
+                    job["id"],
+                    "progress",
+                    {
+                        "current": current,
+                        "total": total,
+                        "phase": f"{current:,} / {total:,} photos reconciled",
+                    },
+                )
+
+            def status_cb(message):
+                runner.push_event(job["id"], "progress", {
+                    "phase": message,
+                    "current": job["progress"].get("current", 0),
+                    "total": job["progress"].get("total", 0),
+                })
+
+            def cancel_check():
+                return runner.is_cancelled(job["id"])
+
+            return backfill_thumb_paths(
+                thread_db, cache_dir,
+                progress_callback=progress_cb,
+                status_callback=status_cb,
+                cancel_check=cancel_check,
+            )
+
+        try:
+            runner.start(
+                "thumb_path_backfill", work,
+                ephemeral=True,
+                config={"trigger": "startup"},
+            )
+        except Exception:
+            log.exception("Failed to start thumb_path backfill job")
+
+    app._kickoff_thumb_path_backfill = _kickoff_thumb_path_backfill
+
+    _thumb_backfill_timer = threading.Timer(6.0, _kickoff_thumb_path_backfill)
+    _thumb_backfill_timer.daemon = True
+    _thumb_backfill_timer.start()
+
     # -- Page routes --
 
     @app.route("/")
