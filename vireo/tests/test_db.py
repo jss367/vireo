@@ -6903,6 +6903,54 @@ def test_backfill_auto_wildlife_for_existing_species_tagged_photos(tmp_path):
     assert has_wildlife(p3) is False
 
 
+def test_backfill_wildlife_genre_matches_legacy_is_species_rows(tmp_path):
+    """Regression: on upgraded DBs, species rows can carry legacy
+    ``is_species=1`` but a non-taxonomy ``type`` (e.g. NULL, 'general')
+    until the background ``mark_species_keywords`` pass retypes them.
+
+    The backfill runs at startup before that pass, so a query that joined
+    only on ``type='taxonomy'`` matched zero rows yet still wrote the
+    one-shot marker — and never re-ran. The backfill must also match
+    ``is_species=1`` so upgraded photos get Wildlife on first startup,
+    independent of background normalization timing.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    # Force a legacy-shaped species keyword via direct SQL: is_species=1
+    # but type='general' (the shape an upgraded DB has before the
+    # background mark_species_keywords pass converts type to 'taxonomy').
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 1)",
+        ("Robin",),
+    )
+    sp = cur.lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, sp),
+    )
+    db.conn.commit()
+
+    db.backfill_wildlife_genre()
+
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    has_wildlife = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is True, (
+        "Backfill must match is_species=1 rows so upgraded DBs get Wildlife "
+        "added on first startup, even before mark_species_keywords retypes "
+        "legacy species keywords to type='taxonomy'."
+    )
+
+
 def test_tag_photo_no_op_re_tag_does_not_re_add_removed_wildlife(tmp_path):
     """Regression: re-tagging an already-tagged species (a no-op INSERT OR
     IGNORE) must NOT re-fire the auto-Wildlife rule, so user-removed

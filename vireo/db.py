@@ -3585,13 +3585,20 @@ class Database:
     _WILDLIFE_BACKFILL_DONE_KEY = "wildlife_backfill_done"
 
     def backfill_wildlife_genre(self, force=False):
-        """One-shot backfill: every photo that has at least one taxonomy
+        """One-shot backfill: every photo that has at least one species
         keyword AND no Wildlife genre keyword gets Wildlife added.
 
         Gated by a db_meta marker so it runs at most once per database.
         Re-running unconditionally would clobber sticky-removed Wildlife rows
         (a user who intentionally removed Wildlife from a species-tagged
         photo would see it re-added on the next app restart).
+
+        Matches keywords by ``type='taxonomy' OR is_species=1`` so the backfill
+        works on upgraded databases whose species rows still carry legacy
+        ``is_species=1`` but have not yet been retyped to ``taxonomy`` by the
+        background ``mark_species_keywords`` pass. Without that, the backfill
+        could write the one-shot marker after matching zero rows and never
+        run again, leaving species photos un-Wildlife'd.
 
         Args:
             force: re-run even if the marker is set. Used by tests; not for
@@ -3610,7 +3617,7 @@ class Database:
                SELECT DISTINCT pk.photo_id, ?
                FROM photo_keywords pk
                JOIN keywords k ON k.id = pk.keyword_id
-               WHERE k.type = 'taxonomy'""",
+               WHERE k.type = 'taxonomy' OR k.is_species = 1""",
             (wildlife_id,),
         )
         self.set_meta(self._WILDLIFE_BACKFILL_DONE_KEY, "1", _commit=False)
