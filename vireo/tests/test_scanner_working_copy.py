@@ -9,6 +9,46 @@ def _make_jpeg(path, width, height):
     img.save(path, "JPEG", quality=85)
 
 
+def _wait_for_backfill_terminal(runner, timeout=60.0, poll=0.05):
+    """Poll runner.list_jobs() until a working_copy_backfill job appears
+    and reaches a terminal status (``completed`` / ``failed``). Returns
+    the job dict.
+
+    Generous default timeout because full-suite test runs accumulate
+    daemon threads, write-lock contention, and FS pressure that can
+    stretch an otherwise sub-second backfill past tighter deadlines —
+    causing order-dependent flakes (passes in isolation, fails after
+    2k+ tests have run). Successful runs return immediately on the
+    poll-rate cadence; the timeout only matters on actual hangs.
+
+    Distinguishes "job never appeared" from "job never completed" so
+    failures point at the right cause.
+    """
+    import time
+    deadline = time.time() + timeout
+    last_seen = None
+    while time.time() < deadline:
+        backfill_jobs = [
+            j for j in runner.list_jobs()
+            if j["type"] == "working_copy_backfill"
+        ]
+        if backfill_jobs:
+            last_seen = backfill_jobs[0]
+            if last_seen["status"] in ("completed", "failed"):
+                return last_seen
+        time.sleep(poll)
+    if last_seen is None:
+        raise AssertionError(
+            f"working_copy_backfill job never appeared in runner.list_jobs() "
+            f"within {timeout}s — kickoff likely never fired"
+        )
+    raise AssertionError(
+        f"working_copy_backfill job appeared but did not reach terminal "
+        f"status within {timeout}s; last seen status="
+        f"{last_seen.get('status')!r}"
+    )
+
+
 def test_extract_working_copy_for_large_jpeg(tmp_path, monkeypatch):
     """A JPEG larger than working_copy_max_size gets a working copy created."""
     import config as cfg
@@ -1059,7 +1099,6 @@ def test_startup_backfill_runs_when_candidates_exist(tmp_path, monkeypatch):
     that produces the working copy and completes successfully.
     """
     import os
-    import time
 
     import config as cfg
     import models
@@ -1096,20 +1135,7 @@ def test_startup_backfill_runs_when_candidates_exist(tmp_path, monkeypatch):
     app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir), api_token="t")
     app._kickoff_working_copy_backfill()
 
-    runner = app._job_runner
-    deadline = time.time() + 5
-    job = None
-    while time.time() < deadline:
-        backfill_jobs = [
-            j for j in runner.list_jobs()
-            if j["type"] == "working_copy_backfill"
-        ]
-        if backfill_jobs and backfill_jobs[0]["status"] in ("completed", "failed"):
-            job = backfill_jobs[0]
-            break
-        time.sleep(0.05)
-
-    assert job is not None, "backfill job should have been started"
+    job = _wait_for_backfill_terminal(app._job_runner)
     assert job["status"] == "completed", f"job: {job}"
     assert job.get("ephemeral") is True
 
@@ -1130,7 +1156,6 @@ def test_startup_backfill_does_not_persist_to_history(tmp_path, monkeypatch):
     Otherwise every restart adds a noise row.
     """
     import os
-    import time
 
     import config as cfg
     import models
@@ -1167,16 +1192,7 @@ def test_startup_backfill_does_not_persist_to_history(tmp_path, monkeypatch):
     app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir), api_token="t")
     app._kickoff_working_copy_backfill()
 
-    runner = app._job_runner
-    deadline = time.time() + 5
-    while time.time() < deadline:
-        backfill_jobs = [
-            j for j in runner.list_jobs()
-            if j["type"] == "working_copy_backfill"
-        ]
-        if backfill_jobs and backfill_jobs[0]["status"] in ("completed", "failed"):
-            break
-        time.sleep(0.05)
+    _wait_for_backfill_terminal(app._job_runner)
 
     db2 = Database(db_path)
     rows = db2.conn.execute(
