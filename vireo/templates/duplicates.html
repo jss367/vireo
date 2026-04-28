@@ -710,9 +710,14 @@
           var trashed = trashData.trashed || 0;
           var trashFailed = (trashData.failed || []).length;
           var msg = 'Resolved ' + resolved.length + ', moved ' + trashed + ' to Trash';
-          if (trashFailed) msg += ', ' + trashFailed + ' trash failed';
+          if (trashFailed) msg += ', ' + trashFailed + ' trash failed — rescan to retry';
           if (skippedCount) msg += ', ' + skippedCount + ' skipped';
           showToast(msg, trashFailed ? 'error' : 'success');
+          // Partial trash failure: some files are still on disk while their
+          // DB rows have been rejected. Skip the local prune so the bucket
+          // card stays visible — otherwise the user has no in-page signal
+          // that those files still need cleanup.
+          if (trashFailed) trashCallFailed = true;
         } catch (e) {
           // Trash call failed entirely — DB is resolved but the duplicate
           // files are still on disk. Surface this and skip the local prune
