@@ -28,6 +28,16 @@ def _add(db, folder_id, filename, file_hash=None, file_mtime=100.0, rating=0):
     return pid
 
 
+def _touch(folder, filename):
+    """Materialize ``filename`` inside ``folder`` so the existence check in
+    ``bulk_resolve_by_folder`` doesn't trip. Tests that exercise the
+    'keep_folder candidate missing on disk' branch deliberately skip this.
+    """
+    p = folder / filename
+    p.write_bytes(b"x")
+    return p
+
+
 def _reset_flags(db, file_hash):
     db.conn.execute(
         "UPDATE photos SET flag = 'none' WHERE file_hash = ?", (file_hash,)
@@ -57,6 +67,8 @@ def test_bulk_resolve_single_hash_picks_photo_in_keep_folder(tmp_path):
     b_fid = db.add_folder(str(b_dir))
     p_a = _add(db, a_fid, "owl.jpg", file_hash="HBR1")
     p_b = _add(db, b_fid, "owl.jpg", file_hash="HBR1")
+    _touch(a_dir, "owl.jpg")
+    _touch(b_dir, "owl.jpg")
     _reset_flags(db, "HBR1")  # make group unresolved
 
     result = db.bulk_resolve_by_folder(["HBR1"], str(b_dir))
@@ -83,6 +95,8 @@ def test_bulk_resolve_multiple_hashes_share_keep_folder(tmp_path):
     for h, name in [("H1", "owl.jpg"), ("H2", "hawk.jpg"), ("H3", "finch.jpg")]:
         p_a = _add(db, a_fid, name, file_hash=h)
         p_b = _add(db, b_fid, name, file_hash=h)
+        _touch(a_dir, name)
+        _touch(b_dir, name)
         _reset_flags(db, h)
         pairs.append((h, p_a, p_b))
 
@@ -116,6 +130,10 @@ def test_bulk_resolve_skips_hash_with_no_photo_in_keep_folder(tmp_path):
     h1_b = _add(db, b_fid, "owl.jpg", file_hash="H1")
     h2_b = _add(db, b_fid, "hawk.jpg", file_hash="H2")
     h2_c = _add(db, c_fid, "hawk.jpg", file_hash="H2")
+    _touch(a_dir, "owl.jpg")
+    _touch(b_dir, "owl.jpg")
+    _touch(b_dir, "hawk.jpg")
+    _touch(c_dir, "hawk.jpg")
     _reset_flags(db, "H1")
     _reset_flags(db, "H2")
 
@@ -213,6 +231,8 @@ def test_bulk_resolve_merges_metadata_onto_forced_winner(tmp_path):
     # Winner has rating=2; loser has rating=5. Bulk-resolve should merge to 5.
     p_a = _add(db, a_fid, "owl.jpg", file_hash="HMERGE", rating=2)
     p_b = _add(db, b_fid, "owl.jpg", file_hash="HMERGE", rating=5)
+    _touch(a_dir, "owl.jpg")
+    _touch(b_dir, "owl.jpg")
     _reset_flags(db, "HMERGE")
 
     db.bulk_resolve_by_folder(["HMERGE"], str(a_dir))
@@ -221,3 +241,59 @@ def test_bulk_resolve_merges_metadata_onto_forced_winner(tmp_path):
         "SELECT rating FROM photos WHERE id = ?", (p_a,)
     ).fetchone()
     assert row["rating"] == 5
+
+
+def test_bulk_resolve_skips_when_keep_folder_candidate_missing_on_disk(tmp_path):
+    """If the keep_folder row points at a file that's been deleted externally,
+    skip the hash rather than promoting a missing winner. Force-rejecting the
+    surviving sibling in another folder, followed by the chained
+    delete-loser-files, would otherwise trash the only remaining copy."""
+    db = Database(str(tmp_path / "t.db"))
+    a_dir = tmp_path / "a"
+    b_dir = tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    a_fid = db.add_folder(str(a_dir))
+    b_fid = db.add_folder(str(b_dir))
+    p_a = _add(db, a_fid, "owl.jpg", file_hash="HGONE")
+    p_b = _add(db, b_fid, "owl.jpg", file_hash="HGONE")
+    # Only the /b copy exists on disk; the /a row is stale.
+    _touch(b_dir, "owl.jpg")
+    _reset_flags(db, "HGONE")
+
+    result = db.bulk_resolve_by_folder(["HGONE"], str(a_dir))
+
+    assert result["resolved"] == []
+    assert result["skipped"] == [
+        {"file_hash": "HGONE", "reason": "keep_folder candidate missing on disk"}
+    ]
+    # Both rows untouched — the surviving /b file MUST remain selectable.
+    assert _flags(db, [p_a, p_b]) == {p_a: "none", p_b: "none"}
+
+
+def test_bulk_resolve_skips_when_all_keep_folder_candidates_missing(tmp_path):
+    """Same protection when there are multiple stale rows in keep_folder:
+    don't fall through to the resolver and pick a missing winner."""
+    db = Database(str(tmp_path / "t.db"))
+    a_dir = tmp_path / "a"
+    b_dir = tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    a_fid = db.add_folder(str(a_dir))
+    b_fid = db.add_folder(str(b_dir))
+    p_a1 = _add(db, a_fid, "owl.jpg", file_hash="HALLGONE")
+    p_a2 = _add(db, a_fid, "owl-2.jpg", file_hash="HALLGONE")
+    p_b = _add(db, b_fid, "owl.jpg", file_hash="HALLGONE")
+    # Neither /a copy on disk; only /b survives.
+    _touch(b_dir, "owl.jpg")
+    _reset_flags(db, "HALLGONE")
+
+    result = db.bulk_resolve_by_folder(["HALLGONE"], str(a_dir))
+
+    assert result["resolved"] == []
+    assert result["skipped"] == [
+        {"file_hash": "HALLGONE", "reason": "keep_folder candidate missing on disk"}
+    ]
+    assert _flags(db, [p_a1, p_a2, p_b]) == {
+        p_a1: "none", p_a2: "none", p_b: "none",
+    }

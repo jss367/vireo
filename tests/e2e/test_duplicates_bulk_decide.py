@@ -10,7 +10,12 @@ from playwright.sync_api import expect
 def _seed_scan_with_buckets(db, folder_a, folder_b, n_groups=3):
     """Insert a synthetic scan result with one bucket of N groups, all
     sharing the same {folder_a, folder_b} parent-dir set."""
-    # Need real DB rows so the bulk-resolve API can find candidates.
+    # Need real DB rows so the bulk-resolve API can find candidates, and
+    # real on-disk files so bulk_resolve_by_folder's existence guard
+    # doesn't skip the hashes.
+    import os
+    os.makedirs(folder_a, exist_ok=True)
+    os.makedirs(folder_b, exist_ok=True)
     a_fid = db.add_folder(folder_a)
     b_fid = db.add_folder(folder_b)
     proposals = []
@@ -18,6 +23,10 @@ def _seed_scan_with_buckets(db, folder_a, folder_b, n_groups=3):
     for i in range(n_groups):
         h = f"BULK{i}"
         name = f"photo{i}.jpg"
+        with open(os.path.join(folder_a, name), "wb") as fh:
+            fh.write(b"x")
+        with open(os.path.join(folder_b, name), "wb") as fh:
+            fh.write(b"x")
         p_a = db.add_photo(folder_id=a_fid, filename=name, extension=".jpg",
                            file_size=1000, file_mtime=100.0, file_hash=h)
         p_b = db.add_photo(folder_id=b_fid, filename=name, extension=".jpg",

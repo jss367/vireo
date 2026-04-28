@@ -728,6 +728,22 @@
           group_count: keptHashes.length,
         });
       });
+      // renderResults reads stored aggregate counters in preference to
+      // counting from proposals, so recompute them here. Without this the
+      // summary bar still reports the pre-bulk-resolve totals (e.g. "Extras
+      // to reject" stays at the original count even after groups are gone).
+      // Mirrors the sums in vireo/duplicate_scan.py.
+      var prunedProposals = _lastScanResult.proposals;
+      _lastScanResult.group_count = prunedProposals.length;
+      _lastScanResult.loser_count = prunedProposals.reduce(function(n, p) {
+        return p.status === 'unresolved' ? n + (p.losers || []).length : n;
+      }, 0);
+      _lastScanResult.resolved_group_count = prunedProposals.reduce(function(n, p) {
+        return p.status === 'resolved' ? n + 1 : n;
+      }, 0);
+      _lastScanResult.resolved_loser_count = prunedProposals.reduce(function(n, p) {
+        return p.status === 'resolved' ? n + (p.losers || []).length : n;
+      }, 0);
       renderResults(_lastScanResult);
     } catch (e) {
       card.classList.remove('applying');
