@@ -6956,25 +6956,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error("paths must be a list of non-empty strings")
 
         db = _get_db()
-        # Look up known paths in one query rather than once-per-path.
-        # JOIN workspace_folders so paths that exist in another workspace
-        # are treated as unknown — without this gate, a caller could probe
-        # cross-workspace paths via the OS-window-opens side channel,
-        # breaking the same isolation /api/files/reveal already enforces.
-        placeholders = ",".join("?" * len(paths))
-        known_rows = db.conn.execute(
-            f"""SELECT f.path FROM folders f
-                JOIN workspace_folders wf ON wf.folder_id = f.id
-                WHERE wf.workspace_id = ? AND f.path IN ({placeholders})""",
-            [db._active_workspace_id, *paths],
+        # Normalize on read so legacy/relocated rows stored with a
+        # trailing separator still match bucket-UI paths derived from
+        # ``os.path.dirname(...)`` — same trap bulk_resolve_by_folder
+        # patched. JOIN workspace_folders so paths from other workspaces
+        # are treated as unknown (without this gate the endpoint would
+        # be a cross-workspace path oracle / open-action gadget).
+        norm_paths = [os.path.normpath(p) for p in paths]
+        all_rows = db.conn.execute(
+            """SELECT f.path FROM folders f
+               JOIN workspace_folders wf ON wf.folder_id = f.id
+               WHERE wf.workspace_id = ?""",
+            (db._active_workspace_id,),
         ).fetchall()
-        known = {r["path"] for r in known_rows}
+        known_norm = {os.path.normpath(r["path"]) for r in all_rows}
 
         revealed = []
         skipped = []
         failed = []
-        for path in paths:
-            if path not in known:
+        for path, norm in zip(paths, norm_paths, strict=True):
+            if norm not in known_norm:
                 skipped.append({"path": path, "reason": "not a known folder"})
                 continue
             try:

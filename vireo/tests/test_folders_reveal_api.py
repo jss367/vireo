@@ -163,6 +163,30 @@ def test_folders_reveal_non_zero_exit_reports_failure(app_and_db):
         assert "reason" in body["failed"][0]
 
 
+def test_folders_reveal_normalizes_path_trailing_slash(app_and_db):
+    """The bucket UI passes folders derived from ``os.path.dirname(...)`` —
+    never trailing-slashed. ``folders.path`` rows can carry a trailing
+    separator from manual relocation or legacy imports. A naive string
+    compare silently treats those as unknown and Reveal in Finder
+    becomes a no-op for affected users — same trap that
+    bulk_resolve_by_folder fell into."""
+    app, db = app_and_db
+    # Folder stored WITH trailing slash.
+    _seed_folder(db, "/tmp/dupreveal_slash/")
+
+    with app.test_client() as c, \
+         patch("vireo.app.sys.platform", "darwin"), \
+         patch("vireo.app.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0)
+        # Caller passes the un-slashed form (the form the bucket UI derives).
+        resp = c.post("/api/folders/reveal",
+                      json={"paths": ["/tmp/dupreveal_slash"]})
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["revealed"] == ["/tmp/dupreveal_slash"]
+        assert body["skipped"] == []
+
+
 def test_folders_reveal_validates_inputs(app_and_db):
     """Missing body / empty list / non-string entries → 400."""
     app, _ = app_and_db

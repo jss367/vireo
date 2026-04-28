@@ -386,6 +386,12 @@
           showProgress(msg);
         },
         onComplete: function(evt) {
+          // Clear the in-progress flag at every terminal scan state.
+          // Without this, a later bulk-resolve's renderResults guard
+          // (``if (!_scanInProgress)``) would block forever after the
+          // first scan, and the just-resolved bucket card never
+          // disappears from the page.
+          _scanInProgress = false;
           if (evt.status === 'completed') {
             renderResults(evt.result || {});
           } else if (evt.status === 'cancelled') {
@@ -402,12 +408,14 @@
           }
         },
         onError: function() {
+          _scanInProgress = false;
           hideProgress();
           scanBtn.disabled = false;
           setEmptyVisible(true);
         },
       });
     } catch (e) {
+      _scanInProgress = false;
       hideProgress();
       scanBtn.disabled = false;
       setEmptyVisible(true);
