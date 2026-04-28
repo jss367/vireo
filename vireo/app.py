@@ -6927,6 +6927,134 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             total_rejected += result.get("rejected", 0)
         return jsonify({"rejected_count": total_rejected})
 
+    @app.route("/api/folders/reveal", methods=["POST"])
+    def api_folders_reveal():
+        """Reveal a batch of folder paths in the OS file manager.
+
+        Body: ``{"paths": [str, ...]}``. Backs the bulk-decide UI's
+        "Reveal in Finder" button, which opens every folder in a bucket
+        with a single click.
+
+        Each path must exist as a row in the ``folders`` table — refusing
+        arbitrary filesystem paths is the security boundary, otherwise
+        a malicious caller could probe paths via the side-channel of
+        whether the OS file manager opened. Unknown paths are returned
+        in ``skipped`` rather than 404'd so a single bad path doesn't
+        kill a bucket-wide batch.
+
+        Returns ``{"ok": True, "revealed": [str], "skipped":
+        [{"path", "reason"}], "failed": [{"path", "reason"}]}``.
+        """
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("paths required")
+        paths = body.get("paths")
+        if not isinstance(paths, list) or not paths:
+            return json_error("paths required")
+        for p in paths:
+            if not isinstance(p, str) or not p:
+                return json_error("paths must be a list of non-empty strings")
+
+        db = _get_db()
+        # Validate every path against the ``folders`` table — refusing
+        # arbitrary filesystem paths is the security boundary, otherwise
+        # a caller could probe disk via the OS-window-opens side channel.
+        # Don't gate on workspace_folders: duplicate scans are
+        # library-wide (file_hash is global), so a bucket can legitimately
+        # surface folders linked only to another workspace, and Vireo is
+        # a single-user app where workspaces are organizational rather
+        # than access-bound.
+        # Normalize both sides so legacy/relocated rows stored with a
+        # trailing separator still match bucket-UI paths derived from
+        # ``os.path.dirname(...)`` — same trap bulk_resolve_by_folder
+        # patched.
+        norm_paths = [os.path.normpath(p) for p in paths]
+        all_rows = db.conn.execute("SELECT path FROM folders").fetchall()
+        known_norm = {os.path.normpath(r["path"]) for r in all_rows}
+
+        revealed = []
+        skipped = []
+        failed = []
+        for path, norm in zip(paths, norm_paths, strict=True):
+            if norm not in known_norm:
+                skipped.append({"path": path, "reason": "not a known folder"})
+                continue
+            try:
+                if sys.platform == "darwin":
+                    proc = subprocess.run(["open", "-R", "--", path],
+                                          timeout=5, check=False)
+                elif sys.platform.startswith("win"):
+                    # Folder reveal opens the folder itself (no /select,)
+                    # so the user sees its contents.
+                    proc = subprocess.run(["explorer", path],
+                                          timeout=5, check=False)
+                else:
+                    # xdg-open doesn't honor `--`; abspath guarantees a
+                    # leading slash so a crafted leading-dash path can't
+                    # be parsed as a flag.
+                    proc = subprocess.run(
+                        ["xdg-open", os.path.abspath(path)],
+                        timeout=5, check=False,
+                    )
+                # check=False returns a CompletedProcess for every exit
+                # code; classify non-zero as failed so the UI doesn't
+                # report success when nothing actually opened (e.g.
+                # unmounted volume, stale path).
+                if proc.returncode != 0:
+                    failed.append({
+                        "path": path,
+                        "reason": f"reveal command exited {proc.returncode}",
+                    })
+                else:
+                    revealed.append(path)
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+                failed.append({"path": path, "reason": str(exc)})
+
+        return jsonify({
+            "ok": True,
+            "revealed": revealed,
+            "skipped": skipped,
+            "failed": failed,
+        })
+
+    @app.route("/api/duplicates/bulk-resolve", methods=["POST"])
+    def api_duplicates_bulk_resolve():
+        """Force-resolve a batch of duplicate groups by keeping the photo
+        whose folder matches ``keep_folder``.
+
+        Body: ``{"file_hashes": [str, ...], "keep_folder": str}``. For each
+        hash, the photo in ``keep_folder`` becomes the kept winner; every
+        other non-rejected photo sharing the hash becomes rejected, with
+        rating/keywords merged onto the winner.
+
+        Returns ``{"ok": True, "resolved_count": int, "resolved":
+        [{"file_hash", "winner_id", "loser_ids"}], "skipped":
+        [{"file_hash", "reason"}]}``. ``loser_ids`` is surfaced so the UI
+        can chain into ``/api/duplicates/delete-loser-files`` when the
+        user opted in to immediate trash.
+        """
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("file_hashes and keep_folder required")
+        file_hashes = body.get("file_hashes")
+        keep_folder = body.get("keep_folder")
+        if not isinstance(file_hashes, list) or not file_hashes:
+            return json_error("file_hashes required")
+        if not isinstance(keep_folder, str) or not keep_folder:
+            return json_error("keep_folder required")
+        for h in file_hashes:
+            if not isinstance(h, str) or not h:
+                return json_error("file_hashes must be a list of non-empty strings")
+
+        db = _get_db()
+        result = db.bulk_resolve_by_folder(file_hashes, keep_folder)
+        return jsonify({
+            "ok": True,
+            "resolved_count": len(result["resolved"]),
+            "resolved": result["resolved"],
+            "skipped": result["skipped"],
+        })
+
     @app.route("/api/duplicates/delete-loser-files", methods=["POST"])
     def api_duplicates_delete_loser_files():
         """Move duplicate loser files to OS Trash and remove their DB rows.
