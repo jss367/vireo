@@ -76,10 +76,42 @@ def test_duplicates_page_renders_bulk_decide_section(live_server, page):
     expect(bucket).to_contain_text("3")
     expect(bucket).to_contain_text(folder_a)
     expect(bucket).to_contain_text(folder_b)
-    # One button per folder, labeled with the folder's basename.
-    keep_buttons = bucket.locator(".keep-btn")
+    # One Keep button per folder + one Reveal button. Use the negation
+    # selector so the count test isolates "Keep" buttons from "Reveal".
+    keep_buttons = bucket.locator(".keep-btn:not(.reveal-btn)")
     expect(keep_buttons).to_have_count(2)
     expect(keep_buttons.nth(0)).to_contain_text("for all 3")
+    expect(bucket.locator(".reveal-btn")).to_have_count(1)
+
+
+def test_duplicates_bulk_decide_reveal_in_finder_posts_bucket_folders(live_server, page):
+    """The 'Reveal in Finder' button posts the bucket's folder list to
+    /api/folders/reveal. We intercept the request rather than letting it
+    actually launch Finder windows in a CI/test environment."""
+    folder_a, folder_b = "/tmp/dupbulkrevealA", "/tmp/dupbulkrevealB"
+    _seed_scan_with_buckets(live_server["db"], folder_a, folder_b, n_groups=2)
+
+    # Stub /api/folders/reveal so the test doesn't actually shell out.
+    captured = {}
+
+    def handle(route):
+        req = route.request
+        captured["body"] = req.post_data_json
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='{"ok": true, "revealed": ["' + folder_a + '", "' + folder_b +
+                 '"], "skipped": [], "failed": []}',
+        )
+
+    page.route("**/api/folders/reveal", handle)
+    page.goto(f"{live_server['url']}/duplicates")
+    expect(page.locator(".bucket-card")).to_have_count(1)
+
+    page.locator(".bucket-card .reveal-btn").click()
+    # Locator-style waiting: the request body should land before this returns.
+    expect(page.locator(".bucket-card")).to_have_count(1)  # still there
+    assert captured.get("body", {}).get("paths") == sorted([folder_a, folder_b])
 
 
 def test_duplicates_bulk_decide_keep_folder_resolves_all_groups(live_server, page):
@@ -97,7 +129,8 @@ def test_duplicates_bulk_decide_keep_folder_resolves_all_groups(live_server, pag
     expect(page.locator(".bucket-card")).to_have_count(1)
 
     # Pick the /a button (index 0; folders are sorted alphabetically).
-    page.locator(".keep-btn").first.click()
+    # Filter out the Reveal button so we click a Keep button.
+    page.locator(".keep-btn:not(.reveal-btn)").first.click()
 
     # Bucket gone post-resolution.
     expect(page.locator(".bucket-card")).to_have_count(0)
