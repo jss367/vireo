@@ -119,6 +119,16 @@ def _build_resolved_proposal(db, group):
         # will surface it again on the next scan.
         return None
 
+    # Auto-reopen: if the kept file is gone but a rejected sibling still
+    # exists on disk, the DB-frozen winner is now a ghost while a survivor
+    # is sitting unhandled. Un-reject the group and rebuild as unresolved
+    # so Rule 0 (present beats missing) promotes the survivor.
+    if not info_by_id[kept[0]["id"]]["exists"] and any(
+        info_by_id[r["id"]]["exists"] for r in rejected
+    ):
+        db.reopen_duplicate_group(group["file_hash"])
+        return _build_unresolved_proposal(db, group)
+
     candidates = [
         DupCandidate(id=r["id"], path=info_by_id[r["id"]]["path"],
                      mtime=r["file_mtime"] or 0.0,

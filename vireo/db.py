@@ -1973,6 +1973,22 @@ class Database:
             "rejected": len(loser_ids),
         }
 
+    def reopen_duplicate_group(self, file_hash):
+        """Un-reject all rejected rows sharing this file_hash.
+
+        Used by the duplicate scan when the kept file has gone missing on
+        disk but a rejected sibling still exists — clearing the rejection
+        lets the next proposal pass run Rule 0 and promote the survivor.
+        Returns the number of rows un-rejected.
+        """
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE photos SET flag = 'none' "
+                "WHERE file_hash = ? AND flag = 'rejected'",
+                (file_hash,),
+            )
+            return cur.rowcount
+
     # Columns to return in photo list queries (excludes large fields)
     PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
                     timestamp, width, height, rating, flag, thumb_path, sharpness,
