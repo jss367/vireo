@@ -535,15 +535,22 @@ def test_last_scan_picks_most_recent_completed(app_and_db):
     assert "HOLD" in hashes  # still present in the library
 
 
-def test_bulk_resolve_endpoint_resolves_by_folder(app_and_db):
+def test_bulk_resolve_endpoint_resolves_by_folder(app_and_db, tmp_path):
     """POST /api/duplicates/bulk-resolve forces winners by keep_folder for
     every supplied hash and returns a summary."""
     app, db = app_and_db
-    a_fid = db.add_folder("/tmp/dupbulka")
-    b_fid = db.add_folder("/tmp/dupbulkb")
-    # Seed three groups with one file in each folder.
+    a_dir = tmp_path / "dupbulka"
+    b_dir = tmp_path / "dupbulkb"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    a_fid = db.add_folder(str(a_dir))
+    b_fid = db.add_folder(str(b_dir))
+    # Seed three groups with one file in each folder. Real on-disk files so
+    # the existence guard in bulk_resolve_by_folder is satisfied.
     pairs = []
     for h, name in [("HBA1", "owl.jpg"), ("HBA2", "hawk.jpg"), ("HBA3", "finch.jpg")]:
+        (a_dir / name).write_bytes(b"x")
+        (b_dir / name).write_bytes(b"x")
         p_a = db.add_photo(folder_id=a_fid, filename=name, extension=".jpg",
                            file_size=1000, file_mtime=100.0, file_hash=h)
         p_b = db.add_photo(folder_id=b_fid, filename=name, extension=".jpg",
@@ -554,7 +561,7 @@ def test_bulk_resolve_endpoint_resolves_by_folder(app_and_db):
 
     resp = app.test_client().post("/api/duplicates/bulk-resolve", json={
         "file_hashes": ["HBA1", "HBA2", "HBA3"],
-        "keep_folder": "/tmp/dupbulkb",
+        "keep_folder": str(b_dir),
     })
     assert resp.status_code == 200
     body = resp.get_json()
@@ -577,18 +584,25 @@ def test_bulk_resolve_endpoint_resolves_by_folder(app_and_db):
     assert surfaced_loser_ids == sorted(p_a for _, p_a, _ in pairs)
 
 
-def test_bulk_resolve_endpoint_skips_hash_with_no_candidate_in_folder(app_and_db):
+def test_bulk_resolve_endpoint_skips_hash_with_no_candidate_in_folder(app_and_db, tmp_path):
     """A hash whose candidates all live outside keep_folder is reported in
     skipped, not as a fatal error — the rest of the batch still resolves."""
     app, db = app_and_db
-    a_fid = db.add_folder("/tmp/dupbulkskipa")
-    b_fid = db.add_folder("/tmp/dupbulkskipb")
-    c_fid = db.add_folder("/tmp/dupbulkskipc")
+    a_dir = tmp_path / "dupbulkskipa"
+    b_dir = tmp_path / "dupbulkskipb"
+    c_dir = tmp_path / "dupbulkskipc"
+    for d in (a_dir, b_dir, c_dir):
+        d.mkdir()
+    a_fid = db.add_folder(str(a_dir))
+    b_fid = db.add_folder(str(b_dir))
+    c_fid = db.add_folder(str(c_dir))
+    folder_by_id = {a_fid: a_dir, b_fid: b_dir, c_fid: c_dir}
     # Distinct filenames per group so the UNIQUE(folder_id, filename) on
     # photos doesn't collide when both groups share folder /b.
     for h, fids, name in [("OK", (a_fid, b_fid), "ok.jpg"),
                           ("SKIP", (b_fid, c_fid), "skip.jpg")]:
         for fid in fids:
+            (folder_by_id[fid] / name).write_bytes(b"x")
             db.add_photo(folder_id=fid, filename=name, extension=".jpg",
                          file_size=1000, file_mtime=100.0, file_hash=h)
         db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash=?", (h,))
@@ -596,7 +610,7 @@ def test_bulk_resolve_endpoint_skips_hash_with_no_candidate_in_folder(app_and_db
 
     resp = app.test_client().post("/api/duplicates/bulk-resolve", json={
         "file_hashes": ["OK", "SKIP"],
-        "keep_folder": "/tmp/dupbulkskipa",
+        "keep_folder": str(a_dir),
     })
     assert resp.status_code == 200
     body = resp.get_json()

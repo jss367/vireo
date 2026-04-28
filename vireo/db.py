@@ -1997,6 +1997,10 @@ class Database:
         - ``"fewer than 2 candidates"`` — only one row left, nothing to do
         - ``"no candidate in keep_folder"`` — group exists but isn't
           actionable from this folder choice
+        - ``"keep_folder candidate missing on disk"`` — the row(s) in
+          keep_folder point at files that no longer exist; promoting them
+          would reject the only surviving sibling (and, if the caller
+          chains a delete, trash it).
 
         Returns ``{"resolved": [{"file_hash", "winner_id", "loser_ids"}],
         "skipped": [{"file_hash", "reason"}]}``.
@@ -2030,19 +2034,39 @@ class Database:
                     "reason": "no candidate in keep_folder",
                 })
                 continue
-            if len(in_folder) == 1:
-                winner_id = in_folder[0]["id"]
+            # Existence-check the keep_folder candidate(s) before promoting.
+            # If the row's file has been deleted externally but a sibling in
+            # another folder still exists, force-picking the missing row as
+            # winner would reject the surviving copy — and chained delete
+            # would then trash it. Skip the hash instead.
+            in_folder_paths = [
+                (r, os.path.join(r["folder_path"] or "", r["filename"] or ""))
+                for r in in_folder
+            ]
+            present_in_folder = [
+                (r, p) for (r, p) in in_folder_paths if os.path.exists(p)
+            ]
+            if not present_in_folder:
+                skipped.append({
+                    "file_hash": file_hash,
+                    "reason": "keep_folder candidate missing on disk",
+                })
+                continue
+            if len(present_in_folder) == 1:
+                winner_id = present_in_folder[0][0]["id"]
             else:
                 # Same-folder duplicates among the keep_folder candidates —
-                # let the resolver pick deterministically among them.
-                cands = []
-                for r in in_folder:
-                    path = os.path.join(r["folder_path"] or "", r["filename"] or "")
-                    cands.append(DupCandidate(
-                        id=r["id"], path=path,
+                # let the resolver pick deterministically among them. All
+                # candidates passed in exist on disk (filtered above), so
+                # Rule 0 is a no-op here.
+                cands = [
+                    DupCandidate(
+                        id=r["id"], path=p,
                         mtime=r["file_mtime"] or 0.0,
-                        exists=os.path.exists(path),
-                    ))
+                        exists=True,
+                    )
+                    for (r, p) in present_in_folder
+                ]
                 winner_id, _ = resolve_duplicates(cands)
             loser_ids = [r["id"] for r in rows if r["id"] != winner_id]
             self._apply_winner_loser_merge(winner_id, loser_ids)
