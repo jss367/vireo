@@ -271,6 +271,36 @@ def test_bulk_resolve_skips_when_keep_folder_candidate_missing_on_disk(tmp_path)
     assert _flags(db, [p_a, p_b]) == {p_a: "none", p_b: "none"}
 
 
+def test_bulk_resolve_normalizes_keep_folder_trailing_slash(tmp_path):
+    """The bucket UI passes folder paths derived from ``os.path.dirname(...)``
+    — never trailing-slashed. But ``folders.path`` rows in the DB can carry
+    a trailing separator (manual relocation, legacy imports). A naive
+    ``folder_path == keep_folder`` comparison would silently no-op the
+    bulk action for affected users; the lookup must normalize."""
+    db = Database(str(tmp_path / "t.db"))
+    a_dir = tmp_path / "a"
+    b_dir = tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    # Folder stored WITH a trailing slash (simulates legacy/relocated rows).
+    a_fid = db.add_folder(str(a_dir) + "/")
+    b_fid = db.add_folder(str(b_dir))
+    p_a = _add(db, a_fid, "owl.jpg", file_hash="HSLASH")
+    p_b = _add(db, b_fid, "owl.jpg", file_hash="HSLASH")
+    _touch(a_dir, "owl.jpg")
+    _touch(b_dir, "owl.jpg")
+    _reset_flags(db, "HSLASH")
+
+    # Caller passes the un-slashed form — the form the bucket UI derives.
+    result = db.bulk_resolve_by_folder(["HSLASH"], str(a_dir))
+
+    assert result["skipped"] == []
+    assert result["resolved"] == [
+        {"file_hash": "HSLASH", "winner_id": p_a, "loser_ids": [p_b]}
+    ]
+    assert _flags(db, [p_a, p_b]) == {p_a: "none", p_b: "rejected"}
+
+
 def test_bulk_resolve_skips_when_all_keep_folder_candidates_missing(tmp_path):
     """Same protection when there are multiple stale rows in keep_folder:
     don't fall through to the resolver and pick a missing winner."""

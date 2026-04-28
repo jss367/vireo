@@ -2007,6 +2007,13 @@ class Database:
         """
         from duplicates import DupCandidate, resolve_duplicates
 
+        # Normalize once. The bucket UI derives folder paths from
+        # ``os.path.dirname(...)`` (never trailing-slashed), but
+        # ``folders.path`` rows can carry a trailing separator from
+        # manual relocation or legacy imports — a naive string compare
+        # silently no-ops the action for those users.
+        keep_folder_norm = os.path.normpath(keep_folder) if keep_folder else ""
+
         resolved = []
         skipped = []
         for file_hash in file_hashes:
@@ -2027,7 +2034,10 @@ class Database:
                     "reason": "fewer than 2 candidates",
                 })
                 continue
-            in_folder = [r for r in rows if (r["folder_path"] or "") == keep_folder]
+            in_folder = [
+                r for r in rows
+                if os.path.normpath(r["folder_path"] or "") == keep_folder_norm
+            ]
             if not in_folder:
                 skipped.append({
                     "file_hash": file_hash,
