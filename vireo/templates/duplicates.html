@@ -488,19 +488,26 @@
 
     // Render each section.
     var html = '';
-    var buckets = (result.buckets || []).filter(function(b) {
-      // Only show buckets that have at least 2 groups — a 1-group bucket
-      // is just an individual group and the per-group UI handles it more
-      // expressively (per-photo cards, ratings, etc.).
+    // Iterate over the unfiltered bucket list so `bi` stays a stable index
+    // into ``_lastScanResult.buckets``. Filtering with ``.filter`` first and
+    // re-indexing the result would let a partial bulk-resolve (which can drop
+    // a bucket to ``group_count === 1`` without removing it from the array)
+    // shift later indexes, so subsequent button clicks would resolve the
+    // wrong bucket — and with delete enabled, potentially trash the wrong
+    // files. Skip 1-group buckets inline instead — the per-group UI handles
+    // them more expressively (per-photo cards, ratings, etc.).
+    var allBuckets = result.buckets || [];
+    var hasVisibleBuckets = allBuckets.some(function(b) {
       return b.group_count >= 2;
     });
-    if (buckets.length > 0) {
+    if (hasVisibleBuckets) {
       html += '<div class="section-header"><div>' +
         '<h2>Bulk decide</h2>' +
         '<div class="section-sub">' +
         'The same dedup question repeats across multiple groups. Decide ' +
         'once per bucket to clear them all at once.</div></div></div>';
-      buckets.forEach(function(bucket, bi) {
+      allBuckets.forEach(function(bucket, bi) {
+        if (bucket.group_count < 2) return;
         html += renderBucket(bucket, bi);
       });
     }
@@ -643,6 +650,10 @@
   function bulkResolveByFolderIdx(bi, fi) {
     var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
     if (!bucket) return;
+    // After a partial prune a bucket can drop to ``group_count < 2`` and be
+    // filtered out of the next render. A button left in the DOM from a stale
+    // render must not be allowed to act on it.
+    if (!bucket.file_hashes || bucket.file_hashes.length < 2) return;
     var folder = (bucket.folders || [])[fi];
     if (folder == null) return;
     return bulkResolveByFolder(bi, folder);
