@@ -6927,6 +6927,94 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             total_rejected += result.get("rejected", 0)
         return jsonify({"rejected_count": total_rejected})
 
+    @app.route("/api/folders/reveal", methods=["POST"])
+    def api_folders_reveal():
+        """Reveal a batch of folder paths in the OS file manager.
+
+        Body: ``{"paths": [str, ...]}``. Backs the bulk-decide UI's
+        "Reveal in Finder" button, which opens every folder in a bucket
+        with a single click.
+
+        Each path must exist as a row in the ``folders`` table — refusing
+        arbitrary filesystem paths is the security boundary, otherwise
+        a malicious caller could probe paths via the side-channel of
+        whether the OS file manager opened. Unknown paths are returned
+        in ``skipped`` rather than 404'd so a single bad path doesn't
+        kill a bucket-wide batch.
+
+        Returns ``{"ok": True, "revealed": [str], "skipped":
+        [{"path", "reason"}], "failed": [{"path", "reason"}]}``.
+        """
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("paths required")
+        paths = body.get("paths")
+        if not isinstance(paths, list) or not paths:
+            return json_error("paths required")
+        for p in paths:
+            if not isinstance(p, str) or not p:
+                return json_error("paths must be a list of non-empty strings")
+
+        db = _get_db()
+        # Look up known paths in one query rather than once-per-path.
+        # JOIN workspace_folders so paths that exist in another workspace
+        # are treated as unknown — without this gate, a caller could probe
+        # cross-workspace paths via the OS-window-opens side channel,
+        # breaking the same isolation /api/files/reveal already enforces.
+        placeholders = ",".join("?" * len(paths))
+        known_rows = db.conn.execute(
+            f"""SELECT f.path FROM folders f
+                JOIN workspace_folders wf ON wf.folder_id = f.id
+                WHERE wf.workspace_id = ? AND f.path IN ({placeholders})""",
+            [db._active_workspace_id, *paths],
+        ).fetchall()
+        known = {r["path"] for r in known_rows}
+
+        revealed = []
+        skipped = []
+        failed = []
+        for path in paths:
+            if path not in known:
+                skipped.append({"path": path, "reason": "not a known folder"})
+                continue
+            try:
+                if sys.platform == "darwin":
+                    proc = subprocess.run(["open", "-R", "--", path],
+                                          timeout=5, check=False)
+                elif sys.platform.startswith("win"):
+                    # Folder reveal opens the folder itself (no /select,)
+                    # so the user sees its contents.
+                    proc = subprocess.run(["explorer", path],
+                                          timeout=5, check=False)
+                else:
+                    # xdg-open doesn't honor `--`; abspath guarantees a
+                    # leading slash so a crafted leading-dash path can't
+                    # be parsed as a flag.
+                    proc = subprocess.run(
+                        ["xdg-open", os.path.abspath(path)],
+                        timeout=5, check=False,
+                    )
+                # check=False returns a CompletedProcess for every exit
+                # code; classify non-zero as failed so the UI doesn't
+                # report success when nothing actually opened (e.g.
+                # unmounted volume, stale path).
+                if proc.returncode != 0:
+                    failed.append({
+                        "path": path,
+                        "reason": f"reveal command exited {proc.returncode}",
+                    })
+                else:
+                    revealed.append(path)
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+                failed.append({"path": path, "reason": str(exc)})
+
+        return jsonify({
+            "ok": True,
+            "revealed": revealed,
+            "skipped": skipped,
+            "failed": failed,
+        })
+
     @app.route("/api/duplicates/bulk-resolve", methods=["POST"])
     def api_duplicates_bulk_resolve():
         """Force-resolve a batch of duplicate groups by keeping the photo
