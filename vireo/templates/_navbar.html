@@ -994,6 +994,76 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   font-weight: 600;
   text-decoration: underline;
 }
+
+/* ---------- Missing Originals (per-photo) ---------- */
+.missing-photo-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.missing-photo-row:last-child { border-bottom: none; }
+.missing-photo-thumb {
+  width: 56px; height: 56px; flex-shrink: 0;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.missing-photo-thumb img {
+  width: 100%; height: 100%; object-fit: cover;
+}
+.missing-photo-info {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.missing-photo-filename {
+  font-family: monospace;
+  font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.missing-photo-path {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.missing-photo-badges {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  margin-top: 2px;
+}
+.missing-photo-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px dashed var(--border);
+  opacity: 0.55;
+}
+.missing-photo-badge.has {
+  background: var(--accent-soft, var(--bg-tertiary));
+  color: var(--accent, var(--text-primary));
+  border: 1px solid var(--accent, var(--border));
+  opacity: 1;
+  font-weight: 600;
+}
+.missing-photo-row .missing-folder-actions { flex-shrink: 0; }
+.missing-photos-toolbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 0 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.missing-photos-toolbar input[type="checkbox"] { margin: 0; }
+.missing-photos-toolbar .spacer { flex: 1; }
+.missing-photo-row input[type="checkbox"] { margin: 0; flex-shrink: 0; }
 .banner-dismiss {
   margin-left: auto;
   background: none;
@@ -1405,6 +1475,13 @@ function sendReport() {
   <button class="banner-dismiss" onclick="dismissMissingBanner()">&times;</button>
 </div>
 
+<!-- Missing Originals Banner -->
+<div class="missing-folders-banner" id="missingPhotosBanner" style="display:none;">
+  <span id="missingPhotosMsg"></span>
+  <a href="#" onclick="openMissingPhotosModal(); return false;">Review</a>
+  <button class="banner-dismiss" onclick="dismissMissingPhotosBanner()">&times;</button>
+</div>
+
 <!-- New Images Banner -->
 <div class="new-images-banner" id="newImagesBanner" style="display:none;">
   <span id="newImagesMsg"></span>
@@ -1430,6 +1507,28 @@ function sendReport() {
     <div class="modal-actions">
       <button class="modal-btn" onclick="loadMissingFolders()">Check Again</button>
       <button class="modal-btn modal-btn-cancel" onclick="closeMissingFoldersModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Missing Originals Modal -->
+<div class="modal-overlay" id="missingPhotosModal">
+  <div class="modal" style="max-width:780px;width:92%;max-height:80vh;display:flex;flex-direction:column;">
+    <h3>Missing Originals</h3>
+    <p style="color:var(--text-secondary);font-size:13px;margin-bottom:8px;">
+      These photos' original files can't be found on disk. Vireo may still have a cached thumbnail, preview, working copy, or XMP sidecar — review what's left, then remove the ones you no longer want in your library.
+    </p>
+    <div class="missing-photos-toolbar" id="missingPhotosToolbar" style="display:none;">
+      <label><input type="checkbox" id="missingPhotosSelectAll" onchange="toggleAllMissingPhotos(this.checked)"> Select all</label>
+      <span id="missingPhotosSelectedCount">0 selected</span>
+      <span class="spacer"></span>
+      <label title="Also delete the .xmp sidecar files left behind on disk."><input type="checkbox" id="missingPhotosDeleteSidecars"> Also delete leftover XMP sidecars</label>
+    </div>
+    <div id="missingPhotosList" style="flex:1;overflow-y:auto;"></div>
+    <div class="modal-actions">
+      <button class="modal-btn danger" id="missingPhotosRemoveBtn" onclick="removeSelectedMissingPhotos()" disabled>Remove selected</button>
+      <button class="modal-btn" onclick="loadMissingPhotos()">Check Again</button>
+      <button class="modal-btn modal-btn-cancel" onclick="closeMissingPhotosModal()">Close</button>
     </div>
   </div>
 </div>
@@ -4293,6 +4392,40 @@ function dismissMissingBanner() {
 checkMissingFolders();
 setInterval(checkMissingFolders, 600000);
 
+/* ---------- Missing Originals Banner ---------- */
+let _missingPhotosCache = [];
+let _missingPhotosBannerDismissedCount = 0;
+
+async function checkMissingPhotos() {
+  try {
+    const resp = await fetch('/api/photos/missing');
+    if (!resp.ok) return;
+    const photos = await resp.json();
+    _missingPhotosCache = photos;
+    const banner = document.getElementById('missingPhotosBanner');
+    const msg = document.getElementById('missingPhotosMsg');
+    if (photos.length > 0 && photos.length !== _missingPhotosBannerDismissedCount) {
+      const s = photos.length === 1 ? '' : 's';
+      msg.textContent = `${photos.length} photo${s} reference${photos.length === 1 ? 's' : ''} a missing original.`;
+      banner.style.display = 'flex';
+    } else if (photos.length === 0) {
+      banner.style.display = 'none';
+      _missingPhotosBannerDismissedCount = 0;
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function dismissMissingPhotosBanner() {
+  document.getElementById('missingPhotosBanner').style.display = 'none';
+  _missingPhotosBannerDismissedCount = _missingPhotosCache.length;
+}
+
+// Missing-originals scan touches every photo's source path on disk; on a
+// large library that's slow over a network volume. Run on load and every
+// 30 minutes — folders disappear faster than individual files do.
+checkMissingPhotos();
+setInterval(checkMissingPhotos, 1800000);
+
 /* ---------- New Images Banner ---------- */
 // Per-workspace dismissal: one sessionStorage key per workspace id so that
 // switching workspaces doesn't clobber other workspaces' dismissal state.
@@ -4660,6 +4793,138 @@ async function startRemoveFolder(folderId, path, photoCount) {
   if (!confirm(`This will remove ${photoCount} photo${photoCount !== 1 ? 's' : ''} from Vireo.\n\nThe files on disk (if they still exist) won't be touched.\n\nRemove "${path}"?`)) return;
   await safeFetch(`/api/folders/${folderId}`, {method: 'DELETE'});
   loadMissingFolders();
+}
+
+/* ---------- Missing Originals Modal ---------- */
+let _missingPhotosSelected = new Set();
+
+function openMissingPhotosModal() {
+  document.getElementById('missingPhotosModal').classList.add('open');
+  loadMissingPhotos();
+}
+
+function closeMissingPhotosModal() {
+  document.getElementById('missingPhotosModal').classList.remove('open');
+  checkMissingPhotos();  // refresh banner
+}
+
+function _escapeAttr(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function _escapeHtml(s) { return _escapeAttr(s); }
+
+async function loadMissingPhotos() {
+  const container = document.getElementById('missingPhotosList');
+  const toolbar = document.getElementById('missingPhotosToolbar');
+  container.innerHTML = '<p style="color:var(--text-secondary);">Checking photos…</p>';
+  toolbar.style.display = 'none';
+  _missingPhotosSelected = new Set();
+  try {
+    const resp = await fetch('/api/photos/missing');
+    if (!resp.ok) throw new Error('check failed');
+    const photos = await resp.json();
+    _missingPhotosCache = photos;
+    if (photos.length === 0) {
+      container.innerHTML = '<p style="color:var(--text-secondary);">No photos with missing originals.</p>';
+      checkMissingPhotos();
+      return;
+    }
+    toolbar.style.display = 'flex';
+    document.getElementById('missingPhotosSelectAll').checked = false;
+    container.innerHTML = photos.map(p => {
+      const ts = p.timestamp ? new Date(p.timestamp).toLocaleDateString() : '';
+      const thumb = p.has_thumb
+        ? `<img src="/thumbnails/${p.id}.jpg" alt="" loading="lazy">`
+        : '<span>no thumb</span>';
+      const badges = [
+        ['thumb', p.has_thumb],
+        ['preview', p.has_preview],
+        ['working copy', p.has_working_copy],
+        ['XMP', p.has_xmp_sidecar],
+      ].map(([label, on]) =>
+        `<span class="missing-photo-badge${on ? ' has' : ''}">${on ? '✓ ' : ''}${label}</span>`
+      ).join('');
+      return `
+        <div class="missing-photo-row" data-photo-id="${p.id}">
+          <input type="checkbox" onchange="toggleMissingPhoto(${p.id}, this.checked)">
+          <div class="missing-photo-thumb">${thumb}</div>
+          <div class="missing-photo-info">
+            <div class="missing-photo-filename" title="${_escapeAttr(p.filename)}">${_escapeHtml(p.filename)}${ts ? ` <span style="font-weight:400;color:var(--text-secondary);">· ${ts}</span>` : ''}</div>
+            <div class="missing-photo-path" title="${_escapeAttr(p.folder_path)}">${_escapeHtml(p.folder_path)}</div>
+            <div class="missing-photo-badges">${badges}</div>
+          </div>
+          <div class="missing-folder-actions">
+            <button class="danger" onclick="removeOneMissingPhoto(${p.id})">Remove</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+    _updateMissingPhotosBulkBtn();
+  } catch (e) {
+    container.innerHTML = '<p style="color:var(--text-secondary);">Failed to check photos.</p>';
+  }
+}
+
+function toggleMissingPhoto(id, checked) {
+  if (checked) _missingPhotosSelected.add(id);
+  else _missingPhotosSelected.delete(id);
+  _updateMissingPhotosBulkBtn();
+}
+
+function toggleAllMissingPhotos(checked) {
+  _missingPhotosSelected = new Set();
+  document.querySelectorAll('#missingPhotosList .missing-photo-row').forEach(function(row) {
+    const cb = row.querySelector('input[type="checkbox"]');
+    cb.checked = checked;
+    if (checked) _missingPhotosSelected.add(parseInt(row.dataset.photoId, 10));
+  });
+  _updateMissingPhotosBulkBtn();
+}
+
+function _updateMissingPhotosBulkBtn() {
+  const n = _missingPhotosSelected.size;
+  document.getElementById('missingPhotosSelectedCount').textContent =
+    `${n} selected`;
+  document.getElementById('missingPhotosRemoveBtn').disabled = (n === 0);
+}
+
+async function removeOneMissingPhoto(id) {
+  if (!confirm('Remove this photo from Vireo?\n\nCached thumbnail/preview/working copy (if any) will also be deleted. The XMP sidecar on disk will not be touched.')) return;
+  await _deleteMissingPhotoIds([id], false);
+  loadMissingPhotos();
+}
+
+async function removeSelectedMissingPhotos() {
+  const ids = Array.from(_missingPhotosSelected);
+  if (ids.length === 0) return;
+  const deleteSidecars = document.getElementById('missingPhotosDeleteSidecars').checked;
+  const sidecarMsg = deleteSidecars ? '\n\nLeftover XMP sidecars will also be deleted from disk.' : '';
+  if (!confirm(`Remove ${ids.length} photo${ids.length !== 1 ? 's' : ''} from Vireo?\n\nCached thumbnails/previews/working copies will be deleted.${sidecarMsg}`)) return;
+  await _deleteMissingPhotoIds(ids, deleteSidecars);
+  loadMissingPhotos();
+}
+
+async function _deleteMissingPhotoIds(ids, deleteSidecars) {
+  // Sidecar cleanup must run BEFORE the batch delete: the server resolves
+  // sidecar paths from the photo row's folder + filename, so once the row
+  // is gone the lookup returns nothing and the .xmp would be left behind.
+  if (deleteSidecars) {
+    const sidecarIds = _missingPhotosCache
+      .filter(p => ids.includes(p.id) && p.has_xmp_sidecar)
+      .map(p => p.id);
+    if (sidecarIds.length > 0) {
+      await safeFetch('/api/photos/missing/delete-sidecars', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({photo_ids: sidecarIds}),
+      });
+    }
+  }
+  await safeFetch('/api/batch/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_ids: ids, mode: 'vireo'}),
+  });
 }
 </script>
 <script src="/static/vireo-utils.js"></script>

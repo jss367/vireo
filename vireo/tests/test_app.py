@@ -2544,6 +2544,225 @@ def test_api_folders_check_health(app_and_db):
     assert isinstance(data["missing"], list)
 
 
+def test_api_photos_missing(app_and_db, tmp_path):
+    """GET /api/photos/missing returns photos with absent source files."""
+    from PIL import Image
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Replace the seed folder with one that exists on disk and seed one
+    # real file + one ghost row so missing detection has something to find.
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    Image.new("RGB", (10, 10)).save(real_dir / "here.jpg")
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_present = db.add_photo(folder_id=fid, filename="here.jpg",
+                               extension=".jpg", file_size=1, file_mtime=1.0)
+    pid_ghost = db.add_photo(folder_id=fid, filename="ghost.NEF",
+                             extension=".nef", file_size=42, file_mtime=2.0,
+                             timestamp="2024-03-08T10:00:00")
+    # Pre-existing seed photos in /photos/2024 also have absent sources;
+    # simplify the assertion by removing them from the workspace.
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    # Cache a thumb for the ghost so the UI can still preview it.
+    Image.new("RGB", (10, 10)).save(
+        os.path.join(app.config["THUMB_CACHE_DIR"], f"{pid_ghost}.jpg"),
+    )
+    # Drop an XMP sidecar next to the ghost.
+    (real_dir / "ghost.xmp").write_text("<x:xmpmeta/>")
+
+    resp = client.get("/api/photos/missing")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert isinstance(data, list)
+    assert [row["id"] for row in data] == [pid_ghost]
+    row = data[0]
+    assert row["filename"] == "ghost.NEF"
+    assert row["folder_path"] == str(real_dir)
+    assert row["timestamp"] == "2024-03-08T10:00:00"
+    assert row["has_thumb"] is True
+    assert row["has_preview"] is False
+    assert row["has_working_copy"] is False
+    assert row["has_xmp_sidecar"] is True
+
+
+def test_api_photos_missing_delete_sidecars(app_and_db, tmp_path):
+    """POST /api/photos/missing/delete-sidecars removes orphan XMP files for ghost photos.
+
+    Safety guards:
+    - Only acts on photo_ids that exist in the active workspace.
+    - Only deletes .xmp/.XMP, only when the source is genuinely missing.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    # Ghost: NEF gone, XMP remains
+    ghost_xmp = real_dir / "ghost.xmp"
+    ghost_xmp.write_text("<x:xmpmeta/>")
+    # Decoy: original still there — endpoint must refuse to touch its sidecar
+    decoy_jpg = real_dir / "decoy.jpg"
+    decoy_jpg.write_bytes(b"jpeg")
+    decoy_xmp = real_dir / "decoy.xmp"
+    decoy_xmp.write_text("<x:xmpmeta/>")
+
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(folder_id=fid, filename="ghost.NEF",
+                             extension=".nef", file_size=1, file_mtime=1.0)
+    pid_decoy = db.add_photo(folder_id=fid, filename="decoy.jpg",
+                             extension=".jpg", file_size=1, file_mtime=1.0)
+
+    resp = client.post("/api/photos/missing/delete-sidecars", json={
+        "photo_ids": [pid_ghost, pid_decoy],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted"] == 1
+    assert data["skipped"] == 1
+    assert not ghost_xmp.exists(), "ghost sidecar should be deleted"
+    assert decoy_xmp.exists(), "sidecar with present original must not be deleted"
+
+
+def test_api_photos_missing_delete_sidecars_rejects_untracked_paths(app_and_db, tmp_path):
+    """Endpoint must not delete .xmp files outside the active workspace.
+
+    Regression: an earlier draft accepted client-supplied (folder_path, filename)
+    pairs and unlinked any matching .xmp on disk as long as the named "original"
+    was absent. That allowed a crafted request to delete arbitrary .xmp files.
+    The fix: only act on photo_ids that resolve to a row in the active workspace.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # An attacker-controlled directory entirely outside Vireo's library —
+    # we drop a sidecar there to confirm the endpoint won't touch it.
+    untracked_dir = tmp_path / "outside"
+    untracked_dir.mkdir()
+    poached = untracked_dir / "victim.xmp"
+    poached.write_text("<x:xmpmeta/>")
+
+    # A high photo id that doesn't exist in the DB (active workspace).
+    resp = client.post("/api/photos/missing/delete-sidecars", json={
+        "photo_ids": [999_999],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted"] == 0
+    assert data["skipped"] == 1
+    assert poached.exists(), "untracked sidecar must not be touched"
+
+
+def test_api_photos_missing_detects_preview_variants(app_and_db, tmp_path):
+    """has_preview must catch both `{id}_{size}.jpg` and legacy `{id}.jpg`.
+
+    Indexing the cache once per request (instead of per-photo glob) is the
+    perf optimization; this test proves both filename shapes still land as
+    True so the behavior change is invisible to callers.
+    """
+    from PIL import Image
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_sized = db.add_photo(folder_id=fid, filename="sized.NEF",
+                             extension=".nef", file_size=1, file_mtime=1.0)
+    pid_legacy = db.add_photo(folder_id=fid, filename="legacy.NEF",
+                              extension=".nef", file_size=1, file_mtime=1.0)
+    pid_no_preview = db.add_photo(folder_id=fid, filename="bare.NEF",
+                                  extension=".nef", file_size=1, file_mtime=1.0)
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    thumb_dir = app.config["THUMB_CACHE_DIR"]
+    vireo_dir = os.path.dirname(thumb_dir)
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    Image.new("RGB", (10, 10)).save(os.path.join(preview_dir, f"{pid_sized}_1920.jpg"))
+    Image.new("RGB", (10, 10)).save(os.path.join(preview_dir, f"{pid_legacy}.jpg"))
+    # Stray non-numeric filename in the cache must not crash the indexer.
+    Image.new("RGB", (10, 10)).save(os.path.join(preview_dir, "stray.jpg"))
+
+    resp = client.get("/api/photos/missing")
+    assert resp.status_code == 200
+    by_id = {r["id"]: r for r in resp.get_json()}
+    assert by_id[pid_sized]["has_preview"] is True
+    assert by_id[pid_legacy]["has_preview"] is True
+    assert by_id[pid_no_preview]["has_preview"] is False
+
+
+def test_api_photos_missing_reports_default_working_copy(app_and_db, tmp_path):
+    """has_working_copy must reflect on-disk reality even when working_copy_path is NULL.
+
+    Legacy rows backfilled before working_copy_path was tracked still have a
+    file at <vireo>/working/<id>.jpg, and the batch-delete path removes it
+    on row removal. If the modal said no working copy existed, users would
+    decide to delete based on stale info.
+    """
+    from PIL import Image
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid = db.add_photo(folder_id=fid, filename="ghost.NEF",
+                       extension=".nef", file_size=1, file_mtime=1.0)
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    # Drop a working-copy file at the default location, leave the DB
+    # column NULL — same shape legacy/backfill state has.
+    thumb_dir = app.config["THUMB_CACHE_DIR"]
+    vireo_dir = os.path.dirname(thumb_dir)
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    Image.new("RGB", (10, 10)).save(os.path.join(working_dir, f"{pid}.jpg"))
+    assert db.get_photo(pid)["working_copy_path"] is None
+
+    resp = client.get("/api/photos/missing")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data) == 1
+    assert data[0]["has_working_copy"] is True
+
+
+def test_api_photos_missing_excludes_present_files(app_and_db, tmp_path):
+    """A photo whose source still exists must not show up as missing."""
+    from PIL import Image
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "ok"
+    real_dir.mkdir()
+    Image.new("RGB", (10, 10)).save(real_dir / "still_here.jpg")
+    fid = db.add_folder(str(real_dir), name="ok")
+    db.add_photo(folder_id=fid, filename="still_here.jpg", extension=".jpg",
+                 file_size=1, file_mtime=1.0)
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    resp = client.get("/api/photos/missing")
+    assert resp.status_code == 200
+    assert resp.get_json() == []
+
+
 def test_api_folder_relocate(app_and_db, tmp_path):
     """POST /api/folders/<id>/relocate updates path and status."""
     app, db = app_and_db

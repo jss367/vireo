@@ -1176,6 +1176,75 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         missing = db.get_missing_folders()
         return jsonify([dict(f) for f in missing])
 
+    @app.route("/api/photos/missing")
+    def api_photos_missing():
+        """Return photos whose original file is gone but the folder remains.
+
+        For each ghost row we report what cached/sidecar artifacts still exist
+        (thumb, preview, working copy, XMP) so the user can decide whether
+        anything is worth keeping before deleting the row.
+        """
+        db = _get_db()
+        thumb_dir = app.config["THUMB_CACHE_DIR"]
+        vireo_dir = os.path.dirname(thumb_dir)
+        preview_dir = os.path.join(vireo_dir, "previews")
+        working_dir = os.path.join(vireo_dir, "working")
+
+        # Index preview cache once. The endpoint is polled from the navbar,
+        # so per-photo `glob(preview_dir, f"{pid}_*.jpg")` was O(missing ×
+        # cache_size) readdirs per request. Build {pid} from a single
+        # listdir and check the set in O(1) per row.
+        preview_pids: set[int] = set()
+        try:
+            for name in os.listdir(preview_dir):
+                # Match `{id}.jpg` (legacy full preview) or `{id}_{size}.jpg`
+                # (sized variant). Anything else is not part of the per-photo
+                # cache and should be ignored.
+                if not name.endswith(".jpg"):
+                    continue
+                head = name[:-4].split("_", 1)[0]
+                if head.isdigit():
+                    preview_pids.add(int(head))
+        except FileNotFoundError:
+            pass  # cache dir hasn't been created yet — no previews
+
+        out = []
+        for row in db.get_missing_photos():
+            pid = row["id"]
+            src = os.path.join(row["folder_path"], row["filename"])
+            stem, _ext = os.path.splitext(src)
+            # Working copy: the DB path wins when set, but legacy rows from
+            # before working_copy_path was tracked can still have a file at
+            # the default <vireo>/working/<id>.jpg location — and the batch
+            # delete path cleans that up regardless of the DB column. If we
+            # only consulted the column the badge would lie about what's
+            # about to be removed.
+            wc_rel = row["working_copy_path"]
+            default_wc = os.path.join(working_dir, f"{pid}.jpg")
+            if wc_rel:
+                has_wc = os.path.isfile(os.path.join(vireo_dir, wc_rel))
+            else:
+                has_wc = os.path.isfile(default_wc)
+            out.append({
+                "id": pid,
+                "filename": row["filename"],
+                "extension": row["extension"],
+                "folder_id": row["folder_id"],
+                "folder_path": row["folder_path"],
+                "timestamp": row["timestamp"],
+                "file_size": row["file_size"],
+                "has_thumb": os.path.isfile(os.path.join(thumb_dir, f"{pid}.jpg")),
+                "has_preview": pid in preview_pids,
+                "has_working_copy": has_wc,
+                "has_xmp_sidecar": (
+                    os.path.isfile(stem + ".xmp")
+                    or os.path.isfile(stem + ".XMP")
+                    or os.path.isfile(src + ".xmp")
+                    or os.path.isfile(src + ".XMP")
+                ),
+            })
+        return jsonify(out)
+
     @app.route("/api/folders/check-health", methods=["POST"])
     def api_folders_check_health():
         db = _get_db()
@@ -1185,6 +1254,66 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "changed": changed,
             "missing": [dict(f) for f in missing],
         })
+
+    @app.route("/api/photos/missing/delete-sidecars", methods=["POST"])
+    def api_photos_missing_delete_sidecars():
+        """Delete leftover .xmp sidecar files for photos whose original is gone.
+
+        Body: ``{"photo_ids": [int, ...]}``.
+
+        IDs are resolved server-side against the active workspace — the
+        client never names paths directly. Earlier drafts accepted
+        ``(folder_path, filename)`` from the body and were usable to
+        unlink any ``.xmp`` on disk as long as the paired non-xmp path
+        was absent. Now we only touch sidecars whose photo row is in
+        the active workspace AND whose source is verified missing.
+        """
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids") or []
+        if not isinstance(photo_ids, list):
+            return json_error("photo_ids must be a list")
+
+        db = _get_db()
+        ws_id = db._active_workspace_id
+        deleted = 0
+        skipped = 0
+        for raw_id in photo_ids:
+            try:
+                pid = int(raw_id)
+            except (TypeError, ValueError):
+                skipped += 1
+                continue
+            row = db.conn.execute(
+                """SELECT p.filename, f.path AS folder_path
+                   FROM photos p
+                   JOIN folders f ON p.folder_id = f.id
+                   JOIN workspace_folders wf ON wf.folder_id = f.id
+                   WHERE p.id = ? AND wf.workspace_id = ?""",
+                (pid, ws_id),
+            ).fetchone()
+            if not row:
+                skipped += 1
+                continue
+            src = os.path.join(row["folder_path"], row["filename"])
+            if os.path.exists(src):
+                # Original came back — refuse to touch the sidecar.
+                skipped += 1
+                continue
+            stem, _ = os.path.splitext(src)
+            removed_one = False
+            for candidate in (stem + ".xmp", stem + ".XMP",
+                              src + ".xmp", src + ".XMP"):
+                if os.path.isfile(candidate):
+                    try:
+                        os.remove(candidate)
+                        removed_one = True
+                    except OSError as e:
+                        log.warning("Failed to delete sidecar %s: %s", candidate, e)
+            if removed_one:
+                deleted += 1
+            else:
+                skipped += 1
+        return jsonify({"deleted": deleted, "skipped": skipped})
 
     @app.route("/api/folders/<int:folder_id>", methods=["GET"])
     def api_folder_get(folder_id):

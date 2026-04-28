@@ -1313,6 +1313,51 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
+    def get_missing_photos(self):
+        """Return photos whose source file is missing from disk.
+
+        Scoped to the active workspace. Skips photos in folders flagged
+        ``'missing'`` — those are surfaced by ``get_missing_folders`` and
+        listing them per-photo would just duplicate that signal at high cost.
+
+        Folder DB ``status`` is updated asynchronously by a 10-minute health
+        loop, so a freshly unmounted volume can still show ``status='ok'``
+        when this query runs. To avoid surfacing thousands of "ghosts" for
+        a temporarily offline drive (and offering them up for bulk delete),
+        we also treat any folder whose root no longer resolves on disk as
+        if it were already flagged missing. Resolution is cached per folder
+        within the call so a 1000-photo folder doesn't stat the same root
+        a thousand times.
+
+        Each row carries ``folder_path``, ``timestamp``, and
+        ``working_copy_path`` so the caller can render rich UI without
+        joining again.
+        """
+        rows = self.conn.execute(
+            """SELECT p.id, p.filename, p.extension, p.file_size,
+                      p.timestamp, p.working_copy_path,
+                      f.id AS folder_id, f.path AS folder_path
+               FROM photos p
+               JOIN folders f ON p.folder_id = f.id
+               JOIN workspace_folders wf ON wf.folder_id = f.id
+               WHERE wf.workspace_id = ? AND f.status != 'missing'
+               ORDER BY f.path, p.filename""",
+            (self._ws_id(),),
+        ).fetchall()
+        folder_online: dict[int, bool] = {}
+        missing = []
+        for row in rows:
+            fid = row["folder_id"]
+            if fid not in folder_online:
+                folder_online[fid] = os.path.isdir(row["folder_path"])
+            if not folder_online[fid]:
+                # Whole folder is offline — surfaced by missing-folders flow.
+                continue
+            src = os.path.join(row["folder_path"], row["filename"])
+            if not os.path.exists(src):
+                missing.append(row)
+        return missing
+
     def relocate_folder(self, folder_id, new_path):
         """Update folder path and set status to 'ok'.
 
