@@ -6957,10 +6957,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         db = _get_db()
         # Look up known paths in one query rather than once-per-path.
+        # JOIN workspace_folders so paths that exist in another workspace
+        # are treated as unknown — without this gate, a caller could probe
+        # cross-workspace paths via the OS-window-opens side channel,
+        # breaking the same isolation /api/files/reveal already enforces.
         placeholders = ",".join("?" * len(paths))
         known_rows = db.conn.execute(
-            f"SELECT path FROM folders WHERE path IN ({placeholders})",
-            list(paths),
+            f"""SELECT f.path FROM folders f
+                JOIN workspace_folders wf ON wf.folder_id = f.id
+                WHERE wf.workspace_id = ? AND f.path IN ({placeholders})""",
+            [db._active_workspace_id, *paths],
         ).fetchall()
         known = {r["path"] for r in known_rows}
 
@@ -6973,21 +6979,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 continue
             try:
                 if sys.platform == "darwin":
-                    subprocess.run(["open", "-R", "--", path],
-                                   timeout=5, check=False)
+                    proc = subprocess.run(["open", "-R", "--", path],
+                                          timeout=5, check=False)
                 elif sys.platform.startswith("win"):
                     # Folder reveal opens the folder itself (no /select,)
                     # so the user sees its contents.
-                    subprocess.run(["explorer", path], timeout=5, check=False)
+                    proc = subprocess.run(["explorer", path],
+                                          timeout=5, check=False)
                 else:
                     # xdg-open doesn't honor `--`; abspath guarantees a
                     # leading slash so a crafted leading-dash path can't
                     # be parsed as a flag.
-                    subprocess.run(
+                    proc = subprocess.run(
                         ["xdg-open", os.path.abspath(path)],
                         timeout=5, check=False,
                     )
-                revealed.append(path)
+                # check=False returns a CompletedProcess for every exit
+                # code; classify non-zero as failed so the UI doesn't
+                # report success when nothing actually opened (e.g.
+                # unmounted volume, stale path).
+                if proc.returncode != 0:
+                    failed.append({
+                        "path": path,
+                        "reason": f"reveal command exited {proc.returncode}",
+                    })
+                else:
+                    revealed.append(path)
             except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
                 failed.append({"path": path, "reason": str(exc)})
 

@@ -110,6 +110,59 @@ def test_folders_reveal_shell_failure_reports_per_path(app_and_db):
         assert "reason" in body["failed"][0]
 
 
+def test_folders_reveal_skips_path_outside_active_workspace(app_and_db):
+    """A folder that exists in the ``folders`` table but isn't linked to
+    the active workspace must be treated as unknown — otherwise this
+    endpoint becomes a cross-workspace path oracle / open-action gadget,
+    breaking the workspace isolation /api/files/reveal already enforces.
+    """
+    app, db = app_and_db
+    default_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    db.add_folder("/secret/cross-ws-only")
+    db.set_active_workspace(default_ws)
+
+    with app.test_client() as c, \
+         patch("vireo.app.sys.platform", "darwin"), \
+         patch("vireo.app.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0)
+        resp = c.post("/api/folders/reveal",
+                      json={"paths": ["/secret/cross-ws-only"]})
+        assert resp.status_code == 200
+        body = resp.get_json()
+        # Skipped, not revealed — and no subprocess call leaks the path
+        # to the OS file manager.
+        assert body["revealed"] == []
+        assert body["skipped"] == [
+            {"path": "/secret/cross-ws-only", "reason": "not a known folder"}
+        ]
+        assert run.call_count == 0
+
+
+def test_folders_reveal_non_zero_exit_reports_failure(app_and_db):
+    """``subprocess.run(..., check=False)`` returns a CompletedProcess for
+    every exit code, success or not. The endpoint must inspect
+    ``returncode`` so a path that fails to open (e.g. unmounted volume,
+    disappeared on disk) lands in ``failed`` instead of ``revealed`` —
+    otherwise the UI shows nothing happened but reports success."""
+    app, db = app_and_db
+    _seed_folder(db, "/tmp/dupreveal_nonzero")
+
+    with app.test_client() as c, \
+         patch("vireo.app.sys.platform", "darwin"), \
+         patch("vireo.app.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=1)
+        resp = c.post("/api/folders/reveal",
+                      json={"paths": ["/tmp/dupreveal_nonzero"]})
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["revealed"] == []
+        assert len(body["failed"]) == 1
+        assert body["failed"][0]["path"] == "/tmp/dupreveal_nonzero"
+        assert "reason" in body["failed"][0]
+
+
 def test_folders_reveal_validates_inputs(app_and_db):
     """Missing body / empty list / non-string entries → 400."""
     app, _ = app_and_db
