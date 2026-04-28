@@ -5,6 +5,7 @@ Read-only. Does not apply — the UI shows the preview and a user action (the
 """
 import os
 
+from duplicate_buckets import bucket_unresolved_proposals
 from duplicates import DupCandidate, resolve_duplicates
 
 # SQLite's legacy ``SQLITE_MAX_VARIABLE_NUMBER`` cap is 999 on older builds.
@@ -188,6 +189,7 @@ def run_duplicate_scan(job, db, include_resolved=True):
 
     return {
         "proposals": proposals,
+        "buckets": bucket_unresolved_proposals(proposals),
         "group_count": total,
         "loser_count": sum(
             len(p["losers"]) for p in proposals if p["status"] == "unresolved"
