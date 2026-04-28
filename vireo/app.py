@@ -1042,6 +1042,57 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         missing = db.get_missing_folders()
         return jsonify([dict(f) for f in missing])
 
+    @app.route("/api/photos/missing")
+    def api_photos_missing():
+        """Return photos whose original file is gone but the folder remains.
+
+        For each ghost row we report what cached/sidecar artifacts still exist
+        (thumb, preview, working copy, XMP) so the user can decide whether
+        anything is worth keeping before deleting the row.
+        """
+        import glob as _glob
+
+        import config as cfg
+
+        db = _get_db()
+        thumb_dir = app.config["THUMB_CACHE_DIR"]
+        vireo_dir = os.path.dirname(thumb_dir)
+        preview_dir = os.path.join(vireo_dir, "previews")
+        working_dir = os.path.join(vireo_dir, "working")
+        preview_size = int(cfg.load().get("preview_max_size") or 1920)
+
+        out = []
+        for row in db.get_missing_photos():
+            pid = row["id"]
+            src = os.path.join(row["folder_path"], row["filename"])
+            stem, _ext = os.path.splitext(src)
+            sized_preview = os.path.join(preview_dir, f"{pid}_{preview_size}.jpg")
+            legacy_preview = os.path.join(preview_dir, f"{pid}.jpg")
+            wc_rel = row["working_copy_path"]
+            wc_abs = os.path.join(vireo_dir, wc_rel) if wc_rel else None
+            out.append({
+                "id": pid,
+                "filename": row["filename"],
+                "extension": row["extension"],
+                "folder_id": row["folder_id"],
+                "folder_path": row["folder_path"],
+                "timestamp": row["timestamp"],
+                "file_size": row["file_size"],
+                "has_thumb": os.path.isfile(os.path.join(thumb_dir, f"{pid}.jpg")),
+                "has_preview": (
+                    os.path.isfile(sized_preview) or os.path.isfile(legacy_preview)
+                    or bool(_glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")))
+                ),
+                "has_working_copy": bool(wc_abs and os.path.isfile(wc_abs)),
+                "has_xmp_sidecar": (
+                    os.path.isfile(stem + ".xmp")
+                    or os.path.isfile(stem + ".XMP")
+                    or os.path.isfile(src + ".xmp")
+                    or os.path.isfile(src + ".XMP")
+                ),
+            })
+        return jsonify(out)
+
     @app.route("/api/folders/check-health", methods=["POST"])
     def api_folders_check_health():
         db = _get_db()
@@ -1051,6 +1102,48 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "changed": changed,
             "missing": [dict(f) for f in missing],
         })
+
+    @app.route("/api/photos/missing/delete-sidecars", methods=["POST"])
+    def api_photos_missing_delete_sidecars():
+        """Delete leftover .xmp sidecar files for photos whose original is gone.
+
+        Body: ``{"photos": [{"folder_path": ..., "filename": ...}, ...]}``
+
+        Guards: only ``.xmp``/``.XMP`` extensions, only when the named
+        original is *actually* missing on disk. A sidecar whose original
+        still exists is silently skipped — that's the user's filesystem
+        and we don't want to delete files we're not sure are orphans.
+        """
+        body = request.get_json(silent=True) or {}
+        photos = body.get("photos") or []
+        deleted = 0
+        skipped = 0
+        for entry in photos:
+            folder_path = entry.get("folder_path") or ""
+            filename = entry.get("filename") or ""
+            if not folder_path or not filename:
+                skipped += 1
+                continue
+            src = os.path.join(folder_path, filename)
+            if os.path.exists(src):
+                # Original is present — refuse to touch the sidecar
+                skipped += 1
+                continue
+            stem, _ = os.path.splitext(src)
+            removed_one = False
+            for candidate in (stem + ".xmp", stem + ".XMP",
+                              src + ".xmp", src + ".XMP"):
+                if os.path.isfile(candidate):
+                    try:
+                        os.remove(candidate)
+                        removed_one = True
+                    except OSError as e:
+                        log.warning("Failed to delete sidecar %s: %s", candidate, e)
+            if removed_one:
+                deleted += 1
+            else:
+                skipped += 1
+        return jsonify({"deleted": deleted, "skipped": skipped})
 
     @app.route("/api/folders/<int:folder_id>", methods=["GET"])
     def api_folder_get(folder_id):

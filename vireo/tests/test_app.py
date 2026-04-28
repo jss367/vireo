@@ -2232,6 +2232,110 @@ def test_api_folders_check_health(app_and_db):
     assert isinstance(data["missing"], list)
 
 
+def test_api_photos_missing(app_and_db, tmp_path):
+    """GET /api/photos/missing returns photos with absent source files."""
+    from PIL import Image
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Replace the seed folder with one that exists on disk and seed one
+    # real file + one ghost row so missing detection has something to find.
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    Image.new("RGB", (10, 10)).save(real_dir / "here.jpg")
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_present = db.add_photo(folder_id=fid, filename="here.jpg",
+                               extension=".jpg", file_size=1, file_mtime=1.0)
+    pid_ghost = db.add_photo(folder_id=fid, filename="ghost.NEF",
+                             extension=".nef", file_size=42, file_mtime=2.0,
+                             timestamp="2024-03-08T10:00:00")
+    # Pre-existing seed photos in /photos/2024 also have absent sources;
+    # simplify the assertion by removing them from the workspace.
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    # Cache a thumb for the ghost so the UI can still preview it.
+    Image.new("RGB", (10, 10)).save(
+        os.path.join(app.config["THUMB_CACHE_DIR"], f"{pid_ghost}.jpg"),
+    )
+    # Drop an XMP sidecar next to the ghost.
+    (real_dir / "ghost.xmp").write_text("<x:xmpmeta/>")
+
+    resp = client.get("/api/photos/missing")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert isinstance(data, list)
+    assert [row["id"] for row in data] == [pid_ghost]
+    row = data[0]
+    assert row["filename"] == "ghost.NEF"
+    assert row["folder_path"] == str(real_dir)
+    assert row["timestamp"] == "2024-03-08T10:00:00"
+    assert row["has_thumb"] is True
+    assert row["has_preview"] is False
+    assert row["has_working_copy"] is False
+    assert row["has_xmp_sidecar"] is True
+
+
+def test_api_photos_missing_delete_sidecars(app_and_db, tmp_path):
+    """POST /api/photos/missing/delete-sidecars removes orphan XMP files for ghost photos.
+
+    Safety guards: only deletes .xmp/.XMP, only when the corresponding original
+    is actually missing on disk. Anything else gets skipped.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    # Ghost: NEF gone, XMP remains
+    ghost_xmp = real_dir / "ghost.xmp"
+    ghost_xmp.write_text("<x:xmpmeta/>")
+    # Decoy: original still there — endpoint must refuse to touch its sidecar
+    decoy_jpg = real_dir / "decoy.jpg"
+    decoy_jpg.write_bytes(b"jpeg")
+    decoy_xmp = real_dir / "decoy.xmp"
+    decoy_xmp.write_text("<x:xmpmeta/>")
+
+    resp = client.post("/api/photos/missing/delete-sidecars", json={
+        "photos": [
+            {"folder_path": str(real_dir), "filename": "ghost.NEF"},
+            {"folder_path": str(real_dir), "filename": "decoy.jpg"},
+        ],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted"] == 1
+    assert data["skipped"] == 1
+    assert not ghost_xmp.exists(), "ghost sidecar should be deleted"
+    assert decoy_xmp.exists(), "sidecar with present original must not be deleted"
+
+
+def test_api_photos_missing_excludes_present_files(app_and_db, tmp_path):
+    """A photo whose source still exists must not show up as missing."""
+    from PIL import Image
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "ok"
+    real_dir.mkdir()
+    Image.new("RGB", (10, 10)).save(real_dir / "still_here.jpg")
+    fid = db.add_folder(str(real_dir), name="ok")
+    db.add_photo(folder_id=fid, filename="still_here.jpg", extension=".jpg",
+                 file_size=1, file_mtime=1.0)
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    resp = client.get("/api/photos/missing")
+    assert resp.status_code == 200
+    assert resp.get_json() == []
+
+
 def test_api_folder_relocate(app_and_db, tmp_path):
     """POST /api/folders/<id>/relocate updates path and status."""
     app, db = app_and_db

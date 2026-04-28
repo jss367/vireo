@@ -4173,6 +4173,79 @@ def test_get_missing_folders_scoped_to_active_workspace(tmp_path):
     assert [row["path"] for row in missing] == ["/gone/in_b"]
 
 
+def test_get_missing_photos_returns_photos_with_missing_source(tmp_path):
+    """get_missing_photos returns photos whose source file is gone but folder remains."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    fid = db.add_folder(str(folder), name="photos")
+
+    here = folder / "present.jpg"
+    here.write_bytes(b"x")
+    pid_present = db.add_photo(folder_id=fid, filename="present.jpg",
+                               extension=".jpg", file_size=1, file_mtime=1.0)
+    pid_gone = db.add_photo(folder_id=fid, filename="gone.NEF",
+                            extension=".nef", file_size=1, file_mtime=1.0,
+                            timestamp="2024-03-08T10:00:00")
+
+    missing = db.get_missing_photos()
+    ids = [row["id"] for row in missing]
+    assert ids == [pid_gone]
+    row = missing[0]
+    assert row["filename"] == "gone.NEF"
+    assert row["folder_path"] == str(folder)
+    assert row["timestamp"] == "2024-03-08T10:00:00"
+
+
+def test_get_missing_photos_excludes_photos_in_missing_folders(tmp_path):
+    """Photos in folders flagged 'missing' are surfaced by get_missing_folders;
+    don't double-count them here."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid = db.add_folder("/gone/folder", name="gone")
+    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                 file_size=1, file_mtime=1.0)
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    assert db.get_missing_photos() == []
+
+
+def test_get_missing_photos_scoped_to_active_workspace(tmp_path):
+    """Missing photos in other workspaces don't leak into the active one."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    ws_b = db.create_workspace("Other")
+
+    folder_a = tmp_path / "a"
+    folder_a.mkdir()
+    folder_b = tmp_path / "b"
+    folder_b.mkdir()
+
+    db.set_active_workspace(ws_a)
+    fid_a = db.add_folder(str(folder_a), name="a")
+    db.add_photo(folder_id=fid_a, filename="ghost_a.jpg", extension=".jpg",
+                 file_size=1, file_mtime=1.0)
+
+    db.set_active_workspace(ws_b)
+    fid_b = db.add_folder(str(folder_b), name="b")
+    db.add_photo(folder_id=fid_b, filename="ghost_b.jpg", extension=".jpg",
+                 file_size=1, file_mtime=1.0)
+
+    db.set_active_workspace(ws_a)
+    assert [row["filename"] for row in db.get_missing_photos()] == ["ghost_a.jpg"]
+    db.set_active_workspace(ws_b)
+    assert [row["filename"] for row in db.get_missing_photos()] == ["ghost_b.jpg"]
+
+
 def test_relocate_folder(tmp_path):
     """relocate_folder updates path and sets status to 'ok'."""
     from db import Database
