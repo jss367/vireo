@@ -216,7 +216,7 @@
   <div class="page-header">
     <div>
       <h1>Duplicate Files</h1>
-      <div class="sub">Find exact-byte duplicate photos and reject the inferior copy.</div>
+      <div class="sub">Find exact-byte duplicate photos and remove the extra copies.</div>
     </div>
     <div>
       <button id="scanBtn" class="btn-primary" onclick="startScan()">Scan for duplicate files</button>
@@ -242,7 +242,7 @@
   </div>
 
   <div id="applyBar" class="apply-bar" style="display:none;">
-    <button id="applyBtn" class="btn-primary" onclick="applyRejections()">Reject 0 losers</button>
+    <button id="applyBtn" class="btn-primary" onclick="applyRejections()">Reject 0 extra copies</button>
     <button class="btn-secondary" onclick="clearResults()">Clear results</button>
     <span id="applyStatus" style="font-size:12px;color:var(--text-dim);"></span>
   </div>
@@ -428,13 +428,13 @@
       '<div class="summary-stat"><div class="num">' + unresolvedGroupCount + '</div>' +
         '<div class="label">Need review</div></div>' +
       '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + unresolvedLoserCount + '</div>' +
-        '<div class="label">Losers to reject</div></div>';
+        '<div class="label">Extras to reject</div></div>';
     if (resolvedGroupCount > 0) {
       summaryHtml +=
         '<div class="summary-stat"><div class="num">' + resolvedGroupCount + '</div>' +
           '<div class="label">Already resolved</div></div>' +
         '<div class="summary-stat"><div class="num">' + formatBytes(resolvedBytes) + '</div>' +
-          '<div class="label">Loser files on disk</div></div>';
+          '<div class="label">Extra files on disk</div></div>';
     }
     summaryHtml += '</div>';
     summary.innerHTML = summaryHtml;
@@ -466,7 +466,7 @@
           '</h2>' +
           '<div class="section-sub">' + resolvedGroupCount +
           ' group' + (resolvedGroupCount === 1 ? '' : 's') +
-          ' auto-handled during scan. Loser files (' + formatBytes(resolvedBytes) +
+          ' auto-handled during scan. Extra copies (' + formatBytes(resolvedBytes) +
           ') may still be on disk.</div>' +
         '</div>';
       // Hide the bulk button entirely when every remaining resolved group is
@@ -475,8 +475,8 @@
       html += '<div class="section-actions">';
       if (bulkTrashableLoserCount > 0) {
         html += '<button class="btn-secondary" onclick="trashAllLoserFiles()" id="trashAllBtn">' +
-            'Move ' + bulkTrashableLoserCount + ' loser file' +
-            (bulkTrashableLoserCount === 1 ? '' : 's') + ' to Trash' +
+            'Move ' + bulkTrashableLoserCount + ' extra ' +
+            (bulkTrashableLoserCount === 1 ? 'copy' : 'copies') + ' to Trash' +
           '</button>';
       }
       html += '</div></div>';
@@ -521,8 +521,8 @@
       if (group.status === 'resolved') {
         return '<div class="group-warning severe">' +
           '<b>Heads up:</b> the kept file in this resolved group is missing on disk. ' +
-          'Any surviving loser file below may be the only remaining copy — ' +
-          'trash actions on those losers are disabled to prevent data loss. ' +
+          'Any surviving extra copy below may be the only remaining copy — ' +
+          'trash actions on those extras are disabled to prevent data loss. ' +
           'Restore the kept file, or rescan the folder so Vireo can re-resolve.' +
           '</div>';
       }
@@ -535,7 +535,7 @@
     }
     if (anyLoserMissing) {
       return '<div class="group-warning">' +
-        'One or more loser files are already missing on disk. They’ll be ' +
+        'One or more extra copies are already missing on disk. They’ll be ' +
         'rejected in the DB; trash actions will skip them.' +
         '</div>';
     }
@@ -577,7 +577,8 @@
                (winnerMissing ? ' data-protected="winner-missing"' : '') + '>';
     html += '<div class="dup-group-header">';
     html += '<label style="cursor:default;">' +
-            losers.length + ' loser' + (losers.length === 1 ? '' : 's') +
+            losers.length + ' extra ' +
+            (losers.length === 1 ? 'copy' : 'copies') +
             ' rejected during scan</label>';
     html += '<span class="hash">' + escapeHtml(hash.substring(0, 16)) + '...</span>';
     html += '</div>';
@@ -708,8 +709,8 @@
     if (!confirm('Move ' + ids.length + ' file' + (ids.length === 1 ? '' : 's') +
                  ' to Trash and remove their entries from Vireo?\n\n' +
                  'Files go to your OS Trash (recoverable from there). The ' +
-                 'corresponding loser records (and their thumbnails/previews) ' +
-                 'are deleted from Vireo. Winners keep all merged keywords ' +
+                 'corresponding extra-copy records (and their thumbnails/previews) ' +
+                 'are deleted from Vireo. Kept copies retain all merged keywords ' +
                  'and ratings.')) {
       return;
     }
@@ -790,8 +791,8 @@
         });
         if (remaining > 0) {
           btn.disabled = false;
-          btn.textContent = 'Move ' + remaining + ' loser file' +
-                            (remaining === 1 ? '' : 's') + ' to Trash';
+          btn.textContent = 'Move ' + remaining + ' extra ' +
+                            (remaining === 1 ? 'copy' : 'copies') + ' to Trash';
         } else {
           // Mirror the initial render: when there's nothing left that the
           // bulk action would actually touch, drop the button rather than
@@ -800,7 +801,7 @@
         }
       }
     } catch (e) {
-      if (btn) { btn.disabled = false; btn.textContent = 'Move loser files to Trash'; }
+      if (btn) { btn.disabled = false; btn.textContent = 'Move extra copies to Trash'; }
     }
   }
 
@@ -828,7 +829,7 @@
     var loserCount = 0;
     checked.forEach(function(g) { loserCount += (g.losers || []).length; });
     var btn = document.getElementById('applyBtn');
-    btn.textContent = 'Reject ' + loserCount + ' loser' + (loserCount === 1 ? '' : 's');
+    btn.textContent = 'Reject ' + loserCount + ' extra ' + (loserCount === 1 ? 'copy' : 'copies');
     btn.disabled = loserCount === 0;
   }
 
