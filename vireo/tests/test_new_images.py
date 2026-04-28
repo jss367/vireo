@@ -226,6 +226,137 @@ def test_count_new_images_basename_collision_across_subdirs(db_with_workspace):
     assert any("day2" in s for s in result["sample"])
 
 
+def test_count_new_images_skips_jpg_companion_of_existing_raw(db_with_workspace):
+    """A JPG sitting next to an already-imported RAW with the same basename
+    is the RAW's working-copy companion, not a new image. The scanner's
+    ``_pair_raw_jpeg_companions`` would attach it as ``companion_path``
+    rather than create a new primary photo, so the detector must not flag
+    it in the "N new images" banner.
+    """
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    # NEF is already in the database; the .jpg sidecar is on disk only.
+    _touch_image(str(root / "_D851928.jpg"))
+    root_id = db.add_folder(str(root), name="shoot")
+    db.add_photo(
+        folder_id=root_id, filename="_D851928.NEF", extension=".nef",
+        file_size=1, file_mtime=0.0,
+    )
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 0, (
+        f"JPG companion of existing RAW should not be flagged as new; "
+        f"got new_count={result['new_count']} sample={result['sample']}"
+    )
+
+
+def test_count_new_images_skips_jpg_companion_for_all_raw_extensions(db_with_workspace):
+    """The suppression must cover the same RAW extension set the scanner
+    pairs against (vireo/scanner.py: ``_pair_raw_jpeg_companions``)."""
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    raw_exts = [".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"]
+    root_id = db.add_folder(str(root), name="shoot")
+    for i, ext in enumerate(raw_exts):
+        stem = f"IMG_{i:04d}"
+        _touch_image(str(root / f"{stem}.jpg"))
+        db.add_photo(
+            folder_id=root_id, filename=f"{stem}{ext.upper()}", extension=ext,
+            file_size=1, file_mtime=0.0,
+        )
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 0, (
+        f"All JPG companions of known RAWs should be suppressed; "
+        f"got new_count={result['new_count']} sample={result['sample']}"
+    )
+
+
+def test_count_new_images_skips_jpeg_extension_companion(db_with_workspace):
+    """``.jpeg`` (long form) is a JPEG too — must be suppressed when paired
+    with an existing RAW."""
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG_0001.jpeg"))
+    root_id = db.add_folder(str(root), name="shoot")
+    db.add_photo(
+        folder_id=root_id, filename="IMG_0001.CR3", extension=".cr3",
+        file_size=1, file_mtime=0.0,
+    )
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 0
+
+
+def test_count_new_images_counts_jpg_without_raw_companion(db_with_workspace):
+    """A JPG with no matching RAW in the database is genuinely new — the
+    suppression must NOT swallow it."""
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG_0001.jpg"))
+    db.add_folder(str(root), name="shoot")
+    # No photos added — workspace is empty.
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 1
+    assert result["sample"] == [str(root / "IMG_0001.jpg")]
+
+
+def test_count_new_images_counts_raw_alongside_existing_jpg(db_with_workspace):
+    """Asymmetric: only JPG-paired-with-existing-RAW is suppressed. A new
+    RAW alongside an already-imported JPG with the same stem is still a
+    new image (the scanner will pair them but keep the RAW as primary —
+    so the user genuinely needs to ingest it)."""
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG_0001.NEF"))
+    root_id = db.add_folder(str(root), name="shoot")
+    db.add_photo(
+        folder_id=root_id, filename="IMG_0001.jpg", extension=".jpg",
+        file_size=1, file_mtime=0.0,
+    )
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 1, (
+        "Asymmetric suppression: a new RAW next to an existing JPG must "
+        "still appear as new — the scanner will promote the RAW to primary."
+    )
+
+
+def test_count_new_images_jpg_companion_in_different_folder_is_new(db_with_workspace):
+    """Pairing matches on (folder, stem), not stem alone. A JPG in a
+    different folder than the RAW with the same stem must still count as
+    new — the scanner won't pair them across folders either."""
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    day1 = root / "day1"
+    day2 = root / "day2"
+    _touch_image(str(day2 / "IMG_0001.jpg"))
+    root_id = db.add_folder(str(root), name="shoot")
+    day1_id = db.add_folder(str(day1), name="day1", parent_id=root_id)
+    db.add_folder(str(day2), name="day2", parent_id=root_id)
+    db.add_photo(
+        folder_id=day1_id, filename="IMG_0001.NEF", extension=".nef",
+        file_size=1, file_mtime=0.0,
+    )
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 1
+    assert any("day2" in s for s in result["sample"])
+
+
 def test_db_get_new_images_for_workspace_caches_result(db_with_workspace, monkeypatch):
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
