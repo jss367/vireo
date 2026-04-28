@@ -4881,11 +4881,19 @@ async function removeSelectedMissingPhotos() {
 }
 
 async function _deleteMissingPhotoIds(ids, deleteSidecars) {
-  const sidecarPaths = [];
+  // Sidecar cleanup must run BEFORE the batch delete: the server resolves
+  // sidecar paths from the photo row's folder + filename, so once the row
+  // is gone the lookup returns nothing and the .xmp would be left behind.
   if (deleteSidecars) {
-    for (const p of _missingPhotosCache) {
-      if (!ids.includes(p.id) || !p.has_xmp_sidecar) continue;
-      sidecarPaths.push(p);
+    const sidecarIds = _missingPhotosCache
+      .filter(p => ids.includes(p.id) && p.has_xmp_sidecar)
+      .map(p => p.id);
+    if (sidecarIds.length > 0) {
+      await safeFetch('/api/photos/missing/delete-sidecars', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({photo_ids: sidecarIds}),
+      });
     }
   }
   await safeFetch('/api/batch/delete', {
@@ -4893,15 +4901,6 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({photo_ids: ids, mode: 'vireo'}),
   });
-  if (sidecarPaths.length > 0) {
-    await safeFetch('/api/photos/missing/delete-sidecars', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({photos: sidecarPaths.map(p => ({
-        folder_path: p.folder_path, filename: p.filename,
-      }))}),
-    });
-  }
 }
 </script>
 <script src="/static/vireo-utils.js"></script>

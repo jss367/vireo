@@ -2282,8 +2282,9 @@ def test_api_photos_missing(app_and_db, tmp_path):
 def test_api_photos_missing_delete_sidecars(app_and_db, tmp_path):
     """POST /api/photos/missing/delete-sidecars removes orphan XMP files for ghost photos.
 
-    Safety guards: only deletes .xmp/.XMP, only when the corresponding original
-    is actually missing on disk. Anything else gets skipped.
+    Safety guards:
+    - Only acts on photo_ids that exist in the active workspace.
+    - Only deletes .xmp/.XMP, only when the source is genuinely missing.
     """
     app, db = app_and_db
     client = app.test_client()
@@ -2299,11 +2300,14 @@ def test_api_photos_missing_delete_sidecars(app_and_db, tmp_path):
     decoy_xmp = real_dir / "decoy.xmp"
     decoy_xmp.write_text("<x:xmpmeta/>")
 
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(folder_id=fid, filename="ghost.NEF",
+                             extension=".nef", file_size=1, file_mtime=1.0)
+    pid_decoy = db.add_photo(folder_id=fid, filename="decoy.jpg",
+                             extension=".jpg", file_size=1, file_mtime=1.0)
+
     resp = client.post("/api/photos/missing/delete-sidecars", json={
-        "photos": [
-            {"folder_path": str(real_dir), "filename": "ghost.NEF"},
-            {"folder_path": str(real_dir), "filename": "decoy.jpg"},
-        ],
+        "photo_ids": [pid_ghost, pid_decoy],
     })
     assert resp.status_code == 200
     data = resp.get_json()
@@ -2311,6 +2315,35 @@ def test_api_photos_missing_delete_sidecars(app_and_db, tmp_path):
     assert data["skipped"] == 1
     assert not ghost_xmp.exists(), "ghost sidecar should be deleted"
     assert decoy_xmp.exists(), "sidecar with present original must not be deleted"
+
+
+def test_api_photos_missing_delete_sidecars_rejects_untracked_paths(app_and_db, tmp_path):
+    """Endpoint must not delete .xmp files outside the active workspace.
+
+    Regression: an earlier draft accepted client-supplied (folder_path, filename)
+    pairs and unlinked any matching .xmp on disk as long as the named "original"
+    was absent. That allowed a crafted request to delete arbitrary .xmp files.
+    The fix: only act on photo_ids that resolve to a row in the active workspace.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # An attacker-controlled directory entirely outside Vireo's library —
+    # we drop a sidecar there to confirm the endpoint won't touch it.
+    untracked_dir = tmp_path / "outside"
+    untracked_dir.mkdir()
+    poached = untracked_dir / "victim.xmp"
+    poached.write_text("<x:xmpmeta/>")
+
+    # A high photo id that doesn't exist in the DB (active workspace).
+    resp = client.post("/api/photos/missing/delete-sidecars", json={
+        "photo_ids": [999_999],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted"] == 0
+    assert data["skipped"] == 1
+    assert poached.exists(), "untracked sidecar must not be touched"
 
 
 def test_api_photos_missing_excludes_present_files(app_and_db, tmp_path):

@@ -1107,26 +1107,44 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_photos_missing_delete_sidecars():
         """Delete leftover .xmp sidecar files for photos whose original is gone.
 
-        Body: ``{"photos": [{"folder_path": ..., "filename": ...}, ...]}``
+        Body: ``{"photo_ids": [int, ...]}``.
 
-        Guards: only ``.xmp``/``.XMP`` extensions, only when the named
-        original is *actually* missing on disk. A sidecar whose original
-        still exists is silently skipped — that's the user's filesystem
-        and we don't want to delete files we're not sure are orphans.
+        IDs are resolved server-side against the active workspace — the
+        client never names paths directly. Earlier drafts accepted
+        ``(folder_path, filename)`` from the body and were usable to
+        unlink any ``.xmp`` on disk as long as the paired non-xmp path
+        was absent. Now we only touch sidecars whose photo row is in
+        the active workspace AND whose source is verified missing.
         """
         body = request.get_json(silent=True) or {}
-        photos = body.get("photos") or []
+        photo_ids = body.get("photo_ids") or []
+        if not isinstance(photo_ids, list):
+            return json_error("photo_ids must be a list")
+
+        db = _get_db()
+        ws_id = db._active_workspace_id
         deleted = 0
         skipped = 0
-        for entry in photos:
-            folder_path = entry.get("folder_path") or ""
-            filename = entry.get("filename") or ""
-            if not folder_path or not filename:
+        for raw_id in photo_ids:
+            try:
+                pid = int(raw_id)
+            except (TypeError, ValueError):
                 skipped += 1
                 continue
-            src = os.path.join(folder_path, filename)
+            row = db.conn.execute(
+                """SELECT p.filename, f.path AS folder_path
+                   FROM photos p
+                   JOIN folders f ON p.folder_id = f.id
+                   JOIN workspace_folders wf ON wf.folder_id = f.id
+                   WHERE p.id = ? AND wf.workspace_id = ?""",
+                (pid, ws_id),
+            ).fetchone()
+            if not row:
+                skipped += 1
+                continue
+            src = os.path.join(row["folder_path"], row["filename"])
             if os.path.exists(src):
-                # Original is present — refuse to touch the sidecar
+                # Original came back — refuse to touch the sidecar.
                 skipped += 1
                 continue
             stem, _ = os.path.splitext(src)
