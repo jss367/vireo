@@ -123,7 +123,11 @@ echo ""
 if $PUBLISH; then
     echo "==> Tagging v$NEW_VERSION..."
     git tag "v$NEW_VERSION"
-    git push && git push origin "v$NEW_VERSION"
+    # Separate commands so `set -e` aborts on a failed `git push`. Inside an
+    # `&&` chain, `set -e` is suppressed for the LHS, so a rejected main push
+    # would silently fall through and the script would still print success.
+    git push
+    git push origin "v$NEW_VERSION"
     echo ""
     echo "Tag pushed. CI will build all platforms and create a draft release."
     echo "Monitor: https://github.com/jss367/vireo/actions"
