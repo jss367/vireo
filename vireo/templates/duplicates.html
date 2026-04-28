@@ -752,14 +752,33 @@
       _lastScanResult.proposals = (_lastScanResult.proposals || []).filter(
         function(p) { return !resolvedHashes.has(p.file_hash); }
       );
+      // Recompute total_size and example_filenames from the surviving
+      // proposals so a partially-pruned bucket card doesn't keep
+      // advertising the pre-resolution recoverable size or stale sample
+      // filenames. Mirrors bucket_unresolved_proposals in Python.
+      var proposalsByHash = {};
+      (_lastScanResult.proposals || []).forEach(function(p) {
+        proposalsByHash[p.file_hash] = p;
+      });
       _lastScanResult.buckets = (_lastScanResult.buckets || []).map(function(b) {
         var keptHashes = (b.file_hashes || []).filter(
           function(h) { return !resolvedHashes.has(h); }
         );
         if (keptHashes.length === b.file_hashes.length) return b;
+        var keptProposals = keptHashes
+          .map(function(h) { return proposalsByHash[h]; })
+          .filter(function(p) { return p != null; });
+        var newTotalSize = keptProposals.reduce(function(n, p) {
+          return n + ((p.losers || []).length * ((p.winner || {}).file_size || 0));
+        }, 0);
+        var newExamples = keptProposals.slice(0, 3).map(function(p) {
+          return (p.winner || {}).filename || '';
+        });
         return Object.assign({}, b, {
           file_hashes: keptHashes,
           group_count: keptHashes.length,
+          total_size: newTotalSize,
+          example_filenames: newExamples,
         });
       });
       // renderResults reads stored aggregate counters in preference to
