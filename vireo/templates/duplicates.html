@@ -228,6 +228,11 @@
     <span class="status" id="progressStatus">Starting scan...</span>
   </div>
 
+  <div id="restoredBanner" class="group-warning" style="display:none;">
+    Showing results from your last scan (<span id="restoredAgo"></span>).
+    Click <b>Scan for duplicate files</b> above for a fresh scan.
+  </div>
+
   <div id="summary" style="display:none;"></div>
 
   <div id="results"></div>
@@ -272,9 +277,38 @@
     document.getElementById('emptyState').style.display = visible ? '' : 'none';
   }
 
+  function hideRestoredBanner() {
+    document.getElementById('restoredBanner').style.display = 'none';
+  }
+
+  function formatTimeAgo(isoStr) {
+    if (!isoStr) return '';
+    var d = new Date(isoStr.endsWith('Z') ? isoStr : isoStr + 'Z');
+    var sec = Math.floor((new Date() - d) / 1000);
+    if (sec < 60) return 'just now';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+    if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
+    return d.toLocaleString();
+  }
+
+  async function tryRestoreLastScan() {
+    try {
+      var data = await safeFetch('/api/duplicates/last-scan', undefined, { toast: false });
+      if (!data || !data.found) return;
+      renderResults(data.result || {});
+      var banner = document.getElementById('restoredBanner');
+      document.getElementById('restoredAgo').textContent =
+        formatTimeAgo(data.finished_at);
+      banner.style.display = '';
+    } catch (e) {
+      // best-effort; fall through to the normal empty-state UI
+    }
+  }
+
   async function startScan() {
     var scanBtn = document.getElementById('scanBtn');
     scanBtn.disabled = true;
+    hideRestoredBanner();
     setEmptyVisible(false);
     document.getElementById('results').innerHTML = '';
     document.getElementById('summary').style.display = 'none';
@@ -820,8 +854,11 @@
     document.getElementById('summary').style.display = 'none';
     document.getElementById('applyBar').style.display = 'none';
     document.getElementById('applyStatus').textContent = '';
+    hideRestoredBanner();
     setEmptyVisible(true);
   }
+
+  document.addEventListener('DOMContentLoaded', tryRestoreLastScan);
 </script>
 </body>
 </html>
