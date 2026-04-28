@@ -638,6 +638,9 @@
         'Keep ' + escapeHtml(label) + ' for all ' + bucket.group_count +
         '</button>';
     });
+    html += '<button class="keep-btn reveal-btn" onclick="revealBucketFolders(' + bi + ')" ' +
+      'title="Open all bucket folders in your OS file manager">' +
+      'Reveal in Finder</button>';
     html += '<label class="delete-toggle">' +
       '<input type="checkbox" data-bi="' + bi + '" data-delete-toggle> ' +
       'Also move extras to Trash</label>';
@@ -645,6 +648,29 @@
     html += '<div class="bucket-status" data-bi="' + bi + '" data-bucket-status></div>';
     html += '</div>';
     return html;
+  }
+
+  async function revealBucketFolders(bi) {
+    var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
+    if (!bucket || !bucket.folders || bucket.folders.length === 0) return;
+    try {
+      var data = await safeFetch('/api/folders/reveal', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ paths: bucket.folders }),
+      });
+      var revealed = (data.revealed || []).length;
+      var skipped = (data.skipped || []).length;
+      var failed = (data.failed || []).length;
+      if (failed > 0) {
+        showToast('Revealed ' + revealed + ', ' + failed + ' failed', 'error');
+      } else if (skipped > 0) {
+        showToast('Revealed ' + revealed + ', ' + skipped + ' unknown to Vireo', 'success');
+      }
+      // Silent on full success — Finder windows opening is feedback enough.
+    } catch (e) {
+      showToast('Reveal failed: ' + (e.message || 'error'), 'error');
+    }
   }
 
   function bulkResolveByFolderIdx(bi, fi) {
