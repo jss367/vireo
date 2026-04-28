@@ -1864,6 +1864,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 raw_results: list = []
                 failed = 0
                 skipped_existing = 0
+                # Photos actually iterated past the inner abort check, used to
+                # correct the per-batch progress claim on a mid-batch cancel
+                # (the per-batch event below pre-advances count by len(batch)).
+                processed_in_loop = 0
                 start_time = time.time()
                 batch_size = 32  # classification batch granularity
 
@@ -1906,6 +1910,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         # then break out of the batch loop entirely.
                         if _should_abort(abort):
                             break
+                        processed_in_loop += 1
                         # Record this photo as classify-processed for the first
                         # successful model. Used by the stale-detection purge to
                         # restrict deletions to photos actually reclassified.
@@ -2050,10 +2055,28 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # for this model (see the comment on the purge below), which
                 # is the safe default when classify didn't finish.
                 if _should_abort(abort):
+                    # The per-batch progress event above pre-advances the
+                    # count by the full batch length BEFORE the inner loop
+                    # runs. On a mid-batch cancel that leaves the UI showing
+                    # a count higher than what was actually classified — emit
+                    # a corrected progress event and step update so the job
+                    # tree reflects the true partial state.
+                    stages["classify"]["count"] = (
+                        spec_idx * total + processed_in_loop
+                    )
+                    stages["classify"]["total"] = (
+                        total * len(resolved_specs_local)
+                    )
+                    runner.push_event(job["id"], "progress", _progress_event(
+                        stages, "classify",
+                        f"Cancelled — {processed_in_loop} of {total} photos",
+                        step_id=step_id,
+                    ))
                     runner.update_step(
                         job["id"], step_id,
                         status="completed",
-                        summary=f"Cancelled ({len(raw_results)} of {total} photos)",
+                        progress={"current": processed_in_loop, "total": total},
+                        summary=f"Cancelled ({processed_in_loop} of {total} photos)",
                     )
                     continue
 

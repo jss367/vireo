@@ -3137,6 +3137,21 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
         f"'Cancelled' summary; got step_updates={runner.step_updates!r}"
     )
 
+    # Progress on the cancelled step must reflect what was *actually*
+    # classified (1 photo), not what the per-batch progress event claimed
+    # (the entire batch).  Without the corrected progress emit, the step
+    # would show 3/3 even though only 1 photo was inferred — Codex P2.
+    cancelled_kw = cancelled_updates[-1]
+    assert cancelled_kw.get("progress") == {"current": 1, "total": 3}, (
+        f"Cancelled step must show actual processed count (1/3), not "
+        f"the pre-emptive batch claim (3/3). Got progress="
+        f"{cancelled_kw.get('progress')!r}"
+    )
+    assert "1 of 3" in (cancelled_kw.get("summary") or ""), (
+        f"Cancelled summary should report actual processed count; got "
+        f"{cancelled_kw.get('summary')!r}"
+    )
+
 
 def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
     tmp_path, monkeypatch,
