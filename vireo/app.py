@@ -1068,8 +1068,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             stem, _ext = os.path.splitext(src)
             sized_preview = os.path.join(preview_dir, f"{pid}_{preview_size}.jpg")
             legacy_preview = os.path.join(preview_dir, f"{pid}.jpg")
+            # Working copy: the DB path wins when set, but legacy rows from
+            # before working_copy_path was tracked can still have a file at
+            # the default <vireo>/working/<id>.jpg location — and the batch
+            # delete path cleans that up regardless of the DB column. If we
+            # only consulted the column the badge would lie about what's
+            # about to be removed.
             wc_rel = row["working_copy_path"]
-            wc_abs = os.path.join(vireo_dir, wc_rel) if wc_rel else None
+            default_wc = os.path.join(working_dir, f"{pid}.jpg")
+            if wc_rel:
+                has_wc = os.path.isfile(os.path.join(vireo_dir, wc_rel))
+            else:
+                has_wc = os.path.isfile(default_wc)
             out.append({
                 "id": pid,
                 "filename": row["filename"],
@@ -1083,7 +1093,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     os.path.isfile(sized_preview) or os.path.isfile(legacy_preview)
                     or bool(_glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")))
                 ),
-                "has_working_copy": bool(wc_abs and os.path.isfile(wc_abs)),
+                "has_working_copy": has_wc,
                 "has_xmp_sidecar": (
                     os.path.isfile(stem + ".xmp")
                     or os.path.isfile(stem + ".XMP")

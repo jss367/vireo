@@ -2346,6 +2346,45 @@ def test_api_photos_missing_delete_sidecars_rejects_untracked_paths(app_and_db, 
     assert poached.exists(), "untracked sidecar must not be touched"
 
 
+def test_api_photos_missing_reports_default_working_copy(app_and_db, tmp_path):
+    """has_working_copy must reflect on-disk reality even when working_copy_path is NULL.
+
+    Legacy rows backfilled before working_copy_path was tracked still have a
+    file at <vireo>/working/<id>.jpg, and the batch-delete path removes it
+    on row removal. If the modal said no working copy existed, users would
+    decide to delete based on stale info.
+    """
+    from PIL import Image
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid = db.add_photo(folder_id=fid, filename="ghost.NEF",
+                       extension=".nef", file_size=1, file_mtime=1.0)
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    # Drop a working-copy file at the default location, leave the DB
+    # column NULL — same shape legacy/backfill state has.
+    thumb_dir = app.config["THUMB_CACHE_DIR"]
+    vireo_dir = os.path.dirname(thumb_dir)
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    Image.new("RGB", (10, 10)).save(os.path.join(working_dir, f"{pid}.jpg"))
+    assert db.get_photo(pid)["working_copy_path"] is None
+
+    resp = client.get("/api/photos/missing")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data) == 1
+    assert data[0]["has_working_copy"] is True
+
+
 def test_api_photos_missing_excludes_present_files(app_and_db, tmp_path):
     """A photo whose source still exists must not show up as missing."""
     from PIL import Image
