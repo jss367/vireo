@@ -433,6 +433,37 @@ def test_run_duplicate_scan_excludes_resolved_when_opt_out(tmp_path):
     assert result["resolved_group_count"] == 0
 
 
+def test_run_duplicate_scan_emits_buckets_for_unresolved_groups(tmp_path):
+    """Scan response includes pre-computed buckets so the UI can offer one
+    decision per (folder-set) bucket instead of per-group. Three unresolved
+    groups all sharing the same {folderA, folderB} parent-dir set should
+    collapse to a single bucket with group_count=3."""
+    from duplicate_scan import run_duplicate_scan
+
+    db = Database(str(tmp_path / "t.db"))
+    a_dir = tmp_path / "a"
+    b_dir = tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    a_fid = db.add_folder(str(a_dir))
+    b_fid = db.add_folder(str(b_dir))
+
+    # Three groups, each with one file in /a and one in /b. Reset flags so
+    # the auto-resolve hook doesn't pre-pick a winner — we want unresolved.
+    for h, name in [("HBKT1", "owl.jpg"), ("HBKT2", "hawk.jpg"), ("HBKT3", "finch.jpg")]:
+        _add(db, a_fid, name, file_hash=h)
+        _add(db, b_fid, name, file_hash=h)
+        _reset_flags(db, h)
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=False)
+    assert "buckets" in result
+    assert len(result["buckets"]) == 1
+    bucket = result["buckets"][0]
+    assert sorted(bucket["folders"]) == [str(a_dir), str(b_dir)]
+    assert bucket["group_count"] == 3
+    assert sorted(bucket["file_hashes"]) == ["HBKT1", "HBKT2", "HBKT3"]
+
+
 def test_run_duplicate_scan_chunks_large_groups(tmp_path, monkeypatch):
     """A single resolved group with more than ``_SQL_PARAM_CHUNK`` photo_ids
     must not raise ``OperationalError`` on SQLite builds with the legacy
