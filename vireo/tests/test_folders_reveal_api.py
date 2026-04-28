@@ -110,17 +110,20 @@ def test_folders_reveal_shell_failure_reports_per_path(app_and_db):
         assert "reason" in body["failed"][0]
 
 
-def test_folders_reveal_skips_path_outside_active_workspace(app_and_db):
-    """A folder that exists in the ``folders`` table but isn't linked to
-    the active workspace must be treated as unknown — otherwise this
-    endpoint becomes a cross-workspace path oracle / open-action gadget,
-    breaking the workspace isolation /api/files/reveal already enforces.
-    """
+def test_folders_reveal_allows_cross_workspace_paths_known_to_library(app_and_db):
+    """Duplicate scans are library-wide (``file_hash`` is global across
+    workspaces), so a bucket can legitimately surface folders linked
+    only to another workspace. Reveal must still succeed for those —
+    otherwise bulk-decide buckets that span workspaces become
+    un-revealable. The "must exist in folders table" check is enough
+    to keep arbitrary filesystem-path probes off this endpoint, and
+    Vireo is single-user so workspaces are organizational, not access
+    boundaries."""
     app, db = app_and_db
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
-    db.add_folder("/secret/cross-ws-only")
+    db.add_folder("/tmp/cross-ws-bucket")
     db.set_active_workspace(default_ws)
 
     with app.test_client() as c, \
@@ -128,16 +131,11 @@ def test_folders_reveal_skips_path_outside_active_workspace(app_and_db):
          patch("vireo.app.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0)
         resp = c.post("/api/folders/reveal",
-                      json={"paths": ["/secret/cross-ws-only"]})
+                      json={"paths": ["/tmp/cross-ws-bucket"]})
         assert resp.status_code == 200
         body = resp.get_json()
-        # Skipped, not revealed — and no subprocess call leaks the path
-        # to the OS file manager.
-        assert body["revealed"] == []
-        assert body["skipped"] == [
-            {"path": "/secret/cross-ws-only", "reason": "not a known folder"}
-        ]
-        assert run.call_count == 0
+        assert body["revealed"] == ["/tmp/cross-ws-bucket"]
+        assert body["skipped"] == []
 
 
 def test_folders_reveal_non_zero_exit_reports_failure(app_and_db):

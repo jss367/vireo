@@ -6956,19 +6956,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error("paths must be a list of non-empty strings")
 
         db = _get_db()
-        # Normalize on read so legacy/relocated rows stored with a
+        # Validate every path against the ``folders`` table — refusing
+        # arbitrary filesystem paths is the security boundary, otherwise
+        # a caller could probe disk via the OS-window-opens side channel.
+        # Don't gate on workspace_folders: duplicate scans are
+        # library-wide (file_hash is global), so a bucket can legitimately
+        # surface folders linked only to another workspace, and Vireo is
+        # a single-user app where workspaces are organizational rather
+        # than access-bound.
+        # Normalize both sides so legacy/relocated rows stored with a
         # trailing separator still match bucket-UI paths derived from
         # ``os.path.dirname(...)`` — same trap bulk_resolve_by_folder
-        # patched. JOIN workspace_folders so paths from other workspaces
-        # are treated as unknown (without this gate the endpoint would
-        # be a cross-workspace path oracle / open-action gadget).
+        # patched.
         norm_paths = [os.path.normpath(p) for p in paths]
-        all_rows = db.conn.execute(
-            """SELECT f.path FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
-               WHERE wf.workspace_id = ?""",
-            (db._active_workspace_id,),
-        ).fetchall()
+        all_rows = db.conn.execute("SELECT path FROM folders").fetchall()
         known_norm = {os.path.normpath(r["path"]) for r in all_rows}
 
         revealed = []
