@@ -1895,14 +1895,21 @@ class Database:
         if len(rows) < 2:
             return {"winner_id": None, "loser_ids": [], "rejected": 0}
 
-        candidates = [
-            DupCandidate(
-                id=r["id"],
-                path=os.path.join(r["folder_path"] or "", r["filename"] or ""),
-                mtime=r["file_mtime"] or 0.0,
+        candidates = []
+        for r in rows:
+            path = os.path.join(r["folder_path"] or "", r["filename"] or "")
+            candidates.append(
+                DupCandidate(
+                    id=r["id"],
+                    path=path,
+                    mtime=r["file_mtime"] or 0.0,
+                    # Stat each candidate so the resolver doesn't pick a
+                    # winner whose file was moved/deleted on disk. The DB
+                    # row would otherwise outvote a surviving twin solely
+                    # on path-string heuristics.
+                    exists=os.path.exists(path),
+                )
             )
-            for r in rows
-        ]
         winner_id, losers_with_reasons = resolve_duplicates(candidates)
         loser_ids = [lid for lid, _reason in losers_with_reasons]
 

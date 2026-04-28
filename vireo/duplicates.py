@@ -12,6 +12,10 @@ class DupCandidate:
     id: int
     path: str
     mtime: float
+    # Whether the file is currently present on disk. Defaults to True so old
+    # call sites and tests that don't care about existence keep working; the
+    # scan/db layers populate it via os.path.exists().
+    exists: bool = True
 
 
 _DUP_SUFFIX_RES = [
@@ -38,6 +42,11 @@ def resolve_duplicates(candidates):
     earlier rule keep the earlier-rule reason; later rules operate only on the
     still-tied pool:
 
+    0. Files that exist on disk beat files that don't. Missing-file losers get
+       reason ``"file missing on disk"``. If all candidates are missing (or
+       all exist), this rule is a no-op — when *all* are missing we still
+       pick a winner via the remaining rules so the DB rows can be cleaned
+       up; callers should warn the user since no on-disk file will survive.
     1. If at least one candidate has a clean filename, all dirty candidates
        lose with reason ``"filename has dup suffix"`` and tiebreaking
        continues among the clean ones. If all candidates are dirty (or all
@@ -50,16 +59,27 @@ def resolve_duplicates(candidates):
 
     losers_with_reasons = []
 
+    # Rule 0: existing files beat missing ones
+    present = [c for c in candidates if c.exists]
+    missing = [c for c in candidates if not c.exists]
+    if present and missing:
+        losers_with_reasons.extend(
+            (c.id, "file missing on disk") for c in missing
+        )
+        pool = present
+        if len(pool) == 1:
+            return pool[0].id, losers_with_reasons
+    else:
+        pool = candidates
+
     # Rule 1: clean filename beats dirty (dup-suffix) filename
-    clean = [c for c in candidates if not _has_dup_suffix(c.path)]
-    dirty = [c for c in candidates if _has_dup_suffix(c.path)]
+    clean = [c for c in pool if not _has_dup_suffix(c.path)]
+    dirty = [c for c in pool if _has_dup_suffix(c.path)]
     if clean and dirty:
         losers_with_reasons.extend(
             (c.id, "filename has dup suffix") for c in dirty
         )
         pool = clean
-    else:
-        pool = candidates
 
     # Rule 2: shorter path wins
     min_len = min(len(c.path) for c in pool)

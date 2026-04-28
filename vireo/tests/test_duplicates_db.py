@@ -618,3 +618,150 @@ def test_run_duplicate_scan_positive_case_with_one_rejected(
     prop = result["proposals"][0]
     # 1 winner + 1 loser after filtering the rejected row.
     assert 1 + len(prop["losers"]) == 2
+
+
+# -----------------------------------------------------------------------------
+# Rule 0 integration: existence check across the DB and scan layers. The
+# resolver itself is unit-tested in test_duplicates.py — these tests verify
+# the DB and scan layers actually populate ``exists`` from disk.
+# -----------------------------------------------------------------------------
+
+def test_apply_resolution_promotes_present_over_missing(tmp_path):
+    """The resolver must not pick a winner whose file is gone from disk.
+
+    Setup mirrors the user-reported bug: two rows share a hash, but the row
+    with the heuristically-better path (shorter, clean filename) has its
+    file deleted on disk. apply_duplicate_resolution should promote the
+    surviving copy via Rule 0.
+    """
+    db = Database(str(tmp_path / "t.db"))
+    # Two folders so paths differ in length.
+    short_dir = tmp_path / "a"
+    long_dir = tmp_path / "archive" / "deep"
+    short_dir.mkdir()
+    long_dir.mkdir(parents=True)
+    short_fid = db.add_folder(str(short_dir))
+    long_fid = db.add_folder(str(long_dir))
+
+    # Create *only* the file in the long path. The short-path file does not
+    # exist on disk — its DB row is a ghost.
+    (long_dir / "owl.jpg").write_bytes(b"binary")
+
+    p_ghost = _add(db, short_fid, "owl.jpg", file_hash="HG")
+    p_real = _add(db, long_fid, "owl.jpg", file_hash="HG")
+    _reset_flags(db, "HG")
+
+    result = db.apply_duplicate_resolution([p_ghost, p_real])
+    assert result["winner_id"] == p_real, (
+        "Resolver picked a missing-on-disk row over a surviving one — Rule 0 broken."
+    )
+    assert result["loser_ids"] == [p_ghost]
+
+
+def test_run_duplicate_scan_marks_missing_files(tmp_path):
+    """Scan proposals must surface ``exists`` and ``all_missing`` so the UI
+    can warn the user before they trash surviving copies."""
+    from duplicate_scan import run_duplicate_scan
+
+    db = Database(str(tmp_path / "t.db"))
+    short_dir = tmp_path / "short"
+    long_dir = tmp_path / "long"
+    short_dir.mkdir()
+    long_dir.mkdir()
+    short_fid = db.add_folder(str(short_dir))
+    long_fid = db.add_folder(str(long_dir))
+
+    # Only the long-path file exists on disk.
+    (long_dir / "owl.jpg").write_bytes(b"x")
+    p_ghost = _add(db, short_fid, "owl.jpg", file_hash="HMISS")
+    p_real = _add(db, long_fid, "owl.jpg", file_hash="HMISS")
+    _reset_flags(db, "HMISS")
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=False)
+    assert len(result["proposals"]) == 1
+    prop = result["proposals"][0]
+    assert prop["all_missing"] is False
+    assert prop["winner"]["id"] == p_real
+    assert prop["winner"]["exists"] is True
+    assert len(prop["losers"]) == 1
+    assert prop["losers"][0]["id"] == p_ghost
+    assert prop["losers"][0]["exists"] is False
+    assert prop["losers"][0]["reason"] == "file missing on disk"
+
+
+def test_run_duplicate_scan_resolved_winner_missing_keeps_kept_row(tmp_path):
+    """Resolved groups don't promote — the kept DB row stays the winner even
+    when its file is gone but a rejected sibling's file still exists.
+
+    Models the scenario where auto-resolve picked a winner earlier (when both
+    files were on disk) and then the kept file was later deleted out from
+    under Vireo. The UI guards against trashing the surviving loser via the
+    warning banner + disabled trash buttons; this test locks in the proposal
+    shape so the JS can rely on ``winner.exists === false`` to detect it.
+    """
+    from duplicate_scan import run_duplicate_scan
+
+    db = Database(str(tmp_path / "t.db"))
+    a_dir = tmp_path / "a"
+    b_dir = tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    a_fid = db.add_folder(str(a_dir))
+    b_fid = db.add_folder(str(b_dir))
+
+    # Both files exist when auto-resolve runs (so the hook resolves the group
+    # using Rule 1 — clean filename wins).
+    (a_dir / "owl.jpg").write_bytes(b"x")
+    (b_dir / "owl-2.jpg").write_bytes(b"x")
+    p_kept = _add(db, a_fid, "owl.jpg", file_hash="HRESM")
+    p_loser = _add(db, b_fid, "owl-2.jpg", file_hash="HRESM")
+
+    # Sanity: auto-resolve should have flagged p_loser as rejected.
+    flags = {
+        r["id"]: r["flag"]
+        for r in db.conn.execute(
+            "SELECT id, flag FROM photos WHERE id IN (?, ?)", (p_kept, p_loser)
+        ).fetchall()
+    }
+    assert flags == {p_kept: "none", p_loser: "rejected"}
+
+    # Now the kept file disappears from disk after auto-resolve.
+    (a_dir / "owl.jpg").unlink()
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=True)
+    resolved = [p for p in result["proposals"] if p["status"] == "resolved"]
+    assert len(resolved) == 1
+    prop = resolved[0]
+    # Winner is still the kept DB row — _build_resolved_proposal does not
+    # promote based on existence; it surfaces the row that flag != 'rejected'.
+    assert prop["winner"]["id"] == p_kept
+    assert prop["winner"]["exists"] is False
+    assert prop["losers"][0]["id"] == p_loser
+    assert prop["losers"][0]["exists"] is True
+    assert prop["all_missing"] is False
+
+
+def test_run_duplicate_scan_all_missing_flag(tmp_path):
+    """When every candidate is missing on disk, the proposal flags it so the
+    UI can tell the user there's nothing to trash — only DB rows to clean up."""
+    from duplicate_scan import run_duplicate_scan
+
+    db = Database(str(tmp_path / "t.db"))
+    a_dir = tmp_path / "a"
+    b_dir = tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    a_fid = db.add_folder(str(a_dir))
+    b_fid = db.add_folder(str(b_dir))
+
+    # No files written. Both rows are ghosts.
+    _add(db, a_fid, "owl.jpg", file_hash="HALLG")
+    _add(db, b_fid, "owl.jpg", file_hash="HALLG")
+    _reset_flags(db, "HALLG")
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=False)
+    assert len(result["proposals"]) == 1
+    prop = result["proposals"][0]
+    assert prop["all_missing"] is True
+    assert prop["winner"]["exists"] is False
+    assert all(l["exists"] is False for l in prop["losers"])

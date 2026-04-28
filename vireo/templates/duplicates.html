@@ -182,6 +182,29 @@
     margin-top: 4px; font-size: 10px; color: var(--text-dim);
     font-style: italic;
   }
+
+  /* Missing-file warning. Cards for rows whose file was deleted/moved on
+     disk get a yellow border + "MISSING" tag so the user doesn't trash
+     surviving twins based on a ghost row. */
+  .dup-card.missing { border-color: var(--warning, #d69e2e); }
+  .dup-card .missing-tag {
+    margin-top: 4px; padding: 2px 6px;
+    background: var(--warning, #d69e2e); color: var(--text-primary);
+    border-radius: 3px;
+    font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    align-self: flex-start;
+  }
+  .group-warning {
+    margin-bottom: 8px; padding: 8px 12px; border-radius: 4px;
+    background: var(--warning-bg, rgba(214, 158, 46, 0.15));
+    border-left: 3px solid var(--warning, #d69e2e);
+    font-size: 12px; color: var(--text-primary);
+  }
+  .group-warning.severe {
+    background: var(--danger-bg, rgba(220, 38, 38, 0.15));
+    border-left-color: var(--danger);
+  }
 </style>
 </head>
 <body>
@@ -343,6 +366,14 @@
         if (l.file_size) resolvedBytes += l.file_size;
       });
     });
+    // Bulk-trashable count must mirror ``isBulkTrashProtected`` so the button
+    // label never advertises files the action would skip. Without this the
+    // button claims N losers but ``trashAllLoserFiles`` returns "Nothing to
+    // trash" when every remaining group is protected.
+    var bulkTrashableLoserCount = resolved.reduce(function(n, p) {
+      if (isBulkTrashProtected(p)) return n;
+      return n + (p.losers || []).length;
+    }, 0);
 
     var summary = document.getElementById('summary');
     summary.style.display = '';
@@ -390,14 +421,18 @@
           ' group' + (resolvedGroupCount === 1 ? '' : 's') +
           ' auto-handled during scan. Loser files (' + formatBytes(resolvedBytes) +
           ') may still be on disk.</div>' +
-        '</div>' +
-        '<div class="section-actions">' +
-          '<button class="btn-secondary" onclick="trashAllLoserFiles()" id="trashAllBtn">' +
-            'Move ' + resolvedLoserCount + ' loser file' +
-            (resolvedLoserCount === 1 ? '' : 's') + ' to Trash' +
-          '</button>' +
-        '</div>' +
-      '</div>';
+        '</div>';
+      // Hide the bulk button entirely when every remaining resolved group is
+      // protected — otherwise it sticks around as a no-op that always toasts
+      // "Nothing to trash" and confuses users about what cleanup is left.
+      html += '<div class="section-actions">';
+      if (bulkTrashableLoserCount > 0) {
+        html += '<button class="btn-secondary" onclick="trashAllLoserFiles()" id="trashAllBtn">' +
+            'Move ' + bulkTrashableLoserCount + ' loser file' +
+            (bulkTrashableLoserCount === 1 ? '' : 's') + ' to Trash' +
+          '</button>';
+      }
+      html += '</div></div>';
       html += '<div class="' + listClass + '" id="resolvedList">';
       resolved.forEach(function(group) {
         html += renderResolvedGroup(group);
@@ -415,6 +450,51 @@
     }
   }
 
+  function renderGroupWarning(group) {
+    // Three levels of severity:
+    //  - all_missing: every file in the group is gone — nothing to keep.
+    //  - winner missing (status-dependent):
+    //      • unresolved: Rule 0 promoted a surviving twin into the KEEP slot.
+    //      • resolved: the kept row in the DB is fixed; if a loser file still
+    //        exists it's the only surviving copy. Trashing it = data loss.
+    //  - any loser missing: informational; trash actions will be no-ops for it.
+    var allMissing = group.all_missing === true;
+    var winner = group.winner || {};
+    var losers = group.losers || [];
+    var winnerMissing = winner.exists === false;
+    var anyLoserMissing = losers.some(function(l) { return l.exists === false; });
+    if (allMissing) {
+      return '<div class="group-warning severe">' +
+        '<b>All files in this group are missing on disk.</b> ' +
+        'Nothing to delete — Vireo just needs to clean up the orphaned DB rows. ' +
+        'Re-scanning the affected folders will mark these as missing.' +
+        '</div>';
+    }
+    if (winnerMissing) {
+      if (group.status === 'resolved') {
+        return '<div class="group-warning severe">' +
+          '<b>Heads up:</b> the kept file in this resolved group is missing on disk. ' +
+          'Any surviving loser file below may be the only remaining copy — ' +
+          'trash actions on those losers are disabled to prevent data loss. ' +
+          'Restore the kept file, or rescan the folder so Vireo can re-resolve.' +
+          '</div>';
+      }
+      // status === 'unresolved': Rule 0 promotes a present candidate, so the
+      // KEEP card here is genuinely a surviving copy that's been swapped in.
+      return '<div class="group-warning severe">' +
+        '<b>Heads up:</b> the file Vireo originally picked to keep is missing on disk. ' +
+        'A surviving copy was promoted instead — check the KEEP card before applying.' +
+        '</div>';
+    }
+    if (anyLoserMissing) {
+      return '<div class="group-warning">' +
+        'One or more loser files are already missing on disk. They’ll be ' +
+        'rejected in the DB; trash actions will skip them.' +
+        '</div>';
+    }
+    return '';
+  }
+
   function renderUnresolvedGroup(group) {
     var winner = group.winner || {};
     var losers = group.losers || [];
@@ -427,6 +507,7 @@
             'Include this group (' + losers.length + ' to reject)</label>';
     html += '<span class="hash">' + escapeHtml(hash.substring(0, 16)) + '...</span>';
     html += '</div>';
+    html += renderGroupWarning(group);
     html += '<div class="dup-row">';
     html += renderCard(winner, true, null, false);
     losers.forEach(function(loser) {
@@ -440,25 +521,33 @@
     var winner = group.winner || {};
     var losers = group.losers || [];
     var hash = group.file_hash || '';
+    // When the kept-file is missing, any surviving loser file is the only
+    // remaining copy. Drop trash affordances for that group entirely so the
+    // bulk and per-card paths stay consistent — both check ``data-protected``.
+    var winnerMissing = winner.exists === false;
 
-    var html = '<div class="dup-group" data-hash="' + escapeHtml(hash) + '">';
+    var html = '<div class="dup-group" data-hash="' + escapeHtml(hash) + '"' +
+               (winnerMissing ? ' data-protected="winner-missing"' : '') + '>';
     html += '<div class="dup-group-header">';
     html += '<label style="cursor:default;">' +
             losers.length + ' loser' + (losers.length === 1 ? '' : 's') +
             ' rejected during scan</label>';
     html += '<span class="hash">' + escapeHtml(hash.substring(0, 16)) + '...</span>';
     html += '</div>';
+    html += renderGroupWarning(group);
     html += '<div class="dup-row">';
     html += renderCard(winner, true, null, false);
     losers.forEach(function(loser) {
-      html += renderCard(loser, false, loser.reason, true);
+      html += renderCard(loser, false, loser.reason, true, winnerMissing);
     });
     html += '</div></div>';
     return html;
   }
 
-  function renderCard(photo, isWinner, reason, isResolvedLoser) {
+  function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProtect) {
     var cls = isWinner ? 'winner' : 'loser';
+    var missing = photo.exists === false;
+    if (missing) cls += ' missing';
     var badge = isWinner ? 'KEEP' : (isResolvedLoser ? 'REJECTED' : 'WILL REJECT');
     var thumbUrl = photo.id != null ? ('/thumbnails/' + photo.id + '.jpg') : null;
     var html = '<div class="dup-card ' + cls + '" data-photo-id="' +
@@ -471,6 +560,7 @@
       html += '<div class="thumb-placeholder">No thumbnail</div>';
     }
     html += '<span class="badge">' + badge + '</span>';
+    if (missing) html += '<span class="missing-tag" title="File is no longer at this path on disk">Missing on disk</span>';
     html += '<div class="filename">' + escapeHtml(photo.filename || '') + '</div>';
     html += '<div class="path">' + escapeHtml(photo.path || '') + '</div>';
     var meta = [];
@@ -478,10 +568,16 @@
     if (photo.file_size != null) meta.push(formatBytes(photo.file_size));
     if (meta.length) html += '<div class="meta">' + meta.join(' \u00b7 ') + '</div>';
     if (reason) html += '<div class="reason">' + escapeHtml(reason) + '</div>';
-    if (isResolvedLoser && photo.id != null) {
+    if (isResolvedLoser && photo.id != null && !missing && !winnerMissingProtect) {
       html += '<button type="button" class="trash-btn" onclick="trashOneLoserFile(' +
               photo.id + ')">Move file to Trash</button>';
       html += '<div class="trash-status" data-trash-status></div>';
+    } else if (isResolvedLoser && !missing && winnerMissingProtect) {
+      // The kept-file is gone, so this loser file may be the only remaining
+      // copy. Suppress the trash button and explain why.
+      html += '<div class="trash-status" data-trash-status>' +
+              'Trash disabled \u2014 kept file is missing, this may be the only copy.' +
+              '</div>';
     }
     html += '</div>';
     return html;
@@ -538,10 +634,19 @@
     }
   }
 
+  // Protected: kept-file is missing on disk for this group, so any surviving
+  // loser file may be the only remaining copy. The bulk-button label and the
+  // bulk action share this predicate so the count never advertises files
+  // ``trashAllLoserFiles`` would skip.
+  function isBulkTrashProtected(p) {
+    return !!(p && p.winner && p.winner.exists === false);
+  }
+
   async function trashAllLoserFiles() {
     var resolved = _proposals.filter(function(p) { return p.status === 'resolved'; });
     var ids = [];
     resolved.forEach(function(p) {
+      if (isBulkTrashProtected(p)) return;
       (p.losers || []).forEach(function(l) {
         // Skip ones already trashed in this session.
         var card = document.querySelector('.dup-card[data-photo-id="' + l.id + '"]');
@@ -620,15 +725,32 @@
       showToast(msg, failed ? 'error' : 'success');
 
       if (btn) {
-        btn.disabled = false;
-        // Recompute remaining count for the bulk button label.
+        // Recompute remaining count using the same protection predicate as
+        // the action path, so the label never advertises files the next
+        // ``trashAllLoserFiles`` call would skip. Without this, a mixed scan
+        // (actionable groups + ``winner.exists === false`` groups) leaves the
+        // button re-enabled with a non-zero count after the first cleanup,
+        // and subsequent clicks become persistent no-ops ("Nothing to trash").
         var remaining = 0;
-        document.querySelectorAll('.resolved-list .dup-card.loser').forEach(function(c) {
-          if (!c.classList.contains('trashed')) remaining++;
+        _proposals.forEach(function(p) {
+          if (p.status !== 'resolved') return;
+          if (isBulkTrashProtected(p)) return;
+          (p.losers || []).forEach(function(l) {
+            var card = document.querySelector(
+              '.dup-card[data-photo-id="' + l.id + '"]');
+            if (card && !card.classList.contains('trashed')) remaining++;
+          });
         });
-        btn.textContent = 'Move ' + remaining + ' loser file' +
-                          (remaining === 1 ? '' : 's') + ' to Trash';
-        if (remaining === 0) btn.disabled = true;
+        if (remaining > 0) {
+          btn.disabled = false;
+          btn.textContent = 'Move ' + remaining + ' loser file' +
+                            (remaining === 1 ? '' : 's') + ' to Trash';
+        } else {
+          // Mirror the initial render: when there's nothing left that the
+          // bulk action would actually touch, drop the button rather than
+          // leaving a disabled "Move 0 ..." stub hanging around.
+          btn.remove();
+        }
       }
     } catch (e) {
       if (btn) { btn.disabled = false; btn.textContent = 'Move loser files to Trash'; }
