@@ -205,7 +205,17 @@ async function loadHistory() {
         try {
           var parsed = typeof r.result === 'string' ? JSON.parse(r.result) : r.result;
           var parts = [];
-          for (var k in parsed) parts.push(k + ': ' + parsed[k]);
+          for (var k in parsed) {
+            var v = parsed[k];
+            // Arrays/objects (e.g. duplicate-scan's `proposals` list) would
+            // stringify to `[object Object],...` and blow out the cell;
+            // summarize them by length instead.
+            var disp;
+            if (Array.isArray(v)) disp = v.length + ' items';
+            else if (v !== null && typeof v === 'object') disp = '{...}';
+            else disp = String(v);
+            parts.push(k + ': ' + disp);
+          }
           result = parts.join(', ');
         } catch(e) { result = String(r.result); }
       }
