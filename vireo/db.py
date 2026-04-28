@@ -1873,12 +1873,7 @@ class Database:
         If fewer than 2 non-rejected candidates remain, returns the no-op
         shape with ``winner_id=None``.
         """
-        from duplicates import (
-            DupCandidate,
-            PhotoMetadata,
-            merge_metadata,
-            resolve_duplicates,
-        )
+        from duplicates import DupCandidate, resolve_duplicates
 
         if not photo_ids or len(photo_ids) < 2:
             return {"winner_id": None, "loser_ids": [], "rejected": 0}
@@ -1912,6 +1907,22 @@ class Database:
             )
         winner_id, losers_with_reasons = resolve_duplicates(candidates)
         loser_ids = [lid for lid, _reason in losers_with_reasons]
+
+        self._apply_winner_loser_merge(winner_id, loser_ids)
+
+        return {
+            "winner_id": winner_id,
+            "loser_ids": list(loser_ids),
+            "rejected": len(loser_ids),
+        }
+
+    def _apply_winner_loser_merge(self, winner_id, loser_ids):
+        """Merge rating/keywords from losers onto winner, then flag losers
+        as rejected. Single transaction. Shared between the resolver-based
+        ``apply_duplicate_resolution`` and the user-driven
+        ``bulk_resolve_by_folder``.
+        """
+        from duplicates import PhotoMetadata, merge_metadata
 
         def _meta(photo_id):
             r = self.conn.execute(
@@ -1956,22 +1967,126 @@ class Database:
             # this transaction. Rare edge case; revisit if product needs it.
             # Collections are rule-based (no junction table) so
             # merge.collection_ids_to_add has nothing to write either.
-            loser_placeholders = ",".join("?" * len(loser_ids))
-            self.conn.execute(
-                f"UPDATE photos SET flag = 'rejected' WHERE id IN ({loser_placeholders})",
-                loser_ids,
-            )
+            if loser_ids:
+                loser_placeholders = ",".join("?" * len(loser_ids))
+                self.conn.execute(
+                    f"UPDATE photos SET flag = 'rejected' WHERE id IN ({loser_placeholders})",
+                    loser_ids,
+                )
 
         logging.getLogger(__name__).info(
             "Duplicate resolved: kept id=%s, rejected id(s)=%s",
             winner_id,
             loser_ids,
         )
-        return {
-            "winner_id": winner_id,
-            "loser_ids": list(loser_ids),
-            "rejected": len(loser_ids),
-        }
+
+    def bulk_resolve_by_folder(self, file_hashes, keep_folder):
+        """Force-resolve many duplicate groups by keeping the photo whose
+        folder matches ``keep_folder``. Companion to the bulk-decide UI.
+
+        For each ``file_hash``: find non-rejected candidates, pick the one
+        whose folder path equals ``keep_folder`` as winner, mark every
+        other candidate as rejected, merge metadata. If multiple
+        candidates live in ``keep_folder`` (rare — typically only happens
+        when same-folder duplicates accumulate), runs the deterministic
+        resolver against just those to pick a single winner.
+
+        Skip reasons are surfaced rather than raised so a single bad hash
+        doesn't poison a 1000-hash batch:
+        - ``"no candidates"`` — file_hash has no DB rows (stale UI state)
+        - ``"fewer than 2 candidates"`` — only one row left, nothing to do
+        - ``"no candidate in keep_folder"`` — group exists but isn't
+          actionable from this folder choice
+        - ``"keep_folder candidate missing on disk"`` — the row(s) in
+          keep_folder point at files that no longer exist; promoting them
+          would reject the only surviving sibling (and, if the caller
+          chains a delete, trash it).
+
+        Returns ``{"resolved": [{"file_hash", "winner_id", "loser_ids"}],
+        "skipped": [{"file_hash", "reason"}]}``.
+        """
+        from duplicates import DupCandidate, resolve_duplicates
+
+        # Normalize once. The bucket UI derives folder paths from
+        # ``os.path.dirname(...)`` (never trailing-slashed), but
+        # ``folders.path`` rows can carry a trailing separator from
+        # manual relocation or legacy imports — a naive string compare
+        # silently no-ops the action for those users.
+        keep_folder_norm = os.path.normpath(keep_folder) if keep_folder else ""
+
+        resolved = []
+        skipped = []
+        for file_hash in file_hashes:
+            rows = self.conn.execute(
+                """SELECT p.id, p.filename, p.file_mtime, p.rating,
+                          f.path AS folder_path
+                   FROM photos p
+                   LEFT JOIN folders f ON f.id = p.folder_id
+                   WHERE p.file_hash = ? AND p.flag != 'rejected'""",
+                (file_hash,),
+            ).fetchall()
+            if not rows:
+                skipped.append({"file_hash": file_hash, "reason": "no candidates"})
+                continue
+            if len(rows) < 2:
+                skipped.append({
+                    "file_hash": file_hash,
+                    "reason": "fewer than 2 candidates",
+                })
+                continue
+            in_folder = [
+                r for r in rows
+                if os.path.normpath(r["folder_path"] or "") == keep_folder_norm
+            ]
+            if not in_folder:
+                skipped.append({
+                    "file_hash": file_hash,
+                    "reason": "no candidate in keep_folder",
+                })
+                continue
+            # Existence-check the keep_folder candidate(s) before promoting.
+            # If the row's file has been deleted externally but a sibling in
+            # another folder still exists, force-picking the missing row as
+            # winner would reject the surviving copy — and chained delete
+            # would then trash it. Skip the hash instead.
+            in_folder_paths = [
+                (r, os.path.join(r["folder_path"] or "", r["filename"] or ""))
+                for r in in_folder
+            ]
+            present_in_folder = [
+                (r, p) for (r, p) in in_folder_paths if os.path.exists(p)
+            ]
+            if not present_in_folder:
+                skipped.append({
+                    "file_hash": file_hash,
+                    "reason": "keep_folder candidate missing on disk",
+                })
+                continue
+            if len(present_in_folder) == 1:
+                winner_id = present_in_folder[0][0]["id"]
+            else:
+                # Same-folder duplicates among the keep_folder candidates —
+                # let the resolver pick deterministically among them. All
+                # candidates passed in exist on disk (filtered above), so
+                # Rule 0 is a no-op here.
+                cands = [
+                    DupCandidate(
+                        id=r["id"], path=p,
+                        mtime=r["file_mtime"] or 0.0,
+                        exists=True,
+                    )
+                    for (r, p) in present_in_folder
+                ]
+                winner_id, _ = resolve_duplicates(cands)
+            loser_ids = [r["id"] for r in rows if r["id"] != winner_id]
+            self._apply_winner_loser_merge(winner_id, loser_ids)
+            resolved.append({
+                "file_hash": file_hash,
+                "winner_id": winner_id,
+                "loser_ids": loser_ids,
+            })
+
+        return {"resolved": resolved, "skipped": skipped}
 
     def reopen_duplicate_group(self, file_hash):
         """Un-reject all rejected rows sharing this file_hash.

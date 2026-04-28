@@ -6927,6 +6927,44 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             total_rejected += result.get("rejected", 0)
         return jsonify({"rejected_count": total_rejected})
 
+    @app.route("/api/duplicates/bulk-resolve", methods=["POST"])
+    def api_duplicates_bulk_resolve():
+        """Force-resolve a batch of duplicate groups by keeping the photo
+        whose folder matches ``keep_folder``.
+
+        Body: ``{"file_hashes": [str, ...], "keep_folder": str}``. For each
+        hash, the photo in ``keep_folder`` becomes the kept winner; every
+        other non-rejected photo sharing the hash becomes rejected, with
+        rating/keywords merged onto the winner.
+
+        Returns ``{"ok": True, "resolved_count": int, "resolved":
+        [{"file_hash", "winner_id", "loser_ids"}], "skipped":
+        [{"file_hash", "reason"}]}``. ``loser_ids`` is surfaced so the UI
+        can chain into ``/api/duplicates/delete-loser-files`` when the
+        user opted in to immediate trash.
+        """
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("file_hashes and keep_folder required")
+        file_hashes = body.get("file_hashes")
+        keep_folder = body.get("keep_folder")
+        if not isinstance(file_hashes, list) or not file_hashes:
+            return json_error("file_hashes required")
+        if not isinstance(keep_folder, str) or not keep_folder:
+            return json_error("keep_folder required")
+        for h in file_hashes:
+            if not isinstance(h, str) or not h:
+                return json_error("file_hashes must be a list of non-empty strings")
+
+        db = _get_db()
+        result = db.bulk_resolve_by_folder(file_hashes, keep_folder)
+        return jsonify({
+            "ok": True,
+            "resolved_count": len(result["resolved"]),
+            "resolved": result["resolved"],
+            "skipped": result["skipped"],
+        })
+
     @app.route("/api/duplicates/delete-loser-files", methods=["POST"])
     def api_duplicates_delete_loser_files():
         """Move duplicate loser files to OS Trash and remove their DB rows.
