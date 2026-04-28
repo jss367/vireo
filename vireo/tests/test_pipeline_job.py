@@ -2964,6 +2964,180 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
     )
 
 
+def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch):
+    """A mid-classify cancel must take effect within roughly one photo's
+    worth of work (not at the next 32-photo batch boundary), and must skip
+    _store_grouped_predictions, which can take a minute on large
+    collections.  The per-model step is finalized with a 'Cancelled'
+    summary so the user sees the partial state in the job tree.
+    """
+    import threading
+
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    import pipeline_job as pj
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_ids = []
+    for i in range(3):
+        name = f"photo{i}.jpg"
+        pid = db.add_photo(folder_id, name, ".jpg", 1000 + i, 1_000_000.0 + i)
+        _drop_jpeg(folder_path, name)
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+              "confidence": 0.9, "category": "animal"}],
+            detector_model="MegaDetector",
+        )
+        photo_ids.append(pid)
+
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    # detect_stage stub: surface the prior-run detection rows we inserted
+    # above as if MegaDetector just produced them, so classify_stage's
+    # cached_detections lookup hits with real DB ids (record_classifier_run
+    # has a FK to detections.id).
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        det_map = {}
+        for p in batch:
+            existing = db_.get_detections(p["id"])
+            det_map[p["id"]] = [{
+                "id": d["id"],
+                "box_x": d["box_x"], "box_y": d["box_y"],
+                "box_w": d["box_w"], "box_h": d["box_h"],
+                "confidence": d["detector_confidence"],
+                "category": d["category"],
+            } for d in existing if d["detector_model"] != "full-image"]
+        return det_map, len(batch), {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    # _prepare_image opens the real image and crops it. Stub it to a fake
+    # PIL image so the per-photo loop progresses to _flush_batch regardless
+    # of the dummy 16x16 black JPEGs on disk.
+    from PIL import Image as _PILImage
+
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+        folder_path = folders.get(photo["folder_id"], "")
+        image_path = os.path.join(folder_path, photo["filename"])
+        return _PILImage.new("RGB", (16, 16), "black"), folder_path, image_path
+
+    monkeypatch.setattr(classify_job, "_prepare_image", fake_prepare_image)
+
+    # Spy on _flush_batch: count calls, populate raw_results with a fake
+    # prediction so the per-model step has something to report, and trigger
+    # abort after the FIRST call so the inner-loop abort check is exercised
+    # on the second photo.
+    abort_after_classify = threading.Event()
+    flush_calls = [0]
+
+    def spy_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
+                        top_k=1):
+        flush_calls[0] += 1
+        for entry in batch:
+            raw_results.append({
+                "photo": entry["photo"],
+                "detection_id": entry.get("detection_id"),
+                "folder_path": entry["folder_path"],
+                "image_path": entry["image_path"],
+                "prediction": "Robin",
+                "confidence": 0.9,
+                "timestamp": None,
+                "filename": entry["photo"]["filename"],
+                "embedding": None,
+                "taxonomy": None,
+            })
+        abort_after_classify.set()
+        return 0
+
+    monkeypatch.setattr(classify_job, "_flush_batch", spy_flush_batch)
+
+    # Spy on _store_grouped_predictions to verify the cancel path skips it.
+    store_calls = [0]
+
+    def spy_store(*args, **kwargs):
+        store_calls[0] += 1
+        return {"predictions_stored": 0, "burst_groups": 0,
+                "already_labeled": 0}
+
+    monkeypatch.setattr(classify_job, "_store_grouped_predictions", spy_store)
+
+    original_should_abort = pj._should_abort
+
+    def patched_should_abort(event):
+        if abort_after_classify.is_set():
+            return True
+        return original_should_abort(event)
+
+    monkeypatch.setattr(pj, "_should_abort", patched_should_abort)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        reclassify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Without the fix, all 3 photos are classified before the next outer
+    # batch boundary fires (batch_size=32 > 3 photos). With the fix, the
+    # inner-loop check catches abort on photo 2.
+    assert 1 <= flush_calls[0] <= 2, (
+        f"Expected classify to stop within ~1 photo of abort; got "
+        f"{flush_calls[0]} _flush_batch calls. Without the inner-loop "
+        f"abort check this would be 3."
+    )
+
+    # _store_grouped_predictions is the slow tail that the user reported
+    # as 'still going' after cancel.  The cancel path must skip it.
+    assert store_calls[0] == 0, (
+        f"_store_grouped_predictions must NOT run on a mid-batch cancel; "
+        f"got {store_calls[0]} calls."
+    )
+
+    classify_step_id = f"classify:{model_id}"
+    cancelled_updates = [
+        kw for (_, sid, kw) in runner.step_updates
+        if sid == classify_step_id and "Cancelled" in (kw.get("summary") or "")
+    ]
+    assert cancelled_updates, (
+        f"Expected at least one update on {classify_step_id!r} with a "
+        f"'Cancelled' summary; got step_updates={runner.step_updates!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sentinel written on ONNX load failure
 # ---------------------------------------------------------------------------

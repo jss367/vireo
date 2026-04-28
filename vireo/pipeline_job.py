@@ -1899,6 +1899,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     )
 
                     for photo in batch:
+                        # Per-photo abort check so cancel takes effect within
+                        # one inference (~seconds) instead of waiting for the
+                        # next batch boundary (~32 photos). The outer batch
+                        # loop's check at the top of the next iteration will
+                        # then break out of the batch loop entirely.
+                        if _should_abort(abort):
+                            break
                         # Record this photo as classify-processed for the first
                         # successful model. Used by the stale-detection purge to
                         # restrict deletions to photos actually reclassified.
@@ -2035,6 +2042,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 primary_det["id"], model_name, spec_fp,
                                 prediction_count=new_count,
                             )
+
+                # Skip the grouping/storage finalization on cancel — it can
+                # take a minute on large collections and the user has already
+                # asked us to stop. Leaving models_succeeded at its current
+                # value also keeps the reclassify stale-row purge from firing
+                # for this model (see the comment on the purge below), which
+                # is the safe default when classify didn't finish.
+                if _should_abort(abort):
+                    runner.update_step(
+                        job["id"], step_id,
+                        status="completed",
+                        summary=f"Cancelled ({len(raw_results)} of {total} photos)",
+                    )
+                    continue
 
                 group_result = _store_grouped_predictions(
                     raw_results, job["id"], model_name,
