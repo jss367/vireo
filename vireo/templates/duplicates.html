@@ -252,6 +252,9 @@
 <script>
   var _proposals = [];
   var _currentJobId = null;
+  // Set synchronously at the top of startScan() so the async tryRestoreLastScan
+  // can detect that a fresh scan is already underway and skip its render.
+  var _scanInProgress = false;
 
   function escapeHtml(s) {
     if (s == null) return '';
@@ -292,8 +295,13 @@
   }
 
   async function tryRestoreLastScan() {
+    if (_scanInProgress) return;
     try {
       var data = await safeFetch('/api/duplicates/last-scan', undefined, { toast: false });
+      // The user may have clicked Scan while we were awaiting the response.
+      // Don't clobber the in-progress scan's UI with stale results — that
+      // would re-enable the scan button and risk overlapping scan jobs.
+      if (_scanInProgress) return;
       if (!data || !data.found) return;
       renderResults(data.result || {});
       var banner = document.getElementById('restoredBanner');
@@ -307,6 +315,7 @@
 
   async function startScan() {
     var scanBtn = document.getElementById('scanBtn');
+    _scanInProgress = true;
     scanBtn.disabled = true;
     hideRestoredBanner();
     setEmptyVisible(false);
