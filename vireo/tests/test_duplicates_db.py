@@ -689,15 +689,15 @@ def test_run_duplicate_scan_marks_missing_files(tmp_path):
     assert prop["losers"][0]["reason"] == "file missing on disk"
 
 
-def test_run_duplicate_scan_resolved_winner_missing_keeps_kept_row(tmp_path):
-    """Resolved groups don't promote — the kept DB row stays the winner even
-    when its file is gone but a rejected sibling's file still exists.
+def test_run_duplicate_scan_reopens_resolved_when_winner_missing_and_loser_exists(tmp_path):
+    """Resolved groups auto-reopen when the kept file is gone but a rejected
+    sibling still exists. The next proposal then runs Rule 0 and promotes the
+    survivor as the new winner.
 
-    Models the scenario where auto-resolve picked a winner earlier (when both
-    files were on disk) and then the kept file was later deleted out from
-    under Vireo. The UI guards against trashing the surviving loser via the
-    warning banner + disabled trash buttons; this test locks in the proposal
-    shape so the JS can rely on ``winner.exists === false`` to detect it.
+    Without auto-reopen, the DB-frozen kept row would stay the winner forever
+    and the UI would have to disable trash on the survivor to avoid data loss.
+    With auto-reopen, the surviving sibling becomes the new winner and the
+    user can resolve normally.
     """
     from duplicate_scan import run_duplicate_scan
 
@@ -713,8 +713,8 @@ def test_run_duplicate_scan_resolved_winner_missing_keeps_kept_row(tmp_path):
     # using Rule 1 — clean filename wins).
     (a_dir / "owl.jpg").write_bytes(b"x")
     (b_dir / "owl-2.jpg").write_bytes(b"x")
-    p_kept = _add(db, a_fid, "owl.jpg", file_hash="HRESM")
-    p_loser = _add(db, b_fid, "owl-2.jpg", file_hash="HRESM")
+    p_kept = _add(db, a_fid, "owl.jpg", file_hash="HREOPEN")
+    p_loser = _add(db, b_fid, "owl-2.jpg", file_hash="HREOPEN")
 
     # Sanity: auto-resolve should have flagged p_loser as rejected.
     flags = {
@@ -725,20 +725,69 @@ def test_run_duplicate_scan_resolved_winner_missing_keeps_kept_row(tmp_path):
     }
     assert flags == {p_kept: "none", p_loser: "rejected"}
 
-    # Now the kept file disappears from disk after auto-resolve.
+    # The kept file disappears from disk after auto-resolve.
     (a_dir / "owl.jpg").unlink()
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=True)
+    # Auto-reopened: the group now appears as unresolved with the surviving
+    # sibling promoted to winner via Rule 0.
+    assert len(result["proposals"]) == 1
+    prop = result["proposals"][0]
+    assert prop["status"] == "unresolved"
+    assert prop["winner"]["id"] == p_loser
+    assert prop["winner"]["exists"] is True
+    assert len(prop["losers"]) == 1
+    assert prop["losers"][0]["id"] == p_kept
+    assert prop["losers"][0]["exists"] is False
+    assert prop["losers"][0]["reason"] == "file missing on disk"
+
+    # Both rows fully un-rejected so the user can apply a fresh resolution.
+    flags_after = {
+        r["id"]: r["flag"]
+        for r in db.conn.execute(
+            "SELECT id, flag FROM photos WHERE id IN (?, ?)", (p_kept, p_loser)
+        ).fetchall()
+    }
+    assert flags_after == {p_kept: "none", p_loser: "none"}
+
+
+def test_run_duplicate_scan_resolved_winner_missing_all_siblings_missing_stays_resolved(tmp_path):
+    """When the kept file AND every rejected sibling are all gone, the group
+    does NOT auto-reopen — there's no surviving copy to promote, so it still
+    surfaces as resolved with all_missing=True for orphan-row cleanup.
+    """
+    from duplicate_scan import run_duplicate_scan
+
+    db = Database(str(tmp_path / "t.db"))
+    a_dir = tmp_path / "a"
+    b_dir = tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    a_fid = db.add_folder(str(a_dir))
+    b_fid = db.add_folder(str(b_dir))
+
+    (a_dir / "owl.jpg").write_bytes(b"x")
+    (b_dir / "owl-2.jpg").write_bytes(b"x")
+    p_kept = _add(db, a_fid, "owl.jpg", file_hash="HALLGONE")
+    p_loser = _add(db, b_fid, "owl-2.jpg", file_hash="HALLGONE")
+
+    (a_dir / "owl.jpg").unlink()
+    (b_dir / "owl-2.jpg").unlink()
 
     result = run_duplicate_scan({"progress": {}}, db, include_resolved=True)
     resolved = [p for p in result["proposals"] if p["status"] == "resolved"]
     assert len(resolved) == 1
     prop = resolved[0]
-    # Winner is still the kept DB row — _build_resolved_proposal does not
-    # promote based on existence; it surfaces the row that flag != 'rejected'.
     assert prop["winner"]["id"] == p_kept
     assert prop["winner"]["exists"] is False
-    assert prop["losers"][0]["id"] == p_loser
-    assert prop["losers"][0]["exists"] is True
-    assert prop["all_missing"] is False
+    assert prop["all_missing"] is True
+    flags_after = {
+        r["id"]: r["flag"]
+        for r in db.conn.execute(
+            "SELECT id, flag FROM photos WHERE id IN (?, ?)", (p_kept, p_loser)
+        ).fetchall()
+    }
+    assert flags_after == {p_kept: "none", p_loser: "rejected"}
 
 
 def test_run_duplicate_scan_all_missing_flag(tmp_path):
