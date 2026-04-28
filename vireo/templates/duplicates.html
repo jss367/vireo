@@ -797,7 +797,14 @@
       _lastScanResult.resolved_loser_count = prunedProposals.reduce(function(n, p) {
         return p.status === 'resolved' ? n + (p.losers || []).length : n;
       }, 0);
-      renderResults(_lastScanResult);
+      // Don't clobber an in-flight scan's UI: if the user clicked Scan
+      // while bulk-resolve was awaiting, ``renderResults`` would hide the
+      // progress spinner, re-enable the scan button, and paint stale
+      // pre-scan results — risking overlapping scan jobs. Same guard
+      // tryRestoreLastScan uses.
+      if (!_scanInProgress) {
+        renderResults(_lastScanResult);
+      }
     } catch (e) {
       card.classList.remove('applying');
       btns.forEach(function(b) { b.disabled = false; });
