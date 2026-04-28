@@ -465,3 +465,87 @@ def test_disk_cleanup_summary_zero_when_clean(app_and_db):
     body = resp.get_json()
     assert body["count"] == 0
     assert body["total_size"] == 0
+
+
+# ---------------------------------------------------------------------------
+# /api/duplicates/last-scan — restore the most recent completed scan's result
+# so navigating away from /duplicates and back doesn't force a rescan.
+# ---------------------------------------------------------------------------
+
+
+def test_last_scan_returns_not_found_when_no_history(app_and_db):
+    """No prior scan -> {found: false}."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/duplicates/last-scan")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"found": False}
+
+
+def test_last_scan_returns_completed_scan_result(app_and_db):
+    """After a scan completes, last-scan returns its proposals."""
+    app, db = app_and_db
+    fid = db.add_folder("/tmp/duplastscan1")
+    _seed_pair(db, "HLAST", fid)
+
+    client = app.test_client()
+    job_id = client.post("/api/duplicates/scan").get_json()["job_id"]
+    for _ in range(50):
+        resp = client.get(f"/api/jobs/{job_id}")
+        if resp.get_json()["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.1)
+
+    resp = client.get("/api/duplicates/last-scan")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["found"] is True
+    assert body["job_id"] == job_id
+    assert body["finished_at"]
+    hashes = [p["file_hash"] for p in body["result"]["proposals"]]
+    assert "HLAST" in hashes
+
+
+def test_last_scan_picks_most_recent_completed(app_and_db):
+    """Two scans -> last-scan reflects the newer one."""
+    app, db = app_and_db
+    fid = db.add_folder("/tmp/duplastscan2")
+    _seed_pair(db, "HOLD", fid)
+
+    client = app.test_client()
+    job1 = client.post("/api/duplicates/scan").get_json()["job_id"]
+    for _ in range(50):
+        if client.get(f"/api/jobs/{job1}").get_json()["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.1)
+
+    # Add another duplicate group then rescan.
+    _seed_pair(db, "HNEW", fid, name_a="n.jpg", name_b="n (2).jpg")
+    job2 = client.post("/api/duplicates/scan").get_json()["job_id"]
+    for _ in range(50):
+        if client.get(f"/api/jobs/{job2}").get_json()["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.1)
+
+    body = client.get("/api/duplicates/last-scan").get_json()
+    assert body["found"] is True
+    assert body["job_id"] == job2
+    hashes = [p["file_hash"] for p in body["result"]["proposals"]]
+    assert "HNEW" in hashes
+    assert "HOLD" in hashes  # still present in the library
+
+
+def test_last_scan_ignores_failed_jobs(app_and_db):
+    """A failed scan in history must not be served as the 'last' result."""
+    app, db = app_and_db
+    # Insert a synthetic 'failed' duplicate-scan row directly into history.
+    db.conn.execute(
+        """INSERT INTO job_history
+              (id, type, status, started_at, finished_at, duration, result)
+           VALUES (?, 'duplicate-scan', 'failed', ?, ?, 0.0, NULL)""",
+        ("duplicate-scan-failed-1", "2026-01-01T00:00:00", "2026-01-01T00:00:01"),
+    )
+    db.conn.commit()
+
+    body = app.test_client().get("/api/duplicates/last-scan").get_json()
+    assert body == {"found": False}

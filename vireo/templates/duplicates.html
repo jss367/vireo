@@ -228,6 +228,11 @@
     <span class="status" id="progressStatus">Starting scan...</span>
   </div>
 
+  <div id="restoredBanner" class="group-warning" style="display:none;">
+    Showing results from your last scan (<span id="restoredAgo"></span>).
+    Click <b>Scan for duplicate files</b> above for a fresh scan.
+  </div>
+
   <div id="summary" style="display:none;"></div>
 
   <div id="results"></div>
@@ -247,6 +252,9 @@
 <script>
   var _proposals = [];
   var _currentJobId = null;
+  // Set synchronously at the top of startScan() so the async tryRestoreLastScan
+  // can detect that a fresh scan is already underway and skip its render.
+  var _scanInProgress = false;
 
   function escapeHtml(s) {
     if (s == null) return '';
@@ -272,9 +280,48 @@
     document.getElementById('emptyState').style.display = visible ? '' : 'none';
   }
 
+  function hideRestoredBanner() {
+    document.getElementById('restoredBanner').style.display = 'none';
+  }
+
+  function formatTimeAgo(isoStr) {
+    if (!isoStr) return '';
+    // job_history timestamps are naive local-time ISO strings written by
+    // datetime.now().isoformat() in vireo/jobs.py. Pass them through as-is so
+    // JS parses them as local time; appending 'Z' would shift the displayed
+    // age by the local UTC offset (e.g. a fresh scan appearing hours old).
+    var d = new Date(isoStr);
+    var sec = Math.floor((new Date() - d) / 1000);
+    if (sec < 60) return 'just now';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+    if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
+    return d.toLocaleString();
+  }
+
+  async function tryRestoreLastScan() {
+    if (_scanInProgress) return;
+    try {
+      var data = await safeFetch('/api/duplicates/last-scan', undefined, { toast: false });
+      // The user may have clicked Scan while we were awaiting the response.
+      // Don't clobber the in-progress scan's UI with stale results — that
+      // would re-enable the scan button and risk overlapping scan jobs.
+      if (_scanInProgress) return;
+      if (!data || !data.found) return;
+      renderResults(data.result || {});
+      var banner = document.getElementById('restoredBanner');
+      document.getElementById('restoredAgo').textContent =
+        formatTimeAgo(data.finished_at);
+      banner.style.display = '';
+    } catch (e) {
+      // best-effort; fall through to the normal empty-state UI
+    }
+  }
+
   async function startScan() {
     var scanBtn = document.getElementById('scanBtn');
+    _scanInProgress = true;
     scanBtn.disabled = true;
+    hideRestoredBanner();
     setEmptyVisible(false);
     document.getElementById('results').innerHTML = '';
     document.getElementById('summary').style.display = 'none';
@@ -820,8 +867,11 @@
     document.getElementById('summary').style.display = 'none';
     document.getElementById('applyBar').style.display = 'none';
     document.getElementById('applyStatus').textContent = '';
+    hideRestoredBanner();
     setEmptyVisible(true);
   }
+
+  document.addEventListener('DOMContentLoaded', tryRestoreLastScan);
 </script>
 </body>
 </html>

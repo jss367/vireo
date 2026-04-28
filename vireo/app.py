@@ -7086,6 +7086,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "failed": failed,
         })
 
+    @app.route("/api/duplicates/last-scan", methods=["GET"])
+    def api_duplicates_last_scan():
+        """Return the most recent completed duplicate-scan's result.
+
+        The /duplicates page only holds proposals in JS memory, so
+        navigating away and back used to require a full rescan. This
+        lets the page restore prior results from ``job_history`` instead.
+
+        Library-wide on purpose: duplicate detection itself ignores
+        workspace scope (photos are global), so the result of any
+        completed scan is valid for any active workspace — even though
+        the row carries the triggering workspace's id.
+
+        Response: ``{found: false}`` or
+        ``{found: true, job_id, started_at, finished_at, result}``.
+        """
+        db = _get_db()
+        row = db.conn.execute(
+            """SELECT id, started_at, finished_at, result
+                 FROM job_history
+                WHERE type = 'duplicate-scan'
+                  AND status = 'completed'
+                  AND result IS NOT NULL
+                ORDER BY finished_at DESC
+                LIMIT 1"""
+        ).fetchone()
+        if row is None:
+            return jsonify({"found": False})
+        try:
+            result = json.loads(row["result"])
+        except (json.JSONDecodeError, TypeError):
+            return jsonify({"found": False})
+        return jsonify({
+            "found": True,
+            "job_id": row["id"],
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+            "result": result,
+        })
+
     @app.route("/api/duplicates/disk-cleanup-summary", methods=["GET"])
     def api_duplicates_disk_cleanup_summary():
         """Return counts of duplicate-loser files that may still be on disk.
