@@ -686,6 +686,7 @@
         (r.loser_ids || []).forEach(function(id) { loserIds.push(id); });
       });
 
+      var trashCallFailed = false;
       if (deleteFiles && loserIds.length > 0) {
         if (status) status.textContent = 'Moving ' + loserIds.length +
           ' file' + (loserIds.length === 1 ? '' : 's') + ' to Trash...';
@@ -702,13 +703,30 @@
           if (skippedCount) msg += ', ' + skippedCount + ' skipped';
           showToast(msg, trashFailed ? 'error' : 'success');
         } catch (e) {
-          showToast('Resolved DB but trash failed: ' + (e.message || 'error'), 'error');
+          // Trash call failed entirely — DB is resolved but the duplicate
+          // files are still on disk. Surface this and skip the local prune
+          // so the bucket card stays visible; otherwise the user thinks
+          // cleanup completed and has no path to retry without a rescan.
+          trashCallFailed = true;
+          showToast('Resolved DB but trash failed: ' + (e.message || 'error') +
+                    ' — rescan to retry trash', 'error');
         }
       } else {
         var msg = 'Resolved ' + resolved.length + ' group' +
           (resolved.length === 1 ? '' : 's');
         if (skippedCount) msg += ', ' + skippedCount + ' skipped';
         showToast(msg, 'success');
+      }
+
+      if (trashCallFailed) {
+        // Restore the card UI so the failure is visible and not stuck in
+        // the spinner state. We deliberately do not prune _lastScanResult
+        // here: a rescan is required to reconcile DB-rejected rows with
+        // the on-disk files that still need trashing.
+        card.classList.remove('applying');
+        btns.forEach(function(b) { b.disabled = false; });
+        if (status) status.textContent = 'Trash failed — rescan to retry';
+        return;
       }
 
       // Locally prune the resolved hashes from _lastScanResult so the next
