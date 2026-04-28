@@ -2081,12 +2081,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # labels_fingerprint so reclassifying one workspace's label
                 # set doesn't wipe another workspace's cached predictions on
                 # the same photos under its own fingerprint (shared-folder
-                # setups).
+                # setups).  ``clear_run_keys=False`` because the per-photo
+                # ``record_classifier_run`` calls inside the loop above
+                # already wrote fresh classifier_runs rows for processed
+                # detections — wiping them here would strand the gate and
+                # force the next non-reclassify pass to re-infer everything.
                 if params.reclassify:
                     thread_db.clear_predictions(
                         model=model_name,
                         collection_photo_ids=[p["id"] for p in photos],
                         labels_fingerprint=spec_fp,
+                        clear_run_keys=False,
                     )
 
                 group_result = _store_grouped_predictions(

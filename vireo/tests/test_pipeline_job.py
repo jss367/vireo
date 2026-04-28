@@ -3319,6 +3319,182 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
     )
 
 
+def test_pipeline_reclassify_success_preserves_classifier_run_keys(
+    tmp_path, monkeypatch,
+):
+    """A successful reclassify must leave fresh classifier_runs rows in
+    place for the processed detections so the next non-reclassify pass
+    hits the skip gate.  The deferred reclassify clear runs AFTER the
+    per-photo ``record_classifier_run`` calls; without ``clear_run_keys=False``
+    it wipes the just-written run keys, forcing the next normal classify to
+    re-infer the entire collection.  Codex P1 review on #710.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_ids = []
+    detection_ids = []
+    for i in range(3):
+        name = f"photo{i}.jpg"
+        pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
+        _drop_jpeg(folder_path, name)
+        det_ids = db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+              "confidence": 0.9, "category": "animal"}],
+            detector_model="MegaDetector",
+        )
+        photo_ids.append(pid)
+        detection_ids.append(det_ids[0])
+
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    import labels_fingerprint as lfp
+    monkeypatch.setattr(lfp, "compute_fingerprint", lambda *a, **k: "legacy")
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        det_map = {}
+        for p in batch:
+            existing = db_.get_detections(p["id"])
+            det_map[p["id"]] = [{
+                "id": d["id"],
+                "box_x": d["box_x"], "box_y": d["box_y"],
+                "box_w": d["box_w"], "box_h": d["box_h"],
+                "confidence": d["detector_confidence"],
+                "category": d["category"],
+            } for d in existing if d["detector_model"] != "full-image"]
+        return det_map, len(batch), {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    from PIL import Image as _PILImage
+
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+        folder_path = folders.get(photo["folder_id"], "")
+        image_path = os.path.join(folder_path, photo["filename"])
+        return _PILImage.new("RGB", (16, 16), "black"), folder_path, image_path
+
+    monkeypatch.setattr(classify_job, "_prepare_image", fake_prepare_image)
+
+    # Wrap clear_predictions to verify the deferred reclassify clear runs
+    # with clear_run_keys=False AND that the just-written classifier_runs
+    # rows survive that clear.  We can't assert via the final post-pipeline
+    # state because the reclassify stale-detection purge runs after
+    # _store_grouped_predictions and FK-cascades the run keys away — but
+    # that's pre-existing reclassify behavior, unrelated to the deferred
+    # clear's scope.  The fix is about the clear itself, so test the clear.
+    from db import Database as _Db
+    original_clear = _Db.clear_predictions
+    clear_calls = []
+
+    def wrapped_clear(self, model=None, collection_photo_ids=None,
+                     labels_fingerprint=None, clear_run_keys=True):
+        before = self.conn.execute(
+            "SELECT COUNT(*) FROM classifier_runs"
+        ).fetchone()[0]
+        result = original_clear(
+            self, model=model,
+            collection_photo_ids=collection_photo_ids,
+            labels_fingerprint=labels_fingerprint,
+            clear_run_keys=clear_run_keys,
+        )
+        after = self.conn.execute(
+            "SELECT COUNT(*) FROM classifier_runs"
+        ).fetchone()[0]
+        clear_calls.append({
+            "model": model,
+            "fp": labels_fingerprint,
+            "clear_run_keys": clear_run_keys,
+            "runs_before": before,
+            "runs_after": after,
+        })
+        return result
+
+    monkeypatch.setattr(_Db, "clear_predictions", wrapped_clear)
+
+    def fake_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
+                        top_k=1):
+        for entry in batch:
+            raw_results.append({
+                "photo": entry["photo"],
+                "detection_id": entry.get("detection_id"),
+                "folder_path": entry["folder_path"],
+                "image_path": entry["image_path"],
+                "prediction": "Robin",
+                "confidence": 0.9,
+                "timestamp": None,
+                "filename": entry["photo"]["filename"],
+                "embedding": None,
+                "taxonomy": None,
+            })
+        return 0
+
+    monkeypatch.setattr(classify_job, "_flush_batch", fake_flush_batch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        reclassify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Find the deferred reclassify clear (the only call inside classify_stage
+    # that scopes by model+fingerprint+photos).  It must have been invoked
+    # with clear_run_keys=False so the per-photo record_classifier_run
+    # writes survive into _store_grouped_predictions.
+    deferred = [c for c in clear_calls if c["model"] == "BioCLIP"
+                and c["fp"] == "legacy"]
+    assert len(deferred) == 1, (
+        f"Expected exactly one deferred reclassify clear; got "
+        f"{len(deferred)}: {clear_calls!r}"
+    )
+    call = deferred[0]
+    assert call["clear_run_keys"] is False, (
+        f"Deferred reclassify clear must run with clear_run_keys=False so "
+        f"the just-written classifier_runs survive into the next "
+        f"non-reclassify pass.  Got clear_run_keys={call['clear_run_keys']!r}."
+    )
+    assert call["runs_before"] >= 3 and call["runs_after"] == call["runs_before"], (
+        f"clear_predictions(clear_run_keys=False) must NOT touch "
+        f"classifier_runs. Got runs_before={call['runs_before']}, "
+        f"runs_after={call['runs_after']}."
+    )
+
+
 def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
     tmp_path, monkeypatch,
 ):

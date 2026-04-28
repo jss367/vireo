@@ -4961,7 +4961,7 @@ class Database:
         self.conn.commit()
 
     def clear_predictions(self, model=None, collection_photo_ids=None,
-                          labels_fingerprint=None):
+                          labels_fingerprint=None, clear_run_keys=True):
         """Clear predictions, optionally filtered by model, photo set, and fingerprint.
 
         The ``predictions`` table is now global (no workspace_id).  This
@@ -4978,6 +4978,15 @@ class Database:
         leave those detections unclassified until forced. With
         ``labels_fingerprint`` passed, we delete only A's rows AND the
         matching ``classifier_runs`` rows so A's next pass actually re-runs.
+
+        ``clear_run_keys=False`` is for callers that have just written fresh
+        ``classifier_runs`` rows for these detections and are about to
+        replace the predictions in the same transaction (e.g. the pipeline's
+        deferred reclassify clear that runs after the per-photo
+        ``record_classifier_run`` calls).  Wiping the run keys in that case
+        would force the next non-reclassify pass to re-infer the entire
+        collection.  Default ``True`` matches the long-standing safety
+        behavior — only opt out if the caller guarantees fresh run keys.
         """
         ws = self._ws_id()
         # Build a reusable (cond, params) pair for the predictions subquery.
@@ -5007,6 +5016,10 @@ class Database:
             )""",
             [ws, *extra_params],
         )
+
+        if not clear_run_keys:
+            self.conn.commit()
+            return
 
         # Also clear matching classifier_runs rows so the next pass actually
         # re-runs the classifier. Without this, the skip gate at
