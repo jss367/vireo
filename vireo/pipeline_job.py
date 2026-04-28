@@ -2122,7 +2122,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     summary=", ".join(parts),
                 )
 
-            if models_succeeded == 0 and skipped_model_names:
+            # Cancellation takes precedence over the all-models-failed-to-load
+            # signal: if the user cancelled mid-classify after a prior model
+            # had already been added to skipped_model_names, raising here
+            # would misclassify the cancel as a fatal load failure and
+            # overwrite the per-model 'Cancelled' summary in the exception
+            # handler.
+            if (
+                models_succeeded == 0
+                and skipped_model_names
+                and not _should_abort(abort)
+            ):
                 raise RuntimeError(
                     f"All {len(skipped_model_names)} model(s) failed to load: "
                     + ", ".join(skipped_model_names)

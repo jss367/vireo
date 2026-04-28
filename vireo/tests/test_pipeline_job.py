@@ -3138,6 +3138,167 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
     )
 
 
+def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
+    tmp_path, monkeypatch,
+):
+    """If model 0 failed to load (populating skipped_model_names) and model 1
+    is then cancelled mid-classify, the post-loop
+    `if models_succeeded == 0 and skipped_model_names: raise` check must
+    NOT fire — cancellation takes precedence over the all-models-failed
+    signal. Without this guard, a user cancel gets misclassified as a
+    fatal load failure (Codex P2 review).
+    """
+    import threading
+
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    import pipeline_job as pj
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_ids = []
+    for i in range(3):
+        name = f"photo{i}.jpg"
+        pid = db.add_photo(folder_id, name, ".jpg", 2000 + i, 2_000_000.0 + i)
+        _drop_jpeg(folder_path, name)
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+              "confidence": 0.9, "category": "animal"}],
+            detector_model="MegaDetector",
+        )
+        photo_ids.append(pid)
+
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        det_map = {}
+        for p in batch:
+            existing = db_.get_detections(p["id"])
+            det_map[p["id"]] = [{
+                "id": d["id"],
+                "box_x": d["box_x"], "box_y": d["box_y"],
+                "box_w": d["box_w"], "box_h": d["box_h"],
+                "confidence": d["detector_confidence"],
+                "category": d["category"],
+            } for d in existing if d["detector_model"] != "full-image"]
+        return det_map, len(batch), {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    from PIL import Image as _PILImage
+
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+        folder_path = folders.get(photo["folder_id"], "")
+        image_path = os.path.join(folder_path, photo["filename"])
+        return _PILImage.new("RGB", (16, 16), "black"), folder_path, image_path
+
+    monkeypatch.setattr(classify_job, "_prepare_image", fake_prepare_image)
+
+    abort_after_classify = threading.Event()
+
+    def spy_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
+                        top_k=1):
+        for entry in batch:
+            raw_results.append({
+                "photo": entry["photo"],
+                "detection_id": entry.get("detection_id"),
+                "folder_path": entry["folder_path"],
+                "image_path": entry["image_path"],
+                "prediction": "Robin",
+                "confidence": 0.9,
+                "timestamp": None,
+                "filename": entry["photo"]["filename"],
+                "embedding": None,
+                "taxonomy": None,
+            })
+        abort_after_classify.set()
+        return 0
+
+    monkeypatch.setattr(classify_job, "_flush_batch", spy_flush_batch)
+    monkeypatch.setattr(
+        classify_job, "_store_grouped_predictions",
+        lambda *a, **k: {"predictions_stored": 0, "burst_groups": 0,
+                         "already_labeled": 0},
+    )
+
+    original_should_abort = pj._should_abort
+
+    def patched_should_abort(event):
+        if abort_after_classify.is_set():
+            return True
+        return original_should_abort(event)
+
+    monkeypatch.setattr(pj, "_should_abort", patched_should_abort)
+
+    # Make model 0 fail to load (so skipped_model_names gets populated) and
+    # model 1 succeed. The pipeline tries model 0 twice — once in
+    # model_loader_stage's preload, once in classify_stage's spec_idx==0
+    # branch — so the first 2 Classifier() calls fail; call 3 (model 1)
+    # succeeds.
+    classifier_calls = [0]
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            classifier_calls[0] += 1
+            if classifier_calls[0] <= 2:
+                raise RuntimeError(
+                    "simulated load failure for model 0"
+                )
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    # Order matters: model 0 fails, model 1 must come second so it actually
+    # runs classify and is the one we cancel. Pass them explicitly to lock
+    # the order against any reordering inside the pipeline.
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=model_ids,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    # Pre-fix, this would raise RuntimeError("All 1 model(s) failed to load: ...")
+    # because models_succeeded=0 and skipped_model_names=[model 0 name].
+    # With the guard, the cancel takes precedence and the call returns cleanly.
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Sanity: the cancelled model 1 step has a 'Cancelled' summary.
+    classify_step_id = f"classify:{model_ids[1]}"
+    cancelled_updates = [
+        kw for (_, sid, kw) in runner.step_updates
+        if sid == classify_step_id and "Cancelled" in (kw.get("summary") or "")
+    ]
+    assert cancelled_updates, (
+        f"Expected {classify_step_id!r} to finalize as 'Cancelled'; "
+        f"got step_updates={runner.step_updates!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sentinel written on ONNX load failure
 # ---------------------------------------------------------------------------
