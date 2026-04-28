@@ -535,6 +535,103 @@ def test_last_scan_picks_most_recent_completed(app_and_db):
     assert "HOLD" in hashes  # still present in the library
 
 
+def test_bulk_resolve_endpoint_resolves_by_folder(app_and_db):
+    """POST /api/duplicates/bulk-resolve forces winners by keep_folder for
+    every supplied hash and returns a summary."""
+    app, db = app_and_db
+    a_fid = db.add_folder("/tmp/dupbulka")
+    b_fid = db.add_folder("/tmp/dupbulkb")
+    # Seed three groups with one file in each folder.
+    pairs = []
+    for h, name in [("HBA1", "owl.jpg"), ("HBA2", "hawk.jpg"), ("HBA3", "finch.jpg")]:
+        p_a = db.add_photo(folder_id=a_fid, filename=name, extension=".jpg",
+                           file_size=1000, file_mtime=100.0, file_hash=h)
+        p_b = db.add_photo(folder_id=b_fid, filename=name, extension=".jpg",
+                           file_size=1000, file_mtime=100.0, file_hash=h)
+        db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash=?", (h,))
+        pairs.append((h, p_a, p_b))
+    db.conn.commit()
+
+    resp = app.test_client().post("/api/duplicates/bulk-resolve", json={
+        "file_hashes": ["HBA1", "HBA2", "HBA3"],
+        "keep_folder": "/tmp/dupbulkb",
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["resolved_count"] == 3
+    assert body["skipped"] == []
+    # All /b photos kept; all /a photos rejected.
+    for h, p_a, p_b in pairs:
+        flags = {
+            r["id"]: r["flag"]
+            for r in db.conn.execute(
+                "SELECT id, flag FROM photos WHERE id IN (?, ?)", (p_a, p_b)
+            ).fetchall()
+        }
+        assert flags == {p_a: "rejected", p_b: "none"}, f"hash {h}"
+    # Loser ids surfaced so the UI can pipe them to delete-loser-files.
+    surfaced_loser_ids = sorted(
+        lid for r in body["resolved"] for lid in r["loser_ids"]
+    )
+    assert surfaced_loser_ids == sorted(p_a for _, p_a, _ in pairs)
+
+
+def test_bulk_resolve_endpoint_skips_hash_with_no_candidate_in_folder(app_and_db):
+    """A hash whose candidates all live outside keep_folder is reported in
+    skipped, not as a fatal error — the rest of the batch still resolves."""
+    app, db = app_and_db
+    a_fid = db.add_folder("/tmp/dupbulkskipa")
+    b_fid = db.add_folder("/tmp/dupbulkskipb")
+    c_fid = db.add_folder("/tmp/dupbulkskipc")
+    # Distinct filenames per group so the UNIQUE(folder_id, filename) on
+    # photos doesn't collide when both groups share folder /b.
+    for h, fids, name in [("OK", (a_fid, b_fid), "ok.jpg"),
+                          ("SKIP", (b_fid, c_fid), "skip.jpg")]:
+        for fid in fids:
+            db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+                         file_size=1000, file_mtime=100.0, file_hash=h)
+        db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash=?", (h,))
+    db.conn.commit()
+
+    resp = app.test_client().post("/api/duplicates/bulk-resolve", json={
+        "file_hashes": ["OK", "SKIP"],
+        "keep_folder": "/tmp/dupbulkskipa",
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["resolved_count"] == 1
+    assert body["resolved"][0]["file_hash"] == "OK"
+    assert body["skipped"] == [
+        {"file_hash": "SKIP", "reason": "no candidate in keep_folder"}
+    ]
+
+
+def test_bulk_resolve_endpoint_validates_inputs(app_and_db):
+    app, _db = app_and_db
+    client = app.test_client()
+    # Missing body
+    assert client.post("/api/duplicates/bulk-resolve").status_code == 400
+    # Missing file_hashes
+    assert client.post("/api/duplicates/bulk-resolve",
+                       json={"keep_folder": "/x"}).status_code == 400
+    # Empty file_hashes
+    assert client.post("/api/duplicates/bulk-resolve",
+                       json={"file_hashes": [], "keep_folder": "/x"}
+                       ).status_code == 400
+    # Missing keep_folder
+    assert client.post("/api/duplicates/bulk-resolve",
+                       json={"file_hashes": ["H"]}).status_code == 400
+    # Bad type for keep_folder
+    assert client.post("/api/duplicates/bulk-resolve",
+                       json={"file_hashes": ["H"], "keep_folder": 123}
+                       ).status_code == 400
+    # Bad entry in file_hashes
+    assert client.post("/api/duplicates/bulk-resolve",
+                       json={"file_hashes": [123], "keep_folder": "/x"}
+                       ).status_code == 400
+
+
 def test_last_scan_ignores_failed_jobs(app_and_db):
     """A failed scan in history must not be served as the 'last' result."""
     app, db = app_and_db

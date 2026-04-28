@@ -205,6 +205,47 @@
     background: var(--danger-bg, rgba(220, 38, 38, 0.15));
     border-left-color: var(--danger);
   }
+
+  /* Bulk-decide bucket cards. When the same dedup question repeats many
+     times across the same folder set, we surface one card per bucket so
+     the user can resolve all of them with one click. */
+  .bucket-card {
+    border: 1px solid var(--border-primary); border-radius: 8px;
+    padding: 12px 14px; margin-bottom: 10px; background: var(--bg-secondary);
+  }
+  .bucket-card .bucket-headline {
+    font-size: 13px; color: var(--text-primary); margin-bottom: 6px;
+  }
+  .bucket-card .bucket-headline b { color: var(--text-primary); }
+  .bucket-card .bucket-headline .count { color: var(--accent); font-weight: 600; }
+  .bucket-card .bucket-meta {
+    font-size: 11px; color: var(--text-dim); margin-bottom: 10px;
+  }
+  .bucket-card .bucket-actions {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  }
+  .bucket-card .bucket-actions .keep-btn {
+    background: var(--bg-tertiary); color: var(--text-primary);
+    border: 1px solid var(--border-secondary); border-radius: 4px;
+    padding: 6px 12px; font-size: 12px; cursor: pointer;
+  }
+  .bucket-card .bucket-actions .keep-btn:hover {
+    background: var(--accent); color: var(--accent-text);
+    border-color: var(--accent);
+  }
+  .bucket-card .bucket-actions .keep-btn:disabled {
+    opacity: 0.5; cursor: not-allowed;
+  }
+  .bucket-card .delete-toggle {
+    margin-left: auto; font-size: 11px; color: var(--text-secondary);
+    display: flex; align-items: center; gap: 6px; cursor: pointer;
+    user-select: none;
+  }
+  .bucket-card .bucket-status {
+    margin-top: 8px; font-size: 11px; color: var(--text-dim);
+    font-style: italic;
+  }
+  .bucket-card.applying { opacity: 0.6; }
 </style>
 </head>
 <body>
@@ -374,10 +415,16 @@
     }
   }
 
+  // Latest scan-result snapshot. Used for client-side bucket pruning
+  // after a successful bulk-resolve so we don't have to round-trip a
+  // full re-scan to refresh the UI.
+  var _lastScanResult = null;
+
   function renderResults(result) {
     hideProgress();
     document.getElementById('scanBtn').disabled = false;
 
+    _lastScanResult = result;
     _proposals = result.proposals || [];
 
     // Split proposals so the two sections render independently. Unresolved
@@ -441,6 +488,22 @@
 
     // Render each section.
     var html = '';
+    var buckets = (result.buckets || []).filter(function(b) {
+      // Only show buckets that have at least 2 groups — a 1-group bucket
+      // is just an individual group and the per-group UI handles it more
+      // expressively (per-photo cards, ratings, etc.).
+      return b.group_count >= 2;
+    });
+    if (buckets.length > 0) {
+      html += '<div class="section-header"><div>' +
+        '<h2>Bulk decide</h2>' +
+        '<div class="section-sub">' +
+        'The same dedup question repeats across multiple groups. Decide ' +
+        'once per bucket to clear them all at once.</div></div></div>';
+      buckets.forEach(function(bucket, bi) {
+        html += renderBucket(bucket, bi);
+      });
+    }
     if (unresolvedGroupCount > 0) {
       html += '<div class="section-header"><div>' +
         '<h2>Needs review</h2>' +
@@ -540,6 +603,138 @@
         '</div>';
     }
     return '';
+  }
+
+  function renderBucket(bucket, bi) {
+    var folders = bucket.folders || [];
+    var folderListHtml = folders.map(function(f) {
+      return '<code>' + escapeHtml(f) + '</code>';
+    }).join(' &middot; ');
+    var examples = (bucket.example_filenames || []).map(escapeHtml).join(', ');
+    var sizeStr = formatBytes(bucket.total_size || 0);
+    var html = '<div class="bucket-card" data-bi="' + bi + '">';
+    html += '<div class="bucket-headline">' +
+      '<span class="count">' + bucket.group_count + '</span> ' +
+      'duplicate group' + (bucket.group_count === 1 ? '' : 's') +
+      ' shared between: ' + folderListHtml + '</div>';
+    var metaParts = [];
+    if (examples) metaParts.push('Examples: ' + examples);
+    if (bucket.total_size) metaParts.push(sizeStr + ' recoverable');
+    if (metaParts.length) {
+      html += '<div class="bucket-meta">' + metaParts.join(' &middot; ') + '</div>';
+    }
+    html += '<div class="bucket-actions">';
+    folders.forEach(function(folder, fi) {
+      var label = folder.split('/').filter(Boolean).pop() || folder;
+      html += '<button class="keep-btn" onclick="bulkResolveByFolderIdx(' +
+              bi + ', ' + fi + ')">' +
+        'Keep ' + escapeHtml(label) + ' for all ' + bucket.group_count +
+        '</button>';
+    });
+    html += '<label class="delete-toggle">' +
+      '<input type="checkbox" data-bi="' + bi + '" data-delete-toggle> ' +
+      'Also move extras to Trash</label>';
+    html += '</div>';
+    html += '<div class="bucket-status" data-bi="' + bi + '" data-bucket-status></div>';
+    html += '</div>';
+    return html;
+  }
+
+  function bulkResolveByFolderIdx(bi, fi) {
+    var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
+    if (!bucket) return;
+    var folder = (bucket.folders || [])[fi];
+    if (folder == null) return;
+    return bulkResolveByFolder(bi, folder);
+  }
+
+  async function bulkResolveByFolder(bi, keepFolder) {
+    var card = document.querySelector('.bucket-card[data-bi="' + bi + '"]');
+    if (!card) return;
+    var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
+    if (!bucket) return;
+
+    var deleteToggle = card.querySelector('input[data-delete-toggle]');
+    var deleteFiles = !!(deleteToggle && deleteToggle.checked);
+    var status = card.querySelector('[data-bucket-status]');
+    var btns = card.querySelectorAll('.keep-btn');
+
+    var n = bucket.group_count;
+    var label = keepFolder.split('/').filter(Boolean).pop() || keepFolder;
+    var confirmMsg = 'Keep all ' + n + ' photo' + (n === 1 ? '' : 's') +
+      ' in ' + label + ' and reject the duplicates' +
+      (deleteFiles ? ', then move the duplicate files to Trash' : '') + '?';
+    if (!confirm(confirmMsg)) return;
+
+    card.classList.add('applying');
+    btns.forEach(function(b) { b.disabled = true; });
+    if (status) status.textContent = 'Resolving ' + n + ' group' + (n === 1 ? '' : 's') + '...';
+
+    try {
+      var data = await safeFetch('/api/duplicates/bulk-resolve', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          file_hashes: bucket.file_hashes,
+          keep_folder: keepFolder,
+        }),
+      });
+      var resolved = data.resolved || [];
+      var skippedCount = (data.skipped || []).length;
+      var loserIds = [];
+      resolved.forEach(function(r) {
+        (r.loser_ids || []).forEach(function(id) { loserIds.push(id); });
+      });
+
+      if (deleteFiles && loserIds.length > 0) {
+        if (status) status.textContent = 'Moving ' + loserIds.length +
+          ' file' + (loserIds.length === 1 ? '' : 's') + ' to Trash...';
+        try {
+          var trashData = await safeFetch('/api/duplicates/delete-loser-files', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ photo_ids: loserIds }),
+          });
+          var trashed = trashData.trashed || 0;
+          var trashFailed = (trashData.failed || []).length;
+          var msg = 'Resolved ' + resolved.length + ', moved ' + trashed + ' to Trash';
+          if (trashFailed) msg += ', ' + trashFailed + ' trash failed';
+          if (skippedCount) msg += ', ' + skippedCount + ' skipped';
+          showToast(msg, trashFailed ? 'error' : 'success');
+        } catch (e) {
+          showToast('Resolved DB but trash failed: ' + (e.message || 'error'), 'error');
+        }
+      } else {
+        var msg = 'Resolved ' + resolved.length + ' group' +
+          (resolved.length === 1 ? '' : 's');
+        if (skippedCount) msg += ', ' + skippedCount + ' skipped';
+        showToast(msg, 'success');
+      }
+
+      // Locally prune the resolved hashes from _lastScanResult so the next
+      // render drops this bucket and the matching unresolved groups. Avoids
+      // an expensive re-scan round-trip on libraries with thousands of dups.
+      var resolvedHashes = new Set(resolved.map(function(r) { return r.file_hash; }));
+      _lastScanResult.proposals = (_lastScanResult.proposals || []).filter(
+        function(p) { return !resolvedHashes.has(p.file_hash); }
+      );
+      _lastScanResult.buckets = (_lastScanResult.buckets || []).map(function(b) {
+        var keptHashes = (b.file_hashes || []).filter(
+          function(h) { return !resolvedHashes.has(h); }
+        );
+        if (keptHashes.length === b.file_hashes.length) return b;
+        return Object.assign({}, b, {
+          file_hashes: keptHashes,
+          group_count: keptHashes.length,
+        });
+      });
+      renderResults(_lastScanResult);
+    } catch (e) {
+      card.classList.remove('applying');
+      btns.forEach(function(b) { b.disabled = false; });
+      if (status) status.textContent = '';
+      showToast('Bulk resolve failed: ' + (e.message || 'error'), 'error');
+    }
   }
 
   function renderUnresolvedGroup(group) {
