@@ -286,7 +286,11 @@
 
   function formatTimeAgo(isoStr) {
     if (!isoStr) return '';
-    var d = new Date(isoStr.endsWith('Z') ? isoStr : isoStr + 'Z');
+    // job_history timestamps are naive local-time ISO strings written by
+    // datetime.now().isoformat() in vireo/jobs.py. Pass them through as-is so
+    // JS parses them as local time; appending 'Z' would shift the displayed
+    // age by the local UTC offset (e.g. a fresh scan appearing hours old).
+    var d = new Date(isoStr);
     var sec = Math.floor((new Date() - d) / 1000);
     if (sec < 60) return 'just now';
     if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
