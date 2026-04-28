@@ -4218,6 +4218,32 @@ def test_get_missing_photos_excludes_photos_in_missing_folders(tmp_path):
     assert db.get_missing_photos() == []
 
 
+def test_get_missing_photos_skips_folder_whose_root_is_offline(tmp_path):
+    """Folders whose path no longer resolves on disk must be skipped wholesale.
+
+    Regression: folder status only flips to 'missing' when the 10-minute
+    health loop runs. When a volume is unmounted, get_missing_photos used
+    to classify every photo in that folder as a ghost, and the UI offered
+    bulk delete — which would wipe library rows for a drive that's just
+    temporarily offline. Treat 'folder root missing on disk' the same as
+    'folder marked missing in DB' so we never surface those rows.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    # Folder is 'ok' in DB but its path doesn't exist (unmounted volume).
+    fid = db.add_folder("/Volumes/never_mounted/dir", name="offline")
+    assert db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (fid,)
+    ).fetchone()["status"] == "ok"
+    db.add_photo(folder_id=fid, filename="bird.NEF", extension=".nef",
+                 file_size=1, file_mtime=1.0)
+
+    assert db.get_missing_photos() == []
+
+
 def test_get_missing_photos_scoped_to_active_workspace(tmp_path):
     """Missing photos in other workspaces don't leak into the active one."""
     from db import Database

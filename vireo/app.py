@@ -1050,24 +1050,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         (thumb, preview, working copy, XMP) so the user can decide whether
         anything is worth keeping before deleting the row.
         """
-        import glob as _glob
-
-        import config as cfg
-
         db = _get_db()
         thumb_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_dir)
         preview_dir = os.path.join(vireo_dir, "previews")
         working_dir = os.path.join(vireo_dir, "working")
-        preview_size = int(cfg.load().get("preview_max_size") or 1920)
+
+        # Index preview cache once. The endpoint is polled from the navbar,
+        # so per-photo `glob(preview_dir, f"{pid}_*.jpg")` was O(missing ×
+        # cache_size) readdirs per request. Build {pid} from a single
+        # listdir and check the set in O(1) per row.
+        preview_pids: set[int] = set()
+        try:
+            for name in os.listdir(preview_dir):
+                # Match `{id}.jpg` (legacy full preview) or `{id}_{size}.jpg`
+                # (sized variant). Anything else is not part of the per-photo
+                # cache and should be ignored.
+                if not name.endswith(".jpg"):
+                    continue
+                head = name[:-4].split("_", 1)[0]
+                if head.isdigit():
+                    preview_pids.add(int(head))
+        except FileNotFoundError:
+            pass  # cache dir hasn't been created yet — no previews
 
         out = []
         for row in db.get_missing_photos():
             pid = row["id"]
             src = os.path.join(row["folder_path"], row["filename"])
             stem, _ext = os.path.splitext(src)
-            sized_preview = os.path.join(preview_dir, f"{pid}_{preview_size}.jpg")
-            legacy_preview = os.path.join(preview_dir, f"{pid}.jpg")
             # Working copy: the DB path wins when set, but legacy rows from
             # before working_copy_path was tracked can still have a file at
             # the default <vireo>/working/<id>.jpg location — and the batch
@@ -1089,10 +1100,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "timestamp": row["timestamp"],
                 "file_size": row["file_size"],
                 "has_thumb": os.path.isfile(os.path.join(thumb_dir, f"{pid}.jpg")),
-                "has_preview": (
-                    os.path.isfile(sized_preview) or os.path.isfile(legacy_preview)
-                    or bool(_glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")))
-                ),
+                "has_preview": pid in preview_pids,
                 "has_working_copy": has_wc,
                 "has_xmp_sidecar": (
                     os.path.isfile(stem + ".xmp")

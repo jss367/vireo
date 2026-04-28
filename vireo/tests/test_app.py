@@ -2346,6 +2346,49 @@ def test_api_photos_missing_delete_sidecars_rejects_untracked_paths(app_and_db, 
     assert poached.exists(), "untracked sidecar must not be touched"
 
 
+def test_api_photos_missing_detects_preview_variants(app_and_db, tmp_path):
+    """has_preview must catch both `{id}_{size}.jpg` and legacy `{id}.jpg`.
+
+    Indexing the cache once per request (instead of per-photo glob) is the
+    perf optimization; this test proves both filename shapes still land as
+    True so the behavior change is invisible to callers.
+    """
+    from PIL import Image
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_sized = db.add_photo(folder_id=fid, filename="sized.NEF",
+                             extension=".nef", file_size=1, file_mtime=1.0)
+    pid_legacy = db.add_photo(folder_id=fid, filename="legacy.NEF",
+                              extension=".nef", file_size=1, file_mtime=1.0)
+    pid_no_preview = db.add_photo(folder_id=fid, filename="bare.NEF",
+                                  extension=".nef", file_size=1, file_mtime=1.0)
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    thumb_dir = app.config["THUMB_CACHE_DIR"]
+    vireo_dir = os.path.dirname(thumb_dir)
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    Image.new("RGB", (10, 10)).save(os.path.join(preview_dir, f"{pid_sized}_1920.jpg"))
+    Image.new("RGB", (10, 10)).save(os.path.join(preview_dir, f"{pid_legacy}.jpg"))
+    # Stray non-numeric filename in the cache must not crash the indexer.
+    Image.new("RGB", (10, 10)).save(os.path.join(preview_dir, "stray.jpg"))
+
+    resp = client.get("/api/photos/missing")
+    assert resp.status_code == 200
+    by_id = {r["id"]: r for r in resp.get_json()}
+    assert by_id[pid_sized]["has_preview"] is True
+    assert by_id[pid_legacy]["has_preview"] is True
+    assert by_id[pid_no_preview]["has_preview"] is False
+
+
 def test_api_photos_missing_reports_default_working_copy(app_and_db, tmp_path):
     """has_working_copy must reflect on-disk reality even when working_copy_path is NULL.
 
