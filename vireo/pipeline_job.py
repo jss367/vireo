@@ -1842,17 +1842,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # the reclassify clear so the clear can scope by fingerprint.
                 spec_fp = loaded_models.get("labels_fingerprint", "legacy")
 
-                if params.reclassify:
-                    photo_ids = [p["id"] for p in photos]
-                    # Scope by labels_fingerprint so reclassifying one
-                    # workspace's label set doesn't wipe another
-                    # workspace's cached predictions on the same photos
-                    # under its own fingerprint (shared-folder setups).
-                    thread_db.clear_predictions(
-                        model=model_name,
-                        collection_photo_ids=photo_ids,
-                        labels_fingerprint=spec_fp,
-                    )
+                # The reclassify clear (wipes prior predictions for this
+                # model+fingerprint) is intentionally deferred to just before
+                # _store_grouped_predictions below — clearing here and then
+                # cancelling mid-classify would leave the predictions table
+                # empty for this model with no replacement, erasing the
+                # user's prior classifications instead of preserving them.
 
                 # No photo-level short-circuit: it would hide detections
                 # that newly cross the workspace's detector_confidence
@@ -2079,6 +2074,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         summary=f"Cancelled ({processed_in_loop} of {total} photos)",
                     )
                     continue
+
+                # Reclassify clear, deferred from the top of the per-spec body
+                # so a mid-batch cancel above leaves the user's prior
+                # predictions intact (Codex P1 review on #710).  Scope by
+                # labels_fingerprint so reclassifying one workspace's label
+                # set doesn't wipe another workspace's cached predictions on
+                # the same photos under its own fingerprint (shared-folder
+                # setups).
+                if params.reclassify:
+                    thread_db.clear_predictions(
+                        model=model_name,
+                        collection_photo_ids=[p["id"] for p in photos],
+                        labels_fingerprint=spec_fp,
+                    )
 
                 group_result = _store_grouped_predictions(
                     raw_results, job["id"], model_name,

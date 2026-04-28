@@ -3153,6 +3153,172 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
     )
 
 
+def test_pipeline_reclassify_cancel_preserves_existing_predictions(
+    tmp_path, monkeypatch,
+):
+    """A reclassify cancelled mid-classify must NOT erase the user's prior
+    predictions. The reclassify clear runs only once we're committed to
+    storing fresh results — Codex P1 review on #710. Without this guard,
+    `clear_predictions` had already wiped the predictions table when the
+    cancel guard skipped `_store_grouped_predictions`, leaving the model
+    with no predictions for the entire collection.
+    """
+    import threading
+
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    import pipeline_job as pj
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_ids = []
+    detection_ids = []
+    for i in range(3):
+        name = f"photo{i}.jpg"
+        pid = db.add_photo(folder_id, name, ".jpg", 3000 + i, 3_000_000.0 + i)
+        _drop_jpeg(folder_path, name)
+        det_ids = db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+              "confidence": 0.9, "category": "animal"}],
+            detector_model="MegaDetector",
+        )
+        photo_ids.append(pid)
+        detection_ids.append(det_ids[0])
+
+    # Insert pre-existing predictions for each detection under the model
+    # name and fingerprint the pipeline will use ('BioCLIP' / 'legacy' for
+    # the test stubs).  These are what must survive the cancelled reclassify.
+    for det_id in detection_ids:
+        db.add_prediction(
+            detection_id=det_id,
+            species="Pre-existing Sparrow",
+            confidence=0.95,
+            model="BioCLIP",
+            labels_fingerprint="legacy",
+        )
+
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    # Force the bundle's labels_fingerprint to 'legacy' so it matches the
+    # add_prediction calls above.
+    import labels_fingerprint as lfp
+    monkeypatch.setattr(lfp, "compute_fingerprint", lambda *a, **k: "legacy")
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        det_map = {}
+        for p in batch:
+            existing = db_.get_detections(p["id"])
+            det_map[p["id"]] = [{
+                "id": d["id"],
+                "box_x": d["box_x"], "box_y": d["box_y"],
+                "box_w": d["box_w"], "box_h": d["box_h"],
+                "confidence": d["detector_confidence"],
+                "category": d["category"],
+            } for d in existing if d["detector_model"] != "full-image"]
+        return det_map, len(batch), {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    from PIL import Image as _PILImage
+
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+        folder_path = folders.get(photo["folder_id"], "")
+        image_path = os.path.join(folder_path, photo["filename"])
+        return _PILImage.new("RGB", (16, 16), "black"), folder_path, image_path
+
+    monkeypatch.setattr(classify_job, "_prepare_image", fake_prepare_image)
+
+    abort_after_classify = threading.Event()
+
+    def spy_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
+                        top_k=1):
+        for entry in batch:
+            raw_results.append({
+                "photo": entry["photo"],
+                "detection_id": entry.get("detection_id"),
+                "folder_path": entry["folder_path"],
+                "image_path": entry["image_path"],
+                "prediction": "Robin",
+                "confidence": 0.9,
+                "timestamp": None,
+                "filename": entry["photo"]["filename"],
+                "embedding": None,
+                "taxonomy": None,
+            })
+        abort_after_classify.set()
+        return 0
+
+    monkeypatch.setattr(classify_job, "_flush_batch", spy_flush_batch)
+
+    original_should_abort = pj._should_abort
+
+    def patched_should_abort(event):
+        if abort_after_classify.is_set():
+            return True
+        return original_should_abort(event)
+
+    monkeypatch.setattr(pj, "_should_abort", patched_should_abort)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        reclassify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    verify_db = Database(db_path)
+    verify_db.set_active_workspace(ws_id)
+
+    # All three pre-existing predictions must still be in the table.
+    # Before the fix, clear_predictions ran at the top of the per-spec body
+    # and wiped them; the cancel guard skipped _store_grouped_predictions,
+    # leaving the predictions table empty for this model.
+    surviving = verify_db.conn.execute(
+        "SELECT COUNT(*) FROM predictions "
+        "WHERE classifier_model = ? AND labels_fingerprint = ? "
+        "AND species = ?",
+        ("BioCLIP", "legacy", "Pre-existing Sparrow"),
+    ).fetchone()[0]
+    assert surviving == 3, (
+        f"A cancelled reclassify must NOT wipe the user's prior "
+        f"predictions. Expected all 3 'Pre-existing Sparrow' rows to "
+        f"survive; found {surviving}."
+    )
+
+
 def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
     tmp_path, monkeypatch,
 ):
