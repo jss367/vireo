@@ -4851,8 +4851,11 @@ def test_get_missing_photos_does_not_stat_every_photo(tmp_path, monkeypatch):
 
     On a large library (tens of thousands of photos) the per-photo
     ``os.path.exists`` was the bottleneck — multi-minute scans over
-    network volumes. One ``os.listdir`` per folder + an in-memory set
-    lookup is the contract.
+    network volumes. One ``os.scandir`` per folder + an in-memory set
+    lookup is the contract for *present* files. Missing candidates pay one
+    fallback ``os.path.exists`` to honor FS-specific case rules without
+    unconditional case-folding, which is bounded by the number of misses
+    rather than the total photo count.
     """
     import os
 
@@ -4887,9 +4890,12 @@ def test_get_missing_photos_does_not_stat_every_photo(tmp_path, monkeypatch):
     missing = db.get_missing_photos()
 
     assert [row["filename"] for row in missing] == ["gone.jpg"]
-    assert exists_calls == 0, (
-        f"get_missing_photos called os.path.exists {exists_calls} times; "
-        "should use one listdir per folder instead"
+    # 1 fallback stat for the single missing photo. Crucially, the 50
+    # present photos share one scandir and pay zero stats — that's the
+    # perf contract this test guards.
+    assert exists_calls <= 1, (
+        f"get_missing_photos called os.path.exists {exists_calls} times for "
+        "1 missing photo; should be at most one stat per miss (no per-present-photo stats)"
     )
 
 
@@ -4928,13 +4934,17 @@ def test_get_missing_photos_handles_unicode_normalization(tmp_path):
     assert db.get_missing_photos() == []
 
 
-def test_get_missing_photos_handles_case_mismatch(tmp_path):
-    """Case-only differences between DB and disk must not cause false ghosts.
+def test_get_missing_photos_defers_case_to_filesystem(tmp_path):
+    """Case-only mismatches must follow the underlying filesystem's rules.
 
-    Why: APFS is case-insensitive by default, so a row inserted as
-    ``IMG_1234.NEF`` happily resolved a file written as ``IMG_1234.nef``.
-    Set-membership against ``listdir`` is case-sensitive, so without
-    explicit lower-casing the check would misreport.
+    On case-insensitive volumes (APFS default, NTFS) a row inserted as
+    ``IMG_1234.NEF`` should resolve a file written as ``IMG_1234.nef`` — the
+    user sees them as the same file in Finder/Explorer. On case-sensitive
+    volumes (ext4, most network mounts) they are genuinely distinct files
+    and the row should surface as missing. Unconditionally case-folding the
+    set-membership check would silently collapse distinct files on
+    case-sensitive volumes, so the implementation falls back to
+    ``os.path.exists`` on a NFC miss and lets the kernel arbitrate.
     """
     from db import Database
 
@@ -4950,7 +4960,90 @@ def test_get_missing_photos_handles_case_mismatch(tmp_path):
     db.add_photo(folder_id=fid, filename="IMG_1234.NEF", extension=".nef",
                  file_size=1, file_mtime=1.0)
 
+    fs_case_insensitive = os.path.exists(str(folder / "IMG_1234.NEF"))
+    if fs_case_insensitive:
+        # APFS/NTFS: kernel resolves the case-mismatched name; not missing.
+        assert db.get_missing_photos() == []
+    else:
+        # ext4/XFS/most network mounts: distinct names ARE distinct files.
+        # The row IS missing — the prior os.path.exists would have agreed.
+        assert [row["filename"] for row in db.get_missing_photos()] == ["IMG_1234.NEF"]
+
+
+def test_get_missing_photos_distinguishes_case_on_case_sensitive_fs(tmp_path):
+    """On a case-sensitive volume two filenames differing only in case are
+    distinct files; the missing-originals scan must not collapse them.
+
+    Regression guard for the prior unconditional ``.lower()`` normalization,
+    which made ``A.jpg`` and ``a.jpg`` share a lookup key. With the kernel
+    arbitrating case via ``os.path.exists``, both rows are correctly tracked
+    and only the absent one surfaces as missing.
+    """
+    import os as _os
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = tmp_path / "shoot"
+    folder.mkdir()
+    fid = db.add_folder(str(folder), name="shoot")
+
+    # Probe FS — only meaningful on case-sensitive volumes.
+    (folder / "_probe").write_bytes(b"")
+    case_insensitive = _os.path.exists(str(folder / "_PROBE"))
+    (folder / "_probe").unlink()
+    if case_insensitive:
+        import pytest
+        pytest.skip("filesystem is case-insensitive; case-distinct names alias")
+
+    (folder / "shot.jpg").write_bytes(b"x")  # lower-case file present
+    db.add_photo(folder_id=fid, filename="shot.jpg", extension=".jpg",
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename="SHOT.jpg", extension=".jpg",
+                 file_size=1, file_mtime=1.0)
+
+    # Only the genuinely-absent SHOT.jpg should surface; the lower-case row
+    # must not be incorrectly aliased away.
+    assert [row["filename"] for row in db.get_missing_photos()] == ["SHOT.jpg"]
+
+
+def test_get_missing_photos_treats_broken_symlink_as_missing(tmp_path):
+    """A symlink whose target no longer exists must surface as missing.
+
+    Regression guard for the listdir → set-membership switch: ``os.listdir``
+    returns the symlink basename even when the target is gone, but the prior
+    ``os.path.exists(src)`` followed the symlink and returned False. Filter
+    broken symlinks during scandir so libraries that track originals via
+    symlinked paths still see them in the cleanup flow.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = tmp_path / "shoot"
+    folder.mkdir()
+    fid = db.add_folder(str(folder), name="shoot")
+
+    target = tmp_path / "originals" / "raw_001.NEF"
+    target.parent.mkdir()
+    target.write_bytes(b"x")
+    link_path = folder / "raw_001.NEF"
+    os.symlink(str(target), str(link_path))
+    db.add_photo(folder_id=fid, filename="raw_001.NEF", extension=".nef",
+                 file_size=1, file_mtime=1.0)
+
+    # Symlink target intact: photo present.
     assert db.get_missing_photos() == []
+
+    # Target deleted: symlink basename still appears in scandir, but the
+    # photo should now surface as missing.
+    target.unlink()
+    assert [row["filename"] for row in db.get_missing_photos()] == ["raw_001.NEF"]
 
 
 def test_relocate_folder(tmp_path):

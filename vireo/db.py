@@ -16,14 +16,20 @@ log = logging.getLogger(__name__)
 _UNSET = object()  # sentinel for "not provided" vs explicit None
 
 
-def _normalize_filename(name: str) -> str:
-    """Canonical form for filename comparison against listdir output.
+def _nfc(name: str) -> str:
+    """NFC-normalize a filename for byte-exact comparison against scandir output.
 
-    Matches what ``os.path.exists`` did implicitly via the kernel: NFC for
-    Unicode (APFS stores names as written but compares with normalization)
-    and lowercase for case (APFS is case-insensitive by default).
+    macOS APFS stores names as written but compares with normalization, so the
+    DB row may be NFC while a filename on disk is NFD (or vice versa). NFC on
+    both sides makes set-membership reliable across that mismatch.
+
+    Case is intentionally NOT folded here: case-sensitivity depends on the
+    underlying filesystem (APFS default and NTFS are case-insensitive; ext4
+    and most network mounts are not). Unconditional lowercasing would collapse
+    distinct files on case-sensitive volumes; ``get_missing_photos`` instead
+    falls back to ``os.path.exists`` on miss, deferring case rules to the kernel.
     """
-    return unicodedata.normalize("NFC", name).lower()
+    return unicodedata.normalize("NFC", name)
 
 # Canonical set of keyword type values stored in keywords.type.
 # - taxonomy: a species/genus/etc. (linked to taxa via taxon_id)
@@ -1357,8 +1363,11 @@ class Database:
         ).fetchall()
         # One readdir per folder instead of one stat per photo. On a 50k-photo
         # library across a network volume the per-photo `os.path.exists` was
-        # costing minutes; a single listdir + set-membership check is orders
+        # costing minutes; a single scandir + set-membership check is orders
         # of magnitude faster and the dominant call site for this endpoint.
+        # Misses fall back to a single os.path.exists to honor FS-specific
+        # case rules without unconditionally case-folding (which would
+        # silently collapse distinct files on case-sensitive volumes).
         folder_online: dict[int, bool] = {}
         folder_names: dict[int, set[str] | None] = {}
         missing = []
@@ -1371,24 +1380,34 @@ class Database:
                 continue
             if fid not in folder_names:
                 try:
-                    # Normalize for matching: NFC handles macOS APFS storing
-                    # decomposed Unicode (NFD) on disk while the DB row was
-                    # inserted as composed (NFC); lower() handles the default
-                    # case-insensitive APFS comparison that `os.path.exists`
-                    # used to do for free.
-                    folder_names[fid] = {
-                        _normalize_filename(name)
-                        for name in os.listdir(row["folder_path"])
-                    }
+                    names_set: set[str] = set()
+                    with os.scandir(row["folder_path"]) as it:
+                        for entry in it:
+                            # Broken symlinks: scandir returns the basename even
+                            # when the target is gone, but the prior os.path.exists
+                            # check returned False. Filter them so missing
+                            # originals tracked via symlinks still surface.
+                            # is_symlink() uses cached lstat from scandir, so
+                            # non-symlinks don't pay an extra stat.
+                            if entry.is_symlink() and not os.path.exists(entry.path):
+                                continue
+                            names_set.add(_nfc(entry.name))
+                    folder_names[fid] = names_set
                 except OSError:
-                    # Folder vanished between isdir and listdir, or unreadable;
+                    # Folder vanished between isdir and scandir, or unreadable;
                     # treat the same as "folder offline" so we don't bulk-flag
                     # every photo as a ghost.
                     folder_names[fid] = None
             names = folder_names[fid]
             if names is None:
                 continue
-            if _normalize_filename(row["filename"]) not in names:
+            if _nfc(row["filename"]) in names:
+                continue
+            # NFC miss: defer to the kernel for case rules. On case-insensitive
+            # volumes (APFS default, NTFS) os.path.exists resolves a
+            # case-mismatched name; on case-sensitive volumes (most Linux
+            # filesystems) it correctly reports the file as absent.
+            if not os.path.exists(os.path.join(row["folder_path"], row["filename"])):
                 missing.append(row)
         return missing
 
