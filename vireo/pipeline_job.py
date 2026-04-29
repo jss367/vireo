@@ -1842,17 +1842,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # the reclassify clear so the clear can scope by fingerprint.
                 spec_fp = loaded_models.get("labels_fingerprint", "legacy")
 
-                if params.reclassify:
-                    photo_ids = [p["id"] for p in photos]
-                    # Scope by labels_fingerprint so reclassifying one
-                    # workspace's label set doesn't wipe another
-                    # workspace's cached predictions on the same photos
-                    # under its own fingerprint (shared-folder setups).
-                    thread_db.clear_predictions(
-                        model=model_name,
-                        collection_photo_ids=photo_ids,
-                        labels_fingerprint=spec_fp,
-                    )
+                # The reclassify clear (wipes prior predictions for this
+                # model+fingerprint) is intentionally deferred to just before
+                # _store_grouped_predictions below — clearing here and then
+                # cancelling mid-classify would leave the predictions table
+                # empty for this model with no replacement, erasing the
+                # user's prior classifications instead of preserving them.
 
                 # No photo-level short-circuit: it would hide detections
                 # that newly cross the workspace's detector_confidence
@@ -1864,6 +1859,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 raw_results: list = []
                 failed = 0
                 skipped_existing = 0
+                # Photos actually iterated past the inner abort check, used to
+                # correct the per-batch progress claim on a mid-batch cancel
+                # (the per-batch event below pre-advances count by len(batch)).
+                processed_in_loop = 0
                 start_time = time.time()
                 batch_size = 32  # classification batch granularity
 
@@ -1899,6 +1898,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     )
 
                     for photo in batch:
+                        # Per-photo abort check so cancel takes effect within
+                        # one inference (~seconds) instead of waiting for the
+                        # next batch boundary (~32 photos). The outer batch
+                        # loop's check at the top of the next iteration will
+                        # then break out of the batch loop entirely.
+                        if _should_abort(abort):
+                            break
+                        processed_in_loop += 1
                         # Record this photo as classify-processed for the first
                         # successful model. Used by the stale-detection purge to
                         # restrict deletions to photos actually reclassified.
@@ -2036,6 +2043,57 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 prediction_count=new_count,
                             )
 
+                # Skip the grouping/storage finalization on cancel — it can
+                # take a minute on large collections and the user has already
+                # asked us to stop. Leaving models_succeeded at its current
+                # value also keeps the reclassify stale-row purge from firing
+                # for this model (see the comment on the purge below), which
+                # is the safe default when classify didn't finish.
+                if _should_abort(abort):
+                    # The per-batch progress event above pre-advances the
+                    # count by the full batch length BEFORE the inner loop
+                    # runs. On a mid-batch cancel that leaves the UI showing
+                    # a count higher than what was actually classified — emit
+                    # a corrected progress event and step update so the job
+                    # tree reflects the true partial state.
+                    stages["classify"]["count"] = (
+                        spec_idx * total + processed_in_loop
+                    )
+                    stages["classify"]["total"] = (
+                        total * len(resolved_specs_local)
+                    )
+                    runner.push_event(job["id"], "progress", _progress_event(
+                        stages, "classify",
+                        f"Cancelled — {processed_in_loop} of {total} photos",
+                        step_id=step_id,
+                    ))
+                    runner.update_step(
+                        job["id"], step_id,
+                        status="completed",
+                        progress={"current": processed_in_loop, "total": total},
+                        summary=f"Cancelled ({processed_in_loop} of {total} photos)",
+                    )
+                    continue
+
+                # Reclassify clear, deferred from the top of the per-spec body
+                # so a mid-batch cancel above leaves the user's prior
+                # predictions intact (Codex P1 review on #710).  Scope by
+                # labels_fingerprint so reclassifying one workspace's label
+                # set doesn't wipe another workspace's cached predictions on
+                # the same photos under its own fingerprint (shared-folder
+                # setups).  ``clear_run_keys=False`` because the per-photo
+                # ``record_classifier_run`` calls inside the loop above
+                # already wrote fresh classifier_runs rows for processed
+                # detections — wiping them here would strand the gate and
+                # force the next non-reclassify pass to re-infer everything.
+                if params.reclassify:
+                    thread_db.clear_predictions(
+                        model=model_name,
+                        collection_photo_ids=[p["id"] for p in photos],
+                        labels_fingerprint=spec_fp,
+                        clear_run_keys=False,
+                    )
+
                 group_result = _store_grouped_predictions(
                     raw_results, job["id"], model_name,
                     grouping_window, similarity_threshold, tax, thread_db,
@@ -2101,7 +2159,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     summary=", ".join(parts),
                 )
 
-            if models_succeeded == 0 and skipped_model_names:
+            # Cancellation takes precedence over the all-models-failed-to-load
+            # signal: if the user cancelled mid-classify after a prior model
+            # had already been added to skipped_model_names, raising here
+            # would misclassify the cancel as a fatal load failure and
+            # overwrite the per-model 'Cancelled' summary in the exception
+            # handler.
+            if (
+                models_succeeded == 0
+                and skipped_model_names
+                and not _should_abort(abort)
+            ):
                 raise RuntimeError(
                     f"All {len(skipped_model_names)} model(s) failed to load: "
                     + ", ".join(skipped_model_names)
