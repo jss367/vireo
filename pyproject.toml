@@ -51,6 +51,7 @@ dev = [
     "pytest-cov>=6.0",
     "pytest-playwright>=0.7",
     "pytest-timeout>=2.3",
+    "pytest-xdist>=3.6",
     "ruff>=0.11",
 ]
 
