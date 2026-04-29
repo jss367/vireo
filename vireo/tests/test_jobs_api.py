@@ -2,6 +2,7 @@ import os
 import time
 
 from PIL import Image
+from wait import wait_for_job_via_client, wait_for_job_via_runner
 
 
 def test_job_scan_returns_job_id(app_and_db, tmp_path):
@@ -41,12 +42,7 @@ def test_job_status_endpoint(app_and_db, tmp_path):
     resp = client.post('/api/jobs/scan', json={'root': scan_dir})
     job_id = resp.get_json()['job_id']
 
-    for _ in range(50):
-        resp = client.get(f'/api/jobs/{job_id}')
-        data = resp.get_json()
-        if data['status'] in ('completed', 'failed'):
-            break
-        time.sleep(0.1)
+    data = wait_for_job_via_client(client, job_id)
 
     assert resp.status_code == 200
     assert data['status'] == 'completed'
@@ -189,7 +185,6 @@ def test_bottom_panel_has_compact_jobs(app_and_db):
 
 def test_scan_job_has_steps(app_and_db, tmp_path):
     """Scan job defines steps for the jobs page tree view."""
-    import time
     app, _ = app_and_db
     client = app.test_client()
 
@@ -200,12 +195,7 @@ def test_scan_job_has_steps(app_and_db, tmp_path):
     resp = client.post('/api/jobs/scan', json={'root': scan_dir})
     job_id = resp.get_json()['job_id']
 
-    for _ in range(50):
-        resp = client.get(f'/api/jobs/{job_id}')
-        data = resp.get_json()
-        if data['status'] in ('completed', 'failed'):
-            break
-        time.sleep(0.1)
+    data = wait_for_job_via_client(client, job_id)
 
     assert data['status'] == 'completed'
     assert 'steps' in data
@@ -216,7 +206,6 @@ def test_scan_job_has_steps(app_and_db, tmp_path):
 
 def test_job_history_includes_parsed_tree(app_and_db, tmp_path):
     """GET /api/jobs/history returns parsed tree data for completed jobs."""
-    import time
     app, _ = app_and_db
     client = app.test_client()
 
@@ -227,14 +216,7 @@ def test_job_history_includes_parsed_tree(app_and_db, tmp_path):
     resp = client.post('/api/jobs/scan', json={'root': scan_dir})
     job_id = resp.get_json()['job_id']
 
-    for _ in range(80):
-        resp = client.get(f'/api/jobs/{job_id}')
-        data = resp.get_json()
-        if data['status'] in ('completed', 'failed'):
-            break
-        time.sleep(0.1)
-
-    time.sleep(0.5)
+    wait_for_job_via_client(client, job_id, wait_for_history=True)
 
     resp = client.get('/api/jobs/history?limit=5')
     assert resp.status_code == 200
@@ -387,7 +369,6 @@ def test_update_step_current_file(app_and_db):
 
 def test_scan_step_has_progress(app_and_db, tmp_path):
     """Scan step reports step-level progress with current/total."""
-    import time
     app, _ = app_and_db
     client = app.test_client()
 
@@ -399,12 +380,7 @@ def test_scan_step_has_progress(app_and_db, tmp_path):
     resp = client.post('/api/jobs/scan', json={'root': scan_dir})
     job_id = resp.get_json()['job_id']
 
-    for _ in range(50):
-        resp = client.get(f'/api/jobs/{job_id}')
-        data = resp.get_json()
-        if data['status'] in ('completed', 'failed'):
-            break
-        time.sleep(0.1)
+    data = wait_for_job_via_client(client, job_id)
 
     assert data['status'] == 'completed'
     scan_step = data['steps'][0]
@@ -417,7 +393,6 @@ def test_scan_step_has_progress(app_and_db, tmp_path):
 
 def test_pipeline_thumbnail_step_has_progress(app_and_db, tmp_path):
     """Thumbnail step in pipeline reports step-level progress."""
-    import time
     app, _ = app_and_db
     client = app.test_client()
 
@@ -433,12 +408,7 @@ def test_pipeline_thumbnail_step_has_progress(app_and_db, tmp_path):
     })
     job_id = resp.get_json()['job_id']
 
-    for _ in range(100):
-        resp = client.get(f'/api/jobs/{job_id}')
-        data = resp.get_json()
-        if data['status'] in ('completed', 'failed'):
-            break
-        time.sleep(0.1)
+    data = wait_for_job_via_client(client, job_id)
 
     assert data['status'] == 'completed'
     thumb_step = next(s for s in data['steps'] if s['id'] == 'thumbnails')
@@ -448,7 +418,6 @@ def test_pipeline_thumbnail_step_has_progress(app_and_db, tmp_path):
 
 def test_pipeline_preview_step_has_progress(app_and_db, tmp_path):
     """Preview step in pipeline reports step-level progress."""
-    import time
     app, _ = app_and_db
     client = app.test_client()
 
@@ -464,12 +433,7 @@ def test_pipeline_preview_step_has_progress(app_and_db, tmp_path):
     })
     job_id = resp.get_json()['job_id']
 
-    for _ in range(100):
-        resp = client.get(f'/api/jobs/{job_id}')
-        data = resp.get_json()
-        if data['status'] in ('completed', 'failed'):
-            break
-        time.sleep(0.1)
+    data = wait_for_job_via_client(client, job_id)
 
     assert data['status'] == 'completed'
     preview_step = next(s for s in data['steps'] if s['id'] == 'previews')
@@ -631,14 +595,7 @@ def test_job_cancel_running_job_marks_cancelled(app_and_db):
         assert data.get("cancelled") is True
 
     # Wait for the work function to observe cancellation and exit.
-    for _ in range(50):
-        job = runner.get(job_id)
-        if job and job["status"] in ("completed", "failed", "cancelled"):
-            break
-        time.sleep(0.05)
-
-    job = runner.get(job_id)
-    assert job is not None
+    job = wait_for_job_via_runner(runner, job_id)
     assert job["status"] == "cancelled"
 
 
@@ -652,11 +609,7 @@ def test_job_cancel_finished_job_returns_404(app_and_db):
 
     job_id = runner.start("test", quick_work)
 
-    for _ in range(50):
-        job = runner.get(job_id)
-        if job and job["status"] == "completed":
-            break
-        time.sleep(0.05)
+    wait_for_job_via_runner(runner, job_id)
 
     with app.test_client() as c:
         resp = c.post(f"/api/jobs/{job_id}/cancel")
@@ -914,12 +867,7 @@ def test_pipeline_with_healthy_collection_skips_scan(app_and_db):
         assert resp.status_code == 200
         job_id = resp.get_json()["job_id"]
 
-        for _ in range(100):
-            resp = client.get(f"/api/jobs/{job_id}")
-            data = resp.get_json()
-            if data["status"] in ("completed", "failed"):
-                break
-            time.sleep(0.1)
+        data = wait_for_job_via_client(client, job_id)
 
         scan_step = next(s for s in data["steps"] if s["id"] == "scan")
         assert scan_step.get("summary") == "Skipped (using collection)"
@@ -983,12 +931,7 @@ def test_pipeline_with_broken_collection_repairs_metadata(app_and_db, tmp_path, 
         assert resp.status_code == 200
         job_id = resp.get_json()["job_id"]
 
-        for _ in range(100):
-            resp = client.get(f"/api/jobs/{job_id}")
-            data = resp.get_json()
-            if data["status"] in ("completed", "failed"):
-                break
-            time.sleep(0.1)
+        data = wait_for_job_via_client(client, job_id)
 
         assert data["status"] == "completed", data
         scan_step = next(s for s in data["steps"] if s["id"] == "scan")
@@ -1062,12 +1005,7 @@ def test_pipeline_repair_does_not_ingest_untracked_files(app_and_db, tmp_path, m
         assert resp.status_code == 200
         job_id = resp.get_json()["job_id"]
 
-        for _ in range(100):
-            resp = client.get(f"/api/jobs/{job_id}")
-            data = resp.get_json()
-            if data["status"] in ("completed", "failed"):
-                break
-            time.sleep(0.1)
+        data = wait_for_job_via_client(client, job_id)
 
     # Tracked photo repaired: timestamp populated.
     tracked_row = db.conn.execute(
@@ -1121,12 +1059,7 @@ def test_pipeline_with_broken_collection_handles_unreachable_folder(app_and_db):
         assert resp.status_code == 200
         job_id = resp.get_json()["job_id"]
 
-        for _ in range(100):
-            resp = client.get(f"/api/jobs/{job_id}")
-            data = resp.get_json()
-            if data["status"] in ("completed", "failed"):
-                break
-            time.sleep(0.1)
+        data = wait_for_job_via_client(client, job_id)
 
         # The scan step should have completed without error. With the
         # broken row's file missing on disk, the repair-target filter
@@ -1208,12 +1141,7 @@ def test_pipeline_repair_does_not_double_process_thumbnails(
         assert resp.status_code == 200
         job_id = resp.get_json()["job_id"]
 
-        for _ in range(100):
-            resp = client.get(f"/api/jobs/{job_id}")
-            data = resp.get_json()
-            if data["status"] in ("completed", "failed"):
-                break
-            time.sleep(0.1)
+        data = wait_for_job_via_client(client, job_id)
 
         assert data["status"] == "completed", data
 
@@ -1282,12 +1210,7 @@ def test_pipeline_repair_respects_excluded_photo_ids(
         assert resp.status_code == 200
         job_id = resp.get_json()["job_id"]
 
-        for _ in range(100):
-            resp = client.get(f"/api/jobs/{job_id}")
-            data = resp.get_json()
-            if data["status"] in ("completed", "failed"):
-                break
-            time.sleep(0.1)
+        data = wait_for_job_via_client(client, job_id)
 
         # The scan step should have reported the "Skipped" fast path
         # because the only broken photo was excluded from the run.

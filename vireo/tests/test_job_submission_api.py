@@ -4,6 +4,7 @@ import os
 import time
 
 from PIL import Image
+from wait import wait_for_job_via_client
 
 
 def test_job_thumbnails_returns_job_id(app_and_db):
@@ -108,12 +109,7 @@ def test_job_history(app_and_db, tmp_path):
     job_id = resp.get_json()["job_id"]
 
     # Poll until job completes or fails
-    for _ in range(50):
-        status_resp = client.get(f"/api/jobs/{job_id}")
-        status_data = status_resp.get_json()
-        if status_data.get("status") in ("completed", "failed"):
-            break
-        time.sleep(0.1)
+    wait_for_job_via_client(client, job_id)
 
     history_resp = client.get("/api/jobs/history")
     assert history_resp.status_code == 200
@@ -134,12 +130,7 @@ def test_job_history_respects_limit(app_and_db, tmp_path):
     assert resp.status_code == 200
     job_id = resp.get_json()["job_id"]
 
-    for _ in range(50):
-        status_resp = client.get(f"/api/jobs/{job_id}")
-        status_data = status_resp.get_json()
-        if status_data.get("status") in ("completed", "failed"):
-            break
-        time.sleep(0.1)
+    wait_for_job_via_client(client, job_id)
 
     history_resp = client.get("/api/jobs/history?limit=1")
     assert history_resp.status_code == 200
