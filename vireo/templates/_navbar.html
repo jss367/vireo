@@ -4395,12 +4395,21 @@ setInterval(checkMissingFolders, 600000);
 /* ---------- Missing Originals Banner ---------- */
 let _missingPhotosCache = [];
 let _missingPhotosBannerDismissedCount = 0;
+// Latest issued fetch id. Both the banner check and the modal load write to
+// _missingPhotosCache; a slow earlier fetch returning after a newer one used
+// to overwrite fresh state with stale results — leaving the banner showing
+// ghosts the user just deleted. Only the response from the latest fetch is
+// allowed to apply.
+let _missingPhotosFetchId = 0;
 
 async function checkMissingPhotos() {
+  const myId = ++_missingPhotosFetchId;
   try {
     const resp = await fetch('/api/photos/missing');
     if (!resp.ok) return;
+    if (myId !== _missingPhotosFetchId) return;  // a newer fetch is authoritative
     const photos = await resp.json();
+    if (myId !== _missingPhotosFetchId) return;
     _missingPhotosCache = photos;
     const banner = document.getElementById('missingPhotosBanner');
     const msg = document.getElementById('missingPhotosMsg');
@@ -4819,10 +4828,13 @@ async function loadMissingPhotos() {
   container.innerHTML = '<p style="color:var(--text-secondary);">Checking photos…</p>';
   toolbar.style.display = 'none';
   _missingPhotosSelected = new Set();
+  const myId = ++_missingPhotosFetchId;
   try {
     const resp = await fetch('/api/photos/missing');
     if (!resp.ok) throw new Error('check failed');
+    if (myId !== _missingPhotosFetchId) return;  // superseded
     const photos = await resp.json();
+    if (myId !== _missingPhotosFetchId) return;
     _missingPhotosCache = photos;
     if (photos.length === 0) {
       container.innerHTML = '<p style="color:var(--text-secondary);">No photos with missing originals.</p>';

@@ -6,6 +6,7 @@ import logging
 import os
 import sqlite3
 import time
+import unicodedata
 import uuid
 
 from new_images import get_shared_cache
@@ -13,6 +14,16 @@ from new_images import get_shared_cache
 log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
+
+
+def _normalize_filename(name: str) -> str:
+    """Canonical form for filename comparison against listdir output.
+
+    Matches what ``os.path.exists`` did implicitly via the kernel: NFC for
+    Unicode (APFS stores names as written but compares with normalization)
+    and lowercase for case (APFS is case-insensitive by default).
+    """
+    return unicodedata.normalize("NFC", name).lower()
 
 # Canonical set of keyword type values stored in keywords.type.
 # - taxonomy: a species/genus/etc. (linked to taxa via taxon_id)
@@ -1344,7 +1355,12 @@ class Database:
                ORDER BY f.path, p.filename""",
             (self._ws_id(),),
         ).fetchall()
+        # One readdir per folder instead of one stat per photo. On a 50k-photo
+        # library across a network volume the per-photo `os.path.exists` was
+        # costing minutes; a single listdir + set-membership check is orders
+        # of magnitude faster and the dominant call site for this endpoint.
         folder_online: dict[int, bool] = {}
+        folder_names: dict[int, set[str] | None] = {}
         missing = []
         for row in rows:
             fid = row["folder_id"]
@@ -1353,8 +1369,26 @@ class Database:
             if not folder_online[fid]:
                 # Whole folder is offline — surfaced by missing-folders flow.
                 continue
-            src = os.path.join(row["folder_path"], row["filename"])
-            if not os.path.exists(src):
+            if fid not in folder_names:
+                try:
+                    # Normalize for matching: NFC handles macOS APFS storing
+                    # decomposed Unicode (NFD) on disk while the DB row was
+                    # inserted as composed (NFC); lower() handles the default
+                    # case-insensitive APFS comparison that `os.path.exists`
+                    # used to do for free.
+                    folder_names[fid] = {
+                        _normalize_filename(name)
+                        for name in os.listdir(row["folder_path"])
+                    }
+                except OSError:
+                    # Folder vanished between isdir and listdir, or unreadable;
+                    # treat the same as "folder offline" so we don't bulk-flag
+                    # every photo as a ghost.
+                    folder_names[fid] = None
+            names = folder_names[fid]
+            if names is None:
+                continue
+            if _normalize_filename(row["filename"]) not in names:
                 missing.append(row)
         return missing
 

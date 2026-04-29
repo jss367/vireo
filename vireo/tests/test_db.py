@@ -4846,6 +4846,113 @@ def test_get_missing_photos_scoped_to_active_workspace(tmp_path):
     assert [row["filename"] for row in db.get_missing_photos()] == ["ghost_b.jpg"]
 
 
+def test_get_missing_photos_does_not_stat_every_photo(tmp_path, monkeypatch):
+    """Photos in the same folder must share a single readdir, not N stats.
+
+    On a large library (tens of thousands of photos) the per-photo
+    ``os.path.exists`` was the bottleneck — multi-minute scans over
+    network volumes. One ``os.listdir`` per folder + an in-memory set
+    lookup is the contract.
+    """
+    import os
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = tmp_path / "shoot"
+    folder.mkdir()
+    fid = db.add_folder(str(folder), name="shoot")
+
+    for i in range(50):
+        name = f"present_{i:03d}.jpg"
+        (folder / name).write_bytes(b"x")
+        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+                     file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename="gone.jpg", extension=".jpg",
+                 file_size=1, file_mtime=1.0)
+
+    real_exists = os.path.exists
+    exists_calls = 0
+
+    def counted_exists(path):
+        nonlocal exists_calls
+        exists_calls += 1
+        return real_exists(path)
+
+    monkeypatch.setattr(os.path, "exists", counted_exists)
+
+    missing = db.get_missing_photos()
+
+    assert [row["filename"] for row in missing] == ["gone.jpg"]
+    assert exists_calls == 0, (
+        f"get_missing_photos called os.path.exists {exists_calls} times; "
+        "should use one listdir per folder instead"
+    )
+
+
+def test_get_missing_photos_handles_unicode_normalization(tmp_path):
+    """A photo row stored as NFC must not be reported missing if the file
+    on disk has the same visible name in NFD bytes (or vice versa).
+
+    Why: macOS APFS stores filenames in their original normalization form
+    but compares with normalization, so ``os.path.exists("café.jpg" NFC)``
+    used to find the NFD file. Switching to ``listdir`` + Python set
+    membership is byte-exact, so without explicit normalization the check
+    would falsely flag the file as missing.
+    """
+    import unicodedata
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = tmp_path / "shoot"
+    folder.mkdir()
+    fid = db.add_folder(str(folder), name="shoot")
+
+    nfc_name = unicodedata.normalize("NFC", "café_dawn.jpg")
+    nfd_name = unicodedata.normalize("NFD", "café_dawn.jpg")
+    assert nfc_name != nfd_name  # sanity: the two encodings differ at byte level
+
+    # File on disk: NFD bytes.
+    (folder / nfd_name).write_bytes(b"x")
+    # DB row: NFC bytes.
+    db.add_photo(folder_id=fid, filename=nfc_name, extension=".jpg",
+                 file_size=1, file_mtime=1.0)
+
+    assert db.get_missing_photos() == []
+
+
+def test_get_missing_photos_handles_case_mismatch(tmp_path):
+    """Case-only differences between DB and disk must not cause false ghosts.
+
+    Why: APFS is case-insensitive by default, so a row inserted as
+    ``IMG_1234.NEF`` happily resolved a file written as ``IMG_1234.nef``.
+    Set-membership against ``listdir`` is case-sensitive, so without
+    explicit lower-casing the check would misreport.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = tmp_path / "shoot"
+    folder.mkdir()
+    fid = db.add_folder(str(folder), name="shoot")
+
+    (folder / "IMG_1234.nef").write_bytes(b"x")
+    db.add_photo(folder_id=fid, filename="IMG_1234.NEF", extension=".nef",
+                 file_size=1, file_mtime=1.0)
+
+    assert db.get_missing_photos() == []
+
+
 def test_relocate_folder(tmp_path):
     """relocate_folder updates path and sets status to 'ok'."""
     from db import Database
