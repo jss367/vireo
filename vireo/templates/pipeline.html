@@ -2530,7 +2530,7 @@ function _updatePipelineStageUI(p) {
   if (stageCachedEst > 0 && stageCurrent === 0 && stageCached === 0) {
     parts.push(
       '~' + stageCachedEst.toLocaleString() + ' cached, ~' +
-      (stageTotal - stageCachedEst).toLocaleString() + ' to classify'
+      Math.max(0, stageTotal - stageCachedEst).toLocaleString() + ' to classify'
     );
   }
 
@@ -2543,13 +2543,15 @@ function _updatePipelineStageUI(p) {
   if (p.current_file) parts.push(p.current_file);
   var label = parts.join(' — ');
 
+  // Always update the status line so indeterminate phases like
+  // "Discovering files..." are visible even before the bar has a total.
   if (status) status.textContent = label;
 
   if (stageTotal > 0) {
     if (progressWrap) progressWrap.style.display = '';
     // Bar fill must reflect both inferred AND cached photos so the bar
     // tracks honest completion, not just inferences.
-    var pct = Math.round((stageCurrent + stageCached) / stageTotal * 100);
+    var pct = Math.min(100, Math.round((stageCurrent + stageCached) / stageTotal * 100));
     if (fill) fill.style.width = pct + '%';
     if (text) text.textContent = label;
   }
