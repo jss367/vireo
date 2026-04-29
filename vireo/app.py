@@ -100,6 +100,33 @@ def _chunked(seq, size=_SQL_PARAM_CHUNK):
         yield seq[i:i + size]
 
 
+def _ensure_volume_trashes_dir(filepath, ensured_volumes):
+    """Make sure ``/Volumes/<X>/.Trashes/<uid>/`` exists when ``filepath`` is on
+    an external/network mount. macOS ``send2trash`` legacy mode raises
+    ``OSError: Directory not found`` on volumes where this directory was never
+    created (fresh SMB shares, NAS mounts, USB drives) — without it the caller
+    falls back to AppleScript Finder, which then times out under load (-1712)
+    and stalls the whole bulk trash for hours.
+
+    No-op for paths outside ``/Volumes/`` (the system Trash already handles
+    those) and for volumes already ensured this request. ``OSError`` from
+    ``makedirs`` (read-only mount, ACL block) is swallowed so the actual
+    trash call surfaces a more specific error than "could not mkdir".
+    """
+    parts = filepath.split(os.sep)
+    if len(parts) < 4 or parts[0] != "" or parts[1] != "Volumes":
+        return
+    volume_root = os.sep.join(parts[:3])
+    if volume_root in ensured_volumes:
+        return
+    ensured_volumes.add(volume_root)
+    trashes_dir = os.path.join(volume_root, ".Trashes", str(os.getuid()))
+    try:
+        os.makedirs(trashes_dir, mode=0o700, exist_ok=True)
+    except OSError as exc:
+        log.debug("could not ensure %s: %s", trashes_dir, exc)
+
+
 def _trash_via_finder(filepath):
     """Trash a file via Finder using AppleScript.
 
@@ -7267,6 +7294,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         trashed_pids = []
         skipped = []
         failed = []
+        ensured_volumes = set()
         for pid in photo_ids:
             row = rows_by_id.get(pid)
             if row is None:
@@ -7292,6 +7320,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 skipped.append({"id": pid, "reason": "file already missing"})
                 trashed_pids.append(pid)
                 continue
+            _ensure_volume_trashes_dir(filepath, ensured_volumes)
             try:
                 from send2trash import send2trash as _trash
                 _trash(filepath)
