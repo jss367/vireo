@@ -1877,14 +1877,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # start. The estimate may overcount if a run-key exists
                 # but no cached predictions do (see lines ~2000-2004); the
                 # live `cached` counter reflects actual skips.
-                cached_est = thread_db.count_classifier_runs(
-                    [p["id"] for p in photos],
-                    model_name,
-                    spec_fp,
-                )
-                stages["classify"]["cached_estimate"] = (
-                    stages["classify"].get("cached_estimate", 0) + cached_est
-                )
+                #
+                # Skipped on reclassify runs: the gate below is bypassed
+                # in that mode, so every photo will be re-inferred and
+                # showing "~N cached" would mislead the user.
+                if not params.reclassify:
+                    cached_est = thread_db.count_classifier_runs(
+                        [p["id"] for p in photos],
+                        model_name,
+                        spec_fp,
+                    )
+                    stages["classify"]["cached_estimate"] = (
+                        stages["classify"].get("cached_estimate", 0) + cached_est
+                    )
                 # Set total BEFORE the pre-flight event so the UI's
                 # ``stageTotal - stageCachedEst`` subtraction renders the
                 # real "to classify" count on the first event the user
