@@ -54,13 +54,104 @@ body { padding-bottom: 36px; }
   display: flex; align-items: center; justify-content: center;
   font-size: 13px; font-weight: 700;
   background: var(--bg-tertiary, #14374E);
-  color: var(--text-dim, #5A8890);
+  color: var(--text-secondary, #B0CCCC);
   flex-shrink: 0;
 }
-.stage-num.complete { background: var(--accent, #24E5CA); color: var(--accent-text); }
-.stage-num.running { background: var(--info, #12C3B5); color: var(--accent-text); animation: pulse 1.2s infinite; }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
 .stage-name { font-size: 15px; font-weight: 600; }
+
+/* Status pill — explicit text label communicating each stage's state */
+.stage-status-pill {
+  display: none;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 10px;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+.stage-status-pill.visible { display: inline-block; }
+.stage-status-pill.will-run {
+  background: color-mix(in srgb, var(--accent, #24E5CA) 20%, transparent);
+  color: var(--accent, #24E5CA);
+}
+.stage-status-pill.will-skip {
+  background: var(--bg-tertiary, #14374E);
+  color: var(--text-dim, #5A8890);
+  font-style: italic;
+}
+.stage-status-pill.done-prior {
+  background: color-mix(in srgb, var(--accent, #24E5CA) 10%, transparent);
+  color: color-mix(in srgb, var(--accent, #24E5CA) 65%, var(--text-secondary, #B0CCCC));
+}
+.stage-status-pill.running {
+  background: var(--info, #12C3B5);
+  color: var(--accent-text);
+  animation: pulse 1.2s infinite;
+}
+.stage-status-pill.done {
+  background: var(--accent, #24E5CA);
+  color: var(--accent-text);
+}
+.stage-status-pill.failed {
+  background: var(--danger, #E74C3C);
+  color: #fff;
+}
+
+/* Section headers grouping the stage cards */
+.stage-section-header {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-faint, #5A8890);
+  margin: 18px 0 8px;
+  padding-left: 4px;
+}
+.stage-section-header:first-child { margin-top: 0; }
+.stage-section-sub {
+  font-size: 11px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-dim, #5A8890);
+  margin-left: 6px;
+}
+
+/* Plan summary above Start button — "what will happen if I press Start" */
+.pipeline-plan-summary {
+  background: var(--bg-secondary, #0E2A3D);
+  border: 1px solid var(--border-primary, #14374E);
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-top: 16px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.pipeline-plan-summary .plan-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+.pipeline-plan-summary .plan-label {
+  font-weight: 700;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-faint, #5A8890);
+  min-width: 90px;
+  flex-shrink: 0;
+}
+.pipeline-plan-summary .plan-stages { color: var(--text-secondary, #B0CCCC); }
+.pipeline-plan-summary .plan-row.will-run .plan-stages { color: var(--accent, #24E5CA); font-weight: 600; }
+.pipeline-plan-summary .plan-row.will-skip .plan-stages { color: var(--text-dim, #5A8890); font-style: italic; }
+.pipeline-plan-summary .plan-row.done-prior .plan-stages {
+  color: color-mix(in srgb, var(--accent, #24E5CA) 65%, var(--text-secondary, #B0CCCC));
+}
+.pipeline-plan-summary .plan-empty {
+  color: var(--text-faint, #5A8890);
+  font-style: italic;
+}
 .stage-summary {
   margin-left: auto;
   font-size: 12px;
@@ -462,6 +553,8 @@ body { padding-bottom: 36px; }
 <div class="pipeline-left">
   <h2 style="margin-bottom:20px;font-size:20px;">Pipeline</h2>
 
+  <div class="stage-section-header">Setup</div>
+
   <!-- Card 1: Source -->
   <div class="stage-card expanded" id="card-source" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('source')">
@@ -706,11 +799,14 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
+  <div class="stage-section-header">Indexing<span class="stage-section-sub">always runs</span></div>
+
   <!-- Card 3: Scan & Import -->
   <div class="stage-card" id="card-scan" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('scan')">
       <span class="stage-num" id="numScan">3</span>
       <span class="stage-name">Scan &amp; Import</span>
+      <span class="stage-status-pill" id="pillScan"></span>
       <span class="stage-summary" id="summaryScan"></span>
       <span class="stage-chevron">&#9656;</span>
     </div>
@@ -731,6 +827,7 @@ body { padding-bottom: 36px; }
     <div class="stage-header" onclick="toggleCard('previews')">
       <span class="stage-num" id="numPreviews">4</span>
       <span class="stage-name">Thumbnails &amp; Previews</span>
+      <span class="stage-status-pill" id="pillPreviews"></span>
       <span class="stage-summary" id="summaryPreviews"></span>
       <span class="stage-chevron">&#9656;</span>
     </div>
@@ -758,6 +855,8 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
+  <div class="stage-section-header">AI processing<span class="stage-section-sub">optional &mdash; toggle to include</span></div>
+
   <!-- Card 5: Classify -->
   <div class="stage-card" id="card-classify" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('classify')">
@@ -765,6 +864,7 @@ body { padding-bottom: 36px; }
       <input type="checkbox" class="stage-enable" id="enableClassify" checked
              onchange="onStageToggle('classify')" onclick="event.stopPropagation()">
       <span class="stage-name">Classify</span>
+      <span class="stage-status-pill" id="pillClassify"></span>
       <span class="stage-summary" id="summaryClassify">
         <span id="txtDetections"></span>
       </span>
@@ -783,7 +883,7 @@ body { padding-bottom: 36px; }
       </div>
       <div class="readiness-panel" id="readinessPanel" style="display:none;"></div>
       <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;" title="Re-process photos that were already classified. Also bypasses the skip for photos already tagged with a subject keyword (taxonomy, individual, or genre) — useful for double-checking existing tags.">
-        <input type="checkbox" id="chkReclassify" style="accent-color:var(--accent);"> Re-classify
+        <input type="checkbox" id="chkReclassify" style="accent-color:var(--accent);" onchange="refreshPipelineUI()"> Re-classify
       </label>
       <div style="margin-top:8px;">
         <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
@@ -809,6 +909,7 @@ body { padding-bottom: 36px; }
       <input type="checkbox" class="stage-enable" id="enableExtract" checked
              onchange="onStageToggle('extract')" onclick="event.stopPropagation()">
       <span class="stage-name">Extract Features</span>
+      <span class="stage-status-pill" id="pillExtract"></span>
       <span class="stage-summary" id="summaryExtract">
         <span id="txtMasks"></span>
       </span>
@@ -861,6 +962,7 @@ body { padding-bottom: 36px; }
     <div class="stage-header" onclick="toggleCard('eyekeypoints')">
       <span class="stage-num" id="numEyeKeypoints">7</span>
       <span class="stage-name">Eye Keypoints (optional)</span>
+      <span class="stage-status-pill" id="pillEyeKeypoints"></span>
       <span class="stage-summary" id="summaryEyeKeypoints">
         <span id="txtEyeKeypoints"></span>
       </span>
@@ -906,6 +1008,7 @@ body { padding-bottom: 36px; }
       <input type="checkbox" class="stage-enable" id="enableGroup" checked
              onchange="onStageToggle('group')" onclick="event.stopPropagation()">
       <span class="stage-name">Group &amp; Score</span>
+      <span class="stage-status-pill" id="pillGroup"></span>
       <span class="stage-summary" id="summaryGroup">
         <span id="txtResults"></span>
       </span>
@@ -925,6 +1028,9 @@ body { padding-bottom: 36px; }
       <a id="viewResultsLink" href="/pipeline/review" class="view-results-btn" style="display:none;">View Results</a>
     </div>
   </div>
+
+  <!-- Plan summary: explicit "what will happen if I press Start" -->
+  <div class="pipeline-plan-summary" id="pipelinePlanSummary" data-testid="pipeline-plan-summary"></div>
 
   <!-- Pipeline action bar -->
   <div class="pipeline-action-bar">
@@ -1069,6 +1175,9 @@ function initPipelinePage() {
 }
 
 document.addEventListener('DOMContentLoaded', initPipelinePage);
+// Render pills + plan summary immediately from default toggle state, so the
+// page isn't blank while the page-init API call is in flight.
+document.addEventListener('DOMContentLoaded', refreshPipelineUI);
 
 // -- New images (Stage 1 third option) --
 var newImagesSnapshotId = null;
@@ -2055,6 +2164,7 @@ function onStageToggle(stage) {
     }
   }
   updateStartButton();
+  refreshPipelineUI();
 }
 
 // -- Pipeline orchestration --
@@ -2106,6 +2216,12 @@ async function startPipeline() {
   btn.textContent = 'Stop Pipeline';
   btn.onclick = stopPipeline;
   btn.disabled = false;
+
+  // Reset live pill state so "Done" / "Failed" from a previous run don't bleed
+  // into this one. Pills will recompute from toggles + prior data.
+  _runningStages = {};
+  _stageOutcomes = {};
+  refreshPipelineUI();
 
   // Gather config from the UI
   var body = {};
@@ -2265,6 +2381,19 @@ var _stageToCard = {
   regroup: 'Group',
 };
 
+// Reverse of _stageToCard: cardSuffix -> [backend stage names]. Used by
+// _updatePipelineStageUI to aggregate the per-card terminal state across
+// multi-substage cards (e.g. Previews = thumbnails + previews) so the pill
+// only flips to 'Done' once every substage has reached a terminal state.
+var _cardToStages = (function() {
+  var m = {};
+  for (var s in _stageToCard) {
+    var c = _stageToCard[s];
+    (m[c] = m[c] || []).push(s);
+  }
+  return m;
+})();
+
 // Map pipeline stage names to the progress bar element suffixes
 var _stageToProgress = {
   ingest: 'Source',
@@ -2293,25 +2422,66 @@ function _formatETA(seconds) {
 function _updatePipelineStageUI(p) {
   var stages = p.stages || {};
 
-  // Update stage number badges based on stage status. "skipped" renders
-  // as complete so cards that don't run (e.g. ingest in scan-in-place
-  // mode) still look resolved rather than pending.
+  // Aggregate backend substages per card. Multiple backend stages share a
+  // card (Previews ← thumbnails + previews; Classify ← model_loader +
+  // classify), so the card's outcome can only be decided once ALL of its
+  // substages reach a terminal state. Resolving each substage event in
+  // isolation made the pill flash 'Done' as soon as the first substage
+  // finished, even though more work was pending.
+  var cardAgg = {};  // cardSuffix -> {running, failed, completed, skipped, present}
   for (var stageName in stages) {
-    var info = stages[stageName];
     var cardSuffix = _stageToCard[stageName];
     if (!cardSuffix) continue;
+    var agg = cardAgg[cardSuffix] || (cardAgg[cardSuffix] = {
+      running: false, failed: false, completed: 0, skipped: 0, present: 0,
+    });
+    agg.present += 1;
+    var st = stages[stageName].status;
+    if (st === 'running') agg.running = true;
+    else if (st === 'failed') agg.failed = true;
+    else if (st === 'completed') agg.completed += 1;
+    else if (st === 'skipped') agg.skipped += 1;
+  }
 
-    var numEl = document.getElementById('num' + cardSuffix);
+  for (var cardSuffix2 in cardAgg) {
+    var a = cardAgg[cardSuffix2];
+    var expected = (_cardToStages[cardSuffix2] || []).length;
+    var numEl = document.getElementById('num' + cardSuffix2);
     if (!numEl) continue;
 
-    if (info.status === 'running') {
+    if (a.running) {
       numEl.className = 'stage-num running';
-      // Auto-expand the card
-      var card = document.getElementById('card-' + cardSuffix.toLowerCase());
+      _runningStages[cardSuffix2] = true;
+      _setPill(cardSuffix2, 'running');
+      var card = document.getElementById('card-' + cardSuffix2.toLowerCase());
       if (card) card.classList.add('expanded');
-    } else if (info.status === 'completed' || info.status === 'skipped') {
+    } else if (a.failed) {
+      // Must clear the running flag — _stageStateFor checks _runningStages
+      // before _stageOutcomes, so a leftover running entry would mask the
+      // failure and leave the pill stuck on "Running…".
+      numEl.className = 'stage-num';
+      delete _runningStages[cardSuffix2];
+      _stageOutcomes[cardSuffix2] = 'failed';
+      _setPill(cardSuffix2, 'failed');
+    } else if (a.completed + a.skipped >= expected && a.completed + a.skipped > 0) {
+      // All expected substages reached a non-running terminal state.
       numEl.className = 'stage-num complete';
+      delete _runningStages[cardSuffix2];
+      if (a.completed > 0) {
+        _stageOutcomes[cardSuffix2] = 'done';
+        _setPill(cardSuffix2, 'done');
+      } else {
+        // Every substage was skipped. Backend 'skipped' covers both
+        // user-disabled stages and auto-skip; pick the right label so a
+        // user-disabled stage doesn't get mislabeled "Already done".
+        var skipState = _isUserDisabledStage(cardSuffix2) ? 'will-skip' : 'done-prior';
+        _stageOutcomes[cardSuffix2] = skipState;
+        _setPill(cardSuffix2, skipState);
+      }
     }
+    // Else: card is mid-pipeline (some substages still pending). Don't
+    // write an outcome — leave the pill at 'running' (set above when an
+    // earlier event hit the running branch) or its pre-run state.
   }
 
   // Route the progress event to the correct card via p.stage_id (set
@@ -2455,6 +2625,10 @@ function _onPipelineComplete(result) {
       // know it's a setup issue rather than an empty eligibility set.
       if (ekp.skipped) {
         ekpTxt.textContent = 'Skipped \u2014 ' + ekp.skipped;
+        // Override the 'done' outcome set above: when the backend reports
+        // skipped (e.g. no model installed), the pill should reflect that.
+        _stageOutcomes['EyeKeypoints'] = 'will-skip';
+        _setPill('EyeKeypoints', 'will-skip');
       } else {
         ekpTxt.textContent = ekpTotal
           ? (ekpProcessed + ' of ' + ekpTotal + ' processed')
@@ -2480,9 +2654,14 @@ function _onPipelineComplete(result) {
       if (cardSuffix) {
         var statusEl = document.getElementById('status' + cardSuffix);
         if (statusEl) statusEl.textContent = 'Failed: ' + errorStages[stage];
+        delete _runningStages[cardSuffix];
+        _stageOutcomes[cardSuffix] = 'failed';
+        _setPill(cardSuffix, 'failed');
       }
     }
   }
+
+  refreshPipelineUI();
 
   // Auto-redirect to review page on success
   if (succeeded && (!r.errors || r.errors.length === 0)) {
@@ -2996,6 +3175,11 @@ async function refreshKeypointsStatus() {
     _renderKeypointRow(
       'superanimal-bird', s.superanimal_bird || 'missing'
     );
+    _keypointModelsReady = (
+      s.superanimal_quadruped === 'ready' ||
+      s.superanimal_bird === 'ready'
+    );
+    refreshPipelineUI();
     // If either model is still downloading, ensure polling is running.
     // Covers the page-reload-mid-download case where init calls
     // refreshKeypointsStatus once and finds an in-flight download but no
@@ -3020,6 +3204,8 @@ async function refreshKeypointsStatus() {
     // clear the timer via the path above.
     _renderKeypointRow('superanimal-quadruped', 'missing');
     _renderKeypointRow('superanimal-bird', 'missing');
+    _keypointModelsReady = false;
+    refreshPipelineUI();
     startKeypointsPolling();
   }
 }
@@ -3143,13 +3329,129 @@ var _pipelineState = {
   hasMasks: false,
 };
 
+// --- Pipeline plan & status pills ---
+//
+// Stages 3-8 each show an explicit text pill (Will run / Will skip / Already
+// done / Running / Done / Failed) instead of relying on the colored circle.
+// `_runningStages` and `_stageOutcomes` are live overrides: while a
+// pipeline is running, they take precedence over the toggle/prior-data state.
+//
+// `_runningStages` is per-stage (not a single global) because the pipeline
+// allows concurrent stages — e.g. scan runs alongside thumbnails/previews —
+// and a single global would let one stage's status update clobber another's
+// "Running…" pill on the next refresh.
+var _runningStages = {};  // suffix -> true while that stage is running
+var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'will-skip' | 'done-prior'
+
+// Eye Keypoints has no enable checkbox and no `prior` flag, so without an
+// extra signal `_stageStateFor` would always show "Will run" for it. The
+// backend skips the stage when no SuperAnimal weights are on disk, so the
+// pre-run plan must reflect that. `null` means "status not yet polled" —
+// treat as runnable until we know better, to avoid flicker on page load.
+var _keypointModelsReady = null;  // true | false | null (unknown)
+
+var _STAGES = [
+  { suffix: 'Scan',         label: 'Scan & Import',          enable: null,             prior: null },
+  { suffix: 'Previews',     label: 'Thumbnails & Previews',  enable: null,             prior: null },
+  { suffix: 'Classify',     label: 'Classify',               enable: 'enableClassify', prior: 'hasDetections' },
+  { suffix: 'Extract',      label: 'Extract Features',       enable: 'enableExtract',  prior: 'hasMasks' },
+  { suffix: 'EyeKeypoints', label: 'Eye Keypoints',          enable: null,             prior: null },
+  { suffix: 'Group',        label: 'Group & Score',          enable: 'enableGroup',    prior: null },
+];
+
+// Lookup: cardSuffix -> enable-checkbox id (null for stages with no toggle).
+var _STAGE_ENABLE_BY_SUFFIX = (function() {
+  var m = {};
+  _STAGES.forEach(function(s) { m[s.suffix] = s.enable; });
+  return m;
+})();
+
+// Did the user disable this stage via its enable checkbox? Used to
+// distinguish backend `skipped` due to a user toggle ("Will skip") from
+// `skipped` due to prior outputs already existing ("Already done").
+function _isUserDisabledStage(cardSuffix) {
+  var enableId = _STAGE_ENABLE_BY_SUFFIX[cardSuffix];
+  if (!enableId) return false;
+  var cb = document.getElementById(enableId);
+  return !!(cb && !cb.checked);
+}
+
+var _PILL_LABELS = {
+  'running':    'Running…',
+  'done':       'Done',
+  'failed':     'Failed',
+  'will-run':   'Will run',
+  'will-skip':  'Will skip',
+  'done-prior': 'Already done',
+};
+
+function _setPill(suffix, state, text) {
+  var pill = document.getElementById('pill' + suffix);
+  if (!pill) return;
+  pill.className = 'stage-status-pill visible ' + state;
+  pill.textContent = text != null ? text : _PILL_LABELS[state];
+}
+
+function _stageStateFor(stage) {
+  if (_runningStages[stage.suffix]) return 'running';
+  if (_stageOutcomes[stage.suffix]) return _stageOutcomes[stage.suffix];
+
+  // Re-classify bypasses the "already done" skip — Classify will run again.
+  var reclassify = false;
+  if (stage.suffix === 'Classify') {
+    var rc = document.getElementById('chkReclassify');
+    reclassify = !!(rc && rc.checked);
+  }
+
+  // Eye Keypoints has no enable checkbox: the stage is gated by whether
+  // SuperAnimal weights are on disk. Backend `eye_keypoint_stage_preflight`
+  // returns a skip reason in the no-weights case, so the plan summary
+  // should mirror that pre-run instead of advertising "Will run".
+  if (stage.suffix === 'EyeKeypoints' && _keypointModelsReady === false) {
+    return 'will-skip';
+  }
+
+  if (stage.enable) {
+    var cb = document.getElementById(stage.enable);
+    if (cb && !cb.checked) return 'will-skip';
+  }
+  if (stage.prior && _pipelineState[stage.prior] && !reclassify) return 'done-prior';
+  return 'will-run';
+}
+
+function _renderPlanSummary(buckets) {
+  var box = document.getElementById('pipelinePlanSummary');
+  if (!box) return;
+  function row(cls, label, names, emptyText) {
+    var inner = names.length
+      ? '<span class="plan-stages">' + names.join(', ') + '</span>'
+      : '<span class="plan-empty">' + emptyText + '</span>';
+    return '<div class="plan-row ' + cls + '">' +
+      '<span class="plan-label">' + label + '</span>' + inner + '</div>';
+  }
+  var html = row('will-run', 'Will run', buckets['will-run'], 'nothing');
+  if (buckets['will-skip'].length)  html += row('will-skip',  'Will skip',    buckets['will-skip'],  '');
+  if (buckets['done-prior'].length) html += row('done-prior', 'Already done', buckets['done-prior'], '');
+  box.innerHTML = html;
+}
+
+function refreshPipelineUI() {
+  var buckets = { 'will-run': [], 'will-skip': [], 'done-prior': [] };
+  _STAGES.forEach(function(stage) {
+    var state = _stageStateFor(stage);
+    _setPill(stage.suffix, state);
+    if (buckets[state]) buckets[state].push(stage.label);
+  });
+  _renderPlanSummary(buckets);
+}
+
 function updateCardStates() {
-  // No individual buttons to enable/disable anymore.
-  // Just auto-expand cards based on state.
+  // Auto-expand the next card based on prior data, then refresh pills + plan.
   if (_pipelineState.hasDetections && !_pipelineState.hasMasks) {
     document.getElementById('card-extract').classList.add('expanded');
   }
   updateStartButton();
+  refreshPipelineUI();
 }
 
 /* ---------- Native folder picker (Tauri only) ---------- */
