@@ -2219,7 +2219,7 @@ async function startPipeline() {
 
   // Reset live pill state so "Done" / "Failed" from a previous run don't bleed
   // into this one. Pills will recompute from toggles + prior data.
-  _runningStageSuffix = null;
+  _runningStages = {};
   _stageOutcomes = {};
   refreshPipelineUI();
 
@@ -2422,24 +2422,29 @@ function _updatePipelineStageUI(p) {
 
     if (info.status === 'running') {
       numEl.className = 'stage-num running';
-      _runningStageSuffix = cardSuffix;
+      _runningStages[cardSuffix] = true;
       _setPill(cardSuffix, 'running');
       // Auto-expand the card
       var card = document.getElementById('card-' + cardSuffix.toLowerCase());
       if (card) card.classList.add('expanded');
     } else if (info.status === 'completed') {
       numEl.className = 'stage-num complete';
-      if (_runningStageSuffix === cardSuffix) _runningStageSuffix = null;
+      delete _runningStages[cardSuffix];
       _stageOutcomes[cardSuffix] = 'done';
       _setPill(cardSuffix, 'done');
     } else if (info.status === 'skipped') {
       numEl.className = 'stage-num complete';
-      if (_runningStageSuffix === cardSuffix) _runningStageSuffix = null;
+      delete _runningStages[cardSuffix];
       // Don't overwrite an earlier 'done' from a sibling stage in the same card
       // (e.g. thumbnails completed, then previews skipped both map to Previews).
       if (_stageOutcomes[cardSuffix] !== 'done') {
-        _stageOutcomes[cardSuffix] = 'done-prior';
-        _setPill(cardSuffix, 'done-prior');
+        // Backend `skipped` is overloaded: it can mean the user disabled the
+        // stage via its toggle, or that the stage had nothing to do because
+        // outputs already exist. Pick the right pill so a user-disabled
+        // stage doesn't get mislabeled "Already done".
+        var skipState = _isUserDisabledStage(cardSuffix) ? 'will-skip' : 'done-prior';
+        _stageOutcomes[cardSuffix] = skipState;
+        _setPill(cardSuffix, skipState);
       }
     }
   }
@@ -3285,10 +3290,15 @@ var _pipelineState = {
 //
 // Stages 3-8 each show an explicit text pill (Will run / Will skip / Already
 // done / Running / Done / Failed) instead of relying on the colored circle.
-// `_runningStageSuffix` and `_stageOutcomes` are live overrides: while a
+// `_runningStages` and `_stageOutcomes` are live overrides: while a
 // pipeline is running, they take precedence over the toggle/prior-data state.
-var _runningStageSuffix = null;
-var _stageOutcomes = {};  // suffix -> 'running' | 'done' | 'failed' | 'will-skip'
+//
+// `_runningStages` is per-stage (not a single global) because the pipeline
+// allows concurrent stages — e.g. scan runs alongside thumbnails/previews —
+// and a single global would let one stage's status update clobber another's
+// "Running…" pill on the next refresh.
+var _runningStages = {};  // suffix -> true while that stage is running
+var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'will-skip' | 'done-prior'
 
 var _STAGES = [
   { suffix: 'Scan',         label: 'Scan & Import',          enable: null,             prior: null },
@@ -3298,6 +3308,23 @@ var _STAGES = [
   { suffix: 'EyeKeypoints', label: 'Eye Keypoints',          enable: null,             prior: null },
   { suffix: 'Group',        label: 'Group & Score',          enable: 'enableGroup',    prior: null },
 ];
+
+// Lookup: cardSuffix -> enable-checkbox id (null for stages with no toggle).
+var _STAGE_ENABLE_BY_SUFFIX = (function() {
+  var m = {};
+  _STAGES.forEach(function(s) { m[s.suffix] = s.enable; });
+  return m;
+})();
+
+// Did the user disable this stage via its enable checkbox? Used to
+// distinguish backend `skipped` due to a user toggle ("Will skip") from
+// `skipped` due to prior outputs already existing ("Already done").
+function _isUserDisabledStage(cardSuffix) {
+  var enableId = _STAGE_ENABLE_BY_SUFFIX[cardSuffix];
+  if (!enableId) return false;
+  var cb = document.getElementById(enableId);
+  return !!(cb && !cb.checked);
+}
 
 var _PILL_LABELS = {
   'running':    'Running…',
@@ -3316,7 +3343,7 @@ function _setPill(suffix, state, text) {
 }
 
 function _stageStateFor(stage) {
-  if (_runningStageSuffix === stage.suffix) return 'running';
+  if (_runningStages[stage.suffix]) return 'running';
   if (_stageOutcomes[stage.suffix]) return _stageOutcomes[stage.suffix];
 
   // Re-classify bypasses the "already done" skip — Classify will run again.
