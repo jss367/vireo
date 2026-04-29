@@ -1797,7 +1797,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     model_type = loaded_models["model_type"]
                     model_name = loaded_models["model_name"]
                 else:
-                    stages["classify"]["count"] = spec_idx * total
+                    # Don't reset stages["classify"]["count"] here — it now
+                    # accumulates real inferences per-photo (Task 3); jumping
+                    # it to spec_idx * total would silently double-count the
+                    # cached hits from prior specs.  total is left at its
+                    # multi-spec value (set by the batch-end push of the
+                    # previous spec, or unchanged on first entry); explicitly
+                    # restate it so the "Loading next model..." event always
+                    # carries the multi-spec total.
                     stages["classify"]["total"] = total * len(resolved_specs_local)
                     runner.push_event(job["id"], "progress", _progress_event(
                         stages, "classify", f"Loading {active_spec['name']}...",
