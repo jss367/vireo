@@ -3139,6 +3139,11 @@ async function refreshKeypointsStatus() {
     _renderKeypointRow(
       'superanimal-bird', s.superanimal_bird || 'missing'
     );
+    _keypointModelsReady = (
+      s.superanimal_quadruped === 'ready' ||
+      s.superanimal_bird === 'ready'
+    );
+    refreshPipelineUI();
     // If either model is still downloading, ensure polling is running.
     // Covers the page-reload-mid-download case where init calls
     // refreshKeypointsStatus once and finds an in-flight download but no
@@ -3163,6 +3168,8 @@ async function refreshKeypointsStatus() {
     // clear the timer via the path above.
     _renderKeypointRow('superanimal-quadruped', 'missing');
     _renderKeypointRow('superanimal-bird', 'missing');
+    _keypointModelsReady = false;
+    refreshPipelineUI();
     startKeypointsPolling();
   }
 }
@@ -3300,6 +3307,13 @@ var _pipelineState = {
 var _runningStages = {};  // suffix -> true while that stage is running
 var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'will-skip' | 'done-prior'
 
+// Eye Keypoints has no enable checkbox and no `prior` flag, so without an
+// extra signal `_stageStateFor` would always show "Will run" for it. The
+// backend skips the stage when no SuperAnimal weights are on disk, so the
+// pre-run plan must reflect that. `null` means "status not yet polled" —
+// treat as runnable until we know better, to avoid flicker on page load.
+var _keypointModelsReady = null;  // true | false | null (unknown)
+
 var _STAGES = [
   { suffix: 'Scan',         label: 'Scan & Import',          enable: null,             prior: null },
   { suffix: 'Previews',     label: 'Thumbnails & Previews',  enable: null,             prior: null },
@@ -3351,6 +3365,14 @@ function _stageStateFor(stage) {
   if (stage.suffix === 'Classify') {
     var rc = document.getElementById('chkReclassify');
     reclassify = !!(rc && rc.checked);
+  }
+
+  // Eye Keypoints has no enable checkbox: the stage is gated by whether
+  // SuperAnimal weights are on disk. Backend `eye_keypoint_stage_preflight`
+  // returns a skip reason in the no-weights case, so the plan summary
+  // should mirror that pre-run instead of advertising "Will run".
+  if (stage.suffix === 'EyeKeypoints' && _keypointModelsReady === false) {
+    return 'will-skip';
   }
 
   if (stage.enable) {

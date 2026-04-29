@@ -237,3 +237,34 @@ def test_pipeline_skipped_auto_stage_shows_already_done(live_server, page):
         _updatePipelineStageUI({stages: {extract_masks: {status: 'skipped'}}});
     """)
     expect(page.locator("#pillExtract")).to_contain_text("Already done")
+
+
+def test_pipeline_eye_keypoints_pill_will_skip_when_no_weights(live_server, page):
+    """Eye Keypoints has no enable checkbox — it's gated by whether
+    SuperAnimal weights are on disk. The fixture doesn't ship any keypoint
+    models, so /api/models/keypoints/status reports both as 'missing' and
+    the pill must show 'Will skip' (mirroring the backend preflight),
+    not 'Will run'.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
+    summary = page.locator("[data-testid='pipeline-plan-summary']")
+    skip_row = summary.locator(".plan-row.will-skip .plan-stages")
+    expect(skip_row).to_contain_text("Eye Keypoints")
+    will_run_row = summary.locator(".plan-row.will-run .plan-stages")
+    expect(will_run_row).not_to_contain_text("Eye Keypoints")
+
+
+def test_pipeline_eye_keypoints_pill_will_run_when_models_ready(live_server, page):
+    """When at least one keypoint model is ready, the pill flips back to
+    'Will run'. Simulated by stubbing the status endpoint client-side and
+    re-invoking refreshKeypointsStatus."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    expect(page.locator("#pillEyeKeypoints")).to_be_visible()
+    page.evaluate("""
+        window._keypointModelsReady = true;
+        refreshPipelineUI();
+    """)
+    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
