@@ -1878,6 +1878,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 raw_results: list = []
                 failed = 0
                 skipped_existing = 0
+                stages["classify"].setdefault("cached", 0)
                 # Photos actually iterated past the inner abort check, used to
                 # correct the per-batch progress claim on a mid-batch cancel
                 # (the per-batch event below pre-advances count by len(batch)).
@@ -1889,32 +1890,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     if _should_abort(abort):
                         break
                     batch = photos[batch_start:batch_start + batch_size]
-                    batch_idx = batch_start + len(batch)
-
-                    phase_label = (
-                        f"Classifying with {active_spec['name']}"
-                        + (
-                            f" ({spec_idx + 1}/{len(resolved_specs_local)})"
-                            if len(resolved_specs_local) > 1 else ""
-                        )
-                    )
-                    # Aggregate classify progress across models: count spans
-                    # [0, total*N] so the overall bar advances smoothly through
-                    # a multi-model run instead of snapping to 100% per model.
-                    stages["classify"]["count"] = spec_idx * total + batch_idx
-                    stages["classify"]["total"] = total * len(resolved_specs_local)
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "classify", phase_label,
-                        step_id=step_id,
-                        rate=round(
-                            batch_idx / max(time.time() - start_time, 0.01) * 60,
-                            1,
-                        ),
-                    ))
-                    runner.update_step(
-                        job["id"], step_id,
-                        progress={"current": batch_idx, "total": total},
-                    )
 
                     for photo in batch:
                         # Per-photo abort check so cancel takes effect within
@@ -1981,6 +1956,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 )
                                 if cached:
                                     skipped_existing += 1
+                                    stages["classify"]["cached"] += 1
                                     top = cached[0]
                                     folder_path = folders.get(photo["folder_id"], "")
                                     image_path = os.path.join(
@@ -2061,36 +2037,53 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 primary_det["id"], model_name, spec_fp,
                                 prediction_count=new_count,
                             )
+                            stages["classify"]["count"] = (
+                                stages["classify"].get("count", 0) + 1
+                            )
 
-                # Skip the grouping/storage finalization on cancel — it can
-                # take a minute on large collections and the user has already
-                # asked us to stop. Leaving models_succeeded at its current
-                # value also keeps the reclassify stale-row purge from firing
-                # for this model (see the comment on the purge below), which
-                # is the safe default when classify didn't finish.
-                if _should_abort(abort):
-                    # The per-batch progress event above pre-advances the
-                    # count by the full batch length BEFORE the inner loop
-                    # runs. On a mid-batch cancel that leaves the UI showing
-                    # a count higher than what was actually classified — emit
-                    # a corrected progress event and step update so the job
-                    # tree reflects the true partial state.
-                    stages["classify"]["count"] = (
-                        spec_idx * total + processed_in_loop
-                    )
-                    stages["classify"]["total"] = (
-                        total * len(resolved_specs_local)
-                    )
+                    # Batch boundary: surface the per-photo accumulated
+                    # count + cached to the UI. Replaces the old per-batch
+                    # pre-advance which lied about progress when batches
+                    # contained cache hits.
+                    stages["classify"]["total"] = total * len(resolved_specs_local)
+                    elapsed = max(time.time() - start_time, 0.01)
+                    seen = stages["classify"]["count"] + stages["classify"]["cached"]
                     runner.push_event(job["id"], "progress", _progress_event(
                         stages, "classify",
-                        f"Cancelled — {processed_in_loop} of {total} photos",
+                        f"Classifying with {active_spec['name']}"
+                        + (
+                            f" ({spec_idx + 1}/{len(resolved_specs_local)})"
+                            if len(resolved_specs_local) > 1 else ""
+                        ),
                         step_id=step_id,
+                        rate=round(seen / elapsed * 60, 1),
                     ))
                     runner.update_step(
                         job["id"], step_id,
+                        progress={
+                            "current": stages["classify"]["count"],
+                            "total": total,
+                        },
+                    )
+
+                # Skip the grouping/storage finalization on cancel — it can
+                # take a minute on large collections and the user has already
+                # asked us to stop. Per-photo counters are accurate, no
+                # corrective fixup needed.
+                if _should_abort(abort):
+                    runner.update_step(
+                        job["id"], step_id,
                         status="completed",
-                        progress={"current": processed_in_loop, "total": total},
-                        summary=f"Cancelled ({processed_in_loop} of {total} photos)",
+                        progress={
+                            "current": stages["classify"]["count"],
+                            "total": total,
+                        },
+                        summary=(
+                            f"Cancelled "
+                            f"({stages['classify']['count']} classified, "
+                            f"{stages['classify']['cached']} cached "
+                            f"of {total})"
+                        ),
                     )
                     continue
 
