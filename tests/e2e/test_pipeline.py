@@ -294,3 +294,29 @@ def test_pipeline_eye_keypoints_pill_will_run_when_models_ready(live_server, pag
         refreshPipelineUI();
     """)
     expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
+
+
+def test_pipeline_shared_card_not_done_until_all_substages_complete(live_server, page):
+    """model_loader and classify both map to the Classify card. The pill must
+    not flip to 'Done' when only model_loader has completed — classify still
+    has work to do. Same shape applies to thumbnails/previews on the Previews
+    card."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.evaluate("""
+        _updatePipelineStageUI({stages: {model_loader: {status: 'running'}}});
+    """)
+    expect(page.locator("#pillClassify")).to_contain_text("Running")
+    # Only model_loader has terminated; classify still has work pending.
+    page.evaluate("""
+        _updatePipelineStageUI({stages: {model_loader: {status: 'completed'}}});
+    """)
+    expect(page.locator("#pillClassify")).not_to_contain_text("Done")
+    # Both substages terminal → Done.
+    page.evaluate("""
+        _updatePipelineStageUI({stages: {
+            model_loader: {status: 'completed'},
+            classify: {status: 'completed'},
+        }});
+    """)
+    expect(page.locator("#pillClassify")).to_contain_text("Done")
