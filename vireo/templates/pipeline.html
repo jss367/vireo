@@ -2504,6 +2504,7 @@ function _updatePipelineStageUI(p) {
   var si = stages[p.stage_id] || {};
   var stageCurrent = si.count || 0;
   var stageCached = si.cached || 0;
+  var stageSeen = si.seen || 0;
   var stageCachedEst = si.cached_estimate || 0;
   var stageTotal = si.total || 0;
 
@@ -2549,9 +2550,13 @@ function _updatePipelineStageUI(p) {
 
   if (stageTotal > 0) {
     if (progressWrap) progressWrap.style.display = '';
-    // Bar fill must reflect both inferred AND cached photos so the bar
-    // tracks honest completion, not just inferences.
-    var pct = Math.min(100, Math.round((stageCurrent + stageCached) / stageTotal * 100));
+    // Bar fill: classify surfaces ``seen`` which counts every photo the
+    // loop iterated past (cached, inferred, no-detection, decode-failed,
+    // inference-failed); use it so the bar reaches 100% on collections that
+    // contain non-classifiable photos. Other stages fall back to
+    // count + cached.
+    var stageProcessed = stageSeen || (stageCurrent + stageCached);
+    var pct = Math.min(100, Math.round(stageProcessed / stageTotal * 100));
     if (fill) fill.style.width = pct + '%';
     if (text) text.textContent = label;
   }

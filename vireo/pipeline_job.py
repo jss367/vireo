@@ -355,7 +355,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         "previews": {"status": "pending", "count": 0, "label": "Generating previews"},
         "model_loader": {"status": "pending", "label": "Loading models"},
         "detect": {"status": "pending", "count": 0, "label": "Detecting subjects"},
-        "classify": {"status": "pending", "count": 0, "label": "Classifying species"},
+        "classify": {"status": "pending", "count": 0, "cached": 0, "seen": 0, "label": "Classifying species"},
         "extract_masks": {"status": "pending", "count": 0, "label": "Extracting features"},
         "eye_keypoints": {"status": "pending", "count": 0, "label": "Detecting eye keypoints"},
         "regroup": {"status": "pending", "label": "Grouping encounters"},
@@ -1886,6 +1886,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 failed = 0
                 skipped_existing = 0
                 stages["classify"].setdefault("cached", 0)
+                stages["classify"].setdefault("seen", 0)
+                # Photos that iterated past the inner abort check IN THIS spec.
+                # Used for the per-spec ``runner.update_step`` progress (which
+                # is bounded by ``total``, not the multi-spec stage total) and
+                # for the batch-end rate calc.  Captures every branch — cache
+                # hit, successful inference, no-detection, image decode fail,
+                # inference fail — so spec-level progress reaches ``total`` at
+                # the end of the spec regardless of outcome mix.
+                processed_in_spec = 0
                 start_time = time.time()
                 batch_size = 32  # classification batch granularity
 
@@ -1902,6 +1911,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         # then break out of the batch loop entirely.
                         if _should_abort(abort):
                             break
+                        processed_in_spec += 1
+                        stages["classify"]["seen"] = (
+                            stages["classify"].get("seen", 0) + 1
+                        )
                         # Record this photo as classify-processed for the first
                         # successful model. Used by the stale-detection purge to
                         # restrict deletions to photos actually reclassified.
@@ -2049,7 +2062,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # contained cache hits.
                     stages["classify"]["total"] = total * len(resolved_specs_local)
                     elapsed = max(time.time() - start_time, 0.01)
-                    seen = stages["classify"]["count"] + stages["classify"]["cached"]
                     runner.push_event(job["id"], "progress", _progress_event(
                         stages, "classify",
                         f"Classifying with {active_spec['name']}"
@@ -2058,12 +2070,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             if len(resolved_specs_local) > 1 else ""
                         ),
                         step_id=step_id,
-                        rate=round(seen / elapsed * 60, 1),
+                        rate=round(processed_in_spec / elapsed * 60, 1),
                     ))
                     runner.update_step(
                         job["id"], step_id,
                         progress={
-                            "current": stages["classify"]["count"],
+                            "current": processed_in_spec,
                             "total": total,
                         },
                     )
@@ -2075,15 +2087,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 if _should_abort(abort):
                     runner.push_event(job["id"], "progress", _progress_event(
                         stages, "classify",
-                        f"Cancelled — {stages['classify']['count']} of "
-                        f"{total} classified",
+                        f"Cancelled — {processed_in_spec} of "
+                        f"{total} processed",
                         step_id=step_id,
                     ))
                     runner.update_step(
                         job["id"], step_id,
                         status="completed",
                         progress={
-                            "current": stages["classify"]["count"],
+                            "current": processed_in_spec,
                             "total": total,
                         },
                         summary=(
