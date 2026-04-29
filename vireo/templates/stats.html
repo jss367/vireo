@@ -165,6 +165,12 @@ body { padding-bottom: 36px; }
     <div class="bar-chart" id="speciesChart"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
+  <!-- Other Keywords -->
+  <div class="section" id="otherKeywordsSection" style="display:none;">
+    <div class="section-title">Other Keywords</div>
+    <div class="bar-chart" id="otherKeywordsChart"></div>
+  </div>
+
   <div class="grid-2col">
     <!-- Rating Distribution -->
     <div class="section">
@@ -357,21 +363,28 @@ function renderSpecies(keywords) {
       '<span class="bar-value">' + k.photo_count.toLocaleString() + '</span>' +
     '</div>';
   });
+  container.innerHTML = html;
 
-  // Also show top non-species keywords
+  // Render top non-species keywords in their own section
   var nonSpecies = keywords.filter(function(k) { return !k.is_species; }).slice(0, 10);
+  var otherSection = document.getElementById('otherKeywordsSection');
+  var otherChart = document.getElementById('otherKeywordsChart');
   if (nonSpecies.length > 0) {
-    html += '<div style="margin-top:16px;font-size:11px;color:var(--text-faint);text-transform:uppercase;margin-bottom:8px;">Other Keywords</div>';
+    var nonSpeciesMax = nonSpecies[0].photo_count;
+    var otherHtml = '';
     nonSpecies.forEach(function(k) {
-      var pct = Math.round((k.photo_count / max) * 100);
-      html += '<div class="bar-row">' +
+      var pct = Math.round((k.photo_count / nonSpeciesMax) * 100);
+      otherHtml += '<div class="bar-row">' +
         '<span class="bar-label">' + escapeHtml(k.name) + '</span>' +
         '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:var(--text-ghost);"></div></div>' +
         '<span class="bar-value">' + k.photo_count.toLocaleString() + '</span>' +
       '</div>';
     });
+    otherChart.innerHTML = otherHtml;
+    otherSection.style.display = '';
+  } else {
+    otherSection.style.display = 'none';
   }
-  container.innerHTML = html;
 }
 
 function renderMonths(months) {
