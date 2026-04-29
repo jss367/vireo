@@ -1856,6 +1856,25 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # classifier_runs gate below handles skipping correctly
                 # and still surfaces cached results into raw_results so
                 # grouping sees them.
+                # Pre-flight cache estimate. One indexed query per spec
+                # so the UI can display "~M cached, ~K to classify" before
+                # the first inference runs and ETAs are honest from the
+                # start. The estimate may overcount if a run-key exists
+                # but no cached predictions do (see lines ~2000-2004); the
+                # live `cached` counter reflects actual skips.
+                cached_est = thread_db.count_classifier_runs(
+                    [p["id"] for p in photos],
+                    model_name,
+                    spec_fp,
+                )
+                stages["classify"]["cached_estimate"] = (
+                    stages["classify"].get("cached_estimate", 0) + cached_est
+                )
+                runner.push_event(job["id"], "progress", _progress_event(
+                    stages, "classify",
+                    f"Classifying with {active_spec['name']}",
+                    step_id=step_id,
+                ))
                 raw_results: list = []
                 failed = 0
                 skipped_existing = 0
