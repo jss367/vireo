@@ -12,22 +12,33 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from duplicate_buckets import bucket_unresolved_proposals
 
 
-def _proposal(file_hash, paths, file_size=1000):
+def _proposal(file_hash, paths, file_size=1000, exists=None):
     """Build a minimal unresolved-proposal dict with given paths.
 
     First path is the winner; remaining are losers. The function under test
     only reads ``status``, ``file_hash``, ``winner.path``, ``winner.file_size``,
-    and ``losers[].path`` / ``losers[].file_size`` so the rest is omitted.
+    ``winner.exists``, and ``losers[].path`` / ``losers[].file_size`` /
+    ``losers[].exists`` so the rest is omitted.
+
+    ``exists``, if given, must be a list of booleans matching ``paths``.
+    Pass ``None`` to omit the key entirely (preserves pre-existence-aware
+    behavior, treated as present by the helper).
     """
+    def _candidate(idx, path):
+        cand = {
+            "path": path,
+            "filename": os.path.basename(path),
+            "file_size": file_size,
+        }
+        if exists is not None:
+            cand["exists"] = exists[idx]
+        return cand
+
     return {
         "status": "unresolved",
         "file_hash": file_hash,
-        "winner": {"path": paths[0], "filename": os.path.basename(paths[0]),
-                   "file_size": file_size},
-        "losers": [
-            {"path": p, "filename": os.path.basename(p), "file_size": file_size}
-            for p in paths[1:]
-        ],
+        "winner": _candidate(0, paths[0]),
+        "losers": [_candidate(i + 1, p) for i, p in enumerate(paths[1:])],
     }
 
 
@@ -145,3 +156,49 @@ def test_same_folder_duplicates_form_a_single_folder_bucket():
     buckets = bucket_unresolved_proposals(proposals)
     assert len(buckets) == 1
     assert buckets[0]["folders"] == ["/a"]
+
+
+def test_folder_with_only_missing_candidates_dropped_from_folders():
+    """A folder whose every candidate has ``exists=False`` would render a
+    bulk-decide button that the backend skip-guard refuses, so hide it."""
+    proposals = [
+        _proposal("h1", ["/a/owl.jpg", "/b/owl.jpg"], exists=[True, False]),
+    ]
+    buckets = bucket_unresolved_proposals(proposals)
+    assert len(buckets) == 1
+    assert buckets[0]["folders"] == ["/a"]
+
+
+def test_folder_with_one_existing_candidate_across_groups_stays():
+    """If a folder has at least one real file across the bucket's groups,
+    keep it — the backend will skip the missing hashes per-row."""
+    proposals = [
+        _proposal("h1", ["/a/owl.jpg", "/b/owl.jpg"], exists=[True, True]),
+        _proposal("h2", ["/a/hawk.jpg", "/b/hawk.jpg"], exists=[True, False]),
+    ]
+    buckets = bucket_unresolved_proposals(proposals)
+    assert len(buckets) == 1
+    assert buckets[0]["folders"] == ["/a", "/b"]
+
+
+def test_bucket_dropped_when_every_folder_only_has_missing_candidates():
+    """Pathological case: every candidate is missing. Bucket has nothing
+    actionable, so don't surface it at all — the per-group review path
+    handles those rows."""
+    proposals = [
+        _proposal("h1", ["/a/owl.jpg", "/b/owl.jpg"], exists=[False, False]),
+    ]
+    assert bucket_unresolved_proposals(proposals) == []
+
+
+def test_proposals_without_exists_key_preserve_all_folders():
+    """Backwards compat: proposals built before existence-aware bucketing
+    didn't carry an ``exists`` flag. Treat absent as present so pre-fix data
+    (and tests that don't bother with the flag) keep working."""
+    proposals = [
+        _proposal("h1", ["/a/owl.jpg", "/b/owl.jpg"]),
+        _proposal("h2", ["/a/hawk.jpg", "/b/hawk.jpg"]),
+    ]
+    buckets = bucket_unresolved_proposals(proposals)
+    assert len(buckets) == 1
+    assert buckets[0]["folders"] == ["/a", "/b"]
