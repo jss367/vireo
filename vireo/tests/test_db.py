@@ -9561,7 +9561,7 @@ def test_add_photo_retries_on_database_is_locked(tmp_path):
     assert photo["filename"] == "DSC_0001.NEF"
 
 
-def _add_one_detection(db, photo_id, detector_model="test-det"):
+def _add_one_detection(db, photo_id, detector_model="test-det", conf=0.9):
     """Append a single detection without wiping prior rows for the same
     (photo, model). save_detections is destructive per (photo, model), so
     use direct SQL when we want multiple detections on one photo.
@@ -9570,8 +9570,8 @@ def _add_one_detection(db, photo_id, detector_model="test-det"):
         """INSERT INTO detections
              (photo_id, detector_model, box_x, box_y, box_w, box_h,
               detector_confidence, category)
-           VALUES (?, ?, 0.0, 0.0, 1.0, 1.0, 0.9, 'animal')""",
-        (photo_id, detector_model),
+           VALUES (?, ?, 0.0, 0.0, 1.0, 1.0, ?, 'animal')""",
+        (photo_id, detector_model, conf),
     )
     db.conn.commit()
     return cur.lastrowid
@@ -9641,3 +9641,40 @@ def test_count_classifier_runs_chunks_large_id_lists(tmp_path):
     assert db.count_classifier_runs(
         photo_ids, "BioCLIP-2.5", "fp-a"
     ) == 1500
+
+
+def test_count_classifier_runs_excludes_full_image_and_below_threshold(tmp_path):
+    """count_classifier_runs mirrors the runtime gate: full-image rows and
+    sub-threshold detections are excluded so prior full-image classifier
+    runs and stale low-confidence boxes don't inflate cached_estimate."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos", name="photos")
+    p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0, timestamp=None,
+                     width=1, height=1)
+    p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0, timestamp=None,
+                     width=1, height=1)
+    p3 = db.add_photo(folder_id=fid, filename="c.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0, timestamp=None,
+                     width=1, height=1)
+
+    # p1: only a full-image detection has a matching run key. Should NOT
+    # be counted (runtime gate skips full-image rows when picking primary).
+    d1_full = _add_one_detection(db, p1, detector_model="full-image", conf=0.9)
+    db.record_classifier_run(d1_full, "BioCLIP-2.5", "fp-a", prediction_count=1)
+
+    # p2: only a below-threshold detection has a matching run key. Should
+    # NOT be counted (runtime gate filters at detector_confidence >= 0.2).
+    d2_low = _add_one_detection(db, p2, conf=0.05)
+    db.record_classifier_run(d2_low, "BioCLIP-2.5", "fp-a", prediction_count=1)
+
+    # p3: a normal above-threshold non-full-image detection has a matching
+    # run key. Should be counted.
+    d3 = _add_one_detection(db, p3, conf=0.9)
+    db.record_classifier_run(d3, "BioCLIP-2.5", "fp-a", prediction_count=1)
+
+    assert db.count_classifier_runs(
+        [p1, p2, p3], "BioCLIP-2.5", "fp-a",
+    ) == 1

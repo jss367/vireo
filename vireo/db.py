@@ -5810,14 +5810,29 @@ class Database:
 
     def count_classifier_runs(self, photo_ids, classifier_model, labels_fingerprint):
         """Count distinct photos in `photo_ids` that have at least one
-        detection with a classifier_runs row matching the given
-        (classifier_model, labels_fingerprint).
+        non-full-image detection above the active workspace's
+        ``detector_confidence`` threshold with a classifier_runs row
+        matching the given (classifier_model, labels_fingerprint).
 
         Used by the streaming pipeline's classify stage to pre-flight how
         many photos will hit the cache vs. require fresh inference.
+
+        Mirrors the runtime gate's photo selection (see pipeline_job.py,
+        the ``primary_det = photo_dets[0]`` block in the classify loop):
+        full-image rows are excluded and below-threshold detections are
+        ignored, so prior full-image classifier_runs and low-confidence
+        secondary boxes don't inflate the cached_estimate. May still
+        overcount for photos with multiple above-threshold non-full-image
+        detections where a non-primary one happens to carry the matching
+        run key — exact mirroring would require a window function over
+        every photo's detection set.
         """
         if not photo_ids:
             return 0
+        import config as cfg
+        min_conf = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2,
+        )
         # Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER (default 999).
         # Match the 500-element chunks used elsewhere in this file.
         CHUNK = 500
@@ -5831,8 +5846,10 @@ class Database:
                 f"JOIN classifier_runs cr ON cr.detection_id = d.id "
                 f"WHERE cr.classifier_model = ? "
                 f"  AND cr.labels_fingerprint = ? "
+                f"  AND d.detector_model != 'full-image' "
+                f"  AND d.detector_confidence >= ? "
                 f"  AND d.photo_id IN ({placeholders})",
-                [classifier_model, labels_fingerprint, *chunk],
+                [classifier_model, labels_fingerprint, min_conf, *chunk],
             ).fetchall()
             for r in rows:
                 matched.add(r["photo_id"])
