@@ -2503,13 +2503,37 @@ function _updatePipelineStageUI(p) {
   // individual cards (it would make every card read the same %).
   var si = stages[p.stage_id] || {};
   var stageCurrent = si.count || 0;
+  var stageCached = si.cached || 0;
+  var stageCachedEst = si.cached_estimate || 0;
   var stageTotal = si.total || 0;
 
   var parts = [];
   if (p.phase) parts.push(p.phase);
-  if (stageTotal > 0 && stageCurrent > 0) {
-    parts.push(stageCurrent.toLocaleString() + ' / ' + stageTotal.toLocaleString());
+
+  // Count line: split when we have actually seen cache hits, otherwise
+  // fall back to single-number display so non-classify stages render
+  // unchanged.
+  if (stageTotal > 0 && (stageCurrent > 0 || stageCached > 0)) {
+    if (stageCached > 0) {
+      parts.push(
+        stageCurrent.toLocaleString() + ' inferred · ' +
+        stageCached.toLocaleString() + ' cached / ' +
+        stageTotal.toLocaleString()
+      );
+    } else {
+      parts.push(stageCurrent.toLocaleString() + ' / ' + stageTotal.toLocaleString());
+    }
   }
+
+  // Pre-flight banner: shown once when the stage starts and we have an
+  // estimate but no actual progress yet.
+  if (stageCachedEst > 0 && stageCurrent === 0 && stageCached === 0) {
+    parts.push(
+      '~' + stageCachedEst.toLocaleString() + ' cached, ~' +
+      (stageTotal - stageCachedEst).toLocaleString() + ' to classify'
+    );
+  }
+
   if (p.rate) parts.push(Math.round(p.rate) + ' files/min');
   if (p.eta_seconds != null && p.eta_seconds > 0) {
     parts.push('~' + _formatETA(p.eta_seconds) + ' remaining');
@@ -2517,15 +2541,15 @@ function _updatePipelineStageUI(p) {
     parts.push('Estimating...');
   }
   if (p.current_file) parts.push(p.current_file);
-  var label = parts.join(' \u2014 ');
+  var label = parts.join(' — ');
 
-  // Always update the status line so indeterminate phases like
-  // "Discovering files..." are visible even before the bar has a total.
   if (status) status.textContent = label;
 
   if (stageTotal > 0) {
     if (progressWrap) progressWrap.style.display = '';
-    var pct = Math.round(stageCurrent / stageTotal * 100);
+    // Bar fill must reflect both inferred AND cached photos so the bar
+    // tracks honest completion, not just inferences.
+    var pct = Math.round((stageCurrent + stageCached) / stageTotal * 100);
     if (fill) fill.style.width = pct + '%';
     if (text) text.textContent = label;
   }
