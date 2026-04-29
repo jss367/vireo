@@ -50,6 +50,7 @@ dev = [
     "pytest>=9.0",
     "pytest-cov>=6.0",
     "pytest-playwright>=0.7",
+    "pytest-timeout>=2.3",
     "ruff>=0.11",
 ]
 
@@ -60,6 +61,8 @@ include = ["vireo*"]
 testpaths = ["tests", "vireo/tests"]
 markers = ["e2e: end-to-end browser tests (require Playwright)"]
 addopts = "--ignore=tests/e2e"
+timeout = 120
+timeout_method = "thread"
 
 [tool.ruff]
 target-version = "py311"
