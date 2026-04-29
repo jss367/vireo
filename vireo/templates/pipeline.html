@@ -2528,7 +2528,7 @@ function _updatePipelineStageUI(p) {
 
   // Pre-flight banner: shown once when the stage starts and we have an
   // estimate but no actual progress yet.
-  if (stageCachedEst > 0 && stageCurrent === 0 && stageCached === 0) {
+  if (stageCachedEst > 0 && stageCurrent === 0 && stageCached === 0 && stageSeen === 0) {
     parts.push(
       '~' + stageCachedEst.toLocaleString() + ' cached, ~' +
       Math.max(0, stageTotal - stageCachedEst).toLocaleString() + ' to classify'

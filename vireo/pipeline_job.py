@@ -2113,9 +2113,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         },
                         summary=(
                             f"Cancelled "
-                            f"({stages['classify']['count']} classified, "
-                            f"{stages['classify']['cached']} cached "
-                            f"of {total})"
+                            f"({processed_in_spec} of {total} processed)"
                         ),
                     )
                     continue
