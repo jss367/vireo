@@ -5808,6 +5808,53 @@ class Database:
         ).fetchall()
         return {(r["classifier_model"], r["labels_fingerprint"]) for r in rows}
 
+    def count_classifier_runs(self, photo_ids, classifier_model, labels_fingerprint):
+        """Count distinct photos in `photo_ids` that have at least one
+        non-full-image detection above the active workspace's
+        ``detector_confidence`` threshold with a classifier_runs row
+        matching the given (classifier_model, labels_fingerprint).
+
+        Used by the streaming pipeline's classify stage to pre-flight how
+        many photos will hit the cache vs. require fresh inference.
+
+        Mirrors the runtime gate's photo selection (see pipeline_job.py,
+        the ``primary_det = photo_dets[0]`` block in the classify loop):
+        full-image rows are excluded and below-threshold detections are
+        ignored, so prior full-image classifier_runs and low-confidence
+        secondary boxes don't inflate the cached_estimate. May still
+        overcount for photos with multiple above-threshold non-full-image
+        detections where a non-primary one happens to carry the matching
+        run key — exact mirroring would require a window function over
+        every photo's detection set.
+        """
+        if not photo_ids:
+            return 0
+        import config as cfg
+        min_conf = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2,
+        )
+        # Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER (default 999).
+        # Match the 500-element chunks used elsewhere in this file.
+        CHUNK = 500
+        matched = set()
+        for i in range(0, len(photo_ids), CHUNK):
+            chunk = photo_ids[i:i + CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"SELECT DISTINCT d.photo_id "
+                f"FROM detections d "
+                f"JOIN classifier_runs cr ON cr.detection_id = d.id "
+                f"WHERE cr.classifier_model = ? "
+                f"  AND cr.labels_fingerprint = ? "
+                f"  AND d.detector_model != 'full-image' "
+                f"  AND d.detector_confidence >= ? "
+                f"  AND d.photo_id IN ({placeholders})",
+                [classifier_model, labels_fingerprint, min_conf, *chunk],
+            ).fetchall()
+            for r in rows:
+                matched.add(r["photo_id"])
+        return len(matched)
+
     def upsert_labels_fingerprint(self, fingerprint, display_name, sources, label_count):
         import json
         self.conn.execute(

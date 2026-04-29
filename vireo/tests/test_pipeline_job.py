@@ -3147,7 +3147,7 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
         f"the pre-emptive batch claim (3/3). Got progress="
         f"{cancelled_kw.get('progress')!r}"
     )
-    assert "1 of 3" in (cancelled_kw.get("summary") or ""), (
+    assert "1 of 3 processed" in (cancelled_kw.get("summary") or ""), (
         f"Cancelled summary should report actual processed count; got "
         f"{cancelled_kw.get('summary')!r}"
     )

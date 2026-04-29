@@ -163,23 +163,31 @@ STAGE_WEIGHTS = {
 def _stage_fraction(info):
     """Return a 0..1 completion fraction for one stage entry.
 
-    'failed' stages still contribute their partial (count/total) progress:
-    heavy stages like classify and extract_masks often process most items
-    before marking themselves failed due to per-item errors, and dropping
-    their weight to 0 would make the overall bar lurch backward when that
-    failure surfaces."""
+    'failed' stages still contribute their partial progress: heavy stages
+    like classify and extract_masks often process most items before marking
+    themselves failed due to per-item errors, and dropping their weight to
+    0 would make the overall bar lurch backward when that failure surfaces.
+
+    Prefer ``seen`` (every photo the stage iterated past, regardless of
+    outcome) when present; fall back to ``count`` for stages that don't
+    surface seen. Without this, classify's per-photo split into ``count``
+    (inferred) + ``cached`` would leave the overall pipeline bar stuck on
+    cached-heavy runs, since count alone stops growing once the cache
+    starts hitting."""
     status = info.get("status", "pending")
     if status in ("completed", "skipped"):
         return 1.0
     if status not in ("running", "failed"):
         return 0.0
     total = info.get("total") or 0
-    count = info.get("count") or 0
+    progressed = info.get("seen")
+    if progressed is None:
+        progressed = info.get("count") or 0
     if total <= 0:
         return 0.0
-    if count >= total:
+    if progressed >= total:
         return 1.0
-    return count / total
+    return progressed / total
 
 
 def _weighted_progress(stages):
@@ -355,7 +363,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         "previews": {"status": "pending", "count": 0, "label": "Generating previews"},
         "model_loader": {"status": "pending", "label": "Loading models"},
         "detect": {"status": "pending", "count": 0, "label": "Detecting subjects"},
-        "classify": {"status": "pending", "count": 0, "label": "Classifying species"},
+        "classify": {"status": "pending", "count": 0, "cached": 0, "seen": 0, "label": "Classifying species"},
         "extract_masks": {"status": "pending", "count": 0, "label": "Extracting features"},
         "eye_keypoints": {"status": "pending", "count": 0, "label": "Detecting eye keypoints"},
         "regroup": {"status": "pending", "label": "Grouping encounters"},
@@ -1797,7 +1805,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     model_type = loaded_models["model_type"]
                     model_name = loaded_models["model_name"]
                 else:
-                    stages["classify"]["count"] = spec_idx * total
+                    # Don't reset stages["classify"]["count"] here — it now
+                    # accumulates real inferences per-photo (Task 3); jumping
+                    # it to spec_idx * total would silently double-count the
+                    # cached hits from prior specs.  total is left at its
+                    # multi-spec value (set by the batch-end push of the
+                    # previous spec, or unchanged on first entry); explicitly
+                    # restate it so the "Loading next model..." event always
+                    # carries the multi-spec total.
                     stages["classify"]["total"] = total * len(resolved_specs_local)
                     runner.push_event(job["id"], "progress", _progress_event(
                         stages, "classify", f"Loading {active_spec['name']}...",
@@ -1856,13 +1871,56 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # classifier_runs gate below handles skipping correctly
                 # and still surfaces cached results into raw_results so
                 # grouping sees them.
+                # Pre-flight cache estimate. One indexed query so the UI
+                # can display "~M cached, ~K to classify" before the first
+                # inference runs and ETAs are honest from the start. The
+                # estimate may overcount if a run-key exists but no cached
+                # predictions do (see lines ~2000-2004); the live `cached`
+                # counter reflects actual skips.
+                #
+                # Skipped on reclassify runs (the gate below is bypassed
+                # so every photo is re-inferred regardless of cache state)
+                # and on multi-spec runs (the estimate would only cover
+                # the current spec while ``total`` already spans every
+                # spec, producing a banner that undercounts cache and
+                # overstates remaining work — and since the UI hides the
+                # banner once any photo lands, there's no correction
+                # window). The single-spec case is the common one.
+                if (
+                    not params.reclassify
+                    and len(resolved_specs_local) == 1
+                ):
+                    cached_est = thread_db.count_classifier_runs(
+                        [p["id"] for p in photos],
+                        model_name,
+                        spec_fp,
+                    )
+                    stages["classify"]["cached_estimate"] = (
+                        stages["classify"].get("cached_estimate", 0) + cached_est
+                    )
+                # Set total BEFORE the pre-flight event so the UI's
+                # ``stageTotal - stageCachedEst`` subtraction renders the
+                # real "to classify" count on the first event the user
+                # sees, not 0.
+                stages["classify"]["total"] = total * len(resolved_specs_local)
+                runner.push_event(job["id"], "progress", _progress_event(
+                    stages, "classify",
+                    f"Classifying with {active_spec['name']}",
+                    step_id=step_id,
+                ))
                 raw_results: list = []
                 failed = 0
                 skipped_existing = 0
-                # Photos actually iterated past the inner abort check, used to
-                # correct the per-batch progress claim on a mid-batch cancel
-                # (the per-batch event below pre-advances count by len(batch)).
-                processed_in_loop = 0
+                stages["classify"].setdefault("cached", 0)
+                stages["classify"].setdefault("seen", 0)
+                # Photos that iterated past the inner abort check IN THIS spec.
+                # Used for the per-spec ``runner.update_step`` progress (which
+                # is bounded by ``total``, not the multi-spec stage total) and
+                # for the batch-end rate calc.  Captures every branch — cache
+                # hit, successful inference, no-detection, image decode fail,
+                # inference fail — so spec-level progress reaches ``total`` at
+                # the end of the spec regardless of outcome mix.
+                processed_in_spec = 0
                 start_time = time.time()
                 batch_size = 32  # classification batch granularity
 
@@ -1870,32 +1928,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     if _should_abort(abort):
                         break
                     batch = photos[batch_start:batch_start + batch_size]
-                    batch_idx = batch_start + len(batch)
-
-                    phase_label = (
-                        f"Classifying with {active_spec['name']}"
-                        + (
-                            f" ({spec_idx + 1}/{len(resolved_specs_local)})"
-                            if len(resolved_specs_local) > 1 else ""
-                        )
-                    )
-                    # Aggregate classify progress across models: count spans
-                    # [0, total*N] so the overall bar advances smoothly through
-                    # a multi-model run instead of snapping to 100% per model.
-                    stages["classify"]["count"] = spec_idx * total + batch_idx
-                    stages["classify"]["total"] = total * len(resolved_specs_local)
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "classify", phase_label,
-                        step_id=step_id,
-                        rate=round(
-                            batch_idx / max(time.time() - start_time, 0.01) * 60,
-                            1,
-                        ),
-                    ))
-                    runner.update_step(
-                        job["id"], step_id,
-                        progress={"current": batch_idx, "total": total},
-                    )
 
                     for photo in batch:
                         # Per-photo abort check so cancel takes effect within
@@ -1905,7 +1937,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         # then break out of the batch loop entirely.
                         if _should_abort(abort):
                             break
-                        processed_in_loop += 1
+                        processed_in_spec += 1
+                        stages["classify"]["seen"] = (
+                            stages["classify"].get("seen", 0) + 1
+                        )
                         # Record this photo as classify-processed for the first
                         # successful model. Used by the stale-detection purge to
                         # restrict deletions to photos actually reclassified.
@@ -1922,7 +1957,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         # skipped entirely; pipeline classify is detection-
                         # driven and won't synthesize full-image boxes.
                         if photo["id"] in cached_detections:
-                            photo_dets = cached_detections[photo["id"]]
+                            # cached_detections from _detect_batch can include
+                            # full-image rows when an earlier pass synthesized
+                            # them (legacy db state); filter to match the
+                            # fallback-query branch below so primary_det never
+                            # lands on a full-image box. Pipeline classify is
+                            # detection-driven and won't classify full-image.
+                            photo_dets = [
+                                d for d in cached_detections[photo["id"]]
+                                if d.get("detector_model") != "full-image"
+                            ]
                         else:
                             photo_dets = [
                                 {
@@ -1962,6 +2006,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 )
                                 if cached:
                                     skipped_existing += 1
+                                    stages["classify"]["cached"] += 1
                                     top = cached[0]
                                     folder_path = folders.get(photo["folder_id"], "")
                                     image_path = os.path.join(
@@ -2042,36 +2087,56 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 primary_det["id"], model_name, spec_fp,
                                 prediction_count=new_count,
                             )
+                            stages["classify"]["count"] = (
+                                stages["classify"].get("count", 0) + 1
+                            )
+
+                    # Batch boundary: surface the per-photo accumulated
+                    # count + cached to the UI. Replaces the old per-batch
+                    # pre-advance which lied about progress when batches
+                    # contained cache hits.
+                    stages["classify"]["total"] = total * len(resolved_specs_local)
+                    elapsed = max(time.time() - start_time, 0.01)
+                    runner.push_event(job["id"], "progress", _progress_event(
+                        stages, "classify",
+                        f"Classifying with {active_spec['name']}"
+                        + (
+                            f" ({spec_idx + 1}/{len(resolved_specs_local)})"
+                            if len(resolved_specs_local) > 1 else ""
+                        ),
+                        step_id=step_id,
+                        rate=round(processed_in_spec / elapsed * 60, 1),
+                    ))
+                    runner.update_step(
+                        job["id"], step_id,
+                        progress={
+                            "current": processed_in_spec,
+                            "total": total,
+                        },
+                    )
 
                 # Skip the grouping/storage finalization on cancel — it can
                 # take a minute on large collections and the user has already
-                # asked us to stop. Leaving models_succeeded at its current
-                # value also keeps the reclassify stale-row purge from firing
-                # for this model (see the comment on the purge below), which
-                # is the safe default when classify didn't finish.
+                # asked us to stop. Per-photo counters are accurate, no
+                # corrective fixup needed.
                 if _should_abort(abort):
-                    # The per-batch progress event above pre-advances the
-                    # count by the full batch length BEFORE the inner loop
-                    # runs. On a mid-batch cancel that leaves the UI showing
-                    # a count higher than what was actually classified — emit
-                    # a corrected progress event and step update so the job
-                    # tree reflects the true partial state.
-                    stages["classify"]["count"] = (
-                        spec_idx * total + processed_in_loop
-                    )
-                    stages["classify"]["total"] = (
-                        total * len(resolved_specs_local)
-                    )
                     runner.push_event(job["id"], "progress", _progress_event(
                         stages, "classify",
-                        f"Cancelled — {processed_in_loop} of {total} photos",
+                        f"Cancelled — {processed_in_spec} of "
+                        f"{total} processed",
                         step_id=step_id,
                     ))
                     runner.update_step(
                         job["id"], step_id,
                         status="completed",
-                        progress={"current": processed_in_loop, "total": total},
-                        summary=f"Cancelled ({processed_in_loop} of {total} photos)",
+                        progress={
+                            "current": processed_in_spec,
+                            "total": total,
+                        },
+                        summary=(
+                            f"Cancelled "
+                            f"({processed_in_spec} of {total} processed)"
+                        ),
                     )
                     continue
 
