@@ -9559,3 +9559,85 @@ def test_add_photo_retries_on_database_is_locked(tmp_path):
     assert fail_remaining["n"] == 0, "the flaky executor should have been hit"
     photo = db.get_photo(pid)
     assert photo["filename"] == "DSC_0001.NEF"
+
+
+def _add_one_detection(db, photo_id, detector_model="test-det"):
+    """Append a single detection without wiping prior rows for the same
+    (photo, model). save_detections is destructive per (photo, model), so
+    use direct SQL when we want multiple detections on one photo.
+    """
+    cur = db.conn.execute(
+        """INSERT INTO detections
+             (photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category)
+           VALUES (?, ?, 0.0, 0.0, 1.0, 1.0, 0.9, 'animal')""",
+        (photo_id, detector_model),
+    )
+    db.conn.commit()
+    return cur.lastrowid
+
+
+def test_count_classifier_runs_filters_by_model_and_fingerprint(tmp_path):
+    """count_classifier_runs returns the number of distinct photos in the
+    given id list that have at least one detection with a classifier_runs
+    row matching the given (model, fingerprint)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos", name="photos")
+    p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0, timestamp=None,
+                     width=1, height=1)
+    p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0, timestamp=None,
+                     width=1, height=1)
+    p3 = db.add_photo(folder_id=fid, filename="c.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0, timestamp=None,
+                     width=1, height=1)
+
+    d1 = _add_one_detection(db, p1)
+    d2 = _add_one_detection(db, p2)
+    d3 = _add_one_detection(db, p3)
+
+    db.record_classifier_run(d1, "BioCLIP-2.5", "fp-a", prediction_count=1)
+    db.record_classifier_run(d2, "BioCLIP-2.5", "fp-b", prediction_count=1)
+    db.record_classifier_run(d3, "iNat21", "fp-a", prediction_count=1)
+
+    # Only p1 matches (BioCLIP-2.5 + fp-a).
+    assert db.count_classifier_runs(
+        [p1, p2, p3], "BioCLIP-2.5", "fp-a"
+    ) == 1
+
+    # Empty input returns 0.
+    assert db.count_classifier_runs([], "BioCLIP-2.5", "fp-a") == 0
+
+    # Photo with multiple detections, only one cached, still counts as 1.
+    d2b = _add_one_detection(db, p2)
+    db.record_classifier_run(d2b, "BioCLIP-2.5", "fp-a", prediction_count=1)
+    assert db.count_classifier_runs(
+        [p1, p2, p3], "BioCLIP-2.5", "fp-a"
+    ) == 2  # p1 and p2
+
+
+def test_count_classifier_runs_chunks_large_id_lists(tmp_path):
+    """count_classifier_runs returns the correct count even when the
+    photo id list exceeds SQLITE_MAX_VARIABLE_NUMBER (default 999)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos", name="photos")
+
+    # 1500 photos, each with one detection and one classifier_runs row
+    # for (BioCLIP-2.5, fp-a). Above the 999 SQLite variable cap.
+    photo_ids = []
+    for i in range(1500):
+        pid = db.add_photo(
+            folder_id=fid, filename=f"p_{i:05d}.jpg", extension=".jpg",
+            file_size=1, file_mtime=1.0, timestamp=None,
+            width=1, height=1,
+        )
+        did = _add_one_detection(db, pid)
+        db.record_classifier_run(did, "BioCLIP-2.5", "fp-a", prediction_count=1)
+        photo_ids.append(pid)
+
+    assert db.count_classifier_runs(
+        photo_ids, "BioCLIP-2.5", "fp-a"
+    ) == 1500
