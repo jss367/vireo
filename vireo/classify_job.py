@@ -361,6 +361,19 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                             "box_h": d["box_h"],
                             "confidence": d["detector_confidence"],
                             "category": d["category"],
+                            # sqlite3.Row supports [key] but not .get(); use try
+                            # so test mocks (plain dicts without detector_model)
+                            # don't crash this path.
+                            # sqlite3.Row supports [key] but lacks .get(),
+                            # and `key in row` is not supported either; .keys()
+                            # is the documented contains-check. Fallback to None
+                            # so test mocks (plain dicts without detector_model)
+                            # don't crash this path.
+                            "detector_model": (
+                                d["detector_model"]
+                                if "detector_model" in d.keys()  # noqa: SIM118
+                                else None
+                            ),
                         })
                     detection_map[photo["id"]] = det_list
                     detected += 1
@@ -418,6 +431,7 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                         "box_h": det["box"]["h"],
                         "confidence": det["confidence"],
                         "category": det.get("category", "animal"),
+                        "detector_model": "megadetector-v6",
                     })
                 detection_map[photo["id"]] = det_list
 

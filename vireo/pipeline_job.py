@@ -1957,7 +1957,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         # skipped entirely; pipeline classify is detection-
                         # driven and won't synthesize full-image boxes.
                         if photo["id"] in cached_detections:
-                            photo_dets = cached_detections[photo["id"]]
+                            # cached_detections from _detect_batch can include
+                            # full-image rows when an earlier pass synthesized
+                            # them (legacy db state); filter to match the
+                            # fallback-query branch below so primary_det never
+                            # lands on a full-image box. Pipeline classify is
+                            # detection-driven and won't classify full-image.
+                            photo_dets = [
+                                d for d in cached_detections[photo["id"]]
+                                if d.get("detector_model") != "full-image"
+                            ]
                         else:
                             photo_dets = [
                                 {
