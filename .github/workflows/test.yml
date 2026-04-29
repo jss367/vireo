@@ -18,11 +18,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pytest pytest-cov
+          pip install pytest pytest-cov pytest-xdist
           pip install -e .
 
       - name: Run tests with coverage
-        run: python -m pytest tests/ vireo/tests/ -v --tb=short --cov=vireo --cov-report=term-missing --cov-fail-under=40
+        run: python -m pytest tests/ vireo/tests/ -n auto -v --tb=short --cov=vireo --cov-report=term-missing --cov-fail-under=40
 
   lint:
     runs-on: ubuntu-latest
