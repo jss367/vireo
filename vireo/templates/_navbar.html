@@ -4395,13 +4395,30 @@ setInterval(checkMissingFolders, 600000);
 /* ---------- Missing Originals Banner ---------- */
 let _missingPhotosCache = [];
 let _missingPhotosBannerDismissedCount = 0;
+// Both the banner poll and the modal load hit /api/photos/missing and write
+// to _missingPhotosCache. A slow earlier fetch returning after a newer one
+// used to overwrite fresh state with stale results — leaving the banner
+// showing ghosts the user just deleted.
+//
+// Cache writes share a single monotonic id across both flows, so only the
+// most-recently-started fetch (regardless of which flow issued it) can
+// overwrite the shared cache. UI rendering uses per-flow ids so a banner
+// poll firing mid-modal-load can't cancel the modal's own render and leave
+// it stuck on "Checking photos…", and vice versa.
+let _missingPhotosCacheFetchId = 0;
+let _missingPhotosBannerFetchId = 0;
+let _missingPhotosModalFetchId = 0;
 
 async function checkMissingPhotos() {
+  const cacheId = ++_missingPhotosCacheFetchId;
+  const myId = ++_missingPhotosBannerFetchId;
   try {
     const resp = await fetch('/api/photos/missing');
     if (!resp.ok) return;
+    if (myId !== _missingPhotosBannerFetchId) return;  // a newer banner poll is authoritative
     const photos = await resp.json();
-    _missingPhotosCache = photos;
+    if (myId !== _missingPhotosBannerFetchId) return;
+    if (cacheId === _missingPhotosCacheFetchId) _missingPhotosCache = photos;
     const banner = document.getElementById('missingPhotosBanner');
     const msg = document.getElementById('missingPhotosMsg');
     if (photos.length > 0 && photos.length !== _missingPhotosBannerDismissedCount) {
@@ -4819,11 +4836,15 @@ async function loadMissingPhotos() {
   container.innerHTML = '<p style="color:var(--text-secondary);">Checking photos…</p>';
   toolbar.style.display = 'none';
   _missingPhotosSelected = new Set();
+  const cacheId = ++_missingPhotosCacheFetchId;
+  const myId = ++_missingPhotosModalFetchId;
   try {
     const resp = await fetch('/api/photos/missing');
     if (!resp.ok) throw new Error('check failed');
+    if (myId !== _missingPhotosModalFetchId) return;  // superseded by a newer modal load
     const photos = await resp.json();
-    _missingPhotosCache = photos;
+    if (myId !== _missingPhotosModalFetchId) return;
+    if (cacheId === _missingPhotosCacheFetchId) _missingPhotosCache = photos;
     if (photos.length === 0) {
       container.innerHTML = '<p style="color:var(--text-secondary);">No photos with missing originals.</p>';
       checkMissingPhotos();
