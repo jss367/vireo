@@ -35,13 +35,21 @@ def bucket_unresolved_proposals(proposals):
 
     buckets = []
     for key, group_proposals in by_key.items():
+        folders_with_existing = set()
+        for p in group_proposals:
+            for cand in [p["winner"]] + list(p["losers"]):
+                if cand.get("exists", True):
+                    folders_with_existing.add(os.path.dirname(cand["path"]))
+        folders = sorted(f for f in key if f in folders_with_existing)
+        if not folders:
+            continue
         total_size = sum(
             len(p["losers"]) * p["winner"]["file_size"]
             for p in group_proposals
         )
         examples = [p["winner"]["filename"] for p in group_proposals[:3]]
         buckets.append({
-            "folders": sorted(key),
+            "folders": folders,
             "group_count": len(group_proposals),
             "file_hashes": [p["file_hash"] for p in group_proposals],
             "total_size": total_size,

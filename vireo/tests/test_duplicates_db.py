@@ -450,7 +450,11 @@ def test_run_duplicate_scan_emits_buckets_for_unresolved_groups(tmp_path):
 
     # Three groups, each with one file in /a and one in /b. Reset flags so
     # the auto-resolve hook doesn't pre-pick a winner — we want unresolved.
+    # Touch the files on disk so the bucket builder's existence check
+    # (which drops folders with only missing candidates) keeps the bucket.
     for h, name in [("HBKT1", "owl.jpg"), ("HBKT2", "hawk.jpg"), ("HBKT3", "finch.jpg")]:
+        (a_dir / name).touch()
+        (b_dir / name).touch()
         _add(db, a_fid, name, file_hash=h)
         _add(db, b_fid, name, file_hash=h)
         _reset_flags(db, h)
