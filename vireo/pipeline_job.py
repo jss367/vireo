@@ -1879,10 +1879,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 failed = 0
                 skipped_existing = 0
                 stages["classify"].setdefault("cached", 0)
-                # Photos actually iterated past the inner abort check, used to
-                # correct the per-batch progress claim on a mid-batch cancel
-                # (the per-batch event below pre-advances count by len(batch)).
-                processed_in_loop = 0
                 start_time = time.time()
                 batch_size = 32  # classification batch granularity
 
@@ -1899,7 +1895,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         # then break out of the batch loop entirely.
                         if _should_abort(abort):
                             break
-                        processed_in_loop += 1
                         # Record this photo as classify-processed for the first
                         # successful model. Used by the stale-detection purge to
                         # restrict deletions to photos actually reclassified.
@@ -2071,6 +2066,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # asked us to stop. Per-photo counters are accurate, no
                 # corrective fixup needed.
                 if _should_abort(abort):
+                    runner.push_event(job["id"], "progress", _progress_event(
+                        stages, "classify",
+                        f"Cancelled — {stages['classify']['count']} of "
+                        f"{total} classified",
+                        step_id=step_id,
+                    ))
                     runner.update_step(
                         job["id"], step_id,
                         status="completed",
