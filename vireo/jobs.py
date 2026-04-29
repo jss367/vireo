@@ -193,6 +193,10 @@ class JobRunner:
             )
             if self._db_path and not job.get("ephemeral"):
                 self._persist_job(job, elapsed)
+            # Mark the in-memory job dict as fully persisted so test code
+            # can synchronize with `job_history` reads. Ephemeral jobs are
+            # also flagged so callers waiting on this don't hang.
+            job["_persisted"] = True
 
     def _persist_job(self, job, duration):
         """Persist job to history table using a thread-local connection."""

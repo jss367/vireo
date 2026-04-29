@@ -5,6 +5,9 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.dirname(__file__))
+
+from wait import wait_for_job_via_runner
 
 
 def test_job_runner_starts_and_completes(tmp_path):
@@ -23,14 +26,7 @@ def test_job_runner_starts_and_completes(tmp_path):
     job_id = runner.start('test', work, config={'note': 'hello'})
     assert job_id is not None
 
-    # Wait for completion
-    for _ in range(50):
-        job = runner.get(job_id)
-        if job['status'] == 'completed':
-            break
-        time.sleep(0.05)
-
-    job = runner.get(job_id)
+    job = wait_for_job_via_runner(runner, job_id)
     assert job['status'] == 'completed'
     assert job['result'] == {'items': 3}
     assert job['progress']['current'] == 3
@@ -47,13 +43,7 @@ def test_job_runner_tracks_failure(tmp_path):
 
     job_id = runner.start('test', failing_work)
 
-    for _ in range(50):
-        job = runner.get(job_id)
-        if job['status'] == 'failed':
-            break
-        time.sleep(0.05)
-
-    job = runner.get(job_id)
+    job = wait_for_job_via_runner(runner, job_id)
     assert job['status'] == 'failed'
     assert len(job['errors']) >= 1
     assert 'something broke' in job['errors'][0]
@@ -77,11 +67,7 @@ def test_job_runner_does_not_duplicate_preexisting_errors():
 
     job_id = runner.start('test', failing_work)
 
-    for _ in range(50):
-        job = runner.get(job_id)
-        if job['status'] == 'failed':
-            break
-        time.sleep(0.05)
+    wait_for_job_via_runner(runner, job_id)
 
     job = runner.get(job_id)
     assert job['status'] == 'failed'
@@ -105,11 +91,7 @@ def test_job_runner_still_records_novel_exception_text():
 
     job_id = runner.start('test', failing_work)
 
-    for _ in range(50):
-        job = runner.get(job_id)
-        if job['status'] == 'failed':
-            break
-        time.sleep(0.05)
+    wait_for_job_via_runner(runner, job_id)
 
     job = runner.get(job_id)
     assert job['status'] == 'failed'
@@ -238,11 +220,7 @@ def test_job_progress_events():
 
     job_id = runner.start('scan', work)
 
-    for _ in range(50):
-        job = runner.get(job_id)
-        if job['status'] == 'completed':
-            break
-        time.sleep(0.05)
+    wait_for_job_via_runner(runner, job_id)
 
     events = runner.get_events(job_id)
     assert len(events) >= 2
@@ -307,11 +285,7 @@ def test_job_history_persistence(tmp_path):
 
     job_id = runner.start('scan', work, config={'root': '/photos'})
 
-    for _ in range(50):
-        job = runner.get(job_id)
-        if job['status'] == 'completed':
-            break
-        time.sleep(0.05)
+    wait_for_job_via_runner(runner, job_id)
 
     # Give it a moment to persist
     time.sleep(0.1)
@@ -335,11 +309,7 @@ def test_ephemeral_job_skips_history_persistence(tmp_path):
 
     job_id = runner.start("new_images_walk", work, ephemeral=True)
 
-    for _ in range(50):
-        job = runner.get(job_id)
-        if job and job["status"] == "completed":
-            break
-        time.sleep(0.05)
+    wait_for_job_via_runner(runner, job_id)
     time.sleep(0.1)
 
     job = runner.get(job_id)
@@ -365,11 +335,7 @@ def test_ephemeral_failed_job_skips_history_persistence(tmp_path):
 
     job_id = runner.start("new_images_walk", work, ephemeral=True)
 
-    for _ in range(50):
-        job = runner.get(job_id)
-        if job and job["status"] == "failed":
-            break
-        time.sleep(0.05)
+    wait_for_job_via_runner(runner, job_id)
     time.sleep(0.1)
 
     rows = db.conn.execute(
@@ -393,7 +359,6 @@ def test_job_history_stores_tree_and_summary(tmp_path):
 
 def test_job_steps_tracking(tmp_path):
     """Jobs can define and update execution steps."""
-    import time
 
     from db import Database
     from jobs import JobRunner
@@ -415,11 +380,7 @@ def test_job_steps_tracking(tmp_path):
 
     job_id = runner.start("scan", work, workspace_id=1)
 
-    for _ in range(50):
-        j = runner.get(job_id)
-        if j and j["status"] != "running":
-            break
-        time.sleep(0.1)
+    wait_for_job_via_runner(runner, job_id)
 
     j = runner.get(job_id)
     assert j["status"] == "completed"
@@ -457,11 +418,7 @@ def test_job_history_persists_steps_tree(tmp_path):
 
     job_id = runner.start("scan", work, workspace_id=ws_id)
 
-    for _ in range(50):
-        j = runner.get(job_id)
-        if j and j["status"] != "running":
-            break
-        time.sleep(0.1)
+    wait_for_job_via_runner(runner, job_id)
 
     time.sleep(0.5)
 
@@ -502,11 +459,7 @@ def test_job_history_prunes_to_100(tmp_path):
         return {}
 
     job_id = runner.start("test", work, workspace_id=ws_id)
-    for _ in range(50):
-        j = runner.get(job_id)
-        if j and j["status"] != "running":
-            break
-        time.sleep(0.1)
+    wait_for_job_via_runner(runner, job_id)
     time.sleep(0.5)
 
     count = db.conn.execute(
@@ -517,7 +470,6 @@ def test_job_history_prunes_to_100(tmp_path):
 
 def test_progress_events_include_steps(tmp_path):
     """Progress events include the steps array when steps are defined."""
-    import time
 
     from db import Database
     from jobs import JobRunner
@@ -540,11 +492,7 @@ def test_progress_events_include_steps(tmp_path):
 
     job_id = runner.start("test", work, workspace_id=1)
 
-    for _ in range(50):
-        j = runner.get(job_id)
-        if j and j["status"] != "running":
-            break
-        time.sleep(0.1)
+    wait_for_job_via_runner(runner, job_id)
 
     events = runner.get_events(job_id)
     progress_events = [e for e in events if e["type"] == "progress"]

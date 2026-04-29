@@ -2,6 +2,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+# Also expose the tests directory itself so test files can import shared
+# helpers (e.g. `from wait import wait_for_job_via_client`).
+sys.path.insert(0, os.path.dirname(__file__))
 
 import pytest
 from db import Database

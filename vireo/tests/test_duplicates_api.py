@@ -1,5 +1,5 @@
 """API tests for /api/duplicates/scan and /api/duplicates/apply."""
-import time
+from wait import wait_for_job_via_client
 
 
 def _seed_pair(db, file_hash, fid, name_a="x.jpg", name_b="x (2).jpg"):
@@ -43,13 +43,7 @@ def test_scan_endpoint_job_completes_with_proposals(app_and_db):
     resp = client.post("/api/duplicates/scan")
     job_id = resp.get_json()["job_id"]
 
-    for _ in range(50):
-        resp = client.get(f"/api/jobs/{job_id}")
-        data = resp.get_json()
-        if data["status"] in ("completed", "failed"):
-            break
-        time.sleep(0.1)
-
+    data = wait_for_job_via_client(client, job_id)
     assert data["status"] == "completed"
     result = data["result"]
     assert result["group_count"] >= 1
@@ -490,11 +484,7 @@ def test_last_scan_returns_completed_scan_result(app_and_db):
 
     client = app.test_client()
     job_id = client.post("/api/duplicates/scan").get_json()["job_id"]
-    for _ in range(50):
-        resp = client.get(f"/api/jobs/{job_id}")
-        if resp.get_json()["status"] in ("completed", "failed"):
-            break
-        time.sleep(0.1)
+    wait_for_job_via_client(client, job_id, wait_for_history=True)
 
     resp = client.get("/api/duplicates/last-scan")
     assert resp.status_code == 200
@@ -514,18 +504,12 @@ def test_last_scan_picks_most_recent_completed(app_and_db):
 
     client = app.test_client()
     job1 = client.post("/api/duplicates/scan").get_json()["job_id"]
-    for _ in range(50):
-        if client.get(f"/api/jobs/{job1}").get_json()["status"] in ("completed", "failed"):
-            break
-        time.sleep(0.1)
+    wait_for_job_via_client(client, job1, wait_for_history=True)
 
     # Add another duplicate group then rescan.
     _seed_pair(db, "HNEW", fid, name_a="n.jpg", name_b="n (2).jpg")
     job2 = client.post("/api/duplicates/scan").get_json()["job_id"]
-    for _ in range(50):
-        if client.get(f"/api/jobs/{job2}").get_json()["status"] in ("completed", "failed"):
-            break
-        time.sleep(0.1)
+    wait_for_job_via_client(client, job2, wait_for_history=True)
 
     body = client.get("/api/duplicates/last-scan").get_json()
     assert body["found"] is True
