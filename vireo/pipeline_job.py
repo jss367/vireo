@@ -1871,17 +1871,25 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # classifier_runs gate below handles skipping correctly
                 # and still surfaces cached results into raw_results so
                 # grouping sees them.
-                # Pre-flight cache estimate. One indexed query per spec
-                # so the UI can display "~M cached, ~K to classify" before
-                # the first inference runs and ETAs are honest from the
-                # start. The estimate may overcount if a run-key exists
-                # but no cached predictions do (see lines ~2000-2004); the
-                # live `cached` counter reflects actual skips.
+                # Pre-flight cache estimate. One indexed query so the UI
+                # can display "~M cached, ~K to classify" before the first
+                # inference runs and ETAs are honest from the start. The
+                # estimate may overcount if a run-key exists but no cached
+                # predictions do (see lines ~2000-2004); the live `cached`
+                # counter reflects actual skips.
                 #
-                # Skipped on reclassify runs: the gate below is bypassed
-                # in that mode, so every photo will be re-inferred and
-                # showing "~N cached" would mislead the user.
-                if not params.reclassify:
+                # Skipped on reclassify runs (the gate below is bypassed
+                # so every photo is re-inferred regardless of cache state)
+                # and on multi-spec runs (the estimate would only cover
+                # the current spec while ``total`` already spans every
+                # spec, producing a banner that undercounts cache and
+                # overstates remaining work — and since the UI hides the
+                # banner once any photo lands, there's no correction
+                # window). The single-spec case is the common one.
+                if (
+                    not params.reclassify
+                    and len(resolved_specs_local) == 1
+                ):
                     cached_est = thread_db.count_classifier_runs(
                         [p["id"] for p in photos],
                         model_name,
