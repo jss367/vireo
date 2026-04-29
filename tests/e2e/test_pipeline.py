@@ -181,3 +181,59 @@ def test_pipeline_plan_summary_updates_on_toggle(live_server, page):
     expect(skip_row).to_contain_text("Classify")
     expect(skip_row).to_contain_text("Extract Features")
     expect(skip_row).to_contain_text("Group & Score")
+
+
+def test_pipeline_concurrent_running_stages_keep_running_pill(live_server, page):
+    """Multiple concurrent running stages must all keep the Running pill, even
+    after refreshPipelineUI() is invoked (e.g. via a toggle change).
+
+    Regression test for the single-string `_runningStageSuffix` bug: when the
+    pipeline ran scan + thumbnails in parallel, each running event clobbered
+    the slot, leaving only one stage pulsing while the other was recomputed
+    back to "Will run" on the next refresh.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.evaluate("""
+        _updatePipelineStageUI({stages: {
+            scan: {status: 'running'},
+            thumbnails: {status: 'running'},
+        }});
+    """)
+    expect(page.locator("#pillScan")).to_contain_text("Running")
+    expect(page.locator("#pillPreviews")).to_contain_text("Running")
+    # Triggering a recompute must NOT flip still-running stages back.
+    page.evaluate("refreshPipelineUI();")
+    expect(page.locator("#pillScan")).to_contain_text("Running")
+    expect(page.locator("#pillPreviews")).to_contain_text("Running")
+
+
+def test_pipeline_skipped_user_disabled_stage_keeps_will_skip_pill(live_server, page):
+    """When the user disables a stage and the backend reports it `skipped`,
+    the pill must stay "Will skip" — not flip to "Already done"."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.click("#card-classify .stage-header")
+    page.uncheck("#enableExtract")
+    expect(page.locator("#pillExtract")).to_contain_text("Will skip")
+    # Simulate the backend `skipped` status the orchestrator emits for a
+    # user-disabled stage (params.skip_extract_masks branch in pipeline_job).
+    page.evaluate("""
+        _updatePipelineStageUI({stages: {extract_masks: {status: 'skipped'}}});
+    """)
+    expect(page.locator("#pillExtract")).to_contain_text("Will skip")
+    expect(page.locator("#pillExtract")).not_to_contain_text("Already done")
+
+
+def test_pipeline_skipped_auto_stage_shows_already_done(live_server, page):
+    """When the backend reports `skipped` for a stage the user *did not*
+    disable (e.g. nothing eligible to process), the pill should show
+    "Already done" — distinguishing it from an explicit user skip."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    # Extract is enabled by default.
+    expect(page.locator("#pillExtract")).to_contain_text("Will run")
+    page.evaluate("""
+        _updatePipelineStageUI({stages: {extract_masks: {status: 'skipped'}}});
+    """)
+    expect(page.locator("#pillExtract")).to_contain_text("Already done")
