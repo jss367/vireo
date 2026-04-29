@@ -163,23 +163,31 @@ STAGE_WEIGHTS = {
 def _stage_fraction(info):
     """Return a 0..1 completion fraction for one stage entry.
 
-    'failed' stages still contribute their partial (count/total) progress:
-    heavy stages like classify and extract_masks often process most items
-    before marking themselves failed due to per-item errors, and dropping
-    their weight to 0 would make the overall bar lurch backward when that
-    failure surfaces."""
+    'failed' stages still contribute their partial progress: heavy stages
+    like classify and extract_masks often process most items before marking
+    themselves failed due to per-item errors, and dropping their weight to
+    0 would make the overall bar lurch backward when that failure surfaces.
+
+    Prefer ``seen`` (every photo the stage iterated past, regardless of
+    outcome) when present; fall back to ``count`` for stages that don't
+    surface seen. Without this, classify's per-photo split into ``count``
+    (inferred) + ``cached`` would leave the overall pipeline bar stuck on
+    cached-heavy runs, since count alone stops growing once the cache
+    starts hitting."""
     status = info.get("status", "pending")
     if status in ("completed", "skipped"):
         return 1.0
     if status not in ("running", "failed"):
         return 0.0
     total = info.get("total") or 0
-    count = info.get("count") or 0
+    progressed = info.get("seen")
+    if progressed is None:
+        progressed = info.get("count") or 0
     if total <= 0:
         return 0.0
-    if count >= total:
+    if progressed >= total:
         return 1.0
-    return count / total
+    return progressed / total
 
 
 def _weighted_progress(stages):
@@ -1877,6 +1885,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 stages["classify"]["cached_estimate"] = (
                     stages["classify"].get("cached_estimate", 0) + cached_est
                 )
+                # Set total BEFORE the pre-flight event so the UI's
+                # ``stageTotal - stageCachedEst`` subtraction renders the
+                # real "to classify" count on the first event the user
+                # sees, not 0.
+                stages["classify"]["total"] = total * len(resolved_specs_local)
                 runner.push_event(job["id"], "progress", _progress_event(
                     stages, "classify",
                     f"Classifying with {active_spec['name']}",
