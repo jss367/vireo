@@ -108,8 +108,8 @@ def test_job_history(app_and_db, tmp_path):
     assert resp.status_code == 200
     job_id = resp.get_json()["job_id"]
 
-    # Poll until job completes or fails
-    wait_for_job_via_client(client, job_id)
+    # Reads /api/jobs/history below — must wait for the row to flush.
+    wait_for_job_via_client(client, job_id, wait_for_history=True)
 
     history_resp = client.get("/api/jobs/history")
     assert history_resp.status_code == 200
@@ -130,7 +130,8 @@ def test_job_history_respects_limit(app_and_db, tmp_path):
     assert resp.status_code == 200
     job_id = resp.get_json()["job_id"]
 
-    wait_for_job_via_client(client, job_id)
+    # Reads /api/jobs/history below — must wait for the row to flush.
+    wait_for_job_via_client(client, job_id, wait_for_history=True)
 
     history_resp = client.get("/api/jobs/history?limit=1")
     assert history_resp.status_code == 200
