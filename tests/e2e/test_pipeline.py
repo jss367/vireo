@@ -239,6 +239,32 @@ def test_pipeline_skipped_auto_stage_shows_already_done(live_server, page):
     expect(page.locator("#pillExtract")).to_contain_text("Already done")
 
 
+def test_pipeline_failed_status_clears_running_pill(live_server, page):
+    """When a stage transitions running -> failed mid-pipeline, the pill must
+    flip to 'Failed' and stay there even after refreshPipelineUI() runs.
+
+    Regression test: _stageStateFor checks _runningStages before _stageOutcomes,
+    so without explicit failed-status handling the leftover running flag would
+    mask the failure and leave the pill stuck on 'Running…'.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    # Stage enters running state.
+    page.evaluate("""
+        _updatePipelineStageUI({stages: {classify: {status: 'running'}}});
+    """)
+    expect(page.locator("#pillClassify")).to_contain_text("Running")
+    # Stage fails mid-run.
+    page.evaluate("""
+        _updatePipelineStageUI({stages: {classify: {status: 'failed'}}});
+    """)
+    expect(page.locator("#pillClassify")).to_contain_text("Failed")
+    # A subsequent recompute must NOT flip back to Running.
+    page.evaluate("refreshPipelineUI();")
+    expect(page.locator("#pillClassify")).to_contain_text("Failed")
+    expect(page.locator("#pillClassify")).not_to_contain_text("Running")
+
+
 def test_pipeline_eye_keypoints_pill_will_skip_when_no_weights(live_server, page):
     """Eye Keypoints has no enable checkbox — it's gated by whether
     SuperAnimal weights are on disk. The fixture doesn't ship any keypoint

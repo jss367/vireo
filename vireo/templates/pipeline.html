@@ -2446,6 +2446,14 @@ function _updatePipelineStageUI(p) {
         _stageOutcomes[cardSuffix] = skipState;
         _setPill(cardSuffix, skipState);
       }
+    } else if (info.status === 'failed') {
+      // Must clear the running flag — _stageStateFor checks _runningStages
+      // before _stageOutcomes, so a leftover running entry would mask the
+      // failure and leave the pill stuck on "Running…".
+      numEl.className = 'stage-num';
+      delete _runningStages[cardSuffix];
+      _stageOutcomes[cardSuffix] = 'failed';
+      _setPill(cardSuffix, 'failed');
     }
   }
 
@@ -2619,6 +2627,7 @@ function _onPipelineComplete(result) {
       if (cardSuffix) {
         var statusEl = document.getElementById('status' + cardSuffix);
         if (statusEl) statusEl.textContent = 'Failed: ' + errorStages[stage];
+        delete _runningStages[cardSuffix];
         _stageOutcomes[cardSuffix] = 'failed';
         _setPill(cardSuffix, 'failed');
       }
