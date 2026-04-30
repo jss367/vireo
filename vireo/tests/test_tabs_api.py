@@ -168,3 +168,21 @@ def test_reorder_tabs_rejects_non_list(app_and_db):
     client = app.test_client()
     r = client.post("/api/workspace/tabs/reorder", json={"tabs": "not-a-list"})
     assert r.status_code == 400
+
+
+def test_get_tabs_endpoint_new_shape(app_and_db):
+    from db import DEFAULT_TABS
+    app, db = app_and_db
+    client = app.test_client()
+    r = client.get("/api/workspace/tabs")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["tabs"] == DEFAULT_TABS
+    assert "all_pages" in body
+    # all_pages must include every nav id, in a stable order, with label and href
+    ids = [p["id"] for p in body["all_pages"]]
+    assert "duplicates" in ids
+    assert "browse" in ids
+    assert len(ids) == 20
+    sample = next(p for p in body["all_pages"] if p["id"] == "duplicates")
+    assert sample == {"id": "duplicates", "label": "Duplicates", "href": "/duplicates"}

@@ -40,6 +40,33 @@ from preview_cache import evict_if_over_quota as evict_preview_cache_if_over_quo
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
+
+# Stable ordering and labels for the palette + nav rendering.
+# The `id` is the nav-id used in `tabs`; `href` is the canonical
+# route. Labels match what the navbar showed before the unification.
+ALL_PAGES = [
+    {"id": "pipeline",        "label": "Pipeline",        "href": "/pipeline"},
+    {"id": "jobs",            "label": "Jobs",            "href": "/jobs"},
+    {"id": "pipeline_review", "label": "Pipeline Review", "href": "/pipeline/review"},
+    {"id": "review",          "label": "Review",          "href": "/review"},
+    {"id": "cull",            "label": "Cull",            "href": "/cull"},
+    {"id": "misses",          "label": "Misses",          "href": "/misses"},
+    {"id": "highlights",      "label": "Highlights",      "href": "/highlights"},
+    {"id": "browse",          "label": "Browse",          "href": "/browse"},
+    {"id": "map",             "label": "Map",             "href": "/map"},
+    {"id": "variants",        "label": "Variants",        "href": "/variants"},
+    {"id": "dashboard",       "label": "Dashboard",       "href": "/dashboard"},
+    {"id": "audit",           "label": "Audit",           "href": "/audit"},
+    {"id": "compare",         "label": "Compare",         "href": "/compare"},
+    {"id": "settings",        "label": "Settings",        "href": "/settings"},
+    {"id": "workspace",       "label": "Workspace",       "href": "/workspace"},
+    {"id": "lightroom",       "label": "Lightroom",       "href": "/lightroom"},
+    {"id": "shortcuts",       "label": "Shortcuts",       "href": "/shortcuts"},
+    {"id": "keywords",        "label": "Keywords",        "href": "/keywords"},
+    {"id": "duplicates",      "label": "Duplicates",      "href": "/duplicates"},
+    {"id": "logs",            "label": "Logs",            "href": "/logs"},
+]
+
 # File logging is attached only when the server actually starts (see
 # main() / _setup_file_logging). Importing this module — e.g. from pytest
 # fixtures — must NOT touch ~/.vireo/vireo.log, or test tracebacks end up
@@ -3230,21 +3257,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_get_tabs():
         db = _get_db()
         try:
-            open_tabs = db.get_open_tabs()
+            tabs = db.get_tabs()
         except Exception:
-            open_tabs = []
-        TOOLS_ORDER = ["settings", "workspace", "lightroom",
-                       "shortcuts", "keywords", "duplicates", "logs"]
-        TAB_LABELS = {
-            "settings": "Settings", "workspace": "Workspace",
-            "lightroom": "Lightroom", "shortcuts": "Shortcuts",
-            "keywords": "Keywords", "duplicates": "Duplicates", "logs": "Logs",
-        }
-        openable_pages = [
-            {"id": t, "label": TAB_LABELS[t], "href": "/" + t}
-            for t in TOOLS_ORDER
-        ]
-        return jsonify({"open_tabs": open_tabs, "openable_pages": openable_pages})
+            from db import DEFAULT_TABS
+            tabs = list(DEFAULT_TABS)
+        return jsonify({"tabs": tabs, "all_pages": ALL_PAGES})
 
     @app.route("/api/workspaces/active/new-images")
     def api_workspace_new_images():
