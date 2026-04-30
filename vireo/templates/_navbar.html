@@ -1241,6 +1241,27 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 /* Ephemeral tab styling — italic + no "active" border */
 .navbar .nav-tab.is-ephemeral {
   font-style: italic;
+  /* Reserve extra right padding for the pin button alongside close. */
+  padding-right: 40px;
+}
+.navbar .nav-tab-pin {
+  display: none;
+  position: absolute;
+  right: 22px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-muted, #999);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.navbar .nav-tab.is-ephemeral .nav-tab-pin,
+.navbar .nav-tab.is-ephemeral:hover .nav-tab-pin { display: inline-block; }
+.navbar .nav-tab-pin:hover {
+  background: var(--bg-tertiary, rgba(255,255,255,0.1));
+  color: var(--text-primary);
 }
 .cmd-palette-overlay {
   position: fixed; inset: 0; z-index: 10001;
@@ -1735,6 +1756,19 @@ function sendReport() {
       badge.id = 'navJobBadge';
       a.appendChild(badge);
     }
+    if (opts && opts.ephemeral) {
+      const pin = document.createElement('span');
+      pin.className = 'nav-tab-pin';
+      pin.title = 'Pin tab';
+      pin.dataset.testid = 'nav-tab-pin-' + page.id;
+      pin.textContent = '📌';
+      pin.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        window.pinTab(page.id);
+      });
+      a.appendChild(pin);
+    }
     const close = document.createElement('span');
     close.className = 'nav-tab-close';
     close.title = 'Close tab';
@@ -1877,9 +1911,23 @@ function sendReport() {
 
   function clearEphemeral() {
     // Closing ephemeral === navigate away from the unpinned page.
-    // Ephemeral renders at the right end of the strip, so its
-    // visually adjacent neighbor is the last pinned tab.
-    const adjId = TABS.length ? TABS[TABS.length - 1] : null;
+    // Ephemeral renders at the right end of the strip, so its visually
+    // adjacent neighbor is the rightmost *visible* pinned tab. Under
+    // overflow, recomputeOverflow() hides rightmost pinned tabs first,
+    // so TABS[length-1] may be hidden; walk right-to-left to find the
+    // first one that's actually rendered.
+    const strip = STRIP();
+    let adjId = null;
+    if (strip) {
+      for (let i = TABS.length - 1; i >= 0; i--) {
+        const id = TABS[i];
+        const t = strip.querySelector(
+          '.nav-tab[data-nav-id="' + id + '"]:not(.is-ephemeral)'
+        );
+        if (t && t.style.display !== 'none') { adjId = id; break; }
+      }
+    }
+    if (!adjId && TABS.length) adjId = TABS[TABS.length - 1];
     const next = adjId ? pageById[adjId] : null;
     window.location.href = next ? next.href : '/browse';
   }

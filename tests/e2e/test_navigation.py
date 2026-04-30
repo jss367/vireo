@@ -212,6 +212,62 @@ def test_cmdw_closes_ephemeral_tab(live_server, page):
     page.wait_for_function("() => !location.pathname.startsWith('/keywords')", timeout=3000)
 
 
+def test_ephemeral_tab_pin_button_persists_tab(live_server, page):
+    """Clicking the 📌 button on an ephemeral tab pins it (no longer italic,
+    survives reload)."""
+    url = live_server["url"]
+    # /keywords is unpinned by default → renders ephemeral on visit.
+    page.goto(f"{url}/keywords")
+    page.wait_for_selector(".nav-tab[data-nav-id='keywords'].is-ephemeral", timeout=3000)
+    page.click("[data-testid='nav-tab-pin-keywords']")
+    # After pin, the same tab loses .is-ephemeral and the API persisted it.
+    page.wait_for_selector(
+        ".nav-tab[data-nav-id='keywords']:not(.is-ephemeral)", timeout=3000
+    )
+    page.reload()
+    page.wait_for_selector(
+        ".nav-tab[data-nav-id='keywords']:not(.is-ephemeral)", timeout=3000
+    )
+
+
+def test_close_ephemeral_navigates_to_rightmost_visible_pinned_tab(live_server, page):
+    """When pinned tabs overflow, closing the ephemeral tab must navigate to
+    the rightmost *visible* pinned tab — not the last pinned id, which may be
+    hidden under overflow."""
+    url = live_server["url"]
+    # Narrow viewport forces overflow with the 9 default pinned tabs.
+    page.set_viewport_size({"width": 700, "height": 800})
+    page.goto(f"{url}/keywords")  # unpinned → ephemeral
+    page.wait_for_selector(".nav-tab[data-nav-id='keywords'].is-ephemeral", timeout=3000)
+    # Identify the rightmost pinned tab that is actually visible (display != 'none').
+    rightmost_visible = page.evaluate("""() => {
+        const tabs = Array.from(document.querySelectorAll(
+          '#navTabStrip .nav-tab:not(.is-ephemeral)'
+        ));
+        for (let i = tabs.length - 1; i >= 0; i--) {
+            if (tabs[i].style.display !== 'none') return tabs[i].dataset.navId;
+        }
+        return null;
+    }""")
+    assert rightmost_visible is not None, "expected at least one visible pinned tab"
+    # And confirm overflow is in effect (some pinned tab is hidden).
+    has_hidden = page.evaluate("""() => {
+        const tabs = Array.from(document.querySelectorAll(
+          '#navTabStrip .nav-tab:not(.is-ephemeral)'
+        ));
+        return tabs.some(t => t.style.display === 'none');
+    }""")
+    assert has_hidden, "expected overflow to hide at least one pinned tab at 700px"
+    # Close the ephemeral tab — should land on rightmost_visible's URL.
+    page.click(".nav-tab[data-nav-id='keywords'] .nav-tab-close")
+    page.wait_for_function(
+        "(want) => document.querySelector('.nav-tab[data-nav-id=\"' + want + '\"]')"
+        " && document.querySelector('.nav-tab[data-nav-id=\"' + want + '\"]').classList.contains('active')",
+        arg=rightmost_visible,
+        timeout=3000,
+    )
+
+
 def test_drag_reorder_persists_via_reorder_endpoint(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/browse")
