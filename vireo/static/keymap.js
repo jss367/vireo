@@ -114,7 +114,11 @@
     }
   }
 
-  document.addEventListener('keydown', _dispatch);
+  // Register in capture phase so the Esc-stack can stop propagation before any
+  // bubble-phase listeners on document.body fire (e.g. page-level Esc handlers).
+  // This preserves the "Esc dismisses overlay without leaking to page" contract
+  // that previously required individual capture-phase listeners per overlay.
+  document.addEventListener('keydown', _dispatch, true);
 
   window.Keymap = {
     parseShortcut: parseShortcut,

@@ -1293,6 +1293,9 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 </div>
 <script>
 function openReportModal() {
+  if (window._reportEscToken) Keymap.popEsc(window._reportEscToken);
+  window._reportEscToken = Keymap.pushEsc(function() { closeReportModal(); });
+
   document.getElementById('reportModal').classList.add('active');
   document.getElementById('reportDescription').value = '';
   document.getElementById('reportStatus').className = 'report-status';
@@ -1301,6 +1304,7 @@ function openReportModal() {
   document.getElementById('reportDescription').focus();
 }
 function closeReportModal() {
+  if (window._reportEscToken) { Keymap.popEsc(window._reportEscToken); window._reportEscToken = null; }
   document.getElementById('reportModal').classList.remove('active');
 }
 function sendReport() {
@@ -1357,11 +1361,12 @@ function sendReport() {
 (function(){
   let _ctxEl = null;
   let _ctxDismiss = null;
+  let _ctxEscToken = null;
 
   window.closeContextMenu = function(){
+    if (_ctxEscToken !== null) { Keymap.popEsc(_ctxEscToken); _ctxEscToken = null; }
     if (_ctxEl) { _ctxEl.remove(); _ctxEl = null; }
     document.removeEventListener('mousedown', _outside, true);
-    document.removeEventListener('keydown', _keydown, true);
     window.removeEventListener('blur', closeContextMenu);
     if (_ctxDismiss) { const f = _ctxDismiss; _ctxDismiss = null; f(); }
   };
@@ -1383,16 +1388,6 @@ function sendReport() {
       // window), remove the swallow listener after a short delay so we
       // don't eat an unrelated later click.
       setTimeout(() => window.removeEventListener('click', swallow, true), 200);
-      closeContextMenu();
-    }
-  }
-  function _keydown(e){
-    if (e.key === 'Escape') {
-      // Stop propagation in the capture phase so page-level Escape handlers
-      // (e.g. browse.html's clearSelection, lightbox close) don't also fire.
-      // The user dismissed the menu, not the underlying surface.
-      e.preventDefault();
-      e.stopPropagation();
       closeContextMenu();
     }
   }
@@ -1453,7 +1448,9 @@ function sendReport() {
     _ctxEl = menu;
     _ctxDismiss = (opts && opts.onDismiss) || null;
     document.addEventListener('mousedown', _outside, true);
-    document.addEventListener('keydown', _keydown, true);
+    // Esc handling: push onto the Keymap stack so a single Esc closes only the
+    // context menu (the user dismissed the menu, not the underlying surface).
+    _ctxEscToken = Keymap.pushEsc(function() { closeContextMenu(); });
     window.addEventListener('blur', closeContextMenu);
   };
 
@@ -2096,25 +2093,29 @@ function sendReport() {
   }
 
   window.openShortcutsSheet = function() {
+    if (window._sheetEscToken) Keymap.popEsc(window._sheetEscToken);
+    window._sheetEscToken = Keymap.pushEsc(function() { closeShortcutsSheet(); });
     renderSheet();
     document.getElementById('shortcutsCheatSheet').classList.add('open');
     document.body.style.overflow = 'hidden';
   };
 
   window.closeShortcutsSheet = function() {
+    if (window._sheetEscToken) { Keymap.popEsc(window._sheetEscToken); window._sheetEscToken = null; }
     document.getElementById('shortcutsCheatSheet').classList.remove('open');
     document.body.style.overflow = '';
   };
 
-  // Listen for ? key
+  // Listen for ? key. Esc is owned by the Keymap.pushEsc stack — this listener
+  // only opens the sheet on '?' and consumes non-Esc keys while the sheet is
+  // open so page handlers (rating, navigation, etc.) don't also fire.
   document.addEventListener('keydown', function(e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
     if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .help-overlay.active')) return;
-    // When overlay is open, consume ALL key events so page handlers don't fire
+    // When sheet is open, consume non-Esc keys so page handlers don't fire.
+    // Esc is handled by the Keymap.pushEsc stack and must reach the dispatcher.
     if (document.getElementById('shortcutsCheatSheet').classList.contains('open')) {
-      if (e.key === 'Escape') {
-        closeShortcutsSheet();
-      }
+      if (e.key === 'Escape') return;
       e.preventDefault();
       e.stopImmediatePropagation();
       return;
@@ -2463,6 +2464,9 @@ function _lbLoadDetections(photoId) {
 }
 
 function openLightbox(photoId, filename, photoList) {
+  if (window._lbEscToken) Keymap.popEsc(window._lbEscToken);
+  window._lbEscToken = Keymap.pushEsc(function() { closeLightbox(); });
+
   _lightboxCurrentId = photoId;
   if (photoList) _lightboxPhotoList = photoList;
 
@@ -2683,6 +2687,7 @@ function toggleLightboxZoom(e) {
 
 function closeLightbox(e) {
   if (e && e.target && e.target.tagName === 'IMG') return;
+  if (window._lbEscToken) { Keymap.popEsc(window._lbEscToken); window._lbEscToken = null; }
   var wrap = document.getElementById('lightboxWrap');
   if (wrap) { wrap.classList.remove('zoomed'); }
   _lbZoom = 1.0;
@@ -2979,6 +2984,9 @@ async function submitToInatBatch(photoIds) {
 }
 
 function openInatModal() {
+  if (window._inatEscToken) Keymap.popEsc(window._inatEscToken);
+  window._inatEscToken = Keymap.pushEsc(function() { closeInatModal(); });
+
   var title = inatQueue.length === 1 ? 'Submit to iNaturalist' : 'Submit ' + inatQueue.length + ' observations to iNaturalist';
   document.getElementById('inatModalTitle').textContent = title;
   document.getElementById('inatProgress').style.display = 'none';
@@ -3016,6 +3024,7 @@ function openInatModal() {
 }
 
 function closeInatModal() {
+  if (window._inatEscToken) { Keymap.popEsc(window._inatEscToken); window._inatEscToken = null; }
   document.getElementById('inatModal').classList.remove('open');
   inatQueue = [];
 }
@@ -3088,7 +3097,10 @@ async function inatDoSubmit() {
 // If adding JS-based navigation shortcuts, guard with:
 //   if (window.__TAURI_INTERNALS__) return;
 document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); closeInatModal(); if (typeof closeHelpModal === 'function') closeHelpModal(); if (typeof closeReportModal === 'function') closeReportModal(); }
+  // Esc handling for the lightbox + overlay cascade is owned by the Keymap.pushEsc
+  // stack now: each open*() pushes its close*() and each close*() pops it. The
+  // listener below still handles arrow keys / +/-/0 / B / Z while the lightbox
+  // is open.
   if (!document.getElementById('lightboxOverlay').classList.contains('active')) return;
   if (e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
   if (e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }
@@ -3420,6 +3432,9 @@ function _lbScheduleSourceSwap() {
 
 <script>
 function openPipeline(photoId) {
+  if (window._pipelineEscToken) Keymap.popEsc(window._pipelineEscToken);
+  window._pipelineEscToken = Keymap.pushEsc(function() { closePipeline(); });
+
   var overlay = document.getElementById('pipelineOverlay');
   var content = document.getElementById('pipelineContent');
   overlay.classList.add('active');
@@ -3432,6 +3447,7 @@ function openPipeline(photoId) {
 }
 
 function closePipeline() {
+  if (window._pipelineEscToken) { Keymap.popEsc(window._pipelineEscToken); window._pipelineEscToken = null; }
   document.getElementById('pipelineOverlay').classList.remove('active');
   document.body.style.overflow = '';
 }
@@ -3567,6 +3583,9 @@ function renderPipeline(data, photoId) {
 
 <script>
 function findSimilar(photoId) {
+  if (window._similarEscToken) Keymap.popEsc(window._similarEscToken);
+  window._similarEscToken = Keymap.pushEsc(function() { closeSimilar(); });
+
   var overlay = document.getElementById('similarOverlay');
   var content = document.getElementById('similarContent');
   overlay.classList.add('active');
@@ -3607,6 +3626,7 @@ function findSimilar(photoId) {
 }
 
 function closeSimilar() {
+  if (window._similarEscToken) { Keymap.popEsc(window._similarEscToken); window._similarEscToken = null; }
   document.getElementById('similarOverlay').classList.remove('active');
   document.body.style.overflow = '';
 }

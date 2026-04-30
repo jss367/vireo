@@ -210,3 +210,60 @@ def test_action_returning_false_does_not_preventdefault(live_server, page):
 
     page.keyboard.press("y")
     assert page.evaluate("window._kmCalls") == ["first", "second"]
+
+
+def test_esc_closes_shortcuts_cheat_sheet(live_server, page):
+    """Opening the cheat sheet pushes an Esc handler; pressing Esc closes it."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    page.keyboard.press("?")
+    sheet = page.locator("#shortcutsCheatSheet")
+    expect_open = sheet.evaluate("el => el.classList.contains('open')")
+    assert expect_open is True
+
+    page.keyboard.press("Escape")
+    expect_closed = sheet.evaluate("el => el.classList.contains('open')")
+    assert expect_closed is False
+
+
+def test_two_overlays_unwind_one_esc_each(live_server, page):
+    """With lightbox open and cheat sheet stacked on top, each Esc closes one
+    overlay (top-of-stack first). Locks in the new one-Esc-per-overlay model
+    that replaces the legacy 'shotgun close' Esc cascade."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    # Open the lightbox on the first photo via the JS API directly
+    page.evaluate("openLightbox(1, 'hawk1.jpg')")
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=2000,
+    )
+
+    # Open the shortcuts cheat sheet on top
+    page.evaluate("openShortcutsSheet()")
+    page.wait_for_function(
+        "document.getElementById('shortcutsCheatSheet').classList.contains('open')",
+        timeout=2000,
+    )
+
+    # First Esc closes only the cheat sheet (top of stack)
+    page.keyboard.press("Escape")
+    page.wait_for_function(
+        "!document.getElementById('shortcutsCheatSheet').classList.contains('open')",
+        timeout=2000,
+    )
+    lightbox_still_open = page.evaluate(
+        "document.getElementById('lightboxOverlay').classList.contains('active')"
+    )
+    assert lightbox_still_open is True, "Lightbox should still be open after first Esc"
+
+    # Second Esc closes the lightbox
+    page.keyboard.press("Escape")
+    page.wait_for_function(
+        "!document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=2000,
+    )
