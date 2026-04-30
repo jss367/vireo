@@ -1992,6 +1992,18 @@ function sendReport() {
           // Return false so the dispatcher does NOT preventDefault and another
           // candidate (or the browser) can still handle the key.
           if (document.querySelector(OVERLAY_SELECTOR)) return false;
+          // Page-shadows-global precedence for legacy _vireoShortcuts bindings:
+          // browse/review page handlers still listen on document directly (they
+          // migrate into the registry in PR 4). If the current page has bound
+          // this key to one of its own actions, yield so the page's bubble-phase
+          // listener can handle it. Without this, a user who remaps e.g. browse
+          // 'flag' to 'b' would navigate away instead of flagging.
+          if (_pageCtx && window._vireoShortcuts && window._vireoShortcuts[_pageCtx]) {
+            var pageShortcuts = window._vireoShortcuts[_pageCtx];
+            for (var a in pageShortcuts) {
+              if (pageShortcuts[a] === key) return false;
+            }
+          }
           // Don't navigate if we're already on this page.
           if (window.location.pathname === route) return false;
           window.location.href = route;

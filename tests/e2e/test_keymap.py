@@ -313,6 +313,40 @@ def test_esc_closes_help_modal_via_stack(live_server, page):
     )
 
 
+def test_legacy_page_binding_shadows_global_nav(live_server, page):
+    """When the current page has bound a key in the legacy _vireoShortcuts
+    config, the global nav action yields so the page's bubble-phase listener
+    can run. Browse/review/cull page handlers don't migrate into the registry
+    until PR 4; until then this preserves user-customized collisions
+    (e.g. mapping a browse action onto the same letter as a nav shortcut)."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    # Pretend the user has remapped a browse action to 'r' (default for
+    # navigation.review). Mutating after registration is fine — the nav
+    # action reads _vireoShortcuts at dispatch time.
+    page.evaluate("""
+        window._vireoShortcuts = window._vireoShortcuts || {};
+        window._vireoShortcuts.browse = window._vireoShortcuts.browse || {};
+        window._vireoShortcuts.browse.flag = 'r';
+
+        // Bubble-phase spy mimicking a legacy page listener.
+        window.__pageHandled = 0;
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'r' && !e.defaultPrevented) window.__pageHandled += 1;
+        });
+    """)
+
+    page.keyboard.press("r")
+    page.wait_for_timeout(300)
+
+    assert page.url.endswith("/browse"), f"Expected to stay on /browse, got {page.url}"
+    assert page.evaluate("window.__pageHandled") == 1, (
+        "Legacy bubble-phase listener should have observed 'r' with defaultPrevented=false"
+    )
+
+
 def test_setscope_runs_synchronously_at_page_load(live_server, page):
     """The navbar IIFE must call Keymap.setScope(pageCtx) synchronously after
     keymap.js loads. Regression test for the script-ordering bug where
