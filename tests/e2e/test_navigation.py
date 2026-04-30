@@ -59,3 +59,47 @@ def test_workspace_persists_across_navigation(live_server, page):
     page.wait_for_load_state("networkidle")
     dropdown = page.locator("[data-testid='workspace-dropdown']")
     expect(dropdown).to_contain_text("Field Work")
+
+
+def test_navbar_renders_default_tabs_dynamically(live_server, page):
+    """The 9 default tabs render as <a class='nav-tab'> dynamically — no
+    static linger-page anchors, no '+ Tools' button."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.wait_for_selector(".nav-tab[data-nav-id='browse']")
+    nav_ids = page.eval_on_selector_all(
+        ".navbar .nav-tab",
+        "els => els.map(e => e.dataset.navId)"
+    )
+    assert "browse" in nav_ids
+    assert "pipeline" in nav_ids
+    assert "review" in nav_ids
+    # No tools button
+    assert page.query_selector(".nav-tools-btn") is None
+    # No standalone Logs icon (it's now a tab if pinned)
+    logs_icons = page.query_selector_all(".nav-icon[href='/logs']")
+    assert len(logs_icons) == 0
+
+
+def test_pinning_a_tab_via_api_makes_it_appear_in_strip(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    # Initially no `logs` tab
+    assert page.query_selector(".nav-tab[data-nav-id='logs']") is None
+    page.evaluate("""async () => {
+        await fetch('/api/workspace/tabs/pin',
+                    {method:'POST', headers:{'Content-Type':'application/json'},
+                     body: JSON.stringify({nav_id:'logs'})});
+    }""")
+    page.reload()
+    page.wait_for_selector(".nav-tab[data-nav-id='logs']", timeout=3000)
+
+
+def test_unpinning_active_tab_navigates_to_adjacent(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/cull")  # active tab is 'cull'
+    page.wait_for_selector(".nav-tab[data-nav-id='cull'].active")
+    page.click(".nav-tab[data-nav-id='cull'] .nav-tab-close")
+    page.wait_for_load_state("networkidle")
+    # Navigated to a sibling — anything that isn't /cull
+    assert "/cull" not in page.url
