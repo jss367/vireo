@@ -841,6 +841,7 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
 def detect_eye_keypoints_stage(
     db, config, progress_callback=None,
     collection_id=None, exclude_photo_ids=None,
+    abort_check=None,
 ):
     """Pipeline stage: detect eye keypoints and persist raw tenengrad.
 
@@ -866,6 +867,10 @@ def detect_eye_keypoints_stage(
             photos the user unchecked don't get eye_* values locked in (the
             stage is idempotent via eye_tenengrad IS NULL, so leaking writes
             here would survive future reruns).
+        abort_check: optional zero-arg callable returning True when the
+            run should stop. Polled once per photo; without it a user
+            cancel during a long stage is swallowed until the loop exits
+            naturally.
     """
     skip_reason = eye_keypoint_stage_preflight(config)
     if skip_reason is not None:
@@ -895,9 +900,11 @@ def detect_eye_keypoints_stage(
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     total = len(photos)
 
+    aborted = False
     for i, row in enumerate(photos):
-        if progress_callback:
-            progress_callback("Eye keypoints", i, total)
+        if abort_check is not None and abort_check():
+            aborted = True
+            break
         try:
             _process_photo_for_eye(
                 db, row, folders, C=C, T=T, k_window=k_window,
@@ -907,6 +914,12 @@ def detect_eye_keypoints_stage(
                 "Eye keypoint detection failed for photo %s", row["id"],
                 exc_info=True,
             )
+        # Emit AFTER processing so `current` reflects actual processed count
+        # — pipeline_job's cancel summary reads this and would lie otherwise.
+        if progress_callback:
+            progress_callback("Eye keypoints", i + 1, total)
 
-    if progress_callback:
+    # Skip the synthetic 100% emit on abort: it would poison the wrapper's
+    # `processed["count"]` to `total` and surface "Cancelled (N of N processed)".
+    if progress_callback and not aborted:
         progress_callback("Eye keypoints", total, total)
