@@ -487,7 +487,7 @@
     if (resolvedGroupCount > 0) {
       summaryHtml +=
         '<div class="summary-stat"><div class="num">' + resolvedGroupCount + '</div>' +
-          '<div class="label">Already resolved</div></div>' +
+          '<div class="label">Cleanup pending</div></div>' +
         '<div class="summary-stat"><div class="num">' + formatBytes(resolvedBytes) + '</div>' +
           '<div class="label">Extra files on disk</div></div>';
     }
@@ -540,12 +540,12 @@
       html += '<div class="section-header">' +
         '<div>' +
           '<h2 class="' + toggleClass + '" id="resolvedToggle" onclick="toggleResolvedSection()">' +
-            '<span class="chev">&#9656;</span> Already resolved' +
+            '<span class="chev">&#9656;</span> Resolved — cleanup pending' +
           '</h2>' +
-          '<div class="section-sub">' + resolvedGroupCount +
-          ' group' + (resolvedGroupCount === 1 ? '' : 's') +
-          ' auto-handled during scan. Extra copies (' + formatBytes(resolvedBytes) +
-          ') may still be on disk.</div>' +
+          '<div class="section-sub">Vireo already picked which copy to keep for ' +
+          resolvedGroupCount + ' group' + (resolvedGroupCount === 1 ? '' : 's') +
+          ', but the extra copies (' + formatBytes(resolvedBytes) +
+          ') are still on disk. Move them to Trash to finish cleanup.</div>' +
         '</div>';
       // Hide the bulk button entirely when every remaining resolved group is
       // protected — otherwise it sticks around as a no-op that always toasts
