@@ -40,3 +40,32 @@ def test_keymap_register_and_lookup(live_server, page):
     browse_scope = page.evaluate("window.Keymap.shortcutsForScope('browse').map(s => s.name)")
     # browse scope returns its own shortcuts plus globals
     assert set(browse_scope) == {"global-test", "browse-test"}
+
+
+def test_dispatcher_fires_registered_action(live_server, page):
+    """Pressing a registered key fires its action; suppressed when input is focused."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate("""
+        window._kmTestFired = 0;
+        window.Keymap.register('global', {
+            key: 'q', name: 'test-q', description: '', category: 'System',
+            action: function() { window._kmTestFired += 1; }
+        });
+        window.Keymap.setScope('global');
+    """)
+
+    page.keyboard.press("q")
+    assert page.evaluate("window._kmTestFired") == 1
+
+    # Focused input suppresses the shortcut
+    page.evaluate("""
+        var i = document.createElement('input');
+        i.id = '_kmTestInput';
+        document.body.appendChild(i);
+        i.focus();
+    """)
+    page.keyboard.press("q")
+    assert page.evaluate("window._kmTestFired") == 1  # unchanged

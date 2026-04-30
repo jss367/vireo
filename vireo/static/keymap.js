@@ -54,11 +54,33 @@
     return _registry[scope].concat(globals);
   }
 
+  var _currentScope = 'global';
+
+  function setScope(scope) { _currentScope = scope; }
+  function getScope() { return _currentScope; }
+
+  function _dispatch(e) {
+    if (isInputFocused()) return;
+    var candidates = shortcutsForScope(_currentScope);
+    for (var i = 0; i < candidates.length; i++) {
+      var sc = candidates[i];
+      if (matchesShortcut(e, sc.key)) {
+        e.preventDefault();
+        try { sc.action(e); } catch (err) { console.error('Keymap action error', err); }
+        return;
+      }
+    }
+  }
+
+  document.addEventListener('keydown', _dispatch);
+
   window.Keymap = {
     parseShortcut: parseShortcut,
     matchesShortcut: matchesShortcut,
     isInputFocused: isInputFocused,
     register: register,
-    shortcutsForScope: shortcutsForScope
+    shortcutsForScope: shortcutsForScope,
+    setScope: setScope,
+    getScope: getScope
   };
 })(window);
