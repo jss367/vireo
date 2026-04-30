@@ -40,9 +40,25 @@
     return false;
   }
 
+  // scope -> array of shortcut definitions
+  var _registry = { global: [] };
+
+  function register(scope, shortcut) {
+    if (!_registry[scope]) _registry[scope] = [];
+    _registry[scope].push(shortcut);
+  }
+
+  function shortcutsForScope(scope) {
+    var globals = _registry.global || [];
+    if (scope === 'global' || !_registry[scope]) return globals.slice();
+    return _registry[scope].concat(globals);
+  }
+
   window.Keymap = {
     parseShortcut: parseShortcut,
     matchesShortcut: matchesShortcut,
-    isInputFocused: isInputFocused
+    isInputFocused: isInputFocused,
+    register: register,
+    shortcutsForScope: shortcutsForScope
   };
 })(window);
