@@ -3202,6 +3202,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         tabs = db.unpin_tab(nav_id)
         return jsonify({"ok": True, "tabs": tabs})
 
+    @app.route("/api/workspace/tabs/reorder", methods=["POST"])
+    def api_reorder_tabs():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        tabs = body.get("tabs")
+        if not isinstance(tabs, list):
+            return json_error("tabs must be a list", 400)
+        try:
+            result = db.set_tabs(tabs)
+        except ValueError as e:
+            return json_error(str(e), 400)
+        return jsonify({"ok": True, "tabs": result})
+
     @app.route("/api/workspace/tabs/close", methods=["POST"])
     def api_close_tab():
         from db import OPENABLE_NAV_IDS

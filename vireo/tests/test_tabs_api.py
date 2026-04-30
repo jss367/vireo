@@ -136,3 +136,35 @@ def test_unpin_tab_endpoint_rejects_unknown_navid(app_and_db):
     client = app.test_client()
     r = client.post("/api/workspace/tabs/unpin", json={"nav_id": "not_a_real_page"})
     assert r.status_code == 400
+
+
+def test_reorder_tabs_endpoint_replaces_order(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    new_order = ["cull", "review", "browse"]
+    r = client.post("/api/workspace/tabs/reorder", json={"tabs": new_order})
+    assert r.status_code == 200
+    assert r.get_json()["tabs"] == new_order
+
+
+def test_reorder_tabs_rejects_unknown_id(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    r = client.post("/api/workspace/tabs/reorder",
+                    json={"tabs": ["browse", "not_a_page"]})
+    assert r.status_code == 400
+
+
+def test_reorder_tabs_rejects_duplicates(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    r = client.post("/api/workspace/tabs/reorder",
+                    json={"tabs": ["browse", "browse"]})
+    assert r.status_code == 400
+
+
+def test_reorder_tabs_rejects_non_list(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    r = client.post("/api/workspace/tabs/reorder", json={"tabs": "not-a-list"})
+    assert r.status_code == 400
