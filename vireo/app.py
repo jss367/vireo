@@ -1016,17 +1016,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         cfg.save(user_cfg)
         return jsonify({"ok": True})
 
-    def _auto_open_tab(nav_id):
-        """Best-effort: append nav_id to the active workspace's open_tabs.
-
-        Called from openable page routes so direct URL visits / shortcuts
-        keep the navbar consistent. Errors are swallowed (the page still renders).
-        """
-        try:
-            _get_db().open_tab(nav_id)
-        except Exception:
-            log.exception("Failed to auto-open tab %r", nav_id)
-
     @app.route("/browse")
     def browse():
         return render_template("browse.html")
@@ -1037,7 +1026,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/lightroom")
     def lightroom_page():
-        _auto_open_tab("lightroom")
         return render_template("lightroom.html")
 
     @app.route("/audit")
@@ -1062,7 +1050,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/workspace")
     def workspace_page():
-        _auto_open_tab("workspace")
         return render_template("workspace.html")
 
     @app.route("/compare")
@@ -1071,17 +1058,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/settings")
     def settings():
-        _auto_open_tab("settings")
         return render_template("settings.html")
 
     @app.route("/shortcuts")
     def shortcuts_page():
-        _auto_open_tab("shortcuts")
         return render_template("shortcuts.html")
 
     @app.route("/keywords")
     def keywords_page():
-        _auto_open_tab("keywords")
         return render_template("keywords.html")
 
     @app.route("/jobs")
@@ -1090,7 +1074,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/duplicates")
     def duplicates_page():
-        _auto_open_tab("duplicates")
         return render_template("duplicates.html")
 
     @app.route("/move")
@@ -3196,17 +3179,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.update_workspace(ws_id, config_overrides=existing)
         return jsonify({"types": cleaned})
 
-    @app.route("/api/workspace/tabs/open", methods=["POST"])
-    def api_open_tab():
-        from db import OPENABLE_NAV_IDS
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        nav_id = body.get("nav_id")
-        if nav_id not in OPENABLE_NAV_IDS:
-            return json_error("nav_id is not openable", 400)
-        tabs = db.open_tab(nav_id)
-        return jsonify({"ok": True, "open_tabs": tabs})
-
     @app.route("/api/workspace/tabs/pin", methods=["POST"])
     def api_pin_tab():
         from db import ALL_NAV_IDS
@@ -3241,17 +3213,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except ValueError as e:
             return json_error(str(e), 400)
         return jsonify({"ok": True, "tabs": result})
-
-    @app.route("/api/workspace/tabs/close", methods=["POST"])
-    def api_close_tab():
-        from db import OPENABLE_NAV_IDS
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        nav_id = body.get("nav_id")
-        if nav_id not in OPENABLE_NAV_IDS:
-            return json_error("nav_id is not openable", 400)
-        tabs = db.close_tab(nav_id)
-        return jsonify({"ok": True, "open_tabs": tabs})
 
     @app.route("/api/workspace/tabs", methods=["GET"])
     def api_get_tabs():
@@ -10710,7 +10671,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/logs")
     def logs_page():
-        _auto_open_tab("logs")
         return render_template("logs.html")
 
     @app.route("/map")
