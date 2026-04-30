@@ -162,6 +162,35 @@ def test_deep_merge_preserves_pipeline(tmp_path):
     assert loaded["photos_per_page"] == 50
 
 
+def test_config_path_is_restored_between_tests_part_1(tmp_path):
+    """First half of a two-test pair that locks in the conftest autouse fixture
+    that restores ``cfg.CONFIG_PATH`` between tests. This test direct-assigns
+    a tmp path and writes a non-default value — the next test must NOT see it.
+    """
+    import config as cfg
+
+    cfg.CONFIG_PATH = str(tmp_path / "leaked.json")
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 1234})
+    # Sanity: leak is real within this test
+    assert cfg.load()["working_copy_max_size"] == 1234
+
+
+def test_config_path_is_restored_between_tests_part_2():
+    """Second half: the prior test direct-assigned ``cfg.CONFIG_PATH`` and
+    wrote ``working_copy_max_size: 1234``. The autouse fixture in
+    ``conftest.py`` restores the original ``CONFIG_PATH``, so we should see
+    defaults here. If this test fails, it means a flake similar to PR #722's
+    has been reintroduced — fix the conftest fixture, not this test.
+    """
+    import config as cfg
+
+    assert cfg.load()["working_copy_max_size"] == cfg.DEFAULTS["working_copy_max_size"], (
+        f"cfg.CONFIG_PATH leaked from prior test: got "
+        f"working_copy_max_size={cfg.load()['working_copy_max_size']!r}, "
+        f"CONFIG_PATH={cfg.CONFIG_PATH!r}"
+    )
+
+
 def test_eye_focus_defaults_exist():
     """Config DEFAULTS includes eye-focus detection tunables."""
     from config import DEFAULTS

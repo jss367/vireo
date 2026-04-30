@@ -816,8 +816,15 @@ def test_pair_raw_jpeg_does_not_overwrite_zero_primary_gps(tmp_path):
 
 def test_scan_extracts_working_copy_for_raw(tmp_path, monkeypatch):
     """Scanning a RAW file creates a working copy JPEG."""
+    import config as cfg
     import scanner
     from db import Database
+
+    # Isolate ``cfg.CONFIG_PATH`` so this test reads defaults instead of
+    # whatever a prior test on the same xdist worker may have left in the
+    # global config (e.g. a small ``working_copy_max_size`` would change
+    # which photos are working-copy candidates and flake the assertion).
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
     # Set up vireo dir structure
     vireo_dir = tmp_path / "vireo"
@@ -851,8 +858,15 @@ def test_scan_extracts_working_copy_for_raw(tmp_path, monkeypatch):
 
 def test_scan_skips_working_copy_for_jpeg(tmp_path, monkeypatch):
     """Scanning a JPEG file does not create a working copy."""
+    import config as cfg
     import scanner
     from db import Database
+
+    # Pin ``working_copy_max_size`` to its default by isolating CONFIG_PATH
+    # — without this, a leaked small cap from another test on the same
+    # xdist worker turns this 3000×2000 JPEG into an oversized candidate
+    # and the scan extracts a working copy.
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
@@ -884,8 +898,13 @@ def test_scan_skips_working_copy_for_jpeg(tmp_path, monkeypatch):
 
 def test_scan_uses_companion_jpeg_for_working_copy(tmp_path, monkeypatch):
     """When RAW+JPEG pair exists, working copy is extracted from the companion JPEG."""
+    import config as cfg
     import scanner
     from db import Database
+
+    # Isolate CONFIG_PATH so the candidate predicate (which depends on
+    # ``working_copy_max_size``) reads defaults instead of leaked state.
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
