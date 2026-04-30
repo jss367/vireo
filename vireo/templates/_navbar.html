@@ -1380,10 +1380,42 @@ document.addEventListener('keydown', function(e) {
   if (mod && e.key.toLowerCase() === 'k') {
     e.preventDefault();
     window.openCommandPalette();
-  } else if (e.key === 'Escape') {
+    return;
+  }
+  if (e.key === 'Escape') {
     const overlay = document.getElementById('commandPalette');
     if (overlay && !overlay.hasAttribute('hidden')) {
       window.closeCommandPalette();
+      return;
+    }
+  }
+  // cmd+1..9 → nth pinned tab
+  if (mod && /^[1-9]$/.test(e.key)) {
+    const tabs = (window._navTabs ? window._navTabs.getTabs() : []);
+    const all = (window._navTabs ? window._navTabs.getAllPages() : []);
+    const idx = parseInt(e.key, 10) - 1;
+    if (idx < tabs.length) {
+      e.preventDefault();
+      const target = all.find(p => p.id === tabs[idx]);
+      if (target) window.location.href = target.href;
+    }
+  }
+  // cmd+W → close current tab
+  if (mod && e.key.toLowerCase() === 'w') {
+    const cur = (function() {
+      const p = window.location.pathname;
+      if (p.startsWith('/pipeline/review')) return 'pipeline_review';
+      if (p === '/' || p.startsWith('/browse')) return 'browse';
+      return (p.split('/')[1] || '').replace(/-/g, '_');
+    })();
+    const tabs = (window._navTabs ? window._navTabs.getTabs() : []);
+    if (cur && tabs.includes(cur)) {
+      e.preventDefault();
+      // Reuse the unpin path: simulate click on the close button
+      const closeBtn = document.querySelector(
+        '.nav-tab[data-nav-id="' + cur + '"] .nav-tab-close'
+      );
+      if (closeBtn) closeBtn.click();
     }
   }
 });
