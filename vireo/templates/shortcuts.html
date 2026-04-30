@@ -180,6 +180,17 @@ function startCapture(btn, ctx, action) {
   btn.classList.add('capturing');
   btn.textContent = 'Press a key...';
 
+  // Pause the global Keymap dispatcher so registered nav actions don't fire
+  // (and navigate the user away) while we're trying to capture the next key.
+  // Both this listener and the dispatcher run in the capture phase, but the
+  // dispatcher was registered at module load and wins the race otherwise.
+  if (window.Keymap && window.Keymap.pauseDispatch) window.Keymap.pauseDispatch();
+
+  function endCapture() {
+    document.removeEventListener('keydown', onKey, true);
+    if (window.Keymap && window.Keymap.resumeDispatch) window.Keymap.resumeDispatch();
+  }
+
   function onKey(e) {
     e.preventDefault();
     e.stopPropagation();
@@ -196,7 +207,7 @@ function startCapture(btn, ctx, action) {
     if (conflict) {
       btn.classList.remove('capturing');
       capturingBtn = null;
-      document.removeEventListener('keydown', onKey, true);
+      endCapture();
       btn.textContent = 'Conflict: ' + SHORTCUT_LABELS[ctx][conflict];
       btn.style.borderColor = 'var(--danger)';
       btn.style.color = 'var(--danger)';
@@ -207,7 +218,7 @@ function startCapture(btn, ctx, action) {
     currentShortcuts[ctx][action] = keyStr;
     btn.classList.remove('capturing');
     capturingBtn = null;
-    document.removeEventListener('keydown', onKey, true);
+    endCapture();
     renderShortcutsEditor();
     saveShortcuts();
   }
@@ -218,7 +229,7 @@ function startCapture(btn, ctx, action) {
     if (capturingBtn === btn) {
       btn.classList.remove('capturing');
       capturingBtn = null;
-      document.removeEventListener('keydown', onKey, true);
+      endCapture();
       renderShortcutsEditor();
     }
     btn.removeEventListener('blur', onBlur);

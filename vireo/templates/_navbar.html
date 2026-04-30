@@ -1291,8 +1291,14 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     <div class="report-status" id="reportStatus"></div>
   </div>
 </div>
+<!-- Load keymap.js before any inline <script> blocks below so window.Keymap
+     (registry, dispatcher, Esc stack) is available when they run. -->
+<script src="/static/keymap.js"></script>
 <script>
 function openReportModal() {
+  if (window._reportEscToken) Keymap.popEsc(window._reportEscToken);
+  window._reportEscToken = Keymap.pushEsc(function() { closeReportModal(); });
+
   document.getElementById('reportModal').classList.add('active');
   document.getElementById('reportDescription').value = '';
   document.getElementById('reportStatus').className = 'report-status';
@@ -1301,6 +1307,7 @@ function openReportModal() {
   document.getElementById('reportDescription').focus();
 }
 function closeReportModal() {
+  if (window._reportEscToken) { Keymap.popEsc(window._reportEscToken); window._reportEscToken = null; }
   document.getElementById('reportModal').classList.remove('active');
 }
 function sendReport() {
@@ -1357,11 +1364,12 @@ function sendReport() {
 (function(){
   let _ctxEl = null;
   let _ctxDismiss = null;
+  let _ctxEscToken = null;
 
   window.closeContextMenu = function(){
+    if (_ctxEscToken !== null) { Keymap.popEsc(_ctxEscToken); _ctxEscToken = null; }
     if (_ctxEl) { _ctxEl.remove(); _ctxEl = null; }
     document.removeEventListener('mousedown', _outside, true);
-    document.removeEventListener('keydown', _keydown, true);
     window.removeEventListener('blur', closeContextMenu);
     if (_ctxDismiss) { const f = _ctxDismiss; _ctxDismiss = null; f(); }
   };
@@ -1383,16 +1391,6 @@ function sendReport() {
       // window), remove the swallow listener after a short delay so we
       // don't eat an unrelated later click.
       setTimeout(() => window.removeEventListener('click', swallow, true), 200);
-      closeContextMenu();
-    }
-  }
-  function _keydown(e){
-    if (e.key === 'Escape') {
-      // Stop propagation in the capture phase so page-level Escape handlers
-      // (e.g. browse.html's clearSelection, lightbox close) don't also fire.
-      // The user dismissed the menu, not the underlying surface.
-      e.preventDefault();
-      e.stopPropagation();
       closeContextMenu();
     }
   }
@@ -1453,7 +1451,9 @@ function sendReport() {
     _ctxEl = menu;
     _ctxDismiss = (opts && opts.onDismiss) || null;
     document.addEventListener('mousedown', _outside, true);
-    document.addEventListener('keydown', _keydown, true);
+    // Esc handling: push onto the Keymap stack so a single Esc closes only the
+    // context menu (the user dismissed the menu, not the underlying surface).
+    _ctxEscToken = Keymap.pushEsc(function() { closeContextMenu(); });
     window.addEventListener('blur', closeContextMenu);
   };
 
@@ -1967,38 +1967,60 @@ function sendReport() {
     }
   }
 
+  // CSS selector for any open overlay/modal. The legacy dispatcher used this
+  // to bail out before navigating; the new Keymap dispatcher has no such
+  // built-in suppression, so each registered nav action checks it itself
+  // (Option B from the migration review). Without this, pressing 'b' while
+  // the lightbox is open would close the lightbox AND navigate.
+  var OVERLAY_SELECTOR = '.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active';
+
   function setupNavKeydown(navShortcuts) {
-    var keyToHref = {};
-    for (var action in navShortcuts) {
-      if (NAV_ROUTES[action]) keyToHref[navShortcuts[action]] = NAV_ROUTES[action];
-    }
+    if (!window.Keymap || !window.Keymap.register) return;
 
-    var path = location.pathname;
-    var pageCtx = null;
-    if (path === '/browse') pageCtx = 'browse';
-    else if (path === '/review') pageCtx = 'review';
-
-    document.addEventListener('keydown', function(e) {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-      // Skip if any overlay or modal is open
-      if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;
-
-      for (var shortcutStr in keyToHref) {
-        if (matchesShortcut(e, shortcutStr)) {
-          // Live check: does the current page claim this key?
-          if (pageCtx && window._vireoShortcuts && window._vireoShortcuts[pageCtx]) {
-            var pageShortcuts = window._vireoShortcuts[pageCtx];
+    Object.keys(NAV_ROUTES).forEach(function (action) {
+      var key = navShortcuts[action];
+      if (!key) return;
+      var route = NAV_ROUTES[action];
+      window.Keymap.register('global', {
+        key: key,
+        name: action,
+        description: 'Go to ' + action.replace(/_/g, ' '),
+        category: 'Navigation',
+        action: function () {
+          // Suppress while any overlay/modal is open — preserves the legacy
+          // dispatcher's overlay-aware behavior (see OVERLAY_SELECTOR comment).
+          // Return false so the dispatcher does NOT preventDefault and another
+          // candidate (or the browser) can still handle the key.
+          if (document.querySelector(OVERLAY_SELECTOR)) return false;
+          // Page-shadows-global precedence for legacy _vireoShortcuts bindings:
+          // browse/review page handlers still listen on document directly (they
+          // migrate into the registry in PR 4). If the current page has bound
+          // this key to one of its own actions, yield so the page's bubble-phase
+          // listener can handle it. Without this, a user who remaps e.g. browse
+          // 'flag' to 'b' would navigate away instead of flagging.
+          if (_pageCtx && window._vireoShortcuts && window._vireoShortcuts[_pageCtx]) {
+            var pageShortcuts = window._vireoShortcuts[_pageCtx];
             for (var a in pageShortcuts) {
-              if (pageShortcuts[a] === shortcutStr) return; // page wins
+              if (pageShortcuts[a] === key) return false;
             }
           }
-          if (keyToHref[shortcutStr] === path) return;
-          e.preventDefault();
-          window.location.href = keyToHref[shortcutStr];
-          return;
+          // Don't navigate if we're already on this page.
+          if (window.location.pathname === route) return false;
+          window.location.href = route;
         }
-      }
+      });
     });
+  }
+
+  // Determine page scope and tell the Keymap dispatcher synchronously, before
+  // any /api/config fetch resolves. Otherwise page-scoped shortcuts registered
+  // by other scripts would race the fetch and dispatch on the wrong scope.
+  var _path = location.pathname;
+  var _pageCtx = null;
+  if (_path === '/browse') _pageCtx = 'browse';
+  else if (_path === '/review') _pageCtx = 'review';
+  if (_pageCtx && window.Keymap && window.Keymap.setScope) {
+    window.Keymap.setScope(_pageCtx);
   }
 
   // Fetch config and apply
@@ -2086,25 +2108,31 @@ function sendReport() {
   }
 
   window.openShortcutsSheet = function() {
+    var alreadyOpen = !!window._sheetEscToken;
+    if (alreadyOpen) Keymap.popEsc(window._sheetEscToken);
+    window._sheetEscToken = Keymap.pushEsc(function() { closeShortcutsSheet(); });
     renderSheet();
     document.getElementById('shortcutsCheatSheet').classList.add('open');
-    document.body.style.overflow = 'hidden';
+    if (!alreadyOpen) Keymap.lockBodyScroll();
   };
 
   window.closeShortcutsSheet = function() {
+    var wasOpen = !!window._sheetEscToken;
+    if (wasOpen) { Keymap.popEsc(window._sheetEscToken); window._sheetEscToken = null; }
     document.getElementById('shortcutsCheatSheet').classList.remove('open');
-    document.body.style.overflow = '';
+    if (wasOpen) Keymap.unlockBodyScroll();
   };
 
-  // Listen for ? key
+  // Listen for ? key. Esc is owned by the Keymap.pushEsc stack — this listener
+  // only opens the sheet on '?' and consumes non-Esc keys while the sheet is
+  // open so page handlers (rating, navigation, etc.) don't also fire.
   document.addEventListener('keydown', function(e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
     if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .help-overlay.active')) return;
-    // When overlay is open, consume ALL key events so page handlers don't fire
+    // When sheet is open, consume non-Esc keys so page handlers don't fire.
+    // Esc is handled by the Keymap.pushEsc stack and must reach the dispatcher.
     if (document.getElementById('shortcutsCheatSheet').classList.contains('open')) {
-      if (e.key === 'Escape') {
-        closeShortcutsSheet();
-      }
+      if (e.key === 'Escape') return;
       e.preventDefault();
       e.stopImmediatePropagation();
       return;
@@ -2453,6 +2481,11 @@ function _lbLoadDetections(photoId) {
 }
 
 function openLightbox(photoId, filename, photoList) {
+  var alreadyOpen = !!window._lbEscToken;
+  if (alreadyOpen) Keymap.popEsc(window._lbEscToken);
+  window._lbEscToken = Keymap.pushEsc(function() { closeLightbox(); });
+  if (!alreadyOpen) Keymap.lockBodyScroll();
+
   _lightboxCurrentId = photoId;
   if (photoList) _lightboxPhotoList = photoList;
 
@@ -2529,7 +2562,6 @@ function openLightbox(photoId, filename, photoList) {
     }
   }
   overlay.classList.add('active');
-  document.body.style.overflow = 'hidden';
 
   // Fetch and render detection bounding boxes
   _lbLoadDetections(photoId);
@@ -2673,6 +2705,8 @@ function toggleLightboxZoom(e) {
 
 function closeLightbox(e) {
   if (e && e.target && e.target.tagName === 'IMG') return;
+  var wasOpen = !!window._lbEscToken;
+  if (wasOpen) { Keymap.popEsc(window._lbEscToken); window._lbEscToken = null; }
   var wrap = document.getElementById('lightboxWrap');
   if (wrap) { wrap.classList.remove('zoomed'); }
   _lbZoom = 1.0;
@@ -2686,7 +2720,7 @@ function closeLightbox(e) {
   document.getElementById('lightboxZoomBadge').style.display = 'none';
   var detContainer = document.getElementById('lightboxDetections');
   if (detContainer) detContainer.innerHTML = '';
-  document.body.style.overflow = '';
+  if (wasOpen) Keymap.unlockBodyScroll();
 }
 
 /* ---------- Lightbox right-click context menu ----------
@@ -2969,6 +3003,9 @@ async function submitToInatBatch(photoIds) {
 }
 
 function openInatModal() {
+  if (window._inatEscToken) Keymap.popEsc(window._inatEscToken);
+  window._inatEscToken = Keymap.pushEsc(function() { closeInatModal(); });
+
   var title = inatQueue.length === 1 ? 'Submit to iNaturalist' : 'Submit ' + inatQueue.length + ' observations to iNaturalist';
   document.getElementById('inatModalTitle').textContent = title;
   document.getElementById('inatProgress').style.display = 'none';
@@ -3006,6 +3043,7 @@ function openInatModal() {
 }
 
 function closeInatModal() {
+  if (window._inatEscToken) { Keymap.popEsc(window._inatEscToken); window._inatEscToken = null; }
   document.getElementById('inatModal').classList.remove('open');
   inatQueue = [];
 }
@@ -3078,7 +3116,10 @@ async function inatDoSubmit() {
 // If adding JS-based navigation shortcuts, guard with:
 //   if (window.__TAURI_INTERNALS__) return;
 document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); closeInatModal(); if (typeof closeHelpModal === 'function') closeHelpModal(); if (typeof closeReportModal === 'function') closeReportModal(); }
+  // Esc handling for the lightbox + overlay cascade is owned by the Keymap.pushEsc
+  // stack now: each open*() pushes its close*() and each close*() pops it. The
+  // listener below still handles arrow keys / +/-/0 / B / Z while the lightbox
+  // is open.
   if (!document.getElementById('lightboxOverlay').classList.contains('active')) return;
   if (e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
   if (e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }
@@ -3410,10 +3451,14 @@ function _lbScheduleSourceSwap() {
 
 <script>
 function openPipeline(photoId) {
+  var alreadyOpen = !!window._pipelineEscToken;
+  if (alreadyOpen) Keymap.popEsc(window._pipelineEscToken);
+  window._pipelineEscToken = Keymap.pushEsc(function() { closePipeline(); });
+
   var overlay = document.getElementById('pipelineOverlay');
   var content = document.getElementById('pipelineContent');
   overlay.classList.add('active');
-  document.body.style.overflow = 'hidden';
+  if (!alreadyOpen) Keymap.lockBodyScroll();
   content.innerHTML = '<p style="color:var(--text-dim);">Loading pipeline data...</p>';
 
   safeFetch('/api/photos/' + photoId + '/pipeline', {}, { toast: false })
@@ -3422,8 +3467,10 @@ function openPipeline(photoId) {
 }
 
 function closePipeline() {
+  var wasOpen = !!window._pipelineEscToken;
+  if (wasOpen) { Keymap.popEsc(window._pipelineEscToken); window._pipelineEscToken = null; }
   document.getElementById('pipelineOverlay').classList.remove('active');
-  document.body.style.overflow = '';
+  if (wasOpen) Keymap.unlockBodyScroll();
 }
 
 function renderPipeline(data, photoId) {
@@ -3557,10 +3604,14 @@ function renderPipeline(data, photoId) {
 
 <script>
 function findSimilar(photoId) {
+  var alreadyOpen = !!window._similarEscToken;
+  if (alreadyOpen) Keymap.popEsc(window._similarEscToken);
+  window._similarEscToken = Keymap.pushEsc(function() { closeSimilar(); });
+
   var overlay = document.getElementById('similarOverlay');
   var content = document.getElementById('similarContent');
   overlay.classList.add('active');
-  document.body.style.overflow = 'hidden';
+  if (!alreadyOpen) Keymap.lockBodyScroll();
   content.innerHTML = '<p style="color:var(--text-dim);">Searching for similar photos...</p>';
 
   safeFetch('/api/photos/' + photoId + '/similar?limit=40', {}, { toast: false })
@@ -3597,8 +3648,10 @@ function findSimilar(photoId) {
 }
 
 function closeSimilar() {
+  var wasOpen = !!window._similarEscToken;
+  if (wasOpen) { Keymap.popEsc(window._similarEscToken); window._similarEscToken = null; }
   document.getElementById('similarOverlay').classList.remove('active');
-  document.body.style.overflow = '';
+  if (wasOpen) Keymap.unlockBodyScroll();
 }
 </script>
 
