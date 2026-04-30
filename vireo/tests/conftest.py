@@ -11,6 +11,39 @@ from db import Database
 from PIL import Image
 
 
+@pytest.fixture(autouse=True)
+def _restore_global_config_paths():
+    """Snapshot/restore ``config.CONFIG_PATH`` (and ``models``' equivalents)
+    around every test so a leak from a fixture that direct-assigns these
+    module attributes (instead of using ``monkeypatch.setattr``) can't make
+    a later test read a stale tmp_path config and flake.
+
+    Concrete failure this prevents: ``test_scanner.py`` working-copy tests
+    call ``scanner.scan`` → ``cfg.load()``. If a prior test on the same
+    xdist worker left ``cfg.CONFIG_PATH`` pointing at a tmp file containing
+    ``working_copy_max_size: 1000``, those tests' 3000×2000 JPEG fixture
+    becomes a working-copy candidate and the assertion flips.
+    """
+    import config as cfg
+    try:
+        import models
+    except ImportError:  # pragma: no cover - models import side-effects vary
+        models = None
+
+    original_cfg = cfg.CONFIG_PATH
+    original_models_cfg = getattr(models, "CONFIG_PATH", None) if models else None
+    original_models_dir = getattr(models, "DEFAULT_MODELS_DIR", None) if models else None
+
+    yield
+
+    cfg.CONFIG_PATH = original_cfg
+    if models is not None:
+        if original_models_cfg is not None:
+            models.CONFIG_PATH = original_models_cfg
+        if original_models_dir is not None:
+            models.DEFAULT_MODELS_DIR = original_models_dir
+
+
 @pytest.fixture
 def db(tmp_path):
     """Return a Database backed by a temp file."""

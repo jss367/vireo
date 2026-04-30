@@ -162,6 +162,77 @@ def test_deep_merge_preserves_pipeline(tmp_path):
     assert loaded["photos_per_page"] == 50
 
 
+def test_conftest_autouse_fixture_restores_cfg_path(tmp_path):
+    """Lock in the conftest autouse fixture that restores ``cfg.CONFIG_PATH``
+    between tests. Runs a sub-pytest in a subprocess so the two halves of
+    the regression (a leak test, then a verify test) execute serially
+    regardless of how the parent ``-n auto`` xdist run distributes them.
+
+    Without this subprocess wrapper, with xdist's default ``--dist=load``
+    scheduling the leak/verify pair could land on different workers and the
+    verify half would pass trivially even if restoration was broken —
+    silently weakening the guard.
+
+    If the conftest autouse fixture is removed, the inner ``test_z_verify``
+    fails and so does this test. If you're tempted to "fix" this by
+    skipping it, fix the conftest fixture instead — the underlying flake
+    shipped as PR #722's CI failure.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    repo_tests_dir = os.path.dirname(__file__)
+    repo_root = os.path.abspath(os.path.join(repo_tests_dir, "..", ".."))
+
+    # Standalone sub-pytest test dir: a conftest that mirrors the production
+    # autouse fixture (snapshotting cfg.CONFIG_PATH and restoring it on
+    # teardown), and a single test file with two ordered tests.
+    sub_dir = tmp_path / "subpytest"
+    sub_dir.mkdir()
+    (sub_dir / "conftest.py").write_text(textwrap.dedent(f"""
+        import os, sys
+        sys.path.insert(0, {os.path.join(repo_root, "vireo")!r})
+        import pytest
+
+        @pytest.fixture(autouse=True)
+        def _restore_cfg_path():
+            import config as cfg
+            original = cfg.CONFIG_PATH
+            yield
+            cfg.CONFIG_PATH = original
+    """))
+    (sub_dir / "test_leak_then_verify.py").write_text(textwrap.dedent("""
+        # Names chosen so default collection order runs leak before verify.
+        def test_a_leak(tmp_path):
+            import config as cfg
+            cfg.CONFIG_PATH = str(tmp_path / "leaked.json")
+            cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 1234})
+            assert cfg.load()["working_copy_max_size"] == 1234
+
+        def test_z_verify():
+            import config as cfg
+            assert (
+                cfg.load()["working_copy_max_size"]
+                == cfg.DEFAULTS["working_copy_max_size"]
+            ), (
+                f"cfg.CONFIG_PATH leaked from prior test: "
+                f"working_copy_max_size={cfg.load()['working_copy_max_size']!r}, "
+                f"CONFIG_PATH={cfg.CONFIG_PATH!r}"
+            )
+    """))
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", str(sub_dir), "-q",
+         "-p", "no:cacheprovider", "-p", "no:xdist", "--no-header"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, (
+        f"sub-pytest failed (exit {result.returncode}):\n"
+        f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+    )
+
+
 def test_eye_focus_defaults_exist():
     """Config DEFAULTS includes eye-focus detection tunables."""
     from config import DEFAULTS
