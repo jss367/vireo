@@ -108,3 +108,26 @@ def test_esc_stack_remove_by_token(live_server, page):
 
     page.keyboard.press("Escape")
     assert page.evaluate("window._kmEscOrder") == ["first"]
+
+
+def test_page_scope_shadows_global_for_same_key(live_server, page):
+    """When global and page scopes register the same key, page wins."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate("""
+        window._kmFired = '';
+        window.Keymap.register('global', {
+            key: 'p', name: 'g', description: '', category: 'System',
+            action: function() { window._kmFired = 'global'; }
+        });
+        window.Keymap.register('browse', {
+            key: 'p', name: 'b', description: '', category: 'Edit',
+            action: function() { window._kmFired = 'page'; }
+        });
+        window.Keymap.setScope('browse');
+    """)
+
+    page.keyboard.press("p")
+    assert page.evaluate("window._kmFired") == "page"
