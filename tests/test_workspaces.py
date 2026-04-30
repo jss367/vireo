@@ -935,3 +935,49 @@ def test_open_tabs_are_per_workspace(db):
     tabs = db.get_open_tabs()
     assert "keywords" in tabs
     assert "logs" not in tabs
+
+
+def test_workspaces_has_tabs_column(db):
+    cols = [r["name"] for r in db.conn.execute("PRAGMA table_info(workspaces)")]
+    assert "tabs" in cols
+
+
+def test_legacy_workspaces_get_default_tabs_on_migration(tmp_path):
+    """A pre-existing workspaces table without `tabs` should be backfilled with DEFAULT_TABS."""
+    import json as _json
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE workspaces (
+              id INTEGER PRIMARY KEY,
+              name TEXT NOT NULL UNIQUE,
+              config_overrides TEXT,
+              ui_state TEXT,
+              open_tabs TEXT,
+              created_at TEXT DEFAULT (datetime('now')),
+              last_opened_at TEXT)"""
+    )
+    conn.execute(
+        "INSERT INTO workspaces (name, open_tabs) VALUES (?, ?)",
+        ("Legacy", _json.dumps(["settings", "workspace"])),
+    )
+    conn.commit()
+    conn.close()
+
+    from db import DEFAULT_TABS, Database
+    db = Database(db_path)
+    cols = [r["name"] for r in db.conn.execute("PRAGMA table_info(workspaces)")]
+    assert "tabs" in cols
+    row = db.conn.execute("SELECT tabs FROM workspaces WHERE name = 'Legacy'").fetchone()
+    assert _json.loads(row["tabs"]) == DEFAULT_TABS
+
+
+def test_new_workspace_gets_default_tabs(db):
+    import json as _json
+
+    from db import DEFAULT_TABS
+    ws_id = db.create_workspace("Fresh")
+    row = db.conn.execute("SELECT tabs FROM workspaces WHERE id = ?", (ws_id,)).fetchone()
+    assert row["tabs"] is not None
+    assert _json.loads(row["tabs"]) == DEFAULT_TABS

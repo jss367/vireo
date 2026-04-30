@@ -325,6 +325,7 @@ class Database:
                 config_overrides TEXT,
                 ui_state        TEXT,
                 open_tabs       TEXT,
+                tabs            TEXT,
                 created_at      TEXT DEFAULT (datetime('now')),
                 last_opened_at  TEXT
             );
@@ -623,6 +624,17 @@ class Database:
                 "UPDATE workspaces SET open_tabs = ? WHERE open_tabs IS NULL",
                 (json.dumps(["settings", "workspace", "lightroom"]),),
             )
+        # Migration: add `tabs` column. Per the unified-tabs design (2026-04-30),
+        # we reset every workspace's tabs to DEFAULT_TABS — solo-user app, no
+        # preservation of prior nav_order / open_tabs customizations.
+        try:
+            self.conn.execute("SELECT tabs FROM workspaces LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE workspaces ADD COLUMN tabs TEXT")
+            self.conn.execute(
+                "UPDATE workspaces SET tabs = ? WHERE tabs IS NULL",
+                (json.dumps(DEFAULT_TABS),),
+            )
         # Migration: working-copy failure markers. Backfill (and the inline
         # scan extraction) record a failure here when extract_working_copy
         # returns False, gated by file_mtime so a user-replaced file retries
@@ -716,12 +728,13 @@ class Database:
     def create_workspace(self, name, config_overrides=None, ui_state=None):
         """Create a new workspace. Returns the workspace id."""
         cur = self.conn.execute(
-            """INSERT INTO workspaces (name, config_overrides, ui_state, open_tabs)
-               VALUES (?, ?, ?, ?)""",
+            """INSERT INTO workspaces (name, config_overrides, ui_state, open_tabs, tabs)
+               VALUES (?, ?, ?, ?, ?)""",
             (name,
              json.dumps(config_overrides) if config_overrides else None,
              json.dumps(ui_state) if ui_state else None,
-             json.dumps(self.DEFAULT_OPEN_TABS)),
+             json.dumps(self.DEFAULT_OPEN_TABS),  # legacy column, still populated until task 6.x
+             json.dumps(DEFAULT_TABS)),
         )
         self.conn.commit()
         workspace_id = cur.lastrowid
