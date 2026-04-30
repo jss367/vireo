@@ -269,6 +269,48 @@ def test_two_overlays_unwind_one_esc_each(live_server, page):
     )
 
 
+def test_body_scroll_stays_locked_while_lower_overlay_open(live_server, page):
+    """With two overlays stacked, closing the top one must not unlock body
+    scroll while the lower one is still open. Regression test for the bug
+    where each close*() unconditionally cleared document.body.style.overflow,
+    letting the page behind an active overlay scroll after one Esc."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate("openLightbox(1, 'hawk1.jpg')")
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=2000,
+    )
+    assert page.evaluate("document.body.style.overflow") == "hidden"
+
+    page.evaluate("openShortcutsSheet()")
+    page.wait_for_function(
+        "document.getElementById('shortcutsCheatSheet').classList.contains('open')",
+        timeout=2000,
+    )
+    assert page.evaluate("document.body.style.overflow") == "hidden"
+
+    # Closing the top overlay must NOT unlock scroll — lightbox is still open.
+    page.keyboard.press("Escape")
+    page.wait_for_function(
+        "!document.getElementById('shortcutsCheatSheet').classList.contains('open')",
+        timeout=2000,
+    )
+    assert page.evaluate("document.body.style.overflow") == "hidden", (
+        "Body scroll must remain locked while the lower overlay (lightbox) is still open"
+    )
+
+    # Closing the last overlay restores scroll.
+    page.keyboard.press("Escape")
+    page.wait_for_function(
+        "!document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=2000,
+    )
+    assert page.evaluate("document.body.style.overflow") == ""
+
+
 def test_overlay_esc_does_not_leak_to_page_handlers(live_server, page):
     """When the Esc stack handles Esc, page-level Esc handlers (e.g. browse.html
     clearing selection, lightbox close-detail) must not also fire. The capture-

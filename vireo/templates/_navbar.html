@@ -2108,17 +2108,19 @@ function sendReport() {
   }
 
   window.openShortcutsSheet = function() {
-    if (window._sheetEscToken) Keymap.popEsc(window._sheetEscToken);
+    var alreadyOpen = !!window._sheetEscToken;
+    if (alreadyOpen) Keymap.popEsc(window._sheetEscToken);
     window._sheetEscToken = Keymap.pushEsc(function() { closeShortcutsSheet(); });
     renderSheet();
     document.getElementById('shortcutsCheatSheet').classList.add('open');
-    document.body.style.overflow = 'hidden';
+    if (!alreadyOpen) Keymap.lockBodyScroll();
   };
 
   window.closeShortcutsSheet = function() {
-    if (window._sheetEscToken) { Keymap.popEsc(window._sheetEscToken); window._sheetEscToken = null; }
+    var wasOpen = !!window._sheetEscToken;
+    if (wasOpen) { Keymap.popEsc(window._sheetEscToken); window._sheetEscToken = null; }
     document.getElementById('shortcutsCheatSheet').classList.remove('open');
-    document.body.style.overflow = '';
+    if (wasOpen) Keymap.unlockBodyScroll();
   };
 
   // Listen for ? key. Esc is owned by the Keymap.pushEsc stack — this listener
@@ -2479,8 +2481,10 @@ function _lbLoadDetections(photoId) {
 }
 
 function openLightbox(photoId, filename, photoList) {
-  if (window._lbEscToken) Keymap.popEsc(window._lbEscToken);
+  var alreadyOpen = !!window._lbEscToken;
+  if (alreadyOpen) Keymap.popEsc(window._lbEscToken);
   window._lbEscToken = Keymap.pushEsc(function() { closeLightbox(); });
+  if (!alreadyOpen) Keymap.lockBodyScroll();
 
   _lightboxCurrentId = photoId;
   if (photoList) _lightboxPhotoList = photoList;
@@ -2558,7 +2562,6 @@ function openLightbox(photoId, filename, photoList) {
     }
   }
   overlay.classList.add('active');
-  document.body.style.overflow = 'hidden';
 
   // Fetch and render detection bounding boxes
   _lbLoadDetections(photoId);
@@ -2702,7 +2705,8 @@ function toggleLightboxZoom(e) {
 
 function closeLightbox(e) {
   if (e && e.target && e.target.tagName === 'IMG') return;
-  if (window._lbEscToken) { Keymap.popEsc(window._lbEscToken); window._lbEscToken = null; }
+  var wasOpen = !!window._lbEscToken;
+  if (wasOpen) { Keymap.popEsc(window._lbEscToken); window._lbEscToken = null; }
   var wrap = document.getElementById('lightboxWrap');
   if (wrap) { wrap.classList.remove('zoomed'); }
   _lbZoom = 1.0;
@@ -2716,7 +2720,7 @@ function closeLightbox(e) {
   document.getElementById('lightboxZoomBadge').style.display = 'none';
   var detContainer = document.getElementById('lightboxDetections');
   if (detContainer) detContainer.innerHTML = '';
-  document.body.style.overflow = '';
+  if (wasOpen) Keymap.unlockBodyScroll();
 }
 
 /* ---------- Lightbox right-click context menu ----------
@@ -3447,13 +3451,14 @@ function _lbScheduleSourceSwap() {
 
 <script>
 function openPipeline(photoId) {
-  if (window._pipelineEscToken) Keymap.popEsc(window._pipelineEscToken);
+  var alreadyOpen = !!window._pipelineEscToken;
+  if (alreadyOpen) Keymap.popEsc(window._pipelineEscToken);
   window._pipelineEscToken = Keymap.pushEsc(function() { closePipeline(); });
 
   var overlay = document.getElementById('pipelineOverlay');
   var content = document.getElementById('pipelineContent');
   overlay.classList.add('active');
-  document.body.style.overflow = 'hidden';
+  if (!alreadyOpen) Keymap.lockBodyScroll();
   content.innerHTML = '<p style="color:var(--text-dim);">Loading pipeline data...</p>';
 
   safeFetch('/api/photos/' + photoId + '/pipeline', {}, { toast: false })
@@ -3462,9 +3467,10 @@ function openPipeline(photoId) {
 }
 
 function closePipeline() {
-  if (window._pipelineEscToken) { Keymap.popEsc(window._pipelineEscToken); window._pipelineEscToken = null; }
+  var wasOpen = !!window._pipelineEscToken;
+  if (wasOpen) { Keymap.popEsc(window._pipelineEscToken); window._pipelineEscToken = null; }
   document.getElementById('pipelineOverlay').classList.remove('active');
-  document.body.style.overflow = '';
+  if (wasOpen) Keymap.unlockBodyScroll();
 }
 
 function renderPipeline(data, photoId) {
@@ -3598,13 +3604,14 @@ function renderPipeline(data, photoId) {
 
 <script>
 function findSimilar(photoId) {
-  if (window._similarEscToken) Keymap.popEsc(window._similarEscToken);
+  var alreadyOpen = !!window._similarEscToken;
+  if (alreadyOpen) Keymap.popEsc(window._similarEscToken);
   window._similarEscToken = Keymap.pushEsc(function() { closeSimilar(); });
 
   var overlay = document.getElementById('similarOverlay');
   var content = document.getElementById('similarContent');
   overlay.classList.add('active');
-  document.body.style.overflow = 'hidden';
+  if (!alreadyOpen) Keymap.lockBodyScroll();
   content.innerHTML = '<p style="color:var(--text-dim);">Searching for similar photos...</p>';
 
   safeFetch('/api/photos/' + photoId + '/similar?limit=40', {}, { toast: false })
@@ -3641,9 +3648,10 @@ function findSimilar(photoId) {
 }
 
 function closeSimilar() {
-  if (window._similarEscToken) { Keymap.popEsc(window._similarEscToken); window._similarEscToken = null; }
+  var wasOpen = !!window._similarEscToken;
+  if (wasOpen) { Keymap.popEsc(window._similarEscToken); window._similarEscToken = null; }
   document.getElementById('similarOverlay').classList.remove('active');
-  document.body.style.overflow = '';
+  if (wasOpen) Keymap.unlockBodyScroll();
 }
 </script>
 

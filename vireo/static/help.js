@@ -81,24 +81,32 @@
     // Push an Esc handler onto the central Keymap stack so the help modal
     // participates in the one-Esc-per-overlay model. Defensive: if keymap.js
     // failed to load, opening still works — Esc just won't close the modal.
+    var alreadyOpen = !!window._helpEscToken;
     if (window.Keymap && window.Keymap.pushEsc) {
-      if (window._helpEscToken) window.Keymap.popEsc(window._helpEscToken);
+      if (alreadyOpen) window.Keymap.popEsc(window._helpEscToken);
       window._helpEscToken = window.Keymap.pushEsc(function() { window.closeHelpModal(); });
     }
     modal.classList.add('active');
-    document.body.style.overflow = 'hidden';
+    if (!alreadyOpen) {
+      if (window.Keymap && window.Keymap.lockBodyScroll) window.Keymap.lockBodyScroll();
+      else document.body.style.overflow = 'hidden';
+    }
     input.value = '';
     onSearch();
     input.focus();
   };
 
   window.closeHelpModal = function() {
-    if (window.Keymap && window.Keymap.popEsc && window._helpEscToken) {
+    var wasOpen = !!window._helpEscToken;
+    if (window.Keymap && window.Keymap.popEsc && wasOpen) {
       window.Keymap.popEsc(window._helpEscToken);
       window._helpEscToken = null;
     }
     modal.classList.remove('active');
-    document.body.style.overflow = '';
+    if (wasOpen) {
+      if (window.Keymap && window.Keymap.unlockBodyScroll) window.Keymap.unlockBodyScroll();
+      else document.body.style.overflow = '';
+    }
   };
 
   // Close on backdrop click

@@ -59,6 +59,23 @@
   function setScope(scope) { _currentScope = scope; }
   function getScope() { return _currentScope; }
 
+  // Reference-counted body scroll lock. Stacked overlays each lock once on
+  // open and unlock once on close; only the outermost transition touches the
+  // DOM. Without this, closing a top overlay while a lower one is still open
+  // would unconditionally unlock page scroll behind the active overlay.
+  var _bodyScrollLockCount = 0;
+
+  function lockBodyScroll() {
+    if (_bodyScrollLockCount === 0) document.body.style.overflow = 'hidden';
+    _bodyScrollLockCount++;
+  }
+
+  function unlockBodyScroll() {
+    if (_bodyScrollLockCount === 0) return;
+    _bodyScrollLockCount--;
+    if (_bodyScrollLockCount === 0) document.body.style.overflow = '';
+  }
+
   // Esc stack — single owner of the Escape key. Handlers push themselves
   // onto the stack; pressing Esc invokes (and removes) the top handler only.
   var _escStack = [];
@@ -129,6 +146,8 @@
     setScope: setScope,
     getScope: getScope,
     pushEsc: pushEsc,
-    popEsc: popEsc
+    popEsc: popEsc,
+    lockBodyScroll: lockBodyScroll,
+    unlockBodyScroll: unlockBodyScroll
   };
 })(window);
