@@ -3180,6 +3180,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         tabs = db.open_tab(nav_id)
         return jsonify({"ok": True, "open_tabs": tabs})
 
+    @app.route("/api/workspace/tabs/pin", methods=["POST"])
+    def api_pin_tab():
+        from db import ALL_NAV_IDS
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        nav_id = body.get("nav_id")
+        if nav_id not in ALL_NAV_IDS:
+            return json_error("nav_id is not a known page", 400)
+        tabs = db.pin_tab(nav_id)
+        return jsonify({"ok": True, "tabs": tabs})
+
     @app.route("/api/workspace/tabs/close", methods=["POST"])
     def api_close_tab():
         from db import OPENABLE_NAV_IDS

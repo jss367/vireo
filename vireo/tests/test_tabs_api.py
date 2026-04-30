@@ -88,3 +88,28 @@ def test_visiting_openable_url_auto_opens_tab(app_and_db, nav_id, url):
     r = client.get(url)
     assert r.status_code == 200
     assert nav_id in db.get_open_tabs()
+
+
+def test_pin_tab_endpoint_appends(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    r = client.post("/api/workspace/tabs/pin", json={"nav_id": "logs"})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert "logs" in body["tabs"]
+
+
+def test_pin_tab_endpoint_rejects_unknown_navid(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    r = client.post("/api/workspace/tabs/pin", json={"nav_id": "not_a_real_page"})
+    assert r.status_code == 400
+
+
+def test_pin_tab_endpoint_idempotent(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    client.post("/api/workspace/tabs/pin", json={"nav_id": "logs"})
+    r = client.post("/api/workspace/tabs/pin", json={"nav_id": "logs"})
+    assert r.status_code == 200
+    assert r.get_json()["tabs"].count("logs") == 1
