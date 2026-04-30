@@ -113,3 +113,26 @@ def test_pin_tab_endpoint_idempotent(app_and_db):
     r = client.post("/api/workspace/tabs/pin", json={"nav_id": "logs"})
     assert r.status_code == 200
     assert r.get_json()["tabs"].count("logs") == 1
+
+
+def test_unpin_tab_endpoint_removes(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    r = client.post("/api/workspace/tabs/unpin", json={"nav_id": "settings"})
+    assert r.status_code == 200
+    assert "settings" not in r.get_json()["tabs"]
+
+
+def test_unpin_tab_endpoint_idempotent_when_not_pinned(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    client.post("/api/workspace/tabs/unpin", json={"nav_id": "settings"})
+    r = client.post("/api/workspace/tabs/unpin", json={"nav_id": "settings"})
+    assert r.status_code == 200
+
+
+def test_unpin_tab_endpoint_rejects_unknown_navid(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    r = client.post("/api/workspace/tabs/unpin", json={"nav_id": "not_a_real_page"})
+    assert r.status_code == 400
