@@ -8322,12 +8322,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"job_id": job_id})
 
+    def _strip_heavy_for_list(job):
+        """Drop heavy fields from a job dict for the polling response.
+
+        ``GET /api/jobs`` is fetched every few seconds by the navbar
+        and the Jobs page. Some jobs (notably duplicate-scan, which
+        stores every proposal) accumulate ``result`` payloads of tens
+        of MB — re-shipping that on every poll freezes the browser
+        and starves the Flask thread pool.
+
+        Callers that need the full result fetch ``GET /api/jobs/<id>``
+        (active jobs) or ``GET /api/jobs/history`` (history rows),
+        which keep the full payload. ``has_result`` lets the UI tell
+        "no result yet" apart from "result available, fetch on
+        demand" without round-tripping.
+        """
+        trimmed = {k: v for k, v in job.items() if k != "result"}
+        trimmed["has_result"] = job.get("result") is not None
+        return trimmed
+
     @app.route("/api/jobs")
     def api_jobs_list():
         runner = app._job_runner
         db = _get_db()
-        active = runner.list_jobs()
-        history = runner.get_history(db, limit=10)
+        active = [_strip_heavy_for_list(j) for j in runner.list_jobs()]
+        history = [_strip_heavy_for_list(j) for j in runner.get_history(db, limit=10)]
         ws_rows = db.get_workspaces()
         ws_names = {w["id"]: w["name"] for w in ws_rows}
         return jsonify({

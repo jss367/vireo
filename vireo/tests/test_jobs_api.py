@@ -60,6 +60,93 @@ def test_jobs_list(app_and_db):
     assert 'history' in data
 
 
+def test_jobs_list_strips_result_payload(app_and_db):
+    """Heavy ``result`` payloads must not ride along on the polling
+    response — duplicate-scan can stash thousands of proposals there
+    and re-shipping that on every poll freezes the browser."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    runner = app._job_runner
+    big_result = {"proposals": [{"i": i, "filename": f"p_{i}.jpg"} for i in range(2000)]}
+    fake_job = {
+        "id": "fake-duplicate-scan-1",
+        "type": "duplicate-scan",
+        "status": "completed",
+        "started_at": "2026-04-29T20:00:00",
+        "finished_at": "2026-04-29T20:01:00",
+        "progress": {"current": 0, "total": 0},
+        "errors": [],
+        "config": {},
+        "result": big_result,
+    }
+    with runner._lock:
+        runner._jobs["fake-duplicate-scan-1"] = fake_job
+
+    resp = client.get('/api/jobs')
+    data = resp.get_json()
+    listed = next(j for j in data["active"] if j["id"] == "fake-duplicate-scan-1")
+    assert "result" not in listed, (
+        "result must be stripped from /api/jobs polling response so "
+        "huge payloads don't ship on every poll"
+    )
+    assert listed["has_result"] is True, (
+        "has_result lets the UI distinguish 'no result yet' from "
+        "'result available, fetch on demand'"
+    )
+
+
+def test_jobs_list_marks_has_result_false_for_running_jobs(app_and_db):
+    """A running job with no result yet must report has_result=False."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    runner = app._job_runner
+    fake_job = {
+        "id": "fake-running-1",
+        "type": "pipeline",
+        "status": "running",
+        "started_at": "2026-04-29T20:00:00",
+        "finished_at": None,
+        "progress": {"current": 5, "total": 100},
+        "errors": [],
+        "config": {},
+        "result": None,
+    }
+    with runner._lock:
+        runner._jobs["fake-running-1"] = fake_job
+
+    data = client.get('/api/jobs').get_json()
+    listed = next(j for j in data["active"] if j["id"] == "fake-running-1")
+    assert listed["has_result"] is False
+
+
+def test_job_detail_endpoint_returns_full_result(app_and_db):
+    """GET /api/jobs/<id> still returns the full result so callers
+    that need the heavy payload (e.g. duplicates page) can fetch on
+    demand instead of paying for it on every poll."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    runner = app._job_runner
+    big_result = {"proposals": [{"i": i} for i in range(100)]}
+    with runner._lock:
+        runner._jobs["fake-detail-1"] = {
+            "id": "fake-detail-1",
+            "type": "duplicate-scan",
+            "status": "completed",
+            "started_at": "2026-04-29T20:00:00",
+            "finished_at": "2026-04-29T20:01:00",
+            "progress": {"current": 0, "total": 0},
+            "errors": [],
+            "config": {},
+            "result": big_result,
+        }
+
+    detail = client.get('/api/jobs/fake-detail-1').get_json()
+    assert detail["result"] == big_result
+
+
 def test_scan_status_includes_extended_stats(app_and_db):
     """GET /api/scan/status includes keyword count, db_size, etc."""
     app, _ = app_and_db
