@@ -5996,3 +5996,352 @@ def test_update_stages_emits_weighted_current_total():
     assert data["total"] == sum(STAGE_WEIGHTS.values())
     # ingest (2) + scan half (4) = 6
     assert data["current"] == 6
+
+
+# ---------------------------------------------------------------------------
+# Cancel responsiveness in extract_masks / eye_keypoints
+#
+# PR #710 fixed mid-batch cancel for the classify stage. The same hang shape
+# (cancel takes minutes, stage finalizes as plain "completed") still affected
+# extract_masks and eye_keypoints. These tests pin the corrected behavior:
+#   - The per-photo loop in extract_masks breaks promptly on abort.
+#   - extract_masks finalizes with a "Cancelled (X of N processed)" summary.
+#   - eye_keypoints finalizes with a "Cancelled" summary, not the
+#     misleading default "X of N photos processed".
+#   - detect_eye_keypoints_stage in pipeline.py honors an abort_check
+#     callable so a stuck mid-stage cancel can take effect within one
+#     keypoint inference, not at end of stage.
+# ---------------------------------------------------------------------------
+
+
+def _stub_extract_masks_heavy_ops(monkeypatch):
+    """Stub the SAM2 + DINOv2 helpers extract_masks_stage imports so the loop
+    body runs in microseconds. Returns a dict with the proxy-call counter so
+    the test can assert how many photos the loop touched.
+    """
+    import dino_embed
+    import masking
+    import numpy as np
+    import quality
+    from db import Database
+
+    state = {"proxy_calls": 0}
+
+    def fake_render_proxy(image_path, longest_edge=None):
+        state["proxy_calls"] += 1
+        return np.zeros((16, 16, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(masking, "render_proxy", fake_render_proxy)
+    monkeypatch.setattr(
+        masking, "generate_mask",
+        lambda *a, **k: np.ones((16, 16), dtype=np.uint8),
+    )
+    monkeypatch.setattr(
+        masking, "save_mask",
+        lambda mask, dir_, pid_: os.path.join(dir_, f"{pid_}.png"),
+    )
+    monkeypatch.setattr(masking, "crop_completeness", lambda m: 1.0)
+    monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
+    monkeypatch.setattr(masking, "ensure_sam2_weights", lambda **k: None)
+    monkeypatch.setattr(quality, "compute_all_quality_features", lambda p, m: {})
+    monkeypatch.setattr(
+        dino_embed, "embed_global",
+        lambda p, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed_subject",
+        lambda c, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
+    monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
+    monkeypatch.setattr(
+        Database, "update_photo_pipeline_features",
+        lambda self, *a, **k: None,
+    )
+    monkeypatch.setattr(
+        Database, "update_photo_embeddings",
+        lambda self, *a, **k: None,
+    )
+    return state
+
+
+def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
+    tmp_path, monkeypatch,
+):
+    """An abort triggered during extract_masks must finalize the stage with
+    a 'Cancelled (X of N processed)' summary, not as plain 'completed' (or
+    'failed') as if the full set was processed.
+
+    Pre-fix shape: stages["extract_masks"]["status"] was unconditionally set
+    to "completed" or "failed" based only on em_failed, regardless of
+    abort. The user saw a green "completed" summary on a stage that had
+    only processed 173 of 11,285 photos.
+    """
+    import config as cfg
+    import pipeline_job as pj
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+
+    photo_ids = []
+    for i in range(3):
+        name = f"photo{i}.jpg"
+        pid = db.add_photo(
+            folder_id, name, ".jpg", 1000 + i, 1_000_000.0 + i,
+        )
+        _drop_jpeg(folder_path, name)
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+              "confidence": 0.9, "category": "animal"}],
+            detector_model="MegaDetector",
+        )
+        photo_ids.append(pid)
+
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+
+    state = _stub_extract_masks_heavy_ops(monkeypatch)
+
+    # Trigger abort once the first photo's render_proxy fires. The next
+    # iteration's top-of-loop abort check (and the new intra-photo checks)
+    # must catch it before any further photo-level work runs.
+    abort_after_first = threading.Event()
+    real_render = state.get("real_render")  # placeholder; we override below
+
+    import masking
+    import numpy as np
+
+    def render_then_abort(image_path, longest_edge=None):
+        state["proxy_calls"] += 1
+        if state["proxy_calls"] == 1:
+            abort_after_first.set()
+        return np.zeros((16, 16, 3), dtype=np.uint8)
+
+    state["proxy_calls"] = 0  # reset for the override
+    monkeypatch.setattr(masking, "render_proxy", render_then_abort)
+
+    original_should_abort = pj._should_abort
+
+    def patched_should_abort(event):
+        if abort_after_first.is_set():
+            return True
+        return original_should_abort(event)
+
+    monkeypatch.setattr(pj, "_should_abort", patched_should_abort)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Without the intra-photo / top-of-loop abort honoring, all 3 photos
+    # would render their proxies. With the fix, the loop bails after photo 1
+    # (and at most one more iteration if abort lands between sub-steps).
+    assert 1 <= state["proxy_calls"] <= 2, (
+        f"Expected extract_masks to stop within ~1 photo of abort; got "
+        f"{state['proxy_calls']} render_proxy calls."
+    )
+
+    # The final extract_masks step update must carry a 'Cancelled' summary,
+    # not the default 'X masked, Y skipped'.
+    em_finals = [
+        kw for (_, sid, kw) in runner.step_updates
+        if sid == "extract_masks" and kw.get("status") in (
+            "completed", "failed",
+        ) and "summary" in kw
+    ]
+    assert em_finals, (
+        f"Expected at least one final extract_masks update; got "
+        f"step_updates={runner.step_updates!r}"
+    )
+    final_kw = em_finals[-1]
+    final_summary = final_kw.get("summary") or ""
+    assert "Cancelled" in final_summary, (
+        f"extract_masks final summary must reflect cancellation; got "
+        f"{final_summary!r}"
+    )
+    # The status must NOT be 'failed' on a clean cancel — failure status
+    # would inflate the job rollup's error count.
+    assert final_kw.get("status") == "completed", (
+        f"Cancelled extract_masks should finalize as 'completed'; got "
+        f"status={final_kw.get('status')!r}"
+    )
+
+
+def test_pipeline_eye_keypoints_cancel_marks_stage_cancelled(
+    tmp_path, monkeypatch,
+):
+    """An abort during eye_keypoints must finalize the stage with a
+    'Cancelled' summary, not the default 'X of N photos processed' which
+    looks indistinguishable from a clean run that happened to process X.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    import pipeline_job as pj
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    # Stub extract_masks heavies so it sails through (eye_keypoints is
+    # gated on extract_masks running). We do NOT trigger abort during
+    # extract_masks — only during eye_keypoints.
+    _stub_extract_masks_heavy_ops(monkeypatch)
+
+    # Make eye_keypoints reachable: preflight returns None.
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    # The wrapping stage uses list_photos_for_eye_keypoint_stage to compute
+    # `total`. Force a simple list of one photo.
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [{"id": pid}],
+    )
+
+    abort_now = [False]
+
+    def fake_detect_eye_keypoints_stage(
+        db_, config, progress_callback=None,
+        collection_id=None, exclude_photo_ids=None,
+        abort_check=None,
+    ):
+        # Mid-stage: emit a progress event then trigger abort. The wrapping
+        # stage must notice and finalize with a "Cancelled" summary.
+        if progress_callback:
+            progress_callback("Eye keypoints", 0, 1)
+        abort_now[0] = True
+
+    monkeypatch.setattr(
+        pipeline_mod, "detect_eye_keypoints_stage",
+        fake_detect_eye_keypoints_stage,
+    )
+
+    original_should_abort = pj._should_abort
+
+    def patched_should_abort(event):
+        if abort_now[0]:
+            return True
+        return original_should_abort(event)
+
+    monkeypatch.setattr(pj, "_should_abort", patched_should_abort)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    ek_finals = [
+        kw for (_, sid, kw) in runner.step_updates
+        if sid == "eye_keypoints" and kw.get("status") in (
+            "completed", "failed",
+        ) and "summary" in kw
+    ]
+    assert ek_finals, (
+        f"Expected eye_keypoints final update; got "
+        f"step_updates={runner.step_updates!r}"
+    )
+    summary = ek_finals[-1].get("summary") or ""
+    assert "Cancelled" in summary, (
+        f"eye_keypoints final summary must reflect cancellation; got "
+        f"{summary!r}"
+    )
+
+
+def test_detect_eye_keypoints_stage_honors_abort_check(tmp_path, monkeypatch):
+    """detect_eye_keypoints_stage must accept an `abort_check` callable and
+    break the per-photo loop the first time it returns True. Without this
+    hook, a long eye_keypoints run swallows the user's cancel for many
+    inferences.
+    """
+    import pipeline as pipeline_mod
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+
+    # Drive the loop with a controlled photos list. Bypass eligibility and
+    # the route check by stubbing helpers; we only care that the abort_check
+    # parameter is honored before per-photo work fires.
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [
+            {"id": 1}, {"id": 2}, {"id": 3},
+        ],
+    )
+    monkeypatch.setattr(
+        Database, "get_folder_tree",
+        lambda self: [],
+    )
+
+    process_calls = [0]
+
+    def spy_process(*args, **kwargs):
+        process_calls[0] += 1
+
+    monkeypatch.setattr(pipeline_mod, "_process_photo_for_eye", spy_process)
+
+    abort_after_first = [False]
+
+    def abort_check():
+        # Returns False on first poll, True on every subsequent poll. The
+        # loop polls once per photo at the top of each iteration. So the
+        # first photo runs, the second iteration's check breaks.
+        result = abort_after_first[0]
+        abort_after_first[0] = True
+        return result
+
+    pipeline_mod.detect_eye_keypoints_stage(
+        db, config={}, abort_check=abort_check,
+    )
+
+    assert process_calls[0] == 1, (
+        f"detect_eye_keypoints_stage must break on abort_check; "
+        f"got {process_calls[0]} _process_photo_for_eye calls (expected 1)."
+    )

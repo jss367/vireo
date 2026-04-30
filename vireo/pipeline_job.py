@@ -2449,6 +2449,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     variant=dinov2_variant, progress_callback=_dl_progress,
                 )
 
+            processed = 0
             for i, entry in enumerate(photos_to_process):
                 if _should_abort(abort):
                     break
@@ -2463,16 +2464,24 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     proxy = render_proxy(image_path, longest_edge=proxy_longest_edge)
                     if proxy is None:
                         skipped += 1
+                        processed = i + 1
                         continue
+                    if _should_abort(abort):
+                        break
 
                     mask = generate_mask(proxy, det_box, variant=sam2_variant)
                     if mask is None:
                         skipped += 1
+                        processed = i + 1
                         continue
+                    if _should_abort(abort):
+                        break
 
                     mask_path = save_mask(mask, masks_dir, photo_id)
                     completeness = crop_completeness(mask)
                     features = compute_all_quality_features(proxy, mask)
+                    if _should_abort(abort):
+                        break
 
                     subject_crop = crop_subject(proxy, mask, margin=0.15)
                     subj_emb_blob = None
@@ -2498,35 +2507,57 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     em_failed += 1
                     log.warning("Mask extraction failed for photo %s", photo_id, exc_info=True)
 
-                stages["extract_masks"]["count"] = i + 1
+                processed = i + 1
+                stages["extract_masks"]["count"] = processed
                 stages["extract_masks"]["total"] = total
                 runner.update_step(job["id"], "extract_masks",
-                                   progress={"current": i + 1, "total": total},
+                                   progress={"current": processed, "total": total},
                                    error_count=em_failed)
                 runner.push_event(job["id"], "progress", _progress_event(
                     stages, "extract_masks",
                     "Extracting features (SAM2 + DINOv2)",
-                    rate=round((i + 1) / max(time.time() - start_time, 0.01) * 60, 1),
+                    rate=round(processed / max(time.time() - start_time, 0.01) * 60, 1),
                 ))
 
-            final_status = "failed" if em_failed > 0 else "completed"
-            stages["extract_masks"]["status"] = final_status
-            em_rollup = (
-                f"[extract_masks] {em_failed} of {total} photos failed mask extraction"
-                if em_failed > 0 else None
-            )
-            if em_rollup:
-                errors.append(em_rollup)
-            em_summary_parts = [f"{masked} masked", f"{skipped} skipped"]
-            if em_failed:
-                em_summary_parts.append(f"{em_failed} failed")
-            runner.update_step(job["id"], "extract_masks", status=final_status,
-                               summary=", ".join(em_summary_parts),
-                               error_count=em_failed,
-                               error=em_rollup)
-            result["stages"]["extract_masks"] = {
-                "masked": masked, "skipped": skipped, "failed": em_failed, "total": total,
-            }
+            if _should_abort(abort):
+                # Distinguish a user cancel from a clean completion: pin a
+                # "Cancelled" summary on the final step update so the job
+                # tree doesn't report a half-done stage as if it ran to
+                # term. Mirrors the classify-cancel path PR #710 added.
+                stages["extract_masks"]["status"] = "completed"
+                em_summary = (
+                    f"Cancelled ({processed} of {total} processed)"
+                    if total else "Cancelled"
+                )
+                runner.update_step(
+                    job["id"], "extract_masks", status="completed",
+                    progress={"current": processed, "total": total},
+                    summary=em_summary,
+                    error_count=em_failed,
+                )
+                result["stages"]["extract_masks"] = {
+                    "masked": masked, "skipped": skipped, "failed": em_failed,
+                    "total": total, "cancelled": True,
+                }
+            else:
+                final_status = "failed" if em_failed > 0 else "completed"
+                stages["extract_masks"]["status"] = final_status
+                em_rollup = (
+                    f"[extract_masks] {em_failed} of {total} photos failed mask extraction"
+                    if em_failed > 0 else None
+                )
+                if em_rollup:
+                    errors.append(em_rollup)
+                em_summary_parts = [f"{masked} masked", f"{skipped} skipped"]
+                if em_failed:
+                    em_summary_parts.append(f"{em_failed} failed")
+                runner.update_step(job["id"], "extract_masks", status=final_status,
+                                   summary=", ".join(em_summary_parts),
+                                   error_count=em_failed,
+                                   error=em_rollup)
+                result["stages"]["extract_masks"] = {
+                    "masked": masked, "skipped": skipped, "failed": em_failed, "total": total,
+                }
         except Exception as e:
             errors.append(f"[extract_masks] Fatal: {e}")
             log.exception("Pipeline extract-masks stage failed")
@@ -2621,19 +2652,38 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 thread_db, config=pipeline_cfg, progress_callback=_progress,
                 collection_id=collection_id,
                 exclude_photo_ids=params.exclude_photo_ids,
+                abort_check=lambda: _should_abort(abort),
             )
 
             stages["eye_keypoints"]["status"] = "completed"
-            summary = (
-                f"{processed['count']} of {total} photos processed"
-                if total else "No eligible photos"
-            )
-            runner.update_step(
-                job["id"], "eye_keypoints", status="completed", summary=summary,
-            )
-            result["stages"]["eye_keypoints"] = {
-                "processed": processed["count"], "total": total,
-            }
+            if _should_abort(abort):
+                # Match the classify- and extract_masks-cancel summaries so
+                # the job tree distinguishes a user cancel from a clean
+                # finish that happened to process the same count.
+                summary = (
+                    f"Cancelled ({processed['count']} of {total} processed)"
+                    if total else "Cancelled"
+                )
+                runner.update_step(
+                    job["id"], "eye_keypoints",
+                    status="completed", summary=summary,
+                )
+                result["stages"]["eye_keypoints"] = {
+                    "processed": processed["count"], "total": total,
+                    "cancelled": True,
+                }
+            else:
+                summary = (
+                    f"{processed['count']} of {total} photos processed"
+                    if total else "No eligible photos"
+                )
+                runner.update_step(
+                    job["id"], "eye_keypoints",
+                    status="completed", summary=summary,
+                )
+                result["stages"]["eye_keypoints"] = {
+                    "processed": processed["count"], "total": total,
+                }
         except Exception as e:
             errors.append(f"[eye_keypoints] Fatal: {e}")
             log.exception("Pipeline eye-keypoints stage failed")

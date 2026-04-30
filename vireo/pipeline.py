@@ -841,6 +841,7 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
 def detect_eye_keypoints_stage(
     db, config, progress_callback=None,
     collection_id=None, exclude_photo_ids=None,
+    abort_check=None,
 ):
     """Pipeline stage: detect eye keypoints and persist raw tenengrad.
 
@@ -866,6 +867,10 @@ def detect_eye_keypoints_stage(
             photos the user unchecked don't get eye_* values locked in (the
             stage is idempotent via eye_tenengrad IS NULL, so leaking writes
             here would survive future reruns).
+        abort_check: optional zero-arg callable returning True when the
+            run should stop. Polled once per photo; without it a user
+            cancel during a long stage is swallowed until the loop exits
+            naturally.
     """
     skip_reason = eye_keypoint_stage_preflight(config)
     if skip_reason is not None:
@@ -896,6 +901,8 @@ def detect_eye_keypoints_stage(
     total = len(photos)
 
     for i, row in enumerate(photos):
+        if abort_check is not None and abort_check():
+            break
         if progress_callback:
             progress_callback("Eye keypoints", i, total)
         try:

@@ -121,6 +121,10 @@
   background: var(--danger); color: #fff; border: none;
 }
 .btn-cancel:hover { opacity: 0.85; }
+.btn-cancel.cancelling,
+.btn-cancel:disabled {
+  background: var(--text-muted); cursor: progress; opacity: 0.7;
+}
 .btn-retry {
   font-size: 11px; padding: 2px 8px; border-radius: 3px; cursor: pointer;
   background: var(--accent); color: var(--accent-text); border: none;
@@ -262,6 +266,11 @@
   var sseSource = null;
   var leafBuffers = {};
   var LEAF_MAX = 20;
+  // Job ids the user has clicked Cancel on but the server hasn't yet
+  // moved out of the active list. Tracked here so subsequent renders
+  // (every 2s poll) keep showing the optimistic "Cancelling…" state
+  // instead of reverting to a fresh "Cancel" button.
+  var cancellingJobIds = {};
   var collapsedSteps = {};
   var activeWsId = null;
   var workspaceNames = {};
@@ -324,7 +333,11 @@
     }
     html += '<span class="job-detail-status ' + job.status + '">' + job.status + '</span>';
     if (isLive) {
-      html += '<button class="btn-cancel" data-cancel-job="' + esc(job.id) + '">Cancel</button>';
+      if (cancellingJobIds[job.id]) {
+        html += '<button class="btn-cancel cancelling" disabled>Cancelling…</button>';
+      } else {
+        html += '<button class="btn-cancel" data-cancel-job="' + esc(job.id) + '">Cancel</button>';
+      }
     }
     html += '</div>';
 
@@ -500,6 +513,14 @@
         activeJobs = data.active || [];
         activeWsId = data.active_workspace_id || null;
         workspaceNames = data.workspace_names || {};
+        // Drop optimistic-cancel state for jobs that have left the active
+        // list (server has finalized them; their next render comes from
+        // historyJobs which never shows a cancel button).
+        var stillActive = {};
+        activeJobs.forEach(function(j) { stillActive[j.id] = true; });
+        Object.keys(cancellingJobIds).forEach(function(id) {
+          if (!stillActive[id]) delete cancellingJobIds[id];
+        });
         updateList();
         updateRunningBadge();
         if (currentView === 'active') renderActiveOverview();
@@ -695,7 +716,15 @@
     var cancelBtn = e.target.closest('[data-cancel-job]');
     if (cancelBtn) {
       var jobId = cancelBtn.getAttribute('data-cancel-job');
+      // Optimistic UI: flip the button to a disabled "Cancelling…" pill
+      // immediately so the click feels live. The server cancel just sets
+      // a flag; the running stage may take seconds to actually exit. Track
+      // jobId in cancellingJobIds so subsequent fetchJobs re-renders keep
+      // the state until the job moves out of active.
       cancelBtn.disabled = true;
+      cancelBtn.textContent = 'Cancelling…';
+      cancelBtn.classList.add('cancelling');
+      cancellingJobIds[jobId] = true;
       fetch('/api/jobs/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST' })
         .then(function(r) {
           if (r.ok) {
@@ -705,13 +734,19 @@
             return r.json().then(function(data) {
               var msg = (data && data.error) || 'Unable to cancel job';
               if (typeof showToast === 'function') showToast(msg, 'error');
+              delete cancellingJobIds[jobId];
               cancelBtn.disabled = false;
+              cancelBtn.textContent = 'Cancel';
+              cancelBtn.classList.remove('cancelling');
             });
           }
         })
         .catch(function() {
           if (typeof showToast === 'function') showToast('Unable to cancel job', 'error');
+          delete cancellingJobIds[jobId];
           cancelBtn.disabled = false;
+          cancelBtn.textContent = 'Cancel';
+          cancelBtn.classList.remove('cancelling');
         });
     }
   });
