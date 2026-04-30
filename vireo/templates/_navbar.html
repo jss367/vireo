@@ -1288,6 +1288,40 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .navbar .nav-tab.is-ephemeral {
   font-style: italic;
 }
+.cmd-palette-overlay {
+  position: fixed; inset: 0; z-index: 10001;
+  background: rgba(0,0,0,0.45);
+  display: flex; justify-content: center; align-items: flex-start;
+  padding-top: 12vh;
+}
+.cmd-palette-overlay[hidden] { display: none; }
+.cmd-palette {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  width: 480px; max-width: 90vw;
+  max-height: 60vh; display: flex; flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+.cmd-palette input {
+  border: 0; outline: none; padding: 14px 16px;
+  background: transparent; color: var(--text-primary);
+  font-size: 15px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.cmd-palette-results {
+  overflow-y: auto; padding: 4px 0;
+}
+.cmd-palette-result {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 16px; cursor: pointer; color: var(--text-primary);
+  font-size: 13px;
+}
+.cmd-palette-result.selected { background: var(--bg-tertiary, rgba(255,255,255,0.08)); }
+.cmd-palette-result.is-current { color: var(--accent); }
+.cmd-palette-result-pinned {
+  color: var(--text-muted); font-size: 11px; margin-left: auto;
+}
 </style>
 
 <nav class="navbar">
@@ -1319,11 +1353,40 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   </span>
 </nav>
 
+<!-- Command palette (cmd+K) -->
+<div class="cmd-palette-overlay" id="commandPalette" hidden onclick="if(event.target===this)closeCommandPalette()">
+  <div class="cmd-palette">
+    <input type="text" id="cmdPaletteInput" autocomplete="off" placeholder="Jump to page…" />
+    <div id="cmdPaletteResults" class="cmd-palette-results"></div>
+  </div>
+</div>
+
 <script>
-// Temporary stub — real implementation lands in Task 4.1.
-if (typeof window.openCommandPalette !== 'function') {
-  window.openCommandPalette = function() {};
-}
+window.openCommandPalette = function() {
+  const overlay = document.getElementById('commandPalette');
+  if (!overlay) return;
+  overlay.removeAttribute('hidden');
+  const input = document.getElementById('cmdPaletteInput');
+  if (input) { input.value = ''; input.focus(); }
+  if (window._cmdPaletteRender) window._cmdPaletteRender('');
+};
+window.closeCommandPalette = function() {
+  const overlay = document.getElementById('commandPalette');
+  if (overlay) overlay.setAttribute('hidden', '');
+};
+document.addEventListener('keydown', function(e) {
+  const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+  const mod = isMac ? e.metaKey : e.ctrlKey;
+  if (mod && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    window.openCommandPalette();
+  } else if (e.key === 'Escape') {
+    const overlay = document.getElementById('commandPalette');
+    if (overlay && !overlay.hasAttribute('hidden')) {
+      window.closeCommandPalette();
+    }
+  }
+});
 </script>
 
 <!-- Help Modal -->

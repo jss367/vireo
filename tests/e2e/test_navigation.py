@@ -145,6 +145,24 @@ def test_tab_close_button_does_not_change_tab_width_on_hover(live_server, page):
         f"Tab height changed on hover ({box_before['height']} → {box_after['height']})"
 
 
+def test_cmdk_opens_palette(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    # Modal initially hidden
+    palette = page.query_selector("#commandPalette")
+    assert palette is not None
+    assert palette.is_hidden()
+    # Cmd+K (mac) or Ctrl+K elsewhere
+    page.keyboard.press("Meta+K")
+    page.wait_for_selector("#commandPalette:not([hidden])", timeout=2000)
+    # Esc closes
+    page.keyboard.press("Escape")
+    page.wait_for_function(
+        "() => document.getElementById('commandPalette').hasAttribute('hidden')",
+        timeout=2000,
+    )
+
+
 def test_drag_reorder_persists_via_reorder_endpoint(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/browse")
