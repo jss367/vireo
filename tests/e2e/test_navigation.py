@@ -143,3 +143,25 @@ def test_tab_close_button_does_not_change_tab_width_on_hover(live_server, page):
         f"Tab width changed on hover ({box_before['width']} → {box_after['width']})"
     assert abs(box_before["height"] - box_after["height"]) < 1.0, \
         f"Tab height changed on hover ({box_before['height']} → {box_after['height']})"
+
+
+def test_drag_reorder_persists_via_reorder_endpoint(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.wait_for_selector(".nav-tab[data-nav-id='browse']")
+    # Move 'browse' to after 'review' via the public reorder endpoint shape.
+    # (We test the JS hook, not raw mouse drag — drag in headless is flaky.)
+    page.evaluate("""async () => {
+        const tabs = window._navTabs.getTabs();
+        const a = tabs.indexOf('browse');
+        const b = tabs.indexOf('review');
+        if (a < 0 || b < 0) throw new Error('expected default tabs');
+        const next = tabs.slice();
+        next.splice(a, 1);
+        next.splice(b, 0, 'browse');
+        await window._navTabs.setTabs(next);
+    }""")
+    page.wait_for_function("""() => {
+        const t = window._navTabs.getTabs();
+        return t.indexOf('browse') > t.indexOf('review');
+    }""", timeout=3000)

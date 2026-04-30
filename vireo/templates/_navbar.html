@@ -1879,146 +1879,87 @@ function sendReport() {
 </script>
 
 <script>
-/* ---------- Nav reorder + Active page highlighting ---------- */
+/* ---------- Drag-reorder over the unified strip ---------- */
 (function() {
-  // Reorder nav links from workspace config
-  function reorderNavLinks(order) {
-    var navbar = document.querySelector('.navbar');
-    var divider = navbar.querySelector('.nav-tab-divider') || navbar.querySelector('.nav-spacer');
-    var links = {};
-    navbar.querySelectorAll('a[data-nav-id]:not([data-tab])').forEach(function(a) {
-      links[a.dataset.navId] = a;
-    });
-    order.forEach(function(id) {
-      if (links[id]) {
-        navbar.insertBefore(links[id], divider);
-        delete links[id];
-      }
-    });
-    Object.keys(links).forEach(function(id) {
-      navbar.insertBefore(links[id], divider);
-    });
+  function strip() { return document.getElementById('navTabStrip'); }
+  function tabAnchors() {
+    return Array.from(strip().querySelectorAll('.nav-tab:not(.is-ephemeral)'));
   }
 
-  fetch('/api/workspaces/active/config')
-    .then(function(r) { return r.json(); })
-    .then(function(cfg) {
-      if (cfg.nav_order && Array.isArray(cfg.nav_order)) {
-        reorderNavLinks(cfg.nav_order);
-      }
-    })
-    .catch(function() {}); // silently ignore — default order is fine
+  let draggedEl = null;
+  let indicator = null;
 
-  // Drag-and-drop reordering
-  (function initNavDragDrop() {
-    var navbar = document.querySelector('.navbar');
-    var draggedEl = null;
-    var indicator = null;
+  function createIndicator() {
+    const el = document.createElement('span');
+    el.className = 'nav-drop-indicator';
+    return el;
+  }
+  function removeIndicator() {
+    if (indicator && indicator.parentNode) indicator.parentNode.removeChild(indicator);
+    indicator = null;
+  }
 
-    function getNavLinks() {
-      // Linger pages only — exclude openable tabs (which are governed by open_tabs).
-      return Array.from(navbar.querySelectorAll('a[data-nav-id]:not([data-tab])'));
-    }
-
-    function createIndicator() {
-      var el = document.createElement('span');
-      el.className = 'nav-drop-indicator';
-      return el;
-    }
-
-    function removeIndicator() {
-      if (indicator && indicator.parentNode) {
-        indicator.parentNode.removeChild(indicator);
-      }
-      indicator = null;
-    }
-
-    function saveOrder() {
-      var order = getNavLinks().map(function(a) { return a.dataset.navId; });
-      fetch('/api/workspaces/active/nav-order', {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({nav_order: order})
-      });
-    }
-
-    getNavLinks().forEach(function(link) {
+  function bindDragHandlers() {
+    tabAnchors().forEach(link => {
+      // Idempotent: ensure draggable=true (re-render replaces nodes).
       link.draggable = true;
-
+      if (link.dataset.dragBound) return;
+      link.dataset.dragBound = '1';
       link.addEventListener('dragstart', function(e) {
         draggedEl = this;
         this.classList.add('dragging');
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', this.dataset.navId);
       });
-
       link.addEventListener('dragend', function() {
         this.classList.remove('dragging');
         removeIndicator();
         draggedEl = null;
       });
-
       link.addEventListener('dragover', function(e) {
         if (!draggedEl || draggedEl === this) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         removeIndicator();
-        var rect = this.getBoundingClientRect();
-        var midX = rect.left + rect.width / 2;
+        const rect = this.getBoundingClientRect();
+        const midX = rect.left + rect.width / 2;
         indicator = createIndicator();
-        if (e.clientX < midX) {
-          navbar.insertBefore(indicator, this);
-        } else {
-          navbar.insertBefore(indicator, this.nextSibling);
-        }
+        if (e.clientX < midX) strip().insertBefore(indicator, this);
+        else strip().insertBefore(indicator, this.nextSibling);
       });
-
       link.addEventListener('drop', function(e) {
         if (!draggedEl || draggedEl === this) return;
         e.preventDefault();
-        var rect = this.getBoundingClientRect();
-        var midX = rect.left + rect.width / 2;
-        if (e.clientX < midX) {
-          navbar.insertBefore(draggedEl, this);
-        } else {
-          navbar.insertBefore(draggedEl, this.nextSibling);
-        }
+        const rect = this.getBoundingClientRect();
+        const midX = rect.left + rect.width / 2;
+        if (e.clientX < midX) strip().insertBefore(draggedEl, this);
+        else strip().insertBefore(draggedEl, this.nextSibling);
         removeIndicator();
-        saveOrder();
+        const newOrder = tabAnchors().map(a => a.dataset.navId);
+        if (window._navTabs) window._navTabs.setTabs(newOrder);
       });
     });
-
-    // Remove indicator when dragging leaves the navbar
-    navbar.addEventListener('dragleave', function(e) {
-      if (!navbar.contains(e.relatedTarget)) {
-        removeIndicator();
-      }
+    // Cancel indicator when leaving the strip
+    strip().addEventListener('dragleave', function(e) {
+      if (!strip().contains(e.relatedTarget)) removeIndicator();
     });
-  })();
-
-  // Active page highlighting
-  var path = location.pathname;
-  var navLinks = document.querySelectorAll('.navbar > a[href]:not(.brand)');
-  var exactMatch = null;
-  for (var i = 0; i < navLinks.length; i++) {
-    if (path === navLinks[i].getAttribute('href')) {
-      exactMatch = navLinks[i];
-      break;
-    }
   }
-  if (exactMatch) {
-    exactMatch.classList.add('active');
+
+  // Re-bind every time the strip re-renders. We do that by hooking into
+  // _navTabs.fetchAndRender via a small wrapper — but simpler: a
+  // MutationObserver on the strip.
+  function init() {
+    const s = strip();
+    if (!s) return;
+    bindDragHandlers();
+    const mo = new MutationObserver(() => bindDragHandlers());
+    mo.observe(s, {childList: true});
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
   } else {
-    var best = null;
-    var bestLen = 0;
-    for (var i = 0; i < navLinks.length; i++) {
-      var href = navLinks[i].getAttribute('href');
-      if (href !== '/' && path.startsWith(href) && href.length > bestLen) {
-        best = navLinks[i];
-        bestLen = href.length;
-      }
-    }
-    if (best) best.classList.add('active');
+    init();
   }
 })();
 
