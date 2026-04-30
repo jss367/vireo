@@ -267,3 +267,47 @@ def test_two_overlays_unwind_one_esc_each(live_server, page):
         "!document.getElementById('lightboxOverlay').classList.contains('active')",
         timeout=2000,
     )
+
+
+def test_overlay_esc_does_not_leak_to_page_handlers(live_server, page):
+    """When the Esc stack handles Esc, page-level Esc handlers (e.g. browse.html
+    clearing selection, lightbox close-detail) must not also fire. The capture-
+    phase dispatcher + stopPropagation guarantees this."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    # Add a body-level bubble Esc spy
+    page.evaluate("""
+        window.__leakCount = 0;
+        document.body.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') window.__leakCount += 1;
+        });
+    """)
+
+    # Push an Esc handler via the stack
+    page.evaluate("""
+        window._testEscToken = window.Keymap.pushEsc(function() {});
+    """)
+
+    page.keyboard.press("Escape")
+    assert page.evaluate("window.__leakCount") == 0, "Esc must not leak to body when handled by stack"
+
+
+def test_esc_closes_help_modal_via_stack(live_server, page):
+    """Help modal opened via F1 pushes an Esc handler; Esc closes it."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    page.keyboard.press("F1")
+    page.wait_for_function(
+        "document.getElementById('helpModal').classList.contains('active')",
+        timeout=2000,
+    )
+
+    page.keyboard.press("Escape")
+    page.wait_for_function(
+        "!document.getElementById('helpModal').classList.contains('active')",
+        timeout=2000,
+    )

@@ -78,6 +78,13 @@
 
   // Open / close
   window.openHelpModal = function() {
+    // Push an Esc handler onto the central Keymap stack so the help modal
+    // participates in the one-Esc-per-overlay model. Defensive: if keymap.js
+    // failed to load, opening still works — Esc just won't close the modal.
+    if (window.Keymap && window.Keymap.pushEsc) {
+      if (window._helpEscToken) window.Keymap.popEsc(window._helpEscToken);
+      window._helpEscToken = window.Keymap.pushEsc(function() { window.closeHelpModal(); });
+    }
     modal.classList.add('active');
     document.body.style.overflow = 'hidden';
     input.value = '';
@@ -86,6 +93,10 @@
   };
 
   window.closeHelpModal = function() {
+    if (window.Keymap && window.Keymap.popEsc && window._helpEscToken) {
+      window.Keymap.popEsc(window._helpEscToken);
+      window._helpEscToken = null;
+    }
     modal.classList.remove('active');
     document.body.style.overflow = '';
   };
@@ -95,7 +106,8 @@
     if (e.target === modal) window.closeHelpModal();
   });
 
-  // Keyboard: F1 to open, Escape to close
+  // Keyboard: F1 toggles the help modal. Esc is owned by the Keymap.pushEsc
+  // stack (registered in openHelpModal) and is intentionally NOT handled here.
   document.addEventListener('keydown', function(e) {
     if (e.key === 'F1') {
       e.preventDefault();
@@ -104,9 +116,6 @@
       } else {
         window.openHelpModal();
       }
-    }
-    if (e.key === 'Escape' && modal.classList.contains('active')) {
-      window.closeHelpModal();
     }
   });
 
