@@ -5127,4 +5127,130 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
   /* Updater disabled — startupUpdateCheck skipped until updater is configured */
 </script>
 <script src="/static/vendor/fuse.min.js"></script>
+<script>
+(function() {
+  let allPages = [];
+  let pinnedSet = new Set();
+  let fuse = null;
+  let results = [];
+  let selectedIndex = 0;
+
+  function refreshFromTabsState() {
+    return fetch('/api/workspace/tabs').then(r => r.json()).then(state => {
+      allPages = state.all_pages || [];
+      pinnedSet = new Set(state.tabs || []);
+      // Configure Fuse over labels and ids
+      if (window.Fuse) {
+        fuse = new Fuse(allPages, {
+          keys: [
+            {name: 'label', weight: 0.7},
+            {name: 'id',    weight: 0.3},
+          ],
+          threshold: 0.4,
+          ignoreLocation: true,
+        });
+      }
+    });
+  }
+
+  function currentNavId() {
+    const p = window.location.pathname;
+    if (p.startsWith('/pipeline/review')) return 'pipeline_review';
+    if (p === '/' || p.startsWith('/browse')) return 'browse';
+    return (p.split('/')[1] || '').replace(/-/g, '_');
+  }
+
+  function defaultSorted() {
+    // Pinned in pinned-order (use _navTabs if available), then unpinned
+    // alphabetically by label.
+    const pinnedOrder = (window._navTabs ? window._navTabs.getTabs() : []);
+    const pinnedById = new Map(allPages.map(p => [p.id, p]));
+    const out = [];
+    pinnedOrder.forEach(id => {
+      if (pinnedById.has(id)) out.push(pinnedById.get(id));
+    });
+    const unpinned = allPages
+      .filter(p => !pinnedSet.has(p.id))
+      .sort((a, b) => a.label.localeCompare(b.label));
+    return out.concat(unpinned);
+  }
+
+  function render(query) {
+    const list = document.getElementById('cmdPaletteResults');
+    if (!list) return;
+    list.textContent = '';
+    if (!query) {
+      results = defaultSorted();
+    } else if (fuse) {
+      results = fuse.search(query).map(r => r.item);
+    } else {
+      const q = query.toLowerCase();
+      results = allPages.filter(p =>
+        p.label.toLowerCase().includes(q) || p.id.includes(q)
+      );
+    }
+    if (selectedIndex >= results.length) selectedIndex = 0;
+    const cur = currentNavId();
+    results.forEach((p, idx) => {
+      const row = document.createElement('div');
+      row.className = 'cmd-palette-result' + (idx === selectedIndex ? ' selected' : '');
+      if (p.id === cur) row.classList.add('is-current');
+      row.dataset.navId = p.id;
+      row.appendChild(document.createTextNode(p.label));
+      if (pinnedSet.has(p.id)) {
+        const pin = document.createElement('span');
+        pin.className = 'cmd-palette-result-pinned';
+        pin.textContent = '📌';
+        row.appendChild(pin);
+      }
+      row.addEventListener('click', () => navigateTo(p));
+      list.appendChild(row);
+    });
+  }
+
+  function navigateTo(page) {
+    window.closeCommandPalette();
+    window.location.href = page.href;
+  }
+
+  // Wire input handlers
+  document.addEventListener('DOMContentLoaded', () => {
+    const input = document.getElementById('cmdPaletteInput');
+    if (!input) return;
+    input.addEventListener('input', () => {
+      selectedIndex = 0;
+      render(input.value);
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (results.length === 0) return;
+        selectedIndex = (selectedIndex + 1) % results.length;
+        render(input.value);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (results.length === 0) return;
+        selectedIndex = (selectedIndex - 1 + results.length) % results.length;
+        render(input.value);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        const target = results[selectedIndex];
+        if (target) navigateTo(target);
+      }
+    });
+  });
+
+  // Re-fetch state when palette opens (in case tabs changed)
+  const origOpen = window.openCommandPalette;
+  window.openCommandPalette = function() {
+    selectedIndex = 0;
+    refreshFromTabsState().then(() => {
+      origOpen();
+    });
+  };
+  window._cmdPaletteRender = render;
+
+  refreshFromTabsState();
+})();
+</script>
 <script src="/static/help.js"></script>

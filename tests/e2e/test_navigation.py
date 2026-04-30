@@ -163,6 +163,37 @@ def test_cmdk_opens_palette(live_server, page):
     )
 
 
+def test_palette_filters_by_query(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.keyboard.press("Meta+K")
+    page.wait_for_selector("#commandPalette:not([hidden])")
+    page.fill("#cmdPaletteInput", "dup")
+    # Wait for Duplicates row to be the (only/top) result
+    page.wait_for_selector(".cmd-palette-result[data-nav-id='duplicates']", timeout=2000)
+
+
+def test_palette_enter_navigates(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.keyboard.press("Meta+K")
+    page.fill("#cmdPaletteInput", "dup")
+    page.wait_for_selector(".cmd-palette-result[data-nav-id='duplicates'].selected")
+    page.keyboard.press("Enter")
+    page.wait_for_url(f"{url}/duplicates", timeout=3000)
+
+
+def test_palette_arrow_keys_change_selection(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.keyboard.press("Meta+K")
+    # Empty query → all 20 pages, selected=top
+    first = page.eval_on_selector(".cmd-palette-result.selected", "el => el.dataset.navId")
+    page.keyboard.press("ArrowDown")
+    second = page.eval_on_selector(".cmd-palette-result.selected", "el => el.dataset.navId")
+    assert first != second
+
+
 def test_drag_reorder_persists_via_reorder_endpoint(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/browse")
