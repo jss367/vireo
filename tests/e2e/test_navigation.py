@@ -201,6 +201,17 @@ def test_cmd1_jumps_to_first_pinned_tab(live_server, page):
     page.wait_for_url(f"{url}/browse", timeout=3000)
 
 
+def test_cmdw_closes_ephemeral_tab(live_server, page):
+    """cmd+W on an ephemeral (unpinned) page navigates away (clears slot)."""
+    url = live_server["url"]
+    # /keywords is not in default pinned tabs — visiting makes it ephemeral.
+    page.goto(f"{url}/keywords")
+    page.wait_for_selector(".nav-tab[data-nav-id='keywords'].is-ephemeral", timeout=3000)
+    page.keyboard.press("Meta+W")
+    # After cmd+W, the page should navigate away from /keywords.
+    page.wait_for_function("() => !location.pathname.startsWith('/keywords')", timeout=3000)
+
+
 def test_drag_reorder_persists_via_reorder_endpoint(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/browse")

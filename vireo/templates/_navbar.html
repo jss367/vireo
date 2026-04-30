@@ -1164,7 +1164,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   position: relative;
   /* Reserve space at the right for the absolutely-positioned close button
      so it never overlaps the tab label. Width matches close-button visual
-     footprint (≈18px including its 4px right offset). */
+     footprint (≈22px including its 4px right offset). */
   padding-right: 22px;
 }
 .navbar .nav-tab-close {
@@ -1354,7 +1354,7 @@ document.addEventListener('keydown', function(e) {
       if (target) window.location.href = target.href;
     }
   }
-  // cmd+W → close current tab
+  // cmd+W → close current tab (pinned or ephemeral)
   if (mod && e.key.toLowerCase() === 'w') {
     const cur = (function() {
       const p = window.location.pathname;
@@ -1362,14 +1362,15 @@ document.addEventListener('keydown', function(e) {
       if (p === '/' || p.startsWith('/browse')) return 'browse';
       return (p.split('/')[1] || '').replace(/-/g, '_');
     })();
-    const tabs = (window._navTabs ? window._navTabs.getTabs() : []);
-    if (cur && tabs.includes(cur)) {
-      e.preventDefault();
-      // Reuse the unpin path: simulate click on the close button
-      const closeBtn = document.querySelector(
-        '.nav-tab[data-nav-id="' + cur + '"] .nav-tab-close'
-      );
-      if (closeBtn) closeBtn.click();
+    if (cur) {
+      // The ephemeral tab also renders as .nav-tab with a .nav-tab-close
+      // that calls clearEphemeral(), so a single selector handles both.
+      const tabAnchor = document.querySelector('.nav-tab[data-nav-id="' + cur + '"]');
+      if (tabAnchor) {
+        e.preventDefault();
+        const closeBtn = tabAnchor.querySelector('.nav-tab-close');
+        if (closeBtn) closeBtn.click();
+      }
     }
   }
 });
