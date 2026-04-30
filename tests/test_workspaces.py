@@ -981,3 +981,87 @@ def test_new_workspace_gets_default_tabs(db):
     row = db.conn.execute("SELECT tabs FROM workspaces WHERE id = ?", (ws_id,)).fetchone()
     assert row["tabs"] is not None
     assert _json.loads(row["tabs"]) == DEFAULT_TABS
+
+
+def test_get_tabs_returns_default_for_new_workspace(db):
+    from db import DEFAULT_TABS
+    ws_id = db.create_workspace("Fresh")
+    db.set_active_workspace(ws_id)
+    assert db.get_tabs() == DEFAULT_TABS
+
+
+def test_pin_tab_appends(db):
+    from db import DEFAULT_TABS
+    ws_id = db.create_workspace("Fresh")
+    db.set_active_workspace(ws_id)
+    result = db.pin_tab("logs")
+    assert result == DEFAULT_TABS + ["logs"]
+    assert db.get_tabs() == DEFAULT_TABS + ["logs"]
+
+
+def test_pin_tab_idempotent(db):
+    ws_id = db.create_workspace("Fresh")
+    db.set_active_workspace(ws_id)
+    db.pin_tab("logs")
+    db.pin_tab("logs")
+    assert db.get_tabs().count("logs") == 1
+
+
+def test_pin_tab_rejects_unknown_id(db):
+    import pytest
+    ws_id = db.create_workspace("Fresh")
+    db.set_active_workspace(ws_id)
+    with pytest.raises(ValueError):
+        db.pin_tab("not_a_real_page")
+
+
+def test_unpin_tab_removes(db):
+    ws_id = db.create_workspace("Fresh")
+    db.set_active_workspace(ws_id)
+    db.unpin_tab("settings")
+    assert "settings" not in db.get_tabs()
+
+
+def test_unpin_tab_idempotent_when_not_pinned(db):
+    ws_id = db.create_workspace("Fresh")
+    db.set_active_workspace(ws_id)
+    db.unpin_tab("logs")  # not in defaults
+    db.unpin_tab("logs")  # again
+    assert "logs" not in db.get_tabs()
+
+
+def test_set_tabs_replaces_full_list(db):
+    ws_id = db.create_workspace("Fresh")
+    db.set_active_workspace(ws_id)
+    new_order = ["cull", "review", "browse"]
+    result = db.set_tabs(new_order)
+    assert result == new_order
+    assert db.get_tabs() == new_order
+
+
+def test_set_tabs_rejects_unknown_id(db):
+    import pytest
+    ws_id = db.create_workspace("Fresh")
+    db.set_active_workspace(ws_id)
+    with pytest.raises(ValueError):
+        db.set_tabs(["browse", "not_a_real_page"])
+
+
+def test_set_tabs_rejects_duplicates(db):
+    import pytest
+    ws_id = db.create_workspace("Fresh")
+    db.set_active_workspace(ws_id)
+    with pytest.raises(ValueError):
+        db.set_tabs(["browse", "browse", "review"])
+
+
+def test_tabs_are_per_workspace(db):
+    from db import DEFAULT_TABS
+    ws1 = db.create_workspace("WS1")
+    ws2 = db.create_workspace("WS2")
+    db.set_active_workspace(ws1)
+    db.pin_tab("logs")
+    assert "logs" in db.get_tabs()
+    db.set_active_workspace(ws2)
+    assert db.get_tabs() == DEFAULT_TABS
+    assert "logs" not in db.get_tabs()

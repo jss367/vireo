@@ -936,6 +936,77 @@ class Database:
             self.conn.commit()
         return tabs
 
+    def get_tabs(self):
+        """Return the active workspace's ordered list of pinned tab nav-ids."""
+        ws = self.get_workspace(self._ws_id())
+        if not ws or not ws["tabs"]:
+            return list(DEFAULT_TABS)
+        try:
+            value = json.loads(ws["tabs"]) if isinstance(ws["tabs"], str) else ws["tabs"]
+            return value if isinstance(value, list) else list(DEFAULT_TABS)
+        except (json.JSONDecodeError, TypeError):
+            return list(DEFAULT_TABS)
+
+    def set_tabs(self, tabs):
+        """Replace the active workspace's tabs with the given ordered list.
+
+        Validates every entry against ALL_NAV_IDS. Rejects duplicates so the
+        UI invariant "each pinned page appears exactly once" is enforced at
+        the storage layer.
+        Returns the new list.
+        """
+        if not isinstance(tabs, list):
+            raise ValueError("tabs must be a list")
+        seen = set()
+        for nav_id in tabs:
+            if nav_id not in ALL_NAV_IDS:
+                raise ValueError(f"{nav_id!r} is not a known nav id")
+            if nav_id in seen:
+                raise ValueError(f"{nav_id!r} appears more than once")
+            seen.add(nav_id)
+        self.conn.execute(
+            "UPDATE workspaces SET tabs = ? WHERE id = ?",
+            (json.dumps(tabs), self._ws_id()),
+        )
+        self.conn.commit()
+        return list(tabs)
+
+    def pin_tab(self, nav_id):
+        """Append nav_id to the active workspace's tabs if not present.
+
+        Raises ValueError if nav_id is not in ALL_NAV_IDS.
+        Returns the new list.
+        """
+        if nav_id not in ALL_NAV_IDS:
+            raise ValueError(f"{nav_id!r} is not a known nav id")
+        tabs = self.get_tabs()
+        if nav_id not in tabs:
+            tabs.append(nav_id)
+            self.conn.execute(
+                "UPDATE workspaces SET tabs = ? WHERE id = ?",
+                (json.dumps(tabs), self._ws_id()),
+            )
+            self.conn.commit()
+        return tabs
+
+    def unpin_tab(self, nav_id):
+        """Remove nav_id from the active workspace's tabs if present.
+
+        Raises ValueError if nav_id is not in ALL_NAV_IDS.
+        Returns the new list.
+        """
+        if nav_id not in ALL_NAV_IDS:
+            raise ValueError(f"{nav_id!r} is not a known nav id")
+        tabs = self.get_tabs()
+        if nav_id in tabs:
+            tabs = [t for t in tabs if t != nav_id]
+            self.conn.execute(
+                "UPDATE workspaces SET tabs = ? WHERE id = ?",
+                (json.dumps(tabs), self._ws_id()),
+            )
+            self.conn.commit()
+        return tabs
+
     def set_workspace_active_labels(self, labels_files):
         """Store active_labels in the workspace's config_overrides."""
         ws = self.get_workspace(self._ws_id())
