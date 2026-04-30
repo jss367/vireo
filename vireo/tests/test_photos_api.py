@@ -1093,6 +1093,130 @@ def test_eviction_removes_oldest_files_when_over_quota(tmp_path, monkeypatch):
     assert not (preview_dir / f"{pid2}_1920.jpg").exists()
 
 
+def test_reconcile_drops_ghost_rows_when_files_missing(tmp_path):
+    """Rows whose on-disk files no longer exist must be removed so
+    accounting doesn't keep eviction asleep on phantom bytes."""
+    from db import Database
+    from preview_cache import reconcile_preview_cache
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    (vireo_dir / "previews").mkdir()
+    db = Database(str(vireo_dir / "vireo.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(tmp_path / "src"), name="src")
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=1, file_mtime=1.0)
+
+    # Row exists in table but no file on disk — exactly the drift state
+    # observed in production (DB says ~2 GB tracked, disk has 0 bytes).
+    db.preview_cache_insert(pid, 1920, 450_000)
+    assert db.preview_cache_total_bytes() == 450_000
+
+    dropped = reconcile_preview_cache(db, str(vireo_dir))
+    assert dropped == 1
+    assert db.preview_cache_total_bytes() == 0
+    assert db.preview_cache_get(pid, 1920) is None
+
+
+def test_reconcile_keeps_live_rows(tmp_path):
+    """Rows whose on-disk file exists must survive reconcile."""
+    from db import Database
+    from PIL import Image
+    from preview_cache import reconcile_preview_cache
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    db = Database(str(vireo_dir / "vireo.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(tmp_path / "src"), name="src")
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=1, file_mtime=1.0)
+
+    preview_file = preview_dir / f"{pid}_1920.jpg"
+    Image.new("RGB", (1920, 1280), (10, 20, 30)).save(str(preview_file), "JPEG")
+    db.preview_cache_insert(pid, 1920, preview_file.stat().st_size)
+
+    dropped = reconcile_preview_cache(db, str(vireo_dir))
+    assert dropped == 0
+    assert db.preview_cache_get(pid, 1920) is not None
+
+
+def test_startup_reconciles_before_eviction(tmp_path, monkeypatch):
+    """create_app must drop ghost rows so eviction sees real totals.
+
+    Regression for the production drift: 2 GB of phantom rows kept
+    eviction asleep while the previews dir was empty, and every
+    pipeline run paid the full RAW-decode cost for previews."""
+    import config as cfg
+    import models
+    from app import create_app
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vm"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    (vireo_dir / "previews").mkdir()
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(tmp_path / "src"), name="src")
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=1, file_mtime=1.0)
+
+    # Seed a ghost row: bytes claimed but no file behind it.
+    db.preview_cache_insert(pid, 1920, 450_000)
+    db.close()
+
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir),
+               api_token="test-token-123")
+
+    db2 = Database(db_path)
+    assert db2.preview_cache_total_bytes() == 0, (
+        "Startup must reconcile ghost rows so eviction operates on "
+        "real bytes, not phantom accounting."
+    )
+    db2.close()
+
+
+def test_preview_cache_endpoint_returns_recommended_mb(client_with_photo):
+    """/api/preview-cache exposes a recommendation so the UI can warn
+    when the configured cap is smaller than the photo library."""
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    # No measured rows yet → uses the 500 KB-per-preview fallback.
+    resp = client.get("/api/preview-cache")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "recommended_mb" in data
+    assert data["recommended_mb"] >= 1
+
+
+def test_recommendation_uses_measured_avg_when_rows_exist(client_with_photo):
+    """Recommendation scales with the actually-observed preview size."""
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    # Generate a real preview to populate the table with a measured size.
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    resp = client.get("/api/preview-cache")
+    data = resp.get_json()
+    # 1 photo × measured avg should round to a small positive MB value.
+    # The exact value depends on JPEG output; just assert sane bounds.
+    assert 1 <= data["recommended_mb"] <= 10
+
+
 def test_preview_cache_endpoint_uses_db(client_with_photo):
     """/api/preview-cache returns totals from preview_cache table, not filesystem."""
     app, db, photo_id = client_with_photo

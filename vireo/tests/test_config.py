@@ -107,9 +107,14 @@ def test_working_copy_defaults(tmp_path, monkeypatch):
 
 
 def test_preview_cache_max_mb_default():
-    """Default config includes preview_cache_max_mb = 2048."""
+    """Default config includes preview_cache_max_mb = 20480 (20 GB).
+
+    A 2 GB cap (the prior default) only fits ~5,000 previews at 1920px,
+    so a single 22k-photo workspace would re-decode every preview from
+    RAW on every pipeline run. 20 GB comfortably covers a typical
+    library."""
     import config as cfg
-    assert cfg.DEFAULTS["preview_cache_max_mb"] == 2048
+    assert cfg.DEFAULTS["preview_cache_max_mb"] == 20480
 
 
 def test_load_returns_defaults_when_no_file(tmp_path):

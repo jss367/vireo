@@ -46,7 +46,7 @@ DEFAULTS = {
     "working_copy_max_size": 4096,
     "working_copy_quality": 92,
     "preview_quality": 90,
-    "preview_cache_max_mb": 2048,
+    "preview_cache_max_mb": 20480,
     "browse_thumb_default": 220,
     # --- Detection ---
     "detector_confidence": 0.2,

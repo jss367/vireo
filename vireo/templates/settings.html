@@ -296,7 +296,7 @@
         <small>Maximum disk space for cached previews (MB). Oldest entries are evicted first. Set to 0 to disable caching.</small>
       </div>
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;width:100%;">
-        <input type="number" id="cfgPreviewCacheMaxMb" min="0" step="128" value="2048"
+        <input type="number" id="cfgPreviewCacheMaxMb" min="0" step="128" value="20480"
                style="width:90px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                onchange="saveConfig()">
         <span style="font-size:13px;color:var(--text-dim);">MB</span>
@@ -304,6 +304,7 @@
         <button id="clearPreviewCacheBtn" onclick="clearPreviewCache()"
                 style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Clear cache</button>
       </div>
+      <div id="previewCacheWarning" style="display:none;width:100%;font-size:12px;color:var(--accent);background:var(--bg-tertiary);border-left:3px solid var(--accent);padding:8px 12px;border-radius:4px;"></div>
     </div>
     <div class="setting-row">
       <div class="setting-label">
@@ -1215,7 +1216,7 @@ async function loadConfig() {
     var pq = cfg.preview_quality != null ? cfg.preview_quality : 90;
     document.getElementById('cfgPreviewQuality').value = pq;
     document.getElementById('cfgPreviewQualityVal').textContent = pq;
-    document.getElementById('cfgPreviewCacheMaxMb').value = cfg.preview_cache_max_mb != null ? cfg.preview_cache_max_mb : 2048;
+    document.getElementById('cfgPreviewCacheMaxMb').value = cfg.preview_cache_max_mb != null ? cfg.preview_cache_max_mb : 20480;
     var bt = cfg.browse_thumb_default != null ? cfg.browse_thumb_default : 220;
     document.getElementById('cfgBrowseThumbDefault').value = bt;
     document.getElementById('cfgBrowseThumbVal').textContent = bt + 'px';
@@ -2321,15 +2322,27 @@ async function precomputeEmbeddings(modelId, labelsFile) {
 /* ---------- Preview Cache ---------- */
 async function loadPreviewCacheStatus() {
   var statusEl = document.getElementById('previewCacheStatus');
+  var warnEl = document.getElementById('previewCacheWarning');
   if (!statusEl) return;
   try {
     var d = await safeFetch('/api/preview-cache', {}, { toast: false });
     var usedMb = (d.total_size / 1024 / 1024).toFixed(1);
-    var quotaMb = (d.quota_bytes / 1024 / 1024).toFixed(0);
+    var quotaMb = Math.round(d.quota_bytes / 1024 / 1024);
     var fileWord = d.count === 1 ? 'file' : 'files';
     statusEl.textContent = 'Current: ' + usedMb + ' / ' + quotaMb + ' MB (' + d.count + ' ' + fileWord + ')';
+    if (warnEl) {
+      var rec = d.recommended_mb || 0;
+      // Quota=0 means "disabled" — that's a deliberate user choice, not a warning case.
+      if (rec > 0 && quotaMb > 0 && quotaMb < rec) {
+        warnEl.textContent = 'Cache is smaller than your library — previews will regenerate from RAW on every pipeline run. Recommended: ' + rec.toLocaleString() + ' MB.';
+        warnEl.style.display = 'block';
+      } else {
+        warnEl.style.display = 'none';
+      }
+    }
   } catch(e) {
     statusEl.textContent = 'Failed to load';
+    if (warnEl) warnEl.style.display = 'none';
   }
 }
 
