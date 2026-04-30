@@ -34,10 +34,20 @@ def test_keymap_register_and_lookup(live_server, page):
         });
     """)
 
-    global_only = page.evaluate("window.Keymap.shortcutsForScope('global').map(s => s.name)")
+    # Filter to just the test-injected names so we don't accidentally pick up
+    # whatever globals the navbar bootstrap registered (nav shortcuts, etc.)
+    global_only = page.evaluate(
+        "window.Keymap.shortcutsForScope('global')"
+        "    .map(s => s.name)"
+        "    .filter(n => n === 'global-test' || n === 'browse-test')"
+    )
     assert global_only == ["global-test"]
 
-    browse_scope = page.evaluate("window.Keymap.shortcutsForScope('browse').map(s => s.name)")
+    browse_scope = page.evaluate(
+        "window.Keymap.shortcutsForScope('browse')"
+        "    .map(s => s.name)"
+        "    .filter(n => n === 'global-test' || n === 'browse-test')"
+    )
     # browse scope returns its own shortcuts plus globals
     assert set(browse_scope) == {"global-test", "browse-test"}
 
@@ -131,3 +141,32 @@ def test_page_scope_shadows_global_for_same_key(live_server, page):
 
     page.keyboard.press("p")
     assert page.evaluate("window._kmFired") == "page"
+
+
+def test_navbar_nav_shortcuts_registered_globally(live_server, page):
+    """Each NAV_ROUTES entry is registered as a global Keymap shortcut after config load."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    # After the nav shortcut bootstrap runs, every nav entry should be in the global scope.
+    names = page.evaluate("""
+        window.Keymap.shortcutsForScope('global')
+            .filter(s => s.category === 'Navigation')
+            .map(s => s.name)
+    """)
+    expected = {
+        'pipeline', 'lightroom', 'pipeline_review', 'review', 'cull',
+        'browse', 'map', 'variants', 'dashboard', 'audit', 'compare',
+        'workspace', 'shortcuts', 'settings', 'keywords'
+    }
+    assert expected.issubset(set(names))
+
+
+def test_pressing_b_navigates_to_browse(live_server, page):
+    """Pressing 'b' from a non-browse page navigates to /browse."""
+    url = live_server["url"]
+    page.goto(f"{url}/cull", timeout=5000)
+    page.wait_for_load_state("networkidle")
+    page.keyboard.press("b")
+    page.wait_for_url(f"{url}/browse", timeout=3000)

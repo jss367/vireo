@@ -1967,37 +1967,46 @@ function sendReport() {
     }
   }
 
-  function setupNavKeydown(navShortcuts) {
-    var keyToHref = {};
-    for (var action in navShortcuts) {
-      if (NAV_ROUTES[action]) keyToHref[navShortcuts[action]] = NAV_ROUTES[action];
-    }
+  // CSS selector for any open overlay/modal. The legacy dispatcher used this
+  // to bail out before navigating; the new Keymap dispatcher has no such
+  // built-in suppression, so each registered nav action checks it itself
+  // (Option B from the migration review). Without this, pressing 'b' while
+  // the lightbox is open would close the lightbox AND navigate.
+  var OVERLAY_SELECTOR = '.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active';
 
+  function setupNavKeydown(navShortcuts) {
     var path = location.pathname;
     var pageCtx = null;
     if (path === '/browse') pageCtx = 'browse';
     else if (path === '/review') pageCtx = 'review';
 
-    document.addEventListener('keydown', function(e) {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-      // Skip if any overlay or modal is open
-      if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;
+    // Tell the central Keymap dispatcher what scope this page is in. Page-scoped
+    // shortcuts that share a key with a global will then shadow it (handled by
+    // shortcutsForScope's page-first ordering).
+    if (pageCtx && window.Keymap && window.Keymap.setScope) {
+      window.Keymap.setScope(pageCtx);
+    }
 
-      for (var shortcutStr in keyToHref) {
-        if (matchesShortcut(e, shortcutStr)) {
-          // Live check: does the current page claim this key?
-          if (pageCtx && window._vireoShortcuts && window._vireoShortcuts[pageCtx]) {
-            var pageShortcuts = window._vireoShortcuts[pageCtx];
-            for (var a in pageShortcuts) {
-              if (pageShortcuts[a] === shortcutStr) return; // page wins
-            }
-          }
-          if (keyToHref[shortcutStr] === path) return;
-          e.preventDefault();
-          window.location.href = keyToHref[shortcutStr];
-          return;
+    if (!window.Keymap || !window.Keymap.register) return;
+
+    Object.keys(NAV_ROUTES).forEach(function (action) {
+      var key = navShortcuts[action];
+      if (!key) return;
+      var route = NAV_ROUTES[action];
+      window.Keymap.register('global', {
+        key: key,
+        name: action,
+        description: 'Go to ' + action.replace(/_/g, ' '),
+        category: 'Navigation',
+        action: function () {
+          // Suppress while any overlay/modal is open — preserves the legacy
+          // dispatcher's overlay-aware behavior (see OVERLAY_SELECTOR comment).
+          if (document.querySelector(OVERLAY_SELECTOR)) return;
+          // Don't navigate if we're already on this page.
+          if (window.location.pathname === route) return;
+          window.location.href = route;
         }
-      }
+      });
     });
   }
 
