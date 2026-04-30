@@ -3095,31 +3095,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.update_workspace(db._active_workspace_id, config_overrides=existing if existing else None)
         return jsonify({"ok": True, "overrides": existing})
 
-    @app.route("/api/workspaces/active/nav-order", methods=["PUT"])
-    def api_set_nav_order():
-        """Save navbar link order for the active workspace."""
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        nav_order = body.get("nav_order")
-        if not isinstance(nav_order, list):
-            return json_error("nav_order must be a list")
-        # Share the schema-driven settings write lock so a concurrent schema
-        # autosave can't read this same overrides snapshot and overwrite the
-        # nav-order change with stale data.
-        with _settings_write_lock:
-            ws = db.get_workspace(db._active_workspace_id)
-            existing = {}
-            if ws and ws["config_overrides"]:
-                try:
-                    existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-                except Exception:
-                    pass
-            if not isinstance(existing, dict):
-                existing = {}
-            existing["nav_order"] = nav_order
-            db.update_workspace(db._active_workspace_id, config_overrides=existing)
-        return jsonify({"ok": True, "nav_order": nav_order})
-
     @app.route("/api/workspaces/active/subject-types", methods=["GET"])
     def api_get_active_subject_types():
         """Return the active workspace's effective subject_types — global

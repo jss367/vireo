@@ -74,8 +74,6 @@ def test_navbar_renders_default_tabs_dynamically(live_server, page):
     assert "browse" in nav_ids
     assert "pipeline" in nav_ids
     assert "review" in nav_ids
-    # No tools button
-    assert page.query_selector(".nav-tools-btn") is None
     # No standalone Logs icon (it's now a tab if pinned)
     logs_icons = page.query_selector_all(".nav-icon[href='/logs']")
     assert len(logs_icons) == 0

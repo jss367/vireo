@@ -2152,34 +2152,6 @@ def test_api_browse_photo_counts_respects_file_types(app_and_db, tmp_path):
     assert resp.get_json()["counts"][str(d)] == 1
 
 
-def test_nav_order_save_and_load(app_and_db):
-    """PUT /api/workspaces/active/nav-order saves and returns nav order."""
-    app, db = app_and_db
-    client = app.test_client()
-    order = ["browse", "pipeline", "cull", "review"]
-    resp = client.put('/api/workspaces/active/nav-order',
-                      json={"nav_order": order},
-                      content_type='application/json')
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["nav_order"] == order
-
-    # Verify it persists in config overrides
-    resp2 = client.get('/api/workspaces/active/config')
-    assert resp2.status_code == 200
-    assert resp2.get_json()["nav_order"] == order
-
-
-def test_nav_order_rejects_non_list(app_and_db):
-    """PUT /api/workspaces/active/nav-order rejects non-list input."""
-    app, _ = app_and_db
-    client = app.test_client()
-    resp = client.put('/api/workspaces/active/nav-order',
-                      json={"nav_order": "not-a-list"},
-                      content_type='application/json')
-    assert resp.status_code == 400
-
-
 def _read_workspace_overrides(db, ws_id):
     """Helper: read and JSON-decode the config_overrides column for ws_id."""
     import json

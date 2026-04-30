@@ -43,11 +43,6 @@ KEYWORD_TYPES = frozenset({"taxonomy", "individual", "location", "genre", "gener
 # membership / classifier skip purposes. Workspaces can override.
 SUBJECT_TYPES_DEFAULT = frozenset({"taxonomy", "individual", "genre"})
 
-OPENABLE_NAV_IDS = frozenset({
-    "settings", "workspace", "lightroom",
-    "shortcuts", "keywords", "duplicates", "logs",
-})
-
 ALL_NAV_IDS = frozenset({
     "pipeline", "jobs", "pipeline_review", "review", "cull",
     "misses", "highlights", "browse", "map", "variants",
@@ -139,8 +134,6 @@ class Database:
     Args:
         db_path: path to the SQLite database file (created if missing)
     """
-
-    DEFAULT_OPEN_TABS = ["settings", "workspace", "lightroom"]
 
     def __init__(self, db_path):
         db_dir = os.path.dirname(db_path)
@@ -324,7 +317,6 @@ class Database:
                 name            TEXT NOT NULL UNIQUE,
                 config_overrides TEXT,
                 ui_state        TEXT,
-                open_tabs       TEXT,
                 tabs            TEXT,
                 created_at      TEXT DEFAULT (datetime('now')),
                 last_opened_at  TEXT
@@ -615,15 +607,6 @@ class Database:
                 )
                 self.conn.execute("ALTER TABLE photos DROP COLUMN embedding_model")
             self.conn.execute("ALTER TABLE photos DROP COLUMN embedding")
-        # Migration: add open_tabs column to existing workspaces tables, with defaults
-        try:
-            self.conn.execute("SELECT open_tabs FROM workspaces LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE workspaces ADD COLUMN open_tabs TEXT")
-            self.conn.execute(
-                "UPDATE workspaces SET open_tabs = ? WHERE open_tabs IS NULL",
-                (json.dumps(["settings", "workspace", "lightroom"]),),
-            )
         # Migration: add `tabs` column. Per the unified-tabs design (2026-04-30),
         # we reset every workspace's tabs to DEFAULT_TABS — solo-user app, no
         # preservation of prior nav_order / open_tabs customizations.
@@ -635,6 +618,12 @@ class Database:
                 "UPDATE workspaces SET tabs = ? WHERE tabs IS NULL",
                 (json.dumps(DEFAULT_TABS),),
             )
+        # Migration: drop legacy open_tabs column (replaced by `tabs`).
+        try:
+            self.conn.execute("SELECT open_tabs FROM workspaces LIMIT 0")
+            self.conn.execute("ALTER TABLE workspaces DROP COLUMN open_tabs")
+        except sqlite3.OperationalError:
+            pass  # column already absent (already dropped or fresh schema)
         # Migration: working-copy failure markers. Backfill (and the inline
         # scan extraction) record a failure here when extract_working_copy
         # returns False, gated by file_mtime so a user-replaced file retries
@@ -728,12 +717,11 @@ class Database:
     def create_workspace(self, name, config_overrides=None, ui_state=None):
         """Create a new workspace. Returns the workspace id."""
         cur = self.conn.execute(
-            """INSERT INTO workspaces (name, config_overrides, ui_state, open_tabs, tabs)
-               VALUES (?, ?, ?, ?, ?)""",
+            """INSERT INTO workspaces (name, config_overrides, ui_state, tabs)
+               VALUES (?, ?, ?, ?)""",
             (name,
              json.dumps(config_overrides) if config_overrides else None,
              json.dumps(ui_state) if ui_state else None,
-             json.dumps(self.DEFAULT_OPEN_TABS),  # legacy column, still populated until task 6.x
              json.dumps(DEFAULT_TABS)),
         )
         self.conn.commit()
@@ -888,53 +876,6 @@ class Database:
             return labels if isinstance(labels, list) else None
         except (json.JSONDecodeError, TypeError):
             return None
-
-    def get_open_tabs(self):
-        """Return the active workspace's list of open tab nav-ids in display order."""
-        ws = self.get_workspace(self._ws_id())
-        if not ws or not ws["open_tabs"]:
-            return []
-        try:
-            value = json.loads(ws["open_tabs"]) if isinstance(ws["open_tabs"], str) else ws["open_tabs"]
-            return value if isinstance(value, list) else []
-        except (json.JSONDecodeError, TypeError):
-            return []
-
-    def open_tab(self, nav_id):
-        """Append nav_id to the active workspace's open_tabs if not present.
-
-        Raises ValueError if nav_id is not in OPENABLE_NAV_IDS.
-        Returns the new list.
-        """
-        if nav_id not in OPENABLE_NAV_IDS:
-            raise ValueError(f"{nav_id!r} is not an openable nav id")
-        tabs = self.get_open_tabs()
-        if nav_id not in tabs:
-            tabs.append(nav_id)
-            self.conn.execute(
-                "UPDATE workspaces SET open_tabs = ? WHERE id = ?",
-                (json.dumps(tabs), self._ws_id()),
-            )
-            self.conn.commit()
-        return tabs
-
-    def close_tab(self, nav_id):
-        """Remove nav_id from the active workspace's open_tabs if present.
-
-        Raises ValueError if nav_id is not in OPENABLE_NAV_IDS.
-        Returns the new list.
-        """
-        if nav_id not in OPENABLE_NAV_IDS:
-            raise ValueError(f"{nav_id!r} is not an openable nav id")
-        tabs = self.get_open_tabs()
-        if nav_id in tabs:
-            tabs = [t for t in tabs if t != nav_id]
-            self.conn.execute(
-                "UPDATE workspaces SET open_tabs = ? WHERE id = ?",
-                (json.dumps(tabs), self._ws_id()),
-            )
-            self.conn.commit()
-        return tabs
 
     def get_tabs(self):
         """Return the active workspace's ordered list of pinned tab nav-ids."""
