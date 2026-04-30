@@ -311,3 +311,18 @@ def test_esc_closes_help_modal_via_stack(live_server, page):
         "!document.getElementById('helpModal').classList.contains('active')",
         timeout=2000,
     )
+
+
+def test_setscope_runs_synchronously_at_page_load(live_server, page):
+    """The navbar IIFE must call Keymap.setScope(pageCtx) synchronously after
+    keymap.js loads. Regression test for the script-ordering bug where
+    keymap.js loaded after the inline IIFE, leaving the dispatcher stuck on
+    'global' scope and silently breaking page-scoped shortcuts in PR 2."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+    assert page.evaluate("window.Keymap.getScope()") == "browse"
+
+    page.goto(f"{url}/review", timeout=5000)
+    page.wait_for_load_state("networkidle")
+    assert page.evaluate("window.Keymap.getScope()") == "review"

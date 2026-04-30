@@ -1291,6 +1291,9 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     <div class="report-status" id="reportStatus"></div>
   </div>
 </div>
+<!-- Load keymap.js before any inline <script> blocks below so window.Keymap
+     (registry, dispatcher, Esc stack) is available when they run. -->
+<script src="/static/keymap.js"></script>
 <script>
 function openReportModal() {
   if (window._reportEscToken) Keymap.popEsc(window._reportEscToken);
@@ -4979,7 +4982,6 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
 }
 </script>
 <script src="/static/vireo-utils.js"></script>
-<script src="/static/keymap.js"></script>
 <script src="/static/tauri-bridge.js"></script>
 <script>
   /* Updater disabled — startupUpdateCheck skipped until updater is configured */
