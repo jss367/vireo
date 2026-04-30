@@ -112,3 +112,34 @@ def test_hotkey_underline_appears_on_pinned_tabs(live_server, page):
     page.wait_for_selector(".nav-tab[data-nav-id='browse']")
     # Wait for hotkey hints to apply (they're computed after tab render)
     page.wait_for_selector(".nav-tab[data-nav-id='browse'] .hk", timeout=2000)
+
+
+def test_tab_close_button_does_not_change_tab_width_on_hover(live_server, page):
+    """Hovering a tab in the navbar must not change the tab's bounding box.
+
+    The bounce bug was: hover → close button shows via display change → tab
+    grows wider → flex re-layout. With absolute positioning the tab width
+    is fixed regardless of hover.
+    """
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1366, "height": 800})
+    page.goto(f"{url}/browse")
+    # Pin a known tab so it's in the strip
+    page.evaluate("""async () => {
+        await fetch('/api/workspace/tabs/pin',
+                    {method:'POST', headers:{'Content-Type':'application/json'},
+                     body: JSON.stringify({nav_id:'logs'})});
+    }""")
+    page.reload()
+    page.wait_for_selector(".nav-tab[data-nav-id='logs']")
+    tab = page.query_selector(".nav-tab[data-nav-id='logs']")
+    box_before = tab.bounding_box()
+    # Hover the tab
+    page.mouse.move(box_before["x"] + box_before["width"] / 2,
+                    box_before["y"] + box_before["height"] / 2)
+    page.wait_for_timeout(150)
+    box_after = tab.bounding_box()
+    assert abs(box_before["width"] - box_after["width"]) < 1.0, \
+        f"Tab width changed on hover ({box_before['width']} → {box_after['width']})"
+    assert abs(box_before["height"] - box_after["height"]) < 1.0, \
+        f"Tab height changed on hover ({box_before['height']} → {box_after['height']})"

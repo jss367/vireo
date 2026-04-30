@@ -1160,10 +1160,19 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .vireo-ctx-chip.is-active { background: var(--accent); color: white; }
 
 /* ---------- Openable tabs ---------- */
-.navbar .nav-tab { position: relative; }
+.navbar .nav-tab {
+  position: relative;
+  /* Reserve space at the right for the absolutely-positioned close button
+     so it never overlaps the tab label. Width matches close-button visual
+     footprint (≈18px including its 4px right offset). */
+  padding-right: 22px;
+}
 .navbar .nav-tab-close {
   display: none;
-  margin-left: 6px;
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
   padding: 0 4px;
   font-size: 14px;
   line-height: 1;
@@ -1173,7 +1182,10 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .navbar .nav-tab:hover .nav-tab-close,
 .navbar .nav-tab.active .nav-tab-close { display: inline-block; }
-.navbar .nav-tab-close:hover { background: var(--bg-tertiary, rgba(255,255,255,0.1)); color: var(--text-primary); }
+.navbar .nav-tab-close:hover {
+  background: var(--bg-tertiary, rgba(255,255,255,0.1));
+  color: var(--text-primary);
+}
 .navbar .nav-tab-divider {
   display: inline-block;
   width: 1px;
