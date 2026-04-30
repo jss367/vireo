@@ -519,6 +519,86 @@ def test_last_scan_picks_most_recent_completed(app_and_db):
     assert "HOLD" in hashes  # still present in the library
 
 
+def test_last_scan_drops_resolved_groups_after_loser_rows_deleted(
+    app_and_db, tmp_path,
+):
+    """After /api/duplicates/delete-loser-files removes the loser rows, the
+    cached scan blob in job_history still references them. Without
+    filtering on read, reloading /duplicates resurrects the pre-cleanup
+    snapshot — same groups, same "still on disk" stats. The endpoint
+    must drop resolved groups whose losers no longer exist and recompute
+    aggregate counts so the page reflects current state.
+    """
+    app, db = app_and_db
+    w, l, _winner_path, _loser_path = _seed_pair_with_real_files(
+        db, tmp_path, "HCLEAN1",
+    )
+
+    client = app.test_client()
+    job_id = client.post("/api/duplicates/scan").get_json()["job_id"]
+    wait_for_job_via_client(client, job_id, wait_for_history=True)
+
+    body = client.get("/api/duplicates/last-scan").get_json()
+    hashes = [p["file_hash"] for p in body["result"]["proposals"]]
+    assert "HCLEAN1" in hashes
+    assert body["result"]["resolved_group_count"] >= 1
+
+    resp = client.post(
+        "/api/duplicates/delete-loser-files", json={"photo_ids": [l]},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["trashed"] == 1
+
+    body = client.get("/api/duplicates/last-scan").get_json()
+    hashes = [p["file_hash"] for p in body["result"]["proposals"]]
+    assert "HCLEAN1" not in hashes
+    assert body["result"]["resolved_group_count"] == 0
+    assert body["result"]["resolved_loser_count"] == 0
+
+
+def test_last_scan_keeps_resolved_group_with_surviving_losers(
+    app_and_db, tmp_path,
+):
+    """Partial cleanup: a resolved group with two losers, one of which has
+    been deleted, still appears with the surviving loser. Without this,
+    a single failed-trash + retry would erase the whole group from view.
+    """
+    app, db = app_and_db
+    folder = tmp_path / "dup_partial"
+    folder.mkdir()
+    fid = db.add_folder(str(folder))
+    # Three rows sharing a hash: hook auto-rejects the (2)/(3) suffixes,
+    # leaving the bare filename as the kept winner.
+    for name in ("owl.jpg", "owl (2).jpg", "owl (3).jpg"):
+        (folder / name).write_bytes(b"x" * 100)
+    w = db.add_photo(folder_id=fid, filename="owl.jpg", extension=".jpg",
+                     file_size=100, file_mtime=100.0, file_hash="HPART")
+    l1 = db.add_photo(folder_id=fid, filename="owl (2).jpg", extension=".jpg",
+                      file_size=100, file_mtime=200.0, file_hash="HPART")
+    l2 = db.add_photo(folder_id=fid, filename="owl (3).jpg", extension=".jpg",
+                      file_size=100, file_mtime=300.0, file_hash="HPART")
+
+    client = app.test_client()
+    job_id = client.post("/api/duplicates/scan").get_json()["job_id"]
+    wait_for_job_via_client(client, job_id, wait_for_history=True)
+
+    # Trash just one of the two losers.
+    resp = client.post(
+        "/api/duplicates/delete-loser-files", json={"photo_ids": [l1]},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["trashed"] == 1
+
+    body = client.get("/api/duplicates/last-scan").get_json()
+    proposals = [p for p in body["result"]["proposals"]
+                 if p["file_hash"] == "HPART"]
+    assert len(proposals) == 1
+    surviving_ids = [ll["id"] for ll in proposals[0]["losers"]]
+    assert surviving_ids == [l2]
+    assert body["result"]["resolved_group_count"] == 1
+    assert body["result"]["resolved_loser_count"] == 1
+
+
 def test_bulk_resolve_endpoint_resolves_by_folder(app_and_db, tmp_path):
     """POST /api/duplicates/bulk-resolve forces winners by keep_folder for
     every supplied hash and returns a summary."""

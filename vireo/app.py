@@ -100,6 +100,61 @@ def _chunked(seq, size=_SQL_PARAM_CHUNK):
         yield seq[i:i + size]
 
 
+def _prune_cleaned_resolved_losers(db, result):
+    """Drop resolved-group losers whose photo rows no longer exist.
+
+    /api/duplicates/delete-loser-files deletes photo rows but does not
+    rewrite the cached scan blob in ``job_history``. Without this filter,
+    reloading /duplicates after a bulk-trash re-renders the pre-trash
+    snapshot — the page re-offers files that are already cleaned up and
+    advertises stale "N groups / X GB still on disk" stats.
+
+    Mutates ``result`` in place: prunes resolved losers, drops resolved
+    groups that lose all their losers, and recomputes the aggregate
+    counts so the JS render path sees a consistent snapshot.
+    """
+    proposals = result.get("proposals") or []
+    loser_ids = [
+        l["id"]
+        for p in proposals if p.get("status") == "resolved"
+        for l in (p.get("losers") or [])
+        if l.get("id") is not None
+    ]
+    if not loser_ids:
+        return
+    existing = set()
+    for chunk in _chunked(loser_ids):
+        placeholders = ",".join("?" * len(chunk))
+        rows = db.conn.execute(
+            f"SELECT id FROM photos WHERE id IN ({placeholders})", chunk
+        ).fetchall()
+        existing.update(r["id"] for r in rows)
+
+    pruned = []
+    for p in proposals:
+        if p.get("status") != "resolved":
+            pruned.append(p)
+            continue
+        kept = [l for l in (p.get("losers") or []) if l.get("id") in existing]
+        if not kept:
+            continue
+        if len(kept) != len(p.get("losers") or []):
+            p = dict(p, losers=kept)
+        pruned.append(p)
+
+    result["proposals"] = pruned
+    res_props = [p for p in pruned if p.get("status") == "resolved"]
+    unr_props = [p for p in pruned if p.get("status") == "unresolved"]
+    result["resolved_group_count"] = len(res_props)
+    result["resolved_loser_count"] = sum(
+        len(p.get("losers") or []) for p in res_props
+    )
+    result["group_count"] = len(res_props) + len(unr_props)
+    result["loser_count"] = sum(
+        len(p.get("losers") or []) for p in unr_props
+    )
+
+
 def _ensure_volume_trashes_dir(filepath, ensured_volumes):
     """Make sure ``/Volumes/<X>/.Trashes/<uid>/`` exists when ``filepath`` is on
     an external/network mount. macOS ``send2trash`` legacy mode raises
@@ -7404,6 +7459,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             result = json.loads(row["result"])
         except (json.JSONDecodeError, TypeError):
             return jsonify({"found": False})
+        _prune_cleaned_resolved_losers(db, result)
         return jsonify({
             "found": True,
             "job_id": row["id"],
