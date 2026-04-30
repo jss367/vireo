@@ -2039,10 +2039,6 @@ function sendReport() {
         if (window._navTabs) window._navTabs.setTabs(newOrder);
       });
     });
-    // Cancel indicator when leaving the strip
-    strip().addEventListener('dragleave', function(e) {
-      if (!strip().contains(e.relatedTarget)) removeIndicator();
-    });
   }
 
   // Re-bind every time the strip re-renders. We do that by hooking into
@@ -2051,6 +2047,12 @@ function sendReport() {
   function init() {
     const s = strip();
     if (!s) return;
+    // Strip-level dragleave is bound exactly once; re-running
+    // bindDragHandlers() on every MutationObserver tick would otherwise
+    // accumulate duplicate listeners.
+    s.addEventListener('dragleave', function(e) {
+      if (!s.contains(e.relatedTarget)) removeIndicator();
+    });
     bindDragHandlers();
     const mo = new MutationObserver(() => bindDragHandlers());
     mo.observe(s, {childList: true});
@@ -5277,13 +5279,15 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
     });
   });
 
-  // Re-fetch state when palette opens (in case tabs changed)
+  // Re-fetch state when palette opens (in case tabs changed). If the
+  // refresh fails (network blip, JSON parse error), still open the
+  // palette with whatever state we already have — a stale-but-open
+  // palette beats a no-op shortcut.
   const origOpen = window.openCommandPalette;
   window.openCommandPalette = function() {
     selectedIndex = 0;
-    refreshFromTabsState().then(() => {
-      origOpen();
-    });
+    const open = () => origOpen();
+    refreshFromTabsState().then(open, open);
   };
   window._cmdPaletteRender = render;
 
