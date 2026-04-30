@@ -402,3 +402,103 @@ def test_setscope_runs_synchronously_at_page_load(live_server, page):
     page.goto(f"{url}/review", timeout=5000)
     page.wait_for_load_state("networkidle")
     assert page.evaluate("window.Keymap.getScope()") == "review"
+
+
+def test_pause_dispatch_silences_global_actions(live_server, page):
+    """While dispatch is paused, registered global actions must not fire — so
+    the /shortcuts editor's capture-phase keydown listener can claim the next
+    press without nav shortcuts navigating the user away first. resumeDispatch
+    restores normal handling."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate("""
+        window._kmPausedFired = 0;
+        window.Keymap.register('global', {
+            key: 'z', name: 'pause-test', description: '', category: 'System',
+            action: function() { window._kmPausedFired += 1; }
+        });
+    """)
+
+    page.evaluate("window.Keymap.pauseDispatch()")
+    page.keyboard.press("z")
+    assert page.evaluate("window._kmPausedFired") == 0, (
+        "Paused dispatcher must not fire registered actions"
+    )
+
+    page.evaluate("window.Keymap.resumeDispatch()")
+    page.keyboard.press("z")
+    assert page.evaluate("window._kmPausedFired") == 1
+
+
+def test_shortcut_capture_does_not_navigate(live_server, page):
+    """On /shortcuts, clicking a binding button enters capture mode. Pressing
+    a key that's also a global nav letter (e.g. 'b' for browse) must be
+    captured as the new binding instead of navigating the user away. Regression
+    test for the bug where the global Keymap dispatcher won the capture-phase
+    race against the editor's own keydown listener."""
+    url = live_server["url"]
+    page.goto(f"{url}/shortcuts", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    # Start capture on the navigation.browse button — pressing 'b' is then a
+    # no-op rebind to itself (findConflict skips the current action), so we
+    # avoid touching unrelated config while still exercising the dispatcher
+    # pause path.
+    page.wait_for_function(
+        "document.querySelector('.shortcut-key-btn') !== null", timeout=2000
+    )
+    page.evaluate("""
+        (function() {
+            var btns = document.querySelectorAll('.shortcut-key-btn');
+            for (var i = 0; i < btns.length; i++) {
+                var attr = btns[i].getAttribute('onclick') || '';
+                if (attr.indexOf("'navigation', 'browse'") !== -1) {
+                    btns[i].click();
+                    return;
+                }
+            }
+            throw new Error('navigation.browse button not found');
+        })();
+    """)
+
+    page.wait_for_function(
+        "document.querySelector('.shortcut-key-btn.capturing') !== null", timeout=2000
+    )
+
+    page.keyboard.press("b")
+    page.wait_for_timeout(300)
+
+    assert page.url.endswith("/shortcuts"), (
+        f"Expected to stay on /shortcuts during capture, got {page.url}"
+    )
+
+
+def test_help_modal_unlocks_scroll_when_keymap_unavailable(live_server, page):
+    """If keymap.js fails to load (or hasn't yet), openHelpModal/closeHelpModal
+    must still pair their body-scroll lock/unlock cleanly. Regression test for
+    the bug where wasOpen was inferred from the Esc token (only set when
+    Keymap is present), so closing the modal left body scroll locked forever."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    # Simulate Keymap being unavailable (e.g. keymap.js failed to load).
+    page.evaluate("window.Keymap = undefined; window._helpEscToken = null;")
+
+    page.evaluate("openHelpModal()")
+    page.wait_for_function(
+        "document.getElementById('helpModal').classList.contains('active')",
+        timeout=2000,
+    )
+    assert page.evaluate("document.body.style.overflow") == "hidden"
+
+    page.evaluate("closeHelpModal()")
+    page.wait_for_function(
+        "!document.getElementById('helpModal').classList.contains('active')",
+        timeout=2000,
+    )
+    assert page.evaluate("document.body.style.overflow") == "", (
+        "Body scroll must unlock when help modal closes, even with Keymap unavailable"
+    )

@@ -107,7 +107,18 @@
     return true;
   }
 
+  // Pause flag — when set, the dispatcher yields the keypress entirely so a
+  // higher-priority capture-phase listener (e.g. the /shortcuts editor's key
+  // capture) can claim the next press without nav/global actions firing first.
+  // Both listeners run in the capture phase; this dispatcher is registered at
+  // module load and would otherwise win the race.
+  var _dispatchPaused = false;
+
+  function pauseDispatch() { _dispatchPaused = true; }
+  function resumeDispatch() { _dispatchPaused = false; }
+
   function _dispatch(e) {
+    if (_dispatchPaused) return;
     // Esc runs first — even if focus is in an input, an open modal should
     // still be dismissable with Esc from a field inside it.
     if (_handleEsc(e)) return;
@@ -148,6 +159,8 @@
     pushEsc: pushEsc,
     popEsc: popEsc,
     lockBodyScroll: lockBodyScroll,
-    unlockBodyScroll: unlockBodyScroll
+    unlockBodyScroll: unlockBodyScroll,
+    pauseDispatch: pauseDispatch,
+    resumeDispatch: resumeDispatch
   };
 })(window);

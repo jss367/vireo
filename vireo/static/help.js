@@ -81,9 +81,11 @@
     // Push an Esc handler onto the central Keymap stack so the help modal
     // participates in the one-Esc-per-overlay model. Defensive: if keymap.js
     // failed to load, opening still works — Esc just won't close the modal.
-    var alreadyOpen = !!window._helpEscToken;
+    // Track open state via the modal's own class rather than the Esc token so
+    // the body-scroll lock pairs cleanly even when Keymap is unavailable.
+    var alreadyOpen = modal.classList.contains('active');
     if (window.Keymap && window.Keymap.pushEsc) {
-      if (alreadyOpen) window.Keymap.popEsc(window._helpEscToken);
+      if (window._helpEscToken) window.Keymap.popEsc(window._helpEscToken);
       window._helpEscToken = window.Keymap.pushEsc(function() { window.closeHelpModal(); });
     }
     modal.classList.add('active');
@@ -97,8 +99,8 @@
   };
 
   window.closeHelpModal = function() {
-    var wasOpen = !!window._helpEscToken;
-    if (window.Keymap && window.Keymap.popEsc && wasOpen) {
+    var wasOpen = modal.classList.contains('active');
+    if (window.Keymap && window.Keymap.popEsc && window._helpEscToken) {
       window.Keymap.popEsc(window._helpEscToken);
       window._helpEscToken = null;
     }
