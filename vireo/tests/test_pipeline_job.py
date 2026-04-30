@@ -6345,3 +6345,114 @@ def test_detect_eye_keypoints_stage_honors_abort_check(tmp_path, monkeypatch):
         f"detect_eye_keypoints_stage must break on abort_check; "
         f"got {process_calls[0]} _process_photo_for_eye calls (expected 1)."
     )
+
+
+def test_detect_eye_keypoints_stage_skips_synthetic_100pct_on_abort(
+    tmp_path, monkeypatch,
+):
+    """When abort fires mid-loop, detect_eye_keypoints_stage must NOT emit
+    the unconditional final progress(total, total) callback. That synthetic
+    100% signal corrupts the wrapping eye_keypoints_stage's processed['count']
+    and surfaces "Cancelled (N of N processed)" — indistinguishable from a
+    clean run that processed N photos.
+    """
+    import pipeline as pipeline_mod
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [{"id": 1}, {"id": 2}, {"id": 3}],
+    )
+    monkeypatch.setattr(
+        Database, "get_folder_tree",
+        lambda self: [],
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "_process_photo_for_eye", lambda *a, **kw: None,
+    )
+
+    progress_events = []
+
+    def progress_callback(phase, current, total):
+        progress_events.append((current, total))
+
+    abort_after_first = [False]
+
+    def abort_check():
+        # First poll returns False (photo 1 runs), subsequent polls True.
+        result = abort_after_first[0]
+        abort_after_first[0] = True
+        return result
+
+    pipeline_mod.detect_eye_keypoints_stage(
+        db, config={},
+        progress_callback=progress_callback,
+        abort_check=abort_check,
+    )
+
+    # Stage processed exactly one photo before aborting; the wrapper must see
+    # current < total on the final emit, not current == total.
+    assert progress_events, "Expected at least one progress event"
+    last_current, last_total = progress_events[-1]
+    assert last_total == 3, f"Unexpected total in last emit: {progress_events!r}"
+    assert last_current < last_total, (
+        f"detect_eye_keypoints_stage must not emit progress({last_current}, "
+        f"{last_total}) after abort — that 100% signal would mask the cancel "
+        f"in the wrapper. Events: {progress_events!r}"
+    )
+    # And the count should reflect the actual photo processed (1), not 0.
+    assert last_current == 1, (
+        f"Expected 1 photo to be reported processed before abort; "
+        f"got events={progress_events!r}"
+    )
+
+
+def test_detect_eye_keypoints_stage_emits_final_100pct_on_clean_run(
+    tmp_path, monkeypatch,
+):
+    """On a clean (non-aborted) run, detect_eye_keypoints_stage must finish
+    by reporting current == total so the wrapping stage's processed['count']
+    matches reality.
+    """
+    import pipeline as pipeline_mod
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [{"id": 1}, {"id": 2}],
+    )
+    monkeypatch.setattr(
+        Database, "get_folder_tree",
+        lambda self: [],
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "_process_photo_for_eye", lambda *a, **kw: None,
+    )
+
+    progress_events = []
+
+    def progress_callback(phase, current, total):
+        progress_events.append((current, total))
+
+    pipeline_mod.detect_eye_keypoints_stage(
+        db, config={},
+        progress_callback=progress_callback,
+    )
+
+    assert progress_events, "Expected at least one progress event"
+    last_current, last_total = progress_events[-1]
+    assert (last_current, last_total) == (2, 2), (
+        f"Expected final emit (2, 2) on clean run; got {progress_events!r}"
+    )

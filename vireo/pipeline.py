@@ -900,11 +900,11 @@ def detect_eye_keypoints_stage(
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     total = len(photos)
 
+    aborted = False
     for i, row in enumerate(photos):
         if abort_check is not None and abort_check():
+            aborted = True
             break
-        if progress_callback:
-            progress_callback("Eye keypoints", i, total)
         try:
             _process_photo_for_eye(
                 db, row, folders, C=C, T=T, k_window=k_window,
@@ -914,6 +914,12 @@ def detect_eye_keypoints_stage(
                 "Eye keypoint detection failed for photo %s", row["id"],
                 exc_info=True,
             )
+        # Emit AFTER processing so `current` reflects actual processed count
+        # — pipeline_job's cancel summary reads this and would lie otherwise.
+        if progress_callback:
+            progress_callback("Eye keypoints", i + 1, total)
 
-    if progress_callback:
+    # Skip the synthetic 100% emit on abort: it would poison the wrapper's
+    # `processed["count"]` to `total` and surface "Cancelled (N of N processed)".
+    if progress_callback and not aborted:
         progress_callback("Eye keypoints", total, total)
