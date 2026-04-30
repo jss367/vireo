@@ -69,3 +69,42 @@ def test_dispatcher_fires_registered_action(live_server, page):
     """)
     page.keyboard.press("q")
     assert page.evaluate("window._kmTestFired") == 1  # unchanged
+
+
+def test_esc_stack_unwinds_top_first(live_server, page):
+    """pushEsc registers handlers; Esc invokes only the top one each press."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate("""
+        window._kmEscOrder = [];
+        window._kmEscToken1 = window.Keymap.pushEsc(function() { window._kmEscOrder.push('first'); });
+        window._kmEscToken2 = window.Keymap.pushEsc(function() { window._kmEscOrder.push('second'); });
+    """)
+
+    page.keyboard.press("Escape")
+    assert page.evaluate("window._kmEscOrder") == ["second"]
+
+    page.keyboard.press("Escape")
+    assert page.evaluate("window._kmEscOrder") == ["second", "first"]
+
+    page.keyboard.press("Escape")
+    assert page.evaluate("window._kmEscOrder") == ["second", "first"]  # stack empty
+
+
+def test_esc_stack_remove_by_token(live_server, page):
+    """popEsc(token) removes a specific handler regardless of position."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate("""
+        window._kmEscOrder = [];
+        var t1 = window.Keymap.pushEsc(function() { window._kmEscOrder.push('first'); });
+        var t2 = window.Keymap.pushEsc(function() { window._kmEscOrder.push('second'); });
+        window.Keymap.popEsc(t2);
+    """)
+
+    page.keyboard.press("Escape")
+    assert page.evaluate("window._kmEscOrder") == ["first"]

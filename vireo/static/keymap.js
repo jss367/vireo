@@ -59,7 +59,41 @@
   function setScope(scope) { _currentScope = scope; }
   function getScope() { return _currentScope; }
 
+  // Esc stack — single owner of the Escape key. Handlers push themselves
+  // onto the stack; pressing Esc invokes (and removes) the top handler only.
+  var _escStack = [];
+  var _escNextToken = 1;
+
+  function pushEsc(handler) {
+    var token = _escNextToken++;
+    _escStack.push({ token: token, handler: handler });
+    return token;
+  }
+
+  function popEsc(token) {
+    for (var i = _escStack.length - 1; i >= 0; i--) {
+      if (_escStack[i].token === token) {
+        _escStack.splice(i, 1);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function _handleEsc(e) {
+    if (e.key !== 'Escape') return false;
+    if (_escStack.length === 0) return false;
+    var top = _escStack.pop();
+    e.preventDefault();
+    e.stopPropagation();
+    try { top.handler(e); } catch (err) { console.error('Esc handler error', err); }
+    return true;
+  }
+
   function _dispatch(e) {
+    // Esc runs first — even if focus is in an input, an open modal should
+    // still be dismissable with Esc from a field inside it.
+    if (_handleEsc(e)) return;
     if (isInputFocused()) return;
     var candidates = shortcutsForScope(_currentScope);
     for (var i = 0; i < candidates.length; i++) {
@@ -81,6 +115,8 @@
     register: register,
     shortcutsForScope: shortcutsForScope,
     setScope: setScope,
-    getScope: getScope
+    getScope: getScope,
+    pushEsc: pushEsc,
+    popEsc: popEsc
   };
 })(window);
