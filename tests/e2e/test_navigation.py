@@ -103,3 +103,12 @@ def test_unpinning_active_tab_navigates_to_adjacent(live_server, page):
     page.wait_for_load_state("networkidle")
     # Navigated to a sibling — anything that isn't /cull
     assert "/cull" not in page.url
+
+
+def test_hotkey_underline_appears_on_pinned_tabs(live_server, page):
+    """Pinned tabs in the dynamic strip get hotkey underlines (.hk span)."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.wait_for_selector(".nav-tab[data-nav-id='browse']")
+    # Wait for hotkey hints to apply (they're computed after tab render)
+    page.wait_for_selector(".nav-tab[data-nav-id='browse'] .hk", timeout=2000)

@@ -1307,6 +1307,13 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   </span>
 </nav>
 
+<script>
+// Temporary stub — real implementation lands in Task 4.1.
+if (typeof window.openCommandPalette !== 'function') {
+  window.openCommandPalette = function() {};
+}
+</script>
+
 <!-- Help Modal -->
 <div class="help-overlay" id="helpModal">
   <div class="help-modal">
@@ -1705,6 +1712,11 @@ function sendReport() {
     }
     applyActiveClass();
     recomputeOverflow();
+    // Re-apply hotkey hints (underline + (key) suffix) — tabs are
+    // built async, so the initial DOM-ready call doesn't see them.
+    if (typeof window._applyNavHotkeyHints === 'function') {
+      window._applyNavHotkeyHints();
+    }
   }
 
   function recomputeOverflow() {
@@ -2020,8 +2032,28 @@ function sendReport() {
   var hrefToAction = {};
   for (var action in NAV_ROUTES) hrefToAction[NAV_ROUTES[action]] = action;
 
+  // Replace the leading label text node of a dynamic .nav-tab anchor
+  // with a label fragment, preserving sibling elements (badge, close
+  // button, etc.). Returns true if a label node was found+replaced.
+  function replaceTabLabel(link, fragment) {
+    // Remove any existing .hk / .hk-suffix from a previous run
+    var hk = link.querySelector('.hk');
+    if (hk && hk.parentNode === link) hk.remove();
+    var hkSuf = link.querySelector('.hk-suffix');
+    if (hkSuf && hkSuf.parentNode === link) hkSuf.remove();
+    // Find the leading text node and replace it.
+    for (var i = 0; i < link.childNodes.length; i++) {
+      var n = link.childNodes[i];
+      if (n.nodeType === 3 /* Node.TEXT_NODE */ && n.textContent.trim().length > 0) {
+        link.replaceChild(fragment, n);
+        return true;
+      }
+    }
+    return false;
+  }
+
   function applyHotkeyHints(navShortcuts) {
-    var navLinks = document.querySelectorAll('.navbar > a[href]:not(.brand):not(.nav-icon):not([data-tab])');
+    var navLinks = document.querySelectorAll('.navbar a[href]:not(.brand):not(.nav-icon):not([data-tab])');
     for (var i = 0; i < navLinks.length; i++) {
       var link = navLinks[i];
       var href = link.getAttribute('href');
@@ -2030,22 +2062,62 @@ function sendReport() {
       var keyStr = navShortcuts[action];
       if (!keyStr) continue;
 
-      var label = link.textContent.trim();
+      var isDynamicTab = link.classList.contains('nav-tab');
+      var label;
+      if (isDynamicTab) {
+        // Dynamic tabs have label as a leading text node; siblings are
+        // badge / close-button spans we must preserve.
+        var labelNode = null;
+        for (var j = 0; j < link.childNodes.length; j++) {
+          var cn = link.childNodes[j];
+          if (cn.nodeType === 3 && cn.textContent.trim().length > 0) {
+            labelNode = cn; break;
+          }
+        }
+        label = labelNode ? labelNode.textContent.trim() : link.textContent.trim();
+      } else {
+        label = link.textContent.trim();
+      }
+
       var sc = parseShortcut(keyStr);
       // Only do inline highlight for single bare keys (no modifiers)
       if (!sc.ctrl && !sc.meta && !sc.shift && !sc.alt && sc.key.length === 1) {
         var idx = label.toLowerCase().indexOf(sc.key.toLowerCase());
         if (idx !== -1) {
-          // Inline highlight: wrap first occurrence of the letter
-          link.innerHTML = escapeHtml(label.substring(0, idx)) +
-            '<span class="hk">' + escapeHtml(label.charAt(idx)) + '</span>' +
-            escapeHtml(label.substring(idx + 1));
+          if (isDynamicTab) {
+            // Build a DocumentFragment so we don't clobber siblings
+            var frag = document.createDocumentFragment();
+            if (idx > 0) frag.appendChild(document.createTextNode(label.substring(0, idx)));
+            var hkSpan = document.createElement('span');
+            hkSpan.className = 'hk';
+            hkSpan.textContent = label.charAt(idx);
+            frag.appendChild(hkSpan);
+            if (idx + 1 < label.length) {
+              frag.appendChild(document.createTextNode(label.substring(idx + 1)));
+            }
+            replaceTabLabel(link, frag);
+          } else {
+            // Legacy linger anchors: safe to replace innerHTML.
+            link.innerHTML = escapeHtml(label.substring(0, idx)) +
+              '<span class="hk">' + escapeHtml(label.charAt(idx)) + '</span>' +
+              escapeHtml(label.substring(idx + 1));
+          }
           continue;
         }
       }
       // Suffix: append (key) after label
-      link.innerHTML = escapeHtml(label) + ' <span class="hk-suffix">(' +
-        escapeHtml(formatShortcut(keyStr)) + ')</span>';
+      if (isDynamicTab) {
+        var frag2 = document.createDocumentFragment();
+        frag2.appendChild(document.createTextNode(label + ' '));
+        var sufSpan = document.createElement('span');
+        sufSpan.className = 'hk-suffix';
+        sufSpan.textContent = '(' + formatShortcut(keyStr) + ')';
+        frag2.appendChild(sufSpan);
+        replaceTabLabel(link, frag2);
+      } else {
+        link.innerHTML = escapeHtml(label) + ' <span class="hk-suffix">(' +
+          escapeHtml(formatShortcut(keyStr)) + ')</span>';
+      }
     }
   }
 
@@ -2099,6 +2171,9 @@ function sendReport() {
       if (!window._vireoShortcuts) window._vireoShortcuts = shortcuts;
       window._vireoShortcuts.navigation = navShortcuts;
 
+      // Expose so renderStrip() (in another IIFE) can re-apply hints
+      // after dynamic tab anchors are inserted.
+      window._applyNavHotkeyHints = function() { applyHotkeyHints(navShortcuts); };
       applyHotkeyHints(navShortcuts);
       setupNavKeydown(navShortcuts);
     })
@@ -4283,7 +4358,7 @@ function formatDuration(seconds) {
     // Badge counts only current workspace
     document.getElementById('jobsBadge').textContent = thisWs.length;
     var navBadge = document.getElementById('navJobBadge');
-    navBadge.textContent = thisWs.length > 0 ? ' (' + thisWs.length + ')' : '';
+    if (navBadge) navBadge.textContent = thisWs.length > 0 ? ' (' + thisWs.length + ')' : '';
 
     if (allRunning.length === 0) {
       var lastDone = activeJobs.filter(function(j) { return j.status !== 'running'; })[0];
