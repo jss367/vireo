@@ -1877,8 +1877,10 @@ function sendReport() {
 
   function clearEphemeral() {
     // Closing ephemeral === navigate away from the unpinned page.
-    // Send the user to an adjacent pinned tab, or /browse.
-    const next = TABS[0] ? pageById[TABS[0]] : null;
+    // Ephemeral renders at the right end of the strip, so its
+    // visually adjacent neighbor is the last pinned tab.
+    const adjId = TABS.length ? TABS[TABS.length - 1] : null;
+    const next = adjId ? pageById[adjId] : null;
     window.location.href = next ? next.href : '/browse';
   }
 
