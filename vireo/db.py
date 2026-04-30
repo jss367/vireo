@@ -48,6 +48,20 @@ OPENABLE_NAV_IDS = frozenset({
     "shortcuts", "keywords", "duplicates", "logs",
 })
 
+ALL_NAV_IDS = frozenset({
+    "pipeline", "jobs", "pipeline_review", "review", "cull",
+    "misses", "highlights", "browse", "map", "variants",
+    "dashboard", "audit", "compare",
+    "settings", "workspace", "lightroom", "shortcuts",
+    "keywords", "duplicates", "logs",
+})
+
+DEFAULT_TABS = [
+    "browse", "pipeline", "pipeline_review",
+    "review", "cull", "jobs",
+    "highlights", "misses", "settings",
+]
+
 
 def commit_with_retry(conn, max_retries=5, base_delay=0.1):
     """Commit ``conn`` with retry on transient "locked"/"busy" errors.
