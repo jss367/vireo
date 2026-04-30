@@ -98,11 +98,19 @@
     var candidates = shortcutsForScope(_currentScope);
     for (var i = 0; i < candidates.length; i++) {
       var sc = candidates[i];
-      if (matchesShortcut(e, sc.key)) {
+      if (!matchesShortcut(e, sc.key)) continue;
+      // Action contract: returning false means "I didn't actually handle this"
+      // (e.g. early-return because an overlay is open). In that case we do NOT
+      // preventDefault and we continue to the next candidate so another scope
+      // still has a chance to handle the key.
+      var handled;
+      try { handled = sc.action(e); }
+      catch (err) { console.error('Keymap action error', err); handled = true; }
+      if (handled !== false) {
         e.preventDefault();
-        try { sc.action(e); } catch (err) { console.error('Keymap action error', err); }
         return;
       }
+      // action returned false — try the next candidate
     }
   }
 

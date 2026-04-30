@@ -1975,18 +1975,6 @@ function sendReport() {
   var OVERLAY_SELECTOR = '.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active';
 
   function setupNavKeydown(navShortcuts) {
-    var path = location.pathname;
-    var pageCtx = null;
-    if (path === '/browse') pageCtx = 'browse';
-    else if (path === '/review') pageCtx = 'review';
-
-    // Tell the central Keymap dispatcher what scope this page is in. Page-scoped
-    // shortcuts that share a key with a global will then shadow it (handled by
-    // shortcutsForScope's page-first ordering).
-    if (pageCtx && window.Keymap && window.Keymap.setScope) {
-      window.Keymap.setScope(pageCtx);
-    }
-
     if (!window.Keymap || !window.Keymap.register) return;
 
     Object.keys(NAV_ROUTES).forEach(function (action) {
@@ -2001,13 +1989,26 @@ function sendReport() {
         action: function () {
           // Suppress while any overlay/modal is open — preserves the legacy
           // dispatcher's overlay-aware behavior (see OVERLAY_SELECTOR comment).
-          if (document.querySelector(OVERLAY_SELECTOR)) return;
+          // Return false so the dispatcher does NOT preventDefault and another
+          // candidate (or the browser) can still handle the key.
+          if (document.querySelector(OVERLAY_SELECTOR)) return false;
           // Don't navigate if we're already on this page.
-          if (window.location.pathname === route) return;
+          if (window.location.pathname === route) return false;
           window.location.href = route;
         }
       });
     });
+  }
+
+  // Determine page scope and tell the Keymap dispatcher synchronously, before
+  // any /api/config fetch resolves. Otherwise page-scoped shortcuts registered
+  // by other scripts would race the fetch and dispatch on the wrong scope.
+  var _path = location.pathname;
+  var _pageCtx = null;
+  if (_path === '/browse') _pageCtx = 'browse';
+  else if (_path === '/review') _pageCtx = 'review';
+  if (_pageCtx && window.Keymap && window.Keymap.setScope) {
+    window.Keymap.setScope(_pageCtx);
   }
 
   // Fetch config and apply

@@ -170,3 +170,43 @@ def test_pressing_b_navigates_to_browse(live_server, page):
     page.wait_for_load_state("networkidle")
     page.keyboard.press("b")
     page.wait_for_url(f"{url}/browse", timeout=3000)
+
+
+def test_nav_shortcut_suppressed_when_overlay_open(live_server, page):
+    """Pressing a nav letter while an overlay is open does not navigate."""
+    url = live_server["url"]
+    page.goto(f"{url}/cull", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    # Inject an overlay matching the OVERLAY_SELECTOR set
+    page.evaluate("""
+        var ov = document.createElement('div');
+        ov.className = 'modal-overlay open';
+        document.body.appendChild(ov);
+    """)
+
+    page.keyboard.press("b")
+    page.wait_for_timeout(400)
+    assert page.url.endswith("/cull"), f"Expected to stay on /cull, got {page.url}"
+
+
+def test_action_returning_false_does_not_preventdefault(live_server, page):
+    """Actions returning false signal 'not handled' and let next candidate run."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=5000)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate("""
+        window._kmCalls = [];
+        window.Keymap.register('global', {
+            key: 'y', name: 'first', description: '', category: 'System',
+            action: function() { window._kmCalls.push('first'); return false; }
+        });
+        window.Keymap.register('global', {
+            key: 'y', name: 'second', description: '', category: 'System',
+            action: function() { window._kmCalls.push('second'); }
+        });
+    """)
+
+    page.keyboard.press("y")
+    assert page.evaluate("window._kmCalls") == ["first", "second"]
