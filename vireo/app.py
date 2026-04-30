@@ -35,7 +35,12 @@ from flask import (
 )
 from highlights import select_highlights
 from jobs import JobRunner, LogBroadcaster
-from preview_cache import evict_if_over_quota as evict_preview_cache_if_over_quota
+from preview_cache import (
+    evict_if_over_quota as evict_preview_cache_if_over_quota,
+)
+from preview_cache import (
+    reconcile_preview_cache,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -415,14 +420,20 @@ def _migrate_legacy_preview_cache(app):
 
 
 def _enforce_preview_cache_quota_at_startup(app):
-    """Run one eviction pass at startup so migration / prior runs can't
-    leave the app over quota indefinitely.
+    """Reconcile and evict at startup so prior runs / external deletes
+    can't leave the table out of sync or over quota.
+
+    Reconcile first: if a previous session left ghost rows (files
+    deleted while cache was under quota), eviction would see inflated
+    totals and stay asleep when it shouldn't, or wake up and run a
+    no-op pass over rows whose files don't exist.
     """
     from preview_cache import evict_if_over_quota
 
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     db = Database(app.config["DB_PATH"])
     try:
+        reconcile_preview_cache(db, vireo_dir)
         evict_if_over_quota(db, vireo_dir)
     finally:
         try:
@@ -4698,6 +4709,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         log.info("Deleted %d files from %s cache", deleted, cache_type)
         return jsonify({"ok": True, "deleted": deleted})
 
+    def _recommended_preview_cache_mb(db):
+        """Recommend a quota that fits one preview per photo across the
+        whole library.
+
+        Uses the measured average bytes-per-preview from the existing
+        ``preview_cache`` rows when available, otherwise falls back to
+        500 KB (a typical 1920px JPEG at quality 90). Photos are global
+        across workspaces so this is a library-wide count, not
+        workspace-scoped.
+
+        Returns 0 when the photos table is empty (avoids a "recommended
+        0 MB" surprise on a fresh install).
+        """
+        photo_count = db.conn.execute(
+            "SELECT COUNT(*) FROM photos"
+        ).fetchone()[0]
+        if not photo_count:
+            return 0
+        avg_row = db.conn.execute(
+            "SELECT AVG(bytes) AS a FROM preview_cache WHERE bytes > 0"
+        ).fetchone()
+        avg_bytes = (avg_row["a"] if avg_row and avg_row["a"] else 500 * 1024)
+        recommended_bytes = photo_count * avg_bytes
+        return max(1, int(recommended_bytes / 1024 / 1024) + 1)
+
     @app.route("/api/preview-cache")
     def api_preview_cache():
         """Return counts and totals from the preview_cache table, plus quota."""
@@ -4707,11 +4743,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "SELECT COUNT(*) AS c FROM preview_cache"
         ).fetchone()
         total = db.preview_cache_total_bytes()
-        quota_mb = cfg.load().get("preview_cache_max_mb", 2048)
+        quota_mb = cfg.load().get("preview_cache_max_mb", 20480)
         return jsonify({
             "count": count_row["c"],
             "total_size": total,
             "quota_bytes": int(quota_mb) * 1024 * 1024,
+            "recommended_mb": _recommended_preview_cache_mb(db),
         })
 
     @app.route("/api/preview-cache/clear", methods=["POST"])
