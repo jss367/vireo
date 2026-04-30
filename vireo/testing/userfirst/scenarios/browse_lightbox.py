@@ -44,11 +44,16 @@ def run(session):
     )
 
     session.page.click("[title='Next (\u2192)']")
-    # Give the filename label a beat to update before reading it.
-    session.page.wait_for_function(
-        f"() => (document.getElementById('lightboxFilename') || {{}}).textContent !== {first['filename']!r}",
-        timeout=3000,
-    )
+    # Give the filename label a beat to update before reading it. Wrap in
+    # try/except so a failure surfaces as a soft BUG finding instead of an
+    # unhandled Playwright TimeoutError that aborts the scenario.
+    try:
+        session.page.wait_for_function(
+            f"() => (document.getElementById('lightboxFilename') || {{}}).textContent !== {first['filename']!r}",
+            timeout=3000,
+        )
+    except Exception:
+        pass
     session.screenshot("lightbox-after-next")
 
     shown_after_next = session.eval(
@@ -68,10 +73,13 @@ def run(session):
     )
 
     session.page.click("[title='Previous (\u2190)']")
-    session.page.wait_for_function(
-        f"() => (document.getElementById('lightboxFilename') || {{}}).textContent === {first['filename']!r}",
-        timeout=3000,
-    )
+    try:
+        session.page.wait_for_function(
+            f"() => (document.getElementById('lightboxFilename') || {{}}).textContent === {first['filename']!r}",
+            timeout=3000,
+        )
+    except Exception:
+        pass
     shown_after_prev = session.eval(
         "(document.getElementById('lightboxFilename') || {}).textContent || ''"
     )
@@ -79,3 +87,11 @@ def run(session):
         shown_after_prev == first["filename"],
         f"Previous arrow should return to the first photo; got {shown_after_prev!r}",
     )
+
+    # Let any in-flight /photos/<id>/full image fetches resolve before
+    # the harness shuts down — otherwise late responses can race the
+    # report finalize step.
+    try:
+        session.page.wait_for_load_state("networkidle", timeout=3000)
+    except Exception:
+        pass

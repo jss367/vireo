@@ -47,25 +47,37 @@ def run(session):
 
     # Dispatch the reject shortcut as a synthetic keydown on document so it
     # bypasses whatever element currently holds focus but still trips the
-    # listener (which is bound on document and ignores INPUT/TEXTAREA).
-    with session.page.expect_response(
-        lambda r: "/api/batch/flag" in r.url and r.request.method == "POST",
-        timeout=5000,
-    ) as resp_info:
-        session.page.evaluate(
-            """() => {
-                const evt = new KeyboardEvent('keydown', {
-                    key: 'x', code: 'KeyX', bubbles: true, cancelable: true,
-                });
-                document.dispatchEvent(evt);
-            }"""
+    # listener (which is bound on document and ignores INPUT/TEXTAREA). If
+    # the regression returns the shortcut hits /api/photos/<id>/flag (single)
+    # instead of /api/batch/flag — the expect_response then times out. Wrap
+    # in try/except so that timeout becomes a soft BUG finding, not an
+    # unhandled Playwright exception.
+    resp = None
+    try:
+        with session.page.expect_response(
+            lambda r: "/api/batch/flag" in r.url and r.request.method == "POST",
+            timeout=5000,
+        ) as resp_info:
+            session.page.evaluate(
+                """() => {
+                    const evt = new KeyboardEvent('keydown', {
+                        key: 'x', code: 'KeyX', bubbles: true, cancelable: true,
+                    });
+                    document.dispatchEvent(evt);
+                }"""
+            )
+        resp = resp_info.value
+    except Exception as e:
+        session.assert_that(
+            False,
+            f"reject shortcut should fire POST /api/batch/flag with multi-select; never observed ({e})",
         )
 
-    resp = resp_info.value
-    session.assert_that(
-        resp.status == 200,
-        f"batch flag request should return 200; got {resp.status}",
-    )
+    if resp is not None:
+        session.assert_that(
+            resp.status == 200,
+            f"batch flag request should return 200; got {resp.status}",
+        )
     session.screenshot("after-reject-shortcut")
 
     session.goto("/browse")

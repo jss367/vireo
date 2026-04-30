@@ -17,13 +17,19 @@ def run(session):
     session.page.wait_for_selector("#folderTree .tree-item", state="visible", timeout=5000)
     session.screenshot("browse-folder-tree")
 
+    # Each tree-item renders as: <indent span><toggle span><name span><count span>.
+    # The name is the only span without a class.
     tree = session.eval(
         """(() => {
             return Array.from(document.querySelectorAll('#folderTree .tree-item'))
-                .map(el => ({
-                    id: parseInt(el.dataset.folderId, 10),
-                    name: (el.querySelector('span') || {}).textContent || '',
-                }));
+                .map(el => {
+                    const nameSpan = Array.from(el.querySelectorAll('span'))
+                        .find(s => !s.className);
+                    return {
+                        id: parseInt(el.dataset.folderId, 10),
+                        name: (nameSpan || {}).textContent || '',
+                    };
+                });
         })()"""
     )
 

@@ -23,6 +23,24 @@ def _make_thumb(thumb_dir, photo_id):
         Image.new("RGB", (100, 100), color=(80, 120, 80)).save(path)
 
 
+def _make_source(folder_path, filename):
+    """Create a 320x240 placeholder JPEG at the photo's source path.
+
+    Without this, /photos/<id>/full and /photos/<id>/preview return 500
+    because the DB row references a path that has no file behind it.
+    Skips non-JPEG extensions (e.g. .nef) — those don't get served as
+    previews from raw files anyway.
+    """
+    from PIL import Image
+
+    if not filename.lower().endswith((".jpg", ".jpeg")):
+        return
+    os.makedirs(folder_path, exist_ok=True)
+    src_path = os.path.join(folder_path, filename)
+    if not os.path.exists(src_path):
+        Image.new("RGB", (320, 240), color=(40, 80, 60)).save(src_path)
+
+
 def browse_seed(db_path, thumb_dir, photos_root):
     """Minimal seed: workspace, 3 folders, ~10 photos with keywords and ratings.
 
@@ -38,11 +56,13 @@ def browse_seed(db_path, thumb_dir, photos_root):
     # fall back to synthetic paths for headless CI.
     base = photos_root if photos_root else "/test/photos"
 
-    f1 = db.add_folder(os.path.join(base, "wildlife"), name="wildlife")
-    f2 = db.add_folder(os.path.join(base, "landscapes"), name="landscapes")
-    f3 = db.add_folder(
-        os.path.join(base, "wildlife", "birds"), name="birds", parent_id=f1
-    )
+    f1_path = os.path.join(base, "wildlife")
+    f2_path = os.path.join(base, "landscapes")
+    f3_path = os.path.join(base, "wildlife", "birds")
+    f1 = db.add_folder(f1_path, name="wildlife")
+    f2 = db.add_folder(f2_path, name="landscapes")
+    f3 = db.add_folder(f3_path, name="birds", parent_id=f1)
+    folder_paths = {f1: f1_path, f2: f2_path, f3: f3_path}
 
     photos = []
     specs = [
@@ -73,6 +93,8 @@ def browse_seed(db_path, thumb_dir, photos_root):
             db.update_photo_rating(pid, rating)
         if flag:
             db.update_photo_flag(pid, flag)
+        if photos_root:
+            _make_source(folder_paths[folder_id], fname)
 
     # Add keywords and tag some photos
     k_eagle = db.add_keyword("Eagle", is_species=True)
@@ -127,6 +149,10 @@ def orphan_folder_seed(db_path, thumb_dir, photos_root):
 
     # Give the orphan child one photo so the grid isn't empty when filtered.
     photos = []
+    folder_paths = {
+        child_id: os.path.join(base, "archive", "2024"),
+        linked_root_id: os.path.join(base, "inbox"),
+    }
     for folder_id, fname, ts in (
         (child_id, "archive2024_01.jpg", "2024-01-15T10:00:00"),
         (linked_root_id, "inbox_01.jpg", "2024-11-01T09:00:00"),
@@ -140,6 +166,8 @@ def orphan_folder_seed(db_path, thumb_dir, photos_root):
             timestamp=ts,
         )
         photos.append(pid)
+        if photos_root:
+            _make_source(folder_paths[folder_id], fname)
 
     os.makedirs(thumb_dir, exist_ok=True)
     for pid in photos:
