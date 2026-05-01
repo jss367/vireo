@@ -210,6 +210,17 @@ def _weighted_progress(stages):
     return int(math.floor(done)), total
 
 
+# Serializes snapshot-and-push of `stages` across the pipeline's daemon
+# threads (scanner, thumbnail, model_loader, ...). All of them emit
+# progress events whose payload includes a shallow copy of the shared
+# `stages` dict; without this lock a thread can build the snapshot, get
+# preempted, and land its stale event after another thread has already
+# pushed events with newer counts — producing a non-monotonic SSE stream
+# (the CI flake on test_pipeline_multi_source_ingest_progress_is_monotonic).
+# Lock order: _progress_lock outside, JobRunner._lock inside.
+_progress_lock = threading.Lock()
+
+
 def _progress_event(stages, stage_id, phase, **extra):
     """Build a push_event 'progress' payload with weighted overall current/total.
 
@@ -228,15 +239,35 @@ def _progress_event(stages, stage_id, phase, **extra):
     return data
 
 
+def _emit_progress(runner, job_id, stages, stage_id, phase, **extra):
+    """Atomically snapshot `stages` and push a progress event.
+
+    Replaces the unguarded ``runner.push_event(..., _progress_event(...))``
+    pattern at every per-stage callback. Holding ``_progress_lock`` across
+    the snapshot construction and the push_event call prevents a stale
+    snapshot from another thread from landing out of order in the event
+    log."""
+    with _progress_lock:
+        runner.push_event(
+            job_id, "progress",
+            _progress_event(stages, stage_id, phase, **extra),
+        )
+
+
 def _update_stages(runner, job_id, stages):
-    """Push a stages progress update with weighted overall current/total."""
-    current, total = _weighted_progress(stages)
-    runner.push_event(job_id, "progress", {
-        "phase": _current_phase(stages),
-        "current": current,
-        "total": total,
-        "stages": {k: dict(v) for k, v in stages.items()},
-    })
+    """Push a stages progress update with weighted overall current/total.
+
+    Snapshot+push are atomic under ``_progress_lock`` so concurrent emits
+    from other pipeline threads can't produce stale events that land out
+    of order."""
+    with _progress_lock:
+        current, total = _weighted_progress(stages)
+        runner.push_event(job_id, "progress", {
+            "phase": _current_phase(stages),
+            "current": current,
+            "total": total,
+            "stages": {k: dict(v) for k, v in stages.items()},
+        })
 
 
 def _current_phase(stages):
@@ -529,9 +560,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
             def status_cb(message):
                 runner.update_step(job["id"], "scan", current_file=message)
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "scan", message,
-                ))
+                _emit_progress(
+                    runner, job["id"], stages, "scan", message,
+                )
 
             # Accumulator so multi-folder scans (repair loop, scan-in-place
             # with sources=[...]) don't rewind the overall progress at each
@@ -553,11 +584,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 eta = round(remaining / rate_per_sec) if rate_per_sec > 0 and cum_current >= 10 else None
                 runner.update_step(job["id"], "scan",
                                    progress={"current": cum_current, "total": cum_total})
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "scan", "Scanning photos",
+                _emit_progress(
+                    runner, job["id"], stages, "scan", "Scanning photos",
                     rate=rate,
                     eta_seconds=eta,
-                ))
+                )
 
             def advance_scan_acc():
                 scan_acc["prior"] += scan_acc["last_total"]
@@ -685,10 +716,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     runner.update_step(job["id"], "ingest",
                                        current_file=filename,
                                        progress={"current": cum_current, "total": cum_total})
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "ingest", "Importing photos",
+                    _emit_progress(
+                        runner, job["id"], stages, "ingest", "Importing photos",
                         current_file=filename,
-                    ))
+                    )
 
                 def advance_ingest_acc():
                     ingest_acc["prior"] += ingest_acc["last_total"]
@@ -1021,11 +1052,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                    progress={"current": processed, "total": scan_total})
                 elapsed = time.time() - job["_start_time"]
                 rate = round(processed / max(elapsed, 0.01) * 60, 1)
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "thumbnails", "Generating thumbnails",
+                _emit_progress(
+                    runner, job["id"], stages, "thumbnails", "Generating thumbnails",
                     current_file=os.path.basename(photo_path),
                     rate=rate,
-                ))
+                )
 
             # Collection mode: the scanner is skipped so the queue above was
             # empty. Iterate the collection's photos directly — mirrors the
@@ -1072,11 +1103,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     )
                     elapsed = time.time() - job["_start_time"]
                     rate = round(processed / max(elapsed, 0.01) * 60, 1)
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "thumbnails", "Generating thumbnails",
+                    _emit_progress(
+                        runner, job["id"], stages, "thumbnails", "Generating thumbnails",
                         current_file=os.path.basename(photo_path),
                         rate=rate,
-                    ))
+                    )
 
             # Flush any thumb_path updates from the final partial batch.
             _flush_thumb_paths()
@@ -1189,13 +1220,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 runner.update_step(job["id"], "previews",
                                    current_file=photo["filename"],
                                    progress={"current": i + 1, "total": total})
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "previews", "Generating previews",
+                _emit_progress(
+                    runner, job["id"], stages, "previews", "Generating previews",
                     current_file=photo["filename"],
                     rate=round(
                         (i + 1) / max(time.time() - job["_start_time"], 0.01) * 60, 1
                     ),
-                ))
+                )
 
             # One eviction pass after the stage so preview_cache_max_mb is
             # enforced even when the pipeline is the only producer (e.g.
@@ -1435,15 +1466,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             if params.download_taxonomy and not os.path.exists(taxonomy_path):
                 try:
                     from taxonomy import download_taxonomy
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "model_loader", "Downloading taxonomy...",
-                    ))
+                    _emit_progress(
+                        runner, job["id"], stages, "model_loader", "Downloading taxonomy...",
+                    )
                     # Always write new downloads to the persistent path.
                     taxonomy_path = TAXONOMY_JSON_PATH
                     download_taxonomy(taxonomy_path, progress_callback=lambda msg:
-                        runner.push_event(job["id"], "progress", _progress_event(
-                            stages, "model_loader", msg,
-                        ))
+                        _emit_progress(
+                            runner, job["id"], stages, "model_loader", msg,
+                        )
                     )
                 except Exception as e:
                     log.warning("Taxonomy download failed, continuing without: %s", e)
@@ -1459,9 +1490,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             # Load the first classifier so classify_stage can start as soon
             # as scan completes; any remaining specs are loaded inside
             # classify_stage so we never hold more than one model in memory.
-            runner.push_event(job["id"], "progress", _progress_event(
-                stages, "model_loader", f"Loading {first_name}...",
-            ))
+            _emit_progress(
+                runner, job["id"], stages, "model_loader", f"Loading {first_name}...",
+            )
 
             try:
                 bundle = _load_model_bundle(resolved_specs[0], tax, thread_db)
@@ -1598,9 +1629,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # Weight download is a sub-phase of detect; don't treat
                     # its bytes as detect's stage-level counter or the bar
                     # jumps ahead before any photo has been detected.
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "detect", phase,
-                    ))
+                    _emit_progress(
+                        runner, job["id"], stages, "detect", phase,
+                    )
 
                 ensure_megadetector_weights(progress_callback=_dl_progress)
 
@@ -1617,13 +1648,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                 stages["detect"]["count"] = batch_idx
                 stages["detect"]["total"] = total
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "detect", "Detecting subjects",
+                _emit_progress(
+                    runner, job["id"], stages, "detect", "Detecting subjects",
                     rate=round(
                         batch_idx / max(time.time() - start_time, 0.01) * 60,
                         1,
                     ),
-                ))
+                )
                 runner.update_step(
                     job["id"], "detect",
                     progress={"current": batch_idx, "total": total},
@@ -1814,10 +1845,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # restate it so the "Loading next model..." event always
                     # carries the multi-spec total.
                     stages["classify"]["total"] = total * len(resolved_specs_local)
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "classify", f"Loading {active_spec['name']}...",
+                    _emit_progress(
+                        runner, job["id"], stages, "classify", f"Loading {active_spec['name']}...",
                         step_id=step_id,
-                    ))
+                    )
                     # Drop the prior model's per-photo payload BEFORE loading
                     # the next bundle so we don't hold old results + new model
                     # weights concurrently. Without this, multi-model runs on
@@ -1903,11 +1934,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # real "to classify" count on the first event the user
                 # sees, not 0.
                 stages["classify"]["total"] = total * len(resolved_specs_local)
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "classify",
+                _emit_progress(
+                    runner, job["id"], stages, "classify",
                     f"Classifying with {active_spec['name']}",
                     step_id=step_id,
-                ))
+                )
                 raw_results: list = []
                 failed = 0
                 skipped_existing = 0
@@ -2097,8 +2128,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # contained cache hits.
                     stages["classify"]["total"] = total * len(resolved_specs_local)
                     elapsed = max(time.time() - start_time, 0.01)
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "classify",
+                    _emit_progress(
+                        runner, job["id"], stages, "classify",
                         f"Classifying with {active_spec['name']}"
                         + (
                             f" ({spec_idx + 1}/{len(resolved_specs_local)})"
@@ -2106,7 +2137,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         ),
                         step_id=step_id,
                         rate=round(processed_in_spec / elapsed * 60, 1),
-                    ))
+                    )
                     runner.update_step(
                         job["id"], step_id,
                         progress={
@@ -2120,12 +2151,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # asked us to stop. Per-photo counters are accurate, no
                 # corrective fixup needed.
                 if _should_abort(abort):
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "classify",
+                    _emit_progress(
+                        runner, job["id"], stages, "classify",
                         f"Cancelled — {processed_in_spec} of "
                         f"{total} processed",
                         step_id=step_id,
-                    ))
+                    )
                     runner.update_step(
                         job["id"], step_id,
                         status="completed",
@@ -2438,9 +2469,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 from masking import ensure_sam2_weights
 
                 def _dl_progress(phase, current, total_steps):
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "extract_masks", phase,
-                    ))
+                    _emit_progress(
+                        runner, job["id"], stages, "extract_masks", phase,
+                    )
 
                 ensure_sam2_weights(
                     variant=sam2_variant, progress_callback=_dl_progress,
@@ -2517,11 +2548,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 runner.update_step(job["id"], "extract_masks",
                                    progress={"current": processed, "total": total},
                                    error_count=em_failed)
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "extract_masks",
+                _emit_progress(
+                    runner, job["id"], stages, "extract_masks",
                     "Extracting features (SAM2 + DINOv2)",
                     rate=round(processed / max(time.time() - start_time, 0.01) * 60, 1),
-                ))
+                )
 
             if _should_abort(abort):
                 # Distinguish a user cancel from a clean completion: pin a
@@ -2645,12 +2676,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     job["id"], "eye_keypoints",
                     progress={"current": current, "total": total_steps},
                 )
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "eye_keypoints", phase,
+                _emit_progress(
+                    runner, job["id"], stages, "eye_keypoints", phase,
                     rate=round(
                         current / max(time.time() - start_time, 0.01) * 60, 1
                     ),
-                ))
+                )
 
             detect_eye_keypoints_stage(
                 thread_db, config=pipeline_cfg, progress_callback=_progress,
