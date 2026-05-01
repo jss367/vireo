@@ -6369,7 +6369,8 @@ def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
     tmp_path, monkeypatch,
 ):
     """The eye_keypoints stage must call ensure_keypoint_weights for both
-    SuperAnimal models before iterating photos. Without this auto-download,
+    SuperAnimal models before iterating photos when the eligible set
+    contains both bird and quadruped subjects. Without this auto-download,
     a fresh install would silently produce zero eye keypoints because the
     per-photo Gate 2 check would skip every photo.
     """
@@ -6404,9 +6405,14 @@ def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
     monkeypatch.setattr(
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
+    # Provide one bird and one quadruped row so the routing-aware download
+    # picks both SuperAnimal variants.
     monkeypatch.setattr(
         Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [{"id": pid}],
+        lambda self, **k: [
+            {"id": pid, "taxonomy_class": "Mammalia"},
+            {"id": pid + 1000, "taxonomy_class": "Aves"},
+        ],
     )
     # detect_eye_keypoints_stage stub — we're testing the wrapping stage's
     # download orchestration, not per-photo inference.
@@ -6437,6 +6443,269 @@ def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
     assert downloaded == ["superanimal-quadruped", "superanimal-bird"], (
         f"Expected stage to auto-download both SuperAnimal variants in order; "
         f"got {downloaded!r}"
+    )
+
+
+def test_pipeline_eye_keypoints_stage_only_downloads_routable_variants(
+    tmp_path, monkeypatch,
+):
+    """When every eligible photo routes to bird, the stage must skip the
+    quadruped variant download (and vice versa). Otherwise a bird-only
+    collection pays the full quadruped download cost for weights it would
+    never use.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    # Bird-only eligible set.
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [
+            {"id": pid, "taxonomy_class": "Aves"},
+        ],
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "detect_eye_keypoints_stage",
+        lambda *a, **k: None,
+    )
+
+    downloaded = []
+    import keypoints as _kp_mod
+    monkeypatch.setattr(
+        _kp_mod, "ensure_keypoint_weights",
+        lambda name, progress_callback=None: downloaded.append(name) or "/fake",
+    )
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    assert downloaded == ["superanimal-bird"], (
+        f"Expected only superanimal-bird to download for a bird-only "
+        f"eligible set; got {downloaded!r}"
+    )
+
+
+def test_pipeline_eye_keypoints_stage_skips_download_for_out_of_scope_only(
+    tmp_path, monkeypatch,
+):
+    """A collection of only out-of-scope subjects (fish/reptiles/inverts)
+    must not trigger any SuperAnimal download. Without routing-awareness,
+    the prior `if total > 0` guard would still pull both ~hundreds-of-MB
+    variants even though `_resolve_keypoint_model` skips every photo.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    # Eligible photos exist (total > 0) but every row carries an
+    # out-of-scope taxonomy_class — the per-photo router will return None
+    # for each, so no SuperAnimal model is needed.
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [
+            {"id": pid, "taxonomy_class": "Reptilia"},
+            {"id": pid + 1, "taxonomy_class": "Actinopterygii"},
+        ],
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "detect_eye_keypoints_stage",
+        lambda *a, **k: None,
+    )
+
+    downloaded = []
+    import keypoints as _kp_mod
+    monkeypatch.setattr(
+        _kp_mod, "ensure_keypoint_weights",
+        lambda name, progress_callback=None: downloaded.append(name) or "/fake",
+    )
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    assert downloaded == [], (
+        f"Expected zero downloads for an out-of-scope-only eligible set; "
+        f"got {downloaded!r}"
+    )
+
+
+def test_pipeline_eye_keypoints_stage_download_progress_isolated_from_photo_count(
+    tmp_path, monkeypatch,
+):
+    """The download progress callback must NOT advance the photo
+    `processed` counter. Otherwise a cancel during/just after weight
+    download surfaces e.g. "Cancelled (1 of N processed)" before any
+    photo has actually been touched, misreporting stage outcomes.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    import pipeline_job as pj
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    # Three quadruped rows so total=3 — large enough to make the bug
+    # observable if the download callback bumps the photo counter.
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [
+            {"id": pid, "taxonomy_class": "Mammalia"},
+            {"id": pid + 1, "taxonomy_class": "Mammalia"},
+            {"id": pid + 2, "taxonomy_class": "Mammalia"},
+        ],
+    )
+
+    abort_now = [False]
+
+    # Stub ensure_keypoint_weights to (a) invoke the progress callback the
+    # way the real implementation does — phase, current=0/total=1 then
+    # current=1/total=1 — and (b) trigger an abort, so detect_*_stage
+    # exits before any real photo work happens.
+    import keypoints as _kp_mod
+
+    def _ensure_with_progress(name, progress_callback=None):
+        if progress_callback is not None:
+            progress_callback(f"Downloading {name}...", 0, 1)
+            progress_callback(f"{name} ready", 1, 1)
+        abort_now[0] = True
+        return "/fake/model.onnx"
+
+    monkeypatch.setattr(
+        _kp_mod, "ensure_keypoint_weights", _ensure_with_progress,
+    )
+    # Make detect_eye_keypoints_stage a no-op — the abort fires before it
+    # would touch a photo and we want to assert what the wrapping stage
+    # reports for processed['count'].
+    monkeypatch.setattr(
+        pipeline_mod, "detect_eye_keypoints_stage",
+        lambda *a, **k: None,
+    )
+
+    original_should_abort = pj._should_abort
+
+    def patched_should_abort(event):
+        if abort_now[0]:
+            return True
+        return original_should_abort(event)
+
+    monkeypatch.setattr(pj, "_should_abort", patched_should_abort)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    ek_finals = [
+        kw for (_, sid, kw) in runner.step_updates
+        if sid == "eye_keypoints" and kw.get("status") in (
+            "completed", "failed",
+        ) and "summary" in kw
+    ]
+    assert ek_finals, (
+        f"Expected eye_keypoints final update; got "
+        f"step_updates={runner.step_updates!r}"
+    )
+    summary = ek_finals[-1].get("summary") or ""
+    # Cancel summary must report 0 processed (no photo ran), not 1 — the
+    # download callback must not bleed into the photo counter.
+    assert "Cancelled (0 of 3 processed)" in summary, (
+        f"Download progress callback leaked into the photo counter; "
+        f"expected 'Cancelled (0 of 3 processed)', got {summary!r}"
     )
 
 

@@ -2668,9 +2668,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     pid for pid in collection_photo_ids
                     if pid not in params.exclude_photo_ids
                 }
-            total = len(thread_db.list_photos_for_eye_keypoint_stage(
+            photos_for_stage = thread_db.list_photos_for_eye_keypoint_stage(
                 photo_ids=collection_photo_ids,
-            ))
+            )
+            total = len(photos_for_stage)
             start_time = time.time()
             processed = {"count": 0}
 
@@ -2692,18 +2693,39 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             # Auto-download SuperAnimal weights on first pipeline run.
             # Mirrors the SAM2/DINOv2 auto-download pattern in extract_masks
             # (commit 90cd0f9): without this, every photo silently skips on
-            # a fresh install. Both variants are fetched because the per-
-            # photo router picks bird vs. quadruped from taxonomy_class.
-            # Gate on total > 0 so a no-op rerun doesn't pay the download
-            # cost for zero photos.
+            # a fresh install. Only fetch variants the per-photo router
+            # would actually pick — a collection of out-of-scope classes
+            # (fish/reptiles/invertebrates) shouldn't pay the bandwidth
+            # cost for weights that will never be used.
             if total > 0:
                 import keypoints as kp
+                from pipeline import _resolve_keypoint_model
+
+                needed_models = []
+                for row in photos_for_stage:
+                    model_name = _resolve_keypoint_model(thread_db, row)
+                    if model_name and model_name not in needed_models:
+                        needed_models.append(model_name)
+
+                # Use a separate download-progress callback so a cancel
+                # during/just after weight download doesn't leak the
+                # download counter into `processed['count']` (which would
+                # surface as e.g. "Cancelled (1 of N processed)" before any
+                # photo has actually been touched).
+                def _dl_progress(phase, current, total_steps):
+                    _emit_progress(
+                        runner, job["id"], stages, "eye_keypoints", phase,
+                    )
+
+                # Preserve a stable order (quadruped, bird) for tests and
+                # log readability when both variants are needed.
                 for kp_model in (
                     "superanimal-quadruped", "superanimal-bird",
                 ):
-                    kp.ensure_keypoint_weights(
-                        kp_model, progress_callback=_progress,
-                    )
+                    if kp_model in needed_models:
+                        kp.ensure_keypoint_weights(
+                            kp_model, progress_callback=_dl_progress,
+                        )
 
             detect_eye_keypoints_stage(
                 thread_db, config=pipeline_cfg, progress_callback=_progress,
