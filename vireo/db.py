@@ -669,6 +669,23 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE photos ADD COLUMN eye_kp_fingerprint TEXT"
             )
+        # One-shot backfill: stamp the current EYE_KP_FINGERPRINT_VERSION
+        # onto photos that already have eye-keypoint data, so existing
+        # users don't see "Outdated" for unchanged data on first upgrade.
+        # Gated by db_meta so it runs exactly once per DB.
+        marker = self.conn.execute(
+            "SELECT value FROM db_meta WHERE key='eye_kp_fingerprint_backfill'"
+        ).fetchone()
+        if marker is None:
+            from pipeline import EYE_KP_FINGERPRINT_VERSION
+            self.conn.execute(
+                "UPDATE photos SET eye_kp_fingerprint = ? "
+                "WHERE eye_tenengrad IS NOT NULL AND eye_kp_fingerprint IS NULL",
+                (EYE_KP_FINGERPRINT_VERSION,),
+            )
+            self.conn.execute(
+                "INSERT INTO db_meta(key, value) VALUES ('eye_kp_fingerprint_backfill', '1')"
+            )
         self.conn.commit()
 
     # -- Workspaces --

@@ -9720,6 +9720,44 @@ def test_photos_eye_kp_fingerprint_migrates_on_old_db(tmp_path):
     db2.conn.execute("SELECT eye_kp_fingerprint FROM photos LIMIT 0")
 
 
+def test_eye_kp_fingerprint_backfilled_on_migration(tmp_path):
+    """One-shot backfill: photos with eye_tenengrad NOT NULL get the
+    current fingerprint; rows without eye data stay NULL. Repeated DB
+    opens don't re-stamp."""
+    from db import Database
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
+    p = str(tmp_path / "v.db")
+    db = Database(p)
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename, eye_tenengrad, "
+        "eye_kp_fingerprint) "
+        "VALUES (1, 1, 'a.jpg', 12.5, NULL), (2, 1, 'b.jpg', NULL, NULL)"
+    )
+    # Wipe the migration marker so reopening reruns the backfill once.
+    db.conn.execute("DELETE FROM db_meta WHERE key='eye_kp_fingerprint_backfill'")
+    db.conn.commit()
+    db.close()
+    db2 = Database(p)
+    rows = {r["id"]: r["eye_kp_fingerprint"]
+            for r in db2.conn.execute(
+                "SELECT id, eye_kp_fingerprint FROM photos ORDER BY id"
+            ).fetchall()}
+    assert rows[1] == EYE_KP_FINGERPRINT_VERSION
+    assert rows[2] is None
+    # Marker now set; reopening must NOT touch already-populated rows.
+    db2.conn.execute(
+        "UPDATE photos SET eye_kp_fingerprint = 'mutated' WHERE id = 1"
+    )
+    db2.conn.commit()
+    db2.close()
+    db3 = Database(p)
+    after = db3.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id = 1"
+    ).fetchone()[0]
+    assert after == "mutated"  # backfill skipped on second open
+
+
 def test_workspaces_has_group_state_columns(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "v.db"))
