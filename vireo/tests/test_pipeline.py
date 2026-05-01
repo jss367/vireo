@@ -1280,3 +1280,31 @@ def test_load_photo_features_honors_workspace_detector_threshold(tmp_path):
         "SELECT COUNT(*) FROM detections WHERE photo_id = ?", (pid,),
     ).fetchone()[0]
     assert raw == 1
+
+
+def test_eye_kp_fingerprint_version_is_string():
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
+    assert isinstance(EYE_KP_FINGERPRINT_VERSION, str)
+    assert len(EYE_KP_FINGERPRINT_VERSION) > 0
+
+
+def test_compute_group_fingerprint_is_stable_for_same_input():
+    from pipeline import compute_group_fingerprint
+    cfg = {"pipeline": {"foo": 1}}
+    assert compute_group_fingerprint(cfg) == compute_group_fingerprint(cfg)
+
+
+def test_compute_group_fingerprint_changes_with_encounter_defaults():
+    """Bumping any value in encounters.DEFAULTS must change the fingerprint."""
+    import encounters
+    from pipeline import compute_group_fingerprint
+    cfg = {}
+    fp_before = compute_group_fingerprint(cfg)
+    original = encounters.DEFAULTS.copy()
+    try:
+        encounters.DEFAULTS["w_time"] = original["w_time"] + 0.01
+        fp_after = compute_group_fingerprint(cfg)
+        assert fp_after != fp_before
+    finally:
+        encounters.DEFAULTS.clear()
+        encounters.DEFAULTS.update(original)

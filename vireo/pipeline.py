@@ -681,6 +681,34 @@ _EYE_KEYPOINT_MODEL_FOR_CLASS = {
 }
 
 
+# Bump this string when the eye-keypoint routing or weights change in a
+# way that invalidates previously persisted (eye_x, eye_y, eye_conf,
+# eye_tenengrad) values. The pipeline page reads photos.eye_kp_fingerprint
+# and treats != current as "Outdated".
+EYE_KP_FINGERPRINT_VERSION = "v1"
+
+
+def compute_group_fingerprint(_config):
+    """Stable hash of the params that drive encounter + burst grouping.
+
+    Workspaces store the fingerprint observed at the last completed
+    grouping run; the pipeline page treats != current as "Outdated".
+    The _config arg is reserved for future per-workspace overrides; for
+    now grouping uses module-level DEFAULTS only.
+    """
+    import hashlib
+    import json
+
+    import bursts
+    import encounters
+    payload = {
+        "encounters": dict(encounters.DEFAULTS),
+        "bursts": dict(bursts.DEFAULTS),
+    }
+    blob = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha1(blob).hexdigest()[:16]
+
+
 def eye_keypoint_stage_preflight(config):
     """Return a short skip reason if the eye-keypoint stage cannot do work.
 
