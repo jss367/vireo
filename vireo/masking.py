@@ -330,36 +330,41 @@ def generate_mask(image, detection_box, variant="sam2-small"):
         return None
 
 
-def save_mask(mask, masks_dir, photo_id):
+def save_mask(mask, masks_dir, photo_id, variant):
     """Save a boolean mask as a single-channel PNG.
+
+    Filename: ``{photo_id}.{variant}.png`` so multiple SAM variants per
+    photo coexist on disk (sam2-small, sam2-large, etc).
 
     Args:
         mask: numpy boolean array (H, W)
         masks_dir: directory for mask files (e.g. ~/.vireo/masks/)
         photo_id: photo ID for the filename
+        variant: SAM variant name (e.g. ``"sam2-small"``)
 
     Returns:
         path to the saved mask file
     """
     os.makedirs(masks_dir, exist_ok=True)
-    path = os.path.join(masks_dir, f"{photo_id}.png")
+    path = os.path.join(masks_dir, f"{photo_id}.{variant}.png")
     # Convert bool mask to uint8 (0 or 255)
     mask_img = Image.fromarray((mask.astype(np.uint8) * 255), mode="L")
     mask_img.save(path, format="PNG")
     return path
 
 
-def load_mask(masks_dir, photo_id):
+def load_mask(masks_dir, photo_id, variant):
     """Load a mask from disk.
 
     Args:
         masks_dir: directory containing mask files
         photo_id: photo ID
+        variant: SAM variant name (e.g. ``"sam2-small"``)
 
     Returns:
         numpy boolean array (H, W), or None if not found
     """
-    path = os.path.join(masks_dir, f"{photo_id}.png")
+    path = os.path.join(masks_dir, f"{photo_id}.{variant}.png")
     if not os.path.exists(path):
         return None
     with Image.open(path) as mask_img:

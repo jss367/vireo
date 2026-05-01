@@ -6105,7 +6105,9 @@ def _stub_extract_masks_heavy_ops(monkeypatch):
     )
     monkeypatch.setattr(
         masking, "save_mask",
-        lambda mask, dir_, pid_: os.path.join(dir_, f"{pid_}.png"),
+        lambda mask, dir_, pid_, variant: os.path.join(
+            dir_, f"{pid_}.{variant}.png",
+        ),
     )
     monkeypatch.setattr(masking, "crop_completeness", lambda m: 1.0)
     monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)

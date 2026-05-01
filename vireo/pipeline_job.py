@@ -2509,7 +2509,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     if _should_abort(abort):
                         break
 
-                    mask_path = save_mask(mask, masks_dir, photo_id)
+                    mask_path = save_mask(
+                        mask, masks_dir, photo_id, sam2_variant,
+                    )
                     completeness = crop_completeness(mask)
                     features = compute_all_quality_features(proxy, mask)
                     if _should_abort(abort):

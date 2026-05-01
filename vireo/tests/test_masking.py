@@ -120,11 +120,11 @@ def test_mask_save_load_roundtrip(tmp_path):
     mask = np.zeros((100, 150), dtype=bool)
     mask[20:60, 30:90] = True  # rectangular subject
 
-    path = save_mask(mask, masks_dir, photo_id=42)
+    path = save_mask(mask, masks_dir, photo_id=42, variant="sam2-small")
     assert os.path.exists(path)
-    assert path.endswith("42.png")
+    assert path.endswith("42.sam2-small.png")
 
-    loaded = load_mask(masks_dir, photo_id=42)
+    loaded = load_mask(masks_dir, photo_id=42, variant="sam2-small")
     assert loaded is not None
     assert loaded.shape == (100, 150)
     assert loaded.dtype == bool
@@ -135,8 +135,35 @@ def test_load_mask_missing(tmp_path):
     """load_mask returns None when mask file doesn't exist."""
     from masking import load_mask
 
-    result = load_mask(str(tmp_path), photo_id=999)
+    result = load_mask(str(tmp_path), photo_id=999, variant="sam2-small")
     assert result is None
+
+
+def test_save_mask_uses_variant_in_filename(tmp_path):
+    """save_mask writes ``{photo_id}.{variant}.png`` so multiple SAM
+    variants for the same photo coexist on disk."""
+    from masking import save_mask
+
+    mask = np.array([[True, False], [False, True]], dtype=bool)
+    out = save_mask(
+        mask, str(tmp_path), photo_id=42, variant="sam2-large",
+    )
+    assert out == str(tmp_path / "42.sam2-large.png")
+    assert (tmp_path / "42.sam2-large.png").exists()
+
+
+def test_save_mask_per_variant_files_coexist(tmp_path):
+    """Saving the same photo under two different variants leaves both
+    files on disk side-by-side."""
+    from masking import save_mask
+
+    mask = np.zeros((4, 4), dtype=bool)
+    mask[1:3, 1:3] = True
+
+    p_small = save_mask(mask, str(tmp_path), photo_id=7, variant="sam2-small")
+    p_large = save_mask(mask, str(tmp_path), photo_id=7, variant="sam2-large")
+    assert p_small != p_large
+    assert os.path.isfile(p_small) and os.path.isfile(p_large)
 
 
 # -- crop_subject --

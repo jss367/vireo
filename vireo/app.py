@@ -9082,8 +9082,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         skipped += 1
                         continue
 
-                    # Save mask PNG
-                    mask_path = save_mask(mask, masks_dir, photo_id)
+                    # Save mask PNG (per SAM variant; one file per variant)
+                    mask_path = save_mask(
+                        mask, masks_dir, photo_id, sam2_variant,
+                    )
 
                     # Compute crop completeness + all quality features
                     completeness = crop_completeness(mask)
