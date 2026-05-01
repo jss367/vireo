@@ -358,6 +358,23 @@ class Database:
                 created_at          TEXT DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS photo_masks (
+                photo_id          INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                variant           TEXT    NOT NULL,
+                path              TEXT    NOT NULL,
+                created_at        INTEGER NOT NULL,
+                detector_model    TEXT    NOT NULL,
+                prompt_x          INTEGER NOT NULL,
+                prompt_y          INTEGER NOT NULL,
+                prompt_w          INTEGER NOT NULL,
+                prompt_h          INTEGER NOT NULL,
+                subject_size      INTEGER,
+                subject_tenengrad REAL,
+                bg_tenengrad      REAL,
+                crop_complete     REAL,
+                PRIMARY KEY (photo_id, variant)
+            );
+
             CREATE TABLE IF NOT EXISTS predictions (
                 id                   INTEGER PRIMARY KEY,
                 detection_id         INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,

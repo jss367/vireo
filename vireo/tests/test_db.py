@@ -9699,3 +9699,41 @@ def test_default_tabs_is_the_curated_nine():
         "review", "cull", "jobs",
         "highlights", "misses", "settings",
     ]
+
+
+def test_photo_masks_table_exists(tmp_path):
+    """photo_masks table must exist on a fresh DB."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    cols = {row[1] for row in db.conn.execute(
+        "PRAGMA table_info(photo_masks)"
+    ).fetchall()}
+    assert {
+        "photo_id", "variant", "path", "created_at",
+        "detector_model", "prompt_x", "prompt_y", "prompt_w", "prompt_h",
+        "subject_size", "subject_tenengrad", "bg_tenengrad", "crop_complete",
+    } <= cols
+
+
+def test_photo_masks_pk_is_photo_and_variant(tmp_path):
+    """(photo_id, variant) is the primary key — same variant twice fails."""
+    import sqlite3
+
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (1, 'sam2-small', '/p1', 0, 'unknown', -1, -1, -1, -1)"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db.conn.execute(
+            "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+            "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+            "VALUES (1, 'sam2-small', '/p2', 1, 'unknown', -1, -1, -1, -1)"
+        )
