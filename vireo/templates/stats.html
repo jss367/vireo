@@ -219,6 +219,29 @@ body { padding-bottom: 36px; }
   <div class="section">
     <div class="section-title">Storage <span id="storageTotalSize" style="font-size:12px;font-weight:400;color:var(--text-dim);margin-left:8px;">-</span></div>
     <div id="storageGrid" class="stats-grid"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
+    <div id="masksCard" style="margin-top:16px;"></div>
+  </div>
+</div>
+
+<!-- Masks variant manager modal -->
+<div class="modal-overlay" id="masksModal" onclick="if(event.target===this)closeMasksModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Manage Mask Variants</h3>
+      <button class="modal-close" onclick="closeMasksModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-desc">
+        SAM mask files saved per photo per variant. The active variant
+        for each photo drives downstream scoring and is denormalized
+        into the photos row. Inactive variants are safe to delete.
+      </div>
+      <div id="masksModalError" style="color:var(--danger);font-size:12px;margin-bottom:10px;display:none;"></div>
+      <ul class="file-list" id="masksModalRows"></ul>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeMasksModal()">Close</button>
+    </div>
   </div>
 </div>
 
@@ -700,6 +723,166 @@ async function loadStoragePanel() {
   } catch(e) {
     document.getElementById('storageGrid').innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load storage info</span>';
   }
+  loadMasksCard();
+}
+
+var _masksData = null;
+
+async function loadMasksCard() {
+  var card = document.getElementById('masksCard');
+  try {
+    var data = await safeFetch('/api/storage/masks', {}, { toast: false });
+    _masksData = data;
+    var variants = data.variants || [];
+    var totalBytes = data.total_bytes || 0;
+    var stale = data.stale_count || 0;
+
+    var inner = '<div style="background:var(--bg-tertiary);border-radius:6px;padding:14px 16px;">';
+    inner += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">';
+    inner += '<div style="font-size:13px;font-weight:600;color:var(--text-primary);">Masks ' +
+      '<span style="font-size:11px;font-weight:400;color:var(--text-dim);margin-left:6px;">' +
+      formatBytes(totalBytes) + '</span></div>';
+    var btnEnabled = 'background:none;color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer;';
+    var btnSecondary = 'background:none;color:var(--text-dim);border:1px solid var(--border-primary);border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer;';
+    var btnDisabledStyle = 'background:none;color:var(--text-ghost);border:1px solid var(--border-primary);border-radius:3px;padding:3px 10px;font-size:11px;opacity:0.6;cursor:default;';
+    inner += '<div style="display:flex;gap:6px;">';
+    inner += '<button onclick="openMasksModal()"' +
+      (variants.length === 0
+        ? ' disabled style="' + btnDisabledStyle + '"'
+        : ' style="' + btnEnabled + '"') +
+      '>Manage</button>';
+    inner += '<button onclick="deleteInactiveMasks()"' +
+      (variants.length === 0
+        ? ' disabled style="' + btnDisabledStyle + '"'
+        : ' style="' + btnSecondary + '"') +
+      '>Delete inactive</button>';
+    if (stale > 0) {
+      inner += '<button onclick="deleteStaleMasks()" ' +
+        'style="background:none;color:var(--warning);border:1px solid var(--warning);border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer;">' +
+        'Delete stale (' + stale + ')</button>';
+    }
+    inner += '</div></div>';
+
+    if (variants.length === 0) {
+      inner += '<div style="font-size:12px;color:var(--text-ghost);">No SAM masks yet. Run the masking stage of the pipeline to populate.</div>';
+    } else {
+      inner += '<div style="display:flex;flex-direction:column;gap:4px;">';
+      variants.forEach(function(v) {
+        var isActive = (v.active_count || 0) > 0;
+        inner += '<div style="display:flex;align-items:center;gap:10px;font-size:12px;font-variant-numeric:tabular-nums;">';
+        inner += '<span style="min-width:120px;color:var(--text-secondary);">' + escapeHtml(v.variant) + '</span>';
+        inner += '<span style="min-width:80px;color:var(--text-dim);">' + (v.count || 0).toLocaleString() + ' photo' + (v.count === 1 ? '' : 's') + '</span>';
+        inner += '<span style="min-width:80px;color:var(--text-faint);">' + formatBytes(v.bytes || 0) + '</span>';
+        if (isActive) {
+          inner += '<span style="font-size:10px;color:var(--accent);background:color-mix(in srgb, var(--accent) 18%, transparent);border-radius:3px;padding:1px 6px;">active &middot; ' +
+            (v.active_count || 0).toLocaleString() + '</span>';
+        }
+        inner += '</div>';
+      });
+      inner += '</div>';
+    }
+    inner += '</div>';
+    card.innerHTML = inner;
+  } catch(e) {
+    card.innerHTML = '<div style="background:var(--bg-tertiary);border-radius:6px;padding:14px 16px;">' +
+      '<span style="color:var(--danger);font-size:12px;">Failed to load mask info</span></div>';
+  }
+}
+
+function openMasksModal() {
+  if (!_masksData) return;
+  var modal = document.getElementById('masksModal');
+  document.getElementById('masksModalError').style.display = 'none';
+  renderMasksModalRows();
+  modal.classList.add('open');
+}
+
+function closeMasksModal() {
+  document.getElementById('masksModal').classList.remove('open');
+}
+
+function renderMasksModalRows() {
+  var rows = document.getElementById('masksModalRows');
+  if (!_masksData || (_masksData.variants || []).length === 0) {
+    rows.innerHTML = '<li style="color:var(--text-ghost);font-size:13px;padding:12px 0;">No mask variants present.</li>';
+    return;
+  }
+  var html = '';
+  _masksData.variants.forEach(function(v) {
+    var isActive = (v.active_count || 0) > 0;
+    html += '<li class="file-item">';
+    html += '<label style="flex:1;">' +
+      '<strong style="color:var(--text-primary);">' + escapeHtml(v.variant) + '</strong>' +
+      ' <span style="color:var(--text-dim);">&middot; ' + (v.count || 0).toLocaleString() +
+      ' photos &middot; ' + formatBytes(v.bytes || 0) + '</span>';
+    if (isActive) {
+      html += ' <span style="font-size:10px;color:var(--accent);margin-left:6px;">[active &middot; ' +
+        (v.active_count || 0).toLocaleString() + ']</span>';
+    }
+    html += '</label>';
+    if (isActive) {
+      html += '<button class="btn-danger" disabled title="set another variant active first" ' +
+        'style="opacity:0.4;cursor:default;">Delete</button>';
+    } else {
+      html += '<button class="btn-danger" onclick="deleteMaskVariant(' + JSON.stringify(v.variant) + ')">Delete</button>';
+    }
+    html += '</li>';
+  });
+  rows.innerHTML = html;
+}
+
+function _showMasksModalError(msg) {
+  var el = document.getElementById('masksModalError');
+  el.textContent = msg;
+  el.style.display = '';
+}
+
+async function deleteMaskVariant(variant) {
+  if (!confirm('Delete all "' + variant + '" masks? Files and DB rows will be removed.')) return;
+  try {
+    var resp = await fetch('/api/storage/masks/delete-variant', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({variant: variant}),
+    });
+    var body = await resp.json();
+    if (!resp.ok) {
+      _showMasksModalError(body.error || ('HTTP ' + resp.status));
+      return;
+    }
+    document.getElementById('masksModalError').style.display = 'none';
+  } catch(e) {
+    _showMasksModalError(String(e));
+    return;
+  }
+  await loadMasksCard();
+  if (_masksData && (_masksData.variants || []).length > 0) {
+    renderMasksModalRows();
+  } else {
+    closeMasksModal();
+  }
+}
+
+async function deleteInactiveMasks() {
+  if (!confirm('Delete all non-active mask variants across photos? The active variant per photo is kept.')) return;
+  try {
+    await safeFetch('/api/storage/masks/delete-inactive', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+    });
+  } catch(e) {}
+  loadMasksCard();
+}
+
+async function deleteStaleMasks() {
+  if (!confirm('Delete masks whose detection prompt no longer matches the photo’s primary detection?')) return;
+  try {
+    await safeFetch('/api/storage/masks/delete-stale', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+    });
+  } catch(e) {}
+  loadMasksCard();
 }
 
 var _modalType = '';
