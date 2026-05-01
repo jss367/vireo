@@ -9163,7 +9163,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         WHERE wf.workspace_id = ?
                           AND d.detector_model != 'full-image'
                           AND d.detector_confidence >= ?
-                        ORDER BY p.id, d.detector_confidence DESC""",
+                        ORDER BY p.id, d.detector_confidence DESC, d.id ASC""",
                     (ws_id, min_detector_conf),
                 ).fetchall()
                 seen = set()

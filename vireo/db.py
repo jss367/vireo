@@ -3757,6 +3757,54 @@ class Database:
         if _commit:
             commit_with_retry(self.conn)
 
+    def _masks_dir_real(self):
+        """Realpath of the masks directory, used as the containment root
+        for cleanup deletes. Returns None for ``:memory:`` databases or
+        when the parent directory can't be resolved (in which case the
+        caller refuses to delete files by stored path).
+        """
+        if self._db_path == ":memory:":
+            return None
+        parent = os.path.dirname(self._db_path)
+        if not parent:
+            return None
+        return os.path.realpath(os.path.join(parent, "masks"))
+
+    def _safe_remove_mask_file(self, path):
+        """``os.remove`` ``path`` only if it resolves inside the masks
+        directory. The user-triggerable storage cleanup endpoints feed
+        ``photo_masks.path`` straight into this; without the realpath
+        containment check, a corrupted or migrated row pointing at
+        ``/etc/...`` could cause arbitrary file deletion. Mirrors the
+        defense already in place on ``/api/masks/<pid>/<variant>.png``.
+        """
+        if not path:
+            return
+        masks_dir = self._masks_dir_real()
+        if masks_dir is None:
+            log.warning(
+                "Refusing to remove mask file %s (no masks dir resolved)",
+                path,
+            )
+            return
+        try:
+            abs_path = os.path.realpath(path)
+        except OSError:
+            log.warning("Failed to resolve mask path %s", path)
+            return
+        if not (abs_path == masks_dir
+                or abs_path.startswith(masks_dir + os.sep)):
+            log.warning(
+                "Refusing to remove mask file %s outside masks dir %s",
+                path, masks_dir,
+            )
+            return
+        try:
+            if os.path.isfile(abs_path):
+                os.remove(abs_path)
+        except OSError:
+            log.warning("Failed to remove mask file %s", abs_path)
+
     def delete_masks_for_variant(self, variant):
         """Delete all photo_masks rows + files for a variant.
         Refuses if the variant is active for any photo (caller must
@@ -3774,11 +3822,7 @@ class Database:
             "SELECT path FROM photo_masks WHERE variant=?", (variant,),
         ).fetchall()
         for r in rows:
-            try:
-                if r["path"] and os.path.isfile(r["path"]):
-                    os.remove(r["path"])
-            except OSError:
-                log.warning("Failed to remove mask file %s", r["path"])
+            self._safe_remove_mask_file(r["path"])
         self.conn.execute("DELETE FROM photo_masks WHERE variant=?", (variant,))
         commit_with_retry(self.conn)
         return len(rows)
@@ -3802,11 +3846,7 @@ class Database:
             "  AND p.active_mask_variant != pm.variant"
         ).fetchall()
         for r in rows:
-            try:
-                if r["path"] and os.path.isfile(r["path"]):
-                    os.remove(r["path"])
-            except OSError:
-                log.warning("Failed to remove mask file %s", r["path"])
+            self._safe_remove_mask_file(r["path"])
             self.conn.execute(
                 "DELETE FROM photo_masks WHERE photo_id=? AND variant=?",
                 (r["photo_id"], r["variant"]),
@@ -3825,8 +3865,18 @@ class Database:
         detection (e.g., a low-confidence secondary box still carrying
         the old coordinates, or another retained model's row) would
         leave stale cache entries lingering after detector/model
-        changes, so we explicitly join the per-photo MAX confidence
-        before comparing.
+        changes, so we pick exactly one primary row per photo and
+        require the prompt to equal that row.
+
+        Tie-break: when multiple detections share the maximum
+        confidence, both this query and the extraction code in
+        ``api_job_extract_masks`` / ``get_detections`` resolve to the
+        smallest ``detections.id`` (insertion order). Using
+        ``MAX(detector_confidence)`` here would leave the primary
+        ambiguous on ties — a mask matching either tied row could be
+        treated as fresh even though extraction is now using the other
+        one. ``ORDER BY detector_confidence DESC, id ASC LIMIT 1`` keeps
+        stale-detection and extraction in sync.
 
         ``detector_confidence`` is an optional workspace floor (the same
         threshold both extraction paths apply when picking detections to
@@ -3842,8 +3892,8 @@ class Database:
             conf_pred = ""
             params = ()
         else:
-            conf_pred = " AND d{n}.detector_confidence >= ?"
-            params = (detector_confidence, detector_confidence)
+            conf_pred = " AND d2.detector_confidence >= ?"
+            params = (detector_confidence,)
         rows = self.conn.execute(
             f"""
             SELECT pm.photo_id, pm.variant, pm.path,
@@ -3852,21 +3902,20 @@ class Database:
               FROM photo_masks pm
              WHERE NOT EXISTS (
                 SELECT 1 FROM detections d
-                 WHERE d.photo_id = pm.photo_id
+                 WHERE d.id = (
+                       SELECT d2.id
+                         FROM detections d2
+                        WHERE d2.photo_id = pm.photo_id
+                          AND d2.detector_model != 'full-image'
+                          {conf_pred}
+                        ORDER BY d2.detector_confidence DESC, d2.id ASC
+                        LIMIT 1
+                   )
                    AND d.detector_model = pm.detector_model
-                   AND d.detector_model != 'full-image'
                    AND d.box_x = pm.prompt_x
                    AND d.box_y = pm.prompt_y
                    AND d.box_w = pm.prompt_w
                    AND d.box_h = pm.prompt_h
-                   {conf_pred.format(n="")}
-                   AND d.detector_confidence = (
-                       SELECT MAX(d2.detector_confidence)
-                         FROM detections d2
-                        WHERE d2.photo_id = pm.photo_id
-                          AND d2.detector_model != 'full-image'
-                          {conf_pred.format(n="2")}
-                   )
              )
             """,
             params,
@@ -3891,11 +3940,7 @@ class Database:
             ).fetchone()
             if is_active:
                 continue
-            try:
-                if s["path"] and os.path.isfile(s["path"]):
-                    os.remove(s["path"])
-            except OSError:
-                log.warning("Failed to remove mask file %s", s["path"])
+            self._safe_remove_mask_file(s["path"])
             self.conn.execute(
                 "DELETE FROM photo_masks WHERE photo_id=? AND variant=?",
                 (s["photo_id"], s["variant"]),
@@ -4096,7 +4141,7 @@ class Database:
                     WHERE p.folder_id IN ({placeholders})
                       AND p.mask_path IS NULL
                       AND d.detector_confidence >= ?
-                    ORDER BY p.id, d.detector_confidence DESC""",
+                    ORDER BY p.id, d.detector_confidence DESC, d.id ASC""",
                 [ws_id, *folder_ids, min_conf],
             ).fetchall()
         else:
@@ -4110,7 +4155,7 @@ class Database:
                    WHERE wf.workspace_id = ?
                      AND p.mask_path IS NULL
                      AND d.detector_confidence >= ?
-                   ORDER BY p.id, d.detector_confidence DESC""",
+                   ORDER BY p.id, d.detector_confidence DESC, d.id ASC""",
                 (ws_id, min_conf),
             ).fetchall()
 
@@ -6467,7 +6512,12 @@ class Database:
         if detector_model is not None:
             q += " AND detector_model = ?"
             params.append(detector_model)
-        q += " ORDER BY detector_confidence DESC"
+        # Explicit ``id ASC`` tie-break so callers that take the first
+        # row (mask extraction's primary detection picker) agree with
+        # ``find_stale_masks`` on which row is the primary when two
+        # detections share the maximum confidence. Without this,
+        # SQLite's row order on ties is implementation-defined.
+        q += " ORDER BY detector_confidence DESC, id ASC"
         return self.conn.execute(q, params).fetchall()
 
     def get_detections_for_photos(self, photo_ids, min_conf=None,

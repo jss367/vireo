@@ -10382,6 +10382,121 @@ def test_delete_stale_masks(tmp_path):
     assert {m["variant"] for m in db.list_masks_for_photo(1)} == {"sam2-small"}
 
 
+def test_find_stale_masks_breaks_primary_ties_deterministically(tmp_path):
+    """When two non-full-image detections share the maximum confidence,
+    extraction (``ORDER BY detector_confidence DESC, id ASC``) picks the
+    smaller-id row as the primary. ``find_stale_masks`` has to agree —
+    otherwise a mask whose prompt matches the *other* tied row could be
+    treated as fresh while extraction is regenerating from the chosen
+    primary, leaving stale cache entries that drift between the two
+    paths.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    # Two detections tied on detector_confidence. Insertion order makes
+    # det id=1 the deterministic primary (smaller id wins on tie).
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.10, 0.10, 0.10, 0.10, 0.80, 'animal')"
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.20, 0.20, 0.20, 0.20, 0.80, 'animal')"
+    )
+
+    # Mask matching the LATER tied row (the one extraction does NOT
+    # pick) must be stale: extraction would not regenerate from it.
+    db.upsert_photo_mask(
+        1, "sam2-small", "/p",
+        detector_model="megadetector-v6",
+        prompt_x=0.20, prompt_y=0.20, prompt_w=0.20, prompt_h=0.20,
+    )
+    stale = db.find_stale_masks()
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {
+        (1, "sam2-small")
+    }
+
+    # Mask matching the FIRST tied row (the deterministic primary) is
+    # fresh.
+    db.upsert_photo_mask(
+        1, "sam2-large", "/q",
+        detector_model="megadetector-v6",
+        prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
+    )
+    stale = db.find_stale_masks()
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {
+        (1, "sam2-small")
+    }
+
+
+def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
+    """``delete_masks_for_variant`` / ``delete_inactive_masks`` /
+    ``delete_stale_masks`` feed ``photo_masks.path`` straight into
+    ``os.remove``. A corrupted or migrated row pointing outside the
+    masks directory must not let the user-triggerable storage cleanup
+    endpoints unlink arbitrary files. Mirrors the realpath containment
+    already enforced by ``/api/masks/<pid>/<variant>.png``.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+
+    # File outside the masks directory — must be untouched.
+    outside = tmp_path / "evil.png"
+    outside.write_bytes(b"important")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(outside),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+
+    db.delete_masks_for_variant("sam2-small")
+    assert outside.exists(), "file outside masks dir was deleted"
+
+    # Same protection on delete_inactive_masks.
+    db.upsert_photo_mask(
+        1, "sam2-small", str(outside),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    inside = masks_dir / "1.sam2-large.png"
+    inside.write_bytes(b"in")
+    db.upsert_photo_mask(
+        1, "sam2-large", str(inside),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    db.set_active_mask_variant(1, "sam2-large")
+    db.delete_inactive_masks()
+    assert outside.exists(), "delete_inactive_masks unlinked outside path"
+    # Active variant inside masks dir is preserved.
+    assert inside.exists()
+
+    # And on delete_stale_masks: a stale row pointing outside is
+    # unlinked from the DB but the file is left alone.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'md', 9, 9, 9, 9, 0.9, 'animal')"
+    )
+    stale_outside = tmp_path / "stale.png"
+    stale_outside.write_bytes(b"stale")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(stale_outside),
+        detector_model="md", prompt_x=1, prompt_y=1, prompt_w=1, prompt_h=1,
+    )
+    db.delete_stale_masks()
+    assert stale_outside.exists(), "delete_stale_masks unlinked outside path"
+
+
 def test_mask_variants_summary(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "v.db"))
