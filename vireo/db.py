@@ -3650,6 +3650,7 @@ class Database:
         eye_y=_UNSET,
         eye_conf=_UNSET,
         eye_tenengrad=_UNSET,
+        eye_kp_fingerprint=_UNSET,
     ):
         """Update pipeline feature columns for a photo.
 
@@ -3670,6 +3671,7 @@ class Database:
             "eye_y": eye_y,
             "eye_conf": eye_conf,
             "eye_tenengrad": eye_tenengrad,
+            "eye_kp_fingerprint": eye_kp_fingerprint,
         }
         # Filter to only provided values
         updates = {k: v for k, v in cols.items() if v is not _UNSET}

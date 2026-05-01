@@ -9758,6 +9758,43 @@ def test_eye_kp_fingerprint_backfilled_on_migration(tmp_path):
     assert after == "mutated"  # backfill skipped on second open
 
 
+def test_update_photo_pipeline_features_stamps_eye_kp_fingerprint(tmp_path):
+    """Passing eye_kp_fingerprint to update_photo_pipeline_features writes it."""
+    from db import Database
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.conn.commit()
+    db.update_photo_pipeline_features(
+        1, eye_x=0.5, eye_y=0.5, eye_conf=0.9, eye_tenengrad=12.0,
+        eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+    )
+    fp = db.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id=1"
+    ).fetchone()[0]
+    assert fp == EYE_KP_FINGERPRINT_VERSION
+
+
+def test_update_photo_pipeline_features_skips_eye_kp_fingerprint_when_unset(tmp_path):
+    """If eye_kp_fingerprint is not passed, it stays NULL (doesn't get clobbered)."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename, eye_kp_fingerprint) "
+        "VALUES (1, 1, 'a.jpg', 'preexisting')"
+    )
+    db.conn.commit()
+    db.update_photo_pipeline_features(1, eye_x=0.5, eye_y=0.5)
+    fp = db.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id=1"
+    ).fetchone()[0]
+    assert fp == "preexisting"
+
+
 def test_workspaces_has_group_state_columns(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "v.db"))

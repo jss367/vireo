@@ -863,6 +863,7 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
         eye_y=best["y"] / float(ih),
         eye_conf=best["conf"],
         eye_tenengrad=best_score,
+        eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
     )
 
 
