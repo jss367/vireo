@@ -3625,6 +3625,29 @@ class Database:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def set_active_mask_variant(self, photo_id, variant):
+        """Mark `variant` as active for `photo_id` and denormalize its
+        fields into the photos row (mask_path + per-mask features) so
+        downstream readers (scoring, pipeline) see the active mask."""
+        row = self.conn.execute(
+            "SELECT path, subject_size, subject_tenengrad, bg_tenengrad, "
+            "crop_complete FROM photo_masks WHERE photo_id=? AND variant=?",
+            (photo_id, variant),
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"No photo_masks row for photo {photo_id} variant {variant!r}"
+            )
+        self.conn.execute(
+            "UPDATE photos SET mask_path=?, active_mask_variant=?, "
+            "subject_size=?, subject_tenengrad=?, bg_tenengrad=?, "
+            "crop_complete=? WHERE id=?",
+            (row["path"], variant, row["subject_size"],
+             row["subject_tenengrad"], row["bg_tenengrad"],
+             row["crop_complete"], photo_id),
+        )
+        commit_with_retry(self.conn)
+
     def upsert_photo_mask(
         self, photo_id, variant, path,
         detector_model, prompt_x, prompt_y, prompt_w, prompt_h,

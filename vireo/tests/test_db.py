@@ -9822,3 +9822,39 @@ def test_list_masks_for_photo(tmp_path):
     )
     variants = sorted(m["variant"] for m in db.list_masks_for_photo(1))
     assert variants == ["sam2-large", "sam2-small"]
+
+
+def test_set_active_mask_variant_denormalizes(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
+        detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
+        subject_size=12345, subject_tenengrad=2.0,
+        bg_tenengrad=0.5, crop_complete=0.9,
+    )
+    db.set_active_mask_variant(1, "sam2-large")
+    row = db.conn.execute(
+        "SELECT mask_path, active_mask_variant, subject_size, "
+        "subject_tenengrad, bg_tenengrad, crop_complete FROM photos WHERE id=1"
+    ).fetchone()
+    assert row["mask_path"] == "/m/1.sam2-large.png"
+    assert row["active_mask_variant"] == "sam2-large"
+    assert row["subject_size"] == 12345
+    assert row["subject_tenengrad"] == 2.0
+
+
+def test_set_active_mask_variant_missing_row_raises(tmp_path):
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    with pytest.raises(ValueError):
+        db.set_active_mask_variant(1, "sam3-small")
