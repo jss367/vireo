@@ -1075,6 +1075,8 @@ def test_pipeline_page_init_api(app_and_db):
     assert 'sam2_variant' in pc
     assert 'dinov2_variant' in pc
     assert 'proxy_longest_edge' in pc
+    # Pipeline page renders the eye-keypoints opt-in checkbox from this flag.
+    assert 'eye_detect_enabled' in pc
     # total_photos should match our fixture data (3 photos)
     assert data['total_photos'] == 3
 

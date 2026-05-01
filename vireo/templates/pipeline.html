@@ -961,6 +961,8 @@ body { padding-bottom: 36px; }
   <div class="stage-card" id="card-eyekeypoints" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('eyekeypoints')">
       <span class="stage-num" id="numEyeKeypoints">7</span>
+      <input type="checkbox" class="stage-enable" id="enableEyeKeypoints" checked
+             onchange="onStageToggle('eyekeypoints')" onclick="event.stopPropagation()">
       <span class="stage-name">Eye Keypoints (optional)</span>
       <span class="stage-status-pill" id="pillEyeKeypoints"></span>
       <span class="stage-summary" id="summaryEyeKeypoints">
@@ -1113,6 +1115,12 @@ function initPipelinePage() {
       document.getElementById('cfgDinov2').value = cfg.dinov2_variant;
       document.getElementById('cfgProxy').value = cfg.proxy_longest_edge;
       document.getElementById('valProxy').textContent = cfg.proxy_longest_edge;
+
+      // Eye keypoints stage default tracks the global eye_detect_enabled
+      // config so users who turned it off in Settings see it unchecked here
+      // by default. The checkbox is the per-run override.
+      var ekCb = document.getElementById('enableEyeKeypoints');
+      if (ekCb) ekCb.checked = cfg.eye_detect_enabled !== false;
 
       // Update saved config defaults from server
       _savedModelConfig.sam2_variant = cfg.sam2_variant;
@@ -2142,27 +2150,44 @@ function updateStartButton() {
 }
 
 // -- Stage enable/disable dependency chain --
+// Eye keypoints sits off the linear chain: it depends on extract (needs masks)
+// but is not a prerequisite for group, so toggling it alone affects only itself.
 function onStageToggle(stage) {
   var chain = ['classify', 'extract', 'group'];
   var idx = chain.indexOf(stage);
-  var cbId = 'enable' + stage.charAt(0).toUpperCase() + stage.slice(1);
-  var checked = document.getElementById(cbId).checked;
 
-  if (!checked) {
-    // Uncheck and disable all downstream
-    for (var i = idx + 1; i < chain.length; i++) {
-      var downId = 'enable' + chain[i].charAt(0).toUpperCase() + chain[i].slice(1);
-      var cb = document.getElementById(downId);
-      cb.checked = false;
-      cb.disabled = true;
-    }
-  } else {
-    // Re-enable the immediate downstream checkbox
-    if (idx + 1 < chain.length) {
+  if (idx >= 0) {
+    var cbId = 'enable' + stage.charAt(0).toUpperCase() + stage.slice(1);
+    var checked = document.getElementById(cbId).checked;
+    if (!checked) {
+      // Uncheck and disable all downstream
+      for (var i = idx + 1; i < chain.length; i++) {
+        var downId = 'enable' + chain[i].charAt(0).toUpperCase() + chain[i].slice(1);
+        var cb = document.getElementById(downId);
+        cb.checked = false;
+        cb.disabled = true;
+      }
+    } else if (idx + 1 < chain.length) {
+      // Re-enable the immediate downstream checkbox
       var nextId = 'enable' + chain[idx + 1].charAt(0).toUpperCase() + chain[idx + 1].slice(1);
       document.getElementById(nextId).disabled = false;
     }
   }
+
+  // Sync eye keypoints to extract: if extract is off, eye keypoints can't
+  // run (no masks); when extract comes back on, leave eye keypoints
+  // unchecked so user must opt in again, matching how group behaves.
+  var extCb = document.getElementById('enableExtract');
+  var ekCb = document.getElementById('enableEyeKeypoints');
+  if (extCb && ekCb && stage !== 'eyekeypoints') {
+    if (!extCb.checked) {
+      ekCb.checked = false;
+      ekCb.disabled = true;
+    } else {
+      ekCb.disabled = false;
+    }
+  }
+
   updateStartButton();
   refreshPipelineUI();
 }
@@ -2277,10 +2302,12 @@ async function startPipeline() {
   // Optional stages
   var classifyEnabled = document.getElementById('enableClassify').checked;
   var extractEnabled = document.getElementById('enableExtract').checked;
+  var eyeKeypointsEnabled = document.getElementById('enableEyeKeypoints').checked;
   var groupEnabled = document.getElementById('enableGroup').checked;
 
   body.skip_classify = !classifyEnabled;
   body.skip_extract_masks = !extractEnabled;
+  body.skip_eye_keypoints = !eyeKeypointsEnabled;
   body.skip_regroup = !groupEnabled;
 
   // Classification options (only if enabled)
@@ -3386,7 +3413,7 @@ var _STAGES = [
   { suffix: 'Previews',     label: 'Thumbnails & Previews',  enable: null,             prior: null },
   { suffix: 'Classify',     label: 'Classify',               enable: 'enableClassify', prior: 'hasDetections' },
   { suffix: 'Extract',      label: 'Extract Features',       enable: 'enableExtract',  prior: 'hasMasks' },
-  { suffix: 'EyeKeypoints', label: 'Eye Keypoints',          enable: null,             prior: null },
+  { suffix: 'EyeKeypoints', label: 'Eye Keypoints',          enable: 'enableEyeKeypoints', prior: null },
   { suffix: 'Group',        label: 'Group & Score',          enable: 'enableGroup',    prior: null },
 ];
 
@@ -3434,10 +3461,10 @@ function _stageStateFor(stage) {
     reclassify = !!(rc && rc.checked);
   }
 
-  // Eye Keypoints has no enable checkbox: the stage is gated by whether
-  // SuperAnimal weights are on disk. Backend `eye_keypoint_stage_preflight`
-  // returns a skip reason in the no-weights case, so the plan summary
-  // should mirror that pre-run instead of advertising "Will run".
+  // Eye Keypoints is also gated by whether SuperAnimal weights are on disk —
+  // backend `eye_keypoint_stage_preflight` returns a skip reason in the
+  // no-weights case, so the plan summary mirrors that pre-run regardless of
+  // the user-toggle state.
   if (stage.suffix === 'EyeKeypoints' && _keypointModelsReady === false) {
     return 'will-skip';
   }

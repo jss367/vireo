@@ -72,6 +72,17 @@ def test_pipeline_params_skip_classify_defaults_false():
     assert params.skip_classify is False
 
 
+def test_pipeline_params_has_skip_eye_keypoints():
+    """PipelineParams should support skip_eye_keypoints flag."""
+    params = PipelineParams(collection_id=1, skip_eye_keypoints=True)
+    assert params.skip_eye_keypoints is True
+
+
+def test_pipeline_params_skip_eye_keypoints_defaults_false():
+    params = PipelineParams(collection_id=1)
+    assert params.skip_eye_keypoints is False
+
+
 def test_pipeline_params_has_preview_max_size():
     """PipelineParams should support preview_max_size."""
     params = PipelineParams(collection_id=1, preview_max_size=2560)
