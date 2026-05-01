@@ -6356,12 +6356,12 @@ def _run_extract_masks_for_test(
         },
     )
     monkeypatch.setattr(
-        dino_embed, "embed_global",
+        dino_embed, "embed",
         lambda p, variant=None: np.zeros(384, dtype=np.float32),
     )
     monkeypatch.setattr(
-        dino_embed, "embed_subject",
-        lambda c, variant=None: np.zeros(384, dtype=np.float32),
+        dino_embed, "embed_batch",
+        lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32),
     )
     monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
     monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
@@ -6434,12 +6434,12 @@ def test_extract_masks_skips_sam_when_cached_with_same_prompt(
         },
     )
     monkeypatch.setattr(
-        dino_embed, "embed_global",
+        dino_embed, "embed",
         lambda p, variant=None: np.zeros(384, dtype=np.float32),
     )
     monkeypatch.setattr(
-        dino_embed, "embed_subject",
-        lambda c, variant=None: np.zeros(384, dtype=np.float32),
+        dino_embed, "embed_batch",
+        lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32),
     )
     monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
     monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
@@ -6525,12 +6525,12 @@ def test_extract_masks_runs_for_new_variant_keeps_old(tmp_path, monkeypatch):
         },
     )
     monkeypatch.setattr(
-        dino_embed, "embed_global",
+        dino_embed, "embed",
         lambda p, variant=None: np.zeros(384, dtype=np.float32),
     )
     monkeypatch.setattr(
-        dino_embed, "embed_subject",
-        lambda c, variant=None: np.zeros(384, dtype=np.float32),
+        dino_embed, "embed_batch",
+        lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32),
     )
     monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
     monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
@@ -6622,12 +6622,12 @@ def test_extract_masks_re_runs_when_prompt_changed(tmp_path, monkeypatch):
         },
     )
     monkeypatch.setattr(
-        dino_embed, "embed_global",
+        dino_embed, "embed",
         lambda p, variant=None: np.zeros(384, dtype=np.float32),
     )
     monkeypatch.setattr(
-        dino_embed, "embed_subject",
-        lambda c, variant=None: np.zeros(384, dtype=np.float32),
+        dino_embed, "embed_batch",
+        lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32),
     )
     monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
     monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)

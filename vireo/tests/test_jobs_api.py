@@ -1371,12 +1371,12 @@ def _patch_extract_masks_deps(monkeypatch, generate_mask_calls):
         },
     )
     monkeypatch.setattr(
-        dino_embed, "embed_global",
+        dino_embed, "embed",
         lambda p, variant=None: np.zeros(384, dtype=np.float32),
     )
     monkeypatch.setattr(
-        dino_embed, "embed_subject",
-        lambda c, variant=None: np.zeros(384, dtype=np.float32),
+        dino_embed, "embed_batch",
+        lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32),
     )
     monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
 
