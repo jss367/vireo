@@ -3759,7 +3759,17 @@ class Database:
     def find_stale_masks(self):
         """Return photo_masks rows whose stored prompt no longer matches
         the photo's current primary detection (highest-confidence,
-        non full-image)."""
+        non full-image).
+
+        A mask is fresh only if its stored ``(detector_model, prompt_*)``
+        equals the photo's primary detection — the single
+        highest-confidence non-``full-image`` row. Matching against any
+        detection (e.g., a low-confidence secondary box still carrying
+        the old coordinates, or another retained model's row) would
+        leave stale cache entries lingering after detector/model
+        changes, so we explicitly join the per-photo MAX confidence
+        before comparing.
+        """
         rows = self.conn.execute(
             """
             SELECT pm.photo_id, pm.variant, pm.path,
@@ -3775,6 +3785,12 @@ class Database:
                    AND CAST(d.box_y AS INTEGER) = pm.prompt_y
                    AND CAST(d.box_w AS INTEGER) = pm.prompt_w
                    AND CAST(d.box_h AS INTEGER) = pm.prompt_h
+                   AND d.detector_confidence = (
+                       SELECT MAX(d2.detector_confidence)
+                         FROM detections d2
+                        WHERE d2.photo_id = pm.photo_id
+                          AND d2.detector_model != 'full-image'
+                   )
              )
             """
         ).fetchall()

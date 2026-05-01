@@ -9054,6 +9054,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         sam2_variant = pipeline_cfg.get("sam2_variant", "sam2-small")
         dinov2_variant = pipeline_cfg.get("dinov2_variant", "vit-b14")
         proxy_longest_edge = pipeline_cfg.get("proxy_longest_edge", 1536)
+        # Workspace-effective detector_confidence floor. Both the
+        # collection branch (via get_detections) and the workspace SQL
+        # below filter on this so we don't run SAM/DINO on noisy
+        # below-threshold boxes — matching get_photos_missing_masks.
+        min_detector_conf = effective_cfg.get("detector_confidence", 0.2)
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
@@ -9090,7 +9095,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 photos = []
                 for p in coll_photos:
                     dets = [
-                        d for d in thread_db.get_detections(p["id"])
+                        d for d in thread_db.get_detections(
+                            p["id"], min_conf=min_detector_conf,
+                        )
                         if d["detector_model"] != "full-image"
                     ]
                     if dets:
@@ -9128,8 +9135,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                          JOIN detections d ON d.photo_id = p.id
                         WHERE wf.workspace_id = ?
                           AND d.detector_model != 'full-image'
+                          AND d.detector_confidence >= ?
                         ORDER BY p.id, d.detector_confidence DESC""",
-                    (ws_id,),
+                    (ws_id, min_detector_conf),
                 ).fetchall()
                 seen = set()
                 photos = []

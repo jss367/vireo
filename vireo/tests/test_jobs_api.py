@@ -1542,3 +1542,71 @@ def test_extract_masks_route_skips_sam_when_cached(
         (pid,),
     ).fetchone()[0]
     assert n == 1
+
+
+def test_extract_masks_route_workspace_branch_respects_detector_confidence(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Without a ``collection_id``, the workspace SQL branch must filter
+    detections by the workspace-effective ``detector_confidence`` floor —
+    matching the collection branch (which goes through
+    ``get_detections``) and the legacy ``get_photos_missing_masks``
+    path. Otherwise SAM/DINO runs on noisy below-threshold boxes and
+    activates masks the user shouldn't see."""
+    import config as cfg
+    cfg.save({
+        "pipeline": {
+            "sam2_variant": "sam2-small",
+            "dinov2_variant": "vit-b14",
+        },
+        "detector_confidence": 0.5,
+    })
+
+    app, db = app_and_db
+
+    # Two photos in the workspace, both with a non-full-image detection.
+    # Photo A's detection clears the 0.5 floor; Photo B's does not.
+    pid_high = _seed_photo_with_detection(
+        db, tmp_path, "above.jpg", (10, 20, 100, 200), "MegaDetector",
+    )
+    pid_low = _seed_photo_with_detection(
+        db, tmp_path, "below.jpg", (30, 40, 80, 90), "MegaDetector",
+    )
+    # _seed_photo_with_detection hardcodes confidence=0.9, so override
+    # the low-confidence row directly.
+    db.conn.execute(
+        "UPDATE detections SET detector_confidence=0.05 WHERE photo_id=?",
+        (pid_low,),
+    )
+    db.conn.commit()
+
+    calls = []
+    _patch_extract_masks_deps(monkeypatch, calls)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/extract-masks", json={})
+    assert resp.status_code == 200
+    data = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert data["status"] == "completed", data
+
+    # SAM was invoked exactly once — for the above-threshold photo only.
+    assert len(calls) == 1, calls
+
+    # photo_masks row exists for the above-threshold photo.
+    high_row = db.conn.execute(
+        "SELECT variant FROM photo_masks WHERE photo_id=?", (pid_high,),
+    ).fetchone()
+    assert high_row is not None, "above-threshold photo must be masked"
+
+    # Below-threshold photo is skipped: no photo_masks row, no
+    # active variant denormalized onto photos.
+    low_row = db.conn.execute(
+        "SELECT variant FROM photo_masks WHERE photo_id=?", (pid_low,),
+    ).fetchone()
+    assert low_row is None, (
+        "below-threshold photo must not get a mask"
+    )
+    low_active = db.conn.execute(
+        "SELECT active_mask_variant FROM photos WHERE id=?", (pid_low,),
+    ).fetchone()
+    assert low_active["active_mask_variant"] is None

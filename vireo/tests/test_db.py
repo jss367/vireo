@@ -10002,6 +10002,58 @@ def test_find_stale_masks(tmp_path):
     assert {(s["photo_id"], s["variant"]) for s in stale} == {(1, "sam2-large")}
 
 
+def test_find_stale_masks_compares_against_primary_detection_only(tmp_path):
+    """Mask validity hangs off the *primary* detection — the
+    highest-confidence non-``full-image`` row. A leftover secondary
+    box (or a row from another retained detector model) that still
+    matches the mask's stored prompt must NOT keep the mask out of
+    the stale set; otherwise stale cache entries linger after
+    detector/model changes.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    # The current primary (highest-confidence non-full-image) is the
+    # 0.95 box at (200, 200, 50, 50). The 0.30 row at the OLD prompt
+    # coordinates is a leftover secondary that should NOT save the
+    # cached mask from being marked stale.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 200, 200, 50, 50, 0.95, 'animal')"
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 10, 20, 100, 200, 0.30, 'animal')"
+    )
+    db.upsert_photo_mask(
+        1, "sam2-small", "/p",
+        detector_model="megadetector-v6",
+        prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
+    )
+    stale = db.find_stale_masks()
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {
+        (1, "sam2-small")
+    }, (
+        "mask whose prompt only matches a secondary detection must be stale"
+    )
+
+    # Sanity: the mask for the current primary's prompt is still fresh.
+    db.upsert_photo_mask(
+        1, "sam2-large", "/q",
+        detector_model="megadetector-v6",
+        prompt_x=200, prompt_y=200, prompt_w=50, prompt_h=50,
+    )
+    stale = db.find_stale_masks()
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {
+        (1, "sam2-small")
+    }
+
+
 def test_delete_stale_masks(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "v.db"))
