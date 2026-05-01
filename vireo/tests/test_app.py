@@ -3693,3 +3693,72 @@ def test_api_storage_masks_delete_stale(app_and_db, tmp_path):
         "SELECT COUNT(*) FROM photo_masks WHERE variant='sam3-small'"
     ).fetchone()[0]
     assert n == 0
+
+
+def test_storage_masks_uses_global_threshold_not_active_workspace(
+    app_and_db, tmp_path
+):
+    """``/api/storage/masks`` and ``/api/storage/masks/delete-stale``
+    are global-storage endpoints, so their stale set must not depend on
+    which workspace is active. Concretely: a permissive workspace
+    (detector_confidence=0.1) has a matching low-confidence detection
+    keeping the mask fresh; a strict workspace
+    (detector_confidence=0.5) would consider that detection invisible
+    and the mask stale. Switching to the strict workspace must NOT
+    cause the storage endpoint to count or delete this mask, because
+    it's still valid under the permissive workspace's settings.
+    """
+    app, db = app_and_db
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir(exist_ok=True)
+    pid = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    # One detection at 0.3 confidence — visible to a 0.1 floor, hidden
+    # by a 0.5 floor.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (?, 'megadetector-v6', 0.10, 0.10, 0.10, 0.10, 0.30, 'animal')",
+        (pid,),
+    )
+    f = masks_dir / f"{pid}.sam2-small.png"
+    f.write_bytes(b"x" * 50)
+    db.upsert_photo_mask(
+        photo_id=pid, variant="sam2-small", path=str(f),
+        detector_model="megadetector-v6",
+        prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
+    )
+    db.conn.commit()
+    permissive = db.create_workspace(
+        "permissive", config_overrides={"detector_confidence": 0.1}
+    )
+    strict = db.create_workspace(
+        "strict", config_overrides={"detector_confidence": 0.5}
+    )
+    # Activate the strict workspace. Pre-fix this would push stale_count
+    # to 1 (and delete-stale would delete the mask) because the endpoint
+    # used the active workspace's 0.5 floor.
+    db.set_active_workspace(strict)
+    client = app.test_client()
+    r = client.get("/api/storage/masks")
+    assert r.status_code == 200
+    assert r.get_json()["stale_count"] == 0, (
+        "global storage view should not flip stale_count when the active "
+        "workspace tightens its detector threshold; another workspace "
+        "still considers the mask fresh"
+    )
+    r = client.post("/api/storage/masks/delete-stale")
+    assert r.status_code == 200
+    assert r.get_json()["deleted"] == 0
+    # Mask + DB row still there.
+    assert f.exists()
+    n = db.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks WHERE photo_id=? AND variant=?",
+        (pid, "sam2-small"),
+    ).fetchone()[0]
+    assert n == 1
+    # Symmetry: switching to permissive doesn't change the answer either.
+    db.set_active_workspace(permissive)
+    r = client.get("/api/storage/masks")
+    assert r.get_json()["stale_count"] == 0

@@ -10227,6 +10227,64 @@ def test_delete_stale_masks_honors_detector_confidence(tmp_path):
     assert not p.exists()
 
 
+def test_min_detector_confidence_no_overrides(tmp_path):
+    """With no per-workspace overrides, the cross-workspace minimum is
+    just the global default. The Default workspace auto-created by
+    Database.__init__ has no config_overrides, so this is the
+    out-of-the-box state.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    assert db.min_detector_confidence_across_workspaces(
+        {"detector_confidence": 0.3}
+    ) == 0.3
+    # Falls back to 0.2 if the global config doesn't define it.
+    assert db.min_detector_confidence_across_workspaces({}) == 0.2
+
+
+def test_min_detector_confidence_picks_lowest_override(tmp_path):
+    """The global storage view must use the most permissive floor
+    across workspaces. If one workspace overrides
+    detector_confidence=0.1 and another sticks with 0.5, the global
+    minimum is 0.1 — masks valid under 0.1 must not be deleted just
+    because the active workspace happens to be the strict one.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    permissive = db.create_workspace(
+        "permissive", config_overrides={"detector_confidence": 0.1}
+    )
+    strict = db.create_workspace(
+        "strict", config_overrides={"detector_confidence": 0.5}
+    )
+    # Active workspace shouldn't matter — try both.
+    db.set_active_workspace(strict)
+    assert db.min_detector_confidence_across_workspaces(
+        {"detector_confidence": 0.3}
+    ) == 0.1
+    db.set_active_workspace(permissive)
+    assert db.min_detector_confidence_across_workspaces(
+        {"detector_confidence": 0.3}
+    ) == 0.1
+
+
+def test_min_detector_confidence_includes_unoverridden_workspaces(tmp_path):
+    """A workspace without an override still counts at the global
+    default. If global=0.2 and one workspace overrides up to 0.5 but
+    others don't override at all, the cross-workspace min is 0.2 (the
+    unoverridden workspaces' effective value), not 0.5.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.create_workspace(
+        "strict", config_overrides={"detector_confidence": 0.5}
+    )
+    # The auto-created Default workspace has no overrides → uses 0.2.
+    assert db.min_detector_confidence_across_workspaces(
+        {"detector_confidence": 0.2}
+    ) == 0.2
+
+
 def test_legacy_mask_backfill_is_resumable(tmp_path):
     """If startup crashes after backfilling some legacy mask rows but
     before completing, the next startup must finish the rest.  The

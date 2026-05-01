@@ -879,6 +879,57 @@ class Database:
         except (json.JSONDecodeError, TypeError):
             return global_config
 
+    def min_detector_confidence_across_workspaces(self, global_config):
+        """Return the minimum effective ``detector_confidence`` across all
+        workspaces.
+
+        Used by global mask-storage endpoints (``/api/storage/masks`` and
+        ``/api/storage/masks/delete-stale``). Stale-mask scoring depends
+        on the floor under which a detection is treated as too noisy to
+        re-extract from. Picking the *active* workspace's floor would
+        mean switching workspaces changes the global deletion set —
+        masks valid under another workspace's lower floor could be
+        deleted just because the user happened to be in a stricter
+        workspace at the moment. The minimum is the most permissive
+        view: a mask is only considered globally stale when **no**
+        workspace would still consider it fresh.
+        """
+        from config import _deep_merge
+
+        default = global_config.get("detector_confidence", 0.2)
+        try:
+            default = float(default)
+        except (TypeError, ValueError):
+            default = 0.2
+        workspaces = self.get_workspaces()
+        if not workspaces:
+            return default
+        values = []
+        for ws in workspaces:
+            overrides_raw = ws["config_overrides"]
+            if not overrides_raw:
+                values.append(default)
+                continue
+            try:
+                overrides = (
+                    json.loads(overrides_raw)
+                    if isinstance(overrides_raw, str)
+                    else overrides_raw
+                )
+            except (json.JSONDecodeError, TypeError):
+                values.append(default)
+                continue
+            if not isinstance(overrides, dict):
+                values.append(default)
+                continue
+            merged = _deep_merge(global_config, overrides)
+            v = merged.get("detector_confidence", default)
+            try:
+                values.append(float(v))
+            except (TypeError, ValueError):
+                values.append(default)
+        return min(values) if values else default
+
     def get_subject_types(self) -> set[str]:
         """Return the keyword types that count as 'identified' for the active
         workspace.

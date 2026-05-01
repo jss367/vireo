@@ -4539,14 +4539,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
 
         db = _get_db()
-        # Workspace-effective detector_confidence floor — the same
-        # threshold extraction applies when picking boxes to run SAM
-        # on. Plumbing it here keeps "stale" aligned with what the
-        # pipeline would actually regenerate: a mask whose prompt only
-        # matches a now-below-threshold detection won't be re-extracted,
-        # so the storage card must surface it as stale.
-        min_detector_conf = db.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
+        # Storage is global across all workspaces, so the stale floor
+        # must be too. Using the active workspace's detector_confidence
+        # would make stale_count flip when the user switches workspaces
+        # and let masks valid under another workspace's lower floor
+        # show up as stale. The minimum across workspaces is the most
+        # permissive view: only mark a mask stale when no workspace
+        # would still consider it fresh.
+        min_detector_conf = db.min_detector_confidence_across_workspaces(
+            cfg.load()
         )
         variants = db.mask_variants_summary()
         stale = db.find_stale_masks(detector_confidence=min_detector_conf)
@@ -4590,11 +4591,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
 
         db = _get_db()
-        # Use the same workspace-effective detector_confidence floor the
-        # storage card shows, so the user deletes exactly what the count
-        # advertised.
-        min_detector_conf = db.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
+        # Mirror /api/storage/masks: the deletion set must be a function
+        # of the data, not of which workspace happens to be active.
+        # Using the cross-workspace minimum keeps the count and the
+        # delete in sync and prevents deleting masks that another
+        # workspace's lower detector_confidence would still consider
+        # fresh.
+        min_detector_conf = db.min_detector_confidence_across_workspaces(
+            cfg.load()
         )
         n = db.delete_stale_masks(detector_confidence=min_detector_conf)
         log.info("Deleted %d stale masks", n)
