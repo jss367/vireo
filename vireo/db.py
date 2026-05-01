@@ -900,6 +900,8 @@ class Database:
             raise ValueError("tabs must be a list")
         seen = set()
         for nav_id in tabs:
+            if not isinstance(nav_id, str):
+                raise ValueError(f"tab id must be a string, got {type(nav_id).__name__}")
             if nav_id not in ALL_NAV_IDS:
                 raise ValueError(f"{nav_id!r} is not a known nav id")
             if nav_id in seen:

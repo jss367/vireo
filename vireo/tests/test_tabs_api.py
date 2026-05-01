@@ -78,6 +78,17 @@ def test_reorder_tabs_rejects_non_list(app_and_db):
     assert r.status_code == 400
 
 
+def test_reorder_tabs_rejects_non_string_entries(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    # Each of these would have raised TypeError on `nav_id not in ALL_NAV_IDS`
+    # (unhashable / unsupported type) and surfaced as a 500. They must come
+    # back as 400 instead.
+    for bad in [[["browse"]], [{"id": "browse"}], [None], [42]]:
+        r = client.post("/api/workspace/tabs/reorder", json={"tabs": bad})
+        assert r.status_code == 400, f"expected 400 for {bad!r}, got {r.status_code}"
+
+
 def test_get_tabs_endpoint_new_shape(app_and_db):
     from db import DEFAULT_TABS
     app, db = app_and_db
