@@ -9718,3 +9718,11 @@ def test_photos_eye_kp_fingerprint_migrates_on_old_db(tmp_path):
     db.close()
     db2 = Database(p)
     db2.conn.execute("SELECT eye_kp_fingerprint FROM photos LIMIT 0")
+
+
+def test_workspaces_has_group_state_columns(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint FROM workspaces LIMIT 0"
+    )

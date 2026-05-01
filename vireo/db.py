@@ -320,7 +320,9 @@ class Database:
                 ui_state        TEXT,
                 tabs            TEXT,
                 created_at      TEXT DEFAULT (datetime('now')),
-                last_opened_at  TEXT
+                last_opened_at  TEXT,
+                last_grouped_at         INTEGER,
+                last_group_fingerprint  TEXT
             );
 
             CREATE TABLE IF NOT EXISTS workspace_folders (
@@ -625,6 +627,22 @@ class Database:
             self.conn.execute("ALTER TABLE workspaces DROP COLUMN open_tabs")
         except sqlite3.OperationalError:
             pass  # column already absent (already dropped or fresh schema)
+        # Migration: per-workspace grouping provenance. last_grouped_at is
+        # the unix epoch when run_full_pipeline last completed for this
+        # workspace; last_group_fingerprint is a stable hash of the encounter
+        # + burst params used. Both NULL for fresh workspaces.
+        try:
+            self.conn.execute("SELECT last_grouped_at FROM workspaces LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE workspaces ADD COLUMN last_grouped_at INTEGER"
+            )
+        try:
+            self.conn.execute("SELECT last_group_fingerprint FROM workspaces LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE workspaces ADD COLUMN last_group_fingerprint TEXT"
+            )
         # Migration: working-copy failure markers. Backfill (and the inline
         # scan extraction) record a failure here when extract_working_copy
         # returns False, gated by file_mtime so a user-replaced file retries
