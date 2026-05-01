@@ -9678,3 +9678,24 @@ def test_count_classifier_runs_excludes_full_image_and_below_threshold(tmp_path)
     assert db.count_classifier_runs(
         [p1, p2, p3], "BioCLIP-2.5", "fp-a",
     ) == 1
+
+
+def test_all_nav_ids_covers_every_page():
+    from db import ALL_NAV_IDS
+    expected = {
+        "pipeline", "jobs", "pipeline_review", "review", "cull",
+        "misses", "highlights", "browse", "map", "variants",
+        "dashboard", "audit", "compare",
+        "settings", "workspace", "lightroom", "shortcuts",
+        "keywords", "duplicates", "logs",
+    }
+    assert expected == ALL_NAV_IDS
+
+
+def test_default_tabs_is_the_curated_nine():
+    from db import DEFAULT_TABS
+    assert DEFAULT_TABS == [
+        "browse", "pipeline", "pipeline_review",
+        "review", "cull", "jobs",
+        "highlights", "misses", "settings",
+    ]

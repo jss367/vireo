@@ -1,90 +1,126 @@
-def test_open_tab_endpoint_appends(app_and_db):
+def test_pin_tab_endpoint_appends(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    r = client.post("/api/workspace/tabs/open", json={"nav_id": "keywords"})
+    r = client.post("/api/workspace/tabs/pin", json={"nav_id": "logs"})
     assert r.status_code == 200
     body = r.get_json()
-    assert "keywords" in body["open_tabs"]
+    assert "logs" in body["tabs"]
 
 
-def test_open_tab_endpoint_rejects_unknown_navid(app_and_db):
+def test_pin_tab_endpoint_rejects_unknown_navid(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    r = client.post("/api/workspace/tabs/open", json={"nav_id": "browse"})
+    r = client.post("/api/workspace/tabs/pin", json={"nav_id": "not_a_real_page"})
     assert r.status_code == 400
 
 
-def test_open_tab_endpoint_idempotent(app_and_db):
+def test_pin_tab_endpoint_idempotent(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    client.post("/api/workspace/tabs/open", json={"nav_id": "logs"})
-    r = client.post("/api/workspace/tabs/open", json={"nav_id": "logs"})
+    client.post("/api/workspace/tabs/pin", json={"nav_id": "logs"})
+    r = client.post("/api/workspace/tabs/pin", json={"nav_id": "logs"})
     assert r.status_code == 200
-    body = r.get_json()
-    assert body["open_tabs"].count("logs") == 1
+    assert r.get_json()["tabs"].count("logs") == 1
 
 
-def test_close_tab_endpoint_removes(app_and_db):
+def test_unpin_tab_endpoint_removes(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    r = client.post("/api/workspace/tabs/close", json={"nav_id": "settings"})
+    r = client.post("/api/workspace/tabs/unpin", json={"nav_id": "settings"})
     assert r.status_code == 200
-    assert "settings" not in r.get_json()["open_tabs"]
+    assert "settings" not in r.get_json()["tabs"]
 
 
-def test_close_tab_endpoint_idempotent_when_not_open(app_and_db):
+def test_unpin_tab_endpoint_idempotent_when_not_pinned(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    client.post("/api/workspace/tabs/close", json={"nav_id": "settings"})
-    r = client.post("/api/workspace/tabs/close", json={"nav_id": "settings"})
+    client.post("/api/workspace/tabs/unpin", json={"nav_id": "settings"})
+    r = client.post("/api/workspace/tabs/unpin", json={"nav_id": "settings"})
     assert r.status_code == 200
 
 
-def test_close_tab_endpoint_rejects_unknown_navid(app_and_db):
+def test_unpin_tab_endpoint_rejects_unknown_navid(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    r = client.post("/api/workspace/tabs/close", json={"nav_id": "browse"})
+    r = client.post("/api/workspace/tabs/unpin", json={"nav_id": "not_a_real_page"})
     assert r.status_code == 400
 
 
-def test_visiting_lightroom_url_auto_opens_tab(app_and_db):
+def test_pin_tab_endpoint_rejects_non_string_navid(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    # Close lightroom first
-    client.post("/api/workspace/tabs/close", json={"nav_id": "lightroom"})
-    assert "lightroom" not in db.get_open_tabs()
-    # Visit the page
-    r = client.get("/lightroom")
-    assert r.status_code == 200
-    assert "lightroom" in db.get_open_tabs()
+    # Each of these would have raised TypeError on `nav_id not in ALL_NAV_IDS`
+    # (unhashable type for list/dict) and surfaced as a 500. They must come
+    # back as 400 instead.
+    for bad in [["browse"], {"id": "browse"}, None, 42]:
+        r = client.post("/api/workspace/tabs/pin", json={"nav_id": bad})
+        assert r.status_code == 400, f"expected 400 for {bad!r}, got {r.status_code}"
 
 
-def test_visiting_logs_url_auto_opens_tab(app_and_db):
+def test_unpin_tab_endpoint_rejects_non_string_navid(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    client.post("/api/workspace/tabs/close", json={"nav_id": "logs"})
-    r = client.get("/logs")
-    assert r.status_code == 200
-    assert "logs" in db.get_open_tabs()
+    for bad in [["settings"], {"id": "settings"}, None, 42]:
+        r = client.post("/api/workspace/tabs/unpin", json={"nav_id": bad})
+        assert r.status_code == 400, f"expected 400 for {bad!r}, got {r.status_code}"
 
 
-import pytest
-
-
-@pytest.mark.parametrize("nav_id,url", [
-    ("settings", "/settings"),
-    ("workspace", "/workspace"),
-    ("lightroom", "/lightroom"),
-    ("shortcuts", "/shortcuts"),
-    ("keywords", "/keywords"),
-    ("duplicates", "/duplicates"),
-    ("logs", "/logs"),
-])
-def test_visiting_openable_url_auto_opens_tab(app_and_db, nav_id, url):
+def test_reorder_tabs_endpoint_replaces_order(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    client.post("/api/workspace/tabs/close", json={"nav_id": nav_id})
-    assert nav_id not in db.get_open_tabs()
-    r = client.get(url)
+    new_order = ["cull", "review", "browse"]
+    r = client.post("/api/workspace/tabs/reorder", json={"tabs": new_order})
     assert r.status_code == 200
-    assert nav_id in db.get_open_tabs()
+    assert r.get_json()["tabs"] == new_order
+
+
+def test_reorder_tabs_rejects_unknown_id(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    r = client.post("/api/workspace/tabs/reorder",
+                    json={"tabs": ["browse", "not_a_page"]})
+    assert r.status_code == 400
+
+
+def test_reorder_tabs_rejects_duplicates(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    r = client.post("/api/workspace/tabs/reorder",
+                    json={"tabs": ["browse", "browse"]})
+    assert r.status_code == 400
+
+
+def test_reorder_tabs_rejects_non_list(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    r = client.post("/api/workspace/tabs/reorder", json={"tabs": "not-a-list"})
+    assert r.status_code == 400
+
+
+def test_reorder_tabs_rejects_non_string_entries(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    # Each of these would have raised TypeError on `nav_id not in ALL_NAV_IDS`
+    # (unhashable / unsupported type) and surfaced as a 500. They must come
+    # back as 400 instead.
+    for bad in [[["browse"]], [{"id": "browse"}], [None], [42]]:
+        r = client.post("/api/workspace/tabs/reorder", json={"tabs": bad})
+        assert r.status_code == 400, f"expected 400 for {bad!r}, got {r.status_code}"
+
+
+def test_get_tabs_endpoint_new_shape(app_and_db):
+    from db import DEFAULT_TABS
+    app, db = app_and_db
+    client = app.test_client()
+    r = client.get("/api/workspace/tabs")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["tabs"] == DEFAULT_TABS
+    assert "all_pages" in body
+    # all_pages must include every nav id, in a stable order, with label and href
+    ids = [p["id"] for p in body["all_pages"]]
+    assert "duplicates" in ids
+    assert "browse" in ids
+    assert len(ids) == 20
+    sample = next(p for p in body["all_pages"] if p["id"] == "duplicates")
+    assert sample == {"id": "duplicates", "label": "Duplicates", "href": "/duplicates"}

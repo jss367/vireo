@@ -809,129 +809,131 @@ def test_move_folders_empty_list(db):
     assert result["folders_moved"] == 0
 
 
-def test_workspaces_has_open_tabs_column(db):
-    cols = [r[1] for r in db.conn.execute("PRAGMA table_info(workspaces)").fetchall()]
-    assert "open_tabs" in cols
+def test_workspaces_has_tabs_column(db):
+    cols = [r["name"] for r in db.conn.execute("PRAGMA table_info(workspaces)")]
+    assert "tabs" in cols
 
 
-def test_existing_workspaces_get_default_open_tabs_on_migration(tmp_path):
-    """A pre-existing workspaces table without open_tabs should be backfilled."""
+def test_legacy_workspaces_get_default_tabs_on_migration(tmp_path):
+    """A pre-existing workspaces table without `tabs` should be backfilled with DEFAULT_TABS."""
     import json as _json
     import sqlite3
-    db_path = tmp_path / "legacy.db"
-    # Hand-craft a legacy DB without the open_tabs column
-    conn = sqlite3.connect(str(db_path))
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
     conn.execute(
-        "CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, "
-        "config_overrides TEXT, ui_state TEXT, created_at TEXT, last_opened_at TEXT)"
+        """CREATE TABLE workspaces (
+              id INTEGER PRIMARY KEY,
+              name TEXT NOT NULL UNIQUE,
+              config_overrides TEXT,
+              ui_state TEXT,
+              open_tabs TEXT,
+              created_at TEXT DEFAULT (datetime('now')),
+              last_opened_at TEXT)"""
     )
-    conn.execute("INSERT INTO workspaces (name) VALUES ('Legacy')")
+    conn.execute(
+        "INSERT INTO workspaces (name, open_tabs) VALUES (?, ?)",
+        ("Legacy", _json.dumps(["settings", "workspace"])),
+    )
     conn.commit()
     conn.close()
 
-    # Open via Database — migration should run
-    from db import Database
-    d = Database(str(db_path))
-
-    cols = [r[1] for r in d.conn.execute("PRAGMA table_info(workspaces)").fetchall()]
-    assert "open_tabs" in cols
-
-    # Existing rows should be backfilled with the defaults
-    row = d.conn.execute(
-        "SELECT open_tabs FROM workspaces WHERE name = 'Legacy'"
-    ).fetchone()
-    assert row[0] is not None
-    assert _json.loads(row[0]) == ["settings", "workspace", "lightroom"]
+    from db import DEFAULT_TABS, Database
+    db = Database(db_path)
+    cols = [r["name"] for r in db.conn.execute("PRAGMA table_info(workspaces)")]
+    assert "tabs" in cols
+    row = db.conn.execute("SELECT tabs FROM workspaces WHERE name = 'Legacy'").fetchone()
+    assert _json.loads(row["tabs"]) == DEFAULT_TABS
 
 
-def test_new_workspace_gets_default_open_tabs(db):
+def test_new_workspace_gets_default_tabs(db):
     import json as _json
+
+    from db import DEFAULT_TABS
     ws_id = db.create_workspace("Fresh")
-    row = db.conn.execute(
-        "SELECT open_tabs FROM workspaces WHERE id = ?", (ws_id,)
-    ).fetchone()
-    assert row["open_tabs"] is not None
-    assert _json.loads(row["open_tabs"]) == ["settings", "workspace", "lightroom"]
+    row = db.conn.execute("SELECT tabs FROM workspaces WHERE id = ?", (ws_id,)).fetchone()
+    assert row["tabs"] is not None
+    assert _json.loads(row["tabs"]) == DEFAULT_TABS
 
 
-def test_get_open_tabs_returns_default_for_new_workspace(db):
-    ws_id = db.create_workspace("WS")
+def test_get_tabs_returns_default_for_new_workspace(db):
+    from db import DEFAULT_TABS
+    ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
-    assert db.get_open_tabs() == ["settings", "workspace", "lightroom"]
+    assert db.get_tabs() == DEFAULT_TABS
 
 
-def test_get_open_tabs_returns_empty_list_when_null(db):
-    ws_id = db.create_workspace("WS2")
-    db.conn.execute("UPDATE workspaces SET open_tabs = NULL WHERE id = ?", (ws_id,))
-    db.conn.commit()
+def test_pin_tab_appends(db):
+    from db import DEFAULT_TABS
+    ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
-    assert db.get_open_tabs() == []
+    result = db.pin_tab("logs")
+    assert result == DEFAULT_TABS + ["logs"]
+    assert db.get_tabs() == DEFAULT_TABS + ["logs"]
 
 
-def test_openable_nav_ids_constant():
-    from db import OPENABLE_NAV_IDS
-    assert frozenset({
-        "settings", "workspace", "lightroom",
-        "shortcuts", "keywords", "duplicates", "logs",
-    }) == OPENABLE_NAV_IDS
-
-
-def test_open_tab_appends_to_end(db):
-    ws_id = db.create_workspace("WS")
+def test_pin_tab_idempotent(db):
+    ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
-    # Start from defaults: ["settings", "workspace", "lightroom"]
-    db.open_tab("keywords")
-    assert db.get_open_tabs() == ["settings", "workspace", "lightroom", "keywords"]
+    db.pin_tab("logs")
+    db.pin_tab("logs")
+    assert db.get_tabs().count("logs") == 1
 
 
-def test_open_tab_is_idempotent(db):
-    ws_id = db.create_workspace("WS")
-    db.set_active_workspace(ws_id)
-    db.open_tab("keywords")
-    db.open_tab("keywords")
-    assert db.get_open_tabs().count("keywords") == 1
-
-
-def test_open_tab_rejects_non_openable_navid(db):
-    ws_id = db.create_workspace("WS")
+def test_pin_tab_rejects_unknown_id(db):
+    import pytest
+    ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
     with pytest.raises(ValueError):
-        db.open_tab("browse")  # browse is a linger page, not openable
+        db.pin_tab("not_a_real_page")
 
 
-def test_close_tab_removes_from_list(db):
-    ws_id = db.create_workspace("WS")
+def test_unpin_tab_removes(db):
+    ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
-    db.close_tab("settings")
-    assert db.get_open_tabs() == ["workspace", "lightroom"]
+    db.unpin_tab("settings")
+    assert "settings" not in db.get_tabs()
 
 
-def test_close_tab_idempotent_when_not_open(db):
-    ws_id = db.create_workspace("WS")
+def test_unpin_tab_idempotent_when_not_pinned(db):
+    ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
-    db.close_tab("keywords")  # not open — should be no-op
-    assert db.get_open_tabs() == ["settings", "workspace", "lightroom"]
+    db.unpin_tab("logs")  # not in defaults
+    db.unpin_tab("logs")  # again
+    assert "logs" not in db.get_tabs()
 
 
-def test_close_tab_rejects_non_openable_navid(db):
-    ws_id = db.create_workspace("WS")
+def test_set_tabs_replaces_full_list(db):
+    ws_id = db.create_workspace("Fresh")
+    db.set_active_workspace(ws_id)
+    new_order = ["cull", "review", "browse"]
+    result = db.set_tabs(new_order)
+    assert result == new_order
+    assert db.get_tabs() == new_order
+
+
+def test_set_tabs_rejects_unknown_id(db):
+    import pytest
+    ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
     with pytest.raises(ValueError):
-        db.close_tab("browse")
+        db.set_tabs(["browse", "not_a_real_page"])
 
 
-def test_open_tabs_are_per_workspace(db):
-    ws_a = db.create_workspace("A")
-    ws_b = db.create_workspace("B")
+def test_set_tabs_rejects_duplicates(db):
+    import pytest
+    ws_id = db.create_workspace("Fresh")
+    db.set_active_workspace(ws_id)
+    with pytest.raises(ValueError):
+        db.set_tabs(["browse", "browse", "review"])
 
-    db.set_active_workspace(ws_a)
-    db.open_tab("keywords")
 
-    db.set_active_workspace(ws_b)
-    assert "keywords" not in db.get_open_tabs()
-    db.open_tab("logs")
-
-    db.set_active_workspace(ws_a)
-    tabs = db.get_open_tabs()
-    assert "keywords" in tabs
-    assert "logs" not in tabs
+def test_tabs_are_per_workspace(db):
+    from db import DEFAULT_TABS
+    ws1 = db.create_workspace("WS1")
+    ws2 = db.create_workspace("WS2")
+    db.set_active_workspace(ws1)
+    db.pin_tab("logs")
+    assert "logs" in db.get_tabs()
+    db.set_active_workspace(ws2)
+    assert db.get_tabs() == DEFAULT_TABS
+    assert "logs" not in db.get_tabs()

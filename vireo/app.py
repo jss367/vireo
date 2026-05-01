@@ -45,6 +45,33 @@ from preview_cache import (
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
+
+# Stable ordering and labels for the palette + nav rendering.
+# The `id` is the nav-id used in `tabs`; `href` is the canonical
+# route. Labels match what the navbar showed before the unification.
+ALL_PAGES = [
+    {"id": "pipeline",        "label": "Pipeline",        "href": "/pipeline"},
+    {"id": "jobs",            "label": "Jobs",            "href": "/jobs"},
+    {"id": "pipeline_review", "label": "Pipeline Review", "href": "/pipeline/review"},
+    {"id": "review",          "label": "Review",          "href": "/review"},
+    {"id": "cull",            "label": "Cull",            "href": "/cull"},
+    {"id": "misses",          "label": "Misses",          "href": "/misses"},
+    {"id": "highlights",      "label": "Highlights",      "href": "/highlights"},
+    {"id": "browse",          "label": "Browse",          "href": "/browse"},
+    {"id": "map",             "label": "Map",             "href": "/map"},
+    {"id": "variants",        "label": "Variants",        "href": "/variants"},
+    {"id": "dashboard",       "label": "Dashboard",       "href": "/dashboard"},
+    {"id": "audit",           "label": "Audit",           "href": "/audit"},
+    {"id": "compare",         "label": "Compare",         "href": "/compare"},
+    {"id": "settings",        "label": "Settings",        "href": "/settings"},
+    {"id": "workspace",       "label": "Workspace",       "href": "/workspace"},
+    {"id": "lightroom",       "label": "Lightroom",       "href": "/lightroom"},
+    {"id": "shortcuts",       "label": "Shortcuts",       "href": "/shortcuts"},
+    {"id": "keywords",        "label": "Keywords",        "href": "/keywords"},
+    {"id": "duplicates",      "label": "Duplicates",      "href": "/duplicates"},
+    {"id": "logs",            "label": "Logs",            "href": "/logs"},
+]
+
 # File logging is attached only when the server actually starts (see
 # main() / _setup_file_logging). Importing this module — e.g. from pytest
 # fixtures — must NOT touch ~/.vireo/vireo.log, or test tracebacks end up
@@ -1000,17 +1027,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         cfg.save(user_cfg)
         return jsonify({"ok": True})
 
-    def _auto_open_tab(nav_id):
-        """Best-effort: append nav_id to the active workspace's open_tabs.
-
-        Called from openable page routes so direct URL visits / shortcuts
-        keep the navbar consistent. Errors are swallowed (the page still renders).
-        """
-        try:
-            _get_db().open_tab(nav_id)
-        except Exception:
-            log.exception("Failed to auto-open tab %r", nav_id)
-
     @app.route("/browse")
     def browse():
         return render_template("browse.html")
@@ -1021,7 +1037,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/lightroom")
     def lightroom_page():
-        _auto_open_tab("lightroom")
         return render_template("lightroom.html")
 
     @app.route("/audit")
@@ -1046,7 +1061,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/workspace")
     def workspace_page():
-        _auto_open_tab("workspace")
         return render_template("workspace.html")
 
     @app.route("/compare")
@@ -1055,17 +1069,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/settings")
     def settings():
-        _auto_open_tab("settings")
         return render_template("settings.html")
 
     @app.route("/shortcuts")
     def shortcuts_page():
-        _auto_open_tab("shortcuts")
         return render_template("shortcuts.html")
 
     @app.route("/keywords")
     def keywords_page():
-        _auto_open_tab("keywords")
         return render_template("keywords.html")
 
     @app.route("/jobs")
@@ -1074,7 +1085,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/duplicates")
     def duplicates_page():
-        _auto_open_tab("duplicates")
         return render_template("duplicates.html")
 
     @app.route("/move")
@@ -3096,31 +3106,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.update_workspace(db._active_workspace_id, config_overrides=existing if existing else None)
         return jsonify({"ok": True, "overrides": existing})
 
-    @app.route("/api/workspaces/active/nav-order", methods=["PUT"])
-    def api_set_nav_order():
-        """Save navbar link order for the active workspace."""
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        nav_order = body.get("nav_order")
-        if not isinstance(nav_order, list):
-            return json_error("nav_order must be a list")
-        # Share the schema-driven settings write lock so a concurrent schema
-        # autosave can't read this same overrides snapshot and overwrite the
-        # nav-order change with stale data.
-        with _settings_write_lock:
-            ws = db.get_workspace(db._active_workspace_id)
-            existing = {}
-            if ws and ws["config_overrides"]:
-                try:
-                    existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-                except Exception:
-                    pass
-            if not isinstance(existing, dict):
-                existing = {}
-            existing["nav_order"] = nav_order
-            db.update_workspace(db._active_workspace_id, config_overrides=existing)
-        return jsonify({"ok": True, "nav_order": nav_order})
-
     @app.route("/api/workspaces/active/subject-types", methods=["GET"])
     def api_get_active_subject_types():
         """Return the active workspace's effective subject_types — global
@@ -3180,47 +3165,54 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.update_workspace(ws_id, config_overrides=existing)
         return jsonify({"types": cleaned})
 
-    @app.route("/api/workspace/tabs/open", methods=["POST"])
-    def api_open_tab():
-        from db import OPENABLE_NAV_IDS
+    @app.route("/api/workspace/tabs/pin", methods=["POST"])
+    def api_pin_tab():
+        from db import ALL_NAV_IDS
         db = _get_db()
         body = request.get_json(silent=True) or {}
         nav_id = body.get("nav_id")
-        if nav_id not in OPENABLE_NAV_IDS:
-            return json_error("nav_id is not openable", 400)
-        tabs = db.open_tab(nav_id)
-        return jsonify({"ok": True, "open_tabs": tabs})
+        if not isinstance(nav_id, str):
+            return json_error("nav_id must be a string", 400)
+        if nav_id not in ALL_NAV_IDS:
+            return json_error("nav_id is not a known page", 400)
+        tabs = db.pin_tab(nav_id)
+        return jsonify({"ok": True, "tabs": tabs})
 
-    @app.route("/api/workspace/tabs/close", methods=["POST"])
-    def api_close_tab():
-        from db import OPENABLE_NAV_IDS
+    @app.route("/api/workspace/tabs/unpin", methods=["POST"])
+    def api_unpin_tab():
+        from db import ALL_NAV_IDS
         db = _get_db()
         body = request.get_json(silent=True) or {}
         nav_id = body.get("nav_id")
-        if nav_id not in OPENABLE_NAV_IDS:
-            return json_error("nav_id is not openable", 400)
-        tabs = db.close_tab(nav_id)
-        return jsonify({"ok": True, "open_tabs": tabs})
+        if not isinstance(nav_id, str):
+            return json_error("nav_id must be a string", 400)
+        if nav_id not in ALL_NAV_IDS:
+            return json_error("nav_id is not a known page", 400)
+        tabs = db.unpin_tab(nav_id)
+        return jsonify({"ok": True, "tabs": tabs})
+
+    @app.route("/api/workspace/tabs/reorder", methods=["POST"])
+    def api_reorder_tabs():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        tabs = body.get("tabs")
+        if not isinstance(tabs, list):
+            return json_error("tabs must be a list", 400)
+        try:
+            result = db.set_tabs(tabs)
+        except ValueError as e:
+            return json_error(str(e), 400)
+        return jsonify({"ok": True, "tabs": result})
 
     @app.route("/api/workspace/tabs", methods=["GET"])
     def api_get_tabs():
         db = _get_db()
         try:
-            open_tabs = db.get_open_tabs()
+            tabs = db.get_tabs()
         except Exception:
-            open_tabs = []
-        TOOLS_ORDER = ["settings", "workspace", "lightroom",
-                       "shortcuts", "keywords", "duplicates", "logs"]
-        TAB_LABELS = {
-            "settings": "Settings", "workspace": "Workspace",
-            "lightroom": "Lightroom", "shortcuts": "Shortcuts",
-            "keywords": "Keywords", "duplicates": "Duplicates", "logs": "Logs",
-        }
-        openable_pages = [
-            {"id": t, "label": TAB_LABELS[t], "href": "/" + t}
-            for t in TOOLS_ORDER
-        ]
-        return jsonify({"open_tabs": open_tabs, "openable_pages": openable_pages})
+            from db import DEFAULT_TABS
+            tabs = list(DEFAULT_TABS)
+        return jsonify({"tabs": tabs, "all_pages": ALL_PAGES})
 
     @app.route("/api/workspaces/active/new-images")
     def api_workspace_new_images():
@@ -10714,7 +10706,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/logs")
     def logs_page():
-        _auto_open_tab("logs")
         return render_template("logs.html")
 
     @app.route("/map")

@@ -1132,6 +1132,55 @@ def test_templates_jinja_free_except_includes():
     )
 
 
+def test_navbar_js_fallbacks_match_python_constants():
+    """The hardcoded fallback lists in _navbar.html must mirror the
+    canonical Python lists. The navbar's JS uses these fallbacks when
+    /api/workspace/tabs fails — drift would mean a broken navbar in
+    failure mode (e.g. a removed page still in the JS list).
+    """
+    import json
+    import os
+    import re
+
+    from app import ALL_PAGES
+    from db import DEFAULT_TABS
+
+    template_path = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), '..', 'templates', '_navbar.html')
+    )
+    with open(template_path, encoding='utf-8') as f:
+        text = f.read()
+
+    tabs_match = re.search(
+        r'window\.NAV_DEFAULT_TABS\s*=\s*(\[[^\]]*\])', text, re.DOTALL
+    )
+    pages_match = re.search(
+        r'window\.NAV_ALL_PAGES\s*=\s*(\[.*?\n\];)', text, re.DOTALL
+    )
+    assert tabs_match, "window.NAV_DEFAULT_TABS not found in _navbar.html"
+    assert pages_match, "window.NAV_ALL_PAGES not found in _navbar.html"
+
+    # Coerce JS-ish list literals to JSON: single→double quotes, strip
+    # trailing semicolon, quote bare object keys.
+    def js_to_json(s):
+        s = s.rstrip(';').strip()
+        s = s.replace("'", '"')
+        s = re.sub(r'(\b)(id|label|href)(\s*:)', r'\1"\2"\3', s)
+        return s
+
+    js_tabs = json.loads(js_to_json(tabs_match.group(1)))
+    js_pages = json.loads(js_to_json(pages_match.group(1)))
+
+    assert js_tabs == list(DEFAULT_TABS), (
+        f"window.NAV_DEFAULT_TABS in _navbar.html drifted from db.DEFAULT_TABS.\n"
+        f"  JS:     {js_tabs}\n"
+        f"  Python: {list(DEFAULT_TABS)}"
+    )
+    assert js_pages == ALL_PAGES, (
+        "window.NAV_ALL_PAGES in _navbar.html drifted from app.ALL_PAGES."
+    )
+
+
 def test_bottom_panel_has_history_tab(app_and_db):
     """The bottom panel includes a History tab."""
     app, _ = app_and_db
@@ -2150,34 +2199,6 @@ def test_api_browse_photo_counts_respects_file_types(app_and_db, tmp_path):
                        content_type='application/json')
     assert resp.status_code == 200
     assert resp.get_json()["counts"][str(d)] == 1
-
-
-def test_nav_order_save_and_load(app_and_db):
-    """PUT /api/workspaces/active/nav-order saves and returns nav order."""
-    app, db = app_and_db
-    client = app.test_client()
-    order = ["browse", "pipeline", "cull", "review"]
-    resp = client.put('/api/workspaces/active/nav-order',
-                      json={"nav_order": order},
-                      content_type='application/json')
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["nav_order"] == order
-
-    # Verify it persists in config overrides
-    resp2 = client.get('/api/workspaces/active/config')
-    assert resp2.status_code == 200
-    assert resp2.get_json()["nav_order"] == order
-
-
-def test_nav_order_rejects_non_list(app_and_db):
-    """PUT /api/workspaces/active/nav-order rejects non-list input."""
-    app, _ = app_and_db
-    client = app.test_client()
-    resp = client.put('/api/workspaces/active/nav-order',
-                      json={"nav_order": "not-a-list"},
-                      content_type='application/json')
-    assert resp.status_code == 400
 
 
 def _read_workspace_overrides(db, ws_id):

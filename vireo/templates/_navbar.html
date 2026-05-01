@@ -1160,10 +1160,19 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .vireo-ctx-chip.is-active { background: var(--accent); color: white; }
 
 /* ---------- Openable tabs ---------- */
-.navbar .nav-tab { position: relative; }
+.navbar .nav-tab {
+  position: relative;
+  /* Reserve space at the right for the absolutely-positioned close button
+     so it never overlaps the tab label. Width matches close-button visual
+     footprint (≈22px including its 4px right offset). */
+  padding-right: 22px;
+}
 .navbar .nav-tab-close {
   display: none;
-  margin-left: 6px;
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
   padding: 0 4px;
   font-size: 14px;
   line-height: 1;
@@ -1173,16 +1182,32 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .navbar .nav-tab:hover .nav-tab-close,
 .navbar .nav-tab.active .nav-tab-close { display: inline-block; }
-.navbar .nav-tab-close:hover { background: var(--bg-tertiary, rgba(255,255,255,0.1)); color: var(--text-primary); }
-.navbar .nav-tab-divider {
-  display: inline-block;
-  width: 1px;
-  height: 18px;
-  margin: 0 8px;
-  background: var(--border-primary, rgba(255,255,255,0.15));
-  vertical-align: middle;
+.navbar .nav-tab-close:hover {
+  background: var(--bg-tertiary, rgba(255,255,255,0.1));
+  color: var(--text-primary);
 }
-.navbar .nav-tools-btn {
+.navbar .nav-tab-strip {
+  display: inline-flex;
+  align-items: stretch;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.navbar .nav-cmd-hint {
+  display: inline-block;
+  padding: 4px 8px;
+  margin: 0 8px;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  color: var(--text-muted);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.navbar .nav-cmd-hint:hover { color: var(--text-primary); border-color: var(--text-primary); }
+.navbar .nav-overflow-btn {
   background: none;
   border: 1px dashed var(--border-primary, rgba(255,255,255,0.2));
   color: var(--text-muted, #999);
@@ -1192,34 +1217,86 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   font: inherit;
   margin-left: 4px;
 }
-.navbar .nav-tools-btn:hover { color: var(--text-primary); border-color: var(--text-primary); }
-.nav-tools-menu {
+.navbar .nav-overflow-btn:hover { color: var(--text-primary); border-color: var(--text-primary); }
+.navbar .nav-overflow-btn[hidden] { display: none; }
+.nav-overflow-menu {
   position: absolute;
-  top: 36px;
+  top: 44px;
   background: var(--bg-secondary, #2a2a2a);
   border: 1px solid var(--border-primary, rgba(255,255,255,0.15));
   border-radius: 6px;
   padding: 4px;
   z-index: 1000;
-  min-width: 160px;
+  min-width: 180px;
   box-shadow: 0 4px 12px rgba(0,0,0,0.25);
 }
-.nav-tools-menu[hidden] { display: none; }
-.nav-tools-item {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  background: none;
-  border: 0;
-  color: var(--text-primary);
-  text-align: left;
-  padding: 6px 8px;
-  font: inherit;
-  cursor: pointer;
-  border-radius: 4px;
+.nav-overflow-menu[hidden] { display: none; }
+.nav-overflow-item {
+  display: flex; align-items: center; width: 100%;
+  background: none; border: 0; color: var(--text-primary);
+  text-align: left; padding: 6px 8px; font: inherit;
+  cursor: pointer; border-radius: 4px;
 }
-.nav-tools-item:hover { background: var(--bg-tertiary, rgba(255,255,255,0.08)); }
-.nav-tools-check { display: inline-block; width: 16px; color: var(--accent); }
+.nav-overflow-item:hover { background: var(--bg-tertiary, rgba(255,255,255,0.08)); }
+/* Ephemeral tab styling — italic + no "active" border */
+.navbar .nav-tab.is-ephemeral {
+  font-style: italic;
+  /* Reserve extra right padding for the pin button alongside close. */
+  padding-right: 40px;
+}
+.navbar .nav-tab-pin {
+  display: none;
+  position: absolute;
+  right: 22px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-muted, #999);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.navbar .nav-tab.is-ephemeral .nav-tab-pin,
+.navbar .nav-tab.is-ephemeral:hover .nav-tab-pin { display: inline-block; }
+.navbar .nav-tab-pin:hover {
+  background: var(--bg-tertiary, rgba(255,255,255,0.1));
+  color: var(--text-primary);
+}
+.cmd-palette-overlay {
+  position: fixed; inset: 0; z-index: 10001;
+  background: rgba(0,0,0,0.45);
+  display: flex; justify-content: center; align-items: flex-start;
+  padding-top: 12vh;
+}
+.cmd-palette-overlay[hidden] { display: none; }
+.cmd-palette {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  width: 480px; max-width: 90vw;
+  max-height: 60vh; display: flex; flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+.cmd-palette input {
+  border: 0; outline: none; padding: 14px 16px;
+  background: transparent; color: var(--text-primary);
+  font-size: 15px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.cmd-palette-results {
+  overflow-y: auto; padding: 4px 0;
+}
+.cmd-palette-result {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 16px; cursor: pointer; color: var(--text-primary);
+  font-size: 13px;
+}
+.cmd-palette-result.selected { background: var(--bg-tertiary, rgba(255,255,255,0.08)); }
+.cmd-palette-result.is-current { color: var(--accent); }
+.cmd-palette-result-pinned {
+  color: var(--text-muted); font-size: 11px; margin-left: auto;
+}
 </style>
 
 <nav class="navbar">
@@ -1236,26 +1313,10 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       <button class="ws-menu-action" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
     </div>
   </div>
-  <a href="/pipeline" data-nav-id="pipeline" data-testid="nav-pipeline">Pipeline</a>
-  <a href="/jobs" data-nav-id="jobs" data-testid="nav-jobs">Jobs<span class="nav-job-badge" id="navJobBadge" data-testid="job-badge"></span></a>
-  <a href="/pipeline/review" data-nav-id="pipeline-review">Pipeline Review</a>
-  <a href="/review" data-nav-id="review" data-testid="nav-review">Review</a>
-  <a href="/cull" data-nav-id="cull">Cull</a>
-  <a href="/misses" data-nav-id="misses" data-testid="nav-misses">Misses</a>
-  <a href="/highlights" data-nav-id="highlights">Highlights</a>
-  <a href="/browse" data-nav-id="browse" data-testid="nav-browse">Browse</a>
-  <a href="/map" data-nav-id="map">Map</a>
-  <a href="/variants" data-nav-id="variants">Variants</a>
-  <a href="/dashboard" data-nav-id="dashboard">Dashboard</a>
-  <a href="/audit" data-nav-id="audit">Audit</a>
-  <a href="/compare" data-nav-id="compare">Compare</a>
-  <span class="nav-tab-divider" aria-hidden="true"></span>
-  <span id="navOpenTabs"></span>
-  <button type="button"
-          class="nav-tools-btn"
-          data-testid="nav-tools-btn"
-          onclick="toggleToolsMenu(event)">+ Tools &#9662;</button>
-  <div class="nav-tools-menu" id="navToolsMenu" hidden></div>
+  <span class="nav-cmd-hint" title="Open command palette (⌘K)" onclick="openCommandPalette()">⌘K</span>
+  <span id="navTabStrip" class="nav-tab-strip"></span>
+  <button type="button" class="nav-overflow-btn" id="navOverflowBtn" hidden onclick="toggleOverflowMenu(event)">&hellip;</button>
+  <div class="nav-overflow-menu" id="navOverflowMenu" hidden></div>
   <span class="nav-spacer"></span>
   <span class="nav-icon" onclick="openReportModal()" title="Report Issue" id="reportToggle">&#9888;</span>
   <span class="nav-icon" onclick="openHelpModal()" title="Help (F1)" id="helpToggle">&#63;</span>
@@ -1265,8 +1326,76 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     &#9638;
     <span class="activity-dot" id="navActivityDot"></span>
   </span>
-  <a class="nav-icon" href="/logs" title="Full log viewer">&#9776;</a>
 </nav>
+
+<!-- Command palette (cmd+K) -->
+<div class="cmd-palette-overlay" id="commandPalette" hidden onclick="if(event.target===this)closeCommandPalette()">
+  <div class="cmd-palette">
+    <input type="text" id="cmdPaletteInput" autocomplete="off" placeholder="Jump to page…" />
+    <div id="cmdPaletteResults" class="cmd-palette-results"></div>
+  </div>
+</div>
+
+<script>
+window.openCommandPalette = function() {
+  const overlay = document.getElementById('commandPalette');
+  if (!overlay) return;
+  overlay.removeAttribute('hidden');
+  const input = document.getElementById('cmdPaletteInput');
+  if (input) { input.value = ''; input.focus(); }
+  if (window._cmdPaletteRender) window._cmdPaletteRender('');
+};
+window.closeCommandPalette = function() {
+  const overlay = document.getElementById('commandPalette');
+  if (overlay) overlay.setAttribute('hidden', '');
+};
+document.addEventListener('keydown', function(e) {
+  const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+  const mod = isMac ? e.metaKey : e.ctrlKey;
+  if (mod && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    window.openCommandPalette();
+    return;
+  }
+  if (e.key === 'Escape') {
+    const overlay = document.getElementById('commandPalette');
+    if (overlay && !overlay.hasAttribute('hidden')) {
+      window.closeCommandPalette();
+      return;
+    }
+  }
+  // cmd+1..9 → nth pinned tab
+  if (mod && /^[1-9]$/.test(e.key)) {
+    const tabs = (window._navTabs ? window._navTabs.getTabs() : []);
+    const all = (window._navTabs ? window._navTabs.getAllPages() : []);
+    const idx = parseInt(e.key, 10) - 1;
+    if (idx < tabs.length) {
+      e.preventDefault();
+      const target = all.find(p => p.id === tabs[idx]);
+      if (target) window.location.href = target.href;
+    }
+  }
+  // cmd+W → close current tab (pinned or ephemeral)
+  if (mod && e.key.toLowerCase() === 'w') {
+    const cur = (function() {
+      const p = window.location.pathname;
+      if (p.startsWith('/pipeline/review')) return 'pipeline_review';
+      if (p === '/' || p.startsWith('/browse')) return 'browse';
+      return (p.split('/')[1] || '').replace(/-/g, '_');
+    })();
+    if (cur) {
+      // The ephemeral tab also renders as .nav-tab with a .nav-tab-close
+      // that calls clearEphemeral(), so a single selector handles both.
+      const tabAnchor = document.querySelector('.nav-tab[data-nav-id="' + cur + '"]');
+      if (tabAnchor) {
+        e.preventDefault();
+        const closeBtn = tabAnchor.querySelector('.nav-tab-close');
+        if (closeBtn) closeBtn.click();
+      }
+    }
+  }
+});
+</script>
 
 <!-- Help Modal -->
 <div class="help-overlay" id="helpModal">
@@ -1586,184 +1715,327 @@ function sendReport() {
 </div>
 
 <script>
-/* ---------- Openable tabs: open/close + Tools dropdown ---------- */
+/* ---------- Unified tab strip + ephemeral slot + overflow ---------- */
+// Hardcoded fallbacks so the strip has something to render even when
+// /api/workspace/tabs fails (network error, 5xx, invalid JSON). Without
+// these, a transient fetch failure on first load leaves the navbar
+// empty and breaks tab-based keyboard flows (cmd+1..9, Ctrl+Tab,
+// drag/close). Templates are Jinja-free by policy, so we mirror the
+// canonical lists here — keep in sync with:
+//   - vireo/app.py:ALL_PAGES        (page registry)
+//   - vireo/db.py:DEFAULT_TABS      (default pinned-tabs list)
+window.NAV_DEFAULT_TABS = [
+  'browse', 'pipeline', 'pipeline_review',
+  'review', 'cull', 'jobs',
+  'highlights', 'misses', 'settings'
+];
+window.NAV_ALL_PAGES = [
+  {id: 'pipeline',        label: 'Pipeline',        href: '/pipeline'},
+  {id: 'jobs',            label: 'Jobs',            href: '/jobs'},
+  {id: 'pipeline_review', label: 'Pipeline Review', href: '/pipeline/review'},
+  {id: 'review',          label: 'Review',          href: '/review'},
+  {id: 'cull',            label: 'Cull',            href: '/cull'},
+  {id: 'misses',          label: 'Misses',          href: '/misses'},
+  {id: 'highlights',      label: 'Highlights',      href: '/highlights'},
+  {id: 'browse',          label: 'Browse',          href: '/browse'},
+  {id: 'map',             label: 'Map',             href: '/map'},
+  {id: 'variants',        label: 'Variants',        href: '/variants'},
+  {id: 'dashboard',       label: 'Dashboard',       href: '/dashboard'},
+  {id: 'audit',           label: 'Audit',           href: '/audit'},
+  {id: 'compare',         label: 'Compare',         href: '/compare'},
+  {id: 'settings',        label: 'Settings',        href: '/settings'},
+  {id: 'workspace',       label: 'Workspace',       href: '/workspace'},
+  {id: 'lightroom',       label: 'Lightroom',       href: '/lightroom'},
+  {id: 'shortcuts',       label: 'Shortcuts',       href: '/shortcuts'},
+  {id: 'keywords',        label: 'Keywords',        href: '/keywords'},
+  {id: 'duplicates',      label: 'Duplicates',      href: '/duplicates'},
+  {id: 'logs',            label: 'Logs',            href: '/logs'}
+];
+
 (function() {
+  const STRIP   = () => document.getElementById('navTabStrip');
+  const OVERBTN = () => document.getElementById('navOverflowBtn');
+  const OVERMENU = () => document.getElementById('navOverflowMenu');
+
+  // Seed from hardcoded fallbacks; the fetch below replaces them with
+  // the workspace's actual tabs on success, but if the fetch fails the
+  // defaults remain so the strip is never empty.
+  let TABS = window.NAV_DEFAULT_TABS.slice();
+  let ALL_PAGES = window.NAV_ALL_PAGES.slice();
+  let pageById = {};
+  ALL_PAGES.forEach(p => { pageById[p.id] = p; });
+  let ephemeralId = null; // nav-id of the ephemeral tab, if any
+
   function postJSON(url, body) {
     return fetch(url, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body || {}),
-    }).then(function(r) { return r.json(); });
+    }).then(r => r.json());
   }
 
-  // Compute current page nav-id from the URL path
   function currentNavId() {
-    var p = window.location.pathname;
-    if (p.startsWith('/pipeline/review')) return 'pipeline-review';
+    const p = window.location.pathname;
+    if (p.startsWith('/pipeline/review')) return 'pipeline_review';
     if (p === '/' || p.startsWith('/browse')) return 'browse';
-    var seg = p.split('/')[1] || '';
+    const seg = (p.split('/')[1] || '').replace(/-/g, '_');
     return seg;
   }
 
-  // Render open tabs into #navOpenTabs and Tools dropdown items into #navToolsMenu
-  // based on the {open_tabs, openable_pages} state returned by /api/workspace/tabs.
-  function renderTabs(state) {
-    var openTabs = (state && state.open_tabs) || [];
-    var pages = (state && state.openable_pages) || [];
-
-    // Build a label/href lookup from openable_pages for the open tabs strip
-    var pageById = {};
-    pages.forEach(function(p) { pageById[p.id] = p; });
-
-    // ---- Open tabs strip ----
-    var tabsHost = document.getElementById('navOpenTabs');
-    if (tabsHost) {
-      tabsHost.textContent = '';  // clear
-      var path = window.location.pathname;
-      openTabs.forEach(function(tabId) {
-        var page = pageById[tabId];
-        if (!page) return;  // unknown id — skip
-        var a = document.createElement('a');
-        a.href = page.href;
-        a.className = 'nav-tab';
-        a.dataset.navId = page.id;
-        a.dataset.tab = '1';
-        // Active-state: linger-page highlighting runs before tabs are rendered,
-        // so apply it here for tabs matching the current path.
-        if (path === page.href || (page.href !== '/' && path.startsWith(page.href + '/'))) {
-          a.classList.add('active');
-        }
-        a.appendChild(document.createTextNode(page.label));
-        var close = document.createElement('span');
-        close.className = 'nav-tab-close';
-        close.title = 'Close tab';
-        close.innerHTML = '&times;';
-        close.addEventListener('click', function(ev) {
-          ev.preventDefault();
-          ev.stopPropagation();
-          window.closeTab(page.id);
-        });
-        a.appendChild(close);
-        tabsHost.appendChild(a);
+  function buildTabAnchor(page, opts) {
+    const a = document.createElement('a');
+    a.href = page.href;
+    a.className = 'nav-tab';
+    if (opts && opts.ephemeral) a.classList.add('is-ephemeral');
+    a.dataset.navId = page.id;
+    a.dataset.testid = 'nav-' + page.id;
+    a.appendChild(document.createTextNode(page.label));
+    if (page.id === 'jobs') {
+      const badge = document.createElement('span');
+      badge.className = 'nav-job-badge';
+      badge.id = 'navJobBadge';
+      a.appendChild(badge);
+    }
+    if (opts && opts.ephemeral) {
+      const pin = document.createElement('span');
+      pin.className = 'nav-tab-pin';
+      pin.title = 'Pin tab';
+      pin.dataset.testid = 'nav-tab-pin-' + page.id;
+      pin.textContent = '📌';
+      pin.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        window.pinTab(page.id);
       });
+      a.appendChild(pin);
     }
-
-    // ---- Tools dropdown items ----
-    var menu = document.getElementById('navToolsMenu');
-    if (menu) {
-      var wasOpen = !menu.hasAttribute('hidden');
-      menu.textContent = '';  // clear
-      pages.forEach(function(page) {
-        var isOpen = openTabs.indexOf(page.id) !== -1;
-        var btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'nav-tools-item';
-        btn.dataset.navId = page.id;
-        btn.dataset.open = isOpen ? '1' : '0';
-        btn.addEventListener('click', function() {
-          window.toggleTabFromMenu(page.id);
-        });
-        var check = document.createElement('span');
-        check.className = 'nav-tools-check';
-        check.innerHTML = isOpen ? '&check;' : '&nbsp;';
-        btn.appendChild(check);
-        btn.appendChild(document.createTextNode(page.label));
-        menu.appendChild(btn);
-      });
-      if (!wasOpen) menu.setAttribute('hidden', '');
-    }
-  }
-
-  function fetchAndRender() {
-    return fetch('/api/workspace/tabs')
-      .then(function(r) { return r.json(); })
-      .then(function(state) {
-        renderTabs(state);
-        return state;
-      })
-      .catch(function() { /* silently ignore — empty containers are fine */ });
-  }
-
-  // Find the tab adjacent to navId in the rendered tab strip — prefer the
-  // next sibling so closing feels like advancing through the strip, fall back
-  // to the previous sibling if navId is the last tab.
-  function adjacentTabId(navId) {
-    var hostEl = document.getElementById('navOpenTabs');
-    if (!hostEl) return null;
-    var anchors = Array.prototype.slice.call(hostEl.querySelectorAll('a[data-nav-id]'));
-    var idx = -1;
-    for (var i = 0; i < anchors.length; i++) {
-      if (anchors[i].dataset.navId === navId) { idx = i; break; }
-    }
-    if (idx === -1) return null;
-    if (idx + 1 < anchors.length) return anchors[idx + 1].dataset.navId;
-    if (idx - 1 >= 0) return anchors[idx - 1].dataset.navId;
-    return null;
-  }
-
-  window.closeTab = function(navId) {
-    // Compute the destination BEFORE the close so we can pick the tab
-    // adjacent to the one being closed, not just the new tabs[0].
-    var isOnTab = currentNavId() === navId;
-    var nextNavId = isOnTab ? adjacentTabId(navId) : null;
-    postJSON('/api/workspace/tabs/close', {nav_id: navId}).then(function(res) {
-      if (isOnTab) {
-        window.location.href = nextNavId ? ('/' + nextNavId) : '/browse';
-      } else {
-        // Update DOM in place — no full reload needed
-        fetchAndRender();
-      }
+    const close = document.createElement('span');
+    close.className = 'nav-tab-close';
+    close.title = 'Close tab';
+    close.innerHTML = '&times;';
+    close.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (opts && opts.ephemeral) clearEphemeral(); else unpinTab(page.id);
     });
-  };
+    a.appendChild(close);
+    return a;
+  }
 
-  window.openTab = function(navId) {
-    postJSON('/api/workspace/tabs/open', {nav_id: navId}).then(function() {
-      window.location.href = '/' + navId;
+  function applyActiveClass() {
+    const cur = currentNavId();
+    STRIP().querySelectorAll('.nav-tab').forEach(a => {
+      if (a.dataset.navId === cur) a.classList.add('active');
+      else a.classList.remove('active');
     });
-  };
+  }
 
-  window.toggleTabFromMenu = function(navId) {
-    var item = document.querySelector('.nav-tools-item[data-nav-id="' + navId + '"]');
-    var isOpen = item && item.dataset.open === '1';
-    if (isOpen) {
-      // Toggle off — remove tab. If user is currently on it, navigate away first.
-      window.closeTab(navId);
+  function renderStrip() {
+    const strip = STRIP();
+    if (!strip) return;
+    strip.textContent = '';
+    TABS.forEach(id => {
+      const page = pageById[id];
+      if (page) strip.appendChild(buildTabAnchor(page, {ephemeral: false}));
+    });
+    // Ephemeral tab: only if currently on an unpinned page
+    const cur = currentNavId();
+    if (cur && !TABS.includes(cur) && pageById[cur]) {
+      ephemeralId = cur;
+      strip.appendChild(buildTabAnchor(pageById[cur], {ephemeral: true}));
     } else {
-      window.openTab(navId);
+      ephemeralId = null;
     }
-  };
+    applyActiveClass();
+    recomputeOverflow();
+    // Re-apply hotkey hints (underline + (key) suffix) — tabs are
+    // built async, so the initial DOM-ready call doesn't see them.
+    if (typeof window._applyNavHotkeyHints === 'function') {
+      window._applyNavHotkeyHints();
+    }
+  }
 
-  window.toggleToolsMenu = function(ev) {
-    if (ev) ev.stopPropagation();
-    var menu = document.getElementById('navToolsMenu');
+  function recomputeOverflow() {
+    const strip = STRIP();
+    const overBtn = OVERBTN();
+    if (!strip || !overBtn) return;
+    // Reset: show all tabs
+    const tabs = Array.from(strip.querySelectorAll('.nav-tab'));
+    tabs.forEach(t => { t.style.display = ''; });
+    overBtn.hidden = true;
+    // Detect overflow against parent (the navbar). The strip is a flex
+    // child with min-width:0 + overflow:hidden — its scrollWidth >
+    // clientWidth means tabs are clipped.
+    if (strip.scrollWidth <= strip.clientWidth) return;
+    // Hide tabs from the right end until the strip fits, but never hide
+    // the active tab or the ephemeral tab.
+    overBtn.hidden = false;
+    const cur = currentNavId();
+    const protectedIds = new Set([cur, ephemeralId].filter(Boolean));
+    // Walk right-to-left, hiding pinned tabs that aren't protected.
+    for (let i = tabs.length - 1; i >= 0; i--) {
+      if (strip.scrollWidth <= strip.clientWidth) break;
+      const t = tabs[i];
+      if (protectedIds.has(t.dataset.navId)) continue;
+      t.style.display = 'none';
+    }
+    rebuildOverflowMenu(tabs);
+  }
+
+  function rebuildOverflowMenu(tabs) {
+    const menu = OVERMENU();
     if (!menu) return;
+    menu.textContent = '';
+    tabs.forEach(t => {
+      if (t.style.display !== 'none') return;
+      const page = pageById[t.dataset.navId];
+      if (!page) return;
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'nav-overflow-item';
+      item.dataset.navId = page.id;
+      item.appendChild(document.createTextNode(page.label));
+      item.addEventListener('click', () => {
+        window.location.href = page.href;
+      });
+      menu.appendChild(item);
+    });
+  }
+
+  window.toggleOverflowMenu = function(ev) {
+    if (ev) ev.stopPropagation();
+    const menu = OVERMENU();
+    const btn = OVERBTN();
+    if (!menu || !btn) return;
     if (menu.hasAttribute('hidden')) {
       menu.removeAttribute('hidden');
-      // Position it under the button
-      var btn = document.querySelector('.nav-tools-btn');
-      var rect = btn.getBoundingClientRect();
-      menu.style.left = rect.left + 'px';
-      // Close on outside click
-      setTimeout(function() {
-        document.addEventListener('click', closeMenuOnOutside, {once: true});
+      const r = btn.getBoundingClientRect();
+      menu.style.left = r.left + 'px';
+      setTimeout(() => {
+        document.addEventListener('click', closeOverflowMenuOnOutside, {once: true});
       }, 0);
     } else {
       menu.setAttribute('hidden', '');
     }
   };
 
-  function closeMenuOnOutside(e) {
-    var menu = document.getElementById('navToolsMenu');
+  function closeOverflowMenuOnOutside(e) {
+    const menu = OVERMENU();
     if (!menu) return;
-    if (e.target.closest('.nav-tools-menu, .nav-tools-btn')) {
-      // re-arm the listener
-      document.addEventListener('click', closeMenuOnOutside, {once: true});
+    if (e.target.closest('.nav-overflow-menu, .nav-overflow-btn')) {
+      document.addEventListener('click', closeOverflowMenuOnOutside, {once: true});
       return;
     }
     menu.setAttribute('hidden', '');
   }
 
-  // Initial population from server state
+  function adjacentTabId(navId) {
+    const idx = TABS.indexOf(navId);
+    if (idx === -1) return null;
+    if (idx + 1 < TABS.length) return TABS[idx + 1];
+    if (idx - 1 >= 0) return TABS[idx - 1];
+    return null;
+  }
+
+  function unpinTab(navId) {
+    const isOnTab = currentNavId() === navId;
+    const nextId = isOnTab ? adjacentTabId(navId) : null;
+    postJSON('/api/workspace/tabs/unpin', {nav_id: navId}).then(() => {
+      if (isOnTab) {
+        window.location.href = nextId ? pageById[nextId].href : '/browse';
+      } else {
+        return fetchAndRender();
+      }
+    });
+  }
+
+  function clearEphemeral() {
+    // Closing ephemeral === navigate away from the unpinned page.
+    // Ephemeral renders at the right end of the strip, so its visually
+    // adjacent neighbor is the rightmost *visible* pinned tab. Under
+    // overflow, recomputeOverflow() hides rightmost pinned tabs first,
+    // so TABS[length-1] may be hidden; walk right-to-left to find the
+    // first one that's actually rendered.
+    const strip = STRIP();
+    let adjId = null;
+    if (strip) {
+      for (let i = TABS.length - 1; i >= 0; i--) {
+        const id = TABS[i];
+        const t = strip.querySelector(
+          '.nav-tab[data-nav-id="' + id + '"]:not(.is-ephemeral)'
+        );
+        if (t && t.style.display !== 'none') { adjId = id; break; }
+      }
+    }
+    if (!adjId && TABS.length) adjId = TABS[TABS.length - 1];
+    const next = adjId ? pageById[adjId] : null;
+    window.location.href = next ? next.href : '/browse';
+  }
+
+  window.pinTab = function(navId) {
+    return postJSON('/api/workspace/tabs/pin', {nav_id: navId})
+      .then(() => fetchAndRender());
+  };
+
+  function fetchAndRender() {
+    return fetch('/api/workspace/tabs')
+      .then(r => r.json())
+      .then(state => {
+        TABS = (state && state.tabs) || [];
+        ALL_PAGES = (state && state.all_pages) || [];
+        pageById = {};
+        ALL_PAGES.forEach(p => { pageById[p.id] = p; });
+        renderStrip();
+        return state;
+      })
+      .catch(err => {
+        // Preserve previously-seeded state (server-rendered defaults on
+        // first load, or the last successful fetch afterward) so the
+        // strip still renders. Without this, a transient failure makes
+        // the navbar disappear and breaks cmd+1..9 / Ctrl+Tab.
+        console.warn('[nav] /api/workspace/tabs failed; keeping current state', err);
+        renderStrip();
+      });
+  }
+
+  // Re-recompute overflow on viewport resize *and* when individual tabs
+  // change width (e.g. the Jobs tab's badge updates as background jobs
+  // start/finish — without observing the tabs themselves, those content
+  // changes never trigger a resize event and overflowing tabs stay
+  // clipped instead of moving into the `…` menu).
+  let tabsRO = null;
+  if (window.ResizeObserver) {
+    const navbarRO = new ResizeObserver(() => recomputeOverflow());
+    if (document.querySelector('.navbar')) navbarRO.observe(document.querySelector('.navbar'));
+    tabsRO = new ResizeObserver(() => recomputeOverflow());
+    // Observe each rendered tab; renderStrip() replaces tab nodes, so
+    // re-attach the observer on the MutationObserver below.
+    function observeTabs() {
+      tabsRO.disconnect();
+      const strip = STRIP();
+      if (!strip) return;
+      strip.querySelectorAll('.nav-tab').forEach(t => tabsRO.observe(t));
+    }
+    const stripEl = STRIP();
+    if (stripEl) {
+      observeTabs();
+      new MutationObserver(observeTabs).observe(stripEl, {childList: true});
+    }
+  } else {
+    window.addEventListener('resize', recomputeOverflow);
+  }
+
+  // Expose for the palette + drag-reorder code in the next scripts
+  window._navTabs = {
+    fetchAndRender,
+    getTabs: () => TABS.slice(),
+    getAllPages: () => ALL_PAGES.slice(),
+    setTabs: (newOrder) => {
+      return postJSON('/api/workspace/tabs/reorder', {tabs: newOrder})
+        .then(() => fetchAndRender());
+    },
+  };
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', fetchAndRender);
   } else {
@@ -1773,146 +2045,89 @@ function sendReport() {
 </script>
 
 <script>
-/* ---------- Nav reorder + Active page highlighting ---------- */
+/* ---------- Drag-reorder over the unified strip ---------- */
 (function() {
-  // Reorder nav links from workspace config
-  function reorderNavLinks(order) {
-    var navbar = document.querySelector('.navbar');
-    var divider = navbar.querySelector('.nav-tab-divider') || navbar.querySelector('.nav-spacer');
-    var links = {};
-    navbar.querySelectorAll('a[data-nav-id]:not([data-tab])').forEach(function(a) {
-      links[a.dataset.navId] = a;
-    });
-    order.forEach(function(id) {
-      if (links[id]) {
-        navbar.insertBefore(links[id], divider);
-        delete links[id];
-      }
-    });
-    Object.keys(links).forEach(function(id) {
-      navbar.insertBefore(links[id], divider);
-    });
+  function strip() { return document.getElementById('navTabStrip'); }
+  function tabAnchors() {
+    return Array.from(strip().querySelectorAll('.nav-tab:not(.is-ephemeral)'));
   }
 
-  fetch('/api/workspaces/active/config')
-    .then(function(r) { return r.json(); })
-    .then(function(cfg) {
-      if (cfg.nav_order && Array.isArray(cfg.nav_order)) {
-        reorderNavLinks(cfg.nav_order);
-      }
-    })
-    .catch(function() {}); // silently ignore — default order is fine
+  let draggedEl = null;
+  let indicator = null;
 
-  // Drag-and-drop reordering
-  (function initNavDragDrop() {
-    var navbar = document.querySelector('.navbar');
-    var draggedEl = null;
-    var indicator = null;
+  function createIndicator() {
+    const el = document.createElement('span');
+    el.className = 'nav-drop-indicator';
+    return el;
+  }
+  function removeIndicator() {
+    if (indicator && indicator.parentNode) indicator.parentNode.removeChild(indicator);
+    indicator = null;
+  }
 
-    function getNavLinks() {
-      // Linger pages only — exclude openable tabs (which are governed by open_tabs).
-      return Array.from(navbar.querySelectorAll('a[data-nav-id]:not([data-tab])'));
-    }
-
-    function createIndicator() {
-      var el = document.createElement('span');
-      el.className = 'nav-drop-indicator';
-      return el;
-    }
-
-    function removeIndicator() {
-      if (indicator && indicator.parentNode) {
-        indicator.parentNode.removeChild(indicator);
-      }
-      indicator = null;
-    }
-
-    function saveOrder() {
-      var order = getNavLinks().map(function(a) { return a.dataset.navId; });
-      fetch('/api/workspaces/active/nav-order', {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({nav_order: order})
-      });
-    }
-
-    getNavLinks().forEach(function(link) {
+  function bindDragHandlers() {
+    tabAnchors().forEach(link => {
+      // Idempotent: ensure draggable=true (re-render replaces nodes).
       link.draggable = true;
-
+      if (link.dataset.dragBound) return;
+      link.dataset.dragBound = '1';
       link.addEventListener('dragstart', function(e) {
         draggedEl = this;
         this.classList.add('dragging');
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', this.dataset.navId);
       });
-
       link.addEventListener('dragend', function() {
         this.classList.remove('dragging');
         removeIndicator();
         draggedEl = null;
       });
-
       link.addEventListener('dragover', function(e) {
         if (!draggedEl || draggedEl === this) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         removeIndicator();
-        var rect = this.getBoundingClientRect();
-        var midX = rect.left + rect.width / 2;
+        const rect = this.getBoundingClientRect();
+        const midX = rect.left + rect.width / 2;
         indicator = createIndicator();
-        if (e.clientX < midX) {
-          navbar.insertBefore(indicator, this);
-        } else {
-          navbar.insertBefore(indicator, this.nextSibling);
-        }
+        if (e.clientX < midX) strip().insertBefore(indicator, this);
+        else strip().insertBefore(indicator, this.nextSibling);
       });
-
       link.addEventListener('drop', function(e) {
         if (!draggedEl || draggedEl === this) return;
         e.preventDefault();
-        var rect = this.getBoundingClientRect();
-        var midX = rect.left + rect.width / 2;
-        if (e.clientX < midX) {
-          navbar.insertBefore(draggedEl, this);
-        } else {
-          navbar.insertBefore(draggedEl, this.nextSibling);
-        }
+        const rect = this.getBoundingClientRect();
+        const midX = rect.left + rect.width / 2;
+        if (e.clientX < midX) strip().insertBefore(draggedEl, this);
+        else strip().insertBefore(draggedEl, this.nextSibling);
         removeIndicator();
-        saveOrder();
+        const newOrder = tabAnchors().map(a => a.dataset.navId);
+        if (window._navTabs) window._navTabs.setTabs(newOrder);
       });
     });
-
-    // Remove indicator when dragging leaves the navbar
-    navbar.addEventListener('dragleave', function(e) {
-      if (!navbar.contains(e.relatedTarget)) {
-        removeIndicator();
-      }
-    });
-  })();
-
-  // Active page highlighting
-  var path = location.pathname;
-  var navLinks = document.querySelectorAll('.navbar > a[href]:not(.brand)');
-  var exactMatch = null;
-  for (var i = 0; i < navLinks.length; i++) {
-    if (path === navLinks[i].getAttribute('href')) {
-      exactMatch = navLinks[i];
-      break;
-    }
   }
-  if (exactMatch) {
-    exactMatch.classList.add('active');
+
+  // Re-bind every time the strip re-renders. We do that by hooking into
+  // _navTabs.fetchAndRender via a small wrapper — but simpler: a
+  // MutationObserver on the strip.
+  function init() {
+    const s = strip();
+    if (!s) return;
+    // Strip-level dragleave is bound exactly once; re-running
+    // bindDragHandlers() on every MutationObserver tick would otherwise
+    // accumulate duplicate listeners.
+    s.addEventListener('dragleave', function(e) {
+      if (!s.contains(e.relatedTarget)) removeIndicator();
+    });
+    bindDragHandlers();
+    const mo = new MutationObserver(() => bindDragHandlers());
+    mo.observe(s, {childList: true});
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
   } else {
-    var best = null;
-    var bestLen = 0;
-    for (var i = 0; i < navLinks.length; i++) {
-      var href = navLinks[i].getAttribute('href');
-      if (href !== '/' && path.startsWith(href) && href.length > bestLen) {
-        best = navLinks[i];
-        bestLen = href.length;
-      }
-    }
-    if (best) best.classList.add('active');
+    init();
   }
 })();
 
@@ -1938,8 +2153,28 @@ function sendReport() {
   var hrefToAction = {};
   for (var action in NAV_ROUTES) hrefToAction[NAV_ROUTES[action]] = action;
 
+  // Replace the leading label text node of a dynamic .nav-tab anchor
+  // with a label fragment, preserving sibling elements (badge, close
+  // button, etc.). Returns true if a label node was found+replaced.
+  function replaceTabLabel(link, fragment) {
+    // Remove any existing .hk / .hk-suffix from a previous run
+    var hk = link.querySelector('.hk');
+    if (hk && hk.parentNode === link) hk.remove();
+    var hkSuf = link.querySelector('.hk-suffix');
+    if (hkSuf && hkSuf.parentNode === link) hkSuf.remove();
+    // Find the leading text node and replace it.
+    for (var i = 0; i < link.childNodes.length; i++) {
+      var n = link.childNodes[i];
+      if (n.nodeType === 3 /* Node.TEXT_NODE */ && n.textContent.trim().length > 0) {
+        link.replaceChild(fragment, n);
+        return true;
+      }
+    }
+    return false;
+  }
+
   function applyHotkeyHints(navShortcuts) {
-    var navLinks = document.querySelectorAll('.navbar > a[href]:not(.brand):not(.nav-icon):not([data-tab])');
+    var navLinks = document.querySelectorAll('.navbar a[href]:not(.brand):not(.nav-icon):not([data-tab])');
     for (var i = 0; i < navLinks.length; i++) {
       var link = navLinks[i];
       var href = link.getAttribute('href');
@@ -1948,22 +2183,62 @@ function sendReport() {
       var keyStr = navShortcuts[action];
       if (!keyStr) continue;
 
-      var label = link.textContent.trim();
+      var isDynamicTab = link.classList.contains('nav-tab');
+      var label;
+      if (isDynamicTab) {
+        // Dynamic tabs have label as a leading text node; siblings are
+        // badge / close-button spans we must preserve.
+        var labelNode = null;
+        for (var j = 0; j < link.childNodes.length; j++) {
+          var cn = link.childNodes[j];
+          if (cn.nodeType === 3 && cn.textContent.trim().length > 0) {
+            labelNode = cn; break;
+          }
+        }
+        label = labelNode ? labelNode.textContent.trim() : link.textContent.trim();
+      } else {
+        label = link.textContent.trim();
+      }
+
       var sc = parseShortcut(keyStr);
       // Only do inline highlight for single bare keys (no modifiers)
       if (!sc.ctrl && !sc.meta && !sc.shift && !sc.alt && sc.key.length === 1) {
         var idx = label.toLowerCase().indexOf(sc.key.toLowerCase());
         if (idx !== -1) {
-          // Inline highlight: wrap first occurrence of the letter
-          link.innerHTML = escapeHtml(label.substring(0, idx)) +
-            '<span class="hk">' + escapeHtml(label.charAt(idx)) + '</span>' +
-            escapeHtml(label.substring(idx + 1));
+          if (isDynamicTab) {
+            // Build a DocumentFragment so we don't clobber siblings
+            var frag = document.createDocumentFragment();
+            if (idx > 0) frag.appendChild(document.createTextNode(label.substring(0, idx)));
+            var hkSpan = document.createElement('span');
+            hkSpan.className = 'hk';
+            hkSpan.textContent = label.charAt(idx);
+            frag.appendChild(hkSpan);
+            if (idx + 1 < label.length) {
+              frag.appendChild(document.createTextNode(label.substring(idx + 1)));
+            }
+            replaceTabLabel(link, frag);
+          } else {
+            // Legacy linger anchors: safe to replace innerHTML.
+            link.innerHTML = escapeHtml(label.substring(0, idx)) +
+              '<span class="hk">' + escapeHtml(label.charAt(idx)) + '</span>' +
+              escapeHtml(label.substring(idx + 1));
+          }
           continue;
         }
       }
       // Suffix: append (key) after label
-      link.innerHTML = escapeHtml(label) + ' <span class="hk-suffix">(' +
-        escapeHtml(formatShortcut(keyStr)) + ')</span>';
+      if (isDynamicTab) {
+        var frag2 = document.createDocumentFragment();
+        frag2.appendChild(document.createTextNode(label + ' '));
+        var sufSpan = document.createElement('span');
+        sufSpan.className = 'hk-suffix';
+        sufSpan.textContent = '(' + formatShortcut(keyStr) + ')';
+        frag2.appendChild(sufSpan);
+        replaceTabLabel(link, frag2);
+      } else {
+        link.innerHTML = escapeHtml(label) + ' <span class="hk-suffix">(' +
+          escapeHtml(formatShortcut(keyStr)) + ')</span>';
+      }
     }
   }
 
@@ -2039,6 +2314,9 @@ function sendReport() {
       if (!window._vireoShortcuts) window._vireoShortcuts = shortcuts;
       window._vireoShortcuts.navigation = navShortcuts;
 
+      // Expose so renderStrip() (in another IIFE) can re-apply hints
+      // after dynamic tab anchors are inserted.
+      window._applyNavHotkeyHints = function() { applyHotkeyHints(navShortcuts); };
       applyHotkeyHints(navShortcuts);
       setupNavKeydown(navShortcuts);
     })
@@ -3174,7 +3452,7 @@ document.addEventListener('keydown', function(e) {
   if (e.key !== 'Tab' || !e.ctrlKey || e.altKey || e.metaKey) return;
   e.preventDefault();
   var navLinks = Array.prototype.slice.call(
-    document.querySelectorAll('.navbar > a[href]:not(.brand):not(.nav-icon)')
+    document.querySelectorAll('#navTabStrip .nav-tab[href]')
   );
   if (!navLinks.length) return;
   var activeIdx = -1;
@@ -4254,7 +4532,7 @@ function formatDuration(seconds) {
     // Badge counts only current workspace
     document.getElementById('jobsBadge').textContent = thisWs.length;
     var navBadge = document.getElementById('navJobBadge');
-    navBadge.textContent = thisWs.length > 0 ? ' (' + thisWs.length + ')' : '';
+    if (navBadge) navBadge.textContent = thisWs.length > 0 ? ' (' + thisWs.length + ')' : '';
 
     if (allRunning.length === 0) {
       var lastDone = activeJobs.filter(function(j) { return j.status !== 'running'; })[0];
@@ -5007,4 +5285,144 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
   /* Updater disabled — startupUpdateCheck skipped until updater is configured */
 </script>
 <script src="/static/vendor/fuse.min.js"></script>
+<script>
+(function() {
+  // Seed from the same hardcoded globals the navbar strip uses so the
+  // palette is usable even when /api/workspace/tabs fails on initial
+  // load. refreshFromTabsState() replaces these with the workspace's
+  // actual state on success.
+  let allPages = (window.NAV_ALL_PAGES || []).slice();
+  let pinnedSet = new Set(window.NAV_DEFAULT_TABS || []);
+  let fuse = null;
+  let results = [];
+  let selectedIndex = 0;
+
+  function rebuildFuse() {
+    if (window.Fuse) {
+      fuse = new Fuse(allPages, {
+        keys: [
+          {name: 'label', weight: 0.7},
+          {name: 'id',    weight: 0.3},
+        ],
+        threshold: 0.4,
+        ignoreLocation: true,
+      });
+    }
+  }
+  rebuildFuse();
+
+  function refreshFromTabsState() {
+    return fetch('/api/workspace/tabs').then(r => r.json()).then(state => {
+      if (Array.isArray(state.all_pages) && state.all_pages.length) {
+        allPages = state.all_pages;
+      }
+      if (Array.isArray(state.tabs)) {
+        pinnedSet = new Set(state.tabs);
+      }
+      rebuildFuse();
+    });
+  }
+
+  function currentNavId() {
+    const p = window.location.pathname;
+    if (p.startsWith('/pipeline/review')) return 'pipeline_review';
+    if (p === '/' || p.startsWith('/browse')) return 'browse';
+    return (p.split('/')[1] || '').replace(/-/g, '_');
+  }
+
+  function defaultSorted() {
+    // Pinned in pinned-order (use _navTabs if available), then unpinned
+    // alphabetically by label.
+    const pinnedOrder = (window._navTabs ? window._navTabs.getTabs() : []);
+    const pinnedById = new Map(allPages.map(p => [p.id, p]));
+    const out = [];
+    pinnedOrder.forEach(id => {
+      if (pinnedById.has(id)) out.push(pinnedById.get(id));
+    });
+    const unpinned = allPages
+      .filter(p => !pinnedSet.has(p.id))
+      .sort((a, b) => a.label.localeCompare(b.label));
+    return out.concat(unpinned);
+  }
+
+  function render(query) {
+    const list = document.getElementById('cmdPaletteResults');
+    if (!list) return;
+    list.textContent = '';
+    if (!query) {
+      results = defaultSorted();
+    } else if (fuse) {
+      results = fuse.search(query).map(r => r.item);
+    } else {
+      const q = query.toLowerCase();
+      results = allPages.filter(p =>
+        p.label.toLowerCase().includes(q) || p.id.includes(q)
+      );
+    }
+    if (selectedIndex >= results.length) selectedIndex = 0;
+    const cur = currentNavId();
+    results.forEach((p, idx) => {
+      const row = document.createElement('div');
+      row.className = 'cmd-palette-result' + (idx === selectedIndex ? ' selected' : '');
+      if (p.id === cur) row.classList.add('is-current');
+      row.dataset.navId = p.id;
+      row.appendChild(document.createTextNode(p.label));
+      if (pinnedSet.has(p.id)) {
+        const pin = document.createElement('span');
+        pin.className = 'cmd-palette-result-pinned';
+        pin.textContent = '📌';
+        row.appendChild(pin);
+      }
+      row.addEventListener('click', () => navigateTo(p));
+      list.appendChild(row);
+    });
+  }
+
+  function navigateTo(page) {
+    window.closeCommandPalette();
+    window.location.href = page.href;
+  }
+
+  // Wire input handlers
+  document.addEventListener('DOMContentLoaded', () => {
+    const input = document.getElementById('cmdPaletteInput');
+    if (!input) return;
+    input.addEventListener('input', () => {
+      selectedIndex = 0;
+      render(input.value);
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (results.length === 0) return;
+        selectedIndex = (selectedIndex + 1) % results.length;
+        render(input.value);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (results.length === 0) return;
+        selectedIndex = (selectedIndex - 1 + results.length) % results.length;
+        render(input.value);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        const target = results[selectedIndex];
+        if (target) navigateTo(target);
+      }
+    });
+  });
+
+  // Re-fetch state when palette opens (in case tabs changed). If the
+  // refresh fails (network blip, JSON parse error), still open the
+  // palette with whatever state we already have — a stale-but-open
+  // palette beats a no-op shortcut.
+  const origOpen = window.openCommandPalette;
+  window.openCommandPalette = function() {
+    selectedIndex = 0;
+    const open = () => origOpen();
+    refreshFromTabsState().then(open, open);
+  };
+  window._cmdPaletteRender = render;
+
+  refreshFromTabsState();
+})();
+</script>
 <script src="/static/help.js"></script>
