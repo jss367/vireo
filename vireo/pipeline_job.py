@@ -45,6 +45,7 @@ class PipelineParams:
     skip_extract_masks: bool = False
     skip_regroup: bool = False
     skip_classify: bool = False
+    skip_eye_keypoints: bool = False
     download_taxonomy: bool = True
     preview_max_size: int = 1920
     exclude_paths: set | None = None
@@ -2609,7 +2610,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         or when no eligible photos remain. Per-photo failures are logged
         and do not abort the stage.
         """
-        if params.skip_extract_masks or abort.is_set() or not collection_id:
+        if (
+            params.skip_eye_keypoints
+            or params.skip_extract_masks
+            or abort.is_set()
+            or not collection_id
+        ):
             stages["eye_keypoints"]["status"] = "skipped"
             runner.update_step(
                 job["id"], "eye_keypoints", status="completed", summary="Skipped",
