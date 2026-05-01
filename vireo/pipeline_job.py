@@ -2668,9 +2668,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     pid for pid in collection_photo_ids
                     if pid not in params.exclude_photo_ids
                 }
-            total = len(thread_db.list_photos_for_eye_keypoint_stage(
+            photos_for_stage = thread_db.list_photos_for_eye_keypoint_stage(
                 photo_ids=collection_photo_ids,
-            ))
+            )
+            # Defensive second filter: when collection_photo_ids is None
+            # (whole-workspace path) the DB query above returned every
+            # eligible row, so excluded IDs would otherwise still influence
+            # the download planner below and trigger weights for variants no
+            # included photo routes to.
+            if params.exclude_photo_ids:
+                photos_for_stage = [
+                    p for p in photos_for_stage
+                    if p["id"] not in params.exclude_photo_ids
+                ]
+            total = len(photos_for_stage)
             start_time = time.time()
             processed = {"count": 0}
 
@@ -2688,6 +2699,90 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         current / max(time.time() - start_time, 0.01) * 60, 1
                     ),
                 )
+
+            # Auto-download SuperAnimal weights on first pipeline run.
+            # Mirrors the SAM2/DINOv2 auto-download pattern in extract_masks
+            # (commit 90cd0f9): without this, every photo silently skips on
+            # a fresh install. Only fetch variants the per-photo router
+            # would actually pick — a collection of out-of-scope classes
+            # (fish/reptiles/invertebrates) shouldn't pay the bandwidth
+            # cost for weights that will never be used.
+            if total > 0:
+                import keypoints as kp
+                from pipeline import _resolve_keypoint_model
+
+                # Mirror Gate 1 in _process_photo_for_eye: rows whose
+                # classifier confidence is below eye_classifier_conf_gate
+                # get skipped at run time, so they shouldn't influence
+                # which variants get downloaded — otherwise an all-low-
+                # confidence collection still pays the bandwidth cost
+                # for weights no photo can reach.
+                conf_gate = pipeline_cfg.get(
+                    "eye_classifier_conf_gate", 0.5,
+                )
+                needed_models = []
+                for row in photos_for_stage:
+                    if (row.get("species_conf") or 0.0) < conf_gate:
+                        continue
+                    model_name = _resolve_keypoint_model(thread_db, row)
+                    if model_name and model_name not in needed_models:
+                        needed_models.append(model_name)
+
+                # Use a separate download-progress callback so a cancel
+                # during/just after weight download doesn't leak the
+                # download counter into `processed['count']` (which would
+                # surface as e.g. "Cancelled (1 of N processed)" before any
+                # photo has actually been touched).
+                def _dl_progress(phase, current, total_steps):
+                    _emit_progress(
+                        runner, job["id"], stages, "eye_keypoints", phase,
+                    )
+
+                # Preserve a stable order (quadruped, bird) for tests and
+                # log readability when both variants are needed. Re-check
+                # abort between models so a cancel that arrives after the
+                # first weights download can short-circuit the second
+                # multi-hundred-MB fetch instead of forcing the user to
+                # wait through it.
+                #
+                # Eye Keypoints is an optional stage: a transient HF /
+                # network failure must degrade to a skipped stage, not a
+                # hard pipeline failure. Without this guard the RuntimeError
+                # raised by ensure_keypoint_weights bubbles to the outer
+                # except, marks the stage 'failed', and tanks the whole
+                # run for a first-run/offline user who never opted into
+                # eye keypoints in the first place.
+                try:
+                    for kp_model in (
+                        "superanimal-quadruped", "superanimal-bird",
+                    ):
+                        if _should_abort(abort):
+                            break
+                        if kp_model in needed_models:
+                            kp.ensure_keypoint_weights(
+                                kp_model, progress_callback=_dl_progress,
+                            )
+                except Exception as dl_err:
+                    log.warning(
+                        "Eye keypoints stage skipped — weight download "
+                        "failed: %s", dl_err,
+                    )
+                    errors.append(f"[eye_keypoints] {dl_err}")
+                    stages["eye_keypoints"]["status"] = "skipped"
+                    runner.update_step(
+                        job["id"], "eye_keypoints",
+                        status="completed",
+                        summary=(
+                            f"Skipped — failed to download keypoint "
+                            f"weights: {dl_err}"
+                        ),
+                    )
+                    result["stages"]["eye_keypoints"] = {
+                        "processed": 0, "total": total,
+                        "skipped": "weight_download_failed",
+                    }
+                    _update_stages(runner, job["id"], stages)
+                    return
 
             detect_eye_keypoints_stage(
                 thread_db, config=pipeline_cfg, progress_callback=_progress,
