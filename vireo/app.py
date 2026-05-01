@@ -4536,9 +4536,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_storage_masks():
         """Per-variant SAM mask summary (counts, bytes, active counts)
         plus stale-mask count for the storage dashboard."""
+        import config as cfg
+
         db = _get_db()
+        # Workspace-effective detector_confidence floor — the same
+        # threshold extraction applies when picking boxes to run SAM
+        # on. Plumbing it here keeps "stale" aligned with what the
+        # pipeline would actually regenerate: a mask whose prompt only
+        # matches a now-below-threshold detection won't be re-extracted,
+        # so the storage card must surface it as stale.
+        min_detector_conf = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
         variants = db.mask_variants_summary()
-        stale = db.find_stale_masks()
+        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
         masks_dir = os.path.join(os.path.dirname(db_path), "masks")
         return jsonify({
             "variants": variants,
@@ -4576,8 +4587,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_storage_masks_delete_stale():
         """Delete masks whose stored prompt no longer matches the current
         primary detection. Skips active variants."""
+        import config as cfg
+
         db = _get_db()
-        n = db.delete_stale_masks()
+        # Use the same workspace-effective detector_confidence floor the
+        # storage card shows, so the user deletes exactly what the count
+        # advertised.
+        min_detector_conf = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
+        n = db.delete_stale_masks(detector_confidence=min_detector_conf)
         log.info("Deleted %d stale masks", n)
         return jsonify({"ok": True, "deleted": n})
 

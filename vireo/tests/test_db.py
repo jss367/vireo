@@ -10096,6 +10096,137 @@ def test_find_stale_masks_preserves_real_precision_bbox(tmp_path):
     }
 
 
+def test_find_stale_masks_applies_detector_confidence_floor(tmp_path):
+    """The staleness check has to honor the workspace's
+    ``detector_confidence`` floor: detections below the floor are
+    invisible to extraction (it skips them), so a cached mask whose
+    prompt only matches a below-floor box must be marked stale even
+    though its coordinates technically still appear in ``detections``.
+    Otherwise raising the floor leaves stale masks active and reused.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    # Photo 1's only non-full-image detection is below the new floor.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.10, 0.20, 0.30, 0.40, 0.15, 'animal')"
+    )
+    db.upsert_photo_mask(
+        1, "sam2-small", "/p",
+        detector_model="megadetector-v6",
+        prompt_x=0.10, prompt_y=0.20, prompt_w=0.30, prompt_h=0.40,
+    )
+    # Photo 2 has a fresh, above-floor detection that matches its mask.
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (2, 1, 'b.jpg')"
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (2, 'megadetector-v6', 0.50, 0.50, 0.20, 0.20, 0.90, 'animal')"
+    )
+    db.upsert_photo_mask(
+        2, "sam2-small", "/q",
+        detector_model="megadetector-v6",
+        prompt_x=0.50, prompt_y=0.50, prompt_w=0.20, prompt_h=0.20,
+    )
+
+    # No floor: photo 1's mask matches its (low-confidence) detection,
+    # so neither mask is stale. Preserves prior behavior for callers
+    # that don't pass a threshold.
+    assert db.find_stale_masks() == []
+
+    # Floor at 0.5: photo 1's only detection (0.15) is invisible, so
+    # there's no primary detection for the mask to match against and
+    # the mask is stale. Photo 2's mask matches its 0.90 detection and
+    # stays fresh.
+    stale = db.find_stale_masks(detector_confidence=0.5)
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {
+        (1, "sam2-small")
+    }
+
+
+def test_find_stale_masks_floor_drops_below_threshold_match(tmp_path):
+    """A cached mask whose prompt only matches a below-floor detection
+    (and the photo has no above-floor detections at all) must be stale
+    once the floor is applied — extraction wouldn't run for that photo
+    so the mask can never be regenerated.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    # Two below-floor detections; the cached mask's prompt matches the
+    # higher-confidence one. Without a floor it'd be the "primary" and
+    # the mask would look fresh; with the floor it disappears.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.10, 0.10, 0.10, 0.10, 0.40, 'animal')"
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.20, 0.20, 0.10, 0.10, 0.30, 'animal')"
+    )
+    db.upsert_photo_mask(
+        1, "sam2-small", "/p",
+        detector_model="megadetector-v6",
+        prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
+    )
+    # Without floor: the 0.40 box is the primary, its prompt equals
+    # the cached one → fresh.
+    assert db.find_stale_masks() == []
+    # With floor 0.5: nothing visible, cached mask is stale.
+    stale = db.find_stale_masks(detector_confidence=0.5)
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {
+        (1, "sam2-small")
+    }
+
+
+def test_delete_stale_masks_honors_detector_confidence(tmp_path):
+    """``delete_stale_masks`` has to forward the threshold so the
+    deleted set matches the count surfaced on the storage card. If it
+    didn't, the user would press *Delete stale* and end up with a
+    non-zero leftover.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.10, 0.10, 0.10, 0.10, 0.20, 'animal')"
+    )
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    p = masks_dir / "1.sam2-small.png"
+    p.write_bytes(b"x")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(p),
+        detector_model="megadetector-v6",
+        prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
+    )
+    # Without a floor the (matching, low-confidence) detection keeps
+    # the mask fresh.
+    assert db.delete_stale_masks() == 0
+    assert p.exists()
+    # With a floor above the detection's confidence the mask becomes
+    # stale and gets removed.
+    assert db.delete_stale_masks(detector_confidence=0.5) == 1
+    assert not p.exists()
+
+
 def test_legacy_mask_backfill_is_resumable(tmp_path):
     """If startup crashes after backfilling some legacy mask rows but
     before completing, the next startup must finish the rest.  The

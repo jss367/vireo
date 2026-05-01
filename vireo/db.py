@@ -3763,7 +3763,7 @@ class Database:
         commit_with_retry(self.conn)
         return len(rows)
 
-    def find_stale_masks(self):
+    def find_stale_masks(self, detector_confidence=None):
         """Return photo_masks rows whose stored prompt no longer matches
         the photo's current primary detection (highest-confidence,
         non full-image).
@@ -3776,9 +3776,25 @@ class Database:
         leave stale cache entries lingering after detector/model
         changes, so we explicitly join the per-photo MAX confidence
         before comparing.
+
+        ``detector_confidence`` is an optional workspace floor (the same
+        threshold both extraction paths apply when picking detections to
+        run SAM on). When provided, detections below the floor are
+        invisible to this query, so masks whose prompt only matches a
+        below-threshold box — i.e. masks the pipeline would no longer
+        regenerate from that detection — are correctly flagged stale.
+        Without this filter, raising ``detector_confidence`` left the
+        storage card under-counting stale masks and ``delete_stale_masks``
+        leaving them on disk.
         """
+        if detector_confidence is None:
+            conf_pred = ""
+            params = ()
+        else:
+            conf_pred = " AND d{n}.detector_confidence >= ?"
+            params = (detector_confidence, detector_confidence)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT pm.photo_id, pm.variant, pm.path,
                    pm.detector_model, pm.prompt_x, pm.prompt_y,
                    pm.prompt_w, pm.prompt_h
@@ -3792,23 +3808,30 @@ class Database:
                    AND d.box_y = pm.prompt_y
                    AND d.box_w = pm.prompt_w
                    AND d.box_h = pm.prompt_h
+                   {conf_pred.format(n="")}
                    AND d.detector_confidence = (
                        SELECT MAX(d2.detector_confidence)
                          FROM detections d2
                         WHERE d2.photo_id = pm.photo_id
                           AND d2.detector_model != 'full-image'
+                          {conf_pred.format(n="2")}
                    )
              )
-            """
+            """,
+            params,
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def delete_stale_masks(self):
+    def delete_stale_masks(self, detector_confidence=None):
         """Remove rows + files for masks whose prompt no longer matches
         the current primary detection. Skips active variants (caller can
         re-run them through the pipeline instead of dropping the
-        currently-displayed mask)."""
-        stale = self.find_stale_masks()
+        currently-displayed mask).
+
+        ``detector_confidence`` is forwarded to :meth:`find_stale_masks`
+        so the deletion set matches the count the storage card shows.
+        """
+        stale = self.find_stale_masks(detector_confidence=detector_confidence)
         deleted = 0
         for s in stale:
             is_active = self.conn.execute(
