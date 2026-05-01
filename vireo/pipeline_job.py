@@ -2744,15 +2744,45 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # first weights download can short-circuit the second
                 # multi-hundred-MB fetch instead of forcing the user to
                 # wait through it.
-                for kp_model in (
-                    "superanimal-quadruped", "superanimal-bird",
-                ):
-                    if _should_abort(abort):
-                        break
-                    if kp_model in needed_models:
-                        kp.ensure_keypoint_weights(
-                            kp_model, progress_callback=_dl_progress,
-                        )
+                #
+                # Eye Keypoints is an optional stage: a transient HF /
+                # network failure must degrade to a skipped stage, not a
+                # hard pipeline failure. Without this guard the RuntimeError
+                # raised by ensure_keypoint_weights bubbles to the outer
+                # except, marks the stage 'failed', and tanks the whole
+                # run for a first-run/offline user who never opted into
+                # eye keypoints in the first place.
+                try:
+                    for kp_model in (
+                        "superanimal-quadruped", "superanimal-bird",
+                    ):
+                        if _should_abort(abort):
+                            break
+                        if kp_model in needed_models:
+                            kp.ensure_keypoint_weights(
+                                kp_model, progress_callback=_dl_progress,
+                            )
+                except Exception as dl_err:
+                    log.warning(
+                        "Eye keypoints stage skipped — weight download "
+                        "failed: %s", dl_err,
+                    )
+                    errors.append(f"[eye_keypoints] {dl_err}")
+                    stages["eye_keypoints"]["status"] = "skipped"
+                    runner.update_step(
+                        job["id"], "eye_keypoints",
+                        status="completed",
+                        summary=(
+                            f"Skipped — failed to download keypoint "
+                            f"weights: {dl_err}"
+                        ),
+                    )
+                    result["stages"]["eye_keypoints"] = {
+                        "processed": 0, "total": total,
+                        "skipped": "weight_download_failed",
+                    }
+                    _update_stages(runner, job["id"], stages)
+                    return
 
             detect_eye_keypoints_stage(
                 thread_db, config=pipeline_cfg, progress_callback=_progress,

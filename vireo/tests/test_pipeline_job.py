@@ -6950,6 +6950,117 @@ def test_pipeline_eye_keypoints_stage_aborts_between_keypoint_downloads(
     )
 
 
+def test_pipeline_eye_keypoints_stage_download_failure_skips_stage_not_pipeline(
+    tmp_path, monkeypatch,
+):
+    """A transient HuggingFace/network failure inside
+    ensure_keypoint_weights must degrade Eye Keypoints to a skipped stage
+    rather than failing the whole pipeline run. Without this, first-run /
+    offline users who never asked to opt out of eye keypoints get a hard
+    RuntimeError out of run_pipeline_job for an optional stage.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [
+            {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
+        ],
+    )
+
+    detect_called = [False]
+
+    def fake_detect_eye_keypoints_stage(*a, **k):
+        detect_called[0] = True
+
+    monkeypatch.setattr(
+        pipeline_mod, "detect_eye_keypoints_stage",
+        fake_detect_eye_keypoints_stage,
+    )
+
+    import keypoints as _kp_mod
+
+    def _ensure_raises(name, progress_callback=None):
+        raise RuntimeError(
+            f"Failed to download {name} weights: connection reset. "
+            "Check your network connection and retry."
+        )
+
+    monkeypatch.setattr(_kp_mod, "ensure_keypoint_weights", _ensure_raises)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    # Must NOT raise: an optional stage's download failure cannot tank
+    # the whole pipeline run.
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert detect_called[0] is False, (
+        "detect_eye_keypoints_stage must be skipped when weight download "
+        "fails; running it would crash on missing weights."
+    )
+
+    ek_finals = [
+        kw for (_, sid, kw) in runner.step_updates
+        if sid == "eye_keypoints" and "summary" in kw
+    ]
+    assert ek_finals, (
+        f"Expected eye_keypoints final update; got "
+        f"step_updates={runner.step_updates!r}"
+    )
+    final = ek_finals[-1]
+    assert final.get("status") == "completed", (
+        f"eye_keypoints must finalize as completed (skipped variant), not "
+        f"failed; got {final!r}"
+    )
+    summary = final.get("summary") or ""
+    assert "Skipped" in summary and "download" in summary.lower(), (
+        f"eye_keypoints summary must explain the download was skipped; "
+        f"got {summary!r}"
+    )
+
+    ek_result = result.get("stages", {}).get("eye_keypoints", {})
+    assert ek_result.get("skipped") == "weight_download_failed", (
+        f"result.stages.eye_keypoints must record the skip reason; "
+        f"got {ek_result!r}"
+    )
+
+
 def test_pipeline_eye_keypoints_stage_excluded_photos_do_not_influence_downloads(
     tmp_path, monkeypatch,
 ):
