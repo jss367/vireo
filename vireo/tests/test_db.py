@@ -9699,3 +9699,22 @@ def test_default_tabs_is_the_curated_nine():
         "review", "cull", "jobs",
         "highlights", "misses", "settings",
     ]
+
+
+def test_photos_has_eye_kp_fingerprint_column(tmp_path):
+    """photos.eye_kp_fingerprint must exist on a fresh DB."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("SELECT eye_kp_fingerprint FROM photos LIMIT 0")
+
+
+def test_photos_eye_kp_fingerprint_migrates_on_old_db(tmp_path):
+    """Opening a DB without the column adds it (idempotent migration)."""
+    from db import Database
+    p = str(tmp_path / "v.db")
+    db = Database(p)
+    db.conn.execute("ALTER TABLE photos DROP COLUMN eye_kp_fingerprint")
+    db.conn.commit()
+    db.close()
+    db2 = Database(p)
+    db2.conn.execute("SELECT eye_kp_fingerprint FROM photos LIMIT 0")

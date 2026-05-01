@@ -268,6 +268,7 @@ class Database:
                 eye_y                    REAL,
                 eye_conf                 REAL,
                 eye_tenengrad            REAL,
+                eye_kp_fingerprint       TEXT,
                 miss_no_subject          INTEGER,
                 miss_clipped             INTEGER,
                 miss_oof                 INTEGER,
@@ -639,6 +640,16 @@ class Database:
         except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE photos ADD COLUMN working_copy_failed_mtime REAL"
+            )
+        # Migration: add eye_kp_fingerprint column. Set to NULL for new
+        # photos; populated when the eye-keypoint stage runs. Phase 1 also
+        # backfills existing eye-keypoint rows to the current fingerprint
+        # in a separate migration step (see Task 2.1).
+        try:
+            self.conn.execute("SELECT eye_kp_fingerprint FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos ADD COLUMN eye_kp_fingerprint TEXT"
             )
         self.conn.commit()
 
