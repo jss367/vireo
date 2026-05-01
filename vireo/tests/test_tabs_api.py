@@ -46,6 +46,25 @@ def test_unpin_tab_endpoint_rejects_unknown_navid(app_and_db):
     assert r.status_code == 400
 
 
+def test_pin_tab_endpoint_rejects_non_string_navid(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    # Each of these would have raised TypeError on `nav_id not in ALL_NAV_IDS`
+    # (unhashable type for list/dict) and surfaced as a 500. They must come
+    # back as 400 instead.
+    for bad in [["browse"], {"id": "browse"}, None, 42]:
+        r = client.post("/api/workspace/tabs/pin", json={"nav_id": bad})
+        assert r.status_code == 400, f"expected 400 for {bad!r}, got {r.status_code}"
+
+
+def test_unpin_tab_endpoint_rejects_non_string_navid(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    for bad in [["settings"], {"id": "settings"}, None, 42]:
+        r = client.post("/api/workspace/tabs/unpin", json={"nav_id": bad})
+        assert r.status_code == 400, f"expected 400 for {bad!r}, got {r.status_code}"
+
+
 def test_reorder_tabs_endpoint_replaces_order(app_and_db):
     app, db = app_and_db
     client = app.test_client()

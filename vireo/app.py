@@ -3160,6 +3160,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         body = request.get_json(silent=True) or {}
         nav_id = body.get("nav_id")
+        if not isinstance(nav_id, str):
+            return json_error("nav_id must be a string", 400)
         if nav_id not in ALL_NAV_IDS:
             return json_error("nav_id is not a known page", 400)
         tabs = db.pin_tab(nav_id)
@@ -3171,6 +3173,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         body = request.get_json(silent=True) or {}
         nav_id = body.get("nav_id")
+        if not isinstance(nav_id, str):
+            return json_error("nav_id must be a string", 400)
         if nav_id not in ALL_NAV_IDS:
             return json_error("nav_id is not a known page", 400)
         tabs = db.unpin_tab(nav_id)
