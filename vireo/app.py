@@ -9112,9 +9112,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 "w": det["box_w"], "h": det["box_h"],
                             }),
                             "detection_conf": det["detector_confidence"],
+                            # Full-precision REAL prompt — see pipeline_job
+                            # for the rationale; int() would truncate the
+                            # normalized [0,1] bbox to (0,0,0,0) and break
+                            # cache invalidation on bbox change.
                             "prompt": (
-                                int(det["box_x"]), int(det["box_y"]),
-                                int(det["box_w"]), int(det["box_h"]),
+                                det["box_x"], det["box_y"],
+                                det["box_w"], det["box_h"],
                             ),
                         })
             else:
@@ -9156,8 +9160,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         }),
                         "detection_conf": r["detector_confidence"],
                         "prompt": (
-                            int(r["box_x"]), int(r["box_y"]),
-                            int(r["box_w"]), int(r["box_h"]),
+                            r["box_x"], r["box_y"],
+                            r["box_w"], r["box_h"],
                         ),
                     })
 

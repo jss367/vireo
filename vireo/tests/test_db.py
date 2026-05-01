@@ -10054,6 +10054,110 @@ def test_find_stale_masks_compares_against_primary_detection_only(tmp_path):
     }
 
 
+def test_find_stale_masks_preserves_real_precision_bbox(tmp_path):
+    """detections.box_* are normalized REAL values in [0, 1].  An older
+    revision int()-truncated those to populate prompt_*, which collapsed
+    every prompt to (0, 0, 0, 0) and meant the staleness query matched
+    any cached mask against any current detection.  A REAL prompt that
+    matches the current primary detection must be fresh; a REAL prompt
+    that doesn't match must be stale.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    # Normalized bbox (x, y, w, h) — typical detector output.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.123, 0.456, 0.300, 0.400, 0.9, 'animal')"
+    )
+    # Mask was made from the same REAL prompt → not stale.
+    db.upsert_photo_mask(
+        1, "sam2-small", "/p",
+        detector_model="megadetector-v6",
+        prompt_x=0.123, prompt_y=0.456, prompt_w=0.300, prompt_h=0.400,
+    )
+    assert db.find_stale_masks() == []
+
+    # Mask whose prompt matches what the prior int() truncation would
+    # have written. The actual detection has moved (any normalized
+    # value), so this mask must be stale.
+    db.upsert_photo_mask(
+        1, "sam2-large", "/q",
+        detector_model="megadetector-v6",
+        prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    stale = db.find_stale_masks()
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {
+        (1, "sam2-large")
+    }
+
+
+def test_legacy_mask_backfill_is_resumable(tmp_path):
+    """If startup crashes after backfilling some legacy mask rows but
+    before completing, the next startup must finish the rest.  The
+    earlier outer ``if total_unknown_rows == 0`` guard caused the
+    remaining photos to be skipped forever, leaving orphan mask_path
+    values that the variant-aware APIs and cleanup logic couldn't see.
+    """
+    from db import Database
+    db_path = str(tmp_path / "v.db")
+    db = Database(db_path)
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename, mask_path) "
+        "VALUES (1, 1, 'a.jpg', '/m/1.png')"
+    )
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename, mask_path) "
+        "VALUES (2, 1, 'b.jpg', '/m/2.png')"
+    )
+    db.conn.commit()
+    db.close()
+
+    # First open: everything backfills.
+    db = Database(db_path)
+    backfilled = {
+        r[0] for r in db.conn.execute(
+            "SELECT photo_id FROM photo_masks WHERE variant='unknown'"
+        )
+    }
+    assert backfilled == {1, 2}
+
+    # Simulate a partial crash: one of the unknown rows was inserted
+    # but the other never made it (rolled back, killed mid-loop, etc.).
+    db.conn.execute(
+        "DELETE FROM photo_masks WHERE photo_id=2 AND variant='unknown'"
+    )
+    db.conn.execute(
+        "UPDATE photos SET active_mask_variant=NULL WHERE id=2"
+    )
+    db.conn.commit()
+    db.close()
+
+    # Next startup must finish the missing photo, not stop just because
+    # *some* unknown rows already exist.
+    db = Database(db_path)
+    backfilled = {
+        r[0] for r in db.conn.execute(
+            "SELECT photo_id FROM photo_masks WHERE variant='unknown'"
+        )
+    }
+    assert backfilled == {1, 2}, (
+        "second startup must re-finish the legacy mask backfill for "
+        "photos missing photo_masks rows"
+    )
+    active = {
+        r[0]: r[1] for r in db.conn.execute(
+            "SELECT id, active_mask_variant FROM photos"
+        )
+    }
+    assert active == {1: "unknown", 2: "unknown"}
+
+
 def test_delete_stale_masks(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "v.db"))

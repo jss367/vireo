@@ -365,16 +365,24 @@ class Database:
             -- was declared INTEGER) still tolerate REAL values without an
             -- ALTER, so we don't bother emitting a migration for the column
             -- type — only fresh DBs see the corrected declaration.
+            -- prompt_* are declared REAL because detections.box_* are
+            -- normalized values in [0, 1] and any int truncation would
+            -- collapse every prompt to (0, 0, 0, 0). SQLite's column
+            -- type affinity already accepts REAL into INTEGER-declared
+            -- columns, so older DBs created with INTEGER continue to
+            -- store the new REAL prompts verbatim — no migration is
+            -- needed; legacy rows with prompt_x = 0 will simply be
+            -- detected as stale on the next pipeline run.
             CREATE TABLE IF NOT EXISTS photo_masks (
                 photo_id          INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
                 variant           TEXT    NOT NULL,
                 path              TEXT    NOT NULL,
                 created_at        INTEGER NOT NULL,
                 detector_model    TEXT    NOT NULL,
-                prompt_x          INTEGER NOT NULL,
-                prompt_y          INTEGER NOT NULL,
-                prompt_w          INTEGER NOT NULL,
-                prompt_h          INTEGER NOT NULL,
+                prompt_x          REAL    NOT NULL,
+                prompt_y          REAL    NOT NULL,
+                prompt_w          REAL    NOT NULL,
+                prompt_h          REAL    NOT NULL,
                 subject_size      REAL,
                 subject_tenengrad REAL,
                 bg_tenengrad      REAL,
@@ -671,24 +679,21 @@ class Database:
                 "ALTER TABLE photos ADD COLUMN active_mask_variant TEXT"
             )
 
-        # One-time backfill: pre-existing photos with mask_path set on the
-        # photos row but no row at all in photo_masks get migrated to
-        # variant='unknown' with a sentinel prompt. detector_model='unknown'
+        # Backfill pre-existing photos with mask_path set on the photos
+        # row but no row in photo_masks. They get migrated to
+        # variant='unknown' with a sentinel prompt; detector_model='unknown'
         # + prompt=-1 mean the staleness check will treat these masks as
         # stale on the next pipeline run, so they get regenerated against
-        # whatever SAM2 variant the user has configured. Idempotent on its
-        # own (skipped once any 'unknown' rows exist), and the per-photo
-        # NOT EXISTS guard means we don't shadow rows that the new code
-        # path already wrote (e.g. a photo that already has a sam2-small
-        # row from a recent pipeline run shouldn't also get an 'unknown'
-        # row appended).
+        # whatever SAM2 variant the user has configured.
+        #
+        # Resumable: gating only on the per-photo NOT EXISTS clause means
+        # a startup crash partway through (e.g. after inserting some
+        # 'unknown' rows but before completing) still finishes the rest
+        # of the legacy photos on the next startup. An earlier outer
+        # ``if total_unknown_rows == 0`` guard caused remaining photos
+        # to be skipped forever, leaving orphaned mask_path values that
+        # variant-aware APIs and cleanup logic couldn't see.
         try:
-            already = self.conn.execute(
-                "SELECT COUNT(*) FROM photo_masks WHERE variant='unknown'"
-            ).fetchone()[0]
-        except sqlite3.OperationalError:
-            already = -1
-        if already == 0:
             rows = self.conn.execute(
                 "SELECT p.id, p.mask_path, p.subject_size, "
                 "p.subject_tenengrad, p.bg_tenengrad, p.crop_complete "
@@ -698,23 +703,25 @@ class Database:
                 "    SELECT 1 FROM photo_masks pm WHERE pm.photo_id = p.id"
                 "  )"
             ).fetchall()
-            now = int(time.time())
-            for r in rows:
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO photo_masks "
-                    "(photo_id, variant, path, created_at, detector_model, "
-                    "prompt_x, prompt_y, prompt_w, prompt_h, "
-                    "subject_size, subject_tenengrad, bg_tenengrad, crop_complete) "
-                    "VALUES (?, 'unknown', ?, ?, 'unknown', -1, -1, -1, -1, ?, ?, ?, ?)",
-                    (r["id"], r["mask_path"], now,
-                     r["subject_size"], r["subject_tenengrad"],
-                     r["bg_tenengrad"], r["crop_complete"]),
-                )
-                self.conn.execute(
-                    "UPDATE photos SET active_mask_variant='unknown' "
-                    "WHERE id=? AND active_mask_variant IS NULL",
-                    (r["id"],),
-                )
+        except sqlite3.OperationalError:
+            rows = []
+        now = int(time.time())
+        for r in rows:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO photo_masks "
+                "(photo_id, variant, path, created_at, detector_model, "
+                "prompt_x, prompt_y, prompt_w, prompt_h, "
+                "subject_size, subject_tenengrad, bg_tenengrad, crop_complete) "
+                "VALUES (?, 'unknown', ?, ?, 'unknown', -1, -1, -1, -1, ?, ?, ?, ?)",
+                (r["id"], r["mask_path"], now,
+                 r["subject_size"], r["subject_tenengrad"],
+                 r["bg_tenengrad"], r["crop_complete"]),
+            )
+            self.conn.execute(
+                "UPDATE photos SET active_mask_variant='unknown' "
+                "WHERE id=? AND active_mask_variant IS NULL",
+                (r["id"],),
+            )
         self.conn.commit()
 
     # -- Workspaces --
@@ -3781,10 +3788,10 @@ class Database:
                  WHERE d.photo_id = pm.photo_id
                    AND d.detector_model = pm.detector_model
                    AND d.detector_model != 'full-image'
-                   AND CAST(d.box_x AS INTEGER) = pm.prompt_x
-                   AND CAST(d.box_y AS INTEGER) = pm.prompt_y
-                   AND CAST(d.box_w AS INTEGER) = pm.prompt_w
-                   AND CAST(d.box_h AS INTEGER) = pm.prompt_h
+                   AND d.box_x = pm.prompt_x
+                   AND d.box_y = pm.prompt_y
+                   AND d.box_w = pm.prompt_w
+                   AND d.box_h = pm.prompt_h
                    AND d.detector_confidence = (
                        SELECT MAX(d2.detector_confidence)
                          FROM detections d2

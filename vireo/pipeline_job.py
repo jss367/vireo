@@ -2392,13 +2392,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             "h": primary["box_h"],
                         },
                         "detector_model": primary["detector_model"],
-                        # Stored prompt provenance: int-cast bbox tuple
-                        # used by photo_masks (PK column type is INTEGER).
+                        # Stored prompt provenance: full-precision bbox
+                        # tuple. detections.box_* are normalized REAL
+                        # values in [0, 1], so int()-truncating would
+                        # collapse every prompt to (0, 0, 0, 0) and the
+                        # cache/staleness check would never invalidate
+                        # on bbox change. SQLite's column type affinity
+                        # accepts REAL into the INTEGER-declared
+                        # columns and stores them verbatim.
                         "prompt": (
-                            int(primary["box_x"]),
-                            int(primary["box_y"]),
-                            int(primary["box_w"]),
-                            int(primary["box_h"]),
+                            primary["box_x"],
+                            primary["box_y"],
+                            primary["box_w"],
+                            primary["box_h"],
                         ),
                     }
 
