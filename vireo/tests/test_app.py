@@ -1095,6 +1095,24 @@ def test_pipeline_page_init_includes_recent_destinations(app_and_db):
         assert data["recent_destinations"] == ["/photos/out1", "/photos/out2"]
 
 
+def test_pipeline_page_init_includes_stages_block(app_and_db):
+    """page-init returns the new `stages` dict with per-stage counts."""
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.get('/api/pipeline/page-init')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "stages" in data
+    stages = data["stages"]
+    for key in ["scan", "previews", "detect", "classify", "eye_kp", "group"]:
+        assert key in stages, f"missing stage {key}"
+    assert "extract" not in stages  # deferred to Phase 3
+    # backwards compat — old fields still present
+    assert "has_detections" in data
+    assert "has_masks" in data
+    assert "has_sharpness" in data
+
+
 def test_templates_jinja_free_except_includes():
     """All .html templates must be free of Jinja2 syntax except {% include '...' %}."""
     import os

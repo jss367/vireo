@@ -1201,6 +1201,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "has_detections": pipeline_counts["detections"],
             "has_masks": pipeline_counts["masks"],
             "has_sharpness": pipeline_counts["sharpness"],
+            "stages": db.pipeline_stage_counts(),
             "taxonomy_available": taxonomy_available,
             "pipeline_config": {
                 "sam2_variant": pipeline_cfg.get("sam2_variant", "sam2-small"),
