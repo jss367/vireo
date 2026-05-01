@@ -3603,14 +3603,6 @@ class Database:
         )
         commit_with_retry(self.conn)
 
-    def update_photo_mask(self, photo_id, mask_path):
-        """Store the mask file path for a photo."""
-        self.conn.execute(
-            "UPDATE photos SET mask_path=? WHERE id=?",
-            (mask_path, photo_id),
-        )
-        commit_with_retry(self.conn)
-
     def get_photo_mask(self, photo_id, variant):
         row = self.conn.execute(
             "SELECT * FROM photo_masks WHERE photo_id=? AND variant=?",

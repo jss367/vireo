@@ -33,22 +33,6 @@ def test_pipeline_columns_exist(tmp_path):
     assert row is None  # empty table
 
 
-def test_update_photo_mask(tmp_path):
-    """update_photo_mask stores the mask path for a photo."""
-    from db import Database
-
-    db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="root")
-    pid = db.add_photo(fid, "bird.jpg", ".jpg", 100, 1.0)
-
-    db.update_photo_mask(pid, "/masks/1.png")
-
-    row = db.conn.execute(
-        "SELECT mask_path FROM photos WHERE id=?", (pid,)
-    ).fetchone()
-    assert row[0] == "/masks/1.png"
-
-
 # -- update_photo_pipeline_features --
 
 
@@ -102,7 +86,7 @@ def test_get_photos_missing_masks(tmp_path):
     db.save_detections(pid3, [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3}, "confidence": 0.8},
     ], detector_model="megadetector")
-    db.update_photo_mask(pid3, "/masks/3.png")
+    db.update_photo_pipeline_features(pid3, mask_path="/masks/3.png")
 
     photos = db.get_photos_missing_masks()
     assert len(photos) == 1

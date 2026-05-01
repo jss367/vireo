@@ -54,7 +54,6 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
             emb = emb_base + np.random.RandomState(pid).randn(768).astype(np.float32) * 0.01
             emb = emb / np.linalg.norm(emb)
 
-            db.update_photo_mask(pid, f"/masks/{pid}.png")
             db.update_photo_pipeline_features(
                 pid,
                 mask_path=f"/masks/{pid}.png",
