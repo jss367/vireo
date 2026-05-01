@@ -3611,6 +3611,40 @@ class Database:
         )
         commit_with_retry(self.conn)
 
+    def upsert_photo_mask(
+        self, photo_id, variant, path,
+        detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
+        subject_size=None, subject_tenengrad=None,
+        bg_tenengrad=None, crop_complete=None,
+    ):
+        """Insert or replace a mask row for (photo_id, variant)."""
+        self.conn.execute(
+            """
+            INSERT INTO photo_masks (
+                photo_id, variant, path, created_at,
+                detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
+                subject_size, subject_tenengrad, bg_tenengrad, crop_complete
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(photo_id, variant) DO UPDATE SET
+                path=excluded.path,
+                created_at=excluded.created_at,
+                detector_model=excluded.detector_model,
+                prompt_x=excluded.prompt_x,
+                prompt_y=excluded.prompt_y,
+                prompt_w=excluded.prompt_w,
+                prompt_h=excluded.prompt_h,
+                subject_size=excluded.subject_size,
+                subject_tenengrad=excluded.subject_tenengrad,
+                bg_tenengrad=excluded.bg_tenengrad,
+                crop_complete=excluded.crop_complete
+            """,
+            (photo_id, variant, path, int(time.time()),
+             detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
+             subject_size, subject_tenengrad, bg_tenengrad, crop_complete),
+        )
+        commit_with_retry(self.conn)
+
     def update_photo_pipeline_features(
         self,
         photo_id,

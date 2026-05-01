@@ -9743,3 +9743,44 @@ def test_photos_has_active_mask_variant_column(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "v.db"))
     db.conn.execute("SELECT active_mask_variant FROM photos LIMIT 0")
+
+
+def test_upsert_photo_mask_inserts_and_replaces(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-small", path="/m/1.sam2-small.png",
+        detector_model="megadetector-v6",
+        prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
+        subject_size=20000, subject_tenengrad=1.5,
+        bg_tenengrad=0.3, crop_complete=1.0,
+    )
+    row = db.conn.execute(
+        "SELECT path, prompt_x FROM photo_masks WHERE photo_id=1 AND variant='sam2-small'"
+    ).fetchone()
+    assert row["path"] == "/m/1.sam2-small.png"
+    assert row["prompt_x"] == 10
+
+    # Re-upsert with new prompt — row replaced
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-small", path="/m/1.sam2-small.png",
+        detector_model="megadetector-v6",
+        prompt_x=11, prompt_y=20, prompt_w=100, prompt_h=200,
+        subject_size=21000, subject_tenengrad=1.5,
+        bg_tenengrad=0.3, crop_complete=1.0,
+    )
+    row = db.conn.execute(
+        "SELECT prompt_x, subject_size FROM photo_masks WHERE photo_id=1 AND variant='sam2-small'"
+    ).fetchone()
+    assert row["prompt_x"] == 11
+    assert row["subject_size"] == 21000
+    # Still exactly one row for this (photo, variant)
+    n = db.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks WHERE photo_id=1 AND variant='sam2-small'"
+    ).fetchone()[0]
+    assert n == 1
