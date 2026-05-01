@@ -9008,6 +9008,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
+            import numpy as np
             from dino_embed import embed, embed_batch, embedding_to_blob
             from masking import (
                 crop_completeness,
@@ -9024,33 +9025,82 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             masks_dir = os.path.join(os.path.dirname(db_path), "masks")
             os.makedirs(masks_dir, exist_ok=True)
 
-            # Get photos that have detections but no masks
+            # Get photos that have a real (non full-image) detection. The
+            # legacy `mask_path IS NULL` gate would silently skip every
+            # photo whose stored mask was made by a *different* SAM
+            # variant — leaving photo_masks empty for the configured
+            # variant. The per-photo cache check inside the loop below
+            # against photo_masks(photo_id, sam2_variant) handles
+            # "already cached for this variant" correctly.
             if collection_id:
                 coll_photos = thread_db.get_collection_photos(
                     collection_id, per_page=999999
                 )
-                # Filter to photos with detections but no masks. Detection
-                # threshold is resolved at read time from the workspace's
-                # effective config (detections table is global now).
                 photos = []
                 for p in coll_photos:
-                    if p["mask_path"]:
-                        continue
-                    dets = thread_db.get_detections(p["id"])
+                    dets = [
+                        d for d in thread_db.get_detections(p["id"])
+                        if d["detector_model"] != "full-image"
+                    ]
                     if dets:
                         det = dets[0]
                         photos.append({
                             "id": p["id"],
                             "folder_id": p["folder_id"],
                             "filename": p["filename"],
+                            "detector_model": det["detector_model"],
                             "detection_box": json.dumps({
                                 "x": det["box_x"], "y": det["box_y"],
                                 "w": det["box_w"], "h": det["box_h"],
                             }),
                             "detection_conf": det["detector_confidence"],
+                            "prompt": (
+                                int(det["box_x"]), int(det["box_y"]),
+                                int(det["box_w"]), int(det["box_h"]),
+                            ),
                         })
             else:
-                photos = thread_db.get_photos_missing_masks()
+                # All workspace photos with at least one real
+                # (non full-image) detection. Direct SQL keeps this
+                # one round-trip to SQLite per workspace; the per-photo
+                # cache check inside the loop handles "skip when
+                # already masked for this variant".
+                ws_id = thread_db._active_workspace_id
+                rows = thread_db.conn.execute(
+                    """SELECT p.id, p.folder_id, p.filename,
+                              d.detector_model,
+                              d.box_x, d.box_y, d.box_w, d.box_h,
+                              d.detector_confidence
+                         FROM photos p
+                         JOIN workspace_folders wf
+                              ON wf.folder_id = p.folder_id
+                         JOIN detections d ON d.photo_id = p.id
+                        WHERE wf.workspace_id = ?
+                          AND d.detector_model != 'full-image'
+                        ORDER BY p.id, d.detector_confidence DESC""",
+                    (ws_id,),
+                ).fetchall()
+                seen = set()
+                photos = []
+                for r in rows:
+                    if r["id"] in seen:
+                        continue
+                    seen.add(r["id"])
+                    photos.append({
+                        "id": r["id"],
+                        "folder_id": r["folder_id"],
+                        "filename": r["filename"],
+                        "detector_model": r["detector_model"],
+                        "detection_box": json.dumps({
+                            "x": r["box_x"], "y": r["box_y"],
+                            "w": r["box_w"], "h": r["box_h"],
+                        }),
+                        "detection_conf": r["detector_confidence"],
+                        "prompt": (
+                            int(r["box_x"]), int(r["box_y"]),
+                            int(r["box_w"]), int(r["box_h"]),
+                        ),
+                    })
 
             folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
             total = len(photos)
@@ -9065,6 +9115,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 image_path = os.path.join(folder_path, photo["filename"])
 
                 try:
+                    # Cache hit: photo_masks already has a row for
+                    # (photo, configured variant) AND its stored prompt
+                    # + detector still match the current primary
+                    # detection AND the file is on disk. Skip SAM and
+                    # just (re-)activate the cached mask.
+                    existing = thread_db.get_photo_mask(
+                        photo_id, sam2_variant,
+                    )
+                    if existing is not None:
+                        cached_prompt = (
+                            existing["prompt_x"], existing["prompt_y"],
+                            existing["prompt_w"], existing["prompt_h"],
+                        )
+                        if (existing["detector_model"]
+                                == photo["detector_model"]
+                                and cached_prompt == photo["prompt"]
+                                and existing["path"]
+                                and os.path.isfile(existing["path"])):
+                            thread_db.set_active_mask_variant(
+                                photo_id, sam2_variant,
+                            )
+                            masked += 1
+                            runner.push_event(
+                                job["id"],
+                                "progress",
+                                {
+                                    "current": i + 1,
+                                    "total": total,
+                                    "current_file": photo["filename"],
+                                    "rate": round(
+                                        (i + 1) / max(
+                                            time.time() - job["_start_time"], 0.01,
+                                        ),
+                                        1,
+                                    ),
+                                    "phase": "Extracting features (SAM2 + DINOv2)",
+                                },
+                            )
+                            continue
+
                     # Load working-resolution proxy
                     proxy = render_proxy(image_path, longest_edge=proxy_longest_edge)
                     if proxy is None:
@@ -9108,13 +9198,51 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             embed(proxy, variant=dinov2_variant),
                         )
 
-                    # Update DB with mask path, completeness, features, and embeddings
-                    thread_db.update_photo_pipeline_features(
-                        photo_id,
-                        mask_path=mask_path,
-                        crop_complete=completeness,
-                        **features,
+                    # Per-mask features: pop them out of `features` so
+                    # they land on the photo_masks row and not on the
+                    # photos row directly. set_active_mask_variant
+                    # denormalizes them back into photos for downstream
+                    # readers.
+                    mask_subject_tenengrad = features.pop(
+                        "subject_tenengrad", None,
                     )
+                    mask_bg_tenengrad = features.pop("bg_tenengrad", None)
+                    # Mask-derived subject_size: fraction of frame
+                    # covered by the boolean mask.
+                    total_pixels = float(mask.size)
+                    if total_pixels > 0:
+                        mask_subject_size = float(
+                            np.count_nonzero(mask) / total_pixels
+                        )
+                    else:
+                        mask_subject_size = None
+
+                    thread_db.upsert_photo_mask(
+                        photo_id=photo_id,
+                        variant=sam2_variant,
+                        path=mask_path,
+                        detector_model=photo["detector_model"],
+                        prompt_x=photo["prompt"][0],
+                        prompt_y=photo["prompt"][1],
+                        prompt_w=photo["prompt"][2],
+                        prompt_h=photo["prompt"][3],
+                        subject_size=mask_subject_size,
+                        subject_tenengrad=mask_subject_tenengrad,
+                        bg_tenengrad=mask_bg_tenengrad,
+                        crop_complete=completeness,
+                    )
+                    thread_db.set_active_mask_variant(
+                        photo_id, sam2_variant,
+                    )
+                    # Remaining (non-mask) per-photo features still land
+                    # on the photos row. mask_path / crop_complete /
+                    # subject_tenengrad / bg_tenengrad / subject_size
+                    # flow via set_active_mask_variant above and are
+                    # intentionally NOT passed here.
+                    if features:
+                        thread_db.update_photo_pipeline_features(
+                            photo_id, **features,
+                        )
                     thread_db.update_photo_embeddings(
                         photo_id,
                         dino_subject_embedding=subj_emb_blob,

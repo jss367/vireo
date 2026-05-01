@@ -18,6 +18,7 @@ import threading
 import time
 from dataclasses import dataclass
 
+import numpy as np
 from db import Database, commit_with_retry
 
 log = logging.getLogger(__name__)
@@ -2056,7 +2057,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                             photo["id"], model_name,
                                         )
                                         if emb_blob:
-                                            import numpy as np
                                             embedding = np.frombuffer(
                                                 emb_blob, dtype=np.float32,
                                             )
@@ -2564,16 +2564,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # Mask-derived subject_size: fraction of frame
                     # covered by the boolean mask. Replaces the
                     # detection-bbox approximation classify uses.
-                    try:
-                        import numpy as _np
-                        total_pixels = float(mask.size)
-                        if total_pixels > 0:
-                            mask_subject_size = float(
-                                _np.count_nonzero(mask) / total_pixels
-                            )
-                        else:
-                            mask_subject_size = None
-                    except Exception:
+                    total_pixels = float(mask.size)
+                    if total_pixels > 0:
+                        mask_subject_size = float(
+                            np.count_nonzero(mask) / total_pixels
+                        )
+                    else:
                         mask_subject_size = None
 
                     subject_crop = crop_subject(proxy, mask, margin=0.15)
