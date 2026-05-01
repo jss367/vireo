@@ -359,6 +359,12 @@ class Database:
                 created_at          TEXT DEFAULT (datetime('now'))
             );
 
+            -- subject_size is declared REAL because compute_all_quality_features
+            -- stores it as a fraction in [0, 1]. SQLite's flexible type affinity
+            -- means existing databases that pre-date this fix (where the column
+            -- was declared INTEGER) still tolerate REAL values without an
+            -- ALTER, so we don't bother emitting a migration for the column
+            -- type — only fresh DBs see the corrected declaration.
             CREATE TABLE IF NOT EXISTS photo_masks (
                 photo_id          INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
                 variant           TEXT    NOT NULL,
@@ -369,7 +375,7 @@ class Database:
                 prompt_y          INTEGER NOT NULL,
                 prompt_w          INTEGER NOT NULL,
                 prompt_h          INTEGER NOT NULL,
-                subject_size      INTEGER,
+                subject_size      REAL,
                 subject_tenengrad REAL,
                 bg_tenengrad      REAL,
                 crop_complete     REAL,
@@ -664,6 +670,51 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE photos ADD COLUMN active_mask_variant TEXT"
             )
+
+        # One-time backfill: pre-existing photos with mask_path set on the
+        # photos row but no row at all in photo_masks get migrated to
+        # variant='unknown' with a sentinel prompt. detector_model='unknown'
+        # + prompt=-1 mean the staleness check will treat these masks as
+        # stale on the next pipeline run, so they get regenerated against
+        # whatever SAM2 variant the user has configured. Idempotent on its
+        # own (skipped once any 'unknown' rows exist), and the per-photo
+        # NOT EXISTS guard means we don't shadow rows that the new code
+        # path already wrote (e.g. a photo that already has a sam2-small
+        # row from a recent pipeline run shouldn't also get an 'unknown'
+        # row appended).
+        try:
+            already = self.conn.execute(
+                "SELECT COUNT(*) FROM photo_masks WHERE variant='unknown'"
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            already = -1
+        if already == 0:
+            rows = self.conn.execute(
+                "SELECT p.id, p.mask_path, p.subject_size, "
+                "p.subject_tenengrad, p.bg_tenengrad, p.crop_complete "
+                "FROM photos p "
+                "WHERE p.mask_path IS NOT NULL "
+                "  AND NOT EXISTS ("
+                "    SELECT 1 FROM photo_masks pm WHERE pm.photo_id = p.id"
+                "  )"
+            ).fetchall()
+            now = int(time.time())
+            for r in rows:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO photo_masks "
+                    "(photo_id, variant, path, created_at, detector_model, "
+                    "prompt_x, prompt_y, prompt_w, prompt_h, "
+                    "subject_size, subject_tenengrad, bg_tenengrad, crop_complete) "
+                    "VALUES (?, 'unknown', ?, ?, 'unknown', -1, -1, -1, -1, ?, ?, ?, ?)",
+                    (r["id"], r["mask_path"], now,
+                     r["subject_size"], r["subject_tenengrad"],
+                     r["bg_tenengrad"], r["crop_complete"]),
+                )
+                self.conn.execute(
+                    "UPDATE photos SET active_mask_variant='unknown' "
+                    "WHERE id=? AND active_mask_variant IS NULL",
+                    (r["id"],),
+                )
         self.conn.commit()
 
     # -- Workspaces --

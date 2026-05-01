@@ -10041,3 +10041,110 @@ def test_mask_variants_summary(tmp_path):
     assert summary["sam2-large"]["count"] == 1
     assert summary["sam2-large"]["active_count"] == 1
     assert summary["sam3-small"]["active_count"] == 0
+
+
+def test_existing_masks_migrate_to_unknown_variant(tmp_path):
+    """A photos row with mask_path set on a pre-migration DB gets a
+    photo_masks row with variant='unknown' and prompt=-1."""
+    import sqlite3
+    db_path = tmp_path / "v.db"
+
+    # Build a DB with the old shape, no photo_masks table. Include the
+    # columns CREATE INDEX statements reference (timestamp, file_hash) so
+    # _create_tables doesn't fail on a freshly-empty schema.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT)")
+    conn.execute(
+        "CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER, "
+        "filename TEXT, timestamp TEXT, file_hash TEXT, rating INTEGER, "
+        "mask_path TEXT, subject_size REAL, subject_tenengrad REAL, "
+        "bg_tenengrad REAL, crop_complete REAL)"
+    )
+    conn.execute("INSERT INTO folders(id, path) VALUES (1, '/tmp')")
+    conn.execute(
+        "INSERT INTO photos(id, folder_id, filename, mask_path, "
+        "subject_tenengrad, crop_complete) "
+        "VALUES (1, 1, 'a.jpg', '/m/1.png', 1.5, 0.9)"
+    )
+    # Photo without a mask_path — should NOT get a photo_masks row.
+    conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) "
+        "VALUES (2, 1, 'b.jpg')"
+    )
+    conn.commit()
+    conn.close()
+
+    from db import Database
+    db = Database(str(db_path))
+
+    row = db.conn.execute(
+        "SELECT * FROM photo_masks WHERE photo_id=1"
+    ).fetchone()
+    assert row is not None
+    assert row["variant"] == "unknown"
+    assert row["detector_model"] == "unknown"
+    assert row["prompt_x"] == -1
+    assert row["prompt_y"] == -1
+    assert row["prompt_w"] == -1
+    assert row["prompt_h"] == -1
+    assert row["path"] == "/m/1.png"
+    assert row["subject_tenengrad"] == 1.5
+    assert row["crop_complete"] == 0.9
+    # And photos.active_mask_variant is set
+    av = db.conn.execute(
+        "SELECT active_mask_variant FROM photos WHERE id=1"
+    ).fetchone()[0]
+    assert av == "unknown"
+
+    # Photo without mask_path: no photo_masks row, no active_mask_variant.
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks WHERE photo_id=2"
+    ).fetchone()[0] == 0
+    av2 = db.conn.execute(
+        "SELECT active_mask_variant FROM photos WHERE id=2"
+    ).fetchone()[0]
+    assert av2 is None
+
+
+def test_mask_migration_is_idempotent(tmp_path):
+    """Re-opening the DB does not re-insert migrated 'unknown' rows."""
+    import sqlite3
+    db_path = tmp_path / "v.db"
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT)")
+    conn.execute(
+        "CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER, "
+        "filename TEXT, timestamp TEXT, file_hash TEXT, rating INTEGER, "
+        "mask_path TEXT, subject_size REAL, subject_tenengrad REAL, "
+        "bg_tenengrad REAL, crop_complete REAL)"
+    )
+    conn.execute("INSERT INTO folders(id, path) VALUES (1, '/tmp')")
+    conn.execute(
+        "INSERT INTO photos(id, folder_id, filename, mask_path) "
+        "VALUES (1, 1, 'a.jpg', '/m/1.png')"
+    )
+    conn.commit()
+    conn.close()
+
+    from db import Database
+    db = Database(str(db_path))
+    db.conn.close()
+
+    # Re-open — migration must not insert a second row.
+    db2 = Database(str(db_path))
+    n = db2.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks WHERE photo_id=1"
+    ).fetchone()[0]
+    assert n == 1
+
+
+def test_photo_masks_subject_size_is_real(tmp_path):
+    """Fresh DBs declare photo_masks.subject_size as REAL since the
+    feature stores a fraction in [0, 1]."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    cols = {row[1]: row[2] for row in db.conn.execute(
+        "PRAGMA table_info(photo_masks)"
+    ).fetchall()}
+    assert cols["subject_size"] == "REAL"
