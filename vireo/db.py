@@ -3648,6 +3648,105 @@ class Database:
         )
         commit_with_retry(self.conn)
 
+    def delete_masks_for_variant(self, variant):
+        """Delete all photo_masks rows + files for a variant.
+        Refuses if the variant is active for any photo (caller must
+        switch active first)."""
+        active_count = self.conn.execute(
+            "SELECT COUNT(*) FROM photos WHERE active_mask_variant=?",
+            (variant,),
+        ).fetchone()[0]
+        if active_count > 0:
+            raise ValueError(
+                f"Variant {variant!r} is active for {active_count} photo(s); "
+                "switch active variant before deleting"
+            )
+        rows = self.conn.execute(
+            "SELECT path FROM photo_masks WHERE variant=?", (variant,),
+        ).fetchall()
+        for r in rows:
+            try:
+                if r["path"] and os.path.isfile(r["path"]):
+                    os.remove(r["path"])
+            except OSError:
+                log.warning("Failed to remove mask file %s", r["path"])
+        self.conn.execute("DELETE FROM photo_masks WHERE variant=?", (variant,))
+        commit_with_retry(self.conn)
+        return len(rows)
+
+    def delete_inactive_masks(self):
+        """Delete all photo_masks rows + files except the active variant
+        per photo. Returns the number of rows deleted."""
+        rows = self.conn.execute(
+            "SELECT pm.photo_id, pm.variant, pm.path FROM photo_masks pm "
+            "JOIN photos p ON p.id = pm.photo_id "
+            "WHERE p.active_mask_variant IS NULL "
+            "   OR p.active_mask_variant != pm.variant"
+        ).fetchall()
+        for r in rows:
+            try:
+                if r["path"] and os.path.isfile(r["path"]):
+                    os.remove(r["path"])
+            except OSError:
+                log.warning("Failed to remove mask file %s", r["path"])
+            self.conn.execute(
+                "DELETE FROM photo_masks WHERE photo_id=? AND variant=?",
+                (r["photo_id"], r["variant"]),
+            )
+        commit_with_retry(self.conn)
+        return len(rows)
+
+    def find_stale_masks(self):
+        """Return photo_masks rows whose stored prompt no longer matches
+        the photo's current primary detection (highest-confidence,
+        non full-image)."""
+        rows = self.conn.execute(
+            """
+            SELECT pm.photo_id, pm.variant, pm.path,
+                   pm.detector_model, pm.prompt_x, pm.prompt_y,
+                   pm.prompt_w, pm.prompt_h
+              FROM photo_masks pm
+             WHERE NOT EXISTS (
+                SELECT 1 FROM detections d
+                 WHERE d.photo_id = pm.photo_id
+                   AND d.detector_model = pm.detector_model
+                   AND d.detector_model != 'full-image'
+                   AND CAST(d.box_x AS INTEGER) = pm.prompt_x
+                   AND CAST(d.box_y AS INTEGER) = pm.prompt_y
+                   AND CAST(d.box_w AS INTEGER) = pm.prompt_w
+                   AND CAST(d.box_h AS INTEGER) = pm.prompt_h
+             )
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_stale_masks(self):
+        """Remove rows + files for masks whose prompt no longer matches
+        the current primary detection. Skips active variants (caller can
+        re-run them through the pipeline instead of dropping the
+        currently-displayed mask)."""
+        stale = self.find_stale_masks()
+        deleted = 0
+        for s in stale:
+            is_active = self.conn.execute(
+                "SELECT 1 FROM photos WHERE id=? AND active_mask_variant=?",
+                (s["photo_id"], s["variant"]),
+            ).fetchone()
+            if is_active:
+                continue
+            try:
+                if s["path"] and os.path.isfile(s["path"]):
+                    os.remove(s["path"])
+            except OSError:
+                log.warning("Failed to remove mask file %s", s["path"])
+            self.conn.execute(
+                "DELETE FROM photo_masks WHERE photo_id=? AND variant=?",
+                (s["photo_id"], s["variant"]),
+            )
+            deleted += 1
+        commit_with_retry(self.conn)
+        return deleted
+
     def upsert_photo_mask(
         self, photo_id, variant, path,
         detector_model, prompt_x, prompt_y, prompt_w, prompt_h,

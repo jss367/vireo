@@ -9858,3 +9858,153 @@ def test_set_active_mask_variant_missing_row_raises(tmp_path):
     )
     with pytest.raises(ValueError):
         db.set_active_mask_variant(1, "sam3-small")
+
+
+def test_delete_masks_for_variant_removes_files_and_rows(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (2, 1, 'b.jpg')"
+    )
+
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    p1 = masks_dir / "1.sam2-small.png"
+    p1.write_bytes(b"x")
+    p2 = masks_dir / "2.sam2-small.png"
+    p2.write_bytes(b"y")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(p1),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    db.upsert_photo_mask(
+        2, "sam2-small", str(p2),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+
+    deleted = db.delete_masks_for_variant("sam2-small")
+    assert deleted == 2
+    assert not p1.exists() and not p2.exists()
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks WHERE variant='sam2-small'"
+    ).fetchone()[0] == 0
+
+
+def test_delete_masks_for_variant_refuses_active(tmp_path):
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    p = masks_dir / "1.sam2-small.png"
+    p.write_bytes(b"x")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(p),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    db.set_active_mask_variant(1, "sam2-small")
+    with pytest.raises(ValueError):
+        db.delete_masks_for_variant("sam2-small")
+
+
+def test_delete_inactive_masks(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    pa = masks_dir / "1.sam2-small.png"
+    pa.write_bytes(b"a")
+    pb = masks_dir / "1.sam2-large.png"
+    pb.write_bytes(b"b")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(pa),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    db.upsert_photo_mask(
+        1, "sam2-large", str(pb),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    db.set_active_mask_variant(1, "sam2-large")
+    n = db.delete_inactive_masks()
+    assert n == 1
+    assert not pa.exists()
+    assert pb.exists()
+    remaining = {m["variant"] for m in db.list_masks_for_photo(1)}
+    assert remaining == {"sam2-large"}
+
+
+def test_find_stale_masks(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 10, 20, 100, 200, 0.9, 'animal')"
+    )
+    # Mask was made from the same prompt → not stale
+    db.upsert_photo_mask(
+        1, "sam2-small", "/p",
+        detector_model="megadetector-v6",
+        prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
+    )
+    assert db.find_stale_masks() == []
+
+    # Insert a mask whose prompt no longer matches the current detection
+    db.upsert_photo_mask(
+        1, "sam2-large", "/q",
+        detector_model="megadetector-v6",
+        prompt_x=99, prompt_y=20, prompt_w=100, prompt_h=200,
+    )
+    stale = db.find_stale_masks()
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {(1, "sam2-large")}
+
+
+def test_delete_stale_masks(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 10, 20, 100, 200, 0.9, 'animal')"
+    )
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    fresh = masks_dir / "1.sam2-small.png"
+    fresh.write_bytes(b"f")
+    stale_path = masks_dir / "1.sam2-large.png"
+    stale_path.write_bytes(b"s")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(fresh),
+        detector_model="megadetector-v6",
+        prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
+    )
+    db.upsert_photo_mask(
+        1, "sam2-large", str(stale_path),
+        detector_model="megadetector-v6",
+        prompt_x=99, prompt_y=20, prompt_w=100, prompt_h=200,
+    )
+    deleted = db.delete_stale_masks()
+    assert deleted == 1
+    assert fresh.exists()
+    assert not stale_path.exists()
+    assert {m["variant"] for m in db.list_masks_for_photo(1)} == {"sam2-small"}
