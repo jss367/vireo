@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import places
-from db import KEYWORD_TYPES, Database
+from db import KEYWORD_TYPES, Database, commit_with_retry
 from flask import (
     Flask,
     Response,
@@ -10203,15 +10203,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             (ws, variant),
         ).fetchall()
         updated = 0
+        # Batch: skip the per-row commit_with_retry inside
+        # set_active_mask_variant and commit once after the loop. A
+        # workspace with 10K photos would otherwise pay 10K WAL fsyncs
+        # per request — multiple seconds with no progress indicator.
         for r in rows:
             try:
-                db.set_active_mask_variant(r["photo_id"], variant)
+                db.set_active_mask_variant(
+                    r["photo_id"], variant, _commit=False,
+                )
                 updated += 1
-            except ValueError:
+            except ValueError as e:
                 # Race: row was deleted between SELECT and UPDATE. Skip
-                # rather than 500 — the user just asked to "make this the
-                # active variant where possible".
+                # rather than 500 — the user just asked to "make this
+                # the active variant where possible". Log the skip so
+                # the cause is visible if the count looks off.
+                log.warning(
+                    "active-mask-variant skip photo %d: %s",
+                    r["photo_id"], e,
+                )
                 continue
+        commit_with_retry(db.conn)
         log.info(
             "Switched active mask variant to %s for %d workspace photo(s)",
             variant, updated,

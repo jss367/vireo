@@ -3668,10 +3668,17 @@ class Database:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def set_active_mask_variant(self, photo_id, variant):
+    def set_active_mask_variant(self, photo_id, variant, _commit=True):
         """Mark `variant` as active for `photo_id` and denormalize its
         fields into the photos row (mask_path + per-mask features) so
-        downstream readers (scoring, pipeline) see the active mask."""
+        downstream readers (scoring, pipeline) see the active mask.
+
+        ``_commit=False`` lets bulk callers (e.g. the
+        ``/api/pipeline/active-mask-variant`` endpoint) batch many
+        per-photo updates into a single commit, instead of paying a WAL
+        fsync per photo. Bulk callers MUST call ``commit_with_retry``
+        themselves once the loop completes.
+        """
         row = self.conn.execute(
             "SELECT path, subject_size, subject_tenengrad, bg_tenengrad, "
             "crop_complete FROM photo_masks WHERE photo_id=? AND variant=?",
@@ -3689,7 +3696,8 @@ class Database:
              row["subject_tenengrad"], row["bg_tenengrad"],
              row["crop_complete"], photo_id),
         )
-        commit_with_retry(self.conn)
+        if _commit:
+            commit_with_retry(self.conn)
 
     def delete_masks_for_variant(self, variant):
         """Delete all photo_masks rows + files for a variant.

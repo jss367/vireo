@@ -756,6 +756,73 @@ def test_active_mask_variant_endpoint_switches_workspace_photos(setup):
             db.close()
 
 
+def test_active_mask_variant_endpoint_is_workspace_scoped(setup):
+    """Switching the active mask variant in workspace A must not affect
+    photos that live in workspace B. ``photo_masks`` and ``photos`` are
+    global tables — the endpoint relies on a workspace_folders join to
+    scope the UPDATE. Regression guard: a buggy version that drops the
+    join would silently flip every photo in the DB.
+    """
+    app, db_path = setup
+
+    from db import Database
+    db = Database(db_path)
+    try:
+        ws_a = db.create_workspace("A")
+        ws_b = db.create_workspace("B")
+
+        f_a = db.add_folder("/a", name="a")
+        f_b = db.add_folder("/b", name="b")
+        db.add_workspace_folder(ws_a, f_a)
+        db.add_workspace_folder(ws_b, f_b)
+
+        p_a = db.add_photo(folder_id=f_a, filename="a.jpg",
+                           extension=".jpg", file_size=1, file_mtime=1.0)
+        p_b = db.add_photo(folder_id=f_b, filename="b.jpg",
+                           extension=".jpg", file_size=1, file_mtime=1.0)
+
+        # Seed the same variant in both workspaces so the only thing
+        # keeping ws_b out of the update is the workspace join.
+        db.upsert_photo_mask(p_a, "sam2-small", "/m/a.small.png",
+            detector_model="md", prompt_x=0, prompt_y=0,
+            prompt_w=0, prompt_h=0)
+        db.upsert_photo_mask(p_b, "sam2-small", "/m/b.small.png",
+            detector_model="md", prompt_x=0, prompt_y=0,
+            prompt_w=0, prompt_h=0)
+
+        # Mark ws_a as the most-recently-opened so a fresh Database()
+        # inside _get_db() picks it as the active workspace.
+        db.update_workspace(ws_b, last_opened_at="2026-01-01T00:00:00")
+        db.update_workspace(ws_a, last_opened_at="2026-05-01T00:00:00")
+    finally:
+        db.close()
+
+    with app.test_client() as c:
+        resp = c.post(
+            "/api/pipeline/active-mask-variant",
+            json={"variant": "sam2-small"},
+        )
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["ok"] is True
+        # Only the workspace-A photo should have been updated.
+        assert body["updated"] == 1
+
+    db = Database(db_path)
+    try:
+        rows = db.conn.execute(
+            "SELECT id, active_mask_variant FROM photos WHERE id IN (?, ?)",
+            (p_a, p_b),
+        ).fetchall()
+        by_id = {r["id"]: r["active_mask_variant"] for r in rows}
+        assert by_id[p_a] == "sam2-small"
+        # ws_b's photo MUST be untouched — it lives in a different
+        # workspace, even though it has the same variant in photo_masks.
+        assert by_id[p_b] is None
+    finally:
+        db.close()
+
+
 def test_active_mask_variant_endpoint_requires_variant(setup):
     app, _ = setup
     with app.test_client() as c:
