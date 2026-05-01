@@ -268,6 +268,24 @@ def test_close_ephemeral_navigates_to_rightmost_visible_pinned_tab(live_server, 
     )
 
 
+def test_palette_seeded_from_fallback_when_tabs_api_fails(live_server, page):
+    """If /api/workspace/tabs fails on initial load, the command palette must
+    still open with navigable rows seeded from NAV_ALL_PAGES/NAV_DEFAULT_TABS."""
+    url = live_server["url"]
+    # Block the tabs endpoint before navigation so the palette IIFE's seed-time
+    # fetch is rejected.
+    page.route("**/api/workspace/tabs", lambda route: route.abort())
+    page.goto(f"{url}/browse")
+    page.keyboard.press("Meta+K")
+    page.wait_for_selector("#commandPalette:not([hidden])", timeout=2000)
+    # Empty query should render the fallback page list, not an empty palette.
+    rows = page.eval_on_selector_all(
+        ".cmd-palette-result", "els => els.map(e => e.dataset.navId)"
+    )
+    assert len(rows) > 0, "palette should fall back to NAV_ALL_PAGES on API failure"
+    assert "duplicates" in rows, "expected fallback list to include known pages"
+
+
 def test_drag_reorder_persists_via_reorder_endpoint(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/browse")

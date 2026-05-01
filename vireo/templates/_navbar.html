@@ -5234,27 +5234,39 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
 <script src="/static/vendor/fuse.min.js"></script>
 <script>
 (function() {
-  let allPages = [];
-  let pinnedSet = new Set();
+  // Seed from the same hardcoded globals the navbar strip uses so the
+  // palette is usable even when /api/workspace/tabs fails on initial
+  // load. refreshFromTabsState() replaces these with the workspace's
+  // actual state on success.
+  let allPages = (window.NAV_ALL_PAGES || []).slice();
+  let pinnedSet = new Set(window.NAV_DEFAULT_TABS || []);
   let fuse = null;
   let results = [];
   let selectedIndex = 0;
 
+  function rebuildFuse() {
+    if (window.Fuse) {
+      fuse = new Fuse(allPages, {
+        keys: [
+          {name: 'label', weight: 0.7},
+          {name: 'id',    weight: 0.3},
+        ],
+        threshold: 0.4,
+        ignoreLocation: true,
+      });
+    }
+  }
+  rebuildFuse();
+
   function refreshFromTabsState() {
     return fetch('/api/workspace/tabs').then(r => r.json()).then(state => {
-      allPages = state.all_pages || [];
-      pinnedSet = new Set(state.tabs || []);
-      // Configure Fuse over labels and ids
-      if (window.Fuse) {
-        fuse = new Fuse(allPages, {
-          keys: [
-            {name: 'label', weight: 0.7},
-            {name: 'id',    weight: 0.3},
-          ],
-          threshold: 0.4,
-          ignoreLocation: true,
-        });
+      if (Array.isArray(state.all_pages) && state.all_pages.length) {
+        allPages = state.all_pages;
       }
+      if (Array.isArray(state.tabs)) {
+        pinnedSet = new Set(state.tabs);
+      }
+      rebuildFuse();
     });
   }
 
