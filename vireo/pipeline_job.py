@@ -2701,8 +2701,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 import keypoints as kp
                 from pipeline import _resolve_keypoint_model
 
+                # Mirror Gate 1 in _process_photo_for_eye: rows whose
+                # classifier confidence is below eye_classifier_conf_gate
+                # get skipped at run time, so they shouldn't influence
+                # which variants get downloaded — otherwise an all-low-
+                # confidence collection still pays the bandwidth cost
+                # for weights no photo can reach.
+                conf_gate = pipeline_cfg.get(
+                    "eye_classifier_conf_gate", 0.5,
+                )
                 needed_models = []
                 for row in photos_for_stage:
+                    if (row.get("species_conf") or 0.0) < conf_gate:
+                        continue
                     model_name = _resolve_keypoint_model(thread_db, row)
                     if model_name and model_name not in needed_models:
                         needed_models.append(model_name)

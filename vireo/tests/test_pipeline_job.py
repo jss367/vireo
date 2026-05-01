@@ -6406,12 +6406,14 @@ def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     # Provide one bird and one quadruped row so the routing-aware download
-    # picks both SuperAnimal variants.
+    # picks both SuperAnimal variants. species_conf is above the default
+    # eye_classifier_conf_gate (0.5) so the conf-gate filter doesn't drop
+    # them before _resolve_keypoint_model runs.
     monkeypatch.setattr(
         Database, "list_photos_for_eye_keypoint_stage",
         lambda self, **k: [
-            {"id": pid, "taxonomy_class": "Mammalia"},
-            {"id": pid + 1000, "taxonomy_class": "Aves"},
+            {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
+            {"id": pid + 1000, "taxonomy_class": "Aves", "species_conf": 0.9},
         ],
     )
     # detect_eye_keypoints_stage stub — we're testing the wrapping stage's
@@ -6485,11 +6487,13 @@ def test_pipeline_eye_keypoints_stage_only_downloads_routable_variants(
     monkeypatch.setattr(
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
-    # Bird-only eligible set.
+    # Bird-only eligible set; species_conf above eye_classifier_conf_gate
+    # (default 0.5) so the conf-gate filter doesn't drop the row before
+    # routing.
     monkeypatch.setattr(
         Database, "list_photos_for_eye_keypoint_stage",
         lambda self, **k: [
-            {"id": pid, "taxonomy_class": "Aves"},
+            {"id": pid, "taxonomy_class": "Aves", "species_conf": 0.9},
         ],
     )
     monkeypatch.setattr(
@@ -6559,12 +6563,15 @@ def test_pipeline_eye_keypoints_stage_skips_download_for_out_of_scope_only(
     )
     # Eligible photos exist (total > 0) but every row carries an
     # out-of-scope taxonomy_class — the per-photo router will return None
-    # for each, so no SuperAnimal model is needed.
+    # for each, so no SuperAnimal model is needed. species_conf is above
+    # the conf-gate threshold to isolate the routing skip from the
+    # confidence skip.
     monkeypatch.setattr(
         Database, "list_photos_for_eye_keypoint_stage",
         lambda self, **k: [
-            {"id": pid, "taxonomy_class": "Reptilia"},
-            {"id": pid + 1, "taxonomy_class": "Actinopterygii"},
+            {"id": pid, "taxonomy_class": "Reptilia", "species_conf": 0.9},
+            {"id": pid + 1, "taxonomy_class": "Actinopterygii",
+             "species_conf": 0.9},
         ],
     )
     monkeypatch.setattr(
@@ -6635,12 +6642,14 @@ def test_pipeline_eye_keypoints_stage_download_progress_isolated_from_photo_coun
     )
     # Three quadruped rows so total=3 — large enough to make the bug
     # observable if the download callback bumps the photo counter.
+    # species_conf above the conf-gate so they reach the download
+    # planner.
     monkeypatch.setattr(
         Database, "list_photos_for_eye_keypoint_stage",
         lambda self, **k: [
-            {"id": pid, "taxonomy_class": "Mammalia"},
-            {"id": pid + 1, "taxonomy_class": "Mammalia"},
-            {"id": pid + 2, "taxonomy_class": "Mammalia"},
+            {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
+            {"id": pid + 1, "taxonomy_class": "Mammalia", "species_conf": 0.9},
+            {"id": pid + 2, "taxonomy_class": "Mammalia", "species_conf": 0.9},
         ],
     )
 
@@ -6773,6 +6782,80 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_no_eligible_photos(
 
     assert downloaded == [], (
         f"Expected no auto-download when 0 photos are eligible; got {downloaded!r}"
+    )
+
+
+def test_pipeline_eye_keypoints_stage_skips_download_when_all_below_conf_gate(
+    tmp_path, monkeypatch,
+):
+    """When every eligible row has species_conf below
+    eye_classifier_conf_gate, _process_photo_for_eye skips it at Gate 1
+    before any keypoint inference. The download planner must mirror that
+    threshold so an all-low-confidence collection doesn't pull
+    multi-hundred-MB SuperAnimal weights that no photo can use.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    # Default eye_classifier_conf_gate is 0.5; both rows sit below it.
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [
+            {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.2},
+            {"id": pid + 1, "taxonomy_class": "Aves", "species_conf": 0.4},
+        ],
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "detect_eye_keypoints_stage",
+        lambda *a, **k: None,
+    )
+
+    downloaded = []
+    import keypoints as _kp_mod
+    monkeypatch.setattr(
+        _kp_mod, "ensure_keypoint_weights",
+        lambda name, progress_callback=None: downloaded.append(name) or "/fake",
+    )
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    assert downloaded == [], (
+        f"Expected no downloads for an all-below-conf-gate set; "
+        f"got {downloaded!r}"
     )
 
 
