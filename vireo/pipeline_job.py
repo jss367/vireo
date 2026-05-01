@@ -2689,6 +2689,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     ),
                 )
 
+            # Auto-download SuperAnimal weights on first pipeline run.
+            # Mirrors the SAM2/DINOv2 auto-download pattern in extract_masks
+            # (commit 90cd0f9): without this, every photo silently skips on
+            # a fresh install. Both variants are fetched because the per-
+            # photo router picks bird vs. quadruped from taxonomy_class.
+            # Gate on total > 0 so a no-op rerun doesn't pay the download
+            # cost for zero photos.
+            if total > 0:
+                import keypoints as kp
+                for kp_model in (
+                    "superanimal-quadruped", "superanimal-bird",
+                ):
+                    kp.ensure_keypoint_weights(
+                        kp_model, progress_callback=_progress,
+                    )
+
             detect_eye_keypoints_stage(
                 thread_db, config=pipeline_cfg, progress_callback=_progress,
                 collection_id=collection_id,

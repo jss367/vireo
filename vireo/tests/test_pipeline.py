@@ -730,36 +730,24 @@ def test_eye_keypoint_stage_preflight_disabled(tmp_path, monkeypatch):
         == "Disabled in config"
 
 
-def test_eye_keypoint_stage_preflight_no_weights(tmp_path, monkeypatch):
-    """Preflight returns a skip reason when no routable weights are installed."""
-    import keypoints as kp
+def test_eye_keypoint_stage_preflight_enabled(tmp_path, monkeypatch):
+    """Preflight returns None when eye detection is enabled. Weights presence
+    is no longer a preflight gate — pipeline_job.eye_keypoints_stage
+    auto-downloads them at run time, so detect_eye_keypoints_stage relies
+    on the per-photo defensive check rather than a stage-level guard.
+    """
     from pipeline import eye_keypoint_stage_preflight
 
-    empty_models_dir = tmp_path / "empty"
-    empty_models_dir.mkdir()
-    monkeypatch.setattr(kp, "MODELS_DIR", str(empty_models_dir))
-
-    assert eye_keypoint_stage_preflight({}) == "No keypoint models installed"
-
-
-def test_eye_keypoint_stage_preflight_ready(tmp_path, monkeypatch):
-    """Preflight returns None when at least one routable model is ready."""
-    import keypoints as kp
-    from pipeline import eye_keypoint_stage_preflight
-
-    models_dir = tmp_path / "models"
-    models_dir.mkdir()
-    _make_fake_weights(str(models_dir), "superanimal-quadruped")
-    monkeypatch.setattr(kp, "MODELS_DIR", str(models_dir))
-
+    assert eye_keypoint_stage_preflight({"eye_detect_enabled": True}) is None
     assert eye_keypoint_stage_preflight({}) is None
 
 
-def test_eye_keypoint_stage_skips_when_weights_absent(tmp_path, monkeypatch):
-    """No routable keypoint weights installed → stage-level preflight
-    short-circuits before enumerating photos. Confirms that
-    list_photos_for_eye_keypoint_stage is never called (no O(N) DB pass)
-    and that no eye fields get written.
+def test_eye_keypoint_stage_writes_nothing_when_weights_absent(
+    tmp_path, monkeypatch,
+):
+    """When detect_eye_keypoints_stage is invoked without weights on disk
+    (e.g. someone bypasses pipeline_job's auto-download), the per-photo
+    Gate 2 check skips writing eye_* — no records get partial state.
     """
     import keypoints as kp
     from pipeline import detect_eye_keypoints_stage
@@ -770,18 +758,8 @@ def test_eye_keypoint_stage_skips_when_weights_absent(tmp_path, monkeypatch):
 
     db, pid = _setup_eligible_mammal_photo(tmp_path)
 
-    called = {"listed": False}
-    orig = db.list_photos_for_eye_keypoint_stage
-
-    def _spy(*args, **kwargs):
-        called["listed"] = True
-        return orig(*args, **kwargs)
-
-    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
-
     detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
 
-    assert called["listed"] is False
     row = db.conn.execute(
         "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
         (pid,),

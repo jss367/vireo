@@ -687,13 +687,13 @@ def eye_keypoint_stage_preflight(config):
     Returns None when the stage should run. Shared between
     detect_eye_keypoints_stage and the pipeline job so the job can avoid the
     O(N) eligibility join when the stage is going to short-circuit anyway.
+
+    SuperAnimal weights are auto-downloaded by the pipeline job at stage
+    start (mirroring SAM2/DINOv2), so a missing-weights state is no longer
+    a preflight skip — only the explicit config flag is.
     """
     if not config.get("eye_detect_enabled", True):
         return "Disabled in config"
-    import keypoints as kp
-    routable = set(_EYE_KEYPOINT_MODEL_FOR_CLASS.values())
-    if not any(kp.weights_status(name) == "ready" for name in routable):
-        return "No keypoint models installed"
     return None
 
 
@@ -749,9 +749,10 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
     if model_name is None:
         return
 
-    # Gate 2: weights present on disk. Stage does NOT auto-download — the
-    # user opts in via the pipeline models card. If a partial download left
-    # model.onnx but no config.json (or vice versa), skip defensively.
+    # Gate 2: weights present on disk. The pipeline job auto-downloads both
+    # SuperAnimal variants at stage start (mirroring SAM2/DINOv2), so this
+    # check is defensive — a partial download (e.g. config.json missing) is
+    # the only case where it should still trip.
     onnx_path = os.path.join(kp.MODELS_DIR, model_name, "model.onnx")
     config_path = os.path.join(kp.MODELS_DIR, model_name, "config.json")
     if not (os.path.isfile(onnx_path) and os.path.isfile(config_path)):

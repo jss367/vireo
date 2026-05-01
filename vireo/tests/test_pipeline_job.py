@@ -6302,6 +6302,13 @@ def test_pipeline_eye_keypoints_cancel_marks_stage_cancelled(
         Database, "list_photos_for_eye_keypoint_stage",
         lambda self, **k: [{"id": pid}],
     )
+    # Stub ensure_keypoint_weights so the auto-download path doesn't try to
+    # hit HuggingFace from a unit test. Pretend weights are already there.
+    import keypoints as _kp_mod
+    monkeypatch.setattr(
+        _kp_mod, "ensure_keypoint_weights",
+        lambda name, progress_callback=None: "/fake/model.onnx",
+    )
 
     abort_now = [False]
 
@@ -6355,6 +6362,148 @@ def test_pipeline_eye_keypoints_cancel_marks_stage_cancelled(
     assert "Cancelled" in summary, (
         f"eye_keypoints final summary must reflect cancellation; got "
         f"{summary!r}"
+    )
+
+
+def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
+    tmp_path, monkeypatch,
+):
+    """The eye_keypoints stage must call ensure_keypoint_weights for both
+    SuperAnimal models before iterating photos. Without this auto-download,
+    a fresh install would silently produce zero eye keypoints because the
+    per-photo Gate 2 check would skip every photo.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [{"id": pid}],
+    )
+    # detect_eye_keypoints_stage stub — we're testing the wrapping stage's
+    # download orchestration, not per-photo inference.
+    monkeypatch.setattr(
+        pipeline_mod, "detect_eye_keypoints_stage",
+        lambda *a, **k: None,
+    )
+
+    downloaded = []
+    import keypoints as _kp_mod
+
+    def _spy_ensure(name, progress_callback=None):
+        downloaded.append(name)
+        return "/fake/model.onnx"
+
+    monkeypatch.setattr(_kp_mod, "ensure_keypoint_weights", _spy_ensure)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert downloaded == ["superanimal-quadruped", "superanimal-bird"], (
+        f"Expected stage to auto-download both SuperAnimal variants in order; "
+        f"got {downloaded!r}"
+    )
+
+
+def test_pipeline_eye_keypoints_stage_skips_download_when_no_eligible_photos(
+    tmp_path, monkeypatch,
+):
+    """When no photos are eligible (total == 0), the stage must NOT trigger
+    a multi-hundred-MB download — gate matches the SAM2/DINOv2 pattern."""
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    # Force "no eligible photos" — preflight passes but the eligibility
+    # query returns nothing.
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [],
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "detect_eye_keypoints_stage",
+        lambda *a, **k: None,
+    )
+
+    downloaded = []
+    import keypoints as _kp_mod
+    monkeypatch.setattr(
+        _kp_mod, "ensure_keypoint_weights",
+        lambda name, progress_callback=None: downloaded.append(name) or "/fake",
+    )
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    assert downloaded == [], (
+        f"Expected no auto-download when 0 photos are eligible; got {downloaded!r}"
     )
 
 

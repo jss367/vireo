@@ -265,34 +265,13 @@ def test_pipeline_failed_status_clears_running_pill(live_server, page):
     expect(page.locator("#pillClassify")).not_to_contain_text("Running")
 
 
-def test_pipeline_eye_keypoints_pill_will_skip_when_no_weights(live_server, page):
-    """Eye Keypoints is gated by both the user toggle and whether SuperAnimal
-    weights are on disk. The fixture doesn't ship any keypoint models, so
-    /api/models/keypoints/status reports both as 'missing' and the pill
-    must show 'Will skip' (mirroring the backend preflight), not 'Will run',
-    even with the enable checkbox checked.
-    """
+def test_pipeline_eye_keypoints_pill_will_run_by_default(live_server, page):
+    """SuperAnimal weights are auto-downloaded by pipeline_job on first run,
+    so the pill defaults to 'Will run' even on a fresh fixture with no
+    keypoint models on disk — the user is no longer expected to click a
+    Download button before starting the pipeline."""
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
-    summary = page.locator("[data-testid='pipeline-plan-summary']")
-    skip_row = summary.locator(".plan-row.will-skip .plan-stages")
-    expect(skip_row).to_contain_text("Eye Keypoints")
-    will_run_row = summary.locator(".plan-row.will-run .plan-stages")
-    expect(will_run_row).not_to_contain_text("Eye Keypoints")
-
-
-def test_pipeline_eye_keypoints_pill_will_run_when_models_ready(live_server, page):
-    """When at least one keypoint model is ready, the pill flips back to
-    'Will run'. Simulated by stubbing the status endpoint client-side and
-    re-invoking refreshKeypointsStatus."""
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    expect(page.locator("#pillEyeKeypoints")).to_be_visible()
-    page.evaluate("""
-        window._keypointModelsReady = true;
-        refreshPipelineUI();
-    """)
     expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
 
 
@@ -301,10 +280,6 @@ def test_pipeline_eye_keypoints_toggle_off_marks_will_skip(live_server, page):
     'Will skip' without affecting Group, which doesn't depend on it."""
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    page.evaluate("""
-        window._keypointModelsReady = true;
-        refreshPipelineUI();
-    """)
     expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
     page.click("#card-eyekeypoints .stage-header")
     page.uncheck("#enableEyeKeypoints")
