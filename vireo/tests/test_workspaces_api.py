@@ -447,6 +447,23 @@ def test_pin_unknown_workspace_returns_404(app_and_db):
     assert resp.status_code == 404
 
 
+def test_pin_rejects_non_boolean_pinned_field(app_and_db):
+    """`pinned` must be a strict bool; truthy strings like "false" or "0"
+    must not be silently coerced to True (which would invert the caller's
+    intent for non-typed clients)."""
+    app, _db = app_and_db
+    client = app.test_client()
+
+    ws_id = client.post("/api/workspaces", json={"name": "Strict"}).get_json()["id"]
+    for bad in ["false", "0", "true", 0, 1, None]:
+        resp = client.post(f"/api/workspaces/{ws_id}/pin", json={"pinned": bad})
+        assert resp.status_code == 400, f"expected 400 for pinned={bad!r}"
+    # Workspace stays unpinned after all bad attempts.
+    listing = client.get("/api/workspaces").get_json()
+    ws = next(w for w in listing if w["id"] == ws_id)
+    assert ws["pinned_at"] is None
+
+
 def test_workspaces_listed_pinned_first_then_alphabetical(app_and_db):
     """GET /api/workspaces returns pinned items first, alphabetical within
     each group regardless of creation or last-opened order."""

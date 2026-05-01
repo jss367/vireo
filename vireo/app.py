@@ -3012,7 +3012,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not ws:
             return json_error("Workspace not found", 404)
         body = request.get_json(silent=True) or {}
-        pinned = bool(body.get("pinned", True))
+        pinned = body.get("pinned", True)
+        if not isinstance(pinned, bool):
+            return json_error("`pinned` must be a boolean")
         from datetime import datetime
         db.update_workspace(
             ws_id,
