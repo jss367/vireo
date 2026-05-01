@@ -1716,14 +1716,54 @@ function sendReport() {
 
 <script>
 /* ---------- Unified tab strip + ephemeral slot + overflow ---------- */
+// Hardcoded fallbacks so the strip has something to render even when
+// /api/workspace/tabs fails (network error, 5xx, invalid JSON). Without
+// these, a transient fetch failure on first load leaves the navbar
+// empty and breaks tab-based keyboard flows (cmd+1..9, Ctrl+Tab,
+// drag/close). Templates are Jinja-free by policy, so we mirror the
+// canonical lists here — keep in sync with:
+//   - vireo/app.py:ALL_PAGES        (page registry)
+//   - vireo/db.py:DEFAULT_TABS      (default pinned-tabs list)
+window.NAV_DEFAULT_TABS = [
+  'browse', 'pipeline', 'pipeline_review',
+  'review', 'cull', 'jobs',
+  'highlights', 'misses', 'settings'
+];
+window.NAV_ALL_PAGES = [
+  {id: 'pipeline',        label: 'Pipeline',        href: '/pipeline'},
+  {id: 'jobs',            label: 'Jobs',            href: '/jobs'},
+  {id: 'pipeline_review', label: 'Pipeline Review', href: '/pipeline/review'},
+  {id: 'review',          label: 'Review',          href: '/review'},
+  {id: 'cull',            label: 'Cull',            href: '/cull'},
+  {id: 'misses',          label: 'Misses',          href: '/misses'},
+  {id: 'highlights',      label: 'Highlights',      href: '/highlights'},
+  {id: 'browse',          label: 'Browse',          href: '/browse'},
+  {id: 'map',             label: 'Map',             href: '/map'},
+  {id: 'variants',        label: 'Variants',        href: '/variants'},
+  {id: 'dashboard',       label: 'Dashboard',       href: '/dashboard'},
+  {id: 'audit',           label: 'Audit',           href: '/audit'},
+  {id: 'compare',         label: 'Compare',         href: '/compare'},
+  {id: 'settings',        label: 'Settings',        href: '/settings'},
+  {id: 'workspace',       label: 'Workspace',       href: '/workspace'},
+  {id: 'lightroom',       label: 'Lightroom',       href: '/lightroom'},
+  {id: 'shortcuts',       label: 'Shortcuts',       href: '/shortcuts'},
+  {id: 'keywords',        label: 'Keywords',        href: '/keywords'},
+  {id: 'duplicates',      label: 'Duplicates',      href: '/duplicates'},
+  {id: 'logs',            label: 'Logs',            href: '/logs'}
+];
+
 (function() {
   const STRIP   = () => document.getElementById('navTabStrip');
   const OVERBTN = () => document.getElementById('navOverflowBtn');
   const OVERMENU = () => document.getElementById('navOverflowMenu');
 
-  let TABS = [];          // ordered list of pinned nav-ids
-  let ALL_PAGES = [];     // [{id,label,href}, ...]
-  let pageById = {};      // map id → {id,label,href}
+  // Seed from hardcoded fallbacks; the fetch below replaces them with
+  // the workspace's actual tabs on success, but if the fetch fails the
+  // defaults remain so the strip is never empty.
+  let TABS = window.NAV_DEFAULT_TABS.slice();
+  let ALL_PAGES = window.NAV_ALL_PAGES.slice();
+  let pageById = {};
+  ALL_PAGES.forEach(p => { pageById[p.id] = p; });
   let ephemeralId = null; // nav-id of the ephemeral tab, if any
 
   function postJSON(url, body) {
@@ -1948,13 +1988,39 @@ function sendReport() {
         renderStrip();
         return state;
       })
-      .catch(() => {});
+      .catch(err => {
+        // Preserve previously-seeded state (server-rendered defaults on
+        // first load, or the last successful fetch afterward) so the
+        // strip still renders. Without this, a transient failure makes
+        // the navbar disappear and breaks cmd+1..9 / Ctrl+Tab.
+        console.warn('[nav] /api/workspace/tabs failed; keeping current state', err);
+        renderStrip();
+      });
   }
 
-  // Re-recompute overflow on viewport resize
+  // Re-recompute overflow on viewport resize *and* when individual tabs
+  // change width (e.g. the Jobs tab's badge updates as background jobs
+  // start/finish — without observing the tabs themselves, those content
+  // changes never trigger a resize event and overflowing tabs stay
+  // clipped instead of moving into the `…` menu).
+  let tabsRO = null;
   if (window.ResizeObserver) {
-    const ro = new ResizeObserver(() => recomputeOverflow());
-    if (document.querySelector('.navbar')) ro.observe(document.querySelector('.navbar'));
+    const navbarRO = new ResizeObserver(() => recomputeOverflow());
+    if (document.querySelector('.navbar')) navbarRO.observe(document.querySelector('.navbar'));
+    tabsRO = new ResizeObserver(() => recomputeOverflow());
+    // Observe each rendered tab; renderStrip() replaces tab nodes, so
+    // re-attach the observer on the MutationObserver below.
+    function observeTabs() {
+      tabsRO.disconnect();
+      const strip = STRIP();
+      if (!strip) return;
+      strip.querySelectorAll('.nav-tab').forEach(t => tabsRO.observe(t));
+    }
+    const stripEl = STRIP();
+    if (stripEl) {
+      observeTabs();
+      new MutationObserver(observeTabs).observe(stripEl, {childList: true});
+    }
   } else {
     window.addEventListener('resize', recomputeOverflow);
   }
