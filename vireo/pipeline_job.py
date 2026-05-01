@@ -2367,6 +2367,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             # not real subject boxes and should not drive mask extraction or
             # count toward the photos_with_detections safeguard below (which
             # surfaces the "weights missing / no detections" diagnostic).
+            # Note: we intentionally do NOT short-circuit when the photo
+            # already has *some* mask in the photos table — that legacy
+            # check ignored which SAM variant produced the mask, so a
+            # config change to a different variant would never re-run.
+            # The per-photo cache check happens inside the loop below
+            # against photo_masks(photo_id, sam2_variant).
             photo_det_map = {}
             photos_with_detections = 0
             for p in photos:
@@ -2377,19 +2383,24 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 if dets:
                     photos_with_detections += 1
                     primary = dets[0]  # already ordered by confidence DESC
-                    has_mask = thread_db.conn.execute(
-                        "SELECT mask_path FROM photos WHERE id=?", (p["id"],)
-                    ).fetchone()[0]
-                    if not has_mask:
-                        photo_det_map[p["id"]] = {
-                            "photo": p,
-                            "det_box": {
-                                "x": primary["box_x"],
-                                "y": primary["box_y"],
-                                "w": primary["box_w"],
-                                "h": primary["box_h"],
-                            },
-                        }
+                    photo_det_map[p["id"]] = {
+                        "photo": p,
+                        "det_box": {
+                            "x": primary["box_x"],
+                            "y": primary["box_y"],
+                            "w": primary["box_w"],
+                            "h": primary["box_h"],
+                        },
+                        "detector_model": primary["detector_model"],
+                        # Stored prompt provenance: int-cast bbox tuple
+                        # used by photo_masks (PK column type is INTEGER).
+                        "prompt": (
+                            int(primary["box_x"]),
+                            int(primary["box_y"]),
+                            int(primary["box_w"]),
+                            int(primary["box_h"]),
+                        ),
+                    }
 
             photos_to_process = [
                 photo_det_map[pid] for pid in photo_det_map
@@ -2493,6 +2504,32 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 image_path = os.path.join(folder_path, photo["filename"])
 
                 try:
+                    # Cache hit: a row already exists for (photo, variant)
+                    # AND its stored prompt + detector still match the
+                    # current primary detection AND the file is on disk.
+                    # In that case the SAM result is unchanged, so we
+                    # only re-activate the mask (cheap denormalize) and
+                    # skip the heavy SAM + DINOv2 work.
+                    existing = thread_db.get_photo_mask(
+                        photo_id, sam2_variant,
+                    )
+                    if existing is not None:
+                        cached_prompt = (
+                            existing["prompt_x"], existing["prompt_y"],
+                            existing["prompt_w"], existing["prompt_h"],
+                        )
+                        if (existing["detector_model"]
+                                == entry["detector_model"]
+                                and cached_prompt == entry["prompt"]
+                                and existing["path"]
+                                and os.path.isfile(existing["path"])):
+                            thread_db.set_active_mask_variant(
+                                photo_id, sam2_variant,
+                            )
+                            masked += 1
+                            processed = i + 1
+                            continue
+
                     proxy = render_proxy(image_path, longest_edge=proxy_longest_edge)
                     if proxy is None:
                         skipped += 1
@@ -2517,6 +2554,28 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     if _should_abort(abort):
                         break
 
+                    # Per-mask features (move from photos row into
+                    # photo_masks; set_active_mask_variant denormalizes
+                    # them back into photos for downstream readers).
+                    mask_subject_tenengrad = features.pop(
+                        "subject_tenengrad", None,
+                    )
+                    mask_bg_tenengrad = features.pop("bg_tenengrad", None)
+                    # Mask-derived subject_size: fraction of frame
+                    # covered by the boolean mask. Replaces the
+                    # detection-bbox approximation classify uses.
+                    try:
+                        import numpy as _np
+                        total_pixels = float(mask.size)
+                        if total_pixels > 0:
+                            mask_subject_size = float(
+                                _np.count_nonzero(mask) / total_pixels
+                            )
+                        else:
+                            mask_subject_size = None
+                    except Exception:
+                        mask_subject_size = None
+
                     subject_crop = crop_subject(proxy, mask, margin=0.15)
                     if subject_crop is not None:
                         embs = embed_batch(
@@ -2530,10 +2589,32 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             embed(proxy, variant=dinov2_variant),
                         )
 
-                    thread_db.update_photo_pipeline_features(
-                        photo_id, mask_path=mask_path, crop_complete=completeness,
-                        **features,
+                    thread_db.upsert_photo_mask(
+                        photo_id=photo_id,
+                        variant=sam2_variant,
+                        path=mask_path,
+                        detector_model=entry["detector_model"],
+                        prompt_x=entry["prompt"][0],
+                        prompt_y=entry["prompt"][1],
+                        prompt_w=entry["prompt"][2],
+                        prompt_h=entry["prompt"][3],
+                        subject_size=mask_subject_size,
+                        subject_tenengrad=mask_subject_tenengrad,
+                        bg_tenengrad=mask_bg_tenengrad,
+                        crop_complete=completeness,
                     )
+                    thread_db.set_active_mask_variant(
+                        photo_id, sam2_variant,
+                    )
+                    # Remaining (non-mask) per-photo features still land
+                    # on the photos row.  mask_path / crop_complete /
+                    # subject_tenengrad / bg_tenengrad now flow via
+                    # set_active_mask_variant above, so they are
+                    # intentionally NOT passed here.
+                    if features:
+                        thread_db.update_photo_pipeline_features(
+                            photo_id, **features,
+                        )
                     thread_db.update_photo_embeddings(
                         photo_id,
                         dino_subject_embedding=subj_emb_blob,

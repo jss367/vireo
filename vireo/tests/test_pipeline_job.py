@@ -6255,6 +6255,406 @@ def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
     )
 
 
+# ---------------------------------------------------------------------------
+# extract_masks per-variant cache (photo_masks)
+#
+# Phase 2 of the SAM mask history plan stops the masking stage from re-running
+# SAM when a row already exists in `photo_masks` for (photo, configured
+# variant) AND its stored prompt + detector still matches the photo's current
+# primary detection.  Three regression tests pin the contract:
+#
+#   - cached_with_same_prompt → generate_mask NOT called, photo_masks
+#     unchanged, masked counter still increments (cache hit is a successful
+#     outcome, not a "skipped" SAM failure).
+#   - variant_differs → switching `pipeline.sam2_variant` re-runs SAM, leaves
+#     the previous variant's row in place, adds a new row.
+#   - prompt_changed → if the detection bbox shifts (e.g. YOLO re-run with a
+#     different threshold), the cached row is replaced with the new prompt.
+# ---------------------------------------------------------------------------
+
+
+def _run_extract_masks_for_test(
+    tmp_path, monkeypatch, sam2_variant, photo_specs,
+):
+    """Drive a single pipeline run with extract_masks enabled and the heavy
+    SAM2/DINOv2 calls stubbed.  Returns (db, runner, generate_mask_calls)
+    where generate_mask_calls is a list of (photo_id, variant) tuples
+    capturing every call the patched generate_mask saw.
+
+    `photo_specs` is a list of dicts:
+        [{"filename": "a.jpg", "box": (x, y, w, h), "model": "MegaDetector"}]
+
+    Each photo gets a unique 1x1 mask whose pixel pattern depends on
+    photo_id, so different photos cannot accidentally collide.
+    """
+    import config as cfg
+    import dino_embed
+    import masking
+    import numpy as np
+    import quality
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    cfg.save({
+        "pipeline": {"sam2_variant": sam2_variant, "dinov2_variant": "vit-b14"},
+    })
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+
+    photo_ids = []
+    for spec in photo_specs:
+        pid = db.add_photo(folder_id, spec["filename"], ".jpg", 1000, 1.0)
+        _drop_jpeg(folder_path, spec["filename"])
+        x, y, w, h = spec["box"]
+        db.save_detections(
+            pid,
+            [{"box": {"x": x, "y": y, "w": w, "h": h},
+              "confidence": 0.9, "category": "animal"}],
+            detector_model=spec["model"],
+        )
+        photo_ids.append(pid)
+
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+
+    generate_mask_calls = []
+
+    def fake_render_proxy(image_path, longest_edge=None):
+        return np.zeros((4, 4, 3), dtype=np.uint8)
+
+    def fake_generate_mask(proxy, det_box, variant=None):
+        # Track every (variant, det_box) we get asked about — the cache
+        # short-circuit must skip past this entirely on a hit.
+        generate_mask_calls.append((variant, tuple(sorted(det_box.items()))))
+        return np.ones((4, 4), dtype=bool)
+
+    monkeypatch.setattr(masking, "render_proxy", fake_render_proxy)
+    monkeypatch.setattr(masking, "generate_mask", fake_generate_mask)
+    monkeypatch.setattr(masking, "crop_completeness", lambda m: 0.9)
+    monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
+    monkeypatch.setattr(masking, "ensure_sam2_weights", lambda **k: None)
+    monkeypatch.setattr(
+        quality, "compute_all_quality_features",
+        lambda p, m: {
+            "subject_tenengrad": 1.5,
+            "bg_tenengrad": 0.3,
+            "subject_clip_high": 0.01,
+            "subject_clip_low": 0.01,
+            "subject_y_median": 100.0,
+            "bg_separation": 50.0,
+            "phash_crop": "deadbeef",
+            "noise_estimate": 5.0,
+        },
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed_global",
+        lambda p, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed_subject",
+        lambda c, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
+    monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    return db, runner, generate_mask_calls, photo_ids
+
+
+def test_extract_masks_skips_sam_when_cached_with_same_prompt(
+    tmp_path, monkeypatch,
+):
+    """Second pipeline pass over the same photo + same detection must NOT
+    call generate_mask: the photo_masks row is already there for the
+    configured variant and the cached prompt still matches.  The
+    photo_masks row remains intact (one row, same path)."""
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200),
+            "model": "MegaDetector"}
+
+    db, _, calls_first, photo_ids = _run_extract_masks_for_test(
+        tmp_path, monkeypatch, "sam2-small", [spec],
+    )
+    pid = photo_ids[0]
+    assert len(calls_first) == 1, (
+        f"first run should call generate_mask once; got {calls_first}"
+    )
+    rows_first = db.list_masks_for_photo(pid)
+    assert len(rows_first) == 1
+    assert rows_first[0]["variant"] == "sam2-small"
+    first_path = rows_first[0]["path"]
+
+    # Re-run the stage in the same workspace with the same DB.  Reuse the
+    # helper to drive a *second* pass — but we want the same DB, so call
+    # run_pipeline_job again directly.
+    import config as cfg
+    import dino_embed
+    import masking
+    import numpy as np
+    import quality
+
+    calls_second = []
+
+    def fake_generate_mask_2(proxy, det_box, variant=None):
+        calls_second.append((variant, tuple(sorted(det_box.items()))))
+        return np.ones((4, 4), dtype=bool)
+
+    monkeypatch.setattr(
+        masking, "render_proxy",
+        lambda *a, **k: np.zeros((4, 4, 3), dtype=np.uint8),
+    )
+    monkeypatch.setattr(masking, "generate_mask", fake_generate_mask_2)
+    monkeypatch.setattr(masking, "crop_completeness", lambda m: 0.9)
+    monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
+    monkeypatch.setattr(masking, "ensure_sam2_weights", lambda **k: None)
+    monkeypatch.setattr(
+        quality, "compute_all_quality_features",
+        lambda p, m: {
+            "subject_tenengrad": 1.5, "bg_tenengrad": 0.3,
+            "subject_clip_high": 0.01, "subject_clip_low": 0.01,
+            "subject_y_median": 100.0, "bg_separation": 50.0,
+            "phash_crop": "deadbeef", "noise_estimate": 5.0,
+        },
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed_global",
+        lambda p, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed_subject",
+        lambda c, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
+    monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
+
+    cfg.save({
+        "pipeline": {"sam2_variant": "sam2-small", "dinov2_variant": "vit-b14"},
+    })
+    # The mask file must exist on disk for the cache check to fire — the
+    # first run wrote it, but ensure it's still there.
+    assert os.path.isfile(first_path)
+
+    col_id = db.conn.execute(
+        "SELECT id FROM collections ORDER BY id LIMIT 1"
+    ).fetchone()[0]
+    params = PipelineParams(
+        collection_id=col_id, skip_classify=True,
+        skip_extract_masks=False, skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(
+        job, runner, str(tmp_path / "test.db"), db._active_workspace_id, params,
+    )
+
+    assert calls_second == [], (
+        f"cache hit must skip generate_mask entirely; got {calls_second}"
+    )
+    rows_after = db.list_masks_for_photo(pid)
+    assert len(rows_after) == 1
+    assert rows_after[0]["path"] == first_path
+
+
+def test_extract_masks_runs_for_new_variant_keeps_old(tmp_path, monkeypatch):
+    """A first pass with sam2-small writes one row; switching the
+    configured variant to sam2-large adds a second row — both
+    variants for the photo are listed in photo_masks.  Active variant
+    on the photos row tracks the most recent run."""
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200),
+            "model": "MegaDetector"}
+
+    db, _, calls_first, photo_ids = _run_extract_masks_for_test(
+        tmp_path, monkeypatch, "sam2-small", [spec],
+    )
+    pid = photo_ids[0]
+    assert len(calls_first) == 1
+    assert calls_first[0][0] == "sam2-small"
+
+    rows = db.list_masks_for_photo(pid)
+    assert {r["variant"] for r in rows} == {"sam2-small"}
+
+    # Switch the configured variant.  Re-run.
+    import config as cfg
+    import dino_embed
+    import masking
+    import numpy as np
+    import quality
+
+    cfg.save({
+        "pipeline": {"sam2_variant": "sam2-large", "dinov2_variant": "vit-b14"},
+    })
+
+    calls_second = []
+
+    def fake_generate_mask_2(proxy, det_box, variant=None):
+        calls_second.append((variant, tuple(sorted(det_box.items()))))
+        return np.ones((4, 4), dtype=bool)
+
+    monkeypatch.setattr(
+        masking, "render_proxy",
+        lambda *a, **k: np.zeros((4, 4, 3), dtype=np.uint8),
+    )
+    monkeypatch.setattr(masking, "generate_mask", fake_generate_mask_2)
+    monkeypatch.setattr(masking, "crop_completeness", lambda m: 0.9)
+    monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
+    monkeypatch.setattr(masking, "ensure_sam2_weights", lambda **k: None)
+    monkeypatch.setattr(
+        quality, "compute_all_quality_features",
+        lambda p, m: {
+            "subject_tenengrad": 2.0, "bg_tenengrad": 0.4,
+            "subject_clip_high": 0.0, "subject_clip_low": 0.0,
+            "subject_y_median": 110.0, "bg_separation": 60.0,
+            "phash_crop": "cafef00d", "noise_estimate": 5.0,
+        },
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed_global",
+        lambda p, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed_subject",
+        lambda c, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
+    monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
+
+    col_id = db.conn.execute(
+        "SELECT id FROM collections ORDER BY id LIMIT 1"
+    ).fetchone()[0]
+    params = PipelineParams(
+        collection_id=col_id, skip_classify=True,
+        skip_extract_masks=False, skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(
+        job, runner, str(tmp_path / "test.db"), db._active_workspace_id, params,
+    )
+
+    assert len(calls_second) == 1 and calls_second[0][0] == "sam2-large", (
+        f"new variant must trigger generate_mask once for sam2-large; "
+        f"got {calls_second}"
+    )
+    rows = db.list_masks_for_photo(pid)
+    assert {r["variant"] for r in rows} == {"sam2-small", "sam2-large"}, (
+        f"expected both variants present after re-run; got {rows}"
+    )
+    active = db.conn.execute(
+        "SELECT active_mask_variant FROM photos WHERE id=?", (pid,),
+    ).fetchone()[0]
+    assert active == "sam2-large"
+
+
+def test_extract_masks_re_runs_when_prompt_changed(tmp_path, monkeypatch):
+    """If the photo's primary detection's bbox changes between runs, the
+    cached photo_masks row's prompt no longer matches and SAM has to
+    re-run.  The row is replaced with the new prompt + path; the
+    photo_masks set still has exactly one row for that variant."""
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200),
+            "model": "MegaDetector"}
+
+    db, _, calls_first, photo_ids = _run_extract_masks_for_test(
+        tmp_path, monkeypatch, "sam2-small", [spec],
+    )
+    pid = photo_ids[0]
+    assert len(calls_first) == 1
+    rows = db.list_masks_for_photo(pid)
+    assert len(rows) == 1
+    assert (rows[0]["prompt_x"], rows[0]["prompt_w"]) == (10, 100)
+
+    # Mutate the detection so it carries a new bbox (mimics YOLO re-run
+    # with a different confidence threshold producing a slightly
+    # different box).
+    db.conn.execute(
+        "UPDATE detections SET box_x = 99 WHERE photo_id=?", (pid,),
+    )
+    db.conn.commit()
+
+    # Re-run — generate_mask must be called and the row must be replaced.
+    import config as cfg
+    import dino_embed
+    import masking
+    import numpy as np
+    import quality
+
+    cfg.save({
+        "pipeline": {"sam2_variant": "sam2-small", "dinov2_variant": "vit-b14"},
+    })
+
+    calls_second = []
+
+    def fake_generate_mask_2(proxy, det_box, variant=None):
+        calls_second.append((variant, tuple(sorted(det_box.items()))))
+        return np.ones((4, 4), dtype=bool)
+
+    monkeypatch.setattr(
+        masking, "render_proxy",
+        lambda *a, **k: np.zeros((4, 4, 3), dtype=np.uint8),
+    )
+    monkeypatch.setattr(masking, "generate_mask", fake_generate_mask_2)
+    monkeypatch.setattr(masking, "crop_completeness", lambda m: 0.95)
+    monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
+    monkeypatch.setattr(masking, "ensure_sam2_weights", lambda **k: None)
+    monkeypatch.setattr(
+        quality, "compute_all_quality_features",
+        lambda p, m: {
+            "subject_tenengrad": 1.5, "bg_tenengrad": 0.3,
+            "subject_clip_high": 0.01, "subject_clip_low": 0.01,
+            "subject_y_median": 100.0, "bg_separation": 50.0,
+            "phash_crop": "deadbeef", "noise_estimate": 5.0,
+        },
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed_global",
+        lambda p, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed_subject",
+        lambda c, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
+    monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
+
+    col_id = db.conn.execute(
+        "SELECT id FROM collections ORDER BY id LIMIT 1"
+    ).fetchone()[0]
+    params = PipelineParams(
+        collection_id=col_id, skip_classify=True,
+        skip_extract_masks=False, skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(
+        job, runner, str(tmp_path / "test.db"), db._active_workspace_id, params,
+    )
+
+    assert len(calls_second) == 1, (
+        f"prompt change must re-run generate_mask; got {calls_second}"
+    )
+    rows_after = db.list_masks_for_photo(pid)
+    assert len(rows_after) == 1, (
+        f"row should be replaced (upsert), not duplicated; got {rows_after}"
+    )
+    assert rows_after[0]["prompt_x"] == 99
+
+
 def test_pipeline_eye_keypoints_cancel_marks_stage_cancelled(
     tmp_path, monkeypatch,
 ):
