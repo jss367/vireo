@@ -2577,6 +2577,131 @@ class Database:
             "sharpness": row["sharpness"] or 0,
         }
 
+    def pipeline_stage_counts(self):
+        """Per-stage counts for the active workspace, used by the pipeline
+        page to render accurate "Will run / Resume / Already done /
+        Outdated" pills. See docs/plans/2026-05-01-pipeline-status-makeover-design.md.
+
+        Extract is intentionally omitted - that block depends on PR #736
+        (per-variant photo_masks) and lands in Phase 3.
+        """
+        import config as cfg
+        from pipeline import EYE_KP_FINGERPRINT_VERSION, compute_group_fingerprint
+        ws = self._ws_id()
+        effective = self.get_effective_config(cfg.load())
+        min_conf = effective.get("detector_confidence", 0.2)
+
+        # eligible_total + scan.done + previews.done in one pass
+        scan_row = self.conn.execute(
+            """SELECT
+                  COUNT(*) AS eligible,
+                  SUM(CASE WHEN p.timestamp IS NOT NULL AND p.width IS NOT NULL
+                           THEN 1 ELSE 0 END) AS scan_done,
+                  SUM(CASE WHEN p.thumb_path IS NOT NULL THEN 1 ELSE 0 END) AS previews_done
+               FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+              WHERE wf.workspace_id = ?""",
+            (ws,),
+        ).fetchone()
+        eligible = scan_row["eligible"] or 0
+
+        # detect.done - distinct photos with at least one above-threshold non-full-image
+        # detection in this workspace.
+        detect_done = self.conn.execute(
+            """SELECT COUNT(DISTINCT d.photo_id)
+                 FROM detections d
+                 JOIN photos p ON p.id = d.photo_id
+                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                WHERE wf.workspace_id = ?
+                  AND d.detector_confidence >= ?
+                  AND d.detector_model != 'full-image'""",
+            (ws, min_conf),
+        ).fetchone()[0] or 0
+
+        # classify.done / .stale - uses classifier_runs + current model + fp.
+        # If the user has never selected a classifier model the count is 0;
+        # the UI then renders "Will run" naturally.
+        pipe_cfg = effective.get("pipeline", {})
+        cur_model = pipe_cfg.get("classifier_model", "")
+        cur_labels_fp = pipe_cfg.get("labels_fingerprint", "")  # set by classifier loader
+        classify_done = 0
+        classify_stale = 0
+        if cur_model and cur_labels_fp:
+            classify_done = self.conn.execute(
+                """SELECT COUNT(DISTINCT d.photo_id)
+                     FROM detections d
+                     JOIN classifier_runs cr ON cr.detection_id = d.id
+                     JOIN photos p ON p.id = d.photo_id
+                     JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    WHERE wf.workspace_id = ?
+                      AND cr.classifier_model = ?
+                      AND cr.labels_fingerprint = ?
+                      AND d.detector_confidence >= ?
+                      AND d.detector_model != 'full-image'""",
+                (ws, cur_model, cur_labels_fp, min_conf),
+            ).fetchone()[0] or 0
+            classify_stale = self.conn.execute(
+                """SELECT COUNT(DISTINCT d.photo_id)
+                     FROM detections d
+                     JOIN classifier_runs cr ON cr.detection_id = d.id
+                     JOIN photos p ON p.id = d.photo_id
+                     JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    WHERE wf.workspace_id = ?
+                      AND (cr.classifier_model != ? OR cr.labels_fingerprint != ?)
+                      AND d.detector_confidence >= ?
+                      AND d.detector_model != 'full-image'""",
+                (ws, cur_model, cur_labels_fp, min_conf),
+            ).fetchone()[0] or 0
+            # Phase 1 approximation: subtract done from stale to avoid
+            # double-counting photos with both matching and non-matching runs.
+            # May undercount when a photo has BOTH (rare); acceptable here
+            # because the UI only uses these for coarse "outdated?" signals.
+            classify_stale = max(0, classify_stale - classify_done)
+
+        # eye_kp.done / .stale
+        eye_done = self.conn.execute(
+            """SELECT COUNT(*)
+                 FROM photos p
+                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                WHERE wf.workspace_id = ?
+                  AND p.eye_tenengrad IS NOT NULL
+                  AND p.eye_kp_fingerprint = ?""",
+            (ws, EYE_KP_FINGERPRINT_VERSION),
+        ).fetchone()[0] or 0
+        eye_stale = self.conn.execute(
+            """SELECT COUNT(*)
+                 FROM photos p
+                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                WHERE wf.workspace_id = ?
+                  AND p.eye_tenengrad IS NOT NULL
+                  AND (p.eye_kp_fingerprint IS NULL OR p.eye_kp_fingerprint != ?)""",
+            (ws, EYE_KP_FINGERPRINT_VERSION),
+        ).fetchone()[0] or 0
+
+        # group state
+        gs_row = self.conn.execute(
+            "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
+            (ws,),
+        ).fetchone()
+        cur_group_fp = compute_group_fingerprint(effective)
+        last_at = gs_row["last_grouped_at"] if gs_row else None
+        last_fp = gs_row["last_group_fingerprint"] if gs_row else None
+        group_computed = last_fp is not None
+        group_stale = group_computed and last_fp != cur_group_fp
+
+        return {
+            "scan":     {"done": scan_row["scan_done"] or 0,    "stale": 0, "eligible_total": eligible, "total": eligible},
+            "previews": {"done": scan_row["previews_done"] or 0, "stale": 0, "eligible_total": eligible, "total": eligible},
+            "detect":   {"done": detect_done, "stale": 0, "eligible_total": eligible, "total": eligible,
+                         "fingerprint": "megadetector-v6"},
+            "classify": {"done": classify_done, "stale": classify_stale, "eligible_total": eligible, "total": eligible,
+                         "fingerprint": f"{cur_model}|{cur_labels_fp}" if cur_model else None},
+            "eye_kp":   {"done": eye_done, "stale": eye_stale, "eligible_total": eligible, "total": eligible,
+                         "fingerprint": EYE_KP_FINGERPRINT_VERSION},
+            "group":    {"computed": group_computed, "stale": group_stale,
+                         "last_at": last_at, "fingerprint": cur_group_fp},
+        }
+
     def get_dashboard_stats(self):
         """Return aggregate statistics for the dashboard."""
         ws = self._ws_id()

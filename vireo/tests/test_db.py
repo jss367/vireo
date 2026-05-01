@@ -9832,3 +9832,86 @@ def test_set_workspace_group_state_overwrites(tmp_path):
     ).fetchone()
     assert row["last_grouped_at"] == 2
     assert row["last_group_fingerprint"] == "new"
+
+
+def test_pipeline_stage_counts_empty_workspace(tmp_path):
+    """Fresh workspace, no photos: every stage shows zeros."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    out = db.pipeline_stage_counts()
+    assert out["scan"]["done"] == 0
+    assert out["scan"]["eligible_total"] == 0
+    assert out["previews"]["done"] == 0
+    assert out["detect"]["done"] == 0
+    assert out["classify"]["done"] == 0
+    assert out["eye_kp"]["done"] == 0
+    assert out["group"]["computed"] is False
+    assert out["group"]["last_at"] is None
+    assert "extract" not in out  # deferred to Phase 3
+
+
+def test_pipeline_stage_counts_scan_and_previews(tmp_path):
+    """scan.done counts photos with timestamp + width;
+    previews.done counts photos with thumb_path."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    fid = 1
+    ws_id = db._active_workspace_id
+    db.add_workspace_folder(ws_id, fid)
+    # Photo 1: scanned (timestamp + width) + has thumb
+    # Photo 2: NOT scanned (NULL timestamp) but has thumb
+    # Photo 3: scanned (timestamp + width) but NO thumb
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename, timestamp, width, thumb_path) "
+        "VALUES (1, ?, 'a.jpg', '2026-01-01', 100, '/t/1.jpg'), "
+        "       (2, ?, 'b.jpg', NULL,         100, '/t/2.jpg'), "
+        "       (3, ?, 'c.jpg', '2026-01-01', 100, NULL)",
+        (fid, fid, fid),
+    )
+    db.conn.commit()
+    out = db.pipeline_stage_counts()
+    assert out["scan"]["eligible_total"] == 3
+    assert out["scan"]["done"] == 2            # photos 1 + 3 (timestamp + width)
+    assert out["previews"]["done"] == 2        # photos 1 + 2 (thumb_path)
+    assert out["previews"]["eligible_total"] == 3
+
+
+def test_pipeline_stage_counts_eye_kp_stale(tmp_path):
+    """eye_kp.stale counts rows with eye_tenengrad NOT NULL but
+    eye_kp_fingerprint != current."""
+    from db import Database
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    fid = 1
+    ws_id = db._active_workspace_id
+    db.add_workspace_folder(ws_id, fid)
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename, eye_tenengrad, "
+        "eye_kp_fingerprint) VALUES "
+        "(1, ?, 'a.jpg', 10.0, ?), "                       # done
+        "(2, ?, 'b.jpg', 10.0, 'old-version'), "          # stale
+        "(3, ?, 'c.jpg', NULL, NULL)",                    # neither
+        (fid, EYE_KP_FINGERPRINT_VERSION, fid, fid),
+    )
+    db.conn.commit()
+    out = db.pipeline_stage_counts()
+    assert out["eye_kp"]["done"] == 1
+    assert out["eye_kp"]["stale"] == 1
+
+
+def test_pipeline_stage_counts_group_state(tmp_path):
+    from db import Database
+    from pipeline import compute_group_fingerprint
+    db = Database(str(tmp_path / "v.db"))
+    ws_id = db._active_workspace_id
+    fp = compute_group_fingerprint({})
+    db.set_workspace_group_state(ws_id, fingerprint=fp, when_ts=1714579200)
+    out = db.pipeline_stage_counts()
+    assert out["group"]["computed"] is True
+    assert out["group"]["stale"] is False
+    assert out["group"]["last_at"] == 1714579200
+    db.set_workspace_group_state(ws_id, fingerprint="old", when_ts=1714579200)
+    out2 = db.pipeline_stage_counts()
+    assert out2["group"]["stale"] is True
