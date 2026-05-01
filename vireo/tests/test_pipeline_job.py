@@ -1099,6 +1099,62 @@ def test_pipeline_multi_source_ingest_progress_is_monotonic(tmp_path, monkeypatc
     )
 
 
+def test_progress_lock_held_during_update_stages_push():
+    """`_update_stages` must call `push_event` while holding `_progress_lock`.
+
+    The lock makes (snapshot stages, append event) atomic across pipeline
+    threads. Without it, a thread can build the stages snapshot, get
+    preempted between the dict comprehension and the push_event call, and
+    finally land its stale snapshot after another thread has already
+    pushed events with newer counts — producing a non-monotonic captured
+    sequence (the trailing stale `5` after `10` that flaked
+    test_pipeline_multi_source_ingest_progress_is_monotonic on CI).
+    """
+    import pipeline_job as pj
+
+    seen = []
+
+    class TrackingRunner:
+        def push_event(self, job_id, event_type, data):
+            seen.append(pj._progress_lock.locked())
+
+    stages = {
+        "ingest": {
+            "count": 0, "status": "running", "weight": 1.0, "label": "Ingest",
+        },
+    }
+    pj._update_stages(TrackingRunner(), "job-1", stages)
+
+    assert seen == [True], (
+        "_update_stages must call push_event while holding _progress_lock; "
+        f"got lock-held sequence {seen}"
+    )
+
+
+def test_emit_progress_lock_held_during_push():
+    """The `_emit_progress` helper (used by per-stage cb pushes) must take
+    the same lock so its snapshot+push is atomic with `_update_stages`."""
+    import pipeline_job as pj
+
+    seen = []
+
+    class TrackingRunner:
+        def push_event(self, job_id, event_type, data):
+            seen.append(pj._progress_lock.locked())
+
+    stages = {
+        "ingest": {
+            "count": 5, "status": "running", "weight": 1.0, "label": "Ingest",
+        },
+    }
+    pj._emit_progress(TrackingRunner(), "job-1", stages, "ingest", "Importing")
+
+    assert seen == [True], (
+        "_emit_progress must call push_event while holding _progress_lock; "
+        f"got lock-held sequence {seen}"
+    )
+
+
 def test_pipeline_ingest_updates_step_progress(tmp_path, monkeypatch):
     """Ingest (import) phase should call update_step so the jobs page shows progress."""
     import config as cfg
