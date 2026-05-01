@@ -2985,3 +2985,52 @@ def test_api_serve_mask_rejects_path_traversal(app_and_db):
     # Backslash variants should also fail validation.
     resp = client.get(f"/api/masks/{pid}/sam2..small.png")
     assert resp.status_code == 404
+
+
+def test_api_serve_mask_uses_stored_db_path_for_legacy_filename(app_and_db):
+    """Migrated legacy masks (filename ``{pid}.png``, no variant suffix)
+    must still serve under their backfilled ``variant='unknown'`` row.
+
+    The DB-init backfill inserts a ``photo_masks`` row pointing at the
+    pre-existing ``{pid}.png`` file; reconstructing ``{pid}.unknown.png``
+    would 404 even though the row and file are both present.
+    """
+    import os as _os
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
+    _os.makedirs(masks_dir, exist_ok=True)
+    legacy_path = _os.path.join(masks_dir, f"{pid}.png")
+    with open(legacy_path, "wb") as fh:
+        fh.write(b"LEGACYPNG")
+    db.upsert_photo_mask(
+        photo_id=pid, variant="unknown", path=legacy_path,
+        detector_model="unknown",
+        prompt_x=-1, prompt_y=-1, prompt_w=-1, prompt_h=-1,
+    )
+
+    client = app.test_client()
+    resp = client.get(f"/api/masks/{pid}/unknown.png")
+    assert resp.status_code == 200
+    assert resp.data == b"LEGACYPNG"
+
+
+def test_api_serve_mask_rejects_path_outside_masks_dir(app_and_db, tmp_path):
+    """A DB row whose ``path`` resolves outside the masks dir must 404.
+
+    Defense in depth: even if the file exists and the ``photo_masks`` row
+    looks valid, serving an arbitrary on-disk file from a corrupted /
+    attacker-controlled DB row would be a directory-escape primitive.
+    """
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"SECRET")
+    db.upsert_photo_mask(
+        photo_id=pid, variant="sam2-small", path=str(outside),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+
+    client = app.test_client()
+    resp = client.get(f"/api/masks/{pid}/sam2-small.png")
+    assert resp.status_code == 404

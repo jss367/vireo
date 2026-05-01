@@ -9933,24 +9933,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/masks/<int:pid>/<variant>.png")
     def api_serve_mask(pid, variant):
-        """Serve ``{pid}.{variant}.png`` from the masks directory.
+        """Serve the mask file recorded on the ``photo_masks`` row.
+
+        Reads the stored ``photo_masks.path`` instead of reconstructing
+        ``{pid}.{variant}.png`` so migrated legacy masks (backfilled as
+        ``variant='unknown'`` pointing at the old ``{pid}.png`` filename)
+        remain viewable in the lightbox.
 
         Defense in depth: the variant must (1) match the conservative
-        whitelist regex and (2) correspond to an actual photo_masks row,
-        not just a file on disk. This means an attacker who manages to
-        write a file matching the URL pattern still can't get it served
-        unless we also have a DB row for that (pid, variant).
+        whitelist regex, (2) correspond to an actual ``photo_masks`` row,
+        and (3) the stored path must resolve inside the masks directory
+        (so an attacker-controlled or corrupted DB row can't escape).
         """
         if not _MASK_VARIANT_RE.match(variant):
             return "", 404
         db = _get_db()
-        if db.get_photo_mask(pid, variant) is None:
+        mask = db.get_photo_mask(pid, variant)
+        if mask is None or not mask.get("path"):
             return "", 404
-        masks_dir = os.path.join(os.path.dirname(db_path), "masks")
-        filename = f"{pid}.{variant}.png"
-        if not os.path.isfile(os.path.join(masks_dir, filename)):
+        masks_dir = os.path.realpath(
+            os.path.join(os.path.dirname(db_path), "masks")
+        )
+        abs_path = os.path.realpath(mask["path"])
+        if not (abs_path == masks_dir
+                or abs_path.startswith(masks_dir + os.sep)):
             return "", 404
-        return send_from_directory(masks_dir, filename)
+        if not os.path.isfile(abs_path):
+            return "", 404
+        return send_from_directory(
+            masks_dir, os.path.relpath(abs_path, masks_dir)
+        )
 
     @app.route("/api/pipeline/reflow", methods=["POST"])
     def api_pipeline_reflow():
