@@ -9737,3 +9737,9 @@ def test_photo_masks_pk_is_photo_and_variant(tmp_path):
             "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
             "VALUES (1, 'sam2-small', '/p2', 1, 'unknown', -1, -1, -1, -1)"
         )
+
+
+def test_photos_has_active_mask_variant_column(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("SELECT active_mask_variant FROM photos LIMIT 0")

@@ -256,6 +256,7 @@ class Database:
                 phash_crop               TEXT,
                 noise_estimate           REAL,
                 dino_embedding_variant   TEXT,
+                active_mask_variant      TEXT,
                 focal_length             REAL,
                 burst_id                 TEXT,
                 file_hash                TEXT,
@@ -656,6 +657,12 @@ class Database:
         except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE photos ADD COLUMN working_copy_failed_mtime REAL"
+            )
+        try:
+            self.conn.execute("SELECT active_mask_variant FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos ADD COLUMN active_mask_variant TEXT"
             )
         self.conn.commit()
 
