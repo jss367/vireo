@@ -996,6 +996,18 @@ class Database:
             self.conn.commit()
         return tabs
 
+    def set_workspace_group_state(self, workspace_id, fingerprint, when_ts):
+        """Record that grouping completed for `workspace_id` at `when_ts`
+        with the given `fingerprint`. Pipeline page treats fingerprint
+        mismatch as "Outdated" so the user knows a regroup is pending.
+        """
+        self.conn.execute(
+            "UPDATE workspaces SET last_grouped_at = ?, last_group_fingerprint = ? "
+            "WHERE id = ?",
+            (when_ts, fingerprint, workspace_id),
+        )
+        self.conn.commit()
+
     def set_workspace_active_labels(self, labels_files):
         """Store active_labels in the workspace's config_overrides."""
         ws = self.get_workspace(self._ws_id())

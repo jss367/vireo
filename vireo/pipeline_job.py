@@ -2730,6 +2730,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             cache_dir = os.path.dirname(db_path)
             save_results(results, cache_dir, workspace_id)
 
+            # Stamp the grouping fingerprint + timestamp BEFORE marking the
+            # step completed, so a partial regroup that crashes between here
+            # and update_step doesn't end up labeled "fresh" with a stale fp.
+            from pipeline import compute_group_fingerprint
+            thread_db.set_workspace_group_state(
+                workspace_id=workspace_id,
+                fingerprint=compute_group_fingerprint(effective_cfg),
+                when_ts=int(time.time()),
+            )
+
             stages["regroup"]["status"] = "completed"
             summary_info = results.get("summary", {})
             groups = summary_info.get("groups", "")

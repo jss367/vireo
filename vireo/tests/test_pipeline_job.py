@@ -5786,6 +5786,75 @@ def test_pipeline_miss_stage_skipped_when_regroup_fails(tmp_path, monkeypatch):
         )
 
 
+def test_pipeline_regroup_stamps_workspace_group_fingerprint(tmp_path, monkeypatch):
+    """When regroup_stage completes successfully, last_grouped_at and
+    last_group_fingerprint must be written on the active workspace so the
+    pipeline page can render "fresh" instead of "Outdated"."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Stub run_full_pipeline + save_results so regroup completes deterministically.
+    import pipeline as pipeline_mod
+
+    def _ok_run(photos, config=None):
+        return {"summary": {"groups": 1}, "photos": photos}
+
+    def _no_save(results, cache_dir, workspace_id):
+        return None
+
+    monkeypatch.setattr(pipeline_mod, "run_full_pipeline", _ok_run)
+    monkeypatch.setattr(pipeline_mod, "save_results", _no_save)
+
+    # Regroup uses load_photo_features to decide whether to skip on empty.
+    # Return a single fake photo so the success branch (which stamps the
+    # fingerprint) is exercised rather than the "no photos to group" branch.
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda thread_db, collection_id=None, config=None: [{"id": 1}],
+    )
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        # Regroup must be attempted and succeed.
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    with contextlib.suppress(Exception):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Verify the workspace row now has last_grouped_at + last_group_fingerprint
+    # set to the values that compute_group_fingerprint() yields for this config.
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws_id)
+    row = db2.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
+        (ws_id,),
+    ).fetchone()
+    assert row["last_grouped_at"] is not None, (
+        "regroup completed but workspace fingerprint timestamp was not stamped"
+    )
+    from pipeline import compute_group_fingerprint
+    effective = db2.get_effective_config(cfg.load())
+    assert row["last_group_fingerprint"] == compute_group_fingerprint(effective)
+
+
 # --- Weighted overall progress ---------------------------------------------
 
 def _empty_stages():

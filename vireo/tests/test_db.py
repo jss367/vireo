@@ -9801,3 +9801,34 @@ def test_workspaces_has_group_state_columns(tmp_path):
     db.conn.execute(
         "SELECT last_grouped_at, last_group_fingerprint FROM workspaces LIMIT 0"
     )
+
+
+def test_set_workspace_group_state(tmp_path):
+    """set_workspace_group_state writes both columns atomically."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    # Use Default workspace which Database auto-creates.
+    ws_id = db._active_workspace_id
+    assert ws_id is not None
+    db.set_workspace_group_state(ws_id, fingerprint="abc123", when_ts=1714579200)
+    row = db.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
+        (ws_id,),
+    ).fetchone()
+    assert row["last_grouped_at"] == 1714579200
+    assert row["last_group_fingerprint"] == "abc123"
+
+
+def test_set_workspace_group_state_overwrites(tmp_path):
+    """Calling set_workspace_group_state again replaces both values."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    ws_id = db._active_workspace_id
+    db.set_workspace_group_state(ws_id, fingerprint="old", when_ts=1)
+    db.set_workspace_group_state(ws_id, fingerprint="new", when_ts=2)
+    row = db.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
+        (ws_id,),
+    ).fetchone()
+    assert row["last_grouped_at"] == 2
+    assert row["last_group_fingerprint"] == "new"
