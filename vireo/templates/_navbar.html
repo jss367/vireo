@@ -890,11 +890,25 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .ws-menu-item {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 12px; cursor: pointer; font-size: 13px;
-  color: var(--text-secondary);
+  color: var(--text-secondary); gap: 8px;
 }
 .ws-menu-item:hover { background: var(--bg-tertiary); }
 .ws-menu-item.active { color: var(--accent); }
+.ws-menu-item .ws-item-name {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ws-menu-item .ws-item-right {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+}
 .ws-menu-item .ws-item-check { font-size: 14px; }
+.ws-menu-item .ws-pin-btn {
+  background: none; border: none; padding: 0 2px; cursor: pointer;
+  color: var(--text-muted); font-size: 13px; line-height: 1;
+  opacity: 0; transition: opacity 0.1s;
+}
+.ws-menu-item:hover .ws-pin-btn { opacity: 0.6; }
+.ws-menu-item .ws-pin-btn:hover { opacity: 1 !important; color: var(--accent); }
+.ws-menu-item .ws-pin-btn.is-pinned { opacity: 1; color: var(--accent); }
 .ws-menu-divider { border-top: 1px solid var(--border-primary); margin: 4px 0; }
 .ws-menu-action {
   display: block; width: 100%; text-align: left; background: none; border: none;
@@ -1307,7 +1321,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       <span class="ws-arrow">&#9662;</span>
     </button>
     <div class="ws-menu" id="wsMenu">
-      <div class="ws-menu-header">Workspaces</div>
       <div id="wsMenuList"></div>
       <div class="ws-menu-divider"></div>
       <button class="ws-menu-action" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
@@ -2469,23 +2482,78 @@ function closeWsDropdownOutside(e) {
   }
 }
 
+function renderWsItem(ws, activeId) {
+  var isActive = ws.id === activeId;
+  var isPinned = !!ws.pinned_at;
+  var div = document.createElement('div');
+  div.className = 'ws-menu-item' + (isActive ? ' active' : '');
+  // Title is "Unpin" if pinned, "Pin" if not. Filled star for pinned, outline for unpinned.
+  div.innerHTML =
+    '<span class="ws-item-name">' + wsEscapeHtml(ws.name) + '</span>' +
+    '<span class="ws-item-right">' +
+      (isActive ? '<span class="ws-item-check">&#10003;</span>' : '') +
+      '<button class="ws-pin-btn' + (isPinned ? ' is-pinned' : '') + '" ' +
+        'title="' + (isPinned ? 'Unpin' : 'Pin') + ' workspace" ' +
+        'data-ws-id="' + ws.id + '" data-pinned="' + (isPinned ? '1' : '0') + '">' +
+        (isPinned ? '&#9733;' : '&#9734;') +
+      '</button>' +
+    '</span>';
+  div.onclick = function(e) {
+    // Pin button clicks are handled separately and must not switch workspaces.
+    if (e.target.closest('.ws-pin-btn')) return;
+    switchWorkspace(ws.id, ws.name);
+  };
+  var pinBtn = div.querySelector('.ws-pin-btn');
+  pinBtn.onclick = function(e) {
+    e.stopPropagation();
+    toggleWorkspacePin(ws.id, !isPinned);
+  };
+  return div;
+}
+
 async function loadWorkspaceMenu() {
   try {
     var workspaces = await safeFetch('/api/workspaces', {}, { toast: false });
     var active = await safeFetch('/api/workspaces/active', {}, { toast: false });
     var list = document.getElementById('wsMenuList');
     list.innerHTML = '';
-    workspaces.forEach(function(ws) {
-      var isActive = ws.id === active.id;
-      var div = document.createElement('div');
-      div.className = 'ws-menu-item' + (isActive ? ' active' : '');
-      div.innerHTML = wsEscapeHtml(ws.name) +
-        (isActive ? ' <span class="ws-item-check">&#10003;</span>' : '');
-      div.onclick = function() { switchWorkspace(ws.id, ws.name); };
-      list.appendChild(div);
-    });
+    var pinned = workspaces.filter(function(w) { return !!w.pinned_at; });
+    var unpinned = workspaces.filter(function(w) { return !w.pinned_at; });
+    function addHeader(text) {
+      var h = document.createElement('div');
+      h.className = 'ws-menu-header';
+      h.textContent = text;
+      list.appendChild(h);
+    }
+    if (pinned.length > 0) {
+      addHeader('Pinned');
+      pinned.forEach(function(ws) { list.appendChild(renderWsItem(ws, active.id)); });
+      if (unpinned.length > 0) {
+        var divider = document.createElement('div');
+        divider.className = 'ws-menu-divider';
+        list.appendChild(divider);
+        addHeader('Workspaces');
+      }
+    } else {
+      addHeader('Workspaces');
+    }
+    unpinned.forEach(function(ws) { list.appendChild(renderWsItem(ws, active.id)); });
   } catch(e) {
     console.error('Failed to load workspaces', e);
+  }
+}
+
+async function toggleWorkspacePin(wsId, pinned) {
+  try {
+    await safeFetch('/api/workspaces/' + wsId + '/pin', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ pinned: pinned })
+    }, { toast: false });
+    // Re-render with updated grouping/order.
+    await loadWorkspaceMenu();
+  } catch(e) {
+    console.error('Failed to toggle pin', e);
   }
 }
 

@@ -413,3 +413,63 @@ def test_move_folders_no_target_returns_400(app_and_db):
         "folder_ids": [1],
     })
     assert resp.status_code == 400
+
+
+# ---- Pin / unpin + ordering ----
+
+def test_pin_workspace_sets_pinned_at(app_and_db):
+    """POST /api/workspaces/<id>/pin with {pinned:true} stamps pinned_at."""
+    app, _db = app_and_db
+    client = app.test_client()
+
+    ws_id = client.post("/api/workspaces", json={"name": "Pin Me"}).get_json()["id"]
+    resp = client.post(f"/api/workspaces/{ws_id}/pin", json={"pinned": True})
+    assert resp.status_code == 200
+    assert resp.get_json()["pinned_at"] is not None
+
+
+def test_unpin_workspace_clears_pinned_at(app_and_db):
+    """POST /api/workspaces/<id>/pin with {pinned:false} clears pinned_at."""
+    app, _db = app_and_db
+    client = app.test_client()
+
+    ws_id = client.post("/api/workspaces", json={"name": "Unpin Me"}).get_json()["id"]
+    client.post(f"/api/workspaces/{ws_id}/pin", json={"pinned": True})
+    resp = client.post(f"/api/workspaces/{ws_id}/pin", json={"pinned": False})
+    assert resp.status_code == 200
+    assert resp.get_json()["pinned_at"] is None
+
+
+def test_pin_unknown_workspace_returns_404(app_and_db):
+    app, _db = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/workspaces/999999/pin", json={"pinned": True})
+    assert resp.status_code == 404
+
+
+def test_workspaces_listed_pinned_first_then_alphabetical(app_and_db):
+    """GET /api/workspaces returns pinned items first, alphabetical within
+    each group regardless of creation or last-opened order."""
+    app, _db = app_and_db
+    client = app.test_client()
+
+    # Create unpinned items in non-alphabetical order
+    for n in ["zebra", "apple", "mango"]:
+        client.post("/api/workspaces", json={"name": n})
+
+    # Pin two of them in non-alphabetical order
+    listing = client.get("/api/workspaces").get_json()
+    by_name = {w["name"]: w["id"] for w in listing}
+    client.post(f"/api/workspaces/{by_name['zebra']}/pin", json={"pinned": True})
+    client.post(f"/api/workspaces/{by_name['apple']}/pin", json={"pinned": True})
+
+    listing = client.get("/api/workspaces").get_json()
+    names = [w["name"] for w in listing]
+    # Pinned section first (alphabetical), then unpinned section (alphabetical).
+    pinned_names = [w["name"] for w in listing if w["pinned_at"]]
+    unpinned_names = [w["name"] for w in listing if not w["pinned_at"]]
+    assert pinned_names == sorted(pinned_names, key=str.lower)
+    assert unpinned_names == sorted(unpinned_names, key=str.lower)
+    # All pinned come before any unpinned in the combined order.
+    assert names.index("apple") < names.index("mango")
+    assert names.index("zebra") < names.index("mango")
