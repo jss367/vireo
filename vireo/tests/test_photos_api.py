@@ -3015,6 +3015,55 @@ def test_api_serve_mask_uses_stored_db_path_for_legacy_filename(app_and_db):
     assert resp.data == b"LEGACYPNG"
 
 
+def test_legacy_serve_mask_falls_back_to_active_variant(app_and_db):
+    """``/masks/{pid}.png`` must keep working after variant-aware extraction.
+
+    Callers like ``openInspect`` in pipeline_review.html still request
+    the legacy URL. New masks are written as ``{pid}.{variant}.png`` and
+    the DB ``active_mask_variant`` points at one of them, so the route
+    must look up the active variant and serve from the stored path
+    when the literal ``{pid}.png`` file no longer exists.
+    """
+    import os as _os
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
+    _seed_mask(db, masks_dir, pid, "sam2-small", body=b"ACTIVEPNG")
+    db.set_active_mask_variant(pid, "sam2-small")
+    # No literal `{pid}.png` on disk.
+    assert not _os.path.exists(_os.path.join(masks_dir, f"{pid}.png"))
+
+    client = app.test_client()
+    resp = client.get(f"/masks/{pid}.png")
+    assert resp.status_code == 200
+    assert resp.data == b"ACTIVEPNG"
+
+
+def test_legacy_serve_mask_404_when_no_active_variant(app_and_db):
+    """No file, no active variant → 404 (don't leak by serving any mask)."""
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    client = app.test_client()
+    resp = client.get(f"/masks/{pid}.png")
+    assert resp.status_code == 404
+
+
+def test_legacy_serve_mask_direct_file_still_served(app_and_db):
+    """A literal ``{pid}.png`` on disk (legacy backfill) is served as-is."""
+    import os as _os
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
+    _os.makedirs(masks_dir, exist_ok=True)
+    with open(_os.path.join(masks_dir, f"{pid}.png"), "wb") as fh:
+        fh.write(b"LEGACYDIRECT")
+
+    client = app.test_client()
+    resp = client.get(f"/masks/{pid}.png")
+    assert resp.status_code == 200
+    assert resp.data == b"LEGACYDIRECT"
+
+
 def test_api_serve_mask_rejects_path_outside_masks_dir(app_and_db, tmp_path):
     """A DB row whose ``path`` resolves outside the masks dir must 404.
 

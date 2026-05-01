@@ -2887,15 +2887,24 @@ function _lbLoadMaskVariants(photoId) {
         // No masks for this photo — keep the control hidden.
         return;
       }
-      // Build options: "active" first, then one per variant.
+      // Build options: "active" first, then one per variant. Variant
+      // names come from workspace config and must be treated as
+      // untrusted — render via DOM APIs so a name containing HTML
+      // can't escape into the page as stored DOM XSS.
       var activeLabel = _lbMaskActiveVariant
         ? 'active (' + _lbMaskActiveVariant + ')'
         : 'active (n/a)';
-      var html = '<option value="__active__">' + activeLabel + '</option>';
+      sel.textContent = '';
+      var activeOpt = document.createElement('option');
+      activeOpt.value = '__active__';
+      activeOpt.textContent = activeLabel;
+      sel.appendChild(activeOpt);
       _lbMaskAvailable.forEach(function(v) {
-        html += '<option value="' + v.variant + '">' + v.variant + '</option>';
+        var opt = document.createElement('option');
+        opt.value = v.variant;
+        opt.textContent = v.variant;
+        sel.appendChild(opt);
       });
-      sel.innerHTML = html;
       sel.value = '__active__';
       ctrls.classList.add('has-variants');
       // Apply the default ("active") overlay so the user sees something

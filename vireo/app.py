@@ -9891,11 +9891,40 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/masks/<filename>")
     def serve_mask(filename):
-        """Serve mask PNG files."""
+        """Serve mask PNG files.
+
+        Legacy callers (e.g. ``openInspect`` in pipeline_review.html) still
+        request ``/masks/{photo_id}.png``. Variant-aware extraction now
+        writes ``{photo_id}.{variant}.png``, so when the literal filename
+        isn't on disk and the request looks like ``{photo_id}.png``, fall
+        back to the photo's active mask via ``photo_masks`` so the inspect
+        panel keeps working without a round-trip API call.
+        """
         masks_dir = os.path.join(os.path.dirname(db_path), "masks")
         mask_path = os.path.join(masks_dir, filename)
         if os.path.exists(mask_path):
             return send_from_directory(masks_dir, filename)
+
+        m = re.match(r"^(\d+)\.png$", filename)
+        if m:
+            pid = int(m.group(1))
+            db = _get_db()
+            row = db.conn.execute(
+                "SELECT active_mask_variant FROM photos WHERE id=?", (pid,)
+            ).fetchone()
+            active = row["active_mask_variant"] if row else None
+            if active:
+                mask = db.get_photo_mask(pid, active)
+                if mask and mask.get("path"):
+                    masks_dir_real = os.path.realpath(masks_dir)
+                    abs_path = os.path.realpath(mask["path"])
+                    if (abs_path == masks_dir_real
+                            or abs_path.startswith(masks_dir_real + os.sep)):
+                        if os.path.isfile(abs_path):
+                            return send_from_directory(
+                                masks_dir_real,
+                                os.path.relpath(abs_path, masks_dir_real),
+                            )
         return "", 404
 
     @app.route("/api/photos/<int:pid>/masks")
