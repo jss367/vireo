@@ -6859,6 +6859,97 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_all_below_conf_gate(
     )
 
 
+def test_pipeline_eye_keypoints_stage_aborts_between_keypoint_downloads(
+    tmp_path, monkeypatch,
+):
+    """A cancel that arrives after the first SuperAnimal weights download
+    must short-circuit the second. Without the abort check between models
+    the user waits through tens-to-hundreds of MB of unwanted bandwidth
+    before the stage exits.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    import pipeline_job as pj
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    # One mammal + one bird so the planner queues both variants.
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [
+            {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
+            {"id": pid + 1, "taxonomy_class": "Aves", "species_conf": 0.9},
+        ],
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "detect_eye_keypoints_stage",
+        lambda *a, **k: None,
+    )
+
+    abort_now = [False]
+    downloaded = []
+    import keypoints as _kp_mod
+
+    def _ensure_then_abort(name, progress_callback=None):
+        downloaded.append(name)
+        # Trigger abort the moment the first download "finishes" so the
+        # next iteration's abort check fires.
+        abort_now[0] = True
+        return "/fake/model.onnx"
+
+    monkeypatch.setattr(
+        _kp_mod, "ensure_keypoint_weights", _ensure_then_abort,
+    )
+
+    original_should_abort = pj._should_abort
+
+    def patched_should_abort(event):
+        if abort_now[0]:
+            return True
+        return original_should_abort(event)
+
+    monkeypatch.setattr(pj, "_should_abort", patched_should_abort)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    assert downloaded == ["superanimal-quadruped"], (
+        f"Cancel after the first weights download must short-circuit the "
+        f"second; expected ['superanimal-quadruped'], got {downloaded!r}"
+    )
+
+
 def test_detect_eye_keypoints_stage_honors_abort_check(tmp_path, monkeypatch):
     """detect_eye_keypoints_stage must accept an `abort_check` callable and
     break the per-photo loop the first time it returns True. Without this

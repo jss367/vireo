@@ -2729,10 +2729,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     )
 
                 # Preserve a stable order (quadruped, bird) for tests and
-                # log readability when both variants are needed.
+                # log readability when both variants are needed. Re-check
+                # abort between models so a cancel that arrives after the
+                # first weights download can short-circuit the second
+                # multi-hundred-MB fetch instead of forcing the user to
+                # wait through it.
                 for kp_model in (
                     "superanimal-quadruped", "superanimal-bird",
                 ):
+                    if _should_abort(abort):
+                        break
                     if kp_model in needed_models:
                         kp.ensure_keypoint_weights(
                             kp_model, progress_callback=_dl_progress,
