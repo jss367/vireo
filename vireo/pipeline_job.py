@@ -2671,6 +2671,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             photos_for_stage = thread_db.list_photos_for_eye_keypoint_stage(
                 photo_ids=collection_photo_ids,
             )
+            # Defensive second filter: when collection_photo_ids is None
+            # (whole-workspace path) the DB query above returned every
+            # eligible row, so excluded IDs would otherwise still influence
+            # the download planner below and trigger weights for variants no
+            # included photo routes to.
+            if params.exclude_photo_ids:
+                photos_for_stage = [
+                    p for p in photos_for_stage
+                    if p["id"] not in params.exclude_photo_ids
+                ]
             total = len(photos_for_stage)
             start_time = time.time()
             processed = {"count": 0}

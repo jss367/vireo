@@ -6950,6 +6950,85 @@ def test_pipeline_eye_keypoints_stage_aborts_between_keypoint_downloads(
     )
 
 
+def test_pipeline_eye_keypoints_stage_excluded_photos_do_not_influence_downloads(
+    tmp_path, monkeypatch,
+):
+    """Photos in params.exclude_photo_ids must not influence which
+    SuperAnimal variants are downloaded. detect_eye_keypoints_stage already
+    skips them per-photo, so pulling weights to satisfy a deselected row
+    wastes bandwidth on a variant that no included photo will use.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    # One bird (kept) + one mammal (excluded). After exclusion, only the
+    # bird variant should be downloaded — the mammal row would route to
+    # quadruped, but it's deselected so that variant is wasted bandwidth.
+    excluded_id = pid + 7
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [
+            {"id": pid, "taxonomy_class": "Aves", "species_conf": 0.9},
+            {"id": excluded_id, "taxonomy_class": "Mammalia",
+             "species_conf": 0.9},
+        ],
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "detect_eye_keypoints_stage",
+        lambda *a, **k: None,
+    )
+
+    downloaded = []
+    import keypoints as _kp_mod
+    monkeypatch.setattr(
+        _kp_mod, "ensure_keypoint_weights",
+        lambda name, progress_callback=None: downloaded.append(name) or "/fake",
+    )
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+        exclude_photo_ids={excluded_id},
+    )
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    assert downloaded == ["superanimal-bird"], (
+        f"Expected only superanimal-bird to download — the mammal row was "
+        f"excluded and shouldn't influence the download planner; "
+        f"got {downloaded!r}"
+    )
+
+
 def test_detect_eye_keypoints_stage_honors_abort_check(tmp_path, monkeypatch):
     """detect_eye_keypoints_stage must accept an `abort_check` callable and
     break the per-photo loop the first time it returns True. Without this
