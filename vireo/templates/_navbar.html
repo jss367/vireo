@@ -4538,7 +4538,7 @@ function formatDuration(seconds) {
       var lastDone = activeJobs.filter(function(j) { return j.status !== 'running'; })[0];
       if (lastDone) {
         container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. Last run: ' +
-          bpEscape(lastDone.type) + ' ' + (lastDone.status === 'completed' ? '\u2713' : '\u2717') +
+          bpEscape(window.formatJobType(lastDone.type)) + ' ' + (lastDone.status === 'completed' ? '\u2713' : '\u2717') +
           ' <a href="/jobs" style="color:var(--accent);text-decoration:none;">View history \u2192</a></div>';
       } else {
         container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. ' +
@@ -4580,7 +4580,7 @@ function formatDuration(seconds) {
       }
       html += '<div class="bp-compact-job" style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;">';
       html += '<span style="width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;"></span>';
-      html += '<span style="font-weight:600;text-transform:capitalize;">' + bpEscape(j.type) + '</span>';
+      html += '<span style="font-weight:600;">' + bpEscape(window.formatJobType(j.type)) + '</span>';
       if (phase) html += '<span style="color:var(--text-muted);">\u2014 ' + bpEscape(phase) + '</span>';
       if (detail) html += '<span style="color:var(--text-muted);font-variant-numeric:tabular-nums;">' + detail + '</span>';
       html += '<a href="/jobs" style="margin-left:auto;color:var(--accent);text-decoration:none;font-size:11px;white-space:nowrap;">View \u2192</a>';
@@ -4602,7 +4602,7 @@ function formatDuration(seconds) {
 
     summary.classList.remove('idle');
     var j = running[0];
-    var text = j.type;
+    var text = window.formatJobType(j.type);
     if (j.progress && j.progress.phase) {
       text += ' — ' + j.progress.phase;
     }
@@ -4682,6 +4682,18 @@ function formatDuration(seconds) {
     div.appendChild(document.createTextNode(String(str)));
     return div.innerHTML;
   }
+
+  // Convert internal job-type identifiers like "new_images_walk" or
+  // "duplicate-scan" into a user-facing label ("New Images Walk", "Duplicate
+  // Scan"). Exposed on window so per-page scripts (e.g. jobs.html) can reuse it.
+  window.formatJobType = function(type) {
+    if (!type) return '';
+    return String(type)
+      .split(/[-_]+/)
+      .filter(function(w) { return w.length > 0; })
+      .map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1); })
+      .join(' ');
+  };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);

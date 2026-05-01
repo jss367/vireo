@@ -295,7 +295,12 @@ class JobRunner:
             if parts:
                 return ", ".join(parts[:3])
 
-        return job["type"] + " " + job["status"]
+        # Final fallback: title-case the job type (e.g. "duplicate-scan" →
+        # "Duplicate Scan") so the summary line is presentable to the user.
+        pretty_type = " ".join(
+            w.capitalize() for w in job["type"].replace("_", " ").replace("-", " ").split()
+        )
+        return f"{pretty_type} {job['status']}"
 
     def get(self, job_id):
         """Get a job by id. Returns a shallow copy so callers don't mutate shared state."""

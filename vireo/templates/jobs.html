@@ -327,7 +327,7 @@
 
     // Header: type, workspace label, status, cancel
     html += '<div class="job-card-header">';
-    html += '<span class="job-detail-title">' + esc(job.type) + '</span>';
+    html += '<span class="job-detail-title">' + esc(window.formatJobType(job.type)) + '</span>';
     if (options.workspaceName) {
       html += '<span class="job-card-workspace">' + esc(options.workspaceName) + '</span>';
     }
@@ -556,7 +556,7 @@
     var current = sel.value;
     sel.innerHTML = '<option value="">All types</option>';
     Object.keys(types).sort().forEach(function(t) {
-      sel.innerHTML += '<option value="' + esc(t) + '">' + esc(t) + '</option>';
+      sel.innerHTML += '<option value="' + esc(t) + '">' + esc(window.formatJobType(t)) + '</option>';
     });
     sel.value = current;
   }
@@ -614,7 +614,7 @@
     var html = '<div class="job-list-item' + selected + '" data-job-id="' + esc(j.id) + '" data-job-source="' + source + '">';
     html += '<div class="job-list-item-header">';
     html += '<span class="job-list-item-dot ' + dot + '"></span>';
-    html += '<span class="job-list-item-type">' + esc(j.type) + '</span>';
+    html += '<span class="job-list-item-type">' + esc(window.formatJobType(j.type)) + '</span>';
     html += '<span class="job-list-item-time">' + time + '</span>';
     html += '</div>';
     if (detail) html += '<div class="job-list-item-detail">' + detail + '</div>';
