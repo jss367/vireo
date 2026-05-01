@@ -10043,6 +10043,53 @@ def test_mask_variants_summary(tmp_path):
     assert summary["sam3-small"]["active_count"] == 0
 
 
+def test_mask_variant_coverage_is_workspace_scoped(tmp_path):
+    """mask_variant_coverage returns per-variant counts of distinct photos
+    in the active workspace that have a row for that variant. Photos
+    outside the workspace are excluded even though photo_masks is global.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    ws_in = db.create_workspace("In")
+    ws_out = db.create_workspace("Out")
+
+    f_in = db.add_folder("/in", name="in")
+    f_out = db.add_folder("/out", name="out")
+    db.add_workspace_folder(ws_in, f_in)
+    db.add_workspace_folder(ws_out, f_out)
+
+    p1 = db.add_photo(folder_id=f_in, filename="a.jpg", extension=".jpg",
+                      file_size=1, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=f_in, filename="b.jpg", extension=".jpg",
+                      file_size=1, file_mtime=1.0)
+    p3 = db.add_photo(folder_id=f_out, filename="c.jpg", extension=".jpg",
+                      file_size=1, file_mtime=1.0)
+
+    db.upsert_photo_mask(p1, "sam2-small", "/p/a.small.png",
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+    db.upsert_photo_mask(p1, "sam2-large", "/p/a.large.png",
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+    db.upsert_photo_mask(p2, "sam2-small", "/p/b.small.png",
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+    # p3 lives outside ws_in — its sam2-large row must NOT be counted.
+    db.upsert_photo_mask(p3, "sam2-large", "/p/c.large.png",
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+
+    db.set_active_mask_variant(p1, "sam2-large")
+
+    db.set_active_workspace(ws_in)
+    cov = {c["variant"]: c for c in db.mask_variant_coverage()}
+    assert cov["sam2-small"]["count"] == 2
+    assert cov["sam2-small"]["active_count"] == 0
+    assert cov["sam2-large"]["count"] == 1  # p3 excluded
+    assert cov["sam2-large"]["active_count"] == 1
+
+    db.set_active_workspace(ws_out)
+    cov_out = {c["variant"]: c for c in db.mask_variant_coverage()}
+    assert cov_out["sam2-large"]["count"] == 1
+    assert "sam2-small" not in cov_out
+
+
 def test_existing_masks_migrate_to_unknown_variant(tmp_path):
     """A photos row with mask_path set on a pre-migration DB gets a
     photo_masks row with variant='unknown' and prompt=-1."""

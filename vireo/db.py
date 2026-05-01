@@ -3790,6 +3790,42 @@ class Database:
         commit_with_retry(self.conn)
         return deleted
 
+    def mask_variant_coverage(self):
+        """Per-variant photo coverage in the **active workspace**.
+
+        photo_masks rows are global (a single mask file is shared across
+        workspaces), but the pipeline page wants workspace-scoped numbers
+        so a user with a small workspace doesn't see counts dominated by
+        photos they can't see. For each variant present in photo_masks,
+        return the count of distinct workspace photos that have a row for
+        that variant, plus the count of those that also have it active.
+
+        Returns: list of dicts {variant, count, active_count} ordered by
+        variant name. Variants with zero workspace photos are omitted.
+        """
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """
+            SELECT pm.variant,
+                   COUNT(DISTINCT pm.photo_id) AS count,
+                   SUM(CASE WHEN p.active_mask_variant = pm.variant
+                            THEN 1 ELSE 0 END) AS active_count
+              FROM photo_masks pm
+              JOIN photos p ON p.id = pm.photo_id
+              JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+             WHERE wf.workspace_id = ?
+             GROUP BY pm.variant
+             ORDER BY pm.variant
+            """,
+            (ws,),
+        ).fetchall()
+        return [
+            {"variant": r["variant"],
+             "count": r["count"] or 0,
+             "active_count": r["active_count"] or 0}
+            for r in rows
+        ]
+
     def mask_variants_summary(self):
         """Per-variant summary: count, total bytes (best-effort, sums
         on-disk file sizes), and active_count.

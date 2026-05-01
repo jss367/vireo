@@ -1208,6 +1208,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "proxy_longest_edge": pipeline_cfg.get("proxy_longest_edge", 1536),
                 "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", True),
             },
+            "mask_variant_coverage": db.mask_variant_coverage(),
             "results": results,
             "workspace_overrides": ws_overrides,
             "recent_destinations": effective_cfg.get("ingest", {}).get("recent_destinations", []),
@@ -10164,6 +10165,58 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.update_workspace(db._active_workspace_id, config_overrides=current_overrides)
 
         return jsonify({"pipeline": pipeline_section, "status": "saved"})
+
+    @app.route("/api/pipeline/active-mask-variant", methods=["POST"])
+    def api_pipeline_active_mask_variant():
+        """Switch the active mask variant for every photo in the workspace
+        that has a row for ``variant`` in ``photo_masks``.
+
+        This is the bulk version of ``Database.set_active_mask_variant``:
+        it walks the workspace's photos, finds the ones with a mask row
+        for the requested variant, and denormalizes that variant's
+        path/features into the ``photos`` row so downstream readers
+        (scoring, lightbox overlay) see the new active mask.
+
+        Body: ``{"variant": "<sam2-variant>"}``.
+        Refuses ``"unknown"`` because it's a migration sentinel, not a
+        user-selectable variant.
+        """
+        body = request.get_json(silent=True) or {}
+        variant = (body.get("variant") or "").strip()
+        if not variant:
+            return json_error("variant required")
+        if variant == "unknown":
+            return json_error(
+                "'unknown' is a migration sentinel and cannot be set active",
+                400,
+            )
+        db = _get_db()
+        ws = db._ws_id()
+        rows = db.conn.execute(
+            """
+            SELECT pm.photo_id
+              FROM photo_masks pm
+              JOIN photos p ON p.id = pm.photo_id
+              JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+             WHERE wf.workspace_id = ? AND pm.variant = ?
+            """,
+            (ws, variant),
+        ).fetchall()
+        updated = 0
+        for r in rows:
+            try:
+                db.set_active_mask_variant(r["photo_id"], variant)
+                updated += 1
+            except ValueError:
+                # Race: row was deleted between SELECT and UPDATE. Skip
+                # rather than 500 — the user just asked to "make this the
+                # active variant where possible".
+                continue
+        log.info(
+            "Switched active mask variant to %s for %d workspace photo(s)",
+            variant, updated,
+        )
+        return jsonify({"ok": True, "updated": updated})
 
     @app.route("/api/culling/results")
     def api_culling_results():
