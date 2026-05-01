@@ -2500,7 +2500,10 @@ function renderWsItem(ws, activeId) {
     '</span>';
   div.onclick = function(e) {
     // Pin button clicks are handled separately and must not switch workspaces.
-    if (e.target.closest('.ws-pin-btn')) return;
+    // e.target can be a text node in some browsers; walk up to the nearest Element first.
+    var t = e.target;
+    if (t && t.nodeType !== 1) t = t.parentElement;
+    if (t && t.closest && t.closest('.ws-pin-btn')) return;
     switchWorkspace(ws.id, ws.name);
   };
   var pinBtn = div.querySelector('.ws-pin-btn');
