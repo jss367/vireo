@@ -9918,13 +9918,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if mask and mask.get("path"):
                     masks_dir_real = os.path.realpath(masks_dir)
                     abs_path = os.path.realpath(mask["path"])
-                    if (abs_path == masks_dir_real
-                            or abs_path.startswith(masks_dir_real + os.sep)):
-                        if os.path.isfile(abs_path):
-                            return send_from_directory(
-                                masks_dir_real,
-                                os.path.relpath(abs_path, masks_dir_real),
-                            )
+                    if (
+                        (abs_path == masks_dir_real
+                            or abs_path.startswith(masks_dir_real + os.sep))
+                        and os.path.isfile(abs_path)
+                    ):
+                        return send_from_directory(
+                            masks_dir_real,
+                            os.path.relpath(abs_path, masks_dir_real),
+                        )
         return "", 404
 
     @app.route("/api/photos/<int:pid>/masks")
