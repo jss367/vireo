@@ -3564,7 +3564,13 @@ def _seed_masks(db, tmp_path):
             detector_model="megadetector-v6",
             prompt_x=0, prompt_y=0, prompt_w=10, prompt_h=10,
         )
+    # Both photos get an active variant set: this mirrors what the
+    # pipeline always does after upsert_photo_mask, so the seed reflects
+    # realistic state. delete_inactive_masks now skips photos with NULL
+    # active (the partial-state case) rather than treating them as
+    # entirely-inactive.
     db.set_active_mask_variant(p1, "sam2-small")
+    db.set_active_mask_variant(p2, "sam2-small")
     return masks_dir, p1, p2
 
 
@@ -3581,7 +3587,7 @@ def test_api_storage_masks_returns_summary(app_and_db, tmp_path):
     assert "path" in data
     by_var = {v["variant"]: v for v in data["variants"]}
     assert by_var["sam2-small"]["count"] == 2
-    assert by_var["sam2-small"]["active_count"] == 1
+    assert by_var["sam2-small"]["active_count"] == 2
     assert by_var["sam2-large"]["count"] == 1
     assert by_var["sam2-large"]["active_count"] == 0
     assert data["total_bytes"] == 100 + 200 + 150
@@ -3650,11 +3656,11 @@ def test_api_storage_masks_delete_inactive(app_and_db, tmp_path):
     assert r.status_code == 200
     body = r.get_json()
     assert body["ok"] is True
-    # We seeded 3 rows; only photo1's sam2-small is active. The other two
-    # rows (photo1 sam2-large, photo2 sam2-small) are inactive and removed.
-    assert body["deleted"] == 2
+    # We seeded 3 rows; both photos have sam2-small active. The only
+    # inactive row is photo1's sam2-large.
+    assert body["deleted"] == 1
     n = db.conn.execute("SELECT COUNT(*) FROM photo_masks").fetchone()[0]
-    assert n == 1
+    assert n == 2
 
 
 def test_api_storage_masks_delete_stale(app_and_db, tmp_path):

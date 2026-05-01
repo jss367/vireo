@@ -3727,12 +3727,21 @@ class Database:
 
     def delete_inactive_masks(self):
         """Delete all photo_masks rows + files except the active variant
-        per photo. Returns the number of rows deleted."""
+        per photo. Returns the number of rows deleted.
+
+        Photos whose ``active_mask_variant IS NULL`` are skipped entirely
+        (we never delete the only mask we know about). The user must
+        promote a variant to active first via the pipeline page; the
+        sentinel migration variant ``'unknown'`` is set as active for
+        legacy photos, so this is only the partial-state case where a
+        prior pipeline run wrote ``photo_masks`` but crashed before
+        ``set_active_mask_variant`` ran.
+        """
         rows = self.conn.execute(
             "SELECT pm.photo_id, pm.variant, pm.path FROM photo_masks pm "
             "JOIN photos p ON p.id = pm.photo_id "
-            "WHERE p.active_mask_variant IS NULL "
-            "   OR p.active_mask_variant != pm.variant"
+            "WHERE p.active_mask_variant IS NOT NULL "
+            "  AND p.active_mask_variant != pm.variant"
         ).fetchall()
         for r in rows:
             try:

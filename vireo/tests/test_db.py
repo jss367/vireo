@@ -9945,6 +9945,33 @@ def test_delete_inactive_masks(tmp_path):
     assert remaining == {"sam2-large"}
 
 
+def test_delete_inactive_masks_skips_photos_with_no_active(tmp_path):
+    """Photos whose active_mask_variant IS NULL must not lose their
+    masks to delete-inactive: that's the partial-state case where a
+    prior pipeline crashed between upsert_photo_mask and
+    set_active_mask_variant. The user has to promote a variant to
+    active first before the cleanup will touch the photo."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    p = masks_dir / "1.sam2-small.png"
+    p.write_bytes(b"x")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(p),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    # Note: NO set_active_mask_variant call — leaves active NULL.
+    n = db.delete_inactive_masks()
+    assert n == 0
+    assert p.exists()
+    assert {m["variant"] for m in db.list_masks_for_photo(1)} == {"sam2-small"}
+
+
 def test_find_stale_masks(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "v.db"))
