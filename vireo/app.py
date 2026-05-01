@@ -4530,6 +4530,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             }
         )
 
+    @app.route("/api/storage/masks")
+    def api_storage_masks():
+        """Per-variant SAM mask summary (counts, bytes, active counts)
+        plus stale-mask count for the storage dashboard."""
+        db = _get_db()
+        variants = db.mask_variants_summary()
+        stale = db.find_stale_masks()
+        masks_dir = os.path.join(os.path.dirname(db_path), "masks")
+        return jsonify({
+            "variants": variants,
+            "total_bytes": sum(v["bytes"] for v in variants),
+            "stale_count": len(stale),
+            "path": masks_dir,
+        })
+
     @app.route("/api/storage/files")
     def api_storage_files():
         """List individual files in a cache directory."""

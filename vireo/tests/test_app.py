@@ -3531,3 +3531,68 @@ def test_precompute_embeddings_rejects_timm_models(app_and_db, monkeypatch):
     job = runner.get(job_id)
     assert job["status"] == "failed"
     assert any("fixed class head" in e for e in (job.get("errors") or []))
+
+
+# ---------------------------------------------------------------------------
+# /api/storage/masks endpoints
+# ---------------------------------------------------------------------------
+
+def _seed_masks(db, tmp_path):
+    """Insert a few photo_masks rows + on-disk files for storage tests.
+
+    Layout:
+      photo 1: sam2-small (active), sam2-large
+      photo 2: sam2-small
+    Returns the masks directory path.
+    """
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir(exist_ok=True)
+    pids = [r["id"] for r in db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 2"
+    ).fetchall()]
+    p1, p2 = pids[0], pids[1]
+
+    for pid, var, size in [
+        (p1, "sam2-small", 100),
+        (p1, "sam2-large", 200),
+        (p2, "sam2-small", 150),
+    ]:
+        f = masks_dir / f"{pid}.{var}.png"
+        f.write_bytes(b"x" * size)
+        db.upsert_photo_mask(
+            photo_id=pid, variant=var, path=str(f),
+            detector_model="megadetector-v6",
+            prompt_x=0, prompt_y=0, prompt_w=10, prompt_h=10,
+        )
+    db.set_active_mask_variant(p1, "sam2-small")
+    return masks_dir, p1, p2
+
+
+def test_api_storage_masks_returns_summary(app_and_db, tmp_path):
+    app, db = app_and_db
+    _seed_masks(db, tmp_path)
+    client = app.test_client()
+    r = client.get("/api/storage/masks")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert "variants" in data
+    assert "total_bytes" in data
+    assert "stale_count" in data
+    assert "path" in data
+    by_var = {v["variant"]: v for v in data["variants"]}
+    assert by_var["sam2-small"]["count"] == 2
+    assert by_var["sam2-small"]["active_count"] == 1
+    assert by_var["sam2-large"]["count"] == 1
+    assert by_var["sam2-large"]["active_count"] == 0
+    assert data["total_bytes"] == 100 + 200 + 150
+
+
+def test_api_storage_masks_empty(app_and_db):
+    app, _db = app_and_db
+    client = app.test_client()
+    r = client.get("/api/storage/masks")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["variants"] == []
+    assert data["total_bytes"] == 0
+    assert data["stale_count"] == 0
