@@ -11,6 +11,7 @@ import logging.handlers
 import math
 import os
 import queue
+import re
 import subprocess
 import sys
 import time
@@ -9888,6 +9889,60 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if os.path.exists(mask_path):
             return send_from_directory(masks_dir, filename)
         return "", 404
+
+    @app.route("/api/photos/<int:pid>/masks")
+    def api_photo_masks(pid):
+        """List a photo's available SAM mask variants and the active one.
+
+        Powers the lightbox variant-toggle dropdown: the UI fetches this
+        when opening / navigating to a photo and builds one option per
+        returned variant plus a default "active" option.
+        """
+        db = _get_db()
+        masks = db.list_masks_for_photo(pid)
+        row = db.conn.execute(
+            "SELECT active_mask_variant FROM photos WHERE id=?", (pid,)
+        ).fetchone()
+        active = row["active_mask_variant"] if row else None
+        return jsonify({
+            "photo_id": pid,
+            "active": active,
+            "variants": [
+                {
+                    "variant": m["variant"],
+                    "url": f"/api/masks/{pid}/{m['variant']}.png",
+                    "created_at": m["created_at"],
+                }
+                for m in masks
+            ],
+        })
+
+    # Variant strings live in URLs and must not be path-traversal vectors.
+    # Allow only alnum / dash / underscore — covers every variant we
+    # actually emit (sam2-small, sam2-large, sam3-small, unknown) and
+    # excludes `.`, `/`, and `..` outright.
+    _MASK_VARIANT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+    @app.route("/api/masks/<int:pid>/<variant>.png")
+    def api_serve_mask(pid, variant):
+        """Serve ``{pid}.{variant}.png`` from the masks directory.
+
+        Defense in depth: the variant must (1) match the conservative
+        whitelist regex and (2) correspond to an actual photo_masks row,
+        not just a file on disk. This means an attacker who manages to
+        write a file matching the URL pattern still can't get it served
+        unless we also have a DB row for that (pid, variant).
+        """
+        if not _MASK_VARIANT_RE.match(variant):
+            return "", 404
+        db = _get_db()
+        if db.get_photo_mask(pid, variant) is None:
+            return "", 404
+        masks_dir = os.path.join(os.path.dirname(db_path), "masks")
+        filename = f"{pid}.{variant}.png"
+        if not os.path.isfile(os.path.join(masks_dir, filename)):
+            return "", 404
+        return send_from_directory(masks_dir, filename)
 
     @app.route("/api/pipeline/reflow", methods=["POST"])
     def api_pipeline_reflow():

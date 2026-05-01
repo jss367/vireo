@@ -2863,3 +2863,125 @@ def test_post_keyword_link_place_records_edit(app_and_db, monkeypatch):
     entry = post_history[0]
     assert entry["action_type"] == "location_link"
     assert "Central Park" in entry["description"]
+
+
+# --- /api/photos/<id>/masks and /api/masks/<pid>/<variant>.png --------------
+
+def _seed_mask(db, masks_dir, pid, variant, body=b"PNGBYTES"):
+    """Helper: write a mask file on disk and insert a photo_masks row.
+
+    Centralizes the bookkeeping the lightbox-variant tests need so each
+    test only declares what's interesting (which variants exist for which
+    photo, and which one is active).
+    """
+    import os as _os
+    _os.makedirs(masks_dir, exist_ok=True)
+    path = _os.path.join(masks_dir, f"{pid}.{variant}.png")
+    with open(path, "wb") as fh:
+        fh.write(body)
+    db.upsert_photo_mask(
+        photo_id=pid, variant=variant, path=path,
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    return path
+
+
+def test_api_photo_masks_lists_variants_and_active(app_and_db):
+    """GET /api/photos/<id>/masks returns the photo's variants and the active one."""
+    import os as _os
+    app, db = app_and_db
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+    masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
+
+    _seed_mask(db, masks_dir, pid, "sam2-small")
+    _seed_mask(db, masks_dir, pid, "sam2-large")
+    db.set_active_mask_variant(pid, "sam2-large")
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pid}/masks")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["photo_id"] == pid
+    assert data["active"] == "sam2-large"
+    variants = {v["variant"]: v for v in data["variants"]}
+    assert set(variants) == {"sam2-small", "sam2-large"}
+    assert variants["sam2-small"]["url"] == f"/api/masks/{pid}/sam2-small.png"
+    assert "created_at" in variants["sam2-small"]
+
+
+def test_api_photo_masks_empty_when_no_masks(app_and_db):
+    """GET /api/photos/<id>/masks returns an empty list and null active."""
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pid}/masks")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["variants"] == []
+    assert data["active"] is None
+
+
+def test_api_serve_mask_png(app_and_db):
+    """GET /api/masks/<pid>/<variant>.png serves the on-disk mask."""
+    import os as _os
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
+    _seed_mask(db, masks_dir, pid, "sam2-small", body=b"\x89PNGFAKE")
+
+    client = app.test_client()
+    resp = client.get(f"/api/masks/{pid}/sam2-small.png")
+    assert resp.status_code == 200
+    assert resp.data == b"\x89PNGFAKE"
+
+
+def test_api_serve_mask_404_when_no_db_row(app_and_db):
+    """Even if a file matching the pattern is on disk, no row → 404.
+
+    Defense in depth: mask file existence alone must not be enough to
+    serve an arbitrary file matching the URL pattern.
+    """
+    import os as _os
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
+    _os.makedirs(masks_dir, exist_ok=True)
+    # File on disk, but no photo_masks row.
+    with open(_os.path.join(masks_dir, f"{pid}.sam2-small.png"), "wb") as fh:
+        fh.write(b"x")
+
+    client = app.test_client()
+    resp = client.get(f"/api/masks/{pid}/sam2-small.png")
+    assert resp.status_code == 404
+
+
+def test_api_serve_mask_404_when_file_missing(app_and_db):
+    """DB row exists but file missing → 404."""
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    db.upsert_photo_mask(
+        photo_id=pid, variant="sam2-small", path="/nope/missing.png",
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    client = app.test_client()
+    resp = client.get(f"/api/masks/{pid}/sam2-small.png")
+    assert resp.status_code == 404
+
+
+def test_api_serve_mask_rejects_path_traversal(app_and_db):
+    """`..` segments and slashes must not allow escaping the masks dir.
+
+    Flask's int converter on <pid> already blocks tricks at that segment,
+    but the variant segment is a string. Any URL whose variant contains
+    ``..`` or path separators must 404 — never reach the file system.
+    """
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    client = app.test_client()
+    # `..%2F` would decode to `../` — must not let us climb out.
+    resp = client.get(f"/api/masks/{pid}/..%2Fevil.png")
+    assert resp.status_code == 404
+    # Backslash variants should also fail validation.
+    resp = client.get(f"/api/masks/{pid}/sam2..small.png")
+    assert resp.status_code == 404
