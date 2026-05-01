@@ -3596,3 +3596,94 @@ def test_api_storage_masks_empty(app_and_db):
     assert data["variants"] == []
     assert data["total_bytes"] == 0
     assert data["stale_count"] == 0
+
+
+def test_api_storage_masks_delete_variant(app_and_db, tmp_path):
+    app, db = app_and_db
+    masks_dir, _p1, _p2 = _seed_masks(db, tmp_path)
+    client = app.test_client()
+    # sam2-large is not active anywhere — should delete fine.
+    r = client.post(
+        "/api/storage/masks/delete-variant",
+        json={"variant": "sam2-large"},
+    )
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert body["deleted"] == 1
+    # File removed
+    assert not any(p.name.endswith(".sam2-large.png") for p in masks_dir.iterdir())
+    # Row removed
+    n = db.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks WHERE variant='sam2-large'"
+    ).fetchone()[0]
+    assert n == 0
+
+
+def test_api_storage_masks_delete_variant_refuses_active(app_and_db, tmp_path):
+    app, db = app_and_db
+    _seed_masks(db, tmp_path)
+    client = app.test_client()
+    # sam2-small is active for photo 1 — should refuse with 400.
+    r = client.post(
+        "/api/storage/masks/delete-variant",
+        json={"variant": "sam2-small"},
+    )
+    assert r.status_code == 400
+    body = r.get_json()
+    assert "active" in body["error"].lower()
+
+
+def test_api_storage_masks_delete_variant_requires_name(app_and_db):
+    app, _db = app_and_db
+    client = app.test_client()
+    r = client.post("/api/storage/masks/delete-variant", json={})
+    assert r.status_code == 400
+    assert "variant" in r.get_json()["error"].lower()
+
+
+def test_api_storage_masks_delete_inactive(app_and_db, tmp_path):
+    app, db = app_and_db
+    _seed_masks(db, tmp_path)
+    client = app.test_client()
+    r = client.post("/api/storage/masks/delete-inactive")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    # We seeded 3 rows; only photo1's sam2-small is active. The other two
+    # rows (photo1 sam2-large, photo2 sam2-small) are inactive and removed.
+    assert body["deleted"] == 2
+    n = db.conn.execute("SELECT COUNT(*) FROM photo_masks").fetchone()[0]
+    assert n == 1
+
+
+def test_api_storage_masks_delete_stale(app_and_db, tmp_path):
+    app, db = app_and_db
+    masks_dir, p1, _p2 = _seed_masks(db, tmp_path)
+    # Add a detection that matches sam2-small's prompt for p1, so it's not stale.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (?, 'megadetector-v6', 0, 0, 10, 10, 0.9, 'animal')",
+        (p1,),
+    )
+    db.conn.commit()
+    # Add a mask whose prompt does NOT match any detection — stale.
+    f = masks_dir / f"{p1}.sam3-small.png"
+    f.write_bytes(b"x" * 50)
+    db.upsert_photo_mask(
+        photo_id=p1, variant="sam3-small", path=str(f),
+        detector_model="megadetector-v6",
+        prompt_x=999, prompt_y=999, prompt_w=10, prompt_h=10,
+    )
+    client = app.test_client()
+    r = client.post("/api/storage/masks/delete-stale")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert body["deleted"] >= 1
+    # The stale sam3-small row is gone.
+    n = db.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks WHERE variant='sam3-small'"
+    ).fetchone()[0]
+    assert n == 0

@@ -4545,6 +4545,40 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "path": masks_dir,
         })
 
+    @app.route("/api/storage/masks/delete-variant", methods=["POST"])
+    def api_storage_masks_delete_variant():
+        """Delete all photo_masks rows + files for the given variant.
+        Returns 400 when the variant is currently active for any photo.
+        """
+        body = request.get_json(silent=True) or {}
+        variant = body.get("variant", "")
+        if not variant:
+            return json_error("variant required")
+        db = _get_db()
+        try:
+            n = db.delete_masks_for_variant(variant)
+        except ValueError as e:
+            return json_error(str(e), 400)
+        log.info("Deleted %d masks for variant %s", n, variant)
+        return jsonify({"ok": True, "deleted": n})
+
+    @app.route("/api/storage/masks/delete-inactive", methods=["POST"])
+    def api_storage_masks_delete_inactive():
+        """Delete all non-active variant masks across all photos."""
+        db = _get_db()
+        n = db.delete_inactive_masks()
+        log.info("Deleted %d inactive-variant masks", n)
+        return jsonify({"ok": True, "deleted": n})
+
+    @app.route("/api/storage/masks/delete-stale", methods=["POST"])
+    def api_storage_masks_delete_stale():
+        """Delete masks whose stored prompt no longer matches the current
+        primary detection. Skips active variants."""
+        db = _get_db()
+        n = db.delete_stale_masks()
+        log.info("Deleted %d stale masks", n)
+        return jsonify({"ok": True, "deleted": n})
+
     @app.route("/api/storage/files")
     def api_storage_files():
         """List individual files in a cache directory."""
