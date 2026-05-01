@@ -1177,7 +1177,7 @@ def test_navbar_js_fallbacks_match_python_constants():
         f"  Python: {list(DEFAULT_TABS)}"
     )
     assert js_pages == ALL_PAGES, (
-        f"window.NAV_ALL_PAGES in _navbar.html drifted from app.ALL_PAGES."
+        "window.NAV_ALL_PAGES in _navbar.html drifted from app.ALL_PAGES."
     )
 
 
