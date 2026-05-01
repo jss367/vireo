@@ -3005,6 +3005,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return jsonify({"ok": True, "workspace": dict(ws), "restore_path": restore_path})
 
+    @app.route("/api/workspaces/<int:ws_id>/pin", methods=["POST"])
+    def api_pin_workspace(ws_id):
+        db = _get_db()
+        ws = db.get_workspace(ws_id)
+        if not ws:
+            return json_error("Workspace not found", 404)
+        body = request.get_json(silent=True) or {}
+        pinned = body.get("pinned", True)
+        if not isinstance(pinned, bool):
+            return json_error("`pinned` must be a boolean")
+        from datetime import datetime
+        db.update_workspace(
+            ws_id,
+            pinned_at=datetime.now().isoformat() if pinned else None,
+        )
+        return jsonify(dict(db.get_workspace(ws_id)))
+
     @app.route("/api/workspaces/<int:ws_id>/folders", methods=["GET"])
     def api_workspace_folders(ws_id):
         db = _get_db()

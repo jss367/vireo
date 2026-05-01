@@ -319,7 +319,8 @@ class Database:
                 ui_state        TEXT,
                 tabs            TEXT,
                 created_at      TEXT DEFAULT (datetime('now')),
-                last_opened_at  TEXT
+                last_opened_at  TEXT,
+                pinned_at       TEXT
             );
 
             CREATE TABLE IF NOT EXISTS workspace_folders (
@@ -624,6 +625,13 @@ class Database:
             self.conn.execute("ALTER TABLE workspaces DROP COLUMN open_tabs")
         except sqlite3.OperationalError:
             pass  # column already absent (already dropped or fresh schema)
+        # Migration: add `pinned_at` for the alphabetical-with-pinned-on-top
+        # workspace dropdown. NULL means unpinned; an ISO timestamp marks the
+        # workspace as pinned.
+        try:
+            self.conn.execute("SELECT pinned_at FROM workspaces LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE workspaces ADD COLUMN pinned_at TEXT")
         # Migration: working-copy failure markers. Backfill (and the inline
         # scan extraction) record a failure here when extract_working_copy
         # returns False, gated by file_mtime so a user-replaced file retries
@@ -740,13 +748,15 @@ class Database:
         ).fetchone()
 
     def get_workspaces(self):
-        """Return all workspaces ordered by last_opened_at desc."""
+        """Return all workspaces, pinned first then alphabetical."""
         return self.conn.execute(
-            "SELECT * FROM workspaces ORDER BY last_opened_at DESC"
+            "SELECT * FROM workspaces "
+            "ORDER BY (pinned_at IS NULL), LOWER(name)"
         ).fetchall()
 
     def update_workspace(self, workspace_id, name=None, config_overrides=_UNSET,
-                         ui_state=_UNSET, last_opened_at=None):
+                         ui_state=_UNSET, last_opened_at=None,
+                         pinned_at=_UNSET):
         """Update workspace fields. Only provided args are updated.
 
         For config_overrides and ui_state, pass None to clear the value
@@ -766,6 +776,9 @@ class Database:
         if last_opened_at is not None:
             updates.append("last_opened_at = ?")
             params.append(last_opened_at)
+        if pinned_at is not _UNSET:
+            updates.append("pinned_at = ?")
+            params.append(pinned_at)
         if not updates:
             return
         params.append(workspace_id)
