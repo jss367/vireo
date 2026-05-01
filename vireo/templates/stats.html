@@ -802,33 +802,66 @@ function closeMasksModal() {
 }
 
 function renderMasksModalRows() {
+  // Variant names come from workspace pipeline config and must be
+  // treated as untrusted. Build rows via DOM APIs / textContent so a
+  // crafted variant name can't escape into HTML, and so the per-row
+  // Delete button's click handler doesn't break on quote characters
+  // (a JSON-stringified variant inside onclick="..." breaks at the
+  // first inner double quote).
   var rows = document.getElementById('masksModalRows');
+  rows.textContent = '';
   if (!_masksData || (_masksData.variants || []).length === 0) {
-    rows.innerHTML = '<li style="color:var(--text-ghost);font-size:13px;padding:12px 0;">No mask variants present.</li>';
+    var empty = document.createElement('li');
+    empty.style.color = 'var(--text-ghost)';
+    empty.style.fontSize = '13px';
+    empty.style.padding = '12px 0';
+    empty.textContent = 'No mask variants present.';
+    rows.appendChild(empty);
     return;
   }
-  var html = '';
   _masksData.variants.forEach(function(v) {
     var isActive = (v.active_count || 0) > 0;
-    html += '<li class="file-item">';
-    html += '<label style="flex:1;">' +
-      '<strong style="color:var(--text-primary);">' + escapeHtml(v.variant) + '</strong>' +
-      ' <span style="color:var(--text-dim);">&middot; ' + (v.count || 0).toLocaleString() +
-      ' photos &middot; ' + formatBytes(v.bytes || 0) + '</span>';
+    var li = document.createElement('li');
+    li.className = 'file-item';
+
+    var label = document.createElement('label');
+    label.style.flex = '1';
+    var strong = document.createElement('strong');
+    strong.style.color = 'var(--text-primary)';
+    strong.textContent = v.variant;
+    label.appendChild(strong);
+    var meta = document.createElement('span');
+    meta.style.color = 'var(--text-dim)';
+    meta.textContent = ' · ' + (v.count || 0).toLocaleString() +
+      ' photos · ' + formatBytes(v.bytes || 0);
+    label.appendChild(meta);
     if (isActive) {
-      html += ' <span style="font-size:10px;color:var(--accent);margin-left:6px;">[active &middot; ' +
-        (v.active_count || 0).toLocaleString() + ']</span>';
+      var activeTag = document.createElement('span');
+      activeTag.style.fontSize = '10px';
+      activeTag.style.color = 'var(--accent)';
+      activeTag.style.marginLeft = '6px';
+      activeTag.textContent = '[active · ' +
+        (v.active_count || 0).toLocaleString() + ']';
+      label.appendChild(activeTag);
     }
-    html += '</label>';
+    li.appendChild(label);
+
+    var btn = document.createElement('button');
+    btn.className = 'btn-danger';
+    btn.textContent = 'Delete';
     if (isActive) {
-      html += '<button class="btn-danger" disabled title="set another variant active first" ' +
-        'style="opacity:0.4;cursor:default;">Delete</button>';
+      btn.disabled = true;
+      btn.title = 'set another variant active first';
+      btn.style.opacity = '0.4';
+      btn.style.cursor = 'default';
     } else {
-      html += '<button class="btn-danger" onclick="deleteMaskVariant(' + JSON.stringify(v.variant) + ')">Delete</button>';
+      btn.addEventListener('click', function() {
+        deleteMaskVariant(v.variant);
+      });
     }
-    html += '</li>';
+    li.appendChild(btn);
+    rows.appendChild(li);
   });
-  rows.innerHTML = html;
 }
 
 function _showMasksModalError(msg) {
