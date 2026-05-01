@@ -10008,3 +10008,36 @@ def test_delete_stale_masks(tmp_path):
     assert fresh.exists()
     assert not stale_path.exists()
     assert {m["variant"] for m in db.list_masks_for_photo(1)} == {"sam2-small"}
+
+
+def test_mask_variants_summary(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    for pid in (1, 2, 3):
+        db.conn.execute(
+            "INSERT INTO photos(id, folder_id, filename) VALUES (?, 1, ?)",
+            (pid, f"p{pid}.jpg"),
+        )
+    md = tmp_path / "masks"
+    md.mkdir()
+    for pid, var, size in [
+        (1, "sam2-small", 100),
+        (2, "sam2-small", 200),
+        (1, "sam2-large", 500),
+        (3, "sam3-small", 700),
+    ]:
+        p = md / f"{pid}.{var}.png"
+        p.write_bytes(b"x" * size)
+        db.upsert_photo_mask(
+            pid, var, str(p),
+            detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        )
+    db.set_active_mask_variant(1, "sam2-large")
+
+    summary = {s["variant"]: s for s in db.mask_variants_summary()}
+    assert summary["sam2-small"]["count"] == 2
+    assert summary["sam2-small"]["bytes"] == 300
+    assert summary["sam2-large"]["count"] == 1
+    assert summary["sam2-large"]["active_count"] == 1
+    assert summary["sam3-small"]["active_count"] == 0

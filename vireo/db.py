@@ -3747,6 +3747,44 @@ class Database:
         commit_with_retry(self.conn)
         return deleted
 
+    def mask_variants_summary(self):
+        """Per-variant summary: count, total bytes (best-effort, sums
+        on-disk file sizes), and active_count.
+
+        Returns: list of dicts ordered by variant name.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT pm.variant,
+                   COUNT(*) AS count,
+                   SUM(CASE WHEN p.active_mask_variant = pm.variant
+                            THEN 1 ELSE 0 END) AS active_count
+              FROM photo_masks pm
+              JOIN photos p ON p.id = pm.photo_id
+             GROUP BY pm.variant
+             ORDER BY pm.variant
+            """
+        ).fetchall()
+        out = []
+        for r in rows:
+            paths = self.conn.execute(
+                "SELECT path FROM photo_masks WHERE variant=?", (r["variant"],),
+            ).fetchall()
+            total = 0
+            for pr in paths:
+                try:
+                    if pr["path"] and os.path.isfile(pr["path"]):
+                        total += os.path.getsize(pr["path"])
+                except OSError:
+                    pass
+            out.append({
+                "variant": r["variant"],
+                "count": r["count"],
+                "active_count": r["active_count"],
+                "bytes": total,
+            })
+        return out
+
     def upsert_photo_mask(
         self, photo_id, variant, path,
         detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
