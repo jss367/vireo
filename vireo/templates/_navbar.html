@@ -482,6 +482,41 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   pointer-events: none;
   box-sizing: border-box;
 }
+/* SAM mask overlay sits on top of #lightboxImg inside .lightbox-transform
+   so it inherits the same transform (zoom + pan). Pointer-events disabled
+   so click-to-zoom on the underlying image still works. */
+.lb-mask-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  mix-blend-mode: multiply;
+  opacity: 0.5;
+  pointer-events: none;
+  display: none;
+}
+.lb-mask-overlay.show { display: block; }
+.lb-mask-controls {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0,0,0,0.6);
+  border: 1px solid var(--text-faint);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.lb-mask-controls.has-variants { display: inline-flex; }
+.lb-mask-controls select {
+  background: rgba(0,0,0,0.4);
+  color: var(--text-primary);
+  border: 1px solid var(--text-faint);
+  border-radius: 3px;
+  font-size: 12px;
+  padding: 1px 4px;
+}
 /* Crosshair over the detected eye keypoint. Scales with the image via
    position:% — parent .lightbox-transform absorbs the zoom transform. */
 .lb-eye-crosshair {
@@ -2584,6 +2619,7 @@ async function createWorkspace() {
     <span class="lightbox-zoom-badge" id="lightboxZoomBadge" style="display:none;">1:1</span>
     <div class="lightbox-transform" id="lightboxTransform">
       <img id="lightboxImg" src="" alt="">
+      <img id="lightboxMaskOverlay" class="lb-mask-overlay" src="" alt="">
       <div id="lightboxDetections" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
       <div id="lightboxEye" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;"></div>
     </div>
@@ -2594,6 +2630,10 @@ async function createWorkspace() {
     <button id="lightboxToggleBoxes" onclick="event.stopPropagation(); toggleLightboxBoxes();" style="background:rgba(0,0,0,0.6);color:var(--text-secondary);border:1px solid var(--text-faint);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Toggle detection boxes (b)">
       Hide Boxes
     </button>
+    <span class="lb-mask-controls" id="lightboxMaskControls" onclick="event.stopPropagation();" title="SAM mask overlay">
+      <span>Mask:</span>
+      <select id="lightboxMaskSelect" onchange="event.stopPropagation(); _lbOnMaskVariantChange();"></select>
+    </span>
     <button id="lightboxNotWildlife" onclick="event.stopPropagation(); lightboxNotWildlife();" style="background:rgba(0,0,0,0.6);color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Mark as Landscape — drops out of Needs Identification and stops the classifier">
       Not Wildlife
     </button>
@@ -2758,6 +2798,113 @@ function _lbLoadDetections(photoId) {
     .catch(function() {});
 }
 
+/* ---- SAM mask overlay ---------------------------------------------------
+ * The lightbox lets the user A/B-compare SAM mask variants without
+ * changing which one drives downstream scoring. The dropdown defaults
+ * to "active" (whatever photos.active_mask_variant points at) and lists
+ * one option per variant the photo has under photo_masks. Selecting a
+ * variant only swaps the overlay src; it never POSTs back to the server.
+ *
+ * Pages that don't surface masks at all (e.g. browse before the pipeline
+ * has run) still get the lightbox — the dropdown stays hidden until at
+ * least one variant comes back from /api/photos/<id>/masks, mirroring
+ * how the detection-box toggle stays present but inert when there are
+ * no detections.
+ */
+var _lbMaskActiveVariant = null;     // name of the photo's currently-active variant
+var _lbMaskAvailable = [];           // [{variant, url, created_at}, ...]
+
+function _lbResetMaskOverlay() {
+  var img = document.getElementById('lightboxMaskOverlay');
+  if (img) { img.classList.remove('show'); img.removeAttribute('src'); }
+  var ctrls = document.getElementById('lightboxMaskControls');
+  if (ctrls) ctrls.classList.remove('has-variants');
+  var sel = document.getElementById('lightboxMaskSelect');
+  if (sel) sel.innerHTML = '';
+  _lbMaskActiveVariant = null;
+  _lbMaskAvailable = [];
+}
+
+function _lbApplyMaskUrl(url) {
+  // Set the overlay's src and reveal it. If url is empty/null, hide
+  // the overlay (e.g. the photo has no mask for the chosen variant).
+  var img = document.getElementById('lightboxMaskOverlay');
+  if (!img) return;
+  if (!url) {
+    img.classList.remove('show');
+    img.removeAttribute('src');
+    return;
+  }
+  // onerror guards against the file being deleted out from under us
+  // between the /api/photos/<id>/masks call and the GET. The DB row
+  // exists but the file is gone → silently hide instead of leaving a
+  // broken-image icon over the photo.
+  img.onerror = function() { img.classList.remove('show'); };
+  img.onload = function() { img.classList.add('show'); };
+  img.src = url;
+}
+
+function _lbOnMaskVariantChange() {
+  var sel = document.getElementById('lightboxMaskSelect');
+  if (!sel) return;
+  var choice = sel.value;
+  if (choice === '__active__') {
+    if (!_lbMaskActiveVariant) {
+      // No active variant → nothing to overlay.
+      _lbApplyMaskUrl(null);
+      return;
+    }
+    var match = _lbMaskAvailable.find(function(v) {
+      return v.variant === _lbMaskActiveVariant;
+    });
+    _lbApplyMaskUrl(match ? match.url : null);
+    return;
+  }
+  var picked = _lbMaskAvailable.find(function(v) { return v.variant === choice; });
+  _lbApplyMaskUrl(picked ? picked.url : null);
+}
+
+function _lbLoadMaskVariants(photoId) {
+  // Fetch the photo's available mask variants and populate the
+  // dropdown. Defaults the selection to "active" (which displays the
+  // photo's active_mask_variant overlay if one exists).
+  var sel = document.getElementById('lightboxMaskSelect');
+  var ctrls = document.getElementById('lightboxMaskControls');
+  if (!sel || !ctrls) return;
+  // Reset before the async fetch resolves so a fast nav doesn't show
+  // stale options for the previous photo.
+  _lbResetMaskOverlay();
+
+  fetch('/api/photos/' + photoId + '/masks')
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
+      // Bail if the user navigated to a different photo while the
+      // request was in flight.
+      if (!data || _lightboxCurrentId !== photoId) return;
+      _lbMaskActiveVariant = data.active || null;
+      _lbMaskAvailable = data.variants || [];
+      if (_lbMaskAvailable.length === 0) {
+        // No masks for this photo — keep the control hidden.
+        return;
+      }
+      // Build options: "active" first, then one per variant.
+      var activeLabel = _lbMaskActiveVariant
+        ? 'active (' + _lbMaskActiveVariant + ')'
+        : 'active (n/a)';
+      var html = '<option value="__active__">' + activeLabel + '</option>';
+      _lbMaskAvailable.forEach(function(v) {
+        html += '<option value="' + v.variant + '">' + v.variant + '</option>';
+      });
+      sel.innerHTML = html;
+      sel.value = '__active__';
+      ctrls.classList.add('has-variants');
+      // Apply the default ("active") overlay so the user sees something
+      // the moment masks become available.
+      _lbOnMaskVariantChange();
+    })
+    .catch(function() { /* network error → leave control hidden */ });
+}
+
 function openLightbox(photoId, filename, photoList) {
   var alreadyOpen = !!window._lbEscToken;
   if (alreadyOpen) Keymap.popEsc(window._lbEscToken);
@@ -2844,6 +2991,11 @@ function openLightbox(photoId, filename, photoList) {
   // Fetch and render detection bounding boxes
   _lbLoadDetections(photoId);
   _lbApplyBoxesVisibility();
+
+  // Fetch the photo's SAM mask variants and (if any) populate the
+  // overlay-variant dropdown. Hidden when the photo has no masks, so
+  // pages that don't run the pipeline still get the lightbox unchanged.
+  _lbLoadMaskVariants(photoId);
 
   // Show position indicator if navigating a list
   var counter = document.getElementById('lightboxCounter');
@@ -2998,6 +3150,9 @@ function closeLightbox(e) {
   document.getElementById('lightboxZoomBadge').style.display = 'none';
   var detContainer = document.getElementById('lightboxDetections');
   if (detContainer) detContainer.innerHTML = '';
+  // Drop the mask overlay too — otherwise reopening on a photo with
+  // no masks would leave the previous photo's mask painted across it.
+  _lbResetMaskOverlay();
   if (wasOpen) Keymap.unlockBodyScroll();
 }
 
