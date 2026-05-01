@@ -2301,7 +2301,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         try:
             import config as cfg
-            from dino_embed import embed_global, embed_subject, embedding_to_blob
+            from dino_embed import embed, embed_batch, embedding_to_blob
             from masking import (
                 crop_completeness,
                 crop_subject,
@@ -2484,13 +2484,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         break
 
                     subject_crop = crop_subject(proxy, mask, margin=0.15)
-                    subj_emb_blob = None
-                    global_emb_blob = None
                     if subject_crop is not None:
-                        subj_emb = embed_subject(subject_crop, variant=dinov2_variant)
-                        subj_emb_blob = embedding_to_blob(subj_emb)
-                    global_emb = embed_global(proxy, variant=dinov2_variant)
-                    global_emb_blob = embedding_to_blob(global_emb)
+                        embs = embed_batch(
+                            [subject_crop, proxy], variant=dinov2_variant,
+                        )
+                        subj_emb_blob = embedding_to_blob(embs[0])
+                        global_emb_blob = embedding_to_blob(embs[1])
+                    else:
+                        subj_emb_blob = None
+                        global_emb_blob = embedding_to_blob(
+                            embed(proxy, variant=dinov2_variant),
+                        )
 
                     thread_db.update_photo_pipeline_features(
                         photo_id, mask_path=mask_path, crop_complete=completeness,

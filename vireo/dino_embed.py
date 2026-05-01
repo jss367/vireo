@@ -298,21 +298,49 @@ def embed(image, variant="vit-b14"):
     Returns:
         numpy float32 array of shape (embedding_dim,)
     """
+    return embed_batch([image], variant=variant)[0]
+
+
+def embed_batch(images, variant="vit-b14"):
+    """Compute DINOv2 CLS token embeddings for a batch of images in one
+    inference call.
+
+    DINOv2 ONNX is forced onto CPU on Apple Silicon (CoreML crashes on
+    external-data models, see ``onnx_runtime.create_session``). Per-call
+    overhead — preprocessing + ORT session.run setup — is non-trivial, so
+    the pipeline's "subject crop + global proxy" pattern previously paid
+    that cost twice per photo. Batching them into one call cuts that
+    overhead in half.
+
+    Args:
+        images: non-empty list of PIL Images. Each is resized + center
+            cropped to 518x518.
+        variant: DINOv2 model variant.
+
+    Returns:
+        numpy float32 array of shape ``(len(images), embedding_dim)``.
+    """
+    if not images:
+        raise ValueError("embed_batch requires at least one image")
+
     session = _get_dinov2_session(variant)
 
-    input_tensor = onnx_runtime.preprocess_image(
-        image,
-        size=(DINOV2_INPUT_SIZE, DINOV2_INPUT_SIZE),
-        mean=_IMAGENET_MEAN,
-        std=_IMAGENET_STD,
-        center_crop=True,
-    )
+    tensors = [
+        onnx_runtime.preprocess_image(
+            img,
+            size=(DINOV2_INPUT_SIZE, DINOV2_INPUT_SIZE),
+            mean=_IMAGENET_MEAN,
+            std=_IMAGENET_STD,
+            center_crop=True,
+        )
+        for img in images
+    ]
+    batch = np.concatenate(tensors, axis=0)
 
     input_name = session.get_inputs()[0].name
-    outputs = session.run(None, {input_name: input_tensor})
+    outputs = session.run(None, {input_name: batch})
 
-    embedding = outputs[0].squeeze(0)
-    return embedding.astype(np.float32)
+    return outputs[0].astype(np.float32)
 
 
 def embed_subject(crop_image, variant="vit-b14"):

@@ -9061,7 +9061,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
-            from dino_embed import embed_global, embed_subject, embedding_to_blob
+            from dino_embed import embed, embed_batch, embedding_to_blob
             from masking import (
                 crop_completeness,
                 crop_subject,
@@ -9142,15 +9142,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     completeness = crop_completeness(mask)
                     features = compute_all_quality_features(proxy, mask)
 
-                    # Compute DINOv2 embeddings
+                    # Compute DINOv2 embeddings — one batched call when both
+                    # subject and global are needed, since DINOv2 is CPU-only
+                    # for external-data ONNX exports and per-call overhead is
+                    # the bottleneck.
                     subject_crop = crop_subject(proxy, mask, margin=0.15)
-                    subj_emb_blob = None
-                    global_emb_blob = None
                     if subject_crop is not None:
-                        subj_emb = embed_subject(subject_crop, variant=dinov2_variant)
-                        subj_emb_blob = embedding_to_blob(subj_emb)
-                    global_emb = embed_global(proxy, variant=dinov2_variant)
-                    global_emb_blob = embedding_to_blob(global_emb)
+                        embs = embed_batch(
+                            [subject_crop, proxy], variant=dinov2_variant,
+                        )
+                        subj_emb_blob = embedding_to_blob(embs[0])
+                        global_emb_blob = embedding_to_blob(embs[1])
+                    else:
+                        subj_emb_blob = None
+                        global_emb_blob = embedding_to_blob(
+                            embed(proxy, variant=dinov2_variant),
+                        )
 
                     # Update DB with mask path, completeness, features, and embeddings
                     thread_db.update_photo_pipeline_features(

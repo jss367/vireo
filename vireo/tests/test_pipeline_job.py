@@ -6045,12 +6045,12 @@ def _stub_extract_masks_heavy_ops(monkeypatch):
     monkeypatch.setattr(masking, "ensure_sam2_weights", lambda **k: None)
     monkeypatch.setattr(quality, "compute_all_quality_features", lambda p, m: {})
     monkeypatch.setattr(
-        dino_embed, "embed_global",
+        dino_embed, "embed",
         lambda p, variant=None: np.zeros(384, dtype=np.float32),
     )
     monkeypatch.setattr(
-        dino_embed, "embed_subject",
-        lambda c, variant=None: np.zeros(384, dtype=np.float32),
+        dino_embed, "embed_batch",
+        lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32),
     )
     monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
     monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
