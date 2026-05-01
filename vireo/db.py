@@ -3611,6 +3611,20 @@ class Database:
         )
         commit_with_retry(self.conn)
 
+    def get_photo_mask(self, photo_id, variant):
+        row = self.conn.execute(
+            "SELECT * FROM photo_masks WHERE photo_id=? AND variant=?",
+            (photo_id, variant),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_masks_for_photo(self, photo_id):
+        rows = self.conn.execute(
+            "SELECT * FROM photo_masks WHERE photo_id=? ORDER BY created_at DESC",
+            (photo_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def upsert_photo_mask(
         self, photo_id, variant, path,
         detector_model, prompt_x, prompt_y, prompt_w, prompt_h,

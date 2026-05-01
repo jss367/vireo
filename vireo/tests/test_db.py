@@ -9784,3 +9784,41 @@ def test_upsert_photo_mask_inserts_and_replaces(tmp_path):
         "SELECT COUNT(*) FROM photo_masks WHERE photo_id=1 AND variant='sam2-small'"
     ).fetchone()[0]
     assert n == 1
+
+
+def test_get_photo_mask_returns_row_or_none(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    assert db.get_photo_mask(1, "sam2-small") is None
+
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-small", path="/p", detector_model="md",
+        prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
+    )
+    m = db.get_photo_mask(1, "sam2-small")
+    assert m["path"] == "/p"
+    assert m["detector_model"] == "md"
+    assert m["prompt_x"] == 1
+
+
+def test_list_masks_for_photo(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-small", path="/a",
+        detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
+    )
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-large", path="/b",
+        detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
+    )
+    variants = sorted(m["variant"] for m in db.list_masks_for_photo(1))
+    assert variants == ["sam2-large", "sam2-small"]
