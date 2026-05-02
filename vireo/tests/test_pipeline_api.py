@@ -679,3 +679,152 @@ def test_pipeline_rejects_non_integer_snapshot_id(setup, bad_id):
             f"bad snapshot id {bad_id!r} must be rejected with 4xx, "
             f"got {resp.status_code}: {resp.get_json()}"
         )
+
+
+def _seed_workspace_with_masks(db_path):
+    """Build a workspace with two photos and a few mask variants so the
+    pipeline coverage endpoint has something to report."""
+    from db import Database
+    db = Database(db_path)
+    ws_id = db._active_workspace_id  # Default workspace, auto-created
+    fid = db.add_folder("/photos/seed", name="seed")
+    db.add_workspace_folder(ws_id, fid)
+    p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                      file_size=1, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                      file_size=1, file_mtime=1.0)
+    db.upsert_photo_mask(p1, "sam2-small", "/m/a.small.png",
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+    db.upsert_photo_mask(p2, "sam2-small", "/m/b.small.png",
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+    db.upsert_photo_mask(p1, "sam2-large", "/m/a.large.png",
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+    db.set_active_mask_variant(p1, "sam2-small")
+    db.set_active_mask_variant(p2, "sam2-small")
+    db.close()
+    return p1, p2
+
+
+def test_pipeline_page_init_includes_mask_variant_coverage(setup):
+    """page-init exposes mask_variant_coverage so the SAM2 dropdown card
+    can render per-variant counts and an active-variant selector."""
+    app, db_path = setup
+    _seed_workspace_with_masks(db_path)
+
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/page-init")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "mask_variant_coverage" in data
+        cov = {row["variant"]: row for row in data["mask_variant_coverage"]}
+        assert cov["sam2-small"]["count"] == 2
+        assert cov["sam2-small"]["active_count"] == 2
+        assert cov["sam2-large"]["count"] == 1
+        assert cov["sam2-large"]["active_count"] == 0
+
+
+def test_active_mask_variant_endpoint_switches_workspace_photos(setup):
+    """POST /api/pipeline/active-mask-variant flips active_mask_variant on
+    every workspace photo that has a row for the requested variant."""
+    app, db_path = setup
+    p1, p2 = _seed_workspace_with_masks(db_path)
+
+    with app.test_client() as c:
+        resp = c.post(
+            "/api/pipeline/active-mask-variant",
+            json={"variant": "sam2-large"},
+        )
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["ok"] is True
+        # Only p1 has a sam2-large row, so only p1 is updated.
+        assert body["updated"] == 1
+
+        # p2 stays on sam2-small (no sam2-large row to switch to).
+        from db import Database
+        db = Database(db_path)
+        try:
+            row = db.conn.execute(
+                "SELECT id, active_mask_variant FROM photos WHERE id IN (?, ?) "
+                "ORDER BY id",
+                (p1, p2),
+            ).fetchall()
+            by_id = {r["id"]: r["active_mask_variant"] for r in row}
+            assert by_id[p1] == "sam2-large"
+            assert by_id[p2] == "sam2-small"
+        finally:
+            db.close()
+
+
+def test_active_mask_variant_endpoint_is_workspace_scoped(setup):
+    """Switching the active mask variant in workspace A must not affect
+    photos that live in workspace B. ``photo_masks`` and ``photos`` are
+    global tables — the endpoint relies on a workspace_folders join to
+    scope the UPDATE. Regression guard: a buggy version that drops the
+    join would silently flip every photo in the DB.
+    """
+    app, db_path = setup
+
+    from db import Database
+    db = Database(db_path)
+    try:
+        ws_a = db.create_workspace("A")
+        ws_b = db.create_workspace("B")
+
+        f_a = db.add_folder("/a", name="a")
+        f_b = db.add_folder("/b", name="b")
+        db.add_workspace_folder(ws_a, f_a)
+        db.add_workspace_folder(ws_b, f_b)
+
+        p_a = db.add_photo(folder_id=f_a, filename="a.jpg",
+                           extension=".jpg", file_size=1, file_mtime=1.0)
+        p_b = db.add_photo(folder_id=f_b, filename="b.jpg",
+                           extension=".jpg", file_size=1, file_mtime=1.0)
+
+        # Seed the same variant in both workspaces so the only thing
+        # keeping ws_b out of the update is the workspace join.
+        db.upsert_photo_mask(p_a, "sam2-small", "/m/a.small.png",
+            detector_model="md", prompt_x=0, prompt_y=0,
+            prompt_w=0, prompt_h=0)
+        db.upsert_photo_mask(p_b, "sam2-small", "/m/b.small.png",
+            detector_model="md", prompt_x=0, prompt_y=0,
+            prompt_w=0, prompt_h=0)
+
+        # Mark ws_a as the most-recently-opened so a fresh Database()
+        # inside _get_db() picks it as the active workspace.
+        db.update_workspace(ws_b, last_opened_at="2026-01-01T00:00:00")
+        db.update_workspace(ws_a, last_opened_at="2026-05-01T00:00:00")
+    finally:
+        db.close()
+
+    with app.test_client() as c:
+        resp = c.post(
+            "/api/pipeline/active-mask-variant",
+            json={"variant": "sam2-small"},
+        )
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["ok"] is True
+        # Only the workspace-A photo should have been updated.
+        assert body["updated"] == 1
+
+    db = Database(db_path)
+    try:
+        rows = db.conn.execute(
+            "SELECT id, active_mask_variant FROM photos WHERE id IN (?, ?)",
+            (p_a, p_b),
+        ).fetchall()
+        by_id = {r["id"]: r["active_mask_variant"] for r in rows}
+        assert by_id[p_a] == "sam2-small"
+        # ws_b's photo MUST be untouched — it lives in a different
+        # workspace, even though it has the same variant in photo_masks.
+        assert by_id[p_b] is None
+    finally:
+        db.close()
+
+
+def test_active_mask_variant_endpoint_requires_variant(setup):
+    app, _ = setup
+    with app.test_client() as c:
+        resp = c.post("/api/pipeline/active-mask-variant", json={})
+        assert resp.status_code == 400

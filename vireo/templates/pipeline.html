@@ -987,6 +987,11 @@ body { padding-bottom: 36px; }
         </div>
       </div>
       <div class="readiness-panel" id="extractReadinessPanel" style="display:none;"></div>
+      <div id="sam2CoveragePanel" style="display:none;margin-top:8px;font-size:12px;line-height:1.6;">
+        <div style="font-weight:600;color:var(--text-secondary);margin-bottom:4px;">SAM2 mask coverage</div>
+        <div id="sam2CoverageRows" style="display:flex;flex-direction:column;gap:2px;"></div>
+        <div id="sam2CoverageError" style="display:none;color:var(--danger);margin-top:4px;font-size:11px;"></div>
+      </div>
       <span class="status-msg" id="statusExtract"></span>
       <div class="progress-wrap" id="progressExtract" style="display:none;">
         <div class="progress-bar-track"><div class="progress-bar-fill" id="fillExtract"></div></div>
@@ -1155,6 +1160,9 @@ function initPipelinePage() {
       updateCardStates();
       if (typeof updateReadiness === 'function') updateReadiness();
       if (typeof updateExtractReadiness === 'function') updateExtractReadiness();
+      if (typeof renderSam2Coverage === 'function') {
+        renderSam2Coverage(data.mask_variant_coverage || []);
+      }
 
       // Populate recent destinations
       var recents = data.recent_destinations || [];
@@ -3218,6 +3226,106 @@ function renderModelReadiness(label, info, known) {
 // Card 7: Eye Keypoints — SuperAnimal weights are auto-downloaded by
 // pipeline_job.eye_keypoints_stage on first run (mirrors SAM2/DINOv2),
 // so no readiness panel, status polling, or download buttons live here.
+
+// -- SAM2 mask coverage (per-variant counts + active-variant selector) --
+//
+// Powered by /api/pipeline/page-init's mask_variant_coverage payload (a
+// list of {variant, count, active_count} for the active workspace).
+// 'unknown' is a migration sentinel: render with [legacy] tag, no button.
+function renderSam2Coverage(coverage) {
+  var panel = document.getElementById('sam2CoveragePanel');
+  var rowsEl = document.getElementById('sam2CoverageRows');
+  if (!panel || !rowsEl) return;
+  var errEl = document.getElementById('sam2CoverageError');
+  if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+  rowsEl.textContent = '';
+  if (!coverage || coverage.length === 0) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = '';
+  coverage.forEach(function(row) {
+    var line = document.createElement('div');
+    line.style.cssText = 'display:flex;align-items:center;gap:10px;font-variant-numeric:tabular-nums;';
+
+    var name = document.createElement('span');
+    name.style.cssText = 'min-width:120px;color:var(--text-secondary);';
+    name.textContent = row.variant;
+    line.appendChild(name);
+
+    var count = document.createElement('span');
+    count.style.cssText = 'min-width:90px;color:var(--text-dim);';
+    var n = row.count || 0;
+    count.textContent = n.toLocaleString() + ' photo' + (n === 1 ? '' : 's');
+    line.appendChild(count);
+
+    if (row.variant === 'unknown') {
+      // Migration sentinel \u2014 never offer to set it active.
+      var legacyTag = document.createElement('span');
+      legacyTag.style.cssText = 'font-size:10px;color:var(--text-faint);background:color-mix(in srgb, var(--text-faint) 15%, transparent);border-radius:3px;padding:1px 6px;';
+      legacyTag.textContent = 'legacy';
+      line.appendChild(legacyTag);
+    } else if ((row.active_count || 0) >= (row.count || 0) && (row.count || 0) > 0) {
+      // Universally active for this variant in this workspace.
+      var activeTag = document.createElement('span');
+      activeTag.style.cssText = 'font-size:10px;color:var(--accent);background:color-mix(in srgb, var(--accent) 18%, transparent);border-radius:3px;padding:1px 6px;';
+      activeTag.textContent = 'active';
+      line.appendChild(activeTag);
+    } else {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.style.cssText = 'background:none;color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:1px 8px;font-size:11px;cursor:pointer;';
+      btn.textContent = 'Set active';
+      var variantValue = row.variant;  // capture for click closure
+      btn.addEventListener('click', function() { setActiveMaskVariant(variantValue); });
+      line.appendChild(btn);
+      if ((row.active_count || 0) > 0) {
+        var partial = document.createElement('span');
+        partial.style.cssText = 'font-size:11px;color:var(--text-faint);';
+        partial.textContent = '(' + (row.active_count || 0).toLocaleString() + ' already active)';
+        line.appendChild(partial);
+      }
+    }
+    rowsEl.appendChild(line);
+  });
+}
+
+function _showSam2CoverageError(msg) {
+  var errEl = document.getElementById('sam2CoverageError');
+  if (!errEl) return;
+  errEl.textContent = msg;
+  errEl.style.display = '';
+}
+
+async function refreshSam2Coverage() {
+  try {
+    var data = await safeFetch('/api/pipeline/page-init', {}, { toast: false });
+    renderSam2Coverage(data.mask_variant_coverage || []);
+  } catch(e) {
+    _showSam2CoverageError('Failed to load mask coverage');
+  }
+}
+
+async function setActiveMaskVariant(variant) {
+  if (variant === 'unknown') return;  // sentinel, no button rendered
+  try {
+    var resp = await fetch('/api/pipeline/active-mask-variant', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({variant: variant}),
+    });
+    var body = await resp.json();
+    if (!resp.ok) {
+      _showSam2CoverageError(body.error || ('HTTP ' + resp.status));
+      return;
+    }
+  } catch(e) {
+    _showSam2CoverageError(String(e));
+    return;
+  }
+  await refreshSam2Coverage();
+}
+
 
 async function runExtractStep(collectionId) {
   var num = document.getElementById('numExtract');

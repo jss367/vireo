@@ -33,22 +33,6 @@ def test_pipeline_columns_exist(tmp_path):
     assert row is None  # empty table
 
 
-def test_update_photo_mask(tmp_path):
-    """update_photo_mask stores the mask path for a photo."""
-    from db import Database
-
-    db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="root")
-    pid = db.add_photo(fid, "bird.jpg", ".jpg", 100, 1.0)
-
-    db.update_photo_mask(pid, "/masks/1.png")
-
-    row = db.conn.execute(
-        "SELECT mask_path FROM photos WHERE id=?", (pid,)
-    ).fetchone()
-    assert row[0] == "/masks/1.png"
-
-
 # -- update_photo_pipeline_features --
 
 
@@ -102,7 +86,7 @@ def test_get_photos_missing_masks(tmp_path):
     db.save_detections(pid3, [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3}, "confidence": 0.8},
     ], detector_model="megadetector")
-    db.update_photo_mask(pid3, "/masks/3.png")
+    db.update_photo_pipeline_features(pid3, mask_path="/masks/3.png")
 
     photos = db.get_photos_missing_masks()
     assert len(photos) == 1
@@ -120,11 +104,11 @@ def test_mask_save_load_roundtrip(tmp_path):
     mask = np.zeros((100, 150), dtype=bool)
     mask[20:60, 30:90] = True  # rectangular subject
 
-    path = save_mask(mask, masks_dir, photo_id=42)
+    path = save_mask(mask, masks_dir, photo_id=42, variant="sam2-small")
     assert os.path.exists(path)
-    assert path.endswith("42.png")
+    assert path.endswith("42.sam2-small.png")
 
-    loaded = load_mask(masks_dir, photo_id=42)
+    loaded = load_mask(masks_dir, photo_id=42, variant="sam2-small")
     assert loaded is not None
     assert loaded.shape == (100, 150)
     assert loaded.dtype == bool
@@ -135,8 +119,35 @@ def test_load_mask_missing(tmp_path):
     """load_mask returns None when mask file doesn't exist."""
     from masking import load_mask
 
-    result = load_mask(str(tmp_path), photo_id=999)
+    result = load_mask(str(tmp_path), photo_id=999, variant="sam2-small")
     assert result is None
+
+
+def test_save_mask_uses_variant_in_filename(tmp_path):
+    """save_mask writes ``{photo_id}.{variant}.png`` so multiple SAM
+    variants for the same photo coexist on disk."""
+    from masking import save_mask
+
+    mask = np.array([[True, False], [False, True]], dtype=bool)
+    out = save_mask(
+        mask, str(tmp_path), photo_id=42, variant="sam2-large",
+    )
+    assert out == str(tmp_path / "42.sam2-large.png")
+    assert (tmp_path / "42.sam2-large.png").exists()
+
+
+def test_save_mask_per_variant_files_coexist(tmp_path):
+    """Saving the same photo under two different variants leaves both
+    files on disk side-by-side."""
+    from masking import save_mask
+
+    mask = np.zeros((4, 4), dtype=bool)
+    mask[1:3, 1:3] = True
+
+    p_small = save_mask(mask, str(tmp_path), photo_id=7, variant="sam2-small")
+    p_large = save_mask(mask, str(tmp_path), photo_id=7, variant="sam2-large")
+    assert p_small != p_large
+    assert os.path.isfile(p_small) and os.path.isfile(p_large)
 
 
 # -- crop_subject --

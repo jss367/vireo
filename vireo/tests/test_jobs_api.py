@@ -1,3 +1,4 @@
+import json
 import os
 import time
 
@@ -1314,3 +1315,298 @@ def test_pipeline_repair_respects_excluded_photo_ids(
     ).fetchone()
     assert row["timestamp"] is None
     assert row["exif_data"] is None
+
+
+# ---------------------------------------------------------------------------
+# /api/jobs/extract-masks — standalone masking route writes photo_masks rows.
+#
+# Phase 2 of the SAM mask history plan migrated the unified pipeline's
+# masking stage to write photo_masks rows. The standalone route in
+# api_job_extract_masks is a separate code path and must follow the
+# same flow: write a per-variant photo_masks row, denormalize via
+# set_active_mask_variant, and skip SAM when the cached row's prompt
+# still matches the photo's primary detection.
+# ---------------------------------------------------------------------------
+
+
+def _patch_extract_masks_deps(monkeypatch, generate_mask_calls):
+    """Stub out the heavy SAM2 / DINOv2 / proxy / quality modules so the
+    extract-masks route runs deterministically without ONNX weights.
+
+    `generate_mask_calls` is a list mutated in place — every fake
+    generate_mask call appends a (variant, det_box_tuple) tuple. Tests
+    assert against this list to check whether SAM was invoked.
+    """
+    import dino_embed
+    import masking
+    import numpy as np
+    import quality
+
+    def fake_render_proxy(image_path, longest_edge=None):
+        return np.zeros((4, 4, 3), dtype=np.uint8)
+
+    def fake_generate_mask(proxy, det_box, variant=None):
+        generate_mask_calls.append(
+            (variant, tuple(sorted(det_box.items())))
+        )
+        return np.ones((4, 4), dtype=bool)
+
+    monkeypatch.setattr(masking, "render_proxy", fake_render_proxy)
+    monkeypatch.setattr(masking, "generate_mask", fake_generate_mask)
+    monkeypatch.setattr(masking, "crop_completeness", lambda m: 0.9)
+    monkeypatch.setattr(
+        masking, "crop_subject", lambda p, m, margin=0.15: None,
+    )
+    monkeypatch.setattr(
+        quality, "compute_all_quality_features",
+        lambda p, m: {
+            "subject_tenengrad": 1.5,
+            "bg_tenengrad": 0.3,
+            "subject_clip_high": 0.01,
+            "subject_clip_low": 0.01,
+            "subject_y_median": 100.0,
+            "bg_separation": 50.0,
+            "phash_crop": "deadbeef",
+            "noise_estimate": 5.0,
+        },
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed",
+        lambda p, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed_batch",
+        lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32),
+    )
+    monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
+
+
+def _seed_photo_with_detection(db, tmp_path, filename, box, model):
+    """Create a folder + photo + JPEG on disk + a single detection row.
+    Returns the photo_id."""
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = None
+    existing = db.conn.execute(
+        "SELECT id FROM folders WHERE path=?", (folder_path,)
+    ).fetchone()
+    if existing:
+        folder_id = existing["id"]
+    else:
+        folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, filename, ".jpg", 1000, 1.0)
+    Image.new("RGB", (16, 16), "black").save(
+        os.path.join(folder_path, filename)
+    )
+    x, y, w, h = box
+    db.save_detections(
+        pid,
+        [{"box": {"x": x, "y": y, "w": w, "h": h},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model=model,
+    )
+    return pid
+
+
+def test_extract_masks_route_writes_photo_masks_row(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """POSTing /api/jobs/extract-masks must write a photo_masks row for
+    the configured variant with the right prompt, AND set
+    photos.active_mask_variant. Before the Phase 2 fix-up the route
+    only updated photos.mask_path and left photo_masks empty."""
+    import config as cfg
+    cfg.save({
+        "pipeline": {
+            "sam2_variant": "sam2-small",
+            "dinov2_variant": "vit-b14",
+        },
+    })
+
+    app, db = app_and_db
+    pid = _seed_photo_with_detection(
+        db, tmp_path, "bird.jpg", (10, 20, 100, 200), "MegaDetector",
+    )
+
+    calls = []
+    _patch_extract_masks_deps(monkeypatch, calls)
+
+    col_id = db.add_collection(
+        "extract-masks-test",
+        json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/jobs/extract-masks", json={"collection_id": col_id},
+    )
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+    data = wait_for_job_via_client(client, job_id)
+    assert data["status"] == "completed", data
+
+    # SAM was invoked exactly once.
+    assert len(calls) == 1, calls
+
+    # photo_masks row exists with the right variant + prompt.
+    row = db.conn.execute(
+        "SELECT variant, detector_model, prompt_x, prompt_y, "
+        "prompt_w, prompt_h, path FROM photo_masks WHERE photo_id=?",
+        (pid,),
+    ).fetchone()
+    assert row is not None, "photo_masks row must be written"
+    assert row["variant"] == "sam2-small"
+    assert row["detector_model"] == "MegaDetector"
+    assert row["prompt_x"] == 10
+    assert row["prompt_y"] == 20
+    assert row["prompt_w"] == 100
+    assert row["prompt_h"] == 200
+    assert row["path"] and os.path.isfile(row["path"]), (
+        "mask PNG must be on disk"
+    )
+
+    # photos.active_mask_variant was denormalized.
+    pr = db.conn.execute(
+        "SELECT active_mask_variant, mask_path FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert pr["active_mask_variant"] == "sam2-small"
+    assert pr["mask_path"] == row["path"]
+
+
+def test_extract_masks_route_skips_sam_when_cached(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Re-hitting /api/jobs/extract-masks with the same configured
+    variant + unchanged detection prompt must skip generate_mask: the
+    cached photo_masks row is reused and active_mask_variant is
+    re-applied. Before the Phase 2 fix-up the route's `mask_path
+    IS NULL` gate skipped these photos entirely instead, so the cache
+    short-circuit was never tested for this route."""
+    import config as cfg
+    cfg.save({
+        "pipeline": {
+            "sam2_variant": "sam2-small",
+            "dinov2_variant": "vit-b14",
+        },
+    })
+
+    app, db = app_and_db
+    pid = _seed_photo_with_detection(
+        db, tmp_path, "bird.jpg", (10, 20, 100, 200), "MegaDetector",
+    )
+
+    calls = []
+    _patch_extract_masks_deps(monkeypatch, calls)
+
+    col_id = db.add_collection(
+        "extract-masks-cache-test",
+        json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    client = app.test_client()
+
+    # First run: SAM is called once.
+    resp = client.post(
+        "/api/jobs/extract-masks", json={"collection_id": col_id},
+    )
+    assert resp.status_code == 200
+    data = wait_for_job_via_client(
+        client, resp.get_json()["job_id"],
+    )
+    assert data["status"] == "completed"
+    assert len(calls) == 1, (
+        f"first run should call generate_mask once; got {calls}"
+    )
+
+    # Second run with the same config + same detection: SAM must NOT
+    # be called again. The cache hit re-applies active_mask_variant
+    # and counts the photo as masked without re-running SAM.
+    calls.clear()
+    resp2 = client.post(
+        "/api/jobs/extract-masks", json={"collection_id": col_id},
+    )
+    assert resp2.status_code == 200
+    data2 = wait_for_job_via_client(
+        client, resp2.get_json()["job_id"],
+    )
+    assert data2["status"] == "completed"
+    assert calls == [], (
+        f"second run with cached prompt must skip generate_mask; got {calls}"
+    )
+
+    # Still exactly one row for this (photo, variant).
+    n = db.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks "
+        "WHERE photo_id=? AND variant='sam2-small'",
+        (pid,),
+    ).fetchone()[0]
+    assert n == 1
+
+
+def test_extract_masks_route_workspace_branch_respects_detector_confidence(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Without a ``collection_id``, the workspace SQL branch must filter
+    detections by the workspace-effective ``detector_confidence`` floor —
+    matching the collection branch (which goes through
+    ``get_detections``) and the legacy ``get_photos_missing_masks``
+    path. Otherwise SAM/DINO runs on noisy below-threshold boxes and
+    activates masks the user shouldn't see."""
+    import config as cfg
+    cfg.save({
+        "pipeline": {
+            "sam2_variant": "sam2-small",
+            "dinov2_variant": "vit-b14",
+        },
+        "detector_confidence": 0.5,
+    })
+
+    app, db = app_and_db
+
+    # Two photos in the workspace, both with a non-full-image detection.
+    # Photo A's detection clears the 0.5 floor; Photo B's does not.
+    pid_high = _seed_photo_with_detection(
+        db, tmp_path, "above.jpg", (10, 20, 100, 200), "MegaDetector",
+    )
+    pid_low = _seed_photo_with_detection(
+        db, tmp_path, "below.jpg", (30, 40, 80, 90), "MegaDetector",
+    )
+    # _seed_photo_with_detection hardcodes confidence=0.9, so override
+    # the low-confidence row directly.
+    db.conn.execute(
+        "UPDATE detections SET detector_confidence=0.05 WHERE photo_id=?",
+        (pid_low,),
+    )
+    db.conn.commit()
+
+    calls = []
+    _patch_extract_masks_deps(monkeypatch, calls)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/extract-masks", json={})
+    assert resp.status_code == 200
+    data = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert data["status"] == "completed", data
+
+    # SAM was invoked exactly once — for the above-threshold photo only.
+    assert len(calls) == 1, calls
+
+    # photo_masks row exists for the above-threshold photo.
+    high_row = db.conn.execute(
+        "SELECT variant FROM photo_masks WHERE photo_id=?", (pid_high,),
+    ).fetchone()
+    assert high_row is not None, "above-threshold photo must be masked"
+
+    # Below-threshold photo is skipped: no photo_masks row, no
+    # active variant denormalized onto photos.
+    low_row = db.conn.execute(
+        "SELECT variant FROM photo_masks WHERE photo_id=?", (pid_low,),
+    ).fetchone()
+    assert low_row is None, (
+        "below-threshold photo must not get a mask"
+    )
+    low_active = db.conn.execute(
+        "SELECT active_mask_variant FROM photos WHERE id=?", (pid_low,),
+    ).fetchone()
+    assert low_active["active_mask_variant"] is None

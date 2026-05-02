@@ -9699,3 +9699,986 @@ def test_default_tabs_is_the_curated_nine():
         "review", "cull", "jobs",
         "highlights", "misses", "settings",
     ]
+
+
+def test_photo_masks_table_exists(tmp_path):
+    """photo_masks table must exist on a fresh DB."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    cols = {row[1] for row in db.conn.execute(
+        "PRAGMA table_info(photo_masks)"
+    ).fetchall()}
+    assert {
+        "photo_id", "variant", "path", "created_at",
+        "detector_model", "prompt_x", "prompt_y", "prompt_w", "prompt_h",
+        "subject_size", "subject_tenengrad", "bg_tenengrad", "crop_complete",
+    } <= cols
+
+
+def test_photo_masks_pk_is_photo_and_variant(tmp_path):
+    """(photo_id, variant) is the primary key — same variant twice fails."""
+    import sqlite3
+
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (1, 'sam2-small', '/p1', 0, 'unknown', -1, -1, -1, -1)"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db.conn.execute(
+            "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+            "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+            "VALUES (1, 'sam2-small', '/p2', 1, 'unknown', -1, -1, -1, -1)"
+        )
+
+
+def test_photos_has_active_mask_variant_column(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("SELECT active_mask_variant FROM photos LIMIT 0")
+
+
+def test_upsert_photo_mask_inserts_and_replaces(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-small", path="/m/1.sam2-small.png",
+        detector_model="megadetector-v6",
+        prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
+        subject_size=20000, subject_tenengrad=1.5,
+        bg_tenengrad=0.3, crop_complete=1.0,
+    )
+    row = db.conn.execute(
+        "SELECT path, prompt_x FROM photo_masks WHERE photo_id=1 AND variant='sam2-small'"
+    ).fetchone()
+    assert row["path"] == "/m/1.sam2-small.png"
+    assert row["prompt_x"] == 10
+
+    # Re-upsert with new prompt — row replaced
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-small", path="/m/1.sam2-small.png",
+        detector_model="megadetector-v6",
+        prompt_x=11, prompt_y=20, prompt_w=100, prompt_h=200,
+        subject_size=21000, subject_tenengrad=1.5,
+        bg_tenengrad=0.3, crop_complete=1.0,
+    )
+    row = db.conn.execute(
+        "SELECT prompt_x, subject_size FROM photo_masks WHERE photo_id=1 AND variant='sam2-small'"
+    ).fetchone()
+    assert row["prompt_x"] == 11
+    assert row["subject_size"] == 21000
+    # Still exactly one row for this (photo, variant)
+    n = db.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks WHERE photo_id=1 AND variant='sam2-small'"
+    ).fetchone()[0]
+    assert n == 1
+
+
+def test_get_photo_mask_returns_row_or_none(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    assert db.get_photo_mask(1, "sam2-small") is None
+
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-small", path="/p", detector_model="md",
+        prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
+    )
+    m = db.get_photo_mask(1, "sam2-small")
+    assert m["path"] == "/p"
+    assert m["detector_model"] == "md"
+    assert m["prompt_x"] == 1
+
+
+def test_list_masks_for_photo(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-small", path="/a",
+        detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
+    )
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-large", path="/b",
+        detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
+    )
+    variants = sorted(m["variant"] for m in db.list_masks_for_photo(1))
+    assert variants == ["sam2-large", "sam2-small"]
+
+
+def test_set_active_mask_variant_denormalizes(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.upsert_photo_mask(
+        photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
+        detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
+        subject_size=12345, subject_tenengrad=2.0,
+        bg_tenengrad=0.5, crop_complete=0.9,
+    )
+    db.set_active_mask_variant(1, "sam2-large")
+    row = db.conn.execute(
+        "SELECT mask_path, active_mask_variant, subject_size, "
+        "subject_tenengrad, bg_tenengrad, crop_complete FROM photos WHERE id=1"
+    ).fetchone()
+    assert row["mask_path"] == "/m/1.sam2-large.png"
+    assert row["active_mask_variant"] == "sam2-large"
+    assert row["subject_size"] == 12345
+    assert row["subject_tenengrad"] == 2.0
+
+
+def test_set_active_mask_variant_missing_row_raises(tmp_path):
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    with pytest.raises(ValueError):
+        db.set_active_mask_variant(1, "sam3-small")
+
+
+def test_delete_masks_for_variant_removes_files_and_rows(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (2, 1, 'b.jpg')"
+    )
+
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    p1 = masks_dir / "1.sam2-small.png"
+    p1.write_bytes(b"x")
+    p2 = masks_dir / "2.sam2-small.png"
+    p2.write_bytes(b"y")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(p1),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    db.upsert_photo_mask(
+        2, "sam2-small", str(p2),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+
+    deleted = db.delete_masks_for_variant("sam2-small")
+    assert deleted == 2
+    assert not p1.exists() and not p2.exists()
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks WHERE variant='sam2-small'"
+    ).fetchone()[0] == 0
+
+
+def test_delete_masks_for_variant_refuses_active(tmp_path):
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    p = masks_dir / "1.sam2-small.png"
+    p.write_bytes(b"x")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(p),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    db.set_active_mask_variant(1, "sam2-small")
+    with pytest.raises(ValueError):
+        db.delete_masks_for_variant("sam2-small")
+
+
+def test_delete_inactive_masks(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    pa = masks_dir / "1.sam2-small.png"
+    pa.write_bytes(b"a")
+    pb = masks_dir / "1.sam2-large.png"
+    pb.write_bytes(b"b")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(pa),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    db.upsert_photo_mask(
+        1, "sam2-large", str(pb),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    db.set_active_mask_variant(1, "sam2-large")
+    n = db.delete_inactive_masks()
+    assert n == 1
+    assert not pa.exists()
+    assert pb.exists()
+    remaining = {m["variant"] for m in db.list_masks_for_photo(1)}
+    assert remaining == {"sam2-large"}
+
+
+def test_delete_inactive_masks_skips_photos_with_no_active(tmp_path):
+    """Photos whose active_mask_variant IS NULL must not lose their
+    masks to delete-inactive: that's the partial-state case where a
+    prior pipeline crashed between upsert_photo_mask and
+    set_active_mask_variant. The user has to promote a variant to
+    active first before the cleanup will touch the photo."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    p = masks_dir / "1.sam2-small.png"
+    p.write_bytes(b"x")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(p),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    # Note: NO set_active_mask_variant call — leaves active NULL.
+    n = db.delete_inactive_masks()
+    assert n == 0
+    assert p.exists()
+    assert {m["variant"] for m in db.list_masks_for_photo(1)} == {"sam2-small"}
+
+
+def test_find_stale_masks(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 10, 20, 100, 200, 0.9, 'animal')"
+    )
+    # Mask was made from the same prompt → not stale
+    db.upsert_photo_mask(
+        1, "sam2-small", "/p",
+        detector_model="megadetector-v6",
+        prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
+    )
+    assert db.find_stale_masks() == []
+
+    # Insert a mask whose prompt no longer matches the current detection
+    db.upsert_photo_mask(
+        1, "sam2-large", "/q",
+        detector_model="megadetector-v6",
+        prompt_x=99, prompt_y=20, prompt_w=100, prompt_h=200,
+    )
+    stale = db.find_stale_masks()
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {(1, "sam2-large")}
+
+
+def test_find_stale_masks_compares_against_primary_detection_only(tmp_path):
+    """Mask validity hangs off the *primary* detection — the
+    highest-confidence non-``full-image`` row. A leftover secondary
+    box (or a row from another retained detector model) that still
+    matches the mask's stored prompt must NOT keep the mask out of
+    the stale set; otherwise stale cache entries linger after
+    detector/model changes.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    # The current primary (highest-confidence non-full-image) is the
+    # 0.95 box at (200, 200, 50, 50). The 0.30 row at the OLD prompt
+    # coordinates is a leftover secondary that should NOT save the
+    # cached mask from being marked stale.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 200, 200, 50, 50, 0.95, 'animal')"
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 10, 20, 100, 200, 0.30, 'animal')"
+    )
+    db.upsert_photo_mask(
+        1, "sam2-small", "/p",
+        detector_model="megadetector-v6",
+        prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
+    )
+    stale = db.find_stale_masks()
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {
+        (1, "sam2-small")
+    }, (
+        "mask whose prompt only matches a secondary detection must be stale"
+    )
+
+    # Sanity: the mask for the current primary's prompt is still fresh.
+    db.upsert_photo_mask(
+        1, "sam2-large", "/q",
+        detector_model="megadetector-v6",
+        prompt_x=200, prompt_y=200, prompt_w=50, prompt_h=50,
+    )
+    stale = db.find_stale_masks()
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {
+        (1, "sam2-small")
+    }
+
+
+def test_find_stale_masks_preserves_real_precision_bbox(tmp_path):
+    """detections.box_* are normalized REAL values in [0, 1].  An older
+    revision int()-truncated those to populate prompt_*, which collapsed
+    every prompt to (0, 0, 0, 0) and meant the staleness query matched
+    any cached mask against any current detection.  A REAL prompt that
+    matches the current primary detection must be fresh; a REAL prompt
+    that doesn't match must be stale.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    # Normalized bbox (x, y, w, h) — typical detector output.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.123, 0.456, 0.300, 0.400, 0.9, 'animal')"
+    )
+    # Mask was made from the same REAL prompt → not stale.
+    db.upsert_photo_mask(
+        1, "sam2-small", "/p",
+        detector_model="megadetector-v6",
+        prompt_x=0.123, prompt_y=0.456, prompt_w=0.300, prompt_h=0.400,
+    )
+    assert db.find_stale_masks() == []
+
+    # Mask whose prompt matches what the prior int() truncation would
+    # have written. The actual detection has moved (any normalized
+    # value), so this mask must be stale.
+    db.upsert_photo_mask(
+        1, "sam2-large", "/q",
+        detector_model="megadetector-v6",
+        prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    stale = db.find_stale_masks()
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {
+        (1, "sam2-large")
+    }
+
+
+def test_find_stale_masks_applies_detector_confidence_floor(tmp_path):
+    """The staleness check has to honor the workspace's
+    ``detector_confidence`` floor: detections below the floor are
+    invisible to extraction (it skips them), so a cached mask whose
+    prompt only matches a below-floor box must be marked stale even
+    though its coordinates technically still appear in ``detections``.
+    Otherwise raising the floor leaves stale masks active and reused.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    # Photo 1's only non-full-image detection is below the new floor.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.10, 0.20, 0.30, 0.40, 0.15, 'animal')"
+    )
+    db.upsert_photo_mask(
+        1, "sam2-small", "/p",
+        detector_model="megadetector-v6",
+        prompt_x=0.10, prompt_y=0.20, prompt_w=0.30, prompt_h=0.40,
+    )
+    # Photo 2 has a fresh, above-floor detection that matches its mask.
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (2, 1, 'b.jpg')"
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (2, 'megadetector-v6', 0.50, 0.50, 0.20, 0.20, 0.90, 'animal')"
+    )
+    db.upsert_photo_mask(
+        2, "sam2-small", "/q",
+        detector_model="megadetector-v6",
+        prompt_x=0.50, prompt_y=0.50, prompt_w=0.20, prompt_h=0.20,
+    )
+
+    # No floor: photo 1's mask matches its (low-confidence) detection,
+    # so neither mask is stale. Preserves prior behavior for callers
+    # that don't pass a threshold.
+    assert db.find_stale_masks() == []
+
+    # Floor at 0.5: photo 1's only detection (0.15) is invisible, so
+    # there's no primary detection for the mask to match against and
+    # the mask is stale. Photo 2's mask matches its 0.90 detection and
+    # stays fresh.
+    stale = db.find_stale_masks(detector_confidence=0.5)
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {
+        (1, "sam2-small")
+    }
+
+
+def test_find_stale_masks_floor_drops_below_threshold_match(tmp_path):
+    """A cached mask whose prompt only matches a below-floor detection
+    (and the photo has no above-floor detections at all) must be stale
+    once the floor is applied — extraction wouldn't run for that photo
+    so the mask can never be regenerated.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    # Two below-floor detections; the cached mask's prompt matches the
+    # higher-confidence one. Without a floor it'd be the "primary" and
+    # the mask would look fresh; with the floor it disappears.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.10, 0.10, 0.10, 0.10, 0.40, 'animal')"
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.20, 0.20, 0.10, 0.10, 0.30, 'animal')"
+    )
+    db.upsert_photo_mask(
+        1, "sam2-small", "/p",
+        detector_model="megadetector-v6",
+        prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
+    )
+    # Without floor: the 0.40 box is the primary, its prompt equals
+    # the cached one → fresh.
+    assert db.find_stale_masks() == []
+    # With floor 0.5: nothing visible, cached mask is stale.
+    stale = db.find_stale_masks(detector_confidence=0.5)
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {
+        (1, "sam2-small")
+    }
+
+
+def test_delete_stale_masks_honors_detector_confidence(tmp_path):
+    """``delete_stale_masks`` has to forward the threshold so the
+    deleted set matches the count surfaced on the storage card. If it
+    didn't, the user would press *Delete stale* and end up with a
+    non-zero leftover.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.10, 0.10, 0.10, 0.10, 0.20, 'animal')"
+    )
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    p = masks_dir / "1.sam2-small.png"
+    p.write_bytes(b"x")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(p),
+        detector_model="megadetector-v6",
+        prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
+    )
+    # Without a floor the (matching, low-confidence) detection keeps
+    # the mask fresh.
+    assert db.delete_stale_masks() == 0
+    assert p.exists()
+    # With a floor above the detection's confidence the mask becomes
+    # stale and gets removed.
+    assert db.delete_stale_masks(detector_confidence=0.5) == 1
+    assert not p.exists()
+
+
+def test_min_detector_confidence_no_overrides(tmp_path):
+    """With no per-workspace overrides, the cross-workspace minimum is
+    just the global default. The Default workspace auto-created by
+    Database.__init__ has no config_overrides, so this is the
+    out-of-the-box state.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    assert db.min_detector_confidence_across_workspaces(
+        {"detector_confidence": 0.3}
+    ) == 0.3
+    # Falls back to 0.2 if the global config doesn't define it.
+    assert db.min_detector_confidence_across_workspaces({}) == 0.2
+
+
+def test_min_detector_confidence_picks_lowest_override(tmp_path):
+    """The global storage view must use the most permissive floor
+    across workspaces. If one workspace overrides
+    detector_confidence=0.1 and another sticks with 0.5, the global
+    minimum is 0.1 — masks valid under 0.1 must not be deleted just
+    because the active workspace happens to be the strict one.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    permissive = db.create_workspace(
+        "permissive", config_overrides={"detector_confidence": 0.1}
+    )
+    strict = db.create_workspace(
+        "strict", config_overrides={"detector_confidence": 0.5}
+    )
+    # Active workspace shouldn't matter — try both.
+    db.set_active_workspace(strict)
+    assert db.min_detector_confidence_across_workspaces(
+        {"detector_confidence": 0.3}
+    ) == 0.1
+    db.set_active_workspace(permissive)
+    assert db.min_detector_confidence_across_workspaces(
+        {"detector_confidence": 0.3}
+    ) == 0.1
+
+
+def test_min_detector_confidence_includes_unoverridden_workspaces(tmp_path):
+    """A workspace without an override still counts at the global
+    default. If global=0.2 and one workspace overrides up to 0.5 but
+    others don't override at all, the cross-workspace min is 0.2 (the
+    unoverridden workspaces' effective value), not 0.5.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.create_workspace(
+        "strict", config_overrides={"detector_confidence": 0.5}
+    )
+    # The auto-created Default workspace has no overrides → uses 0.2.
+    assert db.min_detector_confidence_across_workspaces(
+        {"detector_confidence": 0.2}
+    ) == 0.2
+
+
+def test_legacy_mask_backfill_is_resumable(tmp_path):
+    """If startup crashes after backfilling some legacy mask rows but
+    before completing, the next startup must finish the rest.  The
+    earlier outer ``if total_unknown_rows == 0`` guard caused the
+    remaining photos to be skipped forever, leaving orphan mask_path
+    values that the variant-aware APIs and cleanup logic couldn't see.
+    """
+    from db import Database
+    db_path = str(tmp_path / "v.db")
+    db = Database(db_path)
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename, mask_path) "
+        "VALUES (1, 1, 'a.jpg', '/m/1.png')"
+    )
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename, mask_path) "
+        "VALUES (2, 1, 'b.jpg', '/m/2.png')"
+    )
+    db.conn.commit()
+    db.close()
+
+    # First open: everything backfills.
+    db = Database(db_path)
+    backfilled = {
+        r[0] for r in db.conn.execute(
+            "SELECT photo_id FROM photo_masks WHERE variant='unknown'"
+        )
+    }
+    assert backfilled == {1, 2}
+
+    # Simulate a partial crash: one of the unknown rows was inserted
+    # but the other never made it (rolled back, killed mid-loop, etc.).
+    db.conn.execute(
+        "DELETE FROM photo_masks WHERE photo_id=2 AND variant='unknown'"
+    )
+    db.conn.execute(
+        "UPDATE photos SET active_mask_variant=NULL WHERE id=2"
+    )
+    db.conn.commit()
+    db.close()
+
+    # Next startup must finish the missing photo, not stop just because
+    # *some* unknown rows already exist.
+    db = Database(db_path)
+    backfilled = {
+        r[0] for r in db.conn.execute(
+            "SELECT photo_id FROM photo_masks WHERE variant='unknown'"
+        )
+    }
+    assert backfilled == {1, 2}, (
+        "second startup must re-finish the legacy mask backfill for "
+        "photos missing photo_masks rows"
+    )
+    active = {
+        r[0]: r[1] for r in db.conn.execute(
+            "SELECT id, active_mask_variant FROM photos"
+        )
+    }
+    assert active == {1: "unknown", 2: "unknown"}
+
+
+def test_delete_stale_masks(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 10, 20, 100, 200, 0.9, 'animal')"
+    )
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    fresh = masks_dir / "1.sam2-small.png"
+    fresh.write_bytes(b"f")
+    stale_path = masks_dir / "1.sam2-large.png"
+    stale_path.write_bytes(b"s")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(fresh),
+        detector_model="megadetector-v6",
+        prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
+    )
+    db.upsert_photo_mask(
+        1, "sam2-large", str(stale_path),
+        detector_model="megadetector-v6",
+        prompt_x=99, prompt_y=20, prompt_w=100, prompt_h=200,
+    )
+    deleted = db.delete_stale_masks()
+    assert deleted == 1
+    assert fresh.exists()
+    assert not stale_path.exists()
+    assert {m["variant"] for m in db.list_masks_for_photo(1)} == {"sam2-small"}
+
+
+def test_find_stale_masks_breaks_primary_ties_deterministically(tmp_path):
+    """When two non-full-image detections share the maximum confidence,
+    extraction (``ORDER BY detector_confidence DESC, id ASC``) picks the
+    smaller-id row as the primary. ``find_stale_masks`` has to agree —
+    otherwise a mask whose prompt matches the *other* tied row could be
+    treated as fresh while extraction is regenerating from the chosen
+    primary, leaving stale cache entries that drift between the two
+    paths.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    # Two detections tied on detector_confidence. Insertion order makes
+    # det id=1 the deterministic primary (smaller id wins on tie).
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.10, 0.10, 0.10, 0.10, 0.80, 'animal')"
+    )
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'megadetector-v6', 0.20, 0.20, 0.20, 0.20, 0.80, 'animal')"
+    )
+
+    # Mask matching the LATER tied row (the one extraction does NOT
+    # pick) must be stale: extraction would not regenerate from it.
+    db.upsert_photo_mask(
+        1, "sam2-small", "/p",
+        detector_model="megadetector-v6",
+        prompt_x=0.20, prompt_y=0.20, prompt_w=0.20, prompt_h=0.20,
+    )
+    stale = db.find_stale_masks()
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {
+        (1, "sam2-small")
+    }
+
+    # Mask matching the FIRST tied row (the deterministic primary) is
+    # fresh.
+    db.upsert_photo_mask(
+        1, "sam2-large", "/q",
+        detector_model="megadetector-v6",
+        prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
+    )
+    stale = db.find_stale_masks()
+    assert {(s["photo_id"], s["variant"]) for s in stale} == {
+        (1, "sam2-small")
+    }
+
+
+def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
+    """``delete_masks_for_variant`` / ``delete_inactive_masks`` /
+    ``delete_stale_masks`` feed ``photo_masks.path`` straight into
+    ``os.remove``. A corrupted or migrated row pointing outside the
+    masks directory must not let the user-triggerable storage cleanup
+    endpoints unlink arbitrary files. Mirrors the realpath containment
+    already enforced by ``/api/masks/<pid>/<variant>.png``.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+
+    # File outside the masks directory — must be untouched.
+    outside = tmp_path / "evil.png"
+    outside.write_bytes(b"important")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(outside),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+
+    db.delete_masks_for_variant("sam2-small")
+    assert outside.exists(), "file outside masks dir was deleted"
+
+    # Same protection on delete_inactive_masks.
+    db.upsert_photo_mask(
+        1, "sam2-small", str(outside),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    inside = masks_dir / "1.sam2-large.png"
+    inside.write_bytes(b"in")
+    db.upsert_photo_mask(
+        1, "sam2-large", str(inside),
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+    )
+    db.set_active_mask_variant(1, "sam2-large")
+    db.delete_inactive_masks()
+    assert outside.exists(), "delete_inactive_masks unlinked outside path"
+    # Active variant inside masks dir is preserved.
+    assert inside.exists()
+
+    # And on delete_stale_masks: a stale row pointing outside is
+    # unlinked from the DB but the file is left alone.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (1, 'md', 9, 9, 9, 9, 0.9, 'animal')"
+    )
+    stale_outside = tmp_path / "stale.png"
+    stale_outside.write_bytes(b"stale")
+    db.upsert_photo_mask(
+        1, "sam2-small", str(stale_outside),
+        detector_model="md", prompt_x=1, prompt_y=1, prompt_w=1, prompt_h=1,
+    )
+    db.delete_stale_masks()
+    assert stale_outside.exists(), "delete_stale_masks unlinked outside path"
+
+
+def test_mask_variants_summary(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    for pid in (1, 2, 3):
+        db.conn.execute(
+            "INSERT INTO photos(id, folder_id, filename) VALUES (?, 1, ?)",
+            (pid, f"p{pid}.jpg"),
+        )
+    md = tmp_path / "masks"
+    md.mkdir()
+    for pid, var, size in [
+        (1, "sam2-small", 100),
+        (2, "sam2-small", 200),
+        (1, "sam2-large", 500),
+        (3, "sam3-small", 700),
+    ]:
+        p = md / f"{pid}.{var}.png"
+        p.write_bytes(b"x" * size)
+        db.upsert_photo_mask(
+            pid, var, str(p),
+            detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        )
+    db.set_active_mask_variant(1, "sam2-large")
+
+    summary = {s["variant"]: s for s in db.mask_variants_summary()}
+    assert summary["sam2-small"]["count"] == 2
+    assert summary["sam2-small"]["bytes"] == 300
+    assert summary["sam2-large"]["count"] == 1
+    assert summary["sam2-large"]["active_count"] == 1
+    assert summary["sam3-small"]["active_count"] == 0
+
+
+def test_mask_variant_coverage_is_workspace_scoped(tmp_path):
+    """mask_variant_coverage returns per-variant counts of distinct photos
+    in the active workspace that have a row for that variant. Photos
+    outside the workspace are excluded even though photo_masks is global.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    ws_in = db.create_workspace("In")
+    ws_out = db.create_workspace("Out")
+
+    f_in = db.add_folder("/in", name="in")
+    f_out = db.add_folder("/out", name="out")
+    db.add_workspace_folder(ws_in, f_in)
+    db.add_workspace_folder(ws_out, f_out)
+
+    p1 = db.add_photo(folder_id=f_in, filename="a.jpg", extension=".jpg",
+                      file_size=1, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=f_in, filename="b.jpg", extension=".jpg",
+                      file_size=1, file_mtime=1.0)
+    p3 = db.add_photo(folder_id=f_out, filename="c.jpg", extension=".jpg",
+                      file_size=1, file_mtime=1.0)
+
+    db.upsert_photo_mask(p1, "sam2-small", "/p/a.small.png",
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+    db.upsert_photo_mask(p1, "sam2-large", "/p/a.large.png",
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+    db.upsert_photo_mask(p2, "sam2-small", "/p/b.small.png",
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+    # p3 lives outside ws_in — its sam2-large row must NOT be counted.
+    db.upsert_photo_mask(p3, "sam2-large", "/p/c.large.png",
+        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+
+    db.set_active_mask_variant(p1, "sam2-large")
+
+    db.set_active_workspace(ws_in)
+    cov = {c["variant"]: c for c in db.mask_variant_coverage()}
+    assert cov["sam2-small"]["count"] == 2
+    assert cov["sam2-small"]["active_count"] == 0
+    assert cov["sam2-large"]["count"] == 1  # p3 excluded
+    assert cov["sam2-large"]["active_count"] == 1
+
+    db.set_active_workspace(ws_out)
+    cov_out = {c["variant"]: c for c in db.mask_variant_coverage()}
+    assert cov_out["sam2-large"]["count"] == 1
+    assert "sam2-small" not in cov_out
+
+
+def test_existing_masks_migrate_to_unknown_variant(tmp_path):
+    """A photos row with mask_path set on a pre-migration DB gets a
+    photo_masks row with variant='unknown' and prompt=-1."""
+    import sqlite3
+    db_path = tmp_path / "v.db"
+
+    # Build a DB with the old shape, no photo_masks table. Include the
+    # columns CREATE INDEX statements reference (timestamp, file_hash) so
+    # _create_tables doesn't fail on a freshly-empty schema.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT)")
+    conn.execute(
+        "CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER, "
+        "filename TEXT, timestamp TEXT, file_hash TEXT, rating INTEGER, "
+        "mask_path TEXT, subject_size REAL, subject_tenengrad REAL, "
+        "bg_tenengrad REAL, crop_complete REAL)"
+    )
+    conn.execute("INSERT INTO folders(id, path) VALUES (1, '/tmp')")
+    conn.execute(
+        "INSERT INTO photos(id, folder_id, filename, mask_path, "
+        "subject_tenengrad, crop_complete) "
+        "VALUES (1, 1, 'a.jpg', '/m/1.png', 1.5, 0.9)"
+    )
+    # Photo without a mask_path — should NOT get a photo_masks row.
+    conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) "
+        "VALUES (2, 1, 'b.jpg')"
+    )
+    conn.commit()
+    conn.close()
+
+    from db import Database
+    db = Database(str(db_path))
+
+    row = db.conn.execute(
+        "SELECT * FROM photo_masks WHERE photo_id=1"
+    ).fetchone()
+    assert row is not None
+    assert row["variant"] == "unknown"
+    assert row["detector_model"] == "unknown"
+    assert row["prompt_x"] == -1
+    assert row["prompt_y"] == -1
+    assert row["prompt_w"] == -1
+    assert row["prompt_h"] == -1
+    assert row["path"] == "/m/1.png"
+    assert row["subject_tenengrad"] == 1.5
+    assert row["crop_complete"] == 0.9
+    # And photos.active_mask_variant is set
+    av = db.conn.execute(
+        "SELECT active_mask_variant FROM photos WHERE id=1"
+    ).fetchone()[0]
+    assert av == "unknown"
+
+    # Photo without mask_path: no photo_masks row, no active_mask_variant.
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks WHERE photo_id=2"
+    ).fetchone()[0] == 0
+    av2 = db.conn.execute(
+        "SELECT active_mask_variant FROM photos WHERE id=2"
+    ).fetchone()[0]
+    assert av2 is None
+
+
+def test_mask_migration_is_idempotent(tmp_path):
+    """Re-opening the DB does not re-insert migrated 'unknown' rows."""
+    import sqlite3
+    db_path = tmp_path / "v.db"
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT)")
+    conn.execute(
+        "CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER, "
+        "filename TEXT, timestamp TEXT, file_hash TEXT, rating INTEGER, "
+        "mask_path TEXT, subject_size REAL, subject_tenengrad REAL, "
+        "bg_tenengrad REAL, crop_complete REAL)"
+    )
+    conn.execute("INSERT INTO folders(id, path) VALUES (1, '/tmp')")
+    conn.execute(
+        "INSERT INTO photos(id, folder_id, filename, mask_path) "
+        "VALUES (1, 1, 'a.jpg', '/m/1.png')"
+    )
+    conn.commit()
+    conn.close()
+
+    from db import Database
+    db = Database(str(db_path))
+    db.conn.close()
+
+    # Re-open — migration must not insert a second row.
+    db2 = Database(str(db_path))
+    n = db2.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks WHERE photo_id=1"
+    ).fetchone()[0]
+    assert n == 1
+
+
+def test_photo_masks_subject_size_is_real(tmp_path):
+    """Fresh DBs declare photo_masks.subject_size as REAL since the
+    feature stores a fraction in [0, 1]."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    cols = {row[1]: row[2] for row in db.conn.execute(
+        "PRAGMA table_info(photo_masks)"
+    ).fetchall()}
+    assert cols["subject_size"] == "REAL"
