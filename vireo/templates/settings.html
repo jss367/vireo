@@ -651,12 +651,12 @@
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Embedding similarity</div>
+        <div class="setting-label">Embedding distance</div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgBurstEmb" min="50" max="99" value="80"
+          <input type="range" id="cfgBurstEmb" min="1" max="50" value="20"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgBurstEmbVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgBurstEmbVal">80%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgBurstEmbVal">20%</span>
         </div>
       </div>
 
@@ -1300,7 +1300,8 @@ async function loadConfig() {
     var bph = p.burst_phash_threshold != null ? p.burst_phash_threshold : 12;
     document.getElementById('cfgBurstPhash').value = bph;
     document.getElementById('cfgBurstPhashVal').textContent = bph;
-    var bemb = Math.round((p.burst_embedding_threshold != null ? p.burst_embedding_threshold : 0.80) * 100);
+    // Stored as cosine similarity; UI shows distance = 1 - similarity.
+    var bemb = Math.round((1 - (p.burst_embedding_threshold != null ? p.burst_embedding_threshold : 0.80)) * 100);
     document.getElementById('cfgBurstEmb').value = bemb;
     document.getElementById('cfgBurstEmbVal').textContent = bemb + '%';
     var bl = Math.round((p.burst_lambda != null ? p.burst_lambda : 0.85) * 100);
@@ -1453,7 +1454,7 @@ function saveConfig() {
             reject_eye_focus: parseInt(document.getElementById('cfgRejectEyeFocus').value, 10) / 100,
             burst_time_gap: parseInt(document.getElementById('cfgBurstTimeGap').value, 10) || 3,
             burst_phash_threshold: parseInt(document.getElementById('cfgBurstPhash').value, 10) || 12,
-            burst_embedding_threshold: parseInt(document.getElementById('cfgBurstEmb').value, 10) / 100,
+            burst_embedding_threshold: 1 - parseInt(document.getElementById('cfgBurstEmb').value, 10) / 100,
             burst_lambda: parseInt(document.getElementById('cfgBurstLambda').value, 10) / 100,
             burst_max_keep: parseInt(document.getElementById('cfgBurstMaxKeep').value, 10) || 3,
             encounter_lambda: parseInt(document.getElementById('cfgEncLambda').value, 10) / 100,
@@ -1484,7 +1485,7 @@ function resetPipelineDefaults() {
     cfgRejectComposite: [40, '%'],
     cfgEyeClassifierConfGate: [50, '%'], cfgEyeDetectionConfGate: [50, '%'],
     cfgRejectEyeFocus: [35, '%'],
-    cfgBurstTimeGap: [3, 's'], cfgBurstPhash: [12, ''], cfgBurstEmb: [80, '%'],
+    cfgBurstTimeGap: [3, 's'], cfgBurstPhash: [12, ''], cfgBurstEmb: [20, '%'],
     cfgBurstLambda: [85, '%'], cfgEncLambda: [70, '%'],
     cfgHardCutScore: [42, '%'], cfgSoftCutScore: [52, '%'], cfgMergeScore: [62, '%'],
   };
