@@ -2384,8 +2384,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             photos_with_detections = 0
             photos_subthreshold_only = 0
             for p in photos:
+                # Pass the captured detector_confidence explicitly so the
+                # floor matches effective_cfg (and the standalone
+                # /api/jobs/extract-masks path), not whatever cfg.load()
+                # would re-read from disk inside get_detections. With the
+                # legacy `mask_path IS NULL` prefilter gone, sub-threshold-
+                # only photos would otherwise enter SAM extraction on
+                # variant cache misses.
                 dets = [
-                    d for d in thread_db.get_detections(p["id"])
+                    d for d in thread_db.get_detections(
+                        p["id"], min_conf=detector_confidence,
+                    )
                     if d["detector_model"] != "full-image"
                 ]
                 if dets:
