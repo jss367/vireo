@@ -152,10 +152,48 @@ body { padding-bottom: 36px; }
   color: var(--text-faint, #5A8890);
   font-style: italic;
 }
+/* Per-stage rows: pill + summary text, one row per stage */
+.pipeline-plan-summary .plan-stage-row {
+  display: grid;
+  grid-template-columns: 140px 110px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  padding: 3px 0;
+}
+.pipeline-plan-summary .plan-stage-row .plan-stage-name {
+  color: var(--text-secondary, #B0CCCC);
+  font-weight: 600;
+}
+.pipeline-plan-summary .plan-stage-row .plan-stage-pill {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  font-weight: 700;
+}
+.pipeline-plan-summary .plan-stage-row.will-run .plan-stage-pill { color: var(--accent, #24E5CA); }
+.pipeline-plan-summary .plan-stage-row.will-skip .plan-stage-pill { color: var(--text-dim, #5A8890); font-style: italic; }
+.pipeline-plan-summary .plan-stage-row.done-prior .plan-stage-pill {
+  color: color-mix(in srgb, var(--accent, #24E5CA) 65%, var(--text-secondary, #B0CCCC));
+}
+.pipeline-plan-summary .plan-stage-row .plan-stage-summary {
+  color: var(--text-dim, #5A8890);
+  font-size: 12px;
+}
+.pipeline-plan-summary .plan-loading {
+  color: var(--text-faint, #5A8890);
+  font-style: italic;
+  font-size: 12px;
+}
 .stage-summary {
   margin-left: auto;
   font-size: 12px;
   color: var(--text-dim, #5A8890);
+  text-align: right;
+  /* Plan summaries can run long ("Will classify 47 new pairs (35 for…")
+     so the span needs to wrap rather than push the chevron off the row.
+     min-width:0 lets the flex item actually shrink. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .stage-chevron {
   color: var(--text-ghost, #2D5058);
@@ -883,7 +921,7 @@ body { padding-bottom: 36px; }
       </div>
       <div class="readiness-panel" id="readinessPanel" style="display:none;"></div>
       <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;" title="Re-process photos that were already classified. Also bypasses the skip for photos already tagged with a subject keyword (taxonomy, individual, or genre) — useful for double-checking existing tags.">
-        <input type="checkbox" id="chkReclassify" style="accent-color:var(--accent);" onchange="refreshPipelineUI()"> Re-classify
+        <input type="checkbox" id="chkReclassify" style="accent-color:var(--accent);" onchange="schedulePlanRefresh()"> Re-classify
       </label>
       <div style="margin-top:8px;">
         <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
@@ -1148,8 +1186,14 @@ function initPipelinePage() {
 
   // Load collections, models, labels, volumes in parallel
   loadCollections();
-  loadModels();
-  loadLabels();
+  // Models and labels populate the pickers the plan endpoint reads from,
+  // so chain the first plan refresh once both are in the DOM. Without
+  // this, the initial plan would key off zero models / zero labels and
+  // mislabel Classify as "No models selected" until the user clicks
+  // something.
+  Promise.all([loadModels(), loadLabels()]).then(function() {
+    refreshPipelinePlan();
+  });
   loadVolumes();
 
   // Pre-fill folders from query params (e.g., from audit panel)
@@ -2003,6 +2047,11 @@ async function selectSourceMode(mode) {
   }
 
   fetchFolderPreview();
+  // Source mode controls whether the plan body sends a collection_id, so
+  // pills/summaries can change when the user switches modes (e.g. an
+  // "Already done" Classify under whole-workspace becomes "Will run on N
+  // photos" once a partially-classified collection is selected).
+  schedulePlanRefresh();
 }
 
 function onCollectionChange() {
@@ -2012,6 +2061,7 @@ function onCollectionChange() {
     countEl.textContent = '';
     updateStartButton();
     fetchFolderPreview();
+    schedulePlanRefresh();
     return;
   }
   safeFetch('/api/collections/' + collId + '/photos?per_page=1', {}, { toast: false })
@@ -2021,6 +2071,7 @@ function onCollectionChange() {
     .catch(function() { countEl.textContent = ''; });
   updateStartButton();
   fetchFolderPreview();
+  schedulePlanRefresh();
 }
 
 async function loadVolumes() {
@@ -2172,6 +2223,7 @@ function onStageToggle(stage) {
 
   updateStartButton();
   refreshPipelineUI();
+  schedulePlanRefresh();
 }
 
 // -- Pipeline orchestration --
@@ -2374,6 +2426,10 @@ async function startPipeline() {
     btn.textContent = 'Start Pipeline';
     btn.onclick = startPipeline;
     updateStartButton();
+    // The pipeline just wrote new detections, masks, keypoints, etc. —
+    // refresh the plan so the next run's pills reflect the new state of
+    // the world (e.g. "Already done" for stages that just completed).
+    refreshPipelinePlan();
   }
 }
 
@@ -2837,7 +2893,7 @@ async function loadModels() {
         cb.value = m.id;
         cb.dataset.name = m.name;
         cb.style.cssText = 'accent-color:var(--accent);margin-right:4px;';
-        cb.onchange = updateReadiness;
+        cb.onchange = function() { updateReadiness(); schedulePlanRefresh(); };
         if (m.id === data.active_id) cb.checked = true;
         label.appendChild(cb);
         label.appendChild(document.createTextNode(m.name + ' (' + m.model_str + ')'));
@@ -2863,7 +2919,7 @@ async function loadLabels() {
         var isActive = activePaths.has(l.labels_file);
         html += '<label style="display:flex;align-items:center;gap:4px;color:var(--text-secondary);cursor:pointer;padding:2px 0;">' +
           '<input type="checkbox" class="labels-run-cb" value="' + l.labels_file.replace(/"/g, '&quot;') + '"' +
-          (isActive ? ' checked' : '') + ' onchange="updateReadiness()" style="accent-color:var(--accent);"> ' +
+          (isActive ? ' checked' : '') + ' onchange="updateReadiness(); schedulePlanRefresh();" style="accent-color:var(--accent);"> ' +
           l.name + ' (' + (l.species_count || 0) + ')</label>';
       });
       div.innerHTML = html;
@@ -3257,7 +3313,7 @@ var _pipelineState = {
 // Stages 3-8 each show an explicit text pill (Will run / Will skip / Already
 // done / Running / Done / Failed) instead of relying on the colored circle.
 // `_runningStages` and `_stageOutcomes` are live overrides: while a
-// pipeline is running, they take precedence over the toggle/prior-data state.
+// pipeline is running, they take precedence over plan-derived state.
 //
 // `_runningStages` is per-stage (not a single global) because the pipeline
 // allows concurrent stages — e.g. scan runs alongside thumbnails/previews —
@@ -3266,13 +3322,24 @@ var _pipelineState = {
 var _runningStages = {};  // suffix -> true while that stage is running
 var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'will-skip' | 'done-prior'
 
+// Plan response from POST /api/pipeline/plan, keyed by stage suffix:
+//   { Classify: { state, summary, detail }, Extract: ..., ... }
+// Truth source for the user-visible pill state and per-stage summary text
+// when no run is active. Computed against current UI selections so the
+// page never tells the user a stage is done when, given new models or
+// labels, the next run actually has work to do (CORE_PHILOSOPHY: "No
+// black boxes" — pills must answer the question users read them as).
+var _pipelinePlan = null;
+var _planFetchSeq = 0;
+var _planDebounceTimer = null;
+
 var _STAGES = [
-  { suffix: 'Scan',         label: 'Scan & Import',          enable: null,             prior: null },
-  { suffix: 'Previews',     label: 'Thumbnails & Previews',  enable: null,             prior: null },
-  { suffix: 'Classify',     label: 'Classify',               enable: 'enableClassify', prior: 'hasDetections' },
-  { suffix: 'Extract',      label: 'Extract Features',       enable: 'enableExtract',  prior: 'hasMasks' },
-  { suffix: 'EyeKeypoints', label: 'Eye Keypoints',          enable: 'enableEyeKeypoints', prior: null },
-  { suffix: 'Group',        label: 'Group & Score',          enable: 'enableGroup',    prior: null },
+  { suffix: 'Scan',         label: 'Scan & Import',          enable: null },
+  { suffix: 'Previews',     label: 'Thumbnails & Previews',  enable: null },
+  { suffix: 'Classify',     label: 'Classify',               enable: 'enableClassify' },
+  { suffix: 'Extract',      label: 'Extract Features',       enable: 'enableExtract' },
+  { suffix: 'EyeKeypoints', label: 'Eye Keypoints',          enable: 'enableEyeKeypoints' },
+  { suffix: 'Group',        label: 'Group & Score',          enable: 'enableGroup' },
 ];
 
 // Lookup: cardSuffix -> enable-checkbox id (null for stages with no toggle).
@@ -3308,49 +3375,165 @@ function _setPill(suffix, state, text) {
   pill.textContent = text != null ? text : _PILL_LABELS[state];
 }
 
+// Map each stage suffix to the .stage-summary span it owns. The span shows
+// the plan summary text before/between runs and switches to live counts
+// during a run via the existing txtDetections/txtMasks ids.
+var _STAGE_SUMMARY_IDS = {
+  'Classify':     'txtDetections',
+  'Extract':      'txtMasks',
+  'EyeKeypoints': 'txtEyeKeypoints',
+  'Group':        'txtResults',
+};
+
+function _setStageSummaryText(suffix, text) {
+  var id = _STAGE_SUMMARY_IDS[suffix];
+  if (!id) return;
+  var el = document.getElementById(id);
+  if (el) el.textContent = text || '';
+}
+
 function _stageStateFor(stage) {
   if (_runningStages[stage.suffix]) return 'running';
   if (_stageOutcomes[stage.suffix]) return _stageOutcomes[stage.suffix];
 
-  // Re-classify bypasses the "already done" skip — Classify will run again.
-  var reclassify = false;
-  if (stage.suffix === 'Classify') {
-    var rc = document.getElementById('chkReclassify');
-    reclassify = !!(rc && rc.checked);
-  }
-
+  // User-toggled skip overrides anything the server-side plan returned —
+  // matches the user's mental model that toggling a stage off is the
+  // strongest signal of "do not run this".
   if (stage.enable) {
     var cb = document.getElementById(stage.enable);
     if (cb && !cb.checked) return 'will-skip';
   }
-  if (stage.prior && _pipelineState[stage.prior] && !reclassify) return 'done-prior';
-  return 'will-run';
+  // Stages with no plan entry (Scan, Previews) default to "will-run" —
+  // they always run when the pipeline starts.
+  if (!_pipelinePlan) return 'will-run';
+  var fromPlan = _pipelinePlan.stages && _pipelinePlan.stages[stage.suffix];
+  if (!fromPlan) return 'will-run';
+  return fromPlan.state || 'will-run';
 }
 
-function _renderPlanSummary(buckets) {
+function _stageSummaryFor(stage) {
+  if (!_pipelinePlan) return '';
+  var fromPlan = _pipelinePlan.stages && _pipelinePlan.stages[stage.suffix];
+  return (fromPlan && fromPlan.summary) || '';
+}
+
+function _renderPlanSummary() {
   var box = document.getElementById('pipelinePlanSummary');
   if (!box) return;
-  function row(cls, label, names, emptyText) {
-    var inner = names.length
-      ? '<span class="plan-stages">' + names.join(', ') + '</span>'
-      : '<span class="plan-empty">' + emptyText + '</span>';
-    return '<div class="plan-row ' + cls + '">' +
-      '<span class="plan-label">' + label + '</span>' + inner + '</div>';
+  // Per-stage rows: stage name, pill label, summary text. Mirrors the
+  // pills inside each card so the user sees the same answer in two places
+  // and can scan the whole plan at a glance before pressing Start.
+  var rows = [];
+  _STAGES.forEach(function(stage) {
+    if (!_STAGE_SUMMARY_IDS[stage.suffix]) return;  // Scan/Previews
+    var state = _stageStateFor(stage);
+    var summary = _runningStages[stage.suffix] || _stageOutcomes[stage.suffix]
+      ? ''  // live state takes the .stage-summary span; don't double up here
+      : _stageSummaryFor(stage);
+    var pillLabel = _PILL_LABELS[state] || state;
+    rows.push(
+      '<div class="plan-stage-row ' + state + '">' +
+        '<span class="plan-stage-name">' + stage.label + '</span>' +
+        '<span class="plan-stage-pill">' + pillLabel + '</span>' +
+        '<span class="plan-stage-summary">' + (summary || '') + '</span>' +
+      '</div>'
+    );
+  });
+  if (!_pipelinePlan && !Object.keys(_runningStages).length && !Object.keys(_stageOutcomes).length) {
+    box.innerHTML = '<div class="plan-loading">Loading plan…</div>';
+    return;
   }
-  var html = row('will-run', 'Will run', buckets['will-run'], 'nothing');
-  if (buckets['will-skip'].length)  html += row('will-skip',  'Will skip',    buckets['will-skip'],  '');
-  if (buckets['done-prior'].length) html += row('done-prior', 'Already done', buckets['done-prior'], '');
-  box.innerHTML = html;
+  box.innerHTML = rows.join('');
 }
 
 function refreshPipelineUI() {
-  var buckets = { 'will-run': [], 'will-skip': [], 'done-prior': [] };
   _STAGES.forEach(function(stage) {
     var state = _stageStateFor(stage);
     _setPill(stage.suffix, state);
-    if (buckets[state]) buckets[state].push(stage.label);
+    // Only paint plan summary text when no run is active for this stage,
+    // otherwise the live counts ("12/47", "Done!") get clobbered.
+    if (!_runningStages[stage.suffix] && !_stageOutcomes[stage.suffix]) {
+      _setStageSummaryText(stage.suffix, _stageSummaryFor(stage));
+    }
   });
-  _renderPlanSummary(buckets);
+  _renderPlanSummary();
+}
+
+// Build the body for /api/pipeline/plan from the current DOM. Mirrors the
+// subset of /api/jobs/pipeline the plan needs to make accurate decisions.
+function _buildPlanBody() {
+  var body = {};
+  // Source: only "existing collection" mode lets us scope the plan to a
+  // concrete photo set. For import / new-images modes the photo set
+  // doesn't exist yet, so leave collection_id null and let the plan
+  // describe whole-workspace counts.
+  if (_sourceMode === 'collection') {
+    var picker = document.getElementById('collectionPicker');
+    var cid = picker && picker.value ? parseInt(picker.value, 10) : NaN;
+    if (!isNaN(cid)) body.collection_id = cid;
+    if (_previewData && _previewSelected) {
+      var excludedIds = [];
+      _previewData.files.forEach(function(f) {
+        if (!_previewSelected[f.path] && f.photo_id) excludedIds.push(f.photo_id);
+      });
+      if (excludedIds.length) body.exclude_photo_ids = excludedIds;
+    }
+  }
+
+  body.skip_classify       = !document.getElementById('enableClassify').checked;
+  body.skip_extract_masks  = !document.getElementById('enableExtract').checked;
+  body.skip_eye_keypoints  = !document.getElementById('enableEyeKeypoints').checked;
+  body.skip_regroup        = !document.getElementById('enableGroup').checked;
+
+  if (!body.skip_classify) {
+    var modelIds = [];
+    document.querySelectorAll('.model-checkbox:checked').forEach(function(cb) {
+      modelIds.push(cb.value);
+    });
+    if (modelIds.length) body.model_ids = modelIds;
+
+    var labelsFiles = [];
+    document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) {
+      labelsFiles.push(cb.value);
+    });
+    if (labelsFiles.length) body.labels_files = labelsFiles;
+
+    var rc = document.getElementById('chkReclassify');
+    body.reclassify = !!(rc && rc.checked);
+  }
+  return body;
+}
+
+async function refreshPipelinePlan() {
+  // Don't fetch a plan while a pipeline is running — live state is
+  // authoritative, and the running stages would race the plan response.
+  if (_pipelineRunning) return;
+  var seq = ++_planFetchSeq;
+  try {
+    var data = await safeFetch('/api/pipeline/plan', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(_buildPlanBody()),
+    }, { toast: false });
+    // Drop responses that arrived after a newer request — otherwise a slow
+    // request can overwrite the result of a fresher one and the UI flickers
+    // back to stale state right after the user changed a setting.
+    if (seq !== _planFetchSeq) return;
+    _pipelinePlan = data;
+  } catch(e) {
+    if (seq !== _planFetchSeq) return;
+    _pipelinePlan = null;
+  }
+  refreshPipelineUI();
+}
+
+// Debounced version for chatty controls (label checkboxes, model picker).
+function schedulePlanRefresh() {
+  if (_planDebounceTimer) clearTimeout(_planDebounceTimer);
+  _planDebounceTimer = setTimeout(function() {
+    _planDebounceTimer = null;
+    refreshPipelinePlan();
+  }, 150);
 }
 
 function updateCardStates() {
