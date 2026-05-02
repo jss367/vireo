@@ -2373,8 +2373,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             # config change to a different variant would never re-run.
             # The per-photo cache check happens inside the loop below
             # against photo_masks(photo_id, sam2_variant).
+            #
+            # Track sub-threshold-only photos separately so the silent-
+            # completion guard can distinguish "no detection rows at all"
+            # from "rows exist but every confidence is below
+            # detector_confidence" — the user's remediation differs
+            # (download weights vs lower the threshold).
+            detector_confidence = effective_cfg.get("detector_confidence", 0.2)
             photo_det_map = {}
             photos_with_detections = 0
+            photos_subthreshold_only = 0
             for p in photos:
                 dets = [
                     d for d in thread_db.get_detections(p["id"])
@@ -2407,6 +2415,24 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             primary["box_h"],
                         ),
                     }
+                else:
+                    # No qualifying detection — but check whether sub-
+                    # threshold rows exist so the silent-completion guard
+                    # can distinguish "weights never ran" from "threshold
+                    # too high". This counter only matters for photos
+                    # that haven't been masked yet (an already-masked
+                    # photo isn't in the "what got skipped silently"
+                    # diagnostic regardless of threshold).
+                    raw_dets = [
+                        d for d in thread_db.get_detections(p["id"], min_conf=0)
+                        if d["detector_model"] != "full-image"
+                    ]
+                    if raw_dets:
+                        has_mask = thread_db.conn.execute(
+                            "SELECT mask_path FROM photos WHERE id=?", (p["id"],)
+                        ).fetchone()[0]
+                        if not has_mask:
+                            photos_subthreshold_only += 1
 
             photos_to_process = [
                 photo_det_map[pid] for pid in photo_det_map
@@ -2440,7 +2466,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 except ImportError:
                     weights_present = False
 
-                if weights_present:
+                if photos_subthreshold_only > 0:
+                    reason = (
+                        f"{photos_subthreshold_only} photo(s) have detections but every "
+                        f"detection is below the current detector_confidence threshold "
+                        f"({detector_confidence}). The pipeline will reject these photos "
+                        "with `no_subject_mask`. Lower `detector_confidence` in workspace "
+                        "settings to extract masks for them."
+                    )
+                    summary = (
+                        f"Skipped — {photos_subthreshold_only} photo(s) below "
+                        f"detector_confidence threshold ({detector_confidence})"
+                    )
+                elif weights_present:
                     reason = (
                         f"No detections produced for {len(photos)} photo(s). MegaDetector ran but "
                         "found no animals meeting the confidence threshold. The pipeline will "
@@ -2467,9 +2505,51 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     job["id"], "extract_masks", status="completed",
                     summary=summary,
                 )
+                if photos_subthreshold_only > 0:
+                    em_reason = "all_subthreshold"
+                elif weights_present:
+                    em_reason = "no_detections"
+                else:
+                    em_reason = "weights_missing"
                 result["stages"]["extract_masks"] = {
                     "masked": 0, "skipped": 0, "failed": 0, "total": 0,
-                    "reason": "weights_missing" if not weights_present else "no_detections",
+                    "subthreshold": photos_subthreshold_only,
+                    "reason": em_reason,
+                }
+                _update_stages(runner, job["id"], stages)
+                return
+
+            # Mixed-state guard: photos_with_detections > 0 (some photos have
+            # qualifying detections — already masked from a prior run) but
+            # there are also unmasked photos whose only detections are below
+            # the threshold. Without this branch the stage completes silently
+            # with "0 masked, 0 skipped" and the user has no way to discover
+            # why the unmasked photos were never processed. Production hit
+            # this when 4166 of 5054 photos were already masked and the
+            # remaining 727 had only sub-threshold detections.
+            if total == 0 and photos_subthreshold_only > 0 and classify_ran:
+                reason = (
+                    f"{photos_subthreshold_only} photo(s) have detections but every "
+                    f"detection is below the current detector_confidence threshold "
+                    f"({detector_confidence}). The pipeline will reject these photos "
+                    "with `no_subject_mask`. Lower `detector_confidence` in workspace "
+                    "settings to extract masks for them."
+                )
+                summary = (
+                    f"Skipped — {photos_subthreshold_only} photo(s) below "
+                    f"detector_confidence threshold ({detector_confidence})"
+                )
+                log.warning("Pipeline extract-masks: %s", reason)
+                errors.append(f"[extract_masks] {reason}")
+                stages["extract_masks"]["status"] = "skipped"
+                runner.update_step(
+                    job["id"], "extract_masks", status="completed",
+                    summary=summary,
+                )
+                result["stages"]["extract_masks"] = {
+                    "masked": 0, "skipped": 0, "failed": 0, "total": 0,
+                    "subthreshold": photos_subthreshold_only,
+                    "reason": "all_subthreshold",
                 }
                 _update_stages(runner, job["id"], stages)
                 return
@@ -2477,26 +2557,37 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             # Auto-download SAM2 + DINOv2 weights on first pipeline run.
             # Mirrors the MegaDetector auto-download pattern (commit 90cd0f9):
             # without this, first-time users hit 1 FileNotFoundError per
-            # photo (e.g. 124 identical tracebacks) instead of either
-            # getting the weights automatically or seeing one actionable
-            # message.  Only fire when there is actually work to do — a
-            # no-op rerun over 0 photos should not trigger a multi-hundred
-            # MB download.
-            if total > 0:
-                from dino_embed import ensure_dinov2_weights
-                from masking import ensure_sam2_weights
+            # photo instead of either getting the weights automatically
+            # or seeing one actionable message.
+            #
+            # The download is deferred until the loop hits the first true
+            # cache miss. With per-variant photo_masks, the worklist now
+            # includes every photo with a detection (cache hits are
+            # filtered inside the loop, not by a `mask_path IS NULL`
+            # prefilter), so gating on ``total > 0`` would force a
+            # multi-hundred-MB download even on a fully-cached rerun in
+            # an offline / fresh-checkout environment. ``_ensure_weights``
+            # is idempotent and a no-op on second invocation.
+            from dino_embed import ensure_dinov2_weights
+            from masking import ensure_sam2_weights
 
-                def _dl_progress(phase, current, total_steps):
-                    _emit_progress(
-                        runner, job["id"], stages, "extract_masks", phase,
-                    )
+            def _dl_progress(phase, current, total_steps):
+                _emit_progress(
+                    runner, job["id"], stages, "extract_masks", phase,
+                )
 
+            _weights_ensured = [False]
+
+            def _ensure_weights():
+                if _weights_ensured[0]:
+                    return
                 ensure_sam2_weights(
                     variant=sam2_variant, progress_callback=_dl_progress,
                 )
                 ensure_dinov2_weights(
                     variant=dinov2_variant, progress_callback=_dl_progress,
                 )
+                _weights_ensured[0] = True
 
             processed = 0
             for i, entry in enumerate(photos_to_process):
@@ -2535,6 +2626,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             masked += 1
                             processed = i + 1
                             continue
+
+                    # First true cache miss: ensure SAM2 + DINOv2 weights
+                    # are present before render_proxy/generate_mask runs.
+                    # No-op on subsequent iterations.
+                    _ensure_weights()
 
                     proxy = render_proxy(image_path, longest_edge=proxy_longest_edge)
                     if proxy is None:
@@ -2672,12 +2768,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 em_summary_parts = [f"{masked} masked", f"{skipped} skipped"]
                 if em_failed:
                     em_summary_parts.append(f"{em_failed} failed")
+                if photos_subthreshold_only > 0:
+                    em_summary_parts.append(
+                        f"{photos_subthreshold_only} below detector_confidence "
+                        f"({detector_confidence})"
+                    )
                 runner.update_step(job["id"], "extract_masks", status=final_status,
                                    summary=", ".join(em_summary_parts),
                                    error_count=em_failed,
                                    error=em_rollup)
                 result["stages"]["extract_masks"] = {
-                    "masked": masked, "skipped": skipped, "failed": em_failed, "total": total,
+                    "masked": masked, "skipped": skipped, "failed": em_failed,
+                    "total": total, "subthreshold": photos_subthreshold_only,
                 }
         except Exception as e:
             errors.append(f"[extract_masks] Fatal: {e}")

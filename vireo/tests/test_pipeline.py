@@ -581,6 +581,191 @@ def test_serialize_results_has_burst_species_predictions(tmp_path):
             assert "species_override" in burst
 
 
+def test_serialize_results_partial_confirmation_not_marked_confirmed(tmp_path):
+    """An encounter with a mix of confirmed and unconfirmed photos must NOT be
+    marked species_confirmed=True. This guards the hide_confirmed UX: when
+    threshold-slider regrouping merges a confirmed encounter with an
+    unconfirmed neighbor, the merged encounter previously inherited the
+    confirmed flag and the unconfirmed photos vanished from the review list.
+    """
+    from pipeline import load_photo_features, run_full_pipeline, serialize_results
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    # Confirm species on only some photos of the first encounter — the other
+    # photos in the same encounter remain unconfirmed.
+    kid = db.add_keyword("Robin", is_species=True)
+    for pid in ids[0][:1]:  # tag only the first photo
+        db.tag_photo(pid, kid)
+
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+    serialized = serialize_results(results)
+
+    target_ids = set(ids[0])
+    target_enc = next(
+        e for e in serialized["encounters"]
+        if set(e["photo_ids"]) & target_ids
+    )
+
+    assert target_enc["species_confirmed"] is False, (
+        "Partially-confirmed encounter must not be marked confirmed — "
+        "otherwise hide_confirmed hides its unconfirmed photos."
+    )
+
+
+def test_serialize_results_mixed_species_not_marked_confirmed(tmp_path):
+    """An encounter where photos carry DIFFERENT confirmed species (e.g. when
+    threshold-slider regrouping merges two previously-separate confirmed
+    encounters) must not be marked species_confirmed=True with one species
+    arbitrarily winning. The mixed encounter should be visible for review.
+    """
+    from pipeline import load_photo_features, run_full_pipeline, serialize_results
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    robin_kid = db.add_keyword("Robin", is_species=True)
+    eagle_kid = db.add_keyword("Eagle", is_species=True)
+    # Tag every photo in encounter 0 — but split between two species so the
+    # encounter has a genuinely mixed confirmation set.
+    db.tag_photo(ids[0][0], robin_kid)
+    db.tag_photo(ids[0][1], robin_kid)
+    db.tag_photo(ids[0][2], eagle_kid)
+
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+    serialized = serialize_results(results)
+
+    target_ids = set(ids[0])
+    target_enc = next(
+        e for e in serialized["encounters"]
+        if set(e["photo_ids"]) & target_ids
+    )
+
+    assert target_enc["species_confirmed"] is False, (
+        "Encounter mixing different confirmed species must not be marked "
+        "confirmed — every photo would be hidden under hide_confirmed."
+    )
+
+
+def test_serialize_results_mixed_fallback_species_is_deterministic(tmp_path):
+    """For mixed encounters, confirmed_species falls back to the most
+    frequent confirmed value so /api/encounters/species can untag a stable
+    previous keyword on re-confirm. Set iteration order is not stable
+    across processes, so the earlier next(iter(set)) fallback was
+    effectively arbitrary.
+    """
+    from pipeline import load_photo_features, run_full_pipeline, serialize_results
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    robin_kid = db.add_keyword("Robin", is_species=True)
+    eagle_kid = db.add_keyword("Eagle", is_species=True)
+    # 2x Robin, 1x Eagle — Robin wins by frequency regardless of which
+    # photo happens to come first.
+    db.tag_photo(ids[0][0], eagle_kid)
+    db.tag_photo(ids[0][1], robin_kid)
+    db.tag_photo(ids[0][2], robin_kid)
+
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+    serialized = serialize_results(results)
+
+    target_ids = set(ids[0])
+    target_enc = next(
+        e for e in serialized["encounters"]
+        if set(e["photo_ids"]) & target_ids
+    )
+
+    assert target_enc["species_confirmed"] is False
+    assert target_enc["confirmed_species"] == "Robin"
+
+
+def test_serialize_results_mixed_fallback_species_tiebreaks_by_first_photo(tmp_path):
+    """When confirmed-species counts tie within an encounter, the fallback
+    breaks ties by first appearance in photo order. This locks in
+    deterministic behavior so re-confirming the same encounter twice
+    untags the same previous keyword.
+    """
+    from pipeline import load_photo_features, run_full_pipeline, serialize_results
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    robin_kid = db.add_keyword("Robin", is_species=True)
+    eagle_kid = db.add_keyword("Eagle", is_species=True)
+    # 1x Eagle (earliest photo), 1x Robin, 1x unconfirmed → counts tie
+    # at 1 each, so the earlier photo's species (Eagle) wins the tiebreak.
+    db.tag_photo(ids[0][0], eagle_kid)
+    db.tag_photo(ids[0][1], robin_kid)
+
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+    serialized = serialize_results(results)
+
+    target_ids = set(ids[0])
+    target_enc = next(
+        e for e in serialized["encounters"]
+        if set(e["photo_ids"]) & target_ids
+    )
+
+    assert target_enc["species_confirmed"] is False
+    assert target_enc["confirmed_species"] == "Eagle"
+
+
+def test_serialize_results_uniformly_confirmed_remains_confirmed(tmp_path):
+    """Sanity: an encounter where every photo shares the same confirmed
+    species is still marked species_confirmed=True with confirmed_species set.
+    """
+    from pipeline import load_photo_features, run_full_pipeline, serialize_results
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    kid = db.add_keyword("Robin", is_species=True)
+    for pid in ids[0]:
+        db.tag_photo(pid, kid)
+
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+    serialized = serialize_results(results)
+
+    target_ids = set(ids[0])
+    target_enc = next(
+        e for e in serialized["encounters"]
+        if set(e["photo_ids"]) <= target_ids
+    )
+
+    assert target_enc["species_confirmed"] is True
+    assert target_enc["confirmed_species"] == "Robin"
+
+
+def test_serialize_results_burst_override_derived_from_photos(tmp_path):
+    """When every photo in a burst shares the same confirmed_species, the
+    serialized burst gets a species_override matching that species. This
+    survives a regroup that previously wiped overrides to None on every call.
+    """
+    from pipeline import load_photo_features, run_full_pipeline, serialize_results
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    kid = db.add_keyword("Robin", is_species=True)
+    for pid in ids[0]:
+        db.tag_photo(pid, kid)
+
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+    serialized = serialize_results(results)
+
+    confirmed_burst_ids = set(ids[0])
+    saw_override = False
+    for enc in serialized["encounters"]:
+        for burst in enc.get("bursts", []):
+            burst_ids = set(burst["photo_ids"])
+            if burst_ids and burst_ids <= confirmed_burst_ids:
+                assert burst["species_override"] is not None, (
+                    "Burst whose photos are all confirmed Robin must surface a "
+                    "species_override so frontend burst-confirmed indicators "
+                    "survive a slider-driven regroup."
+                )
+                assert burst["species_override"]["species"] == "Robin"
+                assert burst["species_override"]["confirmed"] is True
+                saw_override = True
+    assert saw_override, "test setup did not produce any all-Robin burst"
+
+
 # -- DINOv2 variant filtering --
 
 

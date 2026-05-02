@@ -4394,6 +4394,212 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
     )
 
 
+def test_extract_masks_stage_warns_when_all_detections_below_threshold(
+    tmp_path, monkeypatch
+):
+    """If a photo has detections but every one is below detector_confidence,
+    extract_masks silently completes with masked=0 and the user has no way to
+    discover why their unmasked photos were skipped — get_detections returns
+    [] at the workspace threshold, so the photo never enters photo_det_map.
+
+    Regression observed in production: 727 of 5054 photos had only
+    sub-threshold detections, so extract_masks finished in 0.5s with
+    "0 masked, 0 skipped" and no error. Surface a clear diagnostic that
+    names the threshold and points at the workaround.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_id = db.add_photo(folder_id, "lowconf.jpg", ".jpg", 12345, 1_000_000.0)
+    _drop_jpeg(folder_path, "lowconf.jpg")
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    # Real MegaDetector hit, but at confidence 0.05 — well below the default
+    # 0.2 detector_confidence threshold. The detection row is real, but
+    # get_detections() filters it out at read time.
+    db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 100, "h": 100},
+          "confidence": 0.05, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    # Mark the photo as already detected so the detect stage reuses the
+    # cached row instead of re-running MegaDetector against the stub jpeg.
+    db.record_detector_run(photo_id, "megadetector-v6", box_count=1)
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        return {}, 0, {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            emb = np.zeros(512, dtype=np.float32)
+            return [
+                ([{"species": "Unknown", "score": 0.5}], emb)
+                for _ in images
+            ]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=[model_id],
+        skip_extract_masks=False,  # exercise extract_masks_stage
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    extract_summaries = [
+        kwargs.get("summary", "")
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == "extract_masks" and kwargs.get("status") in (
+            "completed", "failed", "skipped",
+        )
+    ]
+    joined = " ".join(extract_summaries).lower()
+    assert "below" in joined and (
+        "threshold" in joined or "detector_confidence" in joined
+    ), (
+        f"extract_masks_stage should explain why nothing was masked when all "
+        f"detections are sub-threshold; got summaries: {extract_summaries}"
+    )
+
+
+def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
+    tmp_path, monkeypatch
+):
+    """Production hit: 4166/5054 photos already had masks (photos_with_detections
+    > 0), and the remaining 727 had only sub-threshold detections. The
+    existing "no detections" guard requires photos_with_detections == 0, so
+    it didn't fire — extract_masks completed silently with "0 masked, 0
+    skipped" while 727 unmasked photos sat untouched. The mixed-state guard
+    must fire instead.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+
+    # Photo A: already has a mask AND a qualifying detection — drives
+    # photos_with_detections > 0 so the existing no-detections guard does
+    # NOT fire.
+    masked_id = db.add_photo(folder_id, "masked.jpg", ".jpg", 12345, 1_000_000.0)
+    _drop_jpeg(folder_path, "masked.jpg")
+    db.save_detections(
+        masked_id,
+        [{"box": {"x": 0, "y": 0, "w": 100, "h": 100},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    db.record_detector_run(masked_id, "megadetector-v6", box_count=1)
+    db.update_photo_pipeline_features(
+        masked_id, mask_path=str(tmp_path / "mask_a.png"),
+    )
+
+    # Photo B: no mask, only sub-threshold detection → should be flagged.
+    lowconf_id = db.add_photo(folder_id, "lowconf.jpg", ".jpg", 23456, 1_000_001.0)
+    _drop_jpeg(folder_path, "lowconf.jpg")
+    db.save_detections(
+        lowconf_id,
+        [{"box": {"x": 0, "y": 0, "w": 50, "h": 50},
+          "confidence": 0.05, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    db.record_detector_run(lowconf_id, "megadetector-v6", box_count=1)
+
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [masked_id, lowconf_id]}]),
+    )
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        return {}, 0, {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            emb = np.zeros(512, dtype=np.float32)
+            return [
+                ([{"species": "Unknown", "score": 0.5}], emb)
+                for _ in images
+            ]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=[model_id],
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    extract_summaries = [
+        kwargs.get("summary", "")
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == "extract_masks" and kwargs.get("status") in (
+            "completed", "failed", "skipped",
+        )
+    ]
+    joined = " ".join(extract_summaries).lower()
+    assert "below" in joined and (
+        "threshold" in joined or "detector_confidence" in joined
+    ), (
+        f"extract_masks_stage should flag the sub-threshold photo even when "
+        f"another photo already has a mask; got summaries: {extract_summaries}"
+    )
+
+
 def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
     tmp_path, monkeypatch
 ):
@@ -6470,6 +6676,101 @@ def test_extract_masks_skips_sam_when_cached_with_same_prompt(
     rows_after = db.list_masks_for_photo(pid)
     assert len(rows_after) == 1
     assert rows_after[0]["path"] == first_path
+
+
+def test_extract_masks_skips_weight_download_when_all_cached(
+    tmp_path, monkeypatch,
+):
+    """Fully-cached rerun must NOT call ensure_sam2_weights /
+    ensure_dinov2_weights. Before the fix, the worklist included every
+    photo with a detection (cache hits filtered inside the loop, not by
+    a `mask_path IS NULL` prefilter), so total > 0 unconditionally and
+    the gate fired the multi-hundred-MB weight downloads on every
+    rerun — fatal in offline / fresh-checkout environments where the
+    only thing the user wanted was to denormalize the active variant."""
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200),
+            "model": "MegaDetector"}
+
+    # First run: populates photo_masks (this run *is* allowed to fire the
+    # download; mocked to no-op).
+    db, _, _, photo_ids = _run_extract_masks_for_test(
+        tmp_path, monkeypatch, "sam2-small", [spec],
+    )
+    pid = photo_ids[0]
+    rows = db.list_masks_for_photo(pid)
+    assert rows and rows[0]["variant"] == "sam2-small"
+    assert os.path.isfile(rows[0]["path"])
+
+    # Second run: every photo is a cache hit. Track ensure_*_weights
+    # invocations and assert they are zero.
+    import config as cfg
+    import dino_embed
+    import masking
+    import numpy as np
+    import quality
+
+    sam_calls = []
+    dino_calls = []
+
+    def fake_ensure_sam(**k):
+        sam_calls.append(k)
+
+    def fake_ensure_dino(**k):
+        dino_calls.append(k)
+
+    monkeypatch.setattr(masking, "ensure_sam2_weights", fake_ensure_sam)
+    monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", fake_ensure_dino)
+    monkeypatch.setattr(
+        masking, "render_proxy",
+        lambda *a, **k: np.zeros((4, 4, 3), dtype=np.uint8),
+    )
+    # generate_mask should never be invoked on a cache hit.
+    monkeypatch.setattr(
+        masking, "generate_mask",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("generate_mask called on a cache hit")
+        ),
+    )
+    monkeypatch.setattr(masking, "crop_completeness", lambda m: 0.9)
+    monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
+    monkeypatch.setattr(
+        quality, "compute_all_quality_features",
+        lambda p, m: {},
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed",
+        lambda p, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed_batch",
+        lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32),
+    )
+    monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
+
+    cfg.save({
+        "pipeline": {"sam2_variant": "sam2-small", "dinov2_variant": "vit-b14"},
+    })
+    col_id = db.conn.execute(
+        "SELECT id FROM collections ORDER BY id LIMIT 1"
+    ).fetchone()[0]
+    params = PipelineParams(
+        collection_id=col_id, skip_classify=True,
+        skip_extract_masks=False, skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(
+        job, runner, str(tmp_path / "test.db"), db._active_workspace_id, params,
+    )
+
+    assert sam_calls == [], (
+        f"ensure_sam2_weights must not be called on a fully-cached rerun; "
+        f"got {sam_calls}"
+    )
+    assert dino_calls == [], (
+        f"ensure_dinov2_weights must not be called on a fully-cached rerun; "
+        f"got {dino_calls}"
+    )
 
 
 def test_extract_masks_runs_for_new_variant_keeps_old(tmp_path, monkeypatch):

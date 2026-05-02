@@ -925,11 +925,25 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .ws-menu-item {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 12px; cursor: pointer; font-size: 13px;
-  color: var(--text-secondary);
+  color: var(--text-secondary); gap: 8px;
 }
 .ws-menu-item:hover { background: var(--bg-tertiary); }
 .ws-menu-item.active { color: var(--accent); }
+.ws-menu-item .ws-item-name {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ws-menu-item .ws-item-right {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+}
 .ws-menu-item .ws-item-check { font-size: 14px; }
+.ws-menu-item .ws-pin-btn {
+  background: none; border: none; padding: 0 2px; cursor: pointer;
+  color: var(--text-muted); font-size: 13px; line-height: 1;
+  opacity: 0; transition: opacity 0.1s;
+}
+.ws-menu-item:hover .ws-pin-btn { opacity: 0.6; }
+.ws-menu-item .ws-pin-btn:hover { opacity: 1 !important; color: var(--accent); }
+.ws-menu-item .ws-pin-btn.is-pinned { opacity: 1; color: var(--accent); }
 .ws-menu-divider { border-top: 1px solid var(--border-primary); margin: 4px 0; }
 .ws-menu-action {
   display: block; width: 100%; text-align: left; background: none; border: none;
@@ -1342,7 +1356,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       <span class="ws-arrow">&#9662;</span>
     </button>
     <div class="ws-menu" id="wsMenu">
-      <div class="ws-menu-header">Workspaces</div>
       <div id="wsMenuList"></div>
       <div class="ws-menu-divider"></div>
       <button class="ws-menu-action" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
@@ -2504,23 +2517,81 @@ function closeWsDropdownOutside(e) {
   }
 }
 
+function renderWsItem(ws, activeId) {
+  var isActive = ws.id === activeId;
+  var isPinned = !!ws.pinned_at;
+  var div = document.createElement('div');
+  div.className = 'ws-menu-item' + (isActive ? ' active' : '');
+  // Title is "Unpin" if pinned, "Pin" if not. Filled star for pinned, outline for unpinned.
+  div.innerHTML =
+    '<span class="ws-item-name">' + wsEscapeHtml(ws.name) + '</span>' +
+    '<span class="ws-item-right">' +
+      (isActive ? '<span class="ws-item-check">&#10003;</span>' : '') +
+      '<button class="ws-pin-btn' + (isPinned ? ' is-pinned' : '') + '" ' +
+        'title="' + (isPinned ? 'Unpin' : 'Pin') + ' workspace" ' +
+        'data-ws-id="' + ws.id + '" data-pinned="' + (isPinned ? '1' : '0') + '">' +
+        (isPinned ? '&#9733;' : '&#9734;') +
+      '</button>' +
+    '</span>';
+  div.onclick = function(e) {
+    // Pin button clicks are handled separately and must not switch workspaces.
+    // e.target can be a text node in some browsers; walk up to the nearest Element first.
+    var t = e.target;
+    if (t && t.nodeType !== 1) t = t.parentElement;
+    if (t && t.closest && t.closest('.ws-pin-btn')) return;
+    switchWorkspace(ws.id, ws.name);
+  };
+  var pinBtn = div.querySelector('.ws-pin-btn');
+  pinBtn.onclick = function(e) {
+    e.stopPropagation();
+    toggleWorkspacePin(ws.id, !isPinned);
+  };
+  return div;
+}
+
 async function loadWorkspaceMenu() {
   try {
     var workspaces = await safeFetch('/api/workspaces', {}, { toast: false });
     var active = await safeFetch('/api/workspaces/active', {}, { toast: false });
     var list = document.getElementById('wsMenuList');
     list.innerHTML = '';
-    workspaces.forEach(function(ws) {
-      var isActive = ws.id === active.id;
-      var div = document.createElement('div');
-      div.className = 'ws-menu-item' + (isActive ? ' active' : '');
-      div.innerHTML = wsEscapeHtml(ws.name) +
-        (isActive ? ' <span class="ws-item-check">&#10003;</span>' : '');
-      div.onclick = function() { switchWorkspace(ws.id, ws.name); };
-      list.appendChild(div);
-    });
+    var pinned = workspaces.filter(function(w) { return !!w.pinned_at; });
+    var unpinned = workspaces.filter(function(w) { return !w.pinned_at; });
+    function addHeader(text) {
+      var h = document.createElement('div');
+      h.className = 'ws-menu-header';
+      h.textContent = text;
+      list.appendChild(h);
+    }
+    if (pinned.length > 0) {
+      addHeader('Pinned');
+      pinned.forEach(function(ws) { list.appendChild(renderWsItem(ws, active.id)); });
+      if (unpinned.length > 0) {
+        var divider = document.createElement('div');
+        divider.className = 'ws-menu-divider';
+        list.appendChild(divider);
+        addHeader('Workspaces');
+      }
+    } else {
+      addHeader('Workspaces');
+    }
+    unpinned.forEach(function(ws) { list.appendChild(renderWsItem(ws, active.id)); });
   } catch(e) {
     console.error('Failed to load workspaces', e);
+  }
+}
+
+async function toggleWorkspacePin(wsId, pinned) {
+  try {
+    await safeFetch('/api/workspaces/' + wsId + '/pin', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ pinned: pinned })
+    }, { toast: false });
+    // Re-render with updated grouping/order.
+    await loadWorkspaceMenu();
+  } catch(e) {
+    console.error('Failed to toggle pin', e);
   }
 }
 
@@ -4702,7 +4773,7 @@ function formatDuration(seconds) {
       var lastDone = activeJobs.filter(function(j) { return j.status !== 'running'; })[0];
       if (lastDone) {
         container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. Last run: ' +
-          bpEscape(lastDone.type) + ' ' + (lastDone.status === 'completed' ? '\u2713' : '\u2717') +
+          bpEscape(window.formatJobType(lastDone.type)) + ' ' + (lastDone.status === 'completed' ? '\u2713' : '\u2717') +
           ' <a href="/jobs" style="color:var(--accent);text-decoration:none;">View history \u2192</a></div>';
       } else {
         container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. ' +
@@ -4744,7 +4815,7 @@ function formatDuration(seconds) {
       }
       html += '<div class="bp-compact-job" style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;">';
       html += '<span style="width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;"></span>';
-      html += '<span style="font-weight:600;text-transform:capitalize;">' + bpEscape(j.type) + '</span>';
+      html += '<span style="font-weight:600;">' + bpEscape(window.formatJobType(j.type)) + '</span>';
       if (phase) html += '<span style="color:var(--text-muted);">\u2014 ' + bpEscape(phase) + '</span>';
       if (detail) html += '<span style="color:var(--text-muted);font-variant-numeric:tabular-nums;">' + detail + '</span>';
       html += '<a href="/jobs" style="margin-left:auto;color:var(--accent);text-decoration:none;font-size:11px;white-space:nowrap;">View \u2192</a>';
@@ -4766,7 +4837,7 @@ function formatDuration(seconds) {
 
     summary.classList.remove('idle');
     var j = running[0];
-    var text = j.type;
+    var text = window.formatJobType(j.type);
     if (j.progress && j.progress.phase) {
       text += ' — ' + j.progress.phase;
     }
@@ -4846,6 +4917,18 @@ function formatDuration(seconds) {
     div.appendChild(document.createTextNode(String(str)));
     return div.innerHTML;
   }
+
+  // Convert internal job-type identifiers like "new_images_walk" or
+  // "duplicate-scan" into a user-facing label ("New Images Walk", "Duplicate
+  // Scan"). Exposed on window so per-page scripts (e.g. jobs.html) can reuse it.
+  window.formatJobType = function(type) {
+    if (!type) return '';
+    return String(type)
+      .split(/[-_]+/)
+      .filter(function(w) { return w.length > 0; })
+      .map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1); })
+      .join(' ');
+  };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
