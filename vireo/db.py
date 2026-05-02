@@ -2532,6 +2532,157 @@ class Database:
             "sharpness": row["sharpness"] or 0,
         }
 
+    def _scope_clause(self, photo_ids, table_alias="p"):
+        """Build a (clause, params) pair to scope a query to photo_ids.
+
+        Returns ('', []) when photo_ids is None (whole-workspace scope).
+        Returns (' AND p.id IN (NULL)', []) for an empty set, which is the
+        intentional "no photos in scope" sentinel — callers asked for
+        "this collection" and the collection resolved to zero photos.
+        """
+        if photo_ids is None:
+            return "", []
+        ids = list(photo_ids)
+        if not ids:
+            return f" AND {table_alias}.id IN (NULL)", []
+        placeholders = ",".join("?" for _ in ids)
+        return f" AND {table_alias}.id IN ({placeholders})", ids
+
+    def count_real_detections_in_scope(self, photo_ids=None, min_conf=None):
+        """Count (photos_with_real_dets, total_real_dets) for the workspace.
+
+        "Real" excludes detector_model='full-image' synthetic anchors.
+        ``photo_ids`` scopes to a collection (set/list of ids); None = whole
+        workspace.
+
+        Used by the pipeline plan to compute classify scope.
+        """
+        ws = self._ws_id()
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(*) AS total_dets,
+                       COUNT(DISTINCT d.photo_id) AS photos_with_dets
+                FROM detections d
+                JOIN photos p ON p.id = d.photo_id
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                WHERE d.detector_model != 'full-image'
+                  AND d.detector_confidence >= ?{scope_sql}""",
+            (ws, min_conf, *scope_params),
+        ).fetchone()
+        return {
+            "photos_with_dets": row["photos_with_dets"] or 0,
+            "total_dets": row["total_dets"] or 0,
+        }
+
+    def count_classify_pending_pairs(
+        self, classifier_model, labels_fingerprint,
+        photo_ids=None, min_conf=None,
+    ):
+        """Count detections in scope that lack a classifier_runs row for
+        (classifier_model, labels_fingerprint).
+
+        Mirrors the gate in classify_job._classify_photos: a real detection
+        with no row in classifier_runs for the given (model, fp) is one
+        unit of pending work for the next classify run.
+        """
+        ws = self._ws_id()
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(*) AS pending
+                FROM detections d
+                JOIN photos p ON p.id = d.photo_id
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                LEFT JOIN classifier_runs cr
+                  ON cr.detection_id = d.id
+                 AND cr.classifier_model = ?
+                 AND cr.labels_fingerprint = ?
+                WHERE d.detector_model != 'full-image'
+                  AND d.detector_confidence >= ?
+                  AND cr.detection_id IS NULL{scope_sql}""",
+            (ws, classifier_model, labels_fingerprint, min_conf, *scope_params),
+        ).fetchone()
+        return row["pending"] or 0
+
+    def count_photos_pending_masks(self, photo_ids=None, min_conf=None):
+        """Return (pending, eligible) for the extract-masks stage.
+
+        eligible = photos in scope with at least one real detection above the
+            workspace's effective detector_confidence
+        pending  = eligible photos whose mask_path IS NULL
+
+        Mirrors extract_masks_stage's per-photo gate (which keys solely on
+        mask_path being unset for photos with non-full-image detections).
+        """
+        ws = self._ws_id()
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT
+                  COUNT(DISTINCT p.id) AS eligible,
+                  COUNT(DISTINCT CASE WHEN p.mask_path IS NULL THEN p.id END)
+                    AS pending
+                FROM photos p
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN detections d
+                  ON d.photo_id = p.id
+                 AND d.detector_model != 'full-image'
+                 AND d.detector_confidence >= ?
+                WHERE 1=1{scope_sql}""",
+            (ws, min_conf, *scope_params),
+        ).fetchone()
+        return {
+            "eligible": row["eligible"] or 0,
+            "pending": row["pending"] or 0,
+        }
+
+    def count_eye_keypoint_eligible(self, photo_ids=None):
+        """Count photos eligible for the eye-keypoint stage, ignoring the
+        ``eye_tenengrad IS NULL`` idempotency gate.
+
+        Eligibility = mask present + at least one non-synthetic detection
+        above min_conf + at least one prediction on that detection. Matches
+        the join shape of ``list_photos_for_eye_keypoint_stage`` minus the
+        "not yet processed" filter, so the plan can distinguish "no
+        eligible photos" from "all eligible photos already processed".
+        """
+        import config as cfg
+        ws = self._ws_id()
+        min_conf = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2,
+        )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT p.id) AS n
+                FROM photos p
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN detections d
+                  ON d.photo_id = p.id
+                 AND d.detector_model != 'full-image'
+                 AND d.detector_confidence >= ?
+                JOIN predictions pr ON pr.detection_id = d.id
+                WHERE p.mask_path IS NOT NULL{scope_sql}""",
+            (ws, min_conf, *scope_params),
+        ).fetchone()
+        return row["n"] or 0
+
     def get_dashboard_stats(self):
         """Return aggregate statistics for the dashboard."""
         ws = self._ws_id()

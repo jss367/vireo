@@ -4,6 +4,10 @@
 
 AI-powered wildlife photo organizer. Flask backend, Jinja2 templates, vanilla JS frontend. No frontend framework.
 
+## UI transparency is a hard rule
+
+Read `CORE_PHILOSOPHY.md` ("Show the user what's happening / No black boxes") before writing or reviewing any user-facing status text — pills, badges, counters, summaries, "X of Y", "Already done", "Will run", readiness panels, progress phrases. Each one must answer the question users actually read it as, not a cheaper backend proxy. A pill that says "Already done" must mean *the next run would be a no-op given current settings* — not "there exists prior output somewhere." If the accurate signal needs the current UI selections (selected models, labels, variants, reclassify, etc.), build the endpoint that takes them; don't fall back to a global `COUNT(*) > 0`.
+
 ## Running
 
 ```bash

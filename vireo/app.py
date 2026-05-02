@@ -1213,6 +1213,38 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "recent_destinations": effective_cfg.get("ingest", {}).get("recent_destinations", []),
         })
 
+    @app.route("/api/pipeline/plan", methods=["POST"])
+    def api_pipeline_plan():
+        """Return the per-stage plan for the pipeline given current UI selections.
+
+        Truth source for the Pipeline page's status pills + plan summary —
+        each stage's state ("Will run", "Will skip", "Already done") and
+        its summary text are computed from the same gates the actual
+        pipeline job uses, so the user is never told a stage is done when
+        it isn't (or vice versa).
+
+        Body mirrors a subset of the /api/jobs/pipeline body so the page
+        can pass through the same selections the user is staging.
+        """
+        from pipeline_plan import PipelinePlanParams, compute_plan
+
+        body = request.get_json(silent=True) or {}
+        params = PipelinePlanParams(
+            collection_id=body.get("collection_id"),
+            exclude_photo_ids=body.get("exclude_photo_ids") or [],
+            skip_classify=bool(body.get("skip_classify")),
+            skip_extract_masks=bool(body.get("skip_extract_masks")),
+            skip_eye_keypoints=bool(body.get("skip_eye_keypoints")),
+            skip_regroup=bool(body.get("skip_regroup")),
+            model_ids=body.get("model_ids") or (
+                [body["model_id"]] if body.get("model_id") else []
+            ),
+            labels_files=body.get("labels_files") or [],
+            reclassify=bool(body.get("reclassify")),
+        )
+        db = _get_db()
+        return jsonify(compute_plan(db, params, db_path))
+
     @app.route("/api/folders")
     def api_folders():
         db = _get_db()
