@@ -521,12 +521,22 @@ def serialize_results(results):
     for enc in results["encounters"]:
         photos_list = enc.get("photos", [])
 
-        # Derive confirmed_species from photos (any confirmed photo sets encounter)
-        enc_confirmed = None
-        for p in photos_list:
-            if p.get("confirmed_species"):
-                enc_confirmed = p["confirmed_species"]
-                break
+        # An encounter is confirmed only when every photo shares the same
+        # confirmed_species. Threshold-slider regrouping can merge a confirmed
+        # encounter with an unconfirmed (or differently-confirmed) neighbor;
+        # in that case the merged encounter must stay visible for review
+        # rather than inheriting the confirmed flag from an arbitrary photo.
+        # confirmed_species is still surfaced as the dominant prior species so
+        # the /api/encounters/species endpoint can find the keyword to untag
+        # when the user re-confirms.
+        photo_species = [p.get("confirmed_species") for p in photos_list]
+        confirmed_set = {s for s in photo_species if s}
+        if photos_list and len(confirmed_set) == 1 and all(s for s in photo_species):
+            enc_confirmed = next(iter(confirmed_set))
+            species_confirmed_flag = True
+        else:
+            enc_confirmed = next(iter(confirmed_set)) if confirmed_set else None
+            species_confirmed_flag = False
 
         species_votes = _build_species_predictions(photos_list)
 
@@ -534,7 +544,7 @@ def serialize_results(results):
             "species": enc.get("species"),
             "confirmed_species": enc_confirmed,
             "species_predictions": species_votes,
-            "species_confirmed": enc_confirmed is not None,
+            "species_confirmed": species_confirmed_flag,
             "photo_count": enc.get("photo_count"),
             "burst_count": enc.get("burst_count"),
             "time_range": enc.get("time_range"),
@@ -544,10 +554,23 @@ def serialize_results(results):
             s_enc["bursts"] = []
             for burst in enc["bursts"]:
                 burst_ids = [p["id"] for p in burst]
+                # Derive species_override from per-photo confirmations so that
+                # burst-confirmed indicators survive a regroup. Previously this
+                # was always None, wiping per-burst confirmation state every
+                # time a slider moved even though the underlying tags persist.
+                burst_species = [p.get("confirmed_species") for p in burst]
+                burst_set = {s for s in burst_species if s}
+                if burst and len(burst_set) == 1 and all(s for s in burst_species):
+                    burst_override = {
+                        "species": next(iter(burst_set)),
+                        "confirmed": True,
+                    }
+                else:
+                    burst_override = None
                 s_enc["bursts"].append({
                     "photo_ids": burst_ids,
                     "species_predictions": _build_species_predictions(burst),
-                    "species_override": None,
+                    "species_override": burst_override,
                 })
         serialized_encounters.append(s_enc)
 
