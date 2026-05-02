@@ -647,6 +647,68 @@ def test_serialize_results_mixed_species_not_marked_confirmed(tmp_path):
     )
 
 
+def test_serialize_results_mixed_fallback_species_is_deterministic(tmp_path):
+    """For mixed encounters, confirmed_species falls back to the most
+    frequent confirmed value so /api/encounters/species can untag a stable
+    previous keyword on re-confirm. Set iteration order is not stable
+    across processes, so the earlier next(iter(set)) fallback was
+    effectively arbitrary.
+    """
+    from pipeline import load_photo_features, run_full_pipeline, serialize_results
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    robin_kid = db.add_keyword("Robin", is_species=True)
+    eagle_kid = db.add_keyword("Eagle", is_species=True)
+    # 2x Robin, 1x Eagle — Robin wins by frequency regardless of which
+    # photo happens to come first.
+    db.tag_photo(ids[0][0], eagle_kid)
+    db.tag_photo(ids[0][1], robin_kid)
+    db.tag_photo(ids[0][2], robin_kid)
+
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+    serialized = serialize_results(results)
+
+    target_ids = set(ids[0])
+    target_enc = next(
+        e for e in serialized["encounters"]
+        if set(e["photo_ids"]) & target_ids
+    )
+
+    assert target_enc["species_confirmed"] is False
+    assert target_enc["confirmed_species"] == "Robin"
+
+
+def test_serialize_results_mixed_fallback_species_tiebreaks_by_first_photo(tmp_path):
+    """When confirmed-species counts tie within an encounter, the fallback
+    breaks ties by first appearance in photo order. This locks in
+    deterministic behavior so re-confirming the same encounter twice
+    untags the same previous keyword.
+    """
+    from pipeline import load_photo_features, run_full_pipeline, serialize_results
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    robin_kid = db.add_keyword("Robin", is_species=True)
+    eagle_kid = db.add_keyword("Eagle", is_species=True)
+    # 1x Eagle (earliest photo), 1x Robin, 1x unconfirmed → counts tie
+    # at 1 each, so the earlier photo's species (Eagle) wins the tiebreak.
+    db.tag_photo(ids[0][0], eagle_kid)
+    db.tag_photo(ids[0][1], robin_kid)
+
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+    serialized = serialize_results(results)
+
+    target_ids = set(ids[0])
+    target_enc = next(
+        e for e in serialized["encounters"]
+        if set(e["photo_ids"]) & target_ids
+    )
+
+    assert target_enc["species_confirmed"] is False
+    assert target_enc["confirmed_species"] == "Eagle"
+
+
 def test_serialize_results_uniformly_confirmed_remains_confirmed(tmp_path):
     """Sanity: an encounter where every photo shares the same confirmed
     species is still marked species_confirmed=True with confirmed_species set.

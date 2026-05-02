@@ -535,7 +535,24 @@ def serialize_results(results):
             enc_confirmed = next(iter(confirmed_set))
             species_confirmed_flag = True
         else:
-            enc_confirmed = next(iter(confirmed_set)) if confirmed_set else None
+            # For mixed/partial encounters, pick the most frequent confirmed
+            # species, breaking ties by first appearance in photo order. Set
+            # iteration order is not stable across processes, so iterating
+            # confirmed_set directly would feed /api/encounters/species an
+            # arbitrary previous_species and untag an unpredictable keyword
+            # on re-confirm.
+            enc_confirmed = None
+            if confirmed_set:
+                counts = defaultdict(int)
+                first_index = {}
+                for idx, s in enumerate(photo_species):
+                    if s:
+                        counts[s] += 1
+                        first_index.setdefault(s, idx)
+                enc_confirmed = max(
+                    counts,
+                    key=lambda s: (counts[s], -first_index[s]),
+                )
             species_confirmed_flag = False
 
         species_votes = _build_species_predictions(photos_list)
