@@ -378,21 +378,57 @@ def test_get_taxonomy_info_no_file(monkeypatch):
 
 
 def test_get_taxonomy_info_with_file(tmp_path, monkeypatch):
-    """Returns correct info when taxonomy.json exists."""
+    """Returns correct info when taxonomy.json exists and is plausibly sized."""
     import models
     import taxonomy
 
     tax_path = tmp_path / "taxonomy.json"
-    # Make the file large enough for taxa_count estimation (size // 150)
     tax_data = {"last_updated": "2024-01-15", "taxa": [{"name": f"Species {i}"} for i in range(100)]}
     tax_path.write_text(json.dumps(tax_data))
 
     monkeypatch.setattr(taxonomy, "find_taxonomy_json", lambda: str(tax_path))
+    # The fixture file is far smaller than the production taxonomy; lower
+    # the usability floor so the integrity check passes for the test.
+    monkeypatch.setattr(models, "_TAXONOMY_MIN_USABLE_BYTES", 100)
 
     info = models.get_taxonomy_info()
     assert info["available"] is True
     assert info["last_updated"] == "2024-01-15"
     assert info["taxa_count"] > 0
+
+
+def test_get_taxonomy_info_zero_byte_stub_unavailable(tmp_path, monkeypatch):
+    """A truncated/0-byte file from a failed download must report
+    available=False so the UI keeps the "Download taxonomy" affordance
+    visible — the prior os.path.exists check hid it for unrecoverable users.
+    """
+    import models
+    import taxonomy
+
+    tax_path = tmp_path / "taxonomy.json"
+    tax_path.write_bytes(b"")
+    monkeypatch.setattr(taxonomy, "find_taxonomy_json", lambda: str(tax_path))
+
+    info = models.get_taxonomy_info()
+    assert info["available"] is False
+    assert info.get("corrupt") is True
+
+
+def test_get_taxonomy_info_undersized_stub_unavailable(tmp_path, monkeypatch):
+    """A multi-KB stub (e.g. an HTML error page from a misrouted CDN
+    response saved as taxonomy.json) is structurally too small to be a
+    real taxonomy and must report available=False.
+    """
+    import models
+    import taxonomy
+
+    tax_path = tmp_path / "taxonomy.json"
+    tax_path.write_text('{"error": "404 Not Found"}')
+    monkeypatch.setattr(taxonomy, "find_taxonomy_json", lambda: str(tax_path))
+
+    info = models.get_taxonomy_info()
+    assert info["available"] is False
+    assert info.get("corrupt") is True
 
 
 # ---------------------------------------------------------------------------

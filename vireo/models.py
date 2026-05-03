@@ -941,8 +941,24 @@ def download_hf_model(repo_id, progress_callback=None):
     return {"model_id": model_id, "weights_path": local_dir, "name": name}
 
 
+_TAXONOMY_MIN_USABLE_BYTES = 1_000_000
+
+
 def get_taxonomy_info():
-    """Return taxonomy status info."""
+    """Return taxonomy status info.
+
+    ``available`` means *the file on disk is usable as a taxonomy*, not just
+    that a path exists. A 0-byte stub from an interrupted download or a
+    truncated write must report ``available: False`` so the UI keeps the
+    "Download taxonomy" affordance visible — the prior file-existence check
+    was hiding that affordance for unrecoverable users (CORE_PHILOSOPHY:
+    "Show the user what's happening / No black boxes").
+
+    Cheap-but-effective check: the real iNat taxonomy is hundreds of MB,
+    so anything under ~1MB is structurally broken. Full JSON parsing here
+    would dominate page-init latency for the common case where the file
+    is valid; the deeper parse happens at first ``Taxonomy(path)`` use.
+    """
     from taxonomy import find_taxonomy_json
     taxonomy_path = find_taxonomy_json()
     if not os.path.exists(taxonomy_path):
@@ -951,6 +967,17 @@ def get_taxonomy_info():
             "path": taxonomy_path,
             "taxa_count": 0,
             "last_updated": None,
+        }
+
+    size = os.path.getsize(taxonomy_path)
+    if size < _TAXONOMY_MIN_USABLE_BYTES:
+        return {
+            "available": False,
+            "path": taxonomy_path,
+            "taxa_count": 0,
+            "last_updated": None,
+            "file_size": size,
+            "corrupt": True,
         }
 
     try:
@@ -962,8 +989,6 @@ def get_taxonomy_info():
         updated_match = re.search(r'"last_updated"\s*:\s*"([^"]+)"', raw)
         last_updated = updated_match.group(1) if updated_match else None
 
-        # Get file size as a proxy for taxa count
-        size = os.path.getsize(taxonomy_path)
         # Rough estimate: ~150 bytes per taxon entry
         taxa_estimate = size // 150
 
@@ -976,8 +1001,10 @@ def get_taxonomy_info():
         }
     except Exception:
         return {
-            "available": True,
+            "available": False,
             "path": taxonomy_path,
             "taxa_count": 0,
             "last_updated": None,
+            "file_size": size,
+            "corrupt": True,
         }
