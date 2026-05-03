@@ -1462,10 +1462,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             first_name = resolved_specs[0]["name"]
             runner.update_step(job["id"], "model_loader", current_file=first_name)
 
-            # Download taxonomy if missing and requested
+            # Download taxonomy if missing/unusable and requested. Mirrors the
+            # availability check used by /api/pipeline/page-init: a 0-byte stub
+            # from an interrupted download "exists" but is not a usable
+            # taxonomy, and the user opted into a download to recover from
+            # exactly that state.
+            from models import get_taxonomy_info
             from taxonomy import TAXONOMY_JSON_PATH, find_taxonomy_json
             taxonomy_path = find_taxonomy_json()
-            if params.download_taxonomy and not os.path.exists(taxonomy_path):
+            if params.download_taxonomy and not get_taxonomy_info().get("available"):
                 try:
                     from taxonomy import download_taxonomy
                     _emit_progress(

@@ -2204,6 +2204,139 @@ def test_pipeline_model_ids_back_compat_with_model_id(tmp_path, monkeypatch):
     )
 
 
+def test_pipeline_redownloads_taxonomy_when_existing_file_is_corrupt(
+    tmp_path, monkeypatch
+):
+    """A 0-byte stub from an interrupted download "exists" on disk but is
+    not a usable taxonomy. /api/pipeline/page-init reports unavailable in
+    that case (so the "Download taxonomy if missing" checkbox stays
+    visible), and the runner must honor the same gate — otherwise checking
+    the box from the UI silently no-ops on the exact corruption case the
+    page-init change targets, leaving users with no in-app recovery path.
+    """
+    import classifier as classifier_mod
+    import config as cfg
+    import taxonomy as taxonomy_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    fake_path = tmp_path / "taxonomy.json"
+    fake_path.write_bytes(b"")  # 0-byte stub from an interrupted download
+    monkeypatch.setattr(taxonomy_mod, "TAXONOMY_JSON_PATH", str(fake_path))
+    monkeypatch.setattr(
+        taxonomy_mod, "find_taxonomy_json", lambda: str(fake_path)
+    )
+    monkeypatch.setattr(taxonomy_mod, "load_local_taxonomy", lambda: None)
+
+    download_calls = []
+
+    def fake_download(output_path, progress_callback=None):
+        download_calls.append(output_path)
+
+    monkeypatch.setattr(taxonomy_mod, "download_taxonomy", fake_download)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        download_taxonomy=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert download_calls, (
+        "Pipeline must trigger taxonomy download when the existing file is "
+        "corrupt/undersized; gate must match get_taxonomy_info() availability"
+    )
+
+
+def test_pipeline_skips_taxonomy_download_when_file_is_usable(
+    tmp_path, monkeypatch
+):
+    """Converse of the corruption case: a valid taxonomy file (>= 1MB) on
+    disk must NOT trigger a re-download even when download_taxonomy=True is
+    set, otherwise the checkbox would silently re-download on every run.
+    """
+    import classifier as classifier_mod
+    import config as cfg
+    import taxonomy as taxonomy_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    fake_path = tmp_path / "taxonomy.json"
+    with open(fake_path, "wb") as f:
+        f.truncate(2_000_000)
+    monkeypatch.setattr(taxonomy_mod, "TAXONOMY_JSON_PATH", str(fake_path))
+    monkeypatch.setattr(
+        taxonomy_mod, "find_taxonomy_json", lambda: str(fake_path)
+    )
+    monkeypatch.setattr(taxonomy_mod, "load_local_taxonomy", lambda: None)
+
+    download_calls = []
+    monkeypatch.setattr(
+        taxonomy_mod,
+        "download_taxonomy",
+        lambda output_path, progress_callback=None: download_calls.append(
+            output_path
+        ),
+    )
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        download_taxonomy=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert not download_calls, (
+        "Valid (>= 1MB) taxonomy must not be redundantly redownloaded"
+    )
+
+
 def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
     tmp_path, monkeypatch
 ):
