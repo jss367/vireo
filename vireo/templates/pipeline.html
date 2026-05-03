@@ -3503,11 +3503,60 @@ var _PILL_LABELS = {
   'done-prior': 'Already done',
 };
 
-function _setPill(suffix, state, text) {
+// Map a stage's plan entry to the pill text, including counts and the
+// staleness signal. Returns the literal string to display.
+//
+// The plan endpoint emits `state: 'will-run'` for both fresh and
+// outdated cases; the distinction lives in `detail.fingerprint_outdated`
+// / `detail.fingerprint_invalidated`. We surface that here as a distinct
+// "Outdated" label so users see settings-changed staleness directly,
+// not buried in the summary text.
+function _formatPillLabel(stage, planEntry, state) {
+  // Special-cased states (running/done/failed/will-skip) have static
+  // labels — counts during a run come from a separate channel.
+  if (state === 'running')   return 'Running…';
+  if (state === 'done')      return 'Done';
+  if (state === 'failed')    return 'Failed';
+  if (state === 'will-skip') return 'Will skip';
+
+  if (!planEntry) {
+    // No plan entry yet (page still loading) — fall back to the bare
+    // state label. Same behavior as the pre-PR-#2 lookup.
+    return state === 'done-prior' ? 'Already done' : 'Will run';
+  }
+  var detail   = planEntry.detail || {};
+  var pending  = (typeof detail.pending  === 'number') ? detail.pending  : null;
+  var eligible = (typeof detail.eligible === 'number') ? detail.eligible : null;
+  var outdated = !!(detail.fingerprint_outdated || detail.fingerprint_invalidated);
+
+  // No quantifiable work — fall back to the state-only label.
+  if (eligible === null || eligible === 0) {
+    return state === 'done-prior' ? 'Already done' : 'Will run';
+  }
+
+  if (state === 'done-prior') {
+    return 'Already done (' + eligible + ')';
+  }
+
+  // state === 'will-run' from here on.
+  if (outdated)                  return 'Outdated (' + (pending || eligible) + ' to redo)';
+  if (pending !== null && pending > 0 && pending < eligible) {
+    return 'Resume (' + pending + ' left)';
+  }
+  return 'Will run (' + eligible + ')';
+}
+
+function _setPill(suffix, state, text, stage) {
   var pill = document.getElementById('pill' + suffix);
   if (!pill) return;
   pill.className = 'stage-status-pill visible ' + state;
-  pill.textContent = text != null ? text : _PILL_LABELS[state];
+  if (text != null) {
+    pill.textContent = text;
+    return;
+  }
+  var planEntry = _pipelinePlan && _pipelinePlan.stages
+    ? _pipelinePlan.stages[suffix] : null;
+  pill.textContent = _formatPillLabel(stage, planEntry, state);
 }
 
 // Map each stage suffix to the .stage-summary span it owns. The span shows
@@ -3584,7 +3633,7 @@ function _renderPlanSummary() {
 function refreshPipelineUI() {
   _STAGES.forEach(function(stage) {
     var state = _stageStateFor(stage);
-    _setPill(stage.suffix, state);
+    _setPill(stage.suffix, state, null, stage);
     // Only paint plan summary text when no run is active for this stage,
     // otherwise the live counts ("12/47", "Done!") get clobbered.
     if (!_runningStages[stage.suffix] && !_stageOutcomes[stage.suffix]) {
