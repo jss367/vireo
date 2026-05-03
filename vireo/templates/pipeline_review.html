@@ -64,6 +64,24 @@
 }
 .empty-state h2 { font-size: 20px; margin-bottom: 8px; color: var(--text-secondary); }
 .empty-state p { font-size: 14px; max-width: 400px; margin: 0 auto; line-height: 1.5; }
+.readiness-stages {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 4px 12px;
+  margin: 16px auto;
+  font-size: 13px;
+  max-width: 360px;
+  text-align: left;
+}
+.readiness-stages .stage-name { color: var(--text-dim); }
+.readiness-stages .stage-count { font-variant-numeric: tabular-nums; }
+.readiness-stages .stage-ok { color: var(--success, #4caf50); }
+.readiness-stages .stage-partial { color: var(--warning, #ff9800); }
+.readiness-stages .stage-missing { color: var(--text-dim); }
+.readiness-actions { margin-top: 16px; display: flex; justify-content: center; gap: 12px; }
+.readiness-actions button { padding: 8px 16px; }
+.readiness-actions .compute-btn { background: var(--accent); color: var(--bg); border: none; border-radius: 4px; cursor: pointer; }
+.readiness-actions .compute-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Filter bar */
 .filter-bar {
@@ -1052,8 +1070,10 @@ input[type="range"]::-moz-range-thumb {
     <div id="encountersContainer"></div>
 
     <div class="empty-state" id="emptyState" style="display:none;">
-      <h2>No pipeline results yet</h2>
-      <p>Run the pipeline from the <a href="/pipeline" style="color:var(--accent);">Pipeline</a> page first.</p>
+      <h2 id="emptyStateHeading">No pipeline results yet</h2>
+      <p id="emptyStateBody"></p>
+      <div class="readiness-stages" id="readinessStages"></div>
+      <div class="readiness-actions" id="readinessActions"></div>
     </div>
   </div>
 </div>
@@ -1806,13 +1826,96 @@ function toggleMask() {
 
 // -- Init --
 
+function renderEmptyState(readiness) {
+  var heading = document.getElementById('emptyStateHeading');
+  var body = document.getElementById('emptyStateBody');
+  var stages = document.getElementById('readinessStages');
+  var actions = document.getElementById('readinessActions');
+  document.getElementById('emptyState').style.display = '';
+
+  // Per-stage rows
+  var rows = [
+    ['Photos', readiness.total_photos, readiness.total_photos],
+    ['Masks', readiness.with_masks, readiness.total_photos],
+    ['Embeddings', readiness.with_embeddings, readiness.total_photos],
+    ['Eye keypoints', readiness.with_eye_keypoints, readiness.total_photos],
+    ['Species predictions', readiness.with_predictions, readiness.total_photos],
+  ];
+  stages.innerHTML = rows.map(function(r) {
+    var name = r[0], n = r[1], total = r[2];
+    var cls = (n === total && total > 0) ? 'stage-ok'
+            : (n > 0 ? 'stage-partial' : 'stage-missing');
+    return '<span class="stage-name">' + name + '</span>'
+         + '<span class="stage-count ' + cls + '">' + n + ' / ' + total + '</span>';
+  }).join('');
+
+  if (readiness.state === 'empty') {
+    heading.textContent = 'No photos in this workspace';
+    body.textContent = 'Add folders to this workspace from the Folders page.';
+    actions.innerHTML = '';
+    return;
+  }
+
+  if (readiness.state === 'insufficient') {
+    heading.textContent = 'Not enough features to compute results yet';
+    body.textContent = 'Run mask extraction on the Pipeline page first '
+      + '— the review page needs masks to score photo quality.';
+    actions.innerHTML = '<a href="/pipeline" class="compute-btn" '
+      + 'style="text-decoration:none;display:inline-block;">Open Pipeline</a>';
+    return;
+  }
+
+  // state === 'computable'
+  heading.textContent = 'Ready to compute results';
+  var enhancing = readiness.enhancing_missing || [];
+  if (enhancing.length === 0) {
+    body.textContent = 'All upstream stages are complete. '
+      + 'Click below to group, score, and triage your photos.';
+  } else {
+    var labels = enhancing.map(function(k) {
+      return ({masks_partial: 'full mask coverage',
+               embeddings: 'embeddings',
+               eye_keypoints: 'eye keypoints',
+               species_predictions: 'species predictions'})[k] || k;
+    });
+    body.textContent = 'You can compute results now. Quality will be lower without: '
+      + labels.join(', ') + '. Re-run those stages on the Pipeline page later to improve.';
+  }
+  actions.innerHTML = '<button class="compute-btn" onclick="computeReviewNow()">'
+    + 'Compute results now</button>';
+}
+
+function computeReviewNow() {
+  var btn = document.querySelector('.readiness-actions .compute-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Computing…'; }
+  safeFetch('/api/pipeline/regroup-live', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({})
+  }).then(function(data) {
+    if (!data || !data.encounters) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Compute results now'; }
+      return;
+    }
+    // Hide empty state, render results inline
+    document.getElementById('emptyState').style.display = 'none';
+    pipelineResults = data;
+    document.getElementById('summaryBar').style.display = '';
+    updateSummaryBar(data.summary);
+    document.getElementById('filterBar').style.display = '';
+    document.getElementById('sidebarScoring').style.display = '';
+    document.getElementById('sidebarGrouping').style.display = '';
+    renderResults();
+    refreshMissesReviewBtn();
+  });
+}
+
 function initPipelineReviewPage() {
   safeFetch('/api/pipeline/page-init', {}, { toast: false })
   .then(function(data) {
     if (!data || !data.results) {
-      // No results — show empty state
-      var empty = document.getElementById('emptyState');
-      if (empty) empty.style.display = '';
+      renderEmptyState(data && data.review_readiness ? data.review_readiness
+                                                     : {state: 'empty', total_photos: 0});
       return;
     }
     // Hide empty state, show results UI
