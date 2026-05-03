@@ -3062,15 +3062,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             cache_dir = os.path.dirname(db_path)
             save_results(results, cache_dir, workspace_id)
 
-            # Stamp the grouping fingerprint + timestamp BEFORE marking the
-            # step completed, so a partial regroup that crashes between here
-            # and update_step doesn't end up labeled "fresh" with a stale fp.
-            from pipeline import compute_group_fingerprint
-            thread_db.set_workspace_group_state(
-                workspace_id=workspace_id,
-                fingerprint=compute_group_fingerprint(effective_cfg),
-                when_ts=int(time.time()),
+            # Only stamp the workspace fingerprint when this regroup covered
+            # the whole workspace. A user-passed collection_id or non-empty
+            # exclude_photo_ids means some workspace photos were intentionally
+            # left out, so claiming workspace-wide freshness would lie. The
+            # auto-created collection (collection_id set inside scan stage
+            # while params.collection_id is None) is treated as full-scope —
+            # it contains the photos the user just asked us to process.
+            full_scope = (
+                params.collection_id is None
+                and not params.exclude_photo_ids
             )
+            if full_scope:
+                # Stamp BEFORE marking the step completed, so a partial
+                # regroup that crashes between here and update_step doesn't
+                # end up labeled "fresh" with a stale fp. Hash pipeline_cfg
+                # (the same dict run_full_pipeline received) so workspace
+                # overrides for encounter/burst params actually flip the
+                # fingerprint.
+                from pipeline import compute_group_fingerprint
+                thread_db.set_workspace_group_state(
+                    workspace_id=workspace_id,
+                    fingerprint=compute_group_fingerprint(pipeline_cfg),
+                    when_ts=int(time.time()),
+                )
 
             stages["regroup"]["status"] = "completed"
             summary_info = results.get("summary", {})

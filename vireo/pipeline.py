@@ -728,22 +728,29 @@ _EYE_KEYPOINT_MODEL_FOR_CLASS = {
 EYE_KP_FINGERPRINT_VERSION = "v1"
 
 
-def compute_group_fingerprint(_config):
-    """Stable hash of the params that drive encounter + burst grouping.
+def compute_group_fingerprint(config):
+    """Stable hash of the params that actually drive encounter + burst grouping.
 
-    Workspaces store the fingerprint observed at the last completed
-    grouping run; the pipeline page treats != current as "Outdated".
-    The _config arg is reserved for future per-workspace overrides; for
-    now grouping uses module-level DEFAULTS only.
+    encounters.py and bursts.py both compute ``cfg = {**DEFAULTS, **(config or {})}``
+    at runtime, so any override in ``config`` whose key matches a DEFAULTS key
+    changes the grouping result. The fingerprint mirrors that merge: for each
+    key in encounters.DEFAULTS / bursts.DEFAULTS, take the override if present
+    else the default. Keys that don't appear in either DEFAULTS dict (e.g.
+    ``sam2_variant``) are ignored — they don't affect grouping, so they
+    shouldn't flip the workspace to "Outdated".
+
+    Workspaces store the fingerprint observed at the last completed grouping
+    run; the pipeline page treats != current as "Outdated".
     """
     import hashlib
     import json
 
     import bursts
     import encounters
+    config = config or {}
     payload = {
-        "encounters": dict(encounters.DEFAULTS),
-        "bursts": dict(bursts.DEFAULTS),
+        "encounters": {k: config.get(k, v) for k, v in encounters.DEFAULTS.items()},
+        "bursts": {k: config.get(k, v) for k, v in bursts.DEFAULTS.items()},
     }
     blob = json.dumps(payload, sort_keys=True).encode("utf-8")
     return hashlib.sha1(blob).hexdigest()[:16]

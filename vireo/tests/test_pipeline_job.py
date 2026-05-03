@@ -6125,7 +6125,117 @@ def test_pipeline_regroup_stamps_workspace_group_fingerprint(tmp_path, monkeypat
     )
     from pipeline import compute_group_fingerprint
     effective = db2.get_effective_config(cfg.load())
-    assert row["last_group_fingerprint"] == compute_group_fingerprint(effective)
+    pipeline_cfg = effective.get("pipeline", {})
+    assert row["last_group_fingerprint"] == compute_group_fingerprint(pipeline_cfg)
+
+
+def test_pipeline_regroup_skips_stamp_when_user_passed_collection_id(tmp_path, monkeypatch):
+    """User-passed collection_id means partial scope. Stamping the workspace
+    'fresh' would overclaim — excluded photos weren't regrouped."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Empty rules — no source, mirrors test_pipeline_job_with_collection_skips_scan.
+    col_id = db.add_collection("subset", "[]")
+
+    import pipeline as pipeline_mod
+    monkeypatch.setattr(
+        pipeline_mod, "run_full_pipeline",
+        lambda photos, config=None: {"summary": {"groups": 1}, "photos": photos},
+    )
+    monkeypatch.setattr(pipeline_mod, "save_results", lambda *a, **k: None)
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda thread_db, collection_id=None, config=None: [{"id": 1}],
+    )
+
+    params = PipelineParams(
+        collection_id=col_id,           # USER-passed subset
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_eye_keypoints=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    with contextlib.suppress(Exception):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Workspace stamp must NOT be set — regroup ran on a subset.
+    db2 = Database(db_path)
+    row = db2.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
+        (ws_id,),
+    ).fetchone()
+    assert row["last_grouped_at"] is None, (
+        "regroup with user-passed collection_id stamped workspace 'fresh' "
+        "even though it ran on a subset"
+    )
+    assert row["last_group_fingerprint"] is None
+
+
+def test_pipeline_regroup_skips_stamp_when_exclude_photo_ids_set(tmp_path, monkeypatch):
+    """Non-empty exclude_photo_ids means some workspace photos were
+    intentionally not regrouped — workspace stamp must not claim fresh."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    import pipeline as pipeline_mod
+    monkeypatch.setattr(
+        pipeline_mod, "run_full_pipeline",
+        lambda photos, config=None: {"summary": {"groups": 1}, "photos": photos},
+    )
+    monkeypatch.setattr(pipeline_mod, "save_results", lambda *a, **k: None)
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda thread_db, collection_id=None, config=None: [{"id": 1}, {"id": 2}],
+    )
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_eye_keypoints=True,
+        exclude_photo_ids={2},  # subset via exclusion
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    with contextlib.suppress(Exception):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    db2 = Database(db_path)
+    row = db2.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
+        (ws_id,),
+    ).fetchone()
+    assert row["last_grouped_at"] is None, (
+        "regroup with exclude_photo_ids stamped workspace 'fresh' "
+        "even though some photos were excluded"
+    )
+    assert row["last_group_fingerprint"] is None
 
 
 # --- Weighted overall progress ---------------------------------------------

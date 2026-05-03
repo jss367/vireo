@@ -1470,3 +1470,34 @@ def test_compute_group_fingerprint_changes_with_encounter_defaults():
     finally:
         encounters.DEFAULTS.clear()
         encounters.DEFAULTS.update(original)
+
+
+def test_compute_group_fingerprint_picks_up_encounter_override():
+    """A workspace override that lands in encounters.DEFAULTS' keyspace
+    changes the fingerprint. Mirrors how `cfg = {**DEFAULTS, **(config or {})}`
+    in encounters.py picks up overrides from the dict passed to
+    run_full_pipeline."""
+    from pipeline import compute_group_fingerprint
+    fp_default = compute_group_fingerprint({})
+    fp_overridden = compute_group_fingerprint({"w_time": 0.99})
+    assert fp_overridden != fp_default
+    fp_overridden_again = compute_group_fingerprint({"w_time": 0.99})
+    assert fp_overridden == fp_overridden_again
+
+
+def test_compute_group_fingerprint_picks_up_burst_override():
+    """An override of a key in bursts.DEFAULTS changes the fingerprint."""
+    from pipeline import compute_group_fingerprint
+    fp_default = compute_group_fingerprint({})
+    fp_overridden = compute_group_fingerprint({"burst_time_gap": 99.0})
+    assert fp_overridden != fp_default
+
+
+def test_compute_group_fingerprint_ignores_irrelevant_keys():
+    """Keys that don't appear in encounter/burst DEFAULTS don't affect
+    the fingerprint — sam2_variant changes shouldn't claim grouping is
+    outdated."""
+    from pipeline import compute_group_fingerprint
+    fp_a = compute_group_fingerprint({"sam2_variant": "small"})
+    fp_b = compute_group_fingerprint({"sam2_variant": "large", "totally_unrelated": True})
+    assert fp_a == fp_b
