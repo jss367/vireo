@@ -3529,8 +3529,11 @@ function _formatPillLabel(stage, planEntry, state) {
   var eligible = (typeof detail.eligible === 'number') ? detail.eligible : null;
   var outdated = !!(detail.fingerprint_outdated || detail.fingerprint_invalidated);
 
-  // No quantifiable work — fall back to the state-only label.
+  // No quantifiable work — fall back to the state-only label, but still
+  // surface the outdated flag for stages that don't have a per-photo
+  // unit (e.g., Group emits fingerprint_outdated with no eligible count).
   if (eligible === null || eligible === 0) {
+    if (state === 'will-run' && outdated) return 'Outdated';
     return state === 'done-prior' ? 'Already done' : 'Will run';
   }
 
