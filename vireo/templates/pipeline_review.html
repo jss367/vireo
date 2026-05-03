@@ -83,6 +83,29 @@
 .readiness-actions .compute-btn { background: var(--accent); color: var(--accent-text); border: none; border-radius: 4px; cursor: pointer; }
 .readiness-actions .compute-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+.degraded-banner {
+  background: var(--warning-bg, var(--bg-secondary, #3a2e1f));
+  color: var(--text);
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.degraded-banner-link {
+  color: var(--accent);
+  margin-left: auto;
+}
+.degraded-banner-close {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
 /* Filter bar */
 .filter-bar {
   display: flex;
@@ -1003,6 +1026,13 @@ input[type="range"]::-moz-range-thumb {
 
   <!-- Main area -->
   <div class="pipeline-main" id="mainArea">
+    <!-- Degraded-features banner (shown when results render with enhancing gaps) -->
+    <div class="degraded-banner" id="degradedBanner" style="display:none;">
+      <span id="degradedBannerText"></span>
+      <a href="/pipeline" class="degraded-banner-link">Open Pipeline</a>
+      <button class="degraded-banner-close" onclick="dismissDegradedBanner()" aria-label="Dismiss">&times;</button>
+    </div>
+
     <!-- Summary bar (hidden until data loads) -->
     <div class="summary-bar" id="summaryBar" style="display:none">
       <div class="summary-stat">
@@ -1144,6 +1174,11 @@ var hideConfirmed = false;
 // Captured from /api/pipeline/page-init so computeReviewNow() can apply
 // the same workspace-override logic the happy path uses on page load.
 var workspaceOverrides = null;
+// Captured from /api/pipeline/page-init so computeReviewNow() can re-render
+// the degraded-features banner using the current readiness snapshot
+// (regroup-live doesn't return readiness, but the missing-features set is
+// unchanged by computing the cache).
+var reviewReadiness = null;
 // Survives re-renders so confirming/filtering doesn't re-expand collapsed
 // encounters. Keyed by the encounter's full sorted photo_id set so that
 // detach/regroup (which change composition) naturally invalidate the key
@@ -1829,6 +1864,27 @@ function toggleMask() {
 
 // -- Init --
 
+function renderDegradedBanner(enhancingMissing) {
+  if (!enhancingMissing || enhancingMissing.length === 0) return;
+  if (sessionStorage.getItem('degradedBannerDismissed')) return;
+  var labelMap = {
+    masks_partial: 'full mask coverage',
+    embeddings: 'embeddings',
+    eye_keypoints: 'eye keypoints',
+    species_predictions: 'species predictions'
+  };
+  var labels = enhancingMissing.map(function(k) { return labelMap[k] || k; });
+  document.getElementById('degradedBannerText').textContent =
+    'These results were computed without ' + labels.join(', ')
+    + '. Re-run those stages to improve quality.';
+  document.getElementById('degradedBanner').style.display = '';
+}
+
+function dismissDegradedBanner() {
+  sessionStorage.setItem('degradedBannerDismissed', '1');
+  document.getElementById('degradedBanner').style.display = 'none';
+}
+
 function renderEmptyState(readiness) {
   var heading = document.getElementById('emptyStateHeading');
   var body = document.getElementById('emptyStateBody');
@@ -1918,6 +1974,7 @@ function computeReviewNow() {
     renderResults();
     checkPendingSync();
     refreshMissesReviewBtn();
+    renderDegradedBanner(reviewReadiness && reviewReadiness.enhancing_missing);
   }).catch(function() {
     // safeFetch toasts the error; re-enable the button so the user can retry.
     if (btn) { btn.disabled = false; btn.textContent = 'Compute results now'; }
@@ -1930,6 +1987,9 @@ function initPipelineReviewPage() {
     // Capture overrides regardless of state so computeReviewNow() can apply
     // the same review_min_confidence logic when the user clicks Compute.
     workspaceOverrides = (data && data.workspace_overrides) || null;
+    // Capture readiness so computeReviewNow() can re-render the degraded
+    // banner with the current missing-features set after compute completes.
+    reviewReadiness = (data && data.review_readiness) || null;
     if (!data || !data.results) {
       renderEmptyState(data && data.review_readiness ? data.review_readiness
                                                      : {state: 'empty', total_photos: 0});
@@ -1966,6 +2026,7 @@ function initPipelineReviewPage() {
     renderResults();
     checkPendingSync();
     refreshMissesReviewBtn();
+    renderDegradedBanner(data.review_readiness && data.review_readiness.enhancing_missing);
   });
 }
 
