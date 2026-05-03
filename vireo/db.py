@@ -269,6 +269,7 @@ class Database:
                 eye_y                    REAL,
                 eye_conf                 REAL,
                 eye_tenengrad            REAL,
+                eye_kp_fingerprint       TEXT,
                 miss_no_subject          INTEGER,
                 miss_clipped             INTEGER,
                 miss_oof                 INTEGER,
@@ -321,7 +322,9 @@ class Database:
                 tabs            TEXT,
                 created_at      TEXT DEFAULT (datetime('now')),
                 last_opened_at  TEXT,
-                pinned_at       TEXT
+                pinned_at       TEXT,
+                last_grouped_at         INTEGER,
+                last_group_fingerprint  TEXT
             );
 
             CREATE TABLE IF NOT EXISTS workspace_folders (
@@ -657,6 +660,22 @@ class Database:
             self.conn.execute("ALTER TABLE workspaces DROP COLUMN open_tabs")
         except sqlite3.OperationalError:
             pass  # column already absent (already dropped or fresh schema)
+        # Migration: per-workspace grouping provenance. last_grouped_at is
+        # the unix epoch when run_full_pipeline last completed for this
+        # workspace; last_group_fingerprint is a stable hash of the encounter
+        # + burst params used. Both NULL for fresh workspaces.
+        try:
+            self.conn.execute("SELECT last_grouped_at FROM workspaces LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE workspaces ADD COLUMN last_grouped_at INTEGER"
+            )
+        try:
+            self.conn.execute("SELECT last_group_fingerprint FROM workspaces LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE workspaces ADD COLUMN last_group_fingerprint TEXT"
+            )
         # Migration: add `pinned_at` for the alphabetical-with-pinned-on-top
         # workspace dropdown. NULL means unpinned; an ISO timestamp marks the
         # workspace as pinned.
@@ -679,6 +698,42 @@ class Database:
         except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE photos ADD COLUMN working_copy_failed_mtime REAL"
+            )
+        # Migration: add eye_kp_fingerprint column. Set to NULL for new
+        # photos; populated when the eye-keypoint stage runs. Phase 1 also
+        # backfills existing eye-keypoint rows to the current fingerprint
+        # in a separate migration step (see Task 2.1).
+        try:
+            self.conn.execute("SELECT eye_kp_fingerprint FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos ADD COLUMN eye_kp_fingerprint TEXT"
+            )
+        # One-shot backfill: stamp the current EYE_KP_FINGERPRINT_VERSION
+        # onto photos that already have eye-keypoint data, so existing
+        # users don't see "Outdated" for unchanged data on first upgrade.
+        # Gated by db_meta so it runs exactly once per DB. Probe for
+        # eye_tenengrad first — synthetic old-shape DBs in tests can
+        # predate that column, in which case there's no eye-keypoint data
+        # to backfill anyway and we just record the marker so we don't
+        # keep probing.
+        marker = self.conn.execute(
+            "SELECT value FROM db_meta WHERE key='eye_kp_fingerprint_backfill'"
+        ).fetchone()
+        if marker is None:
+            try:
+                self.conn.execute("SELECT eye_tenengrad FROM photos LIMIT 0")
+            except sqlite3.OperationalError:
+                pass
+            else:
+                from pipeline import EYE_KP_FINGERPRINT_VERSION
+                self.conn.execute(
+                    "UPDATE photos SET eye_kp_fingerprint = ? "
+                    "WHERE eye_tenengrad IS NOT NULL AND eye_kp_fingerprint IS NULL",
+                    (EYE_KP_FINGERPRINT_VERSION,),
+                )
+            self.conn.execute(
+                "INSERT INTO db_meta(key, value) VALUES ('eye_kp_fingerprint_backfill', '1')"
             )
         try:
             self.conn.execute("SELECT active_mask_variant FROM photos LIMIT 0")
@@ -1095,6 +1150,18 @@ class Database:
             )
             self.conn.commit()
         return tabs
+
+    def set_workspace_group_state(self, workspace_id, fingerprint, when_ts):
+        """Record that grouping completed for `workspace_id` at `when_ts`
+        with the given `fingerprint`. Pipeline page treats fingerprint
+        mismatch as "Outdated" so the user knows a regroup is pending.
+        """
+        self.conn.execute(
+            "UPDATE workspaces SET last_grouped_at = ?, last_group_fingerprint = ? "
+            "WHERE id = ?",
+            (when_ts, fingerprint, workspace_id),
+        )
+        self.conn.commit()
 
     def set_workspace_active_labels(self, labels_files):
         """Store active_labels in the workspace's config_overrides."""
@@ -4238,6 +4305,7 @@ class Database:
         eye_y=_UNSET,
         eye_conf=_UNSET,
         eye_tenengrad=_UNSET,
+        eye_kp_fingerprint=_UNSET,
     ):
         """Update pipeline feature columns for a photo.
 
@@ -4258,6 +4326,7 @@ class Database:
             "eye_y": eye_y,
             "eye_conf": eye_conf,
             "eye_tenengrad": eye_tenengrad,
+            "eye_kp_fingerprint": eye_kp_fingerprint,
         }
         # Filter to only provided values
         updates = {k: v for k, v in cols.items() if v is not _UNSET}
@@ -4352,8 +4421,11 @@ class Database:
           * has at least one non-synthetic detection (excludes full-image
             rows that exist only to anchor predictions)
           * has at least one prediction on that detection
-          * has not already been processed — eye_tenengrad IS NULL keeps
-            the stage idempotent across reruns
+          * EITHER has not been processed (eye_tenengrad IS NULL) OR was
+            processed with a stale fingerprint (eye_kp_fingerprint differs
+            from EYE_KP_FINGERPRINT_VERSION). The stale path lets a
+            keypoint-model bump re-run on already-processed photos, since
+            (eye_x, eye_y, eye_conf, eye_tenengrad) are model-specific.
           * (optional) photo.id is in ``photo_ids`` when provided — lets the
             caller scope the stage to a collection so a pipeline run doesn't
             touch unrelated photos elsewhere in the workspace
@@ -4371,6 +4443,7 @@ class Database:
         scientific_name, species.
         """
         import config as cfg
+        from pipeline import EYE_KP_FINGERPRINT_VERSION
         ws_id = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
@@ -4381,10 +4454,10 @@ class Database:
                 return []
             placeholders = ",".join("?" for _ in photo_ids)
             extra_where = f" AND p.id IN ({placeholders})"
-            params = (ws_id, min_conf, *photo_ids)
+            params = (ws_id, min_conf, EYE_KP_FINGERPRINT_VERSION, *photo_ids)
         else:
             extra_where = ""
-            params = (ws_id, min_conf)
+            params = (ws_id, min_conf, EYE_KP_FINGERPRINT_VERSION)
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.width, p.height,
                       p.mask_path,
@@ -4403,7 +4476,9 @@ class Database:
                 AND d.detector_confidence >= ?
                JOIN predictions pr ON pr.detection_id = d.id
                WHERE p.mask_path IS NOT NULL
-                 AND p.eye_tenengrad IS NULL{extra_where}
+                 AND (p.eye_tenengrad IS NULL
+                      OR p.eye_kp_fingerprint IS NULL
+                      OR p.eye_kp_fingerprint != ?){extra_where}
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
                     WHERE pr2.detection_id = pr.detection_id

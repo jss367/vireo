@@ -1442,3 +1442,59 @@ def test_load_photo_features_honors_workspace_detector_threshold(tmp_path):
         "SELECT COUNT(*) FROM detections WHERE photo_id = ?", (pid,),
     ).fetchone()[0]
     assert raw == 1
+
+
+def test_eye_kp_fingerprint_version_is_string():
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
+    assert isinstance(EYE_KP_FINGERPRINT_VERSION, str)
+    assert len(EYE_KP_FINGERPRINT_VERSION) > 0
+
+
+def test_compute_group_fingerprint_is_stable_for_same_input():
+    from pipeline import compute_group_fingerprint
+    cfg = {"pipeline": {"foo": 1}}
+    assert compute_group_fingerprint(cfg) == compute_group_fingerprint(cfg)
+
+
+def test_compute_group_fingerprint_changes_with_encounter_defaults():
+    """Bumping any value in encounters.DEFAULTS must change the fingerprint."""
+    import encounters
+    from pipeline import compute_group_fingerprint
+    cfg = {}
+    fp_before = compute_group_fingerprint(cfg)
+    original = encounters.DEFAULTS.copy()
+    try:
+        encounters.DEFAULTS["w_time"] = original["w_time"] + 0.01
+        fp_after = compute_group_fingerprint(cfg)
+        assert fp_after != fp_before
+    finally:
+        encounters.DEFAULTS.clear()
+        encounters.DEFAULTS.update(original)
+
+
+def test_compute_group_fingerprint_changes_with_pipeline_override():
+    """A workspace pipeline override of an encounter/burst param must change
+    the fingerprint — otherwise the pipeline page can't tell that grouping
+    settings have moved and would falsely claim "fresh" after a settings edit."""
+    from pipeline import compute_group_fingerprint
+    base = compute_group_fingerprint({})
+    encounters_override = compute_group_fingerprint(
+        {"pipeline": {"w_time": 0.99}},
+    )
+    assert encounters_override != base
+    bursts_override = compute_group_fingerprint(
+        {"pipeline": {"burst_time_gap": 7.5}},
+    )
+    assert bursts_override != base
+
+
+def test_compute_group_fingerprint_ignores_unrelated_pipeline_keys():
+    """Pipeline settings that don't drive grouping (e.g. detector / classifier
+    knobs) must not bump the group fingerprint, otherwise unrelated config
+    edits would mark Group as Outdated."""
+    from pipeline import compute_group_fingerprint
+    base = compute_group_fingerprint({})
+    unrelated = compute_group_fingerprint(
+        {"pipeline": {"classifier_model": "x", "detector_confidence": 0.9}},
+    )
+    assert unrelated == base

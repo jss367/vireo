@@ -10682,3 +10682,143 @@ def test_photo_masks_subject_size_is_real(tmp_path):
         "PRAGMA table_info(photo_masks)"
     ).fetchall()}
     assert cols["subject_size"] == "REAL"
+
+
+# -- Pipeline-status-makeover Phase 1: fingerprint columns + writes -----------
+#
+# These tests cover the per-stage staleness columns added by the
+# pipeline-status-makeover (see docs/plans/2026-05-01-pipeline-status-makeover-design.md).
+# The aggregate `pipeline_stage_counts()` helper that originally lived here
+# was dropped after PR #745 landed `vireo/pipeline_plan.py` covering the same
+# territory; only the staleness primitives remain.
+
+def test_photos_has_eye_kp_fingerprint_column(tmp_path):
+    """photos.eye_kp_fingerprint must exist on a fresh DB."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("SELECT eye_kp_fingerprint FROM photos LIMIT 0")
+
+
+def test_photos_eye_kp_fingerprint_migrates_on_old_db(tmp_path):
+    """Opening a DB without the column adds it (idempotent migration)."""
+    from db import Database
+    p = str(tmp_path / "v.db")
+    db = Database(p)
+    db.conn.execute("ALTER TABLE photos DROP COLUMN eye_kp_fingerprint")
+    db.conn.commit()
+    db.close()
+    db2 = Database(p)
+    db2.conn.execute("SELECT eye_kp_fingerprint FROM photos LIMIT 0")
+
+
+def test_eye_kp_fingerprint_backfilled_on_migration(tmp_path):
+    """One-shot backfill: photos with eye_tenengrad NOT NULL get the
+    current fingerprint; rows without eye data stay NULL. Repeated DB
+    opens don't re-stamp."""
+    from db import Database
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
+    p = str(tmp_path / "v.db")
+    db = Database(p)
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename, eye_tenengrad, "
+        "eye_kp_fingerprint) "
+        "VALUES (1, 1, 'a.jpg', 12.5, NULL), (2, 1, 'b.jpg', NULL, NULL)"
+    )
+    # Wipe the migration marker so reopening reruns the backfill once.
+    db.conn.execute("DELETE FROM db_meta WHERE key='eye_kp_fingerprint_backfill'")
+    db.conn.commit()
+    db.close()
+    db2 = Database(p)
+    rows = {r["id"]: r["eye_kp_fingerprint"]
+            for r in db2.conn.execute(
+                "SELECT id, eye_kp_fingerprint FROM photos ORDER BY id"
+            ).fetchall()}
+    assert rows[1] == EYE_KP_FINGERPRINT_VERSION
+    assert rows[2] is None
+    # Marker now set; reopening must NOT touch already-populated rows.
+    db2.conn.execute(
+        "UPDATE photos SET eye_kp_fingerprint = 'mutated' WHERE id = 1"
+    )
+    db2.conn.commit()
+    db2.close()
+    db3 = Database(p)
+    after = db3.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id = 1"
+    ).fetchone()[0]
+    assert after == "mutated"  # backfill skipped on second open
+
+
+def test_update_photo_pipeline_features_stamps_eye_kp_fingerprint(tmp_path):
+    """Passing eye_kp_fingerprint to update_photo_pipeline_features writes it."""
+    from db import Database
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
+    )
+    db.conn.commit()
+    db.update_photo_pipeline_features(
+        1, eye_x=0.5, eye_y=0.5, eye_conf=0.9, eye_tenengrad=12.0,
+        eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+    )
+    fp = db.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id=1"
+    ).fetchone()[0]
+    assert fp == EYE_KP_FINGERPRINT_VERSION
+
+
+def test_update_photo_pipeline_features_skips_eye_kp_fingerprint_when_unset(tmp_path):
+    """If eye_kp_fingerprint is not passed, it stays NULL (doesn't get clobbered)."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute("INSERT INTO folders(path) VALUES ('/tmp')")
+    db.conn.execute(
+        "INSERT INTO photos(id, folder_id, filename, eye_kp_fingerprint) "
+        "VALUES (1, 1, 'a.jpg', 'preexisting')"
+    )
+    db.conn.commit()
+    db.update_photo_pipeline_features(1, eye_x=0.5, eye_y=0.5)
+    fp = db.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id=1"
+    ).fetchone()[0]
+    assert fp == "preexisting"
+
+
+def test_workspaces_has_group_state_columns(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    db.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint FROM workspaces LIMIT 0"
+    )
+
+
+def test_set_workspace_group_state(tmp_path):
+    """set_workspace_group_state writes both columns atomically."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    ws_id = db._active_workspace_id
+    assert ws_id is not None
+    db.set_workspace_group_state(ws_id, fingerprint="abc123", when_ts=1714579200)
+    row = db.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
+        (ws_id,),
+    ).fetchone()
+    assert row["last_grouped_at"] == 1714579200
+    assert row["last_group_fingerprint"] == "abc123"
+
+
+def test_set_workspace_group_state_overwrites(tmp_path):
+    """Calling set_workspace_group_state again replaces both values."""
+    from db import Database
+    db = Database(str(tmp_path / "v.db"))
+    ws_id = db._active_workspace_id
+    db.set_workspace_group_state(ws_id, fingerprint="old", when_ts=1)
+    db.set_workspace_group_state(ws_id, fingerprint="new", when_ts=2)
+    row = db.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
+        (ws_id,),
+    ).fetchone()
+    assert row["last_grouped_at"] == 2
+    assert row["last_group_fingerprint"] == "new"

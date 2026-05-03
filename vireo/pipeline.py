@@ -721,6 +721,47 @@ _EYE_KEYPOINT_MODEL_FOR_CLASS = {
 }
 
 
+# Bump this string when the eye-keypoint routing or weights change in a
+# way that invalidates previously persisted (eye_x, eye_y, eye_conf,
+# eye_tenengrad) values. The pipeline page reads photos.eye_kp_fingerprint
+# and treats != current as "Outdated".
+EYE_KP_FINGERPRINT_VERSION = "v1"
+
+
+def compute_group_fingerprint(config):
+    """Stable hash of the effective params that drive encounter + burst
+    grouping in the active workspace.
+
+    Workspaces store the fingerprint observed at the last completed
+    grouping run; the pipeline page treats != current as "Outdated".
+
+    Mirrors the merge that ``segment_encounters`` and
+    ``segment_bursts_for_encounters`` do at runtime: pipeline-level
+    overrides under ``config["pipeline"]`` shadow ``encounters.DEFAULTS``
+    and ``bursts.DEFAULTS`` for any matching key. Only keys present in
+    those DEFAULTS dicts contribute to the hash, so unrelated pipeline
+    settings (detector confidence, classifier model, etc.) don't bump
+    the fingerprint.
+    """
+    import hashlib
+    import json
+
+    import bursts
+    import encounters
+
+    pipeline_overrides = (config or {}).get("pipeline") or {}
+
+    def _effective(defaults):
+        return {k: pipeline_overrides.get(k, v) for k, v in defaults.items()}
+
+    payload = {
+        "encounters": _effective(encounters.DEFAULTS),
+        "bursts": _effective(bursts.DEFAULTS),
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha1(blob).hexdigest()[:16]
+
+
 def eye_keypoint_stage_preflight(config):
     """Return a short skip reason if the eye-keypoint stage cannot do work.
 
@@ -876,6 +917,7 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
         eye_y=best["y"] / float(ih),
         eye_conf=best["conf"],
         eye_tenengrad=best_score,
+        eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
     )
 
 

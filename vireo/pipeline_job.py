@@ -3067,6 +3067,55 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             cache_dir = os.path.dirname(db_path)
             save_results(results, cache_dir, workspace_id)
 
+            # Stamp the grouping fingerprint + timestamp BEFORE marking the
+            # step completed, so a partial regroup that crashes between here
+            # and update_step doesn't end up labeled "fresh" with a stale fp.
+            #
+            # Only stamp when the regroup actually covered the whole
+            # workspace — if it ran on a filtered subset (a sub-collection,
+            # or with exclude_photo_ids set) some workspace photos were
+            # intentionally not regrouped, so claiming workspace-level
+            # freshness would let the pipeline page hide a real stale state.
+            from pipeline import (
+                _resolve_collection_photo_ids,
+                compute_group_fingerprint,
+            )
+            collection_photo_ids = _resolve_collection_photo_ids(
+                thread_db, collection_id,
+            )
+            ws_photo_ids = {
+                r["id"] for r in thread_db.conn.execute(
+                    """SELECT p.id
+                         FROM photos p
+                         JOIN workspace_folders wf
+                           ON wf.folder_id = p.folder_id
+                        WHERE wf.workspace_id = ?""",
+                    (workspace_id,),
+                ).fetchall()
+            }
+            covered_full_workspace = (
+                not params.exclude_photo_ids
+                and ws_photo_ids.issubset(collection_photo_ids)
+            )
+            if covered_full_workspace:
+                thread_db.set_workspace_group_state(
+                    workspace_id=workspace_id,
+                    fingerprint=compute_group_fingerprint(effective_cfg),
+                    when_ts=int(time.time()),
+                )
+            else:
+                # Partial run — save_results just clobbered
+                # pipeline_results_ws*.json with subset output, so any
+                # pre-existing fingerprint now points at a cache that no
+                # longer reflects the full workspace. Invalidate so the
+                # pipeline page surfaces the staleness as will-run instead
+                # of falsely reporting done-prior.
+                thread_db.set_workspace_group_state(
+                    workspace_id=workspace_id,
+                    fingerprint=None,
+                    when_ts=None,
+                )
+
             stages["regroup"]["status"] = "completed"
             summary_info = results.get("summary", {})
             groups = summary_info.get("groups", "")

@@ -305,7 +305,7 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg):
     }
 
 
-def _regroup_plan(db, params, db_path, ws_id, upstream_will_run):
+def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg):
     if params.skip_regroup:
         return {
             "state": "will-skip",
@@ -322,6 +322,44 @@ def _regroup_plan(db, params, db_path, ws_id, upstream_will_run):
             "detail": {"cache_exists": cache_exists, "upstream_will_run": True},
         }
     if cache_exists:
+        # Cache exists and nothing upstream needs to run, but check whether
+        # the workspace's last_group_fingerprint matches the fingerprint that
+        # would be produced by a fresh run with current settings. Mismatch =>
+        # encounter/burst params have changed since the cache was written, so
+        # the cache is stale even though it's there.
+        from pipeline import compute_group_fingerprint
+        current_fp = compute_group_fingerprint(effective_cfg)
+        row = db.conn.execute(
+            "SELECT last_group_fingerprint FROM workspaces WHERE id = ?",
+            (ws_id,),
+        ).fetchone()
+        last_fp = row["last_group_fingerprint"] if row else None
+        if last_fp is None:
+            # Cache file exists but no fingerprint stamp. Two paths land
+            # here: (1) a partial regroup wrote subset output to the
+            # cache and invalidated the stamp; (2) pre-Phase-1 DBs that
+            # cached results before fingerprint stamping existed.
+            # Either way the cache no longer represents a fresh
+            # full-workspace grouping, so report will-run.
+            return {
+                "state": "will-run",
+                "summary": "Will re-group — cached grouping is partial or untracked",
+                "detail": {
+                    "cache_exists": True,
+                    "upstream_will_run": False,
+                    "fingerprint_invalidated": True,
+                },
+            }
+        if last_fp != current_fp:
+            return {
+                "state": "will-run",
+                "summary": "Will re-group — settings changed since last run",
+                "detail": {
+                    "cache_exists": True,
+                    "upstream_will_run": False,
+                    "fingerprint_outdated": True,
+                },
+            }
         return {
             "state": "done-prior",
             "summary": "Grouping cached from prior run",
@@ -368,7 +406,7 @@ def compute_plan(db, params, db_path):
     upstream_will_run = any(
         s["state"] == "will-run" for s in (classify, extract, eye)
     )
-    regroup = _regroup_plan(db, params, db_path, ws_id, upstream_will_run)
+    regroup = _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg)
 
     return {
         "stages": {
