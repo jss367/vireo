@@ -303,13 +303,22 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg):
             "detail": {"eligible": eligible, "pending": 0,
                        "stale": 0, "fingerprint_outdated": False},
         }
+    # Stale masks (stored prompt no longer matches current detection) are
+    # work the stage will redo, just like photos with no mask at all.
+    # Roll them into ``pending`` so the UI's pill text ("N to redo") and
+    # progress bar (`(eligible - pending) / eligible`) reflect the actual
+    # work — otherwise stale-only states render as "0 to redo" + 100% bar.
+    # The two sets are disjoint in normal flow (pending = mask_path IS
+    # NULL, stale rows have mask_path set), so simple addition matches
+    # the per-photo work the stage actually performs.
+    work = pending + stale
     return {
         "state": "will-run",
         "summary": (
-            f"Will extract masks for {pending} "
-            f"photo{_plural(pending)} ({eligible} eligible)"
+            f"Will extract masks for {work} "
+            f"photo{_plural(work)} ({eligible} eligible)"
         ),
-        "detail": {"eligible": eligible, "pending": pending,
+        "detail": {"eligible": eligible, "pending": work,
                    "stale": stale, "fingerprint_outdated": stale > 0},
     }
 

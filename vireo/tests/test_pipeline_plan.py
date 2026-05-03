@@ -796,6 +796,59 @@ def test_extract_plan_emits_fingerprint_outdated_when_stale(tmp_path):
     assert detail["fingerprint_outdated"] is True
 
 
+def test_extract_plan_pending_includes_stale_when_all_masked(tmp_path):
+    """When every eligible photo already has an active mask but some
+    stored prompts no longer match the current detection, ``detail.pending``
+    must reflect the stale work the stage will redo. Otherwise the pill UI
+    (``pending || eligible``) collapses to ``eligible`` and the progress
+    bar (``eligible - pending``) renders 100% — both incorrect for a
+    stage that is about to re-extract masks for the stale photos.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    # Two eligible photos: one fresh, one stale. Both already have an
+    # active mask (mask_path set), so count_photos_pending_masks reports
+    # pending=0.
+    pid_fresh, _ = _add_photo_with_detection(db, folder_id, "fresh.jpg")
+    pid_stale, _ = _add_photo_with_detection(db, folder_id, "stale.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/fresh.png' WHERE id=?",
+        (pid_fresh,),
+    )
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/stale.png' WHERE id=?",
+        (pid_stale,),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/fresh.png', 0, 'megadetector-v6', "
+        "0.1, 0.1, 0.5, 0.5)",  # matches detection
+        (pid_fresh,),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/stale.png', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",  # mismatched prompt
+        (pid_stale,),
+    )
+    db.conn.commit()
+
+    plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
+    extract = plan["stages"]["Extract"]
+    assert extract["state"] == "will-run"
+    detail = extract["detail"]
+    assert detail["eligible"] == 2
+    assert detail["stale"] == 1
+    assert detail["pending"] == 1, (
+        "stale work must be reflected in pending so pill text + bar are "
+        "accurate; got "
+        f"pending={detail['pending']}, stale={detail['stale']}"
+    )
+    assert detail["fingerprint_outdated"] is True
+
+
 # -------- compute_plan: eye keypoints --------
 
 def test_eye_keypoints_plan_will_skip_when_disabled(tmp_path):
