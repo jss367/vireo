@@ -180,6 +180,11 @@ def _classify_plan(db, params, photo_ids):
             pending_total += pending
 
     if blocked and not pending_total:
+        # eligible=0 here even when some unblocked models happen to be
+        # fully cached — the stage is functionally blocked on missing
+        # labels and the summary text already explains that. Returning
+        # eligible>0 with pending=0 would let the UI render
+        # "Resume (0 left)" against a state that's actually "Blocked".
         return {
             "state": "will-run",
             "summary": (
@@ -189,7 +194,7 @@ def _classify_plan(db, params, photo_ids):
             "detail": {
                 "blocked_models": blocked,
                 "pending": 0,
-                "eligible": eligible,
+                "eligible": 0,
             },
         }
 
