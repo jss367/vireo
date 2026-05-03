@@ -97,6 +97,24 @@ body { padding-bottom: 36px; }
   background: var(--danger, #E74C3C);
   color: #fff;
 }
+.stage-progress-bar {
+  display: inline-flex;
+  width: 80px;
+  height: 6px;
+  margin-left: 8px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--bg-tertiary, #14374E);
+  vertical-align: middle;
+}
+.stage-progress-bar.hidden { display: none; }
+.stage-progress-bar-fill {
+  background: var(--accent, #24E5CA);
+  transition: width 200ms ease-out;
+}
+.stage-progress-bar.outdated .stage-progress-bar-fill {
+  background: var(--warning, #F0A030);
+}
 
 /* Section headers grouping the stage cards */
 .stage-section-header {
