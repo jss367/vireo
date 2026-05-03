@@ -3630,12 +3630,40 @@ function _renderPlanSummary() {
   box.innerHTML = rows.join('');
 }
 
+// Stages that don't have a per-photo work unit don't get a progress bar.
+// Group is workspace-level; Scan/Previews don't have stage cards.
+var _STAGES_WITH_BAR = { 'Classify': 1, 'Extract': 1, 'EyeKeypoints': 1 };
+
+function _renderProgressBar(stage, planEntry) {
+  var bar = document.getElementById('progressBar' + stage.suffix);
+  if (!bar) return;
+  if (!_STAGES_WITH_BAR[stage.suffix]) {
+    bar.classList.add('hidden');
+    return;
+  }
+  var detail   = (planEntry && planEntry.detail) || {};
+  var pending  = (typeof detail.pending  === 'number') ? detail.pending  : null;
+  var eligible = (typeof detail.eligible === 'number') ? detail.eligible : null;
+  if (eligible === null || eligible === 0) {
+    bar.classList.add('hidden');
+    return;
+  }
+  bar.classList.remove('hidden');
+  var outdated = !!(detail.fingerprint_outdated || detail.fingerprint_invalidated);
+  bar.classList.toggle('outdated', outdated);
+  var done = Math.max(0, eligible - (pending || 0));
+  var pct = (done / eligible) * 100;
+  var fill = bar.querySelector('.stage-progress-bar-fill');
+  if (fill) fill.style.width = pct + '%';
+}
+
 function refreshPipelineUI() {
   _STAGES.forEach(function(stage) {
     var state = _stageStateFor(stage);
     _setPill(stage.suffix, state, null, stage);
-    // Only paint plan summary text when no run is active for this stage,
-    // otherwise the live counts ("12/47", "Done!") get clobbered.
+    var planEntry = _pipelinePlan && _pipelinePlan.stages
+      ? _pipelinePlan.stages[stage.suffix] : null;
+    _renderProgressBar(stage, planEntry);
     if (!_runningStages[stage.suffix] && !_stageOutcomes[stage.suffix]) {
       _setStageSummaryText(stage.suffix, _stageSummaryFor(stage));
     }
