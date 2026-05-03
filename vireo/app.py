@@ -1193,9 +1193,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except Exception:
                 pass
 
-        from taxonomy import find_taxonomy_json
-        taxonomy_path = find_taxonomy_json()
-        taxonomy_available = os.path.exists(taxonomy_path)
+        # "Available" must mean *usable*, not just *file exists*: a 0-byte
+        # stub from a failed download passed os.path.exists and hid the
+        # "Download taxonomy" checkbox in the pipeline page, leaving the
+        # user no in-app path to recovery. get_taxonomy_info() owns the
+        # actual integrity check.
+        from models import get_taxonomy_info
+        taxonomy_available = get_taxonomy_info()["available"]
 
         return jsonify({
             "total_photos": total_photos,
