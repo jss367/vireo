@@ -1189,6 +1189,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # the page can render. enhancing_missing still reflects the
             # current gap so the degraded banner can surface accurately.
             review_readiness["state"] = "ready"
+            # When the cache lets the page render, missing_required no
+            # longer represents a block — fold any blocking gaps into
+            # enhancing_missing so the degraded banner surfaces them.
+            for missing in review_readiness["missing_required"]:
+                if missing == "masks" and "masks_partial" not in review_readiness["enhancing_missing"]:
+                    review_readiness["enhancing_missing"].insert(0, "masks_partial")
+            review_readiness["missing_required"] = []
 
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})

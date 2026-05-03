@@ -764,6 +764,51 @@ def test_pipeline_page_init_review_readiness_state_ready_when_cache_exists(setup
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["review_readiness"]["state"] == "ready"
+        # The cache letting the page render does not erase enhancing_missing —
+        # the seed has masks but no embeddings, so the degraded banner should
+        # still see "embeddings" as a quality gap.
+        assert "embeddings" in data["review_readiness"]["enhancing_missing"]
+
+
+def test_pipeline_page_init_state_ready_folds_blocking_gaps_into_enhancing(setup, tmp_path):
+    """When the grouping cache is on disk but mask coverage is below the
+    25% threshold, compute_review_readiness returns missing_required=["masks"]
+    without "masks_partial" in enhancing_missing. The page-init route should
+    force state="ready" (cache lets the page render) AND fold "masks" into
+    enhancing_missing as "masks_partial" so the degraded banner surfaces it.
+    """
+    app, db_path = setup
+
+    # Seed photos but DON'T add masks — so cov["mask"] = 0 and state is
+    # "insufficient" with missing_required=["masks"] before the route fixup.
+    from db import Database
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    fid = db.add_folder("/photos/seed_no_masks", name="seed_no_masks")
+    db.add_workspace_folder(ws, fid)
+    db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                 file_size=1, file_mtime=1.0)
+    db.close()
+
+    # Drop a minimal cache file at <db_dir>/pipeline_results_ws{N}.json
+    import json as _json
+
+    cache_path = os.path.join(
+        os.path.dirname(db_path), f"pipeline_results_ws{ws}.json"
+    )
+    with open(cache_path, "w") as f:
+        _json.dump({"encounters": [], "photos": [], "summary": {}}, f)
+
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/page-init")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        rr = data["review_readiness"]
+        assert rr["state"] == "ready"
+        assert rr["missing_required"] == []
+        assert "masks_partial" in rr["enhancing_missing"]
 
 
 def test_active_mask_variant_endpoint_switches_workspace_photos(setup):
