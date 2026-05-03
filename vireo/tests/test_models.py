@@ -431,6 +431,31 @@ def test_get_taxonomy_info_undersized_stub_unavailable(tmp_path, monkeypatch):
     assert info.get("corrupt") is True
 
 
+def test_get_taxonomy_info_race_after_exists_check(tmp_path, monkeypatch):
+    """If the taxonomy file is removed between os.path.exists() and the
+    stat call (e.g. a concurrent refresh), the helper must degrade to
+    available=False rather than letting OSError bubble up and 500 the
+    /api/pipeline/page-init endpoint.
+    """
+    import models
+    import os as os_mod
+    import taxonomy
+
+    tax_path = tmp_path / "taxonomy.json"
+    monkeypatch.setattr(taxonomy, "find_taxonomy_json", lambda: str(tax_path))
+
+    # Pretend the file exists at the entry check, but the stat call
+    # races with a delete/replace and raises.
+    monkeypatch.setattr(os_mod.path, "exists", lambda p: True)
+    def _raise(_):
+        raise FileNotFoundError(_)
+    monkeypatch.setattr(os_mod.path, "getsize", _raise)
+
+    info = models.get_taxonomy_info()
+    assert info["available"] is False
+    assert info.get("corrupt") is True
+
+
 # ---------------------------------------------------------------------------
 # download_model (validation only — no actual downloads)
 # ---------------------------------------------------------------------------

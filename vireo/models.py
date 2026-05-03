@@ -969,7 +969,23 @@ def get_taxonomy_info():
             "last_updated": None,
         }
 
-    size = os.path.getsize(taxonomy_path)
+    # Wrap the stat in the same fault path as the read: the file existed
+    # at the exists() check above, but a concurrent taxonomy refresh can
+    # remove or replace it between calls. Without this guard, getsize()
+    # would raise FileNotFoundError/OSError straight out of the helper
+    # and 500 every caller (including /api/pipeline/page-init) in exactly
+    # the transient window where we should degrade to "unavailable".
+    try:
+        size = os.path.getsize(taxonomy_path)
+    except OSError:
+        return {
+            "available": False,
+            "path": taxonomy_path,
+            "taxa_count": 0,
+            "last_updated": None,
+            "corrupt": True,
+        }
+
     if size < _TAXONOMY_MIN_USABLE_BYTES:
         return {
             "available": False,
