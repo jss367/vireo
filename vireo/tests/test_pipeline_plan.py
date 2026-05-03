@@ -503,6 +503,19 @@ def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path
     with open(cache_path, "w") as f:
         f.write('{"photos": []}')
 
+    # Stamp the workspace fingerprint to match current settings — this is
+    # the post-Phase-1 state for a workspace that completed a clean full
+    # regroup. Without this, the "cache exists but fingerprint NULL" path
+    # would correctly report will-run (covered by the dedicated test).
+    import config as cfg
+    from pipeline import compute_group_fingerprint
+    effective = db.get_effective_config(cfg.load())
+    db.set_workspace_group_state(
+        db._active_workspace_id,
+        fingerprint=compute_group_fingerprint(effective),
+        when_ts=1714579200,
+    )
+
     import labels as labels_mod
     import models as models_mod
     monkeypatch.setattr(models_mod, "get_models", lambda: [
@@ -585,6 +598,61 @@ def test_regroup_plan_will_run_when_workspace_fingerprint_outdated(tmp_path, mon
 
     assert plan["stages"]["Group"]["state"] == "will-run"
     assert "settings" in plan["stages"]["Group"]["summary"].lower()
+
+
+
+def test_regroup_plan_will_run_when_cache_exists_but_fingerprint_invalidated(
+    tmp_path, monkeypatch,
+):
+    """A partial regroup wipes last_group_fingerprint to NULL after
+    overwriting the cache with subset output. The plan must treat this
+    state (cache_exists AND last_fp IS NULL) as will-run, not done-prior,
+    because the cache no longer reflects the full workspace."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
+    db.conn.commit()
+    from labels_fingerprint import TOL_SENTINEL
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+
+    # Cache file from a prior partial regroup write.
+    cache_path = os.path.join(
+        str(tmp_path), f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(cache_path, "w") as f:
+        f.write('{"photos": []}')
+
+    # Workspace fingerprint is NULL (invalidated by the partial run).
+    # Default state is already NULL — assert and proceed.
+    row = db.conn.execute(
+        "SELECT last_group_fingerprint FROM workspaces WHERE id=?",
+        (db._active_workspace_id,),
+    ).fetchone()
+    assert row["last_group_fingerprint"] is None
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    plan = compute_plan(
+        db,
+        _params(model_ids=["m1"], skip_eye_keypoints=True),
+        str(tmp_path / "test.db"),
+    )
+
+    assert plan["stages"]["Group"]["state"] == "will-run", (
+        "cache exists but fingerprint is NULL → previous run was partial / "
+        "predates fingerprint stamping; plan must report will-run, not done-prior"
+    )
+
 
 
 def test_regroup_plan_will_run_when_no_cache(tmp_path):

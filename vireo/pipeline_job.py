@@ -3098,6 +3098,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     fingerprint=compute_group_fingerprint(effective_cfg),
                     when_ts=int(time.time()),
                 )
+            else:
+                # Partial run — save_results just clobbered
+                # pipeline_results_ws*.json with subset output, so any
+                # pre-existing fingerprint now points at a cache that no
+                # longer reflects the full workspace. Invalidate so the
+                # pipeline page surfaces the staleness as will-run instead
+                # of falsely reporting done-prior.
+                thread_db.set_workspace_group_state(
+                    workspace_id=workspace_id,
+                    fingerprint=None,
+                    when_ts=None,
+                )
 
             stages["regroup"]["status"] = "completed"
             summary_info = results.get("summary", {})

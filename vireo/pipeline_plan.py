@@ -334,7 +334,23 @@ def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg):
             (ws_id,),
         ).fetchone()
         last_fp = row["last_group_fingerprint"] if row else None
-        if last_fp is not None and last_fp != current_fp:
+        if last_fp is None:
+            # Cache file exists but no fingerprint stamp. Two paths land
+            # here: (1) a partial regroup wrote subset output to the
+            # cache and invalidated the stamp; (2) pre-Phase-1 DBs that
+            # cached results before fingerprint stamping existed.
+            # Either way the cache no longer represents a fresh
+            # full-workspace grouping, so report will-run.
+            return {
+                "state": "will-run",
+                "summary": "Will re-group — cached grouping is partial or untracked",
+                "detail": {
+                    "cache_exists": True,
+                    "upstream_will_run": False,
+                    "fingerprint_invalidated": True,
+                },
+            }
+        if last_fp != current_fp:
             return {
                 "state": "will-run",
                 "summary": "Will re-group — settings changed since last run",

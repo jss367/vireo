@@ -6191,6 +6191,74 @@ def test_pipeline_regroup_does_not_stamp_for_partial_run(tmp_path, monkeypatch):
     assert row["last_group_fingerprint"] is None
 
 
+def test_pipeline_regroup_invalidates_stamp_on_partial_run(tmp_path, monkeypatch):
+    """A partial regroup overwrites the workspace's pipeline_results_ws*.json
+    cache with subset output via save_results. Any pre-existing
+    last_group_fingerprint would now point at a cache that no longer
+    reflects the full workspace, so the pipeline page would falsely report
+    Group as 'done-prior'. The stamp must be invalidated (NULL'd) on
+    partial runs so pipeline_plan treats the resulting state as outdated."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Pre-stamp a fingerprint as if a prior FULL workspace regroup had
+    # completed cleanly. The partial run we're about to do must wipe
+    # this, since save_results will overwrite the cache with subset output.
+    db.set_workspace_group_state(
+        ws_id, fingerprint="pre-existing-from-full-run", when_ts=1714579200,
+    )
+
+    import pipeline as pipeline_mod
+    monkeypatch.setattr(
+        pipeline_mod, "run_full_pipeline",
+        lambda photos, config=None: {"summary": {"groups": 1}, "photos": photos},
+    )
+    monkeypatch.setattr(pipeline_mod, "save_results",
+                        lambda results, cache_dir, workspace_id: None)
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda thread_db, collection_id=None, config=None: [{"id": 1}],
+    )
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        exclude_photo_ids={999},
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    with contextlib.suppress(Exception):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    db2 = Database(db_path)
+    row = db2.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
+        (ws_id,),
+    ).fetchone()
+    assert row["last_group_fingerprint"] is None, (
+        "partial regroup left stale fingerprint behind — pipeline page would "
+        "falsely report Group as 'done-prior' against a subset-only cache"
+    )
+    assert row["last_grouped_at"] is None
+
+
+
 # --- Weighted overall progress ---------------------------------------------
 
 def _empty_stages():
