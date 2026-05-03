@@ -669,6 +669,71 @@ def load_results_raw(cache_dir, workspace_id):
         return json.load(f)
 
 
+def compute_review_readiness(db, mask_threshold=0.25):
+    """Classify whether the pipeline review page can render meaningful results.
+
+    The Group stage of the pipeline is purely computational and reads
+    features already cached in the DB. A "ready" workspace has the
+    grouping cache already on disk; a "computable" workspace has enough
+    features that calling /api/pipeline/regroup-live would produce a
+    useful triage view; an "insufficient" workspace has too few masks
+    for the result to be anything but a wall of REJECTs.
+
+    Args:
+        db: Database with active workspace
+        mask_threshold: minimum fraction of photos that must have masks
+            for the result to be computable (default 25%)
+
+    Returns:
+        {
+            "state": "ready" | "computable" | "insufficient" | "empty",
+            "total_photos": int,
+            "with_masks": int,
+            "with_sharpness": int,
+            "with_embeddings": int,
+            "with_eye_keypoints": int,
+            "with_predictions": int,
+            "missing_required": list[str],   # stages that block computation
+            "enhancing_missing": list[str],  # stages that would improve quality
+        }
+    """
+    cov = db.get_coverage_stats()
+    total = cov["total"]
+    out = {
+        "state": "empty",
+        "total_photos": total,
+        "with_masks": cov["mask"],
+        "with_sharpness": cov["subject_sharpness"],
+        "with_embeddings": cov["dino_embedding"],
+        "with_eye_keypoints": cov["eye"],
+        "with_predictions": cov["classified"],
+        "missing_required": [],
+        "enhancing_missing": [],
+    }
+    if total == 0:
+        return out
+
+    # Required: enough photos have masks (otherwise pipeline rejects all)
+    if cov["mask"] < max(1, int(total * mask_threshold)):
+        out["state"] = "insufficient"
+        out["missing_required"].append("masks")
+        # Still surface enhancing_missing so the diagnostic is complete
+    else:
+        out["state"] = "computable"
+
+    # Enhancing: per-stage gaps that would improve quality if filled
+    if cov["mask"] < total:
+        out["enhancing_missing"].append("masks_partial")
+    if cov["dino_embedding"] < total:
+        out["enhancing_missing"].append("embeddings")
+    if cov["eye"] < total:
+        out["enhancing_missing"].append("eye_keypoints")
+    if cov["classified"] < total:
+        out["enhancing_missing"].append("species_predictions")
+
+    return out
+
+
 def rebuild_species_predictions(results, photo_ids):
     """Rebuild species_predictions for a subset of photos from cached results.
 

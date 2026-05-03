@@ -283,6 +283,83 @@ def test_load_results_missing(tmp_path):
     assert load_results(str(tmp_path), workspace_id=999) is None
 
 
+# -- compute_review_readiness --
+
+
+def test_compute_review_readiness_empty_workspace(tmp_path):
+    """No photos in the workspace → state='empty'."""
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    db = Database(str(tmp_path / "test.db"))
+    out = compute_review_readiness(db)
+    assert out["state"] == "empty"
+    assert out["total_photos"] == 0
+    assert out["missing_required"] == []
+    assert out["enhancing_missing"] == []
+
+
+def test_compute_review_readiness_no_masks(tmp_path):
+    """Photos exist but none have masks → state='insufficient',
+    'masks' listed in missing_required."""
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    base_time = datetime(2026, 3, 20, 10, 0, 0)
+    for i in range(5):
+        ts = base_time + timedelta(seconds=i * 2)
+        db.add_photo(
+            fid, f"photo{i}.jpg", ".jpg", 1000, 1.0,
+            timestamp=ts.isoformat(), width=4000, height=3000,
+        )
+
+    out = compute_review_readiness(db)
+    assert out["state"] == "insufficient"
+    assert "masks" in out["missing_required"]
+    assert out["total_photos"] == 5
+    assert out["with_masks"] == 0
+
+
+def test_compute_review_readiness_masks_present_no_eye(tmp_path):
+    """Masks present for all photos, no eye keypoints →
+    state='computable', 'eye_keypoints' in enhancing_missing."""
+    from pipeline import compute_review_readiness
+
+    # _setup_db_with_photos populates masks, embeddings, and predictions
+    # for every photo but does NOT set eye_x — exactly the "computable
+    # but enhancing inputs missing" state we want to assert against.
+    db, _ids = _setup_db_with_photos(tmp_path)
+    out = compute_review_readiness(db)
+    assert out["state"] == "computable"
+    assert out["with_masks"] > 0
+    assert out["with_masks"] == out["total_photos"]
+    assert "eye_keypoints" in out["enhancing_missing"]
+
+
+def test_compute_review_readiness_full_features(tmp_path):
+    """All upstream features present including eye keypoints →
+    state='computable', enhancing_missing empty."""
+    from pipeline import compute_review_readiness
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    # Backfill eye keypoints for every photo so coverage is 100%.
+    for enc_ids in ids:
+        for pid in enc_ids:
+            db.update_photo_pipeline_features(
+                pid,
+                eye_x=0.5,
+                eye_y=0.5,
+                eye_conf=0.9,
+                eye_tenengrad=200.0,
+            )
+
+    out = compute_review_readiness(db)
+    assert out["state"] == "computable"
+    assert out["enhancing_missing"] == []
+
+
 def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
     """save_results must preserve an existing miss_computed_at marker
     when the caller's results dict doesn't carry one. reflow and
