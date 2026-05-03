@@ -173,7 +173,7 @@ body { padding-bottom: 36px; }
 /* Per-stage rows: pill + summary text, one row per stage */
 .pipeline-plan-summary .plan-stage-row {
   display: grid;
-  grid-template-columns: 140px 110px 1fr;
+  grid-template-columns: 140px 180px 1fr;
   gap: 10px;
   align-items: baseline;
   padding: 3px 0;
@@ -3617,7 +3617,9 @@ function _renderPlanSummary() {
     var summary = _runningStages[stage.suffix] || _stageOutcomes[stage.suffix]
       ? ''  // live state takes the .stage-summary span; don't double up here
       : _stageSummaryFor(stage);
-    var pillLabel = _PILL_LABELS[state] || state;
+    var planEntry = _pipelinePlan && _pipelinePlan.stages
+      ? _pipelinePlan.stages[stage.suffix] : null;
+    var pillLabel = _formatPillLabel(stage, planEntry, state);
     rows.push(
       '<div class="plan-stage-row ' + state + '">' +
         '<span class="plan-stage-name">' + stage.label + '</span>' +
