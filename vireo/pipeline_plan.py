@@ -308,9 +308,12 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg):
     # Roll them into ``pending`` so the UI's pill text ("N to redo") and
     # progress bar (`(eligible - pending) / eligible`) reflect the actual
     # work — otherwise stale-only states render as "0 to redo" + 100% bar.
-    # The two sets are disjoint in normal flow (pending = mask_path IS
-    # NULL, stale rows have mask_path set), so simple addition matches
-    # the per-photo work the stage actually performs.
+    # The two sets are disjoint by construction: pending requires
+    # ``mask_path IS NULL`` while ``count_extract_stale`` requires
+    # ``mask_path IS NOT NULL``. Without that gate, a photo in an
+    # interrupted state (photo_masks row inserted but mask_path not
+    # yet updated) would land in both buckets and inflate work past
+    # eligible.
     work = pending + stale
     return {
         "state": "will-run",

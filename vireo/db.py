@@ -2900,9 +2900,10 @@ class Database:
 
     def count_extract_stale(self, sam2_variant, photo_ids=None,
                              detector_confidence=None):
-        """Count photos in scope that have a photo_masks row for
-        ``sam2_variant`` whose stored prompt no longer matches the
-        photo's primary detection.
+        """Count photos in scope that "look done" (``photos.mask_path``
+        is set) but whose ``photo_masks`` row for ``sam2_variant`` has a
+        stored prompt that no longer matches the photo's primary
+        detection.
 
         Reuses the staleness predicate from ``find_stale_masks`` — a
         mask is fresh only when its stored ``(detector_model,
@@ -2919,6 +2920,14 @@ class Database:
         to redo" — it's just an orphan that storage cleanup handles.
         Counting those would inflate ``detail.stale`` and keep the
         stage flagged Outdated/Will run forever in mixed workspaces.
+
+        The ``photos.mask_path IS NOT NULL`` gate keeps this count
+        disjoint from ``count_photos_pending_masks``'s ``pending``
+        (``mask_path IS NULL``). Photos with ``mask_path IS NULL`` are
+        already pending — they will be re-extracted regardless of
+        whether their ``photo_masks`` row's prompt matches — so
+        counting them here would double-count when a planner combines
+        ``pending + stale`` as total work.
         """
         import config as cfg
         ws = self._ws_id()
@@ -2934,6 +2943,7 @@ class Database:
                 JOIN workspace_folders wf
                   ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                WHERE pm.variant = ?
+                 AND p.mask_path IS NOT NULL
                  AND EXISTS (
                     SELECT 1 FROM detections d0
                      WHERE d0.photo_id = pm.photo_id

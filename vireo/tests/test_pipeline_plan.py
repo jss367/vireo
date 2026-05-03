@@ -281,6 +281,7 @@ def test_count_extract_stale_zero_when_prompt_matches(tmp_path):
         "0.1, 0.1, 0.5, 0.5)",
         (pid,),
     )
+    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
     db.conn.commit()
     assert db.count_extract_stale("sam2-small") == 0
 
@@ -297,6 +298,7 @@ def test_count_extract_stale_counts_prompt_mismatch(tmp_path):
         "0.9, 0.9, 0.05, 0.05)",  # bbox mismatches detection (0.1,0.1,0.5,0.5)
         (pid,),
     )
+    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
     db.conn.commit()
     assert db.count_extract_stale("sam2-small") == 1
 
@@ -313,9 +315,35 @@ def test_count_extract_stale_filters_by_variant(tmp_path):
         "0.9, 0.9, 0.05, 0.05)",
         (pid,),
     )
+    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
     db.conn.commit()
     assert db.count_extract_stale("sam2-small") == 0
     assert db.count_extract_stale("sam2-large") == 1
+
+
+def test_count_extract_stale_excludes_photos_with_null_mask_path(tmp_path):
+    """A photo in an interrupted state — photo_masks row inserted but
+    photos.mask_path still NULL — is already counted as ``pending`` by
+    ``count_photos_pending_masks``. Counting it again as stale here
+    would double-count when ``_extract_plan`` does ``pending + stale``,
+    pushing ``detail.pending`` past ``eligible`` and producing a wrong
+    "N to redo" + progress bar in the pipeline UI.
+    """
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/a.png', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",  # mismatches the detection
+        (pid,),
+    )
+    # Note: mask_path on photos is NOT set — represents an interrupted
+    # extract run that inserted a photo_masks row before updating
+    # photos.mask_path.
+    db.conn.commit()
+    assert db.count_photos_pending_masks()["pending"] == 1
+    assert db.count_extract_stale("sam2-small") == 0
 
 
 def test_count_extract_stale_ignores_photos_without_primary_detection(tmp_path):
@@ -359,6 +387,7 @@ def test_count_extract_stale_ignores_photos_below_confidence_floor(tmp_path):
         "0.9, 0.9, 0.05, 0.05)",
         (pid,),
     )
+    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
     db.conn.commit()
     # detector_confidence floor of 0.2 means the 0.05-conf detection is
     # invisible; the photo has no eligible primary, so no stale work.
@@ -781,7 +810,10 @@ def test_extract_plan_emits_fingerprint_outdated_when_stale(tmp_path):
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
     pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
-    # Mask under default sam2_variant ('sam2-small') with mismatched prompt
+    # Mask under default sam2_variant ('sam2-small') with mismatched prompt.
+    # mask_path is set so the photo is "complete" — without it the photo
+    # would already be in `pending` and stale wouldn't apply (see
+    # test_count_extract_stale_excludes_photos_with_null_mask_path).
     db.conn.execute(
         "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
         "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
@@ -789,6 +821,7 @@ def test_extract_plan_emits_fingerprint_outdated_when_stale(tmp_path):
         "0.9, 0.9, 0.05, 0.05)",
         (pid,),
     )
+    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
     db.conn.commit()
     plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
     detail = plan["stages"]["Extract"]["detail"]
@@ -847,6 +880,50 @@ def test_extract_plan_pending_includes_stale_when_all_masked(tmp_path):
         f"pending={detail['pending']}, stale={detail['stale']}"
     )
     assert detail["fingerprint_outdated"] is True
+
+
+def test_extract_plan_pending_does_not_double_count_interrupted_state(tmp_path):
+    """Interrupted extract: a ``photo_masks`` row was inserted but
+    ``photos.mask_path`` is still NULL. The photo is one unit of work,
+    not two — ``detail.pending`` must not exceed ``eligible`` and the
+    progress bar must stay sane.
+
+    Before the disjoint-by-construction fix, ``count_extract_stale``
+    counted this photo and ``count_photos_pending_masks`` also counted
+    it, so ``work = pending + stale`` produced ``pending=2`` for one
+    eligible photo — a 0/2 progress bar and "2 to redo" pill on a
+    single-photo workspace.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "interrupted.jpg")
+    # photo_masks row exists with stale prompt, but mask_path is still NULL.
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/i.png', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",
+        (pid,),
+    )
+    db.conn.commit()
+
+    plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
+    extract = plan["stages"]["Extract"]
+    assert extract["state"] == "will-run"
+    detail = extract["detail"]
+    assert detail["eligible"] == 1
+    assert detail["pending"] == 1, (
+        "interrupted photo must count as one unit of work, not two; got "
+        f"pending={detail['pending']}, stale={detail['stale']}"
+    )
+    assert detail["pending"] <= detail["eligible"], (
+        "detail.pending must never exceed eligible (would render "
+        f">100% progress); got pending={detail['pending']}, "
+        f"eligible={detail['eligible']}"
+    )
+    # The photo is in pending (mask_path NULL), not stale — so the
+    # planner reports stale=0 for this case.
+    assert detail["stale"] == 0
 
 
 # -------- compute_plan: eye keypoints --------
