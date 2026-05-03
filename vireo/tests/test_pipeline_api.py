@@ -723,6 +723,49 @@ def test_pipeline_page_init_includes_mask_variant_coverage(setup):
         assert cov["sam2-large"]["active_count"] == 0
 
 
+def test_pipeline_page_init_includes_review_readiness(setup):
+    """page-init exposes review_readiness so the review page can render
+    a diagnostic empty state and decide whether to offer Compute now."""
+    app, db_path = setup
+    # _seed_workspace_with_masks leaves photos with masks but no Group cache.
+    _seed_workspace_with_masks(db_path)
+
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/page-init")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "review_readiness" in data
+        rr = data["review_readiness"]
+        assert rr["state"] == "computable"
+        assert rr["total_photos"] >= 2
+        assert rr["with_masks"] >= 2
+
+
+def test_pipeline_page_init_review_readiness_state_ready_when_cache_exists(setup, tmp_path):
+    """When the grouping cache is already on disk, state should be 'ready'."""
+    app, db_path = setup
+    _seed_workspace_with_masks(db_path)
+
+    # Drop a minimal cache file at <db_dir>/pipeline_results_ws{N}.json
+    import json as _json
+
+    from db import Database
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    db.close()
+    cache_path = os.path.join(
+        os.path.dirname(db_path), f"pipeline_results_ws{ws}.json"
+    )
+    with open(cache_path, "w") as f:
+        _json.dump({"encounters": [], "photos": [], "summary": {}}, f)
+
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/page-init")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["review_readiness"]["state"] == "ready"
+
+
 def test_active_mask_variant_endpoint_switches_workspace_photos(setup):
     """POST /api/pipeline/active-mask-variant flips active_mask_variant on
     every workspace photo that has a row for the requested variant."""

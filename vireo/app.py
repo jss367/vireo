@@ -1167,7 +1167,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         total_photos = db.count_photos()
 
         import config as cfg
-        from pipeline import load_results
+        from pipeline import compute_review_readiness, load_results
         cache_dir = os.path.dirname(db_path)
         results = load_results(cache_dir, db._active_workspace_id)
         if results and results.get("photos"):
@@ -1182,6 +1182,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f, r = flag_map.get(p["id"], ("none", 0))
                 p["flag"] = f
                 p["rating"] = r
+
+        review_readiness = compute_review_readiness(db)
+        if results is not None:
+            # Cache exists — even if features have changed underneath,
+            # the page can render. enhancing_missing still reflects the
+            # current gap so the degraded banner can surface accurately.
+            review_readiness["state"] = "ready"
+
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
 
@@ -1215,6 +1223,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             },
             "mask_variant_coverage": db.mask_variant_coverage(),
             "results": results,
+            "review_readiness": review_readiness,
             "workspace_overrides": ws_overrides,
             "recent_destinations": effective_cfg.get("ingest", {}).get("recent_destinations", []),
         })
