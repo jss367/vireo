@@ -369,10 +369,12 @@ def test_eye_keypoints_plan_will_skip_when_preflight_fails(tmp_path, monkeypatch
 
 
 def test_eye_keypoints_plan_done_prior_when_all_processed(tmp_path, monkeypatch):
-    """The headline bug case: every eligible photo has eye_tenengrad set,
-    so the next run is a no-op. The pill must say so.
+    """The headline bug case: every eligible photo has eye_tenengrad set
+    (with the current fingerprint, so it isn't stale), so the next run is
+    a no-op. The pill must say so.
     """
     import pipeline as pipeline_mod
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
     monkeypatch.setattr(
@@ -381,8 +383,9 @@ def test_eye_keypoints_plan_done_prior_when_all_processed(tmp_path, monkeypatch)
     )
     pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
     db.conn.execute(
-        "UPDATE photos SET mask_path='/m/a.png', eye_tenengrad=0.5 WHERE id=?",
-        (pid,),
+        "UPDATE photos SET mask_path='/m/a.png', eye_tenengrad=0.5, "
+        "eye_kp_fingerprint=? WHERE id=?",
+        (EYE_KP_FINGERPRINT_VERSION, pid),
     )
     db.conn.execute(
         """INSERT INTO predictions
@@ -398,6 +401,40 @@ def test_eye_keypoints_plan_done_prior_when_all_processed(tmp_path, monkeypatch)
     assert eye["state"] == "done-prior"
 
 
+def test_eye_keypoints_plan_will_run_when_fingerprint_outdated(tmp_path, monkeypatch):
+    """A photo with eye_tenengrad set but a stale eye_kp_fingerprint must
+    surface as will-run, not done-prior — keypoint model/routing changed
+    since the photo was processed."""
+    import pipeline as pipeline_mod
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight",
+        lambda config: None,
+    )
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    # Old fingerprint string — definitely doesn't match current.
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png', eye_tenengrad=0.5, "
+        "eye_kp_fingerprint='superanimal-old' WHERE id=?",
+        (pid,),
+    )
+    db.conn.execute(
+        """INSERT INTO predictions
+            (detection_id, classifier_model, labels_fingerprint,
+             species, confidence)
+           VALUES (?, ?, ?, ?, ?)""",
+        (did, "BioCLIP-2", "fp1", "robin", 0.9),
+    )
+    db.conn.commit()
+
+    plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
+    eye = plan["stages"]["EyeKeypoints"]
+    assert eye["state"] == "will-run", (
+        f"expected will-run for stale fingerprint, got {eye['state']!r}: {eye['summary']}"
+    )
+
+
 def test_eye_keypoints_plan_will_run_when_some_pending(tmp_path, monkeypatch):
     import pipeline as pipeline_mod
     from pipeline_plan import compute_plan
@@ -406,11 +443,14 @@ def test_eye_keypoints_plan_will_run_when_some_pending(tmp_path, monkeypatch):
         pipeline_mod, "eye_keypoint_stage_preflight",
         lambda config: None,
     )
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
     pid_done, did_done = _add_photo_with_detection(db, folder_id, "done.jpg")
     pid_todo, did_todo = _add_photo_with_detection(db, folder_id, "todo.jpg")
+    # done.jpg: processed with current fingerprint → not stale, not pending
     db.conn.execute(
-        "UPDATE photos SET mask_path='/m/d.png', eye_tenengrad=0.5 WHERE id=?",
-        (pid_done,),
+        "UPDATE photos SET mask_path='/m/d.png', eye_tenengrad=0.5, "
+        "eye_kp_fingerprint=? WHERE id=?",
+        (EYE_KP_FINGERPRINT_VERSION, pid_done),
     )
     db.conn.execute(
         "UPDATE photos SET mask_path='/m/t.png' WHERE id=?", (pid_todo,),
@@ -500,6 +540,51 @@ def test_regroup_plan_will_run_when_upstream_has_work(tmp_path):
     # Extract has pending work → upstream_will_run = True
     assert plan["stages"]["Extract"]["state"] == "will-run"
     assert plan["stages"]["Group"]["state"] == "will-run"
+
+
+def test_regroup_plan_will_run_when_workspace_fingerprint_outdated(tmp_path, monkeypatch):
+    """Cache exists and no upstream work, BUT workspace.last_group_fingerprint
+    no longer matches the current settings — surface as will-run with a
+    'settings changed' summary, not done-prior."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
+    db.conn.commit()
+    from labels_fingerprint import TOL_SENTINEL
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+
+    cache_path = os.path.join(
+        str(tmp_path), f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(cache_path, "w") as f:
+        f.write('{"photos": []}')
+
+    # Stamp a deliberately mismatched fingerprint.
+    db.set_workspace_group_state(
+        db._active_workspace_id,
+        fingerprint="old-fingerprint-from-prior-settings",
+        when_ts=1714579200,
+    )
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+    plan = compute_plan(
+        db,
+        _params(model_ids=["m1"], skip_eye_keypoints=True),
+        str(tmp_path / "test.db"),
+    )
+
+    assert plan["stages"]["Group"]["state"] == "will-run"
+    assert "settings" in plan["stages"]["Group"]["summary"].lower()
 
 
 def test_regroup_plan_will_run_when_no_cache(tmp_path):

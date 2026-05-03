@@ -712,17 +712,26 @@ class Database:
         # One-shot backfill: stamp the current EYE_KP_FINGERPRINT_VERSION
         # onto photos that already have eye-keypoint data, so existing
         # users don't see "Outdated" for unchanged data on first upgrade.
-        # Gated by db_meta so it runs exactly once per DB.
+        # Gated by db_meta so it runs exactly once per DB. Probe for
+        # eye_tenengrad first — synthetic old-shape DBs in tests can
+        # predate that column, in which case there's no eye-keypoint data
+        # to backfill anyway and we just record the marker so we don't
+        # keep probing.
         marker = self.conn.execute(
             "SELECT value FROM db_meta WHERE key='eye_kp_fingerprint_backfill'"
         ).fetchone()
         if marker is None:
-            from pipeline import EYE_KP_FINGERPRINT_VERSION
-            self.conn.execute(
-                "UPDATE photos SET eye_kp_fingerprint = ? "
-                "WHERE eye_tenengrad IS NOT NULL AND eye_kp_fingerprint IS NULL",
-                (EYE_KP_FINGERPRINT_VERSION,),
-            )
+            try:
+                self.conn.execute("SELECT eye_tenengrad FROM photos LIMIT 0")
+            except sqlite3.OperationalError:
+                pass
+            else:
+                from pipeline import EYE_KP_FINGERPRINT_VERSION
+                self.conn.execute(
+                    "UPDATE photos SET eye_kp_fingerprint = ? "
+                    "WHERE eye_tenengrad IS NOT NULL AND eye_kp_fingerprint IS NULL",
+                    (EYE_KP_FINGERPRINT_VERSION,),
+                )
             self.conn.execute(
                 "INSERT INTO db_meta(key, value) VALUES ('eye_kp_fingerprint_backfill', '1')"
             )
@@ -4412,8 +4421,11 @@ class Database:
           * has at least one non-synthetic detection (excludes full-image
             rows that exist only to anchor predictions)
           * has at least one prediction on that detection
-          * has not already been processed — eye_tenengrad IS NULL keeps
-            the stage idempotent across reruns
+          * EITHER has not been processed (eye_tenengrad IS NULL) OR was
+            processed with a stale fingerprint (eye_kp_fingerprint differs
+            from EYE_KP_FINGERPRINT_VERSION). The stale path lets a
+            keypoint-model bump re-run on already-processed photos, since
+            (eye_x, eye_y, eye_conf, eye_tenengrad) are model-specific.
           * (optional) photo.id is in ``photo_ids`` when provided — lets the
             caller scope the stage to a collection so a pipeline run doesn't
             touch unrelated photos elsewhere in the workspace
@@ -4431,6 +4443,7 @@ class Database:
         scientific_name, species.
         """
         import config as cfg
+        from pipeline import EYE_KP_FINGERPRINT_VERSION
         ws_id = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
@@ -4441,10 +4454,10 @@ class Database:
                 return []
             placeholders = ",".join("?" for _ in photo_ids)
             extra_where = f" AND p.id IN ({placeholders})"
-            params = (ws_id, min_conf, *photo_ids)
+            params = (ws_id, min_conf, EYE_KP_FINGERPRINT_VERSION, *photo_ids)
         else:
             extra_where = ""
-            params = (ws_id, min_conf)
+            params = (ws_id, min_conf, EYE_KP_FINGERPRINT_VERSION)
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.width, p.height,
                       p.mask_path,
@@ -4463,7 +4476,9 @@ class Database:
                 AND d.detector_confidence >= ?
                JOIN predictions pr ON pr.detection_id = d.id
                WHERE p.mask_path IS NOT NULL
-                 AND p.eye_tenengrad IS NULL{extra_where}
+                 AND (p.eye_tenengrad IS NULL
+                      OR p.eye_kp_fingerprint IS NULL
+                      OR p.eye_kp_fingerprint != ?){extra_where}
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
                     WHERE pr2.detection_id = pr.detection_id
