@@ -921,6 +921,9 @@ body { padding-bottom: 36px; }
              onchange="onStageToggle('classify')" onclick="event.stopPropagation()">
       <span class="stage-name">Classify</span>
       <span class="stage-status-pill" id="pillClassify"></span>
+      <div class="stage-progress-bar hidden" id="progressBarClassify">
+        <div class="stage-progress-bar-fill" style="width:0%"></div>
+      </div>
       <span class="stage-summary" id="summaryClassify">
         <span id="txtDetections"></span>
       </span>
@@ -966,6 +969,9 @@ body { padding-bottom: 36px; }
              onchange="onStageToggle('extract')" onclick="event.stopPropagation()">
       <span class="stage-name">Extract Features</span>
       <span class="stage-status-pill" id="pillExtract"></span>
+      <div class="stage-progress-bar hidden" id="progressBarExtract">
+        <div class="stage-progress-bar-fill" style="width:0%"></div>
+      </div>
       <span class="stage-summary" id="summaryExtract">
         <span id="txtMasks"></span>
       </span>
@@ -1026,6 +1032,9 @@ body { padding-bottom: 36px; }
              onchange="onStageToggle('eyekeypoints')" onclick="event.stopPropagation()">
       <span class="stage-name">Eye Keypoints (optional)</span>
       <span class="stage-status-pill" id="pillEyeKeypoints"></span>
+      <div class="stage-progress-bar hidden" id="progressBarEyeKeypoints">
+        <div class="stage-progress-bar-fill" style="width:0%"></div>
+      </div>
       <span class="stage-summary" id="summaryEyeKeypoints">
         <span id="txtEyeKeypoints"></span>
       </span>
