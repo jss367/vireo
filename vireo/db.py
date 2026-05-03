@@ -2852,6 +2852,55 @@ class Database:
             "pending": row["pending"] or 0,
         }
 
+    def count_extract_stale(self, sam2_variant, photo_ids=None,
+                             detector_confidence=None):
+        """Count photos in scope that have a photo_masks row for
+        ``sam2_variant`` whose stored prompt no longer matches the
+        photo's primary detection.
+
+        Reuses the staleness predicate from ``find_stale_masks`` — a
+        mask is fresh only when its stored ``(detector_model,
+        prompt_xywh)`` equals the highest-confidence non-full-image
+        detection on the same photo (with optional ``detector_confidence``
+        floor). Filtered by ``sam2_variant`` so a stale mask under a
+        different variant doesn't pollute the count for the currently
+        configured variant.
+        """
+        import config as cfg
+        ws = self._ws_id()
+        if detector_confidence is None:
+            detector_confidence = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT pm.photo_id) AS n
+                FROM photo_masks pm
+                JOIN photos p ON p.id = pm.photo_id
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               WHERE pm.variant = ?
+                 AND NOT EXISTS (
+                    SELECT 1 FROM detections d
+                     WHERE d.id = (
+                           SELECT d2.id
+                             FROM detections d2
+                            WHERE d2.photo_id = pm.photo_id
+                              AND d2.detector_model != 'full-image'
+                              AND d2.detector_confidence >= ?
+                            ORDER BY d2.detector_confidence DESC, d2.id ASC
+                            LIMIT 1
+                       )
+                       AND d.detector_model = pm.detector_model
+                       AND d.box_x = pm.prompt_x
+                       AND d.box_y = pm.prompt_y
+                       AND d.box_w = pm.prompt_w
+                       AND d.box_h = pm.prompt_h
+                 ){scope_sql}""",
+            (ws, sam2_variant, detector_confidence, *scope_params),
+        ).fetchone()
+        return row["n"] or 0
+
     def count_eye_keypoint_eligible(self, photo_ids=None):
         """Count photos eligible for the eye-keypoint stage, ignoring the
         ``eye_tenengrad IS NULL`` idempotency gate.

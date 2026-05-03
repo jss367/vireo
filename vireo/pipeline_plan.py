@@ -243,7 +243,7 @@ def _classify_plan(db, params, photo_ids):
     return {"state": "will-run", "summary": summary, "detail": detail}
 
 
-def _extract_plan(db, params, photo_ids):
+def _extract_plan(db, params, photo_ids, pipeline_cfg):
     if params.skip_extract_masks:
         return {
             "state": "will-skip",
@@ -252,6 +252,8 @@ def _extract_plan(db, params, photo_ids):
     counts = db.count_photos_pending_masks(photo_ids)
     eligible = counts["eligible"]
     pending = counts["pending"]
+    sam2_variant = pipeline_cfg.get("sam2_variant", "sam2-small")
+    stale = db.count_extract_stale(sam2_variant, photo_ids)
     if eligible == 0:
         return {
             "state": "will-run",
@@ -259,16 +261,18 @@ def _extract_plan(db, params, photo_ids):
                 "Will run after classify produces detections "
                 "(no eligible photos yet)"
             ),
-            "detail": {"eligible": 0, "pending": 0},
+            "detail": {"eligible": 0, "pending": 0,
+                       "stale": 0, "fingerprint_outdated": False},
         }
-    if pending == 0:
+    if pending == 0 and stale == 0:
         return {
             "state": "done-prior",
             "summary": (
                 f"Masks present for all {eligible} eligible "
                 f"photo{_plural(eligible)}"
             ),
-            "detail": {"eligible": eligible, "pending": 0},
+            "detail": {"eligible": eligible, "pending": 0,
+                       "stale": 0, "fingerprint_outdated": False},
         }
     return {
         "state": "will-run",
@@ -276,7 +280,8 @@ def _extract_plan(db, params, photo_ids):
             f"Will extract masks for {pending} "
             f"photo{_plural(pending)} ({eligible} eligible)"
         ),
-        "detail": {"eligible": eligible, "pending": pending},
+        "detail": {"eligible": eligible, "pending": pending,
+                   "stale": stale, "fingerprint_outdated": stale > 0},
     }
 
 
@@ -441,7 +446,7 @@ def compute_plan(db, params, db_path):
             photo_ids = {pid for pid in photo_ids if pid not in excl}
 
     classify = _classify_plan(db, params, photo_ids)
-    extract = _extract_plan(db, params, photo_ids)
+    extract = _extract_plan(db, params, photo_ids, pipeline_cfg)
     eye = _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg)
     upstream_will_run = any(
         s["state"] == "will-run" for s in (classify, extract, eye)

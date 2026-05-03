@@ -234,6 +234,62 @@ def test_count_eye_keypoint_stale_ignores_never_processed(tmp_path):
     assert db.count_eye_keypoint_stale() == 0
 
 
+def test_count_extract_stale_zero_when_no_masks(tmp_path):
+    db, folder_id = _make_db(tmp_path)
+    _add_photo_with_detection(db, folder_id, "a.jpg")
+    assert db.count_extract_stale("sam2-small") == 0
+
+
+def test_count_extract_stale_zero_when_prompt_matches(tmp_path):
+    """A mask whose stored prompt matches the photo's primary detection
+    is fresh — not stale."""
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    # Stored prompt matches the detection's box (0.1, 0.1, 0.5, 0.5)
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/a.png', 0, 'megadetector-v6', "
+        "0.1, 0.1, 0.5, 0.5)",
+        (pid,),
+    )
+    db.conn.commit()
+    assert db.count_extract_stale("sam2-small") == 0
+
+
+def test_count_extract_stale_counts_prompt_mismatch(tmp_path):
+    """A mask whose stored prompt does NOT match the photo's primary
+    detection (e.g., re-detection produced a different bbox) is stale."""
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/a.png', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",  # bbox mismatches detection (0.1,0.1,0.5,0.5)
+        (pid,),
+    )
+    db.conn.commit()
+    assert db.count_extract_stale("sam2-small") == 1
+
+
+def test_count_extract_stale_filters_by_variant(tmp_path):
+    """Stale masks for a different variant don't count toward the
+    configured variant's staleness."""
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-large', '/m/a.png', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",
+        (pid,),
+    )
+    db.conn.commit()
+    assert db.count_extract_stale("sam2-small") == 0
+    assert db.count_extract_stale("sam2-large") == 1
+
+
 # -------- compute_plan: classify --------
 
 def _params(**kwargs):
@@ -562,6 +618,27 @@ def test_extract_plan_will_run_when_some_photos_missing_masks(tmp_path):
     assert extract["state"] == "will-run"
     assert extract["detail"]["pending"] == 1
     assert extract["detail"]["eligible"] == 2
+
+
+def test_extract_plan_emits_fingerprint_outdated_when_stale(tmp_path):
+    """When the configured sam2_variant has stale masks (prompt mismatch),
+    surface fingerprint_outdated + stale count so the UI shows Outdated."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    # Mask under default sam2_variant ('sam2-small') with mismatched prompt
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/a.png', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",
+        (pid,),
+    )
+    db.conn.commit()
+    plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
+    detail = plan["stages"]["Extract"]["detail"]
+    assert detail["stale"] == 1
+    assert detail["fingerprint_outdated"] is True
 
 
 # -------- compute_plan: eye keypoints --------
