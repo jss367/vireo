@@ -289,7 +289,7 @@ Add CSS in the `<style>` block (find an analogous block for `.empty-state` and s
 .readiness-stages .stage-missing { color: var(--text-dim); }
 .readiness-actions { margin-top: 16px; display: flex; justify-content: center; gap: 12px; }
 .readiness-actions button { padding: 8px 16px; }
-.readiness-actions .compute-btn { background: var(--accent); color: var(--bg); border: none; border-radius: 4px; cursor: pointer; }
+.readiness-actions .compute-btn { background: var(--accent); color: var(--accent-text); border: none; border-radius: 4px; cursor: pointer; }
 .readiness-actions .compute-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 ```
 
@@ -436,7 +436,7 @@ CSS:
 
 ```css
 .degraded-banner {
-  background: var(--warning-bg, #3a2e1f);
+  background: var(--warning-bg, var(--bg-secondary, #3a2e1f));
   color: var(--text);
   padding: 8px 16px;
   border-bottom: 1px solid var(--border);

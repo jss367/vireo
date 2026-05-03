@@ -80,7 +80,7 @@
 .readiness-stages .stage-missing { color: var(--text-dim); }
 .readiness-actions { margin-top: 16px; display: flex; justify-content: center; gap: 12px; }
 .readiness-actions button { padding: 8px 16px; }
-.readiness-actions .compute-btn { background: var(--accent); color: var(--bg); border: none; border-radius: 4px; cursor: pointer; }
+.readiness-actions .compute-btn { background: var(--accent); color: var(--accent-text); border: none; border-radius: 4px; cursor: pointer; }
 .readiness-actions .compute-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Filter bar */
@@ -1141,6 +1141,9 @@ var activeFilter = 'all';
 var minConfidence = 40;
 var speciesFilter = '';
 var hideConfirmed = false;
+// Captured from /api/pipeline/page-init so computeReviewNow() can apply
+// the same workspace-override logic the happy path uses on page load.
+var workspaceOverrides = null;
 // Survives re-renders so confirming/filtering doesn't re-expand collapsed
 // encounters. Keyed by the encounter's full sorted photo_id set so that
 // detach/regroup (which change composition) naturally invalidate the key
@@ -1900,19 +1903,33 @@ function computeReviewNow() {
     // Hide empty state, render results inline
     document.getElementById('emptyState').style.display = 'none';
     pipelineResults = data;
+    // Parity with initPipelineReviewPage's happy path:
+    collapsedEncounters = new Set();
+    if (workspaceOverrides && workspaceOverrides.review_min_confidence != null) {
+      minConfidence = workspaceOverrides.review_min_confidence;
+      document.getElementById('confSlider').value = minConfidence;
+      document.getElementById('confSliderVal').textContent = minConfidence + '%';
+    }
     document.getElementById('summaryBar').style.display = '';
     updateSummaryBar(data.summary);
     document.getElementById('filterBar').style.display = '';
     document.getElementById('sidebarScoring').style.display = '';
     document.getElementById('sidebarGrouping').style.display = '';
     renderResults();
+    checkPendingSync();
     refreshMissesReviewBtn();
+  }).catch(function() {
+    // safeFetch toasts the error; re-enable the button so the user can retry.
+    if (btn) { btn.disabled = false; btn.textContent = 'Compute results now'; }
   });
 }
 
 function initPipelineReviewPage() {
   safeFetch('/api/pipeline/page-init', {}, { toast: false })
   .then(function(data) {
+    // Capture overrides regardless of state so computeReviewNow() can apply
+    // the same review_min_confidence logic when the user clicks Compute.
+    workspaceOverrides = (data && data.workspace_overrides) || null;
     if (!data || !data.results) {
       renderEmptyState(data && data.review_readiness ? data.review_readiness
                                                      : {state: 'empty', total_photos: 0});
