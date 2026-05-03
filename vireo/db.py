@@ -2815,6 +2815,52 @@ class Database:
         ).fetchone()
         return row["pending"] or 0
 
+    def count_classify_stale(
+        self, classifier_model, labels_fingerprint,
+        photo_ids=None, min_conf=None,
+    ):
+        """Count detections in scope that have a stale classifier_runs row
+        for ``classifier_model`` (some non-current fingerprint) AND no row
+        matching the current ``labels_fingerprint``.
+
+        A detection with a current-fp row is "done" (not stale). A
+        detection with no row at all is "never processed" (counted by
+        :meth:`count_classify_pending_pairs`, not here). The stale set is
+        their disjoint complement: previously processed under settings
+        that no longer match.
+        """
+        ws = self._ws_id()
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT d.id) AS n
+                FROM detections d
+                JOIN photos p ON p.id = d.photo_id
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               WHERE d.detector_model != 'full-image'
+                 AND d.detector_confidence >= ?
+                 AND EXISTS (
+                    SELECT 1 FROM classifier_runs cr_stale
+                     WHERE cr_stale.detection_id = d.id
+                       AND cr_stale.classifier_model = ?
+                       AND cr_stale.labels_fingerprint != ?
+                 )
+                 AND NOT EXISTS (
+                    SELECT 1 FROM classifier_runs cr_cur
+                     WHERE cr_cur.detection_id = d.id
+                       AND cr_cur.classifier_model = ?
+                       AND cr_cur.labels_fingerprint = ?
+                 ){scope_sql}""",
+            (ws, min_conf, classifier_model, labels_fingerprint,
+             classifier_model, labels_fingerprint, *scope_params),
+        ).fetchone()
+        return row["n"] or 0
+
     def count_photos_pending_masks(self, photo_ids=None, min_conf=None):
         """Return (pending, eligible) for the extract-masks stage.
 

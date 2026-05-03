@@ -112,6 +112,34 @@ def test_count_classify_pending_excludes_recorded_runs(tmp_path):
     assert db.count_classify_pending_pairs("OtherModel", "fp1") == 2
 
 
+def test_count_classify_stale_zero_when_no_runs(tmp_path):
+    from labels_fingerprint import TOL_SENTINEL
+    db, folder_id = _make_db(tmp_path)
+    _add_photo_with_detection(db, folder_id, "a.jpg")
+    assert db.count_classify_stale("BioCLIP-2", TOL_SENTINEL) == 0
+
+
+def test_count_classify_stale_zero_when_current_run_present(tmp_path):
+    """A detection with a row matching current (model, fp) is done,
+    not stale — even if older rows under different fingerprints exist."""
+    from labels_fingerprint import TOL_SENTINEL
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    assert db.count_classify_stale("BioCLIP-2", TOL_SENTINEL) == 0
+
+
+def test_count_classify_stale_counts_old_only_runs(tmp_path):
+    """A detection with a row for current model under a stale fingerprint
+    AND no row matching current fingerprint is stale."""
+    from labels_fingerprint import TOL_SENTINEL
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
+    assert db.count_classify_stale("BioCLIP-2", TOL_SENTINEL) == 1
+
+
 def test_count_photos_pending_masks(tmp_path):
     db, folder_id = _make_db(tmp_path)
     pid_unmasked, _ = _add_photo_with_detection(db, folder_id, "no_mask.jpg")
@@ -577,6 +605,84 @@ def test_classify_plan_exposes_pending_and_eligible_mixed_blocked_and_done(
         "models happen to be fully cached — otherwise pending=0/eligible>0 "
         "lets the UI show 'Resume (0 left)' against a stage that's actually "
         "blocked on missing labels"
+    )
+
+
+def test_classify_plan_emits_fingerprint_outdated_when_stale(
+    tmp_path, monkeypatch,
+):
+    """A detection classified under fp_old + no current-fp row → outdated."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    detail = plan["stages"]["Classify"]["detail"]
+    assert detail["stale"] == 1
+    assert detail["fingerprint_outdated"] is True
+
+
+def test_classify_plan_no_outdated_flag_when_current(
+    tmp_path, monkeypatch,
+):
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    detail = plan["stages"]["Classify"]["detail"]
+    assert detail["stale"] == 0
+    assert not detail.get("fingerprint_outdated")
+
+
+def test_classify_plan_reclassify_suppresses_outdated(
+    tmp_path, monkeypatch,
+):
+    """Reclassify is a user override, not a settings-change signal —
+    don't render as 'Outdated' even though all pairs will redo."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
+
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+
+    plan = compute_plan(
+        db, _params(model_ids=["m1"], reclassify=True),
+        str(tmp_path / "test.db"),
+    )
+    detail = plan["stages"]["Classify"]["detail"]
+    assert not detail.get("fingerprint_outdated"), (
+        "reclassify is user-explicit; outdated flag should stay off so "
+        "pill says 'Re-classify' not 'Outdated'"
     )
 
 

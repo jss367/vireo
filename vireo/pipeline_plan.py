@@ -120,7 +120,10 @@ def _classify_plan(db, params, photo_ids):
         return {
             "state": "will-skip",
             "summary": "Disabled — stage will be skipped",
-            "detail": {"pending": 0, "eligible": 0},
+            "detail": {
+                "pending": 0, "eligible": 0,
+                "stale": 0, "fingerprint_outdated": False,
+            },
         }
 
     models = _resolve_models(params.model_ids)
@@ -128,7 +131,10 @@ def _classify_plan(db, params, photo_ids):
         return {
             "state": "will-skip",
             "summary": "No models selected — stage will be skipped",
-            "detail": {"pending": 0, "eligible": 0},
+            "detail": {
+                "pending": 0, "eligible": 0,
+                "stale": 0, "fingerprint_outdated": False,
+            },
         }
 
     label_resolution = _resolve_labels_for_models(models, params.labels_files, db)
@@ -141,6 +147,21 @@ def _classify_plan(db, params, photo_ids):
         1 for m in models if not label_resolution[m["id"]].get("blocked")
     )
     eligible = total_dets * unblocked_count
+
+    stale_total = 0
+    if total_dets > 0 and not params.reclassify:
+        for m in models:
+            info = label_resolution[m["id"]]
+            if info.get("blocked"):
+                continue
+            fp = info["fingerprint"]
+            stale_total += db.count_classify_stale(
+                classifier_model=m["name"],
+                labels_fingerprint=fp,
+                photo_ids=photo_ids,
+            )
+    # Reclassify is a user override, not a settings-change signal.
+    fingerprint_outdated = stale_total > 0 and not params.reclassify
 
     if total_dets == 0:
         return {
@@ -155,6 +176,8 @@ def _classify_plan(db, params, photo_ids):
                 "models": [m["name"] for m in models],
                 "pending": 0,
                 "eligible": 0,
+                "stale": stale_total,
+                "fingerprint_outdated": fingerprint_outdated,
             },
         }
 
@@ -195,6 +218,8 @@ def _classify_plan(db, params, photo_ids):
                 "blocked_models": blocked,
                 "pending": 0,
                 "eligible": 0,
+                "stale": stale_total,
+                "fingerprint_outdated": fingerprint_outdated,
             },
         }
 
@@ -212,6 +237,8 @@ def _classify_plan(db, params, photo_ids):
                 "models": [m["name"] for m in models],
                 "pending": 0,
                 "eligible": eligible,
+                "stale": stale_total,
+                "fingerprint_outdated": fingerprint_outdated,
             },
         }
 
@@ -237,6 +264,8 @@ def _classify_plan(db, params, photo_ids):
         "photos_with_dets": photos_with_dets,
         "pending": pending_total,
         "eligible": eligible,
+        "stale": stale_total,
+        "fingerprint_outdated": fingerprint_outdated,
     }
     if blocked:
         detail["blocked_models"] = blocked
