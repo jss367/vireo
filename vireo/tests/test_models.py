@@ -437,8 +437,9 @@ def test_get_taxonomy_info_race_after_exists_check(tmp_path, monkeypatch):
     available=False rather than letting OSError bubble up and 500 the
     /api/pipeline/page-init endpoint.
     """
-    import models
     import os as os_mod
+
+    import models
     import taxonomy
 
     tax_path = tmp_path / "taxonomy.json"
