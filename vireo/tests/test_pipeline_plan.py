@@ -293,6 +293,177 @@ def test_classify_plan_reclassify_bypasses_cache(tmp_path, monkeypatch):
     assert "Re-classify" in classify["summary"]
 
 
+def test_classify_plan_exposes_pending_and_eligible_done_prior(tmp_path, monkeypatch):
+    """Every classify return path must expose detail.pending + detail.eligible
+    so the UI's pill formatter doesn't need per-stage count knowledge.
+    Done-prior path: eligible = total_dets * num_models, pending = 0."""
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    detail = plan["stages"]["Classify"]["detail"]
+    assert detail["pending"] == 0
+    assert detail["eligible"] == 1  # 1 detection × 1 model
+
+
+def test_classify_plan_exposes_pending_and_eligible_will_run(tmp_path, monkeypatch):
+    """will-run path with new model added: eligible counts pairs across
+    all unblocked models, pending counts the unfinished ones."""
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+        {"id": "m2", "name": "BioCLIP",
+         "model_str": "hf-hub:imageomics/bioclip",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
+
+    plan = compute_plan(
+        db, _params(model_ids=["m1", "m2"]), str(tmp_path / "test.db"),
+    )
+    detail = plan["stages"]["Classify"]["detail"]
+    assert detail["eligible"] == 2  # 1 detection × 2 models
+    assert detail["pending"] == 1   # only m2 is unrun
+
+
+def test_classify_plan_exposes_pending_and_eligible_reclassify(tmp_path, monkeypatch):
+    """Reclassify path: pending == eligible (everything will redo)."""
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
+
+    plan = compute_plan(
+        db,
+        _params(model_ids=["m1"], reclassify=True),
+        str(tmp_path / "test.db"),
+    )
+    detail = plan["stages"]["Classify"]["detail"]
+    assert detail["eligible"] == 1
+    assert detail["pending"] == 1  # reclassify forces all pairs to redo
+
+
+def test_classify_plan_exposes_pending_and_eligible_no_detections(tmp_path, monkeypatch):
+    """No detections cached yet: eligible=0, pending=0. Bar will hide."""
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    detail = plan["stages"]["Classify"]["detail"]
+    assert detail["eligible"] == 0
+    assert detail["pending"] == 0
+
+
+def test_classify_plan_exposes_pending_and_eligible_blocked_only(tmp_path, monkeypatch):
+    """Blocked-only path (model needs labels): eligible=0 since no model can run.
+    pending=0. UI hides the bar; the summary explains the block."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+
+    import labels as labels_mod
+    import models as models_mod
+    # timm models without labels are blocked. Use a non-bioclip model_str
+    # so the TOL fallback doesn't kick in.
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "SomeTimmModel",
+         "model_str": "hf-hub:other/model",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    detail = plan["stages"]["Classify"]["detail"]
+    assert detail["eligible"] == 0  # no unblocked models
+    assert detail["pending"] == 0
+
+
+
+def test_classify_plan_exposes_pending_and_eligible_mixed_blocked_and_done(
+    tmp_path, monkeypatch,
+):
+    """Mixed path: one unblocked model is fully cached AND another model is
+    blocked-needs-labels. The blocked-only return branch fires (pending_total
+    is 0 from the cached model + the blocked one was skipped via continue).
+    eligible must be 0/0 since the stage is functionally blocked — returning
+    eligible>0 with pending=0 here would let the UI render "Resume (0 left)"
+    which is contradictory with the "Blocked" summary text."""
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+        {"id": "m2", "name": "OtherModel",
+         "model_str": "hf-hub:other/model",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+    # m1 is fully cached under the TOL fallback. m2 is blocked (no labels,
+    # not a TOL-supported model_str).
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
+
+    plan = compute_plan(
+        db, _params(model_ids=["m1", "m2"]), str(tmp_path / "test.db"),
+    )
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "will-run"
+    assert "Blocked" in classify["summary"]
+    detail = classify["detail"]
+    assert detail["pending"] == 0
+    assert detail["eligible"] == 0, (
+        "blocked-only branch must return eligible=0 even when some unblocked "
+        "models happen to be fully cached — otherwise pending=0/eligible>0 "
+        "lets the UI show 'Resume (0 left)' against a stage that's actually "
+        "blocked on missing labels"
+    )
+
+
 # -------- compute_plan: extract --------
 
 def test_extract_plan_will_skip_when_disabled(tmp_path):
