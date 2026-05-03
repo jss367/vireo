@@ -297,6 +297,7 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg):
 
     pending = len(db.list_photos_for_eye_keypoint_stage(photo_ids=photo_ids))
     eligible = db.count_eye_keypoint_eligible(photo_ids)
+    stale = db.count_eye_keypoint_stale(photo_ids)
     processed = max(eligible - pending, 0)
 
     if eligible == 0:
@@ -306,7 +307,12 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg):
                 "Will run after upstream produces masks + species "
                 "predictions (no eligible photos yet)"
             ),
-            "detail": {"eligible": 0, "pending": 0},
+            "detail": {
+                "eligible": 0,
+                "pending": 0,
+                "stale": stale,
+                "fingerprint_outdated": stale > 0,
+            },
         }
     if pending == 0:
         return {
@@ -315,7 +321,13 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg):
                 f"Eye keypoints present for all {eligible} eligible "
                 f"photo{_plural(eligible)}"
             ),
-            "detail": {"eligible": eligible, "pending": 0, "processed": processed},
+            "detail": {
+                "eligible": eligible,
+                "pending": 0,
+                "processed": processed,
+                "stale": stale,
+                "fingerprint_outdated": stale > 0,
+            },
         }
     return {
         "state": "will-run",
@@ -323,7 +335,13 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg):
             f"Will run on {pending} photo{_plural(pending)} "
             f"({processed} of {eligible} already processed)"
         ),
-        "detail": {"eligible": eligible, "pending": pending, "processed": processed},
+        "detail": {
+            "eligible": eligible,
+            "pending": pending,
+            "processed": processed,
+            "stale": stale,
+            "fingerprint_outdated": stale > 0,
+        },
     }
 
 

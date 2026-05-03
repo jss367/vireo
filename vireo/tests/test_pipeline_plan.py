@@ -174,6 +174,66 @@ def test_count_eye_keypoint_eligible_requires_mask_and_prediction(tmp_path):
     assert db.count_eye_keypoint_eligible() == 1
 
 
+def test_count_eye_keypoint_stale_zero_when_all_current(tmp_path):
+    """No stale photos when every eligible row's eye_kp_fingerprint
+    matches the current EYE_KP_FINGERPRINT_VERSION."""
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
+    db, folder_id = _make_db(tmp_path)
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png', "
+        "eye_tenengrad=12.0, eye_kp_fingerprint=? WHERE id=?",
+        (EYE_KP_FINGERPRINT_VERSION, pid),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
+        (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
+    )
+    db.conn.commit()
+    assert db.count_eye_keypoint_stale() == 0
+
+
+def test_count_eye_keypoint_stale_counts_old_fingerprint(tmp_path):
+    """A photo with eye_tenengrad set under an old fingerprint counts
+    as stale; the planner will use this to flip Outdated."""
+    from labels_fingerprint import TOL_SENTINEL
+    db, folder_id = _make_db(tmp_path)
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png', "
+        "eye_tenengrad=12.0, eye_kp_fingerprint='superanimal-old' WHERE id=?",
+        (pid,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
+        (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
+    )
+    db.conn.commit()
+    assert db.count_eye_keypoint_stale() == 1
+
+
+def test_count_eye_keypoint_stale_ignores_never_processed(tmp_path):
+    """Photos with eye_tenengrad IS NULL are 'never processed', not stale.
+    Stale specifically means 'previously processed under different
+    settings that no longer match'."""
+    from labels_fingerprint import TOL_SENTINEL
+    db, folder_id = _make_db(tmp_path)
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
+        (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
+    )
+    db.conn.commit()
+    assert db.count_eye_keypoint_stale() == 0
+
+
 # -------- compute_plan: classify --------
 
 def _params(**kwargs):
@@ -641,6 +701,67 @@ def test_eye_keypoints_plan_will_run_when_some_pending(tmp_path, monkeypatch):
     assert eye["state"] == "will-run"
     assert eye["detail"]["pending"] == 1
     assert eye["detail"]["eligible"] == 2
+
+
+def test_eye_keypoints_plan_emits_fingerprint_outdated_when_stale(
+    tmp_path, monkeypatch,
+):
+    """The planner must surface fingerprint_outdated + a stale count when
+    any eligible photo has a non-current eye_kp_fingerprint. PR #748's
+    pill formatter renders this as 'Outdated (N to redo)' + amber bar."""
+    import pipeline as pipeline_mod
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png', "
+        "eye_tenengrad=12.0, eye_kp_fingerprint='superanimal-old' WHERE id=?",
+        (pid,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
+        (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
+    )
+    db.conn.commit()
+    plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
+    detail = plan["stages"]["EyeKeypoints"]["detail"]
+    assert detail["stale"] == 1
+    assert detail["fingerprint_outdated"] is True
+
+
+def test_eye_keypoints_plan_no_outdated_flag_when_all_current(
+    tmp_path, monkeypatch,
+):
+    """No stale photos → flag absent (or False), pill stays 'Already done'."""
+    import pipeline as pipeline_mod
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png', "
+        "eye_tenengrad=12.0, eye_kp_fingerprint=? WHERE id=?",
+        (EYE_KP_FINGERPRINT_VERSION, pid),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
+        (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
+    )
+    db.conn.commit()
+    plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
+    detail = plan["stages"]["EyeKeypoints"]["detail"]
+    assert detail["stale"] == 0
+    assert not detail.get("fingerprint_outdated")
 
 
 # -------- compute_plan: regroup --------

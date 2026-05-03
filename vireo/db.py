@@ -2883,6 +2883,42 @@ class Database:
         ).fetchone()
         return row["n"] or 0
 
+    def count_eye_keypoint_stale(self, photo_ids=None):
+        """Count photos in scope whose eye_tenengrad is set under a
+        non-current eye_kp_fingerprint. Mirrors
+        ``count_eye_keypoint_eligible``'s join shape (workspace + mask +
+        detection + prediction) and adds the staleness predicate.
+
+        A NULL fingerprint on a row with eye_tenengrad set is treated as
+        stale — only the migration backfill should produce that state,
+        and even there the user is expected to re-run after a model
+        change to restamp.
+        """
+        import config as cfg
+        from pipeline import EYE_KP_FINGERPRINT_VERSION
+        ws = self._ws_id()
+        min_conf = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2,
+        )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT p.id) AS n
+                FROM photos p
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN detections d
+                  ON d.photo_id = p.id
+                 AND d.detector_model != 'full-image'
+                 AND d.detector_confidence >= ?
+                JOIN predictions pr ON pr.detection_id = d.id
+                WHERE p.mask_path IS NOT NULL
+                  AND p.eye_tenengrad IS NOT NULL
+                  AND (p.eye_kp_fingerprint IS NULL
+                       OR p.eye_kp_fingerprint != ?){scope_sql}""",
+            (ws, min_conf, EYE_KP_FINGERPRINT_VERSION, *scope_params),
+        ).fetchone()
+        return row["n"] or 0
+
     def get_dashboard_stats(self):
         """Return aggregate statistics for the dashboard."""
         ws = self._ws_id()
