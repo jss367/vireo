@@ -305,7 +305,7 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg):
     }
 
 
-def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, pipeline_cfg):
+def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg):
     if params.skip_regroup:
         return {
             "state": "will-skip",
@@ -328,7 +328,7 @@ def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, pipeline_cfg):
         # encounter/burst params have changed since the cache was written, so
         # the cache is stale even though it's there.
         from pipeline import compute_group_fingerprint
-        current_fp = compute_group_fingerprint(pipeline_cfg)
+        current_fp = compute_group_fingerprint(effective_cfg)
         row = db.conn.execute(
             "SELECT last_group_fingerprint FROM workspaces WHERE id = ?",
             (ws_id,),
@@ -390,7 +390,7 @@ def compute_plan(db, params, db_path):
     upstream_will_run = any(
         s["state"] == "will-run" for s in (classify, extract, eye)
     )
-    regroup = _regroup_plan(db, params, db_path, ws_id, upstream_will_run, pipeline_cfg)
+    regroup = _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg)
 
     return {
         "stages": {

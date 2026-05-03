@@ -1472,32 +1472,29 @@ def test_compute_group_fingerprint_changes_with_encounter_defaults():
         encounters.DEFAULTS.update(original)
 
 
-def test_compute_group_fingerprint_picks_up_encounter_override():
-    """A workspace override that lands in encounters.DEFAULTS' keyspace
-    changes the fingerprint. Mirrors how `cfg = {**DEFAULTS, **(config or {})}`
-    in encounters.py picks up overrides from the dict passed to
-    run_full_pipeline."""
+def test_compute_group_fingerprint_changes_with_pipeline_override():
+    """A workspace pipeline override of an encounter/burst param must change
+    the fingerprint — otherwise the pipeline page can't tell that grouping
+    settings have moved and would falsely claim "fresh" after a settings edit."""
     from pipeline import compute_group_fingerprint
-    fp_default = compute_group_fingerprint({})
-    fp_overridden = compute_group_fingerprint({"w_time": 0.99})
-    assert fp_overridden != fp_default
-    fp_overridden_again = compute_group_fingerprint({"w_time": 0.99})
-    assert fp_overridden == fp_overridden_again
+    base = compute_group_fingerprint({})
+    encounters_override = compute_group_fingerprint(
+        {"pipeline": {"w_time": 0.99}},
+    )
+    assert encounters_override != base
+    bursts_override = compute_group_fingerprint(
+        {"pipeline": {"burst_time_gap": 7.5}},
+    )
+    assert bursts_override != base
 
 
-def test_compute_group_fingerprint_picks_up_burst_override():
-    """An override of a key in bursts.DEFAULTS changes the fingerprint."""
+def test_compute_group_fingerprint_ignores_unrelated_pipeline_keys():
+    """Pipeline settings that don't drive grouping (e.g. detector / classifier
+    knobs) must not bump the group fingerprint, otherwise unrelated config
+    edits would mark Group as Outdated."""
     from pipeline import compute_group_fingerprint
-    fp_default = compute_group_fingerprint({})
-    fp_overridden = compute_group_fingerprint({"burst_time_gap": 99.0})
-    assert fp_overridden != fp_default
-
-
-def test_compute_group_fingerprint_ignores_irrelevant_keys():
-    """Keys that don't appear in encounter/burst DEFAULTS don't affect
-    the fingerprint — sam2_variant changes shouldn't claim grouping is
-    outdated."""
-    from pipeline import compute_group_fingerprint
-    fp_a = compute_group_fingerprint({"sam2_variant": "small"})
-    fp_b = compute_group_fingerprint({"sam2_variant": "large", "totally_unrelated": True})
-    assert fp_a == fp_b
+    base = compute_group_fingerprint({})
+    unrelated = compute_group_fingerprint(
+        {"pipeline": {"classifier_model": "x", "detector_confidence": 0.9}},
+    )
+    assert unrelated == base

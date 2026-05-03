@@ -729,30 +729,36 @@ EYE_KP_FINGERPRINT_VERSION = "v1"
 
 
 def compute_group_fingerprint(config):
-    """Stable hash of the params that actually drive encounter + burst grouping.
+    """Stable hash of the effective params that drive encounter + burst
+    grouping in the active workspace.
 
-    encounters.py and bursts.py both compute ``cfg = {**DEFAULTS, **(config or {})}``
-    at runtime, so any override in ``config`` whose key matches a DEFAULTS key
-    changes the grouping result. The fingerprint mirrors that merge: for each
-    key in encounters.DEFAULTS / bursts.DEFAULTS, take the override if present
-    else the default. Keys that don't appear in either DEFAULTS dict (e.g.
-    ``sam2_variant``) are ignored — they don't affect grouping, so they
-    shouldn't flip the workspace to "Outdated".
+    Workspaces store the fingerprint observed at the last completed
+    grouping run; the pipeline page treats != current as "Outdated".
 
-    Workspaces store the fingerprint observed at the last completed grouping
-    run; the pipeline page treats != current as "Outdated".
+    Mirrors the merge that ``segment_encounters`` and
+    ``segment_bursts_for_encounters`` do at runtime: pipeline-level
+    overrides under ``config["pipeline"]`` shadow ``encounters.DEFAULTS``
+    and ``bursts.DEFAULTS`` for any matching key. Only keys present in
+    those DEFAULTS dicts contribute to the hash, so unrelated pipeline
+    settings (detector confidence, classifier model, etc.) don't bump
+    the fingerprint.
     """
     import hashlib
     import json
 
     import bursts
     import encounters
-    config = config or {}
+
+    pipeline_overrides = (config or {}).get("pipeline") or {}
+
+    def _effective(defaults):
+        return {k: pipeline_overrides.get(k, v) for k, v in defaults.items()}
+
     payload = {
-        "encounters": {k: config.get(k, v) for k, v in encounters.DEFAULTS.items()},
-        "bursts": {k: config.get(k, v) for k, v in bursts.DEFAULTS.items()},
+        "encounters": _effective(encounters.DEFAULTS),
+        "bursts": _effective(bursts.DEFAULTS),
     }
-    blob = json.dumps(payload, sort_keys=True).encode("utf-8")
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha1(blob).hexdigest()[:16]
 
 
