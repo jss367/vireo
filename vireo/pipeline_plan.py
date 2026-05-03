@@ -120,6 +120,7 @@ def _classify_plan(db, params, photo_ids):
         return {
             "state": "will-skip",
             "summary": "Disabled — stage will be skipped",
+            "detail": {"pending": 0, "eligible": 0},
         }
 
     models = _resolve_models(params.model_ids)
@@ -127,6 +128,7 @@ def _classify_plan(db, params, photo_ids):
         return {
             "state": "will-skip",
             "summary": "No models selected — stage will be skipped",
+            "detail": {"pending": 0, "eligible": 0},
         }
 
     label_resolution = _resolve_labels_for_models(models, params.labels_files, db)
@@ -134,6 +136,11 @@ def _classify_plan(db, params, photo_ids):
     det_counts = db.count_real_detections_in_scope(photo_ids)
     total_dets = det_counts["total_dets"]
     photos_with_dets = det_counts["photos_with_dets"]
+
+    unblocked_count = sum(
+        1 for m in models if not label_resolution[m["id"]].get("blocked")
+    )
+    eligible = total_dets * unblocked_count
 
     if total_dets == 0:
         return {
@@ -146,6 +153,8 @@ def _classify_plan(db, params, photo_ids):
                 "total_dets": 0,
                 "photos_with_dets": 0,
                 "models": [m["name"] for m in models],
+                "pending": 0,
+                "eligible": 0,
             },
         }
 
@@ -177,7 +186,11 @@ def _classify_plan(db, params, photo_ids):
                 f"Blocked — {len(blocked)} model{_plural(len(blocked))} "
                 f"need labels: {', '.join(blocked)}"
             ),
-            "detail": {"blocked_models": blocked},
+            "detail": {
+                "blocked_models": blocked,
+                "pending": 0,
+                "eligible": eligible,
+            },
         }
 
     if pending_total == 0:
@@ -192,6 +205,8 @@ def _classify_plan(db, params, photo_ids):
                 "total_dets": total_dets,
                 "photos_with_dets": photos_with_dets,
                 "models": [m["name"] for m in models],
+                "pending": 0,
+                "eligible": eligible,
             },
         }
 
@@ -215,6 +230,8 @@ def _classify_plan(db, params, photo_ids):
         "per_model": pending_per_model,
         "total_dets": total_dets,
         "photos_with_dets": photos_with_dets,
+        "pending": pending_total,
+        "eligible": eligible,
     }
     if blocked:
         detail["blocked_models"] = blocked
