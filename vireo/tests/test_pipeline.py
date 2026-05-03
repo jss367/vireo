@@ -360,6 +360,55 @@ def test_compute_review_readiness_full_features(tmp_path):
     assert out["enhancing_missing"] == []
 
 
+def test_compute_review_readiness_at_mask_threshold_boundary(tmp_path):
+    """Mask coverage exactly at the 25% threshold → state='computable'.
+
+    Pins the contract that the comparison is strict ``<`` (not ``<=``):
+    with 4 photos and 1 having a mask, coverage is 1/4 = 25%, which is
+    *at* threshold and must classify as computable. Drop one mask (0/4)
+    and the same workspace must classify as insufficient. If the
+    comparison flips to ``<=``, the boundary case becomes insufficient
+    and the first assertion below fails.
+    """
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    base_time = datetime(2026, 3, 20, 10, 0, 0)
+    pids = []
+    for i in range(4):
+        ts = base_time + timedelta(seconds=i * 2)
+        pid = db.add_photo(
+            fid, f"photo{i}.jpg", ".jpg", 1000, 1.0,
+            timestamp=ts.isoformat(), width=4000, height=3000,
+        )
+        pids.append(pid)
+
+    # Exactly one mask out of four → 25% coverage, at the threshold.
+    db.update_photo_pipeline_features(pids[0], mask_path=f"/masks/{pids[0]}.png")
+
+    out = compute_review_readiness(db)
+    assert out["state"] == "computable"
+    assert out["total_photos"] == 4
+    assert out["with_masks"] == 1
+    assert "masks" not in out["missing_required"]
+    # Fix 1 contract: when masks-partial would be redundant with a
+    # required-masks block we suppress it, but here masks is NOT required
+    # (we're at threshold) so the partial signal is informative and present.
+    assert "masks_partial" in out["enhancing_missing"]
+
+    # Asymmetric companion: drop the only mask → 0/4, below threshold.
+    db.update_photo_pipeline_features(pids[0], mask_path=None)
+    out_below = compute_review_readiness(db)
+    assert out_below["state"] == "insufficient"
+    assert out_below["with_masks"] == 0
+    assert "masks" in out_below["missing_required"]
+    # Fix 1 contract: when masks is in missing_required we must NOT
+    # also surface the redundant masks_partial enhancing signal.
+    assert "masks_partial" not in out_below["enhancing_missing"]
+
+
 def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
     """save_results must preserve an existing miss_computed_at marker
     when the caller's results dict doesn't carry one. reflow and

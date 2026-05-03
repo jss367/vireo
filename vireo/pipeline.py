@@ -722,7 +722,7 @@ def compute_review_readiness(db, mask_threshold=0.25):
         out["state"] = "computable"
 
     # Enhancing: per-stage gaps that would improve quality if filled
-    if cov["mask"] < total:
+    if cov["mask"] < total and "masks" not in out["missing_required"]:
         out["enhancing_missing"].append("masks_partial")
     if cov["dino_embedding"] < total:
         out["enhancing_missing"].append("embeddings")
