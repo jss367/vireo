@@ -18,6 +18,7 @@ import threading
 import time
 from dataclasses import dataclass
 
+import numpy as np
 from db import Database, commit_with_retry
 
 log = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ class PipelineParams:
     skip_extract_masks: bool = False
     skip_regroup: bool = False
     skip_classify: bool = False
+    skip_eye_keypoints: bool = False
     download_taxonomy: bool = True
     preview_max_size: int = 1920
     exclude_paths: set | None = None
@@ -210,6 +212,17 @@ def _weighted_progress(stages):
     return int(math.floor(done)), total
 
 
+# Serializes snapshot-and-push of `stages` across the pipeline's daemon
+# threads (scanner, thumbnail, model_loader, ...). All of them emit
+# progress events whose payload includes a shallow copy of the shared
+# `stages` dict; without this lock a thread can build the snapshot, get
+# preempted, and land its stale event after another thread has already
+# pushed events with newer counts — producing a non-monotonic SSE stream
+# (the CI flake on test_pipeline_multi_source_ingest_progress_is_monotonic).
+# Lock order: _progress_lock outside, JobRunner._lock inside.
+_progress_lock = threading.Lock()
+
+
 def _progress_event(stages, stage_id, phase, **extra):
     """Build a push_event 'progress' payload with weighted overall current/total.
 
@@ -228,15 +241,35 @@ def _progress_event(stages, stage_id, phase, **extra):
     return data
 
 
+def _emit_progress(runner, job_id, stages, stage_id, phase, **extra):
+    """Atomically snapshot `stages` and push a progress event.
+
+    Replaces the unguarded ``runner.push_event(..., _progress_event(...))``
+    pattern at every per-stage callback. Holding ``_progress_lock`` across
+    the snapshot construction and the push_event call prevents a stale
+    snapshot from another thread from landing out of order in the event
+    log."""
+    with _progress_lock:
+        runner.push_event(
+            job_id, "progress",
+            _progress_event(stages, stage_id, phase, **extra),
+        )
+
+
 def _update_stages(runner, job_id, stages):
-    """Push a stages progress update with weighted overall current/total."""
-    current, total = _weighted_progress(stages)
-    runner.push_event(job_id, "progress", {
-        "phase": _current_phase(stages),
-        "current": current,
-        "total": total,
-        "stages": {k: dict(v) for k, v in stages.items()},
-    })
+    """Push a stages progress update with weighted overall current/total.
+
+    Snapshot+push are atomic under ``_progress_lock`` so concurrent emits
+    from other pipeline threads can't produce stale events that land out
+    of order."""
+    with _progress_lock:
+        current, total = _weighted_progress(stages)
+        runner.push_event(job_id, "progress", {
+            "phase": _current_phase(stages),
+            "current": current,
+            "total": total,
+            "stages": {k: dict(v) for k, v in stages.items()},
+        })
 
 
 def _current_phase(stages):
@@ -529,9 +562,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
             def status_cb(message):
                 runner.update_step(job["id"], "scan", current_file=message)
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "scan", message,
-                ))
+                _emit_progress(
+                    runner, job["id"], stages, "scan", message,
+                )
 
             # Accumulator so multi-folder scans (repair loop, scan-in-place
             # with sources=[...]) don't rewind the overall progress at each
@@ -553,11 +586,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 eta = round(remaining / rate_per_sec) if rate_per_sec > 0 and cum_current >= 10 else None
                 runner.update_step(job["id"], "scan",
                                    progress={"current": cum_current, "total": cum_total})
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "scan", "Scanning photos",
+                _emit_progress(
+                    runner, job["id"], stages, "scan", "Scanning photos",
                     rate=rate,
                     eta_seconds=eta,
-                ))
+                )
 
             def advance_scan_acc():
                 scan_acc["prior"] += scan_acc["last_total"]
@@ -685,10 +718,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     runner.update_step(job["id"], "ingest",
                                        current_file=filename,
                                        progress={"current": cum_current, "total": cum_total})
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "ingest", "Importing photos",
+                    _emit_progress(
+                        runner, job["id"], stages, "ingest", "Importing photos",
                         current_file=filename,
-                    ))
+                    )
 
                 def advance_ingest_acc():
                     ingest_acc["prior"] += ingest_acc["last_total"]
@@ -1021,11 +1054,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                    progress={"current": processed, "total": scan_total})
                 elapsed = time.time() - job["_start_time"]
                 rate = round(processed / max(elapsed, 0.01) * 60, 1)
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "thumbnails", "Generating thumbnails",
+                _emit_progress(
+                    runner, job["id"], stages, "thumbnails", "Generating thumbnails",
                     current_file=os.path.basename(photo_path),
                     rate=rate,
-                ))
+                )
 
             # Collection mode: the scanner is skipped so the queue above was
             # empty. Iterate the collection's photos directly — mirrors the
@@ -1072,11 +1105,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     )
                     elapsed = time.time() - job["_start_time"]
                     rate = round(processed / max(elapsed, 0.01) * 60, 1)
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "thumbnails", "Generating thumbnails",
+                    _emit_progress(
+                        runner, job["id"], stages, "thumbnails", "Generating thumbnails",
                         current_file=os.path.basename(photo_path),
                         rate=rate,
-                    ))
+                    )
 
             # Flush any thumb_path updates from the final partial batch.
             _flush_thumb_paths()
@@ -1189,13 +1222,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 runner.update_step(job["id"], "previews",
                                    current_file=photo["filename"],
                                    progress={"current": i + 1, "total": total})
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "previews", "Generating previews",
+                _emit_progress(
+                    runner, job["id"], stages, "previews", "Generating previews",
                     current_file=photo["filename"],
                     rate=round(
                         (i + 1) / max(time.time() - job["_start_time"], 0.01) * 60, 1
                     ),
-                ))
+                )
 
             # One eviction pass after the stage so preview_cache_max_mb is
             # enforced even when the pipeline is the only producer (e.g.
@@ -1435,15 +1468,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             if params.download_taxonomy and not os.path.exists(taxonomy_path):
                 try:
                     from taxonomy import download_taxonomy
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "model_loader", "Downloading taxonomy...",
-                    ))
+                    _emit_progress(
+                        runner, job["id"], stages, "model_loader", "Downloading taxonomy...",
+                    )
                     # Always write new downloads to the persistent path.
                     taxonomy_path = TAXONOMY_JSON_PATH
                     download_taxonomy(taxonomy_path, progress_callback=lambda msg:
-                        runner.push_event(job["id"], "progress", _progress_event(
-                            stages, "model_loader", msg,
-                        ))
+                        _emit_progress(
+                            runner, job["id"], stages, "model_loader", msg,
+                        )
                     )
                 except Exception as e:
                     log.warning("Taxonomy download failed, continuing without: %s", e)
@@ -1459,9 +1492,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             # Load the first classifier so classify_stage can start as soon
             # as scan completes; any remaining specs are loaded inside
             # classify_stage so we never hold more than one model in memory.
-            runner.push_event(job["id"], "progress", _progress_event(
-                stages, "model_loader", f"Loading {first_name}...",
-            ))
+            _emit_progress(
+                runner, job["id"], stages, "model_loader", f"Loading {first_name}...",
+            )
 
             try:
                 bundle = _load_model_bundle(resolved_specs[0], tax, thread_db)
@@ -1598,9 +1631,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # Weight download is a sub-phase of detect; don't treat
                     # its bytes as detect's stage-level counter or the bar
                     # jumps ahead before any photo has been detected.
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "detect", phase,
-                    ))
+                    _emit_progress(
+                        runner, job["id"], stages, "detect", phase,
+                    )
 
                 ensure_megadetector_weights(progress_callback=_dl_progress)
 
@@ -1617,13 +1650,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                 stages["detect"]["count"] = batch_idx
                 stages["detect"]["total"] = total
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "detect", "Detecting subjects",
+                _emit_progress(
+                    runner, job["id"], stages, "detect", "Detecting subjects",
                     rate=round(
                         batch_idx / max(time.time() - start_time, 0.01) * 60,
                         1,
                     ),
-                ))
+                )
                 runner.update_step(
                     job["id"], "detect",
                     progress={"current": batch_idx, "total": total},
@@ -1814,10 +1847,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # restate it so the "Loading next model..." event always
                     # carries the multi-spec total.
                     stages["classify"]["total"] = total * len(resolved_specs_local)
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "classify", f"Loading {active_spec['name']}...",
+                    _emit_progress(
+                        runner, job["id"], stages, "classify", f"Loading {active_spec['name']}...",
                         step_id=step_id,
-                    ))
+                    )
                     # Drop the prior model's per-photo payload BEFORE loading
                     # the next bundle so we don't hold old results + new model
                     # weights concurrently. Without this, multi-model runs on
@@ -1903,11 +1936,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # real "to classify" count on the first event the user
                 # sees, not 0.
                 stages["classify"]["total"] = total * len(resolved_specs_local)
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "classify",
+                _emit_progress(
+                    runner, job["id"], stages, "classify",
                     f"Classifying with {active_spec['name']}",
                     step_id=step_id,
-                ))
+                )
                 raw_results: list = []
                 failed = 0
                 skipped_existing = 0
@@ -2024,7 +2057,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                             photo["id"], model_name,
                                         )
                                         if emb_blob:
-                                            import numpy as np
                                             embedding = np.frombuffer(
                                                 emb_blob, dtype=np.float32,
                                             )
@@ -2097,8 +2129,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # contained cache hits.
                     stages["classify"]["total"] = total * len(resolved_specs_local)
                     elapsed = max(time.time() - start_time, 0.01)
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "classify",
+                    _emit_progress(
+                        runner, job["id"], stages, "classify",
                         f"Classifying with {active_spec['name']}"
                         + (
                             f" ({spec_idx + 1}/{len(resolved_specs_local)})"
@@ -2106,7 +2138,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         ),
                         step_id=step_id,
                         rate=round(processed_in_spec / elapsed * 60, 1),
-                    ))
+                    )
                     runner.update_step(
                         job["id"], step_id,
                         progress={
@@ -2120,12 +2152,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # asked us to stop. Per-photo counters are accurate, no
                 # corrective fixup needed.
                 if _should_abort(abort):
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "classify",
+                    _emit_progress(
+                        runner, job["id"], stages, "classify",
                         f"Cancelled — {processed_in_spec} of "
                         f"{total} processed",
                         step_id=step_id,
-                    ))
+                    )
                     runner.update_step(
                         job["id"], step_id,
                         status="completed",
@@ -2301,7 +2333,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         try:
             import config as cfg
-            from dino_embed import embed_global, embed_subject, embedding_to_blob
+            from dino_embed import embed, embed_batch, embedding_to_blob
             from masking import (
                 crop_completeness,
                 crop_subject,
@@ -2335,29 +2367,81 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             # not real subject boxes and should not drive mask extraction or
             # count toward the photos_with_detections safeguard below (which
             # surfaces the "weights missing / no detections" diagnostic).
+            # Note: we intentionally do NOT short-circuit when the photo
+            # already has *some* mask in the photos table — that legacy
+            # check ignored which SAM variant produced the mask, so a
+            # config change to a different variant would never re-run.
+            # The per-photo cache check happens inside the loop below
+            # against photo_masks(photo_id, sam2_variant).
+            #
+            # Track sub-threshold-only photos separately so the silent-
+            # completion guard can distinguish "no detection rows at all"
+            # from "rows exist but every confidence is below
+            # detector_confidence" — the user's remediation differs
+            # (download weights vs lower the threshold).
+            detector_confidence = effective_cfg.get("detector_confidence", 0.2)
             photo_det_map = {}
             photos_with_detections = 0
+            photos_subthreshold_only = 0
             for p in photos:
+                # Pass the captured detector_confidence explicitly so the
+                # floor matches effective_cfg (and the standalone
+                # /api/jobs/extract-masks path), not whatever cfg.load()
+                # would re-read from disk inside get_detections. With the
+                # legacy `mask_path IS NULL` prefilter gone, sub-threshold-
+                # only photos would otherwise enter SAM extraction on
+                # variant cache misses.
                 dets = [
-                    d for d in thread_db.get_detections(p["id"])
+                    d for d in thread_db.get_detections(
+                        p["id"], min_conf=detector_confidence,
+                    )
                     if d["detector_model"] != "full-image"
                 ]
                 if dets:
                     photos_with_detections += 1
                     primary = dets[0]  # already ordered by confidence DESC
-                    has_mask = thread_db.conn.execute(
-                        "SELECT mask_path FROM photos WHERE id=?", (p["id"],)
-                    ).fetchone()[0]
-                    if not has_mask:
-                        photo_det_map[p["id"]] = {
-                            "photo": p,
-                            "det_box": {
-                                "x": primary["box_x"],
-                                "y": primary["box_y"],
-                                "w": primary["box_w"],
-                                "h": primary["box_h"],
-                            },
-                        }
+                    photo_det_map[p["id"]] = {
+                        "photo": p,
+                        "det_box": {
+                            "x": primary["box_x"],
+                            "y": primary["box_y"],
+                            "w": primary["box_w"],
+                            "h": primary["box_h"],
+                        },
+                        "detector_model": primary["detector_model"],
+                        # Stored prompt provenance: full-precision bbox
+                        # tuple. detections.box_* are normalized REAL
+                        # values in [0, 1], so int()-truncating would
+                        # collapse every prompt to (0, 0, 0, 0) and the
+                        # cache/staleness check would never invalidate
+                        # on bbox change. SQLite's column type affinity
+                        # accepts REAL into the INTEGER-declared
+                        # columns and stores them verbatim.
+                        "prompt": (
+                            primary["box_x"],
+                            primary["box_y"],
+                            primary["box_w"],
+                            primary["box_h"],
+                        ),
+                    }
+                else:
+                    # No qualifying detection — but check whether sub-
+                    # threshold rows exist so the silent-completion guard
+                    # can distinguish "weights never ran" from "threshold
+                    # too high". This counter only matters for photos
+                    # that haven't been masked yet (an already-masked
+                    # photo isn't in the "what got skipped silently"
+                    # diagnostic regardless of threshold).
+                    raw_dets = [
+                        d for d in thread_db.get_detections(p["id"], min_conf=0)
+                        if d["detector_model"] != "full-image"
+                    ]
+                    if raw_dets:
+                        has_mask = thread_db.conn.execute(
+                            "SELECT mask_path FROM photos WHERE id=?", (p["id"],)
+                        ).fetchone()[0]
+                        if not has_mask:
+                            photos_subthreshold_only += 1
 
             photos_to_process = [
                 photo_det_map[pid] for pid in photo_det_map
@@ -2391,7 +2475,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 except ImportError:
                     weights_present = False
 
-                if weights_present:
+                if photos_subthreshold_only > 0:
+                    reason = (
+                        f"{photos_subthreshold_only} photo(s) have detections but every "
+                        f"detection is below the current detector_confidence threshold "
+                        f"({detector_confidence}). The pipeline will reject these photos "
+                        "with `no_subject_mask`. Lower `detector_confidence` in workspace "
+                        "settings to extract masks for them."
+                    )
+                    summary = (
+                        f"Skipped — {photos_subthreshold_only} photo(s) below "
+                        f"detector_confidence threshold ({detector_confidence})"
+                    )
+                elif weights_present:
                     reason = (
                         f"No detections produced for {len(photos)} photo(s). MegaDetector ran but "
                         "found no animals meeting the confidence threshold. The pipeline will "
@@ -2418,9 +2514,51 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     job["id"], "extract_masks", status="completed",
                     summary=summary,
                 )
+                if photos_subthreshold_only > 0:
+                    em_reason = "all_subthreshold"
+                elif weights_present:
+                    em_reason = "no_detections"
+                else:
+                    em_reason = "weights_missing"
                 result["stages"]["extract_masks"] = {
                     "masked": 0, "skipped": 0, "failed": 0, "total": 0,
-                    "reason": "weights_missing" if not weights_present else "no_detections",
+                    "subthreshold": photos_subthreshold_only,
+                    "reason": em_reason,
+                }
+                _update_stages(runner, job["id"], stages)
+                return
+
+            # Mixed-state guard: photos_with_detections > 0 (some photos have
+            # qualifying detections — already masked from a prior run) but
+            # there are also unmasked photos whose only detections are below
+            # the threshold. Without this branch the stage completes silently
+            # with "0 masked, 0 skipped" and the user has no way to discover
+            # why the unmasked photos were never processed. Production hit
+            # this when 4166 of 5054 photos were already masked and the
+            # remaining 727 had only sub-threshold detections.
+            if total == 0 and photos_subthreshold_only > 0 and classify_ran:
+                reason = (
+                    f"{photos_subthreshold_only} photo(s) have detections but every "
+                    f"detection is below the current detector_confidence threshold "
+                    f"({detector_confidence}). The pipeline will reject these photos "
+                    "with `no_subject_mask`. Lower `detector_confidence` in workspace "
+                    "settings to extract masks for them."
+                )
+                summary = (
+                    f"Skipped — {photos_subthreshold_only} photo(s) below "
+                    f"detector_confidence threshold ({detector_confidence})"
+                )
+                log.warning("Pipeline extract-masks: %s", reason)
+                errors.append(f"[extract_masks] {reason}")
+                stages["extract_masks"]["status"] = "skipped"
+                runner.update_step(
+                    job["id"], "extract_masks", status="completed",
+                    summary=summary,
+                )
+                result["stages"]["extract_masks"] = {
+                    "masked": 0, "skipped": 0, "failed": 0, "total": 0,
+                    "subthreshold": photos_subthreshold_only,
+                    "reason": "all_subthreshold",
                 }
                 _update_stages(runner, job["id"], stages)
                 return
@@ -2428,26 +2566,37 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             # Auto-download SAM2 + DINOv2 weights on first pipeline run.
             # Mirrors the MegaDetector auto-download pattern (commit 90cd0f9):
             # without this, first-time users hit 1 FileNotFoundError per
-            # photo (e.g. 124 identical tracebacks) instead of either
-            # getting the weights automatically or seeing one actionable
-            # message.  Only fire when there is actually work to do — a
-            # no-op rerun over 0 photos should not trigger a multi-hundred
-            # MB download.
-            if total > 0:
-                from dino_embed import ensure_dinov2_weights
-                from masking import ensure_sam2_weights
+            # photo instead of either getting the weights automatically
+            # or seeing one actionable message.
+            #
+            # The download is deferred until the loop hits the first true
+            # cache miss. With per-variant photo_masks, the worklist now
+            # includes every photo with a detection (cache hits are
+            # filtered inside the loop, not by a `mask_path IS NULL`
+            # prefilter), so gating on ``total > 0`` would force a
+            # multi-hundred-MB download even on a fully-cached rerun in
+            # an offline / fresh-checkout environment. ``_ensure_weights``
+            # is idempotent and a no-op on second invocation.
+            from dino_embed import ensure_dinov2_weights
+            from masking import ensure_sam2_weights
 
-                def _dl_progress(phase, current, total_steps):
-                    runner.push_event(job["id"], "progress", _progress_event(
-                        stages, "extract_masks", phase,
-                    ))
+            def _dl_progress(phase, current, total_steps):
+                _emit_progress(
+                    runner, job["id"], stages, "extract_masks", phase,
+                )
 
+            _weights_ensured = [False]
+
+            def _ensure_weights():
+                if _weights_ensured[0]:
+                    return
                 ensure_sam2_weights(
                     variant=sam2_variant, progress_callback=_dl_progress,
                 )
                 ensure_dinov2_weights(
                     variant=dinov2_variant, progress_callback=_dl_progress,
                 )
+                _weights_ensured[0] = True
 
             processed = 0
             for i, entry in enumerate(photos_to_process):
@@ -2461,6 +2610,37 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 image_path = os.path.join(folder_path, photo["filename"])
 
                 try:
+                    # Cache hit: a row already exists for (photo, variant)
+                    # AND its stored prompt + detector still match the
+                    # current primary detection AND the file is on disk.
+                    # In that case the SAM result is unchanged, so we
+                    # only re-activate the mask (cheap denormalize) and
+                    # skip the heavy SAM + DINOv2 work.
+                    existing = thread_db.get_photo_mask(
+                        photo_id, sam2_variant,
+                    )
+                    if existing is not None:
+                        cached_prompt = (
+                            existing["prompt_x"], existing["prompt_y"],
+                            existing["prompt_w"], existing["prompt_h"],
+                        )
+                        if (existing["detector_model"]
+                                == entry["detector_model"]
+                                and cached_prompt == entry["prompt"]
+                                and existing["path"]
+                                and os.path.isfile(existing["path"])):
+                            thread_db.set_active_mask_variant(
+                                photo_id, sam2_variant,
+                            )
+                            masked += 1
+                            processed = i + 1
+                            continue
+
+                    # First true cache miss: ensure SAM2 + DINOv2 weights
+                    # are present before render_proxy/generate_mask runs.
+                    # No-op on subsequent iterations.
+                    _ensure_weights()
+
                     proxy = render_proxy(image_path, longest_edge=proxy_longest_edge)
                     if proxy is None:
                         skipped += 1
@@ -2477,25 +2657,71 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     if _should_abort(abort):
                         break
 
-                    mask_path = save_mask(mask, masks_dir, photo_id)
+                    mask_path = save_mask(
+                        mask, masks_dir, photo_id, sam2_variant,
+                    )
                     completeness = crop_completeness(mask)
                     features = compute_all_quality_features(proxy, mask)
                     if _should_abort(abort):
                         break
 
-                    subject_crop = crop_subject(proxy, mask, margin=0.15)
-                    subj_emb_blob = None
-                    global_emb_blob = None
-                    if subject_crop is not None:
-                        subj_emb = embed_subject(subject_crop, variant=dinov2_variant)
-                        subj_emb_blob = embedding_to_blob(subj_emb)
-                    global_emb = embed_global(proxy, variant=dinov2_variant)
-                    global_emb_blob = embedding_to_blob(global_emb)
-
-                    thread_db.update_photo_pipeline_features(
-                        photo_id, mask_path=mask_path, crop_complete=completeness,
-                        **features,
+                    # Per-mask features (move from photos row into
+                    # photo_masks; set_active_mask_variant denormalizes
+                    # them back into photos for downstream readers).
+                    mask_subject_tenengrad = features.pop(
+                        "subject_tenengrad", None,
                     )
+                    mask_bg_tenengrad = features.pop("bg_tenengrad", None)
+                    # Mask-derived subject_size: fraction of frame
+                    # covered by the boolean mask. Replaces the
+                    # detection-bbox approximation classify uses.
+                    total_pixels = float(mask.size)
+                    if total_pixels > 0:
+                        mask_subject_size = float(
+                            np.count_nonzero(mask) / total_pixels
+                        )
+                    else:
+                        mask_subject_size = None
+
+                    subject_crop = crop_subject(proxy, mask, margin=0.15)
+                    if subject_crop is not None:
+                        embs = embed_batch(
+                            [subject_crop, proxy], variant=dinov2_variant,
+                        )
+                        subj_emb_blob = embedding_to_blob(embs[0])
+                        global_emb_blob = embedding_to_blob(embs[1])
+                    else:
+                        subj_emb_blob = None
+                        global_emb_blob = embedding_to_blob(
+                            embed(proxy, variant=dinov2_variant),
+                        )
+
+                    thread_db.upsert_photo_mask(
+                        photo_id=photo_id,
+                        variant=sam2_variant,
+                        path=mask_path,
+                        detector_model=entry["detector_model"],
+                        prompt_x=entry["prompt"][0],
+                        prompt_y=entry["prompt"][1],
+                        prompt_w=entry["prompt"][2],
+                        prompt_h=entry["prompt"][3],
+                        subject_size=mask_subject_size,
+                        subject_tenengrad=mask_subject_tenengrad,
+                        bg_tenengrad=mask_bg_tenengrad,
+                        crop_complete=completeness,
+                    )
+                    thread_db.set_active_mask_variant(
+                        photo_id, sam2_variant,
+                    )
+                    # Remaining (non-mask) per-photo features still land
+                    # on the photos row.  mask_path / crop_complete /
+                    # subject_tenengrad / bg_tenengrad now flow via
+                    # set_active_mask_variant above, so they are
+                    # intentionally NOT passed here.
+                    if features:
+                        thread_db.update_photo_pipeline_features(
+                            photo_id, **features,
+                        )
                     thread_db.update_photo_embeddings(
                         photo_id,
                         dino_subject_embedding=subj_emb_blob,
@@ -2513,11 +2739,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 runner.update_step(job["id"], "extract_masks",
                                    progress={"current": processed, "total": total},
                                    error_count=em_failed)
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "extract_masks",
+                _emit_progress(
+                    runner, job["id"], stages, "extract_masks",
                     "Extracting features (SAM2 + DINOv2)",
                     rate=round(processed / max(time.time() - start_time, 0.01) * 60, 1),
-                ))
+                )
 
             if _should_abort(abort):
                 # Distinguish a user cancel from a clean completion: pin a
@@ -2551,12 +2777,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 em_summary_parts = [f"{masked} masked", f"{skipped} skipped"]
                 if em_failed:
                     em_summary_parts.append(f"{em_failed} failed")
+                if photos_subthreshold_only > 0:
+                    em_summary_parts.append(
+                        f"{photos_subthreshold_only} below detector_confidence "
+                        f"({detector_confidence})"
+                    )
                 runner.update_step(job["id"], "extract_masks", status=final_status,
                                    summary=", ".join(em_summary_parts),
                                    error_count=em_failed,
                                    error=em_rollup)
                 result["stages"]["extract_masks"] = {
-                    "masked": masked, "skipped": skipped, "failed": em_failed, "total": total,
+                    "masked": masked, "skipped": skipped, "failed": em_failed,
+                    "total": total, "subthreshold": photos_subthreshold_only,
                 }
         except Exception as e:
             errors.append(f"[extract_masks] Fatal: {e}")
@@ -2574,7 +2806,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         or when no eligible photos remain. Per-photo failures are logged
         and do not abort the stage.
         """
-        if params.skip_extract_masks or abort.is_set() or not collection_id:
+        if (
+            params.skip_eye_keypoints
+            or params.skip_extract_masks
+            or abort.is_set()
+            or not collection_id
+        ):
             stages["eye_keypoints"]["status"] = "skipped"
             runner.update_step(
                 job["id"], "eye_keypoints", status="completed", summary="Skipped",
@@ -2627,9 +2864,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     pid for pid in collection_photo_ids
                     if pid not in params.exclude_photo_ids
                 }
-            total = len(thread_db.list_photos_for_eye_keypoint_stage(
+            photos_for_stage = thread_db.list_photos_for_eye_keypoint_stage(
                 photo_ids=collection_photo_ids,
-            ))
+            )
+            # Defensive second filter: when collection_photo_ids is None
+            # (whole-workspace path) the DB query above returned every
+            # eligible row, so excluded IDs would otherwise still influence
+            # the download planner below and trigger weights for variants no
+            # included photo routes to.
+            if params.exclude_photo_ids:
+                photos_for_stage = [
+                    p for p in photos_for_stage
+                    if p["id"] not in params.exclude_photo_ids
+                ]
+            total = len(photos_for_stage)
             start_time = time.time()
             processed = {"count": 0}
 
@@ -2641,12 +2889,96 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     job["id"], "eye_keypoints",
                     progress={"current": current, "total": total_steps},
                 )
-                runner.push_event(job["id"], "progress", _progress_event(
-                    stages, "eye_keypoints", phase,
+                _emit_progress(
+                    runner, job["id"], stages, "eye_keypoints", phase,
                     rate=round(
                         current / max(time.time() - start_time, 0.01) * 60, 1
                     ),
-                ))
+                )
+
+            # Auto-download SuperAnimal weights on first pipeline run.
+            # Mirrors the SAM2/DINOv2 auto-download pattern in extract_masks
+            # (commit 90cd0f9): without this, every photo silently skips on
+            # a fresh install. Only fetch variants the per-photo router
+            # would actually pick — a collection of out-of-scope classes
+            # (fish/reptiles/invertebrates) shouldn't pay the bandwidth
+            # cost for weights that will never be used.
+            if total > 0:
+                import keypoints as kp
+                from pipeline import _resolve_keypoint_model
+
+                # Mirror Gate 1 in _process_photo_for_eye: rows whose
+                # classifier confidence is below eye_classifier_conf_gate
+                # get skipped at run time, so they shouldn't influence
+                # which variants get downloaded — otherwise an all-low-
+                # confidence collection still pays the bandwidth cost
+                # for weights no photo can reach.
+                conf_gate = pipeline_cfg.get(
+                    "eye_classifier_conf_gate", 0.5,
+                )
+                needed_models = []
+                for row in photos_for_stage:
+                    if (row.get("species_conf") or 0.0) < conf_gate:
+                        continue
+                    model_name = _resolve_keypoint_model(thread_db, row)
+                    if model_name and model_name not in needed_models:
+                        needed_models.append(model_name)
+
+                # Use a separate download-progress callback so a cancel
+                # during/just after weight download doesn't leak the
+                # download counter into `processed['count']` (which would
+                # surface as e.g. "Cancelled (1 of N processed)" before any
+                # photo has actually been touched).
+                def _dl_progress(phase, current, total_steps):
+                    _emit_progress(
+                        runner, job["id"], stages, "eye_keypoints", phase,
+                    )
+
+                # Preserve a stable order (quadruped, bird) for tests and
+                # log readability when both variants are needed. Re-check
+                # abort between models so a cancel that arrives after the
+                # first weights download can short-circuit the second
+                # multi-hundred-MB fetch instead of forcing the user to
+                # wait through it.
+                #
+                # Eye Keypoints is an optional stage: a transient HF /
+                # network failure must degrade to a skipped stage, not a
+                # hard pipeline failure. Without this guard the RuntimeError
+                # raised by ensure_keypoint_weights bubbles to the outer
+                # except, marks the stage 'failed', and tanks the whole
+                # run for a first-run/offline user who never opted into
+                # eye keypoints in the first place.
+                try:
+                    for kp_model in (
+                        "superanimal-quadruped", "superanimal-bird",
+                    ):
+                        if _should_abort(abort):
+                            break
+                        if kp_model in needed_models:
+                            kp.ensure_keypoint_weights(
+                                kp_model, progress_callback=_dl_progress,
+                            )
+                except Exception as dl_err:
+                    log.warning(
+                        "Eye keypoints stage skipped — weight download "
+                        "failed: %s", dl_err,
+                    )
+                    errors.append(f"[eye_keypoints] {dl_err}")
+                    stages["eye_keypoints"]["status"] = "skipped"
+                    runner.update_step(
+                        job["id"], "eye_keypoints",
+                        status="completed",
+                        summary=(
+                            f"Skipped — failed to download keypoint "
+                            f"weights: {dl_err}"
+                        ),
+                    )
+                    result["stages"]["eye_keypoints"] = {
+                        "processed": 0, "total": total,
+                        "skipped": "weight_download_failed",
+                    }
+                    _update_stages(runner, job["id"], stages)
+                    return
 
             detect_eye_keypoints_stage(
                 thread_db, config=pipeline_cfg, progress_callback=_progress,

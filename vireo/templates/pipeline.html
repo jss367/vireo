@@ -152,10 +152,48 @@ body { padding-bottom: 36px; }
   color: var(--text-faint, #5A8890);
   font-style: italic;
 }
+/* Per-stage rows: pill + summary text, one row per stage */
+.pipeline-plan-summary .plan-stage-row {
+  display: grid;
+  grid-template-columns: 140px 110px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  padding: 3px 0;
+}
+.pipeline-plan-summary .plan-stage-row .plan-stage-name {
+  color: var(--text-secondary, #B0CCCC);
+  font-weight: 600;
+}
+.pipeline-plan-summary .plan-stage-row .plan-stage-pill {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  font-weight: 700;
+}
+.pipeline-plan-summary .plan-stage-row.will-run .plan-stage-pill { color: var(--accent, #24E5CA); }
+.pipeline-plan-summary .plan-stage-row.will-skip .plan-stage-pill { color: var(--text-dim, #5A8890); font-style: italic; }
+.pipeline-plan-summary .plan-stage-row.done-prior .plan-stage-pill {
+  color: color-mix(in srgb, var(--accent, #24E5CA) 65%, var(--text-secondary, #B0CCCC));
+}
+.pipeline-plan-summary .plan-stage-row .plan-stage-summary {
+  color: var(--text-dim, #5A8890);
+  font-size: 12px;
+}
+.pipeline-plan-summary .plan-loading {
+  color: var(--text-faint, #5A8890);
+  font-style: italic;
+  font-size: 12px;
+}
 .stage-summary {
   margin-left: auto;
   font-size: 12px;
   color: var(--text-dim, #5A8890);
+  text-align: right;
+  /* Plan summaries can run long ("Will classify 47 new pairs (35 for…")
+     so the span needs to wrap rather than push the chevron off the row.
+     min-width:0 lets the flex item actually shrink. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .stage-chevron {
   color: var(--text-ghost, #2D5058);
@@ -883,7 +921,7 @@ body { padding-bottom: 36px; }
       </div>
       <div class="readiness-panel" id="readinessPanel" style="display:none;"></div>
       <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;" title="Re-process photos that were already classified. Also bypasses the skip for photos already tagged with a subject keyword (taxonomy, individual, or genre) — useful for double-checking existing tags.">
-        <input type="checkbox" id="chkReclassify" style="accent-color:var(--accent);" onchange="refreshPipelineUI()"> Re-classify
+        <input type="checkbox" id="chkReclassify" style="accent-color:var(--accent);" onchange="schedulePlanRefresh()"> Re-classify
       </label>
       <div style="margin-top:8px;">
         <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
@@ -949,6 +987,11 @@ body { padding-bottom: 36px; }
         </div>
       </div>
       <div class="readiness-panel" id="extractReadinessPanel" style="display:none;"></div>
+      <div id="sam2CoveragePanel" style="display:none;margin-top:8px;font-size:12px;line-height:1.6;">
+        <div style="font-weight:600;color:var(--text-secondary);margin-bottom:4px;">SAM2 mask coverage</div>
+        <div id="sam2CoverageRows" style="display:flex;flex-direction:column;gap:2px;"></div>
+        <div id="sam2CoverageError" style="display:none;color:var(--danger);margin-top:4px;font-size:11px;"></div>
+      </div>
       <span class="status-msg" id="statusExtract"></span>
       <div class="progress-wrap" id="progressExtract" style="display:none;">
         <div class="progress-bar-track"><div class="progress-bar-fill" id="fillExtract"></div></div>
@@ -961,6 +1004,8 @@ body { padding-bottom: 36px; }
   <div class="stage-card" id="card-eyekeypoints" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('eyekeypoints')">
       <span class="stage-num" id="numEyeKeypoints">7</span>
+      <input type="checkbox" class="stage-enable" id="enableEyeKeypoints" checked
+             onchange="onStageToggle('eyekeypoints')" onclick="event.stopPropagation()">
       <span class="stage-name">Eye Keypoints (optional)</span>
       <span class="stage-status-pill" id="pillEyeKeypoints"></span>
       <span class="stage-summary" id="summaryEyeKeypoints">
@@ -970,29 +1015,12 @@ body { padding-bottom: 36px; }
     </div>
     <div class="stage-body">
       <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
-        Per-photo eye localization via SuperAnimal keypoint models. When weights
-        are present, the pipeline refines the focus score using the windowed
-        sharpness around the eye instead of the whole subject. Fish, reptiles,
-        and invertebrates are skipped automatically.
+        Per-photo eye localization via SuperAnimal keypoint models. The pipeline
+        refines the focus score using the windowed sharpness around the eye
+        instead of the whole subject. Fish, reptiles, and invertebrates are
+        skipped automatically. SuperAnimal weights are downloaded automatically
+        on first run.
       </p>
-      <div id="eyeKeypointsReadinessPanel" style="font-size:13px;line-height:1.8;">
-        <div data-keypoint-row="superanimal-quadruped">
-          <span class="kp-state-icon"></span>
-          <span>SuperAnimal-Quadruped</span>
-          <span class="kp-state-text" style="color:var(--text-secondary);margin-left:6px;"></span>
-          <button type="button" class="btn btn-small kp-download-btn"
-                  onclick="downloadKeypointModel('superanimal-quadruped')"
-                  style="margin-left:10px;display:none;">Download</button>
-        </div>
-        <div data-keypoint-row="superanimal-bird">
-          <span class="kp-state-icon"></span>
-          <span>SuperAnimal-Bird</span>
-          <span class="kp-state-text" style="color:var(--text-secondary);margin-left:6px;"></span>
-          <button type="button" class="btn btn-small kp-download-btn"
-                  onclick="downloadKeypointModel('superanimal-bird')"
-                  style="margin-left:10px;display:none;">Download</button>
-        </div>
-      </div>
       <span class="status-msg" id="statusEyeKeypoints"></span>
       <div class="progress-wrap" id="progressEyeKeypoints" style="display:none;">
         <div class="progress-bar-track"><div class="progress-bar-fill" id="fillEyeKeypoints"></div></div>
@@ -1114,6 +1142,12 @@ function initPipelinePage() {
       document.getElementById('cfgProxy').value = cfg.proxy_longest_edge;
       document.getElementById('valProxy').textContent = cfg.proxy_longest_edge;
 
+      // Eye keypoints stage default tracks the global eye_detect_enabled
+      // config so users who turned it off in Settings see it unchecked here
+      // by default. The checkbox is the per-run override.
+      var ekCb = document.getElementById('enableEyeKeypoints');
+      if (ekCb) ekCb.checked = cfg.eye_detect_enabled !== false;
+
       // Update saved config defaults from server
       _savedModelConfig.sam2_variant = cfg.sam2_variant;
       _savedModelConfig.dinov2_variant = cfg.dinov2_variant;
@@ -1126,7 +1160,9 @@ function initPipelinePage() {
       updateCardStates();
       if (typeof updateReadiness === 'function') updateReadiness();
       if (typeof updateExtractReadiness === 'function') updateExtractReadiness();
-      if (typeof refreshKeypointsStatus === 'function') refreshKeypointsStatus();
+      if (typeof renderSam2Coverage === 'function') {
+        renderSam2Coverage(data.mask_variant_coverage || []);
+      }
 
       // Populate recent destinations
       var recents = data.recent_destinations || [];
@@ -1158,8 +1194,14 @@ function initPipelinePage() {
 
   // Load collections, models, labels, volumes in parallel
   loadCollections();
-  loadModels();
-  loadLabels();
+  // Models and labels populate the pickers the plan endpoint reads from,
+  // so chain the first plan refresh once both are in the DOM. Without
+  // this, the initial plan would key off zero models / zero labels and
+  // mislabel Classify as "No models selected" until the user clicks
+  // something.
+  Promise.all([loadModels(), loadLabels()]).then(function() {
+    refreshPipelinePlan();
+  });
   loadVolumes();
 
   // Pre-fill folders from query params (e.g., from audit panel)
@@ -2013,6 +2055,11 @@ async function selectSourceMode(mode) {
   }
 
   fetchFolderPreview();
+  // Source mode controls whether the plan body sends a collection_id, so
+  // pills/summaries can change when the user switches modes (e.g. an
+  // "Already done" Classify under whole-workspace becomes "Will run on N
+  // photos" once a partially-classified collection is selected).
+  schedulePlanRefresh();
 }
 
 function onCollectionChange() {
@@ -2022,6 +2069,7 @@ function onCollectionChange() {
     countEl.textContent = '';
     updateStartButton();
     fetchFolderPreview();
+    schedulePlanRefresh();
     return;
   }
   safeFetch('/api/collections/' + collId + '/photos?per_page=1', {}, { toast: false })
@@ -2031,6 +2079,7 @@ function onCollectionChange() {
     .catch(function() { countEl.textContent = ''; });
   updateStartButton();
   fetchFolderPreview();
+  schedulePlanRefresh();
 }
 
 async function loadVolumes() {
@@ -2142,29 +2191,47 @@ function updateStartButton() {
 }
 
 // -- Stage enable/disable dependency chain --
+// Eye keypoints sits off the linear chain: it depends on extract (needs masks)
+// but is not a prerequisite for group, so toggling it alone affects only itself.
 function onStageToggle(stage) {
   var chain = ['classify', 'extract', 'group'];
   var idx = chain.indexOf(stage);
-  var cbId = 'enable' + stage.charAt(0).toUpperCase() + stage.slice(1);
-  var checked = document.getElementById(cbId).checked;
 
-  if (!checked) {
-    // Uncheck and disable all downstream
-    for (var i = idx + 1; i < chain.length; i++) {
-      var downId = 'enable' + chain[i].charAt(0).toUpperCase() + chain[i].slice(1);
-      var cb = document.getElementById(downId);
-      cb.checked = false;
-      cb.disabled = true;
-    }
-  } else {
-    // Re-enable the immediate downstream checkbox
-    if (idx + 1 < chain.length) {
+  if (idx >= 0) {
+    var cbId = 'enable' + stage.charAt(0).toUpperCase() + stage.slice(1);
+    var checked = document.getElementById(cbId).checked;
+    if (!checked) {
+      // Uncheck and disable all downstream
+      for (var i = idx + 1; i < chain.length; i++) {
+        var downId = 'enable' + chain[i].charAt(0).toUpperCase() + chain[i].slice(1);
+        var cb = document.getElementById(downId);
+        cb.checked = false;
+        cb.disabled = true;
+      }
+    } else if (idx + 1 < chain.length) {
+      // Re-enable the immediate downstream checkbox
       var nextId = 'enable' + chain[idx + 1].charAt(0).toUpperCase() + chain[idx + 1].slice(1);
       document.getElementById(nextId).disabled = false;
     }
   }
+
+  // Sync eye keypoints to extract: if extract is off, eye keypoints can't
+  // run (no masks); when extract comes back on, leave eye keypoints
+  // unchecked so user must opt in again, matching how group behaves.
+  var extCb = document.getElementById('enableExtract');
+  var ekCb = document.getElementById('enableEyeKeypoints');
+  if (extCb && ekCb && stage !== 'eyekeypoints') {
+    if (!extCb.checked) {
+      ekCb.checked = false;
+      ekCb.disabled = true;
+    } else {
+      ekCb.disabled = false;
+    }
+  }
+
   updateStartButton();
   refreshPipelineUI();
+  schedulePlanRefresh();
 }
 
 // -- Pipeline orchestration --
@@ -2277,10 +2344,12 @@ async function startPipeline() {
   // Optional stages
   var classifyEnabled = document.getElementById('enableClassify').checked;
   var extractEnabled = document.getElementById('enableExtract').checked;
+  var eyeKeypointsEnabled = document.getElementById('enableEyeKeypoints').checked;
   var groupEnabled = document.getElementById('enableGroup').checked;
 
   body.skip_classify = !classifyEnabled;
   body.skip_extract_masks = !extractEnabled;
+  body.skip_eye_keypoints = !eyeKeypointsEnabled;
   body.skip_regroup = !groupEnabled;
 
   // Classification options (only if enabled)
@@ -2365,6 +2434,10 @@ async function startPipeline() {
     btn.textContent = 'Start Pipeline';
     btn.onclick = startPipeline;
     updateStartButton();
+    // The pipeline just wrote new detections, masks, keypoints, etc. —
+    // refresh the plan so the next run's pills reflect the new state of
+    // the world (e.g. "Already done" for stages that just completed).
+    refreshPipelinePlan();
   }
 }
 
@@ -2828,7 +2901,7 @@ async function loadModels() {
         cb.value = m.id;
         cb.dataset.name = m.name;
         cb.style.cssText = 'accent-color:var(--accent);margin-right:4px;';
-        cb.onchange = updateReadiness;
+        cb.onchange = function() { updateReadiness(); schedulePlanRefresh(); };
         if (m.id === data.active_id) cb.checked = true;
         label.appendChild(cb);
         label.appendChild(document.createTextNode(m.name + ' (' + m.model_str + ')'));
@@ -2854,7 +2927,7 @@ async function loadLabels() {
         var isActive = activePaths.has(l.labels_file);
         html += '<label style="display:flex;align-items:center;gap:4px;color:var(--text-secondary);cursor:pointer;padding:2px 0;">' +
           '<input type="checkbox" class="labels-run-cb" value="' + l.labels_file.replace(/"/g, '&quot;') + '"' +
-          (isActive ? ' checked' : '') + ' onchange="updateReadiness()" style="accent-color:var(--accent);"> ' +
+          (isActive ? ' checked' : '') + ' onchange="updateReadiness(); schedulePlanRefresh();" style="accent-color:var(--accent);"> ' +
           l.name + ' (' + (l.species_count || 0) + ')</label>';
       });
       div.innerHTML = html;
@@ -3150,126 +3223,109 @@ function renderModelReadiness(label, info, known) {
   return frag;
 }
 
-// -- Card 7: Eye Keypoints (optional) --
-// Status polling is driven by openKeypointsCardPolling / closeKeypointsCardPolling
-// to avoid a permanent background timer that wastes cycles when the card is
-// not expanded.
+// Card 7: Eye Keypoints — SuperAnimal weights are auto-downloaded by
+// pipeline_job.eye_keypoints_stage on first run (mirrors SAM2/DINOv2),
+// so no readiness panel, status polling, or download buttons live here.
 
-var _kpPollTimer = null;
-
-function _renderKeypointRow(modelName, state) {
-  // Per-model row in the Eye Keypoints card. state: 'ready' | 'missing' |
-  // 'downloading' | 'failed'. Reset disabled=false up front so a stale
-  // disable from the initial click never survives a transition to a state
-  // that re-shows the button (e.g. 'failed' → Retry).
-  var row = document.querySelector('[data-keypoint-row="' + modelName + '"]');
-  if (!row) return;
-  var iconEl = row.querySelector('.kp-state-icon');
-  var textEl = row.querySelector('.kp-state-text');
-  var btnEl  = row.querySelector('.kp-download-btn');
-  btnEl.disabled = false;
-
-  if (state === 'ready') {
-    iconEl.textContent = '\u2713';
-    iconEl.style.color = 'var(--accent,#24E5CA)';
-    textEl.textContent = 'Ready';
-    btnEl.style.display = 'none';
-  } else if (state === 'downloading') {
-    iconEl.textContent = '\u25EF';
-    iconEl.style.color = 'var(--warning,#f0c040)';
-    textEl.textContent = 'Downloading...';
-    btnEl.disabled = true;
-    btnEl.style.display = 'none';
-  } else if (state === 'failed') {
-    iconEl.textContent = '\u2717';
-    iconEl.style.color = 'var(--danger,#e74c3c)';
-    textEl.textContent = 'Download failed \u2014 retry?';
-    btnEl.textContent = 'Retry';
-    btnEl.style.display = '';
-  } else {
-    iconEl.textContent = '\u25CB';
-    iconEl.style.color = 'var(--text-faint,#5A8890)';
-    textEl.textContent = 'Not downloaded';
-    btnEl.textContent = 'Download';
-    btnEl.style.display = '';
+// -- SAM2 mask coverage (per-variant counts + active-variant selector) --
+//
+// Powered by /api/pipeline/page-init's mask_variant_coverage payload (a
+// list of {variant, count, active_count} for the active workspace).
+// 'unknown' is a migration sentinel: render with [legacy] tag, no button.
+function renderSam2Coverage(coverage) {
+  var panel = document.getElementById('sam2CoveragePanel');
+  var rowsEl = document.getElementById('sam2CoverageRows');
+  if (!panel || !rowsEl) return;
+  var errEl = document.getElementById('sam2CoverageError');
+  if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+  rowsEl.textContent = '';
+  if (!coverage || coverage.length === 0) {
+    panel.style.display = 'none';
+    return;
   }
-}
+  panel.style.display = '';
+  coverage.forEach(function(row) {
+    var line = document.createElement('div');
+    line.style.cssText = 'display:flex;align-items:center;gap:10px;font-variant-numeric:tabular-nums;';
 
-async function refreshKeypointsStatus() {
-  try {
-    var s = await safeFetch(
-      '/api/models/keypoints/status', {}, { toast: false }
-    );
-    _renderKeypointRow(
-      'superanimal-quadruped', s.superanimal_quadruped || 'missing'
-    );
-    _renderKeypointRow(
-      'superanimal-bird', s.superanimal_bird || 'missing'
-    );
-    _keypointModelsReady = (
-      s.superanimal_quadruped === 'ready' ||
-      s.superanimal_bird === 'ready'
-    );
-    refreshPipelineUI();
-    // If either model is still downloading, ensure polling is running.
-    // Covers the page-reload-mid-download case where init calls
-    // refreshKeypointsStatus once and finds an in-flight download but no
-    // local timer. Otherwise stop polling — user will re-trigger via a
-    // button click that restarts it.
-    var inflight = (
-      s.superanimal_quadruped === 'downloading' ||
-      s.superanimal_bird === 'downloading'
-    );
-    if (inflight) {
-      startKeypointsPolling();
-    } else if (_kpPollTimer) {
-      clearInterval(_kpPollTimer);
-      _kpPollTimer = null;
+    var name = document.createElement('span');
+    name.style.cssText = 'min-width:120px;color:var(--text-secondary);';
+    name.textContent = row.variant;
+    line.appendChild(name);
+
+    var count = document.createElement('span');
+    count.style.cssText = 'min-width:90px;color:var(--text-dim);';
+    var n = row.count || 0;
+    count.textContent = n.toLocaleString() + ' photo' + (n === 1 ? '' : 's');
+    line.appendChild(count);
+
+    if (row.variant === 'unknown') {
+      // Migration sentinel \u2014 never offer to set it active.
+      var legacyTag = document.createElement('span');
+      legacyTag.style.cssText = 'font-size:10px;color:var(--text-faint);background:color-mix(in srgb, var(--text-faint) 15%, transparent);border-radius:3px;padding:1px 6px;';
+      legacyTag.textContent = 'legacy';
+      line.appendChild(legacyTag);
+    } else if ((row.active_count || 0) >= (row.count || 0) && (row.count || 0) > 0) {
+      // Universally active for this variant in this workspace.
+      var activeTag = document.createElement('span');
+      activeTag.style.cssText = 'font-size:10px;color:var(--accent);background:color-mix(in srgb, var(--accent) 18%, transparent);border-radius:3px;padding:1px 6px;';
+      activeTag.textContent = 'active';
+      line.appendChild(activeTag);
+    } else {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.style.cssText = 'background:none;color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:1px 8px;font-size:11px;cursor:pointer;';
+      btn.textContent = 'Set active';
+      var variantValue = row.variant;  // capture for click closure
+      btn.addEventListener('click', function() { setActiveMaskVariant(variantValue); });
+      line.appendChild(btn);
+      if ((row.active_count || 0) > 0) {
+        var partial = document.createElement('span');
+        partial.style.cssText = 'font-size:11px;color:var(--text-faint);';
+        partial.textContent = '(' + (row.active_count || 0).toLocaleString() + ' already active)';
+        line.appendChild(partial);
+      }
     }
-  } catch (e) {
-    // Initial page-load call has no timer yet, so render the fallback
-    // 'missing' state (which shows a Download button) and schedule a
-    // retry. Otherwise users see a blank row after a transient API error
-    // until they reload the page. startKeypointsPolling is idempotent,
-    // and a subsequent successful fetch with no in-flight downloads will
-    // clear the timer via the path above.
-    _renderKeypointRow('superanimal-quadruped', 'missing');
-    _renderKeypointRow('superanimal-bird', 'missing');
-    _keypointModelsReady = false;
-    refreshPipelineUI();
-    startKeypointsPolling();
-  }
+    rowsEl.appendChild(line);
+  });
 }
 
-function startKeypointsPolling() {
-  if (_kpPollTimer) return;
-  _kpPollTimer = setInterval(refreshKeypointsStatus, 2000);
+function _showSam2CoverageError(msg) {
+  var errEl = document.getElementById('sam2CoverageError');
+  if (!errEl) return;
+  errEl.textContent = msg;
+  errEl.style.display = '';
 }
 
-async function downloadKeypointModel(modelName) {
-  // Disable the button immediately to prevent double-clicks; refreshKeypointsStatus
-  // will re-render with the real server state on the next poll tick.
-  var row = document.querySelector('[data-keypoint-row="' + modelName + '"]');
-  if (row) {
-    var btn = row.querySelector('.kp-download-btn');
-    if (btn) btn.disabled = true;
-  }
+async function refreshSam2Coverage() {
   try {
-    await safeFetch(
-      '/api/models/keypoints/' + encodeURIComponent(modelName) + '/download',
-      { method: 'POST' },
-      { toast: false }
-    );
-    // Optimistic render: show 'downloading' before the first poll confirms.
-    _renderKeypointRow(modelName, 'downloading');
-    startKeypointsPolling();
-  } catch (e) {
-    if (row) {
-      var btn2 = row.querySelector('.kp-download-btn');
-      if (btn2) btn2.disabled = false;
-    }
+    var data = await safeFetch('/api/pipeline/page-init', {}, { toast: false });
+    renderSam2Coverage(data.mask_variant_coverage || []);
+  } catch(e) {
+    _showSam2CoverageError('Failed to load mask coverage');
   }
 }
+
+async function setActiveMaskVariant(variant) {
+  if (variant === 'unknown') return;  // sentinel, no button rendered
+  try {
+    var resp = await fetch('/api/pipeline/active-mask-variant', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({variant: variant}),
+    });
+    var body = await resp.json();
+    if (!resp.ok) {
+      _showSam2CoverageError(body.error || ('HTTP ' + resp.status));
+      return;
+    }
+  } catch(e) {
+    _showSam2CoverageError(String(e));
+    return;
+  }
+  await refreshSam2Coverage();
+}
+
 
 async function runExtractStep(collectionId) {
   var num = document.getElementById('numExtract');
@@ -3365,7 +3421,7 @@ var _pipelineState = {
 // Stages 3-8 each show an explicit text pill (Will run / Will skip / Already
 // done / Running / Done / Failed) instead of relying on the colored circle.
 // `_runningStages` and `_stageOutcomes` are live overrides: while a
-// pipeline is running, they take precedence over the toggle/prior-data state.
+// pipeline is running, they take precedence over plan-derived state.
 //
 // `_runningStages` is per-stage (not a single global) because the pipeline
 // allows concurrent stages — e.g. scan runs alongside thumbnails/previews —
@@ -3374,20 +3430,24 @@ var _pipelineState = {
 var _runningStages = {};  // suffix -> true while that stage is running
 var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'will-skip' | 'done-prior'
 
-// Eye Keypoints has no enable checkbox and no `prior` flag, so without an
-// extra signal `_stageStateFor` would always show "Will run" for it. The
-// backend skips the stage when no SuperAnimal weights are on disk, so the
-// pre-run plan must reflect that. `null` means "status not yet polled" —
-// treat as runnable until we know better, to avoid flicker on page load.
-var _keypointModelsReady = null;  // true | false | null (unknown)
+// Plan response from POST /api/pipeline/plan, keyed by stage suffix:
+//   { Classify: { state, summary, detail }, Extract: ..., ... }
+// Truth source for the user-visible pill state and per-stage summary text
+// when no run is active. Computed against current UI selections so the
+// page never tells the user a stage is done when, given new models or
+// labels, the next run actually has work to do (CORE_PHILOSOPHY: "No
+// black boxes" — pills must answer the question users read them as).
+var _pipelinePlan = null;
+var _planFetchSeq = 0;
+var _planDebounceTimer = null;
 
 var _STAGES = [
-  { suffix: 'Scan',         label: 'Scan & Import',          enable: null,             prior: null },
-  { suffix: 'Previews',     label: 'Thumbnails & Previews',  enable: null,             prior: null },
-  { suffix: 'Classify',     label: 'Classify',               enable: 'enableClassify', prior: 'hasDetections' },
-  { suffix: 'Extract',      label: 'Extract Features',       enable: 'enableExtract',  prior: 'hasMasks' },
-  { suffix: 'EyeKeypoints', label: 'Eye Keypoints',          enable: null,             prior: null },
-  { suffix: 'Group',        label: 'Group & Score',          enable: 'enableGroup',    prior: null },
+  { suffix: 'Scan',         label: 'Scan & Import',          enable: null },
+  { suffix: 'Previews',     label: 'Thumbnails & Previews',  enable: null },
+  { suffix: 'Classify',     label: 'Classify',               enable: 'enableClassify' },
+  { suffix: 'Extract',      label: 'Extract Features',       enable: 'enableExtract' },
+  { suffix: 'EyeKeypoints', label: 'Eye Keypoints',          enable: 'enableEyeKeypoints' },
+  { suffix: 'Group',        label: 'Group & Score',          enable: 'enableGroup' },
 ];
 
 // Lookup: cardSuffix -> enable-checkbox id (null for stages with no toggle).
@@ -3423,57 +3483,165 @@ function _setPill(suffix, state, text) {
   pill.textContent = text != null ? text : _PILL_LABELS[state];
 }
 
+// Map each stage suffix to the .stage-summary span it owns. The span shows
+// the plan summary text before/between runs and switches to live counts
+// during a run via the existing txtDetections/txtMasks ids.
+var _STAGE_SUMMARY_IDS = {
+  'Classify':     'txtDetections',
+  'Extract':      'txtMasks',
+  'EyeKeypoints': 'txtEyeKeypoints',
+  'Group':        'txtResults',
+};
+
+function _setStageSummaryText(suffix, text) {
+  var id = _STAGE_SUMMARY_IDS[suffix];
+  if (!id) return;
+  var el = document.getElementById(id);
+  if (el) el.textContent = text || '';
+}
+
 function _stageStateFor(stage) {
   if (_runningStages[stage.suffix]) return 'running';
   if (_stageOutcomes[stage.suffix]) return _stageOutcomes[stage.suffix];
 
-  // Re-classify bypasses the "already done" skip — Classify will run again.
-  var reclassify = false;
-  if (stage.suffix === 'Classify') {
-    var rc = document.getElementById('chkReclassify');
-    reclassify = !!(rc && rc.checked);
-  }
-
-  // Eye Keypoints has no enable checkbox: the stage is gated by whether
-  // SuperAnimal weights are on disk. Backend `eye_keypoint_stage_preflight`
-  // returns a skip reason in the no-weights case, so the plan summary
-  // should mirror that pre-run instead of advertising "Will run".
-  if (stage.suffix === 'EyeKeypoints' && _keypointModelsReady === false) {
-    return 'will-skip';
-  }
-
+  // User-toggled skip overrides anything the server-side plan returned —
+  // matches the user's mental model that toggling a stage off is the
+  // strongest signal of "do not run this".
   if (stage.enable) {
     var cb = document.getElementById(stage.enable);
     if (cb && !cb.checked) return 'will-skip';
   }
-  if (stage.prior && _pipelineState[stage.prior] && !reclassify) return 'done-prior';
-  return 'will-run';
+  // Stages with no plan entry (Scan, Previews) default to "will-run" —
+  // they always run when the pipeline starts.
+  if (!_pipelinePlan) return 'will-run';
+  var fromPlan = _pipelinePlan.stages && _pipelinePlan.stages[stage.suffix];
+  if (!fromPlan) return 'will-run';
+  return fromPlan.state || 'will-run';
 }
 
-function _renderPlanSummary(buckets) {
+function _stageSummaryFor(stage) {
+  if (!_pipelinePlan) return '';
+  var fromPlan = _pipelinePlan.stages && _pipelinePlan.stages[stage.suffix];
+  return (fromPlan && fromPlan.summary) || '';
+}
+
+function _renderPlanSummary() {
   var box = document.getElementById('pipelinePlanSummary');
   if (!box) return;
-  function row(cls, label, names, emptyText) {
-    var inner = names.length
-      ? '<span class="plan-stages">' + names.join(', ') + '</span>'
-      : '<span class="plan-empty">' + emptyText + '</span>';
-    return '<div class="plan-row ' + cls + '">' +
-      '<span class="plan-label">' + label + '</span>' + inner + '</div>';
+  // Per-stage rows: stage name, pill label, summary text. Mirrors the
+  // pills inside each card so the user sees the same answer in two places
+  // and can scan the whole plan at a glance before pressing Start.
+  var rows = [];
+  _STAGES.forEach(function(stage) {
+    if (!_STAGE_SUMMARY_IDS[stage.suffix]) return;  // Scan/Previews
+    var state = _stageStateFor(stage);
+    var summary = _runningStages[stage.suffix] || _stageOutcomes[stage.suffix]
+      ? ''  // live state takes the .stage-summary span; don't double up here
+      : _stageSummaryFor(stage);
+    var pillLabel = _PILL_LABELS[state] || state;
+    rows.push(
+      '<div class="plan-stage-row ' + state + '">' +
+        '<span class="plan-stage-name">' + stage.label + '</span>' +
+        '<span class="plan-stage-pill">' + pillLabel + '</span>' +
+        '<span class="plan-stage-summary">' + (summary || '') + '</span>' +
+      '</div>'
+    );
+  });
+  if (!_pipelinePlan && !Object.keys(_runningStages).length && !Object.keys(_stageOutcomes).length) {
+    box.innerHTML = '<div class="plan-loading">Loading plan…</div>';
+    return;
   }
-  var html = row('will-run', 'Will run', buckets['will-run'], 'nothing');
-  if (buckets['will-skip'].length)  html += row('will-skip',  'Will skip',    buckets['will-skip'],  '');
-  if (buckets['done-prior'].length) html += row('done-prior', 'Already done', buckets['done-prior'], '');
-  box.innerHTML = html;
+  box.innerHTML = rows.join('');
 }
 
 function refreshPipelineUI() {
-  var buckets = { 'will-run': [], 'will-skip': [], 'done-prior': [] };
   _STAGES.forEach(function(stage) {
     var state = _stageStateFor(stage);
     _setPill(stage.suffix, state);
-    if (buckets[state]) buckets[state].push(stage.label);
+    // Only paint plan summary text when no run is active for this stage,
+    // otherwise the live counts ("12/47", "Done!") get clobbered.
+    if (!_runningStages[stage.suffix] && !_stageOutcomes[stage.suffix]) {
+      _setStageSummaryText(stage.suffix, _stageSummaryFor(stage));
+    }
   });
-  _renderPlanSummary(buckets);
+  _renderPlanSummary();
+}
+
+// Build the body for /api/pipeline/plan from the current DOM. Mirrors the
+// subset of /api/jobs/pipeline the plan needs to make accurate decisions.
+function _buildPlanBody() {
+  var body = {};
+  // Source: only "existing collection" mode lets us scope the plan to a
+  // concrete photo set. For import / new-images modes the photo set
+  // doesn't exist yet, so leave collection_id null and let the plan
+  // describe whole-workspace counts.
+  if (_sourceMode === 'collection') {
+    var picker = document.getElementById('collectionPicker');
+    var cid = picker && picker.value ? parseInt(picker.value, 10) : NaN;
+    if (!isNaN(cid)) body.collection_id = cid;
+    if (_previewData && _previewSelected) {
+      var excludedIds = [];
+      _previewData.files.forEach(function(f) {
+        if (!_previewSelected[f.path] && f.photo_id) excludedIds.push(f.photo_id);
+      });
+      if (excludedIds.length) body.exclude_photo_ids = excludedIds;
+    }
+  }
+
+  body.skip_classify       = !document.getElementById('enableClassify').checked;
+  body.skip_extract_masks  = !document.getElementById('enableExtract').checked;
+  body.skip_eye_keypoints  = !document.getElementById('enableEyeKeypoints').checked;
+  body.skip_regroup        = !document.getElementById('enableGroup').checked;
+
+  if (!body.skip_classify) {
+    var modelIds = [];
+    document.querySelectorAll('.model-checkbox:checked').forEach(function(cb) {
+      modelIds.push(cb.value);
+    });
+    if (modelIds.length) body.model_ids = modelIds;
+
+    var labelsFiles = [];
+    document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) {
+      labelsFiles.push(cb.value);
+    });
+    if (labelsFiles.length) body.labels_files = labelsFiles;
+
+    var rc = document.getElementById('chkReclassify');
+    body.reclassify = !!(rc && rc.checked);
+  }
+  return body;
+}
+
+async function refreshPipelinePlan() {
+  // Don't fetch a plan while a pipeline is running — live state is
+  // authoritative, and the running stages would race the plan response.
+  if (_pipelineRunning) return;
+  var seq = ++_planFetchSeq;
+  try {
+    var data = await safeFetch('/api/pipeline/plan', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(_buildPlanBody()),
+    }, { toast: false });
+    // Drop responses that arrived after a newer request — otherwise a slow
+    // request can overwrite the result of a fresher one and the UI flickers
+    // back to stale state right after the user changed a setting.
+    if (seq !== _planFetchSeq) return;
+    _pipelinePlan = data;
+  } catch(e) {
+    if (seq !== _planFetchSeq) return;
+    _pipelinePlan = null;
+  }
+  refreshPipelineUI();
+}
+
+// Debounced version for chatty controls (label checkboxes, model picker).
+function schedulePlanRefresh() {
+  if (_planDebounceTimer) clearTimeout(_planDebounceTimer);
+  _planDebounceTimer = setTimeout(function() {
+    _planDebounceTimer = null;
+    refreshPipelinePlan();
+  }, 150);
 }
 
 function updateCardStates() {

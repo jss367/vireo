@@ -27,7 +27,6 @@ def _setup_db(tmp_path):
             fid, f"photo{i}.jpg", ".jpg", 1000, 1.0,
             timestamp=ts.isoformat(), width=4000, height=3000,
         )
-        db.update_photo_mask(pid, f"/masks/{pid}.png")
         db.update_photo_pipeline_features(
             pid,
             mask_path=f"/masks/{pid}.png",

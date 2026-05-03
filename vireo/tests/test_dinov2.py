@@ -189,6 +189,47 @@ def test_embed_output_shape():
     dino_embed._variant_loaded = None
 
 
+def test_embed_batch_one_session_call():
+    """embed_batch runs all images through a single session.run, returning
+    a stacked (N, dim) array. This is the optimization that lets us pay
+    DINOv2's per-call CPU overhead once per photo instead of twice."""
+    import dino_embed
+
+    mock_session = MagicMock()
+    mock_session.get_inputs.return_value = [MagicMock(name="input")]
+    mock_session.run.return_value = [np.random.randn(2, 768).astype(np.float32)]
+
+    dino_embed._session = mock_session
+    dino_embed._variant_loaded = "vit-b14"
+
+    from PIL import Image
+
+    img1 = Image.new("RGB", (100, 100))
+    img2 = Image.new("RGB", (200, 150))
+    result = dino_embed.embed_batch([img1, img2], variant="vit-b14")
+
+    assert result.shape == (2, 768)
+    assert result.dtype == np.float32
+    # Single call into ONNX Runtime, not one per image.
+    assert mock_session.run.call_count == 1
+    # Input tensor must have batch dim = 2.
+    _, kwargs = mock_session.run.call_args
+    feed = mock_session.run.call_args[0][1]
+    batch_tensor = next(iter(feed.values()))
+    assert batch_tensor.shape == (2, 3, 518, 518)
+
+    dino_embed._session = None
+    dino_embed._variant_loaded = None
+
+
+def test_embed_batch_rejects_empty_input():
+    """An empty image list is a programmer error — surface it loudly."""
+    import dino_embed
+
+    with pytest.raises(ValueError, match="at least one image"):
+        dino_embed.embed_batch([], variant="vit-b14")
+
+
 def test_embed_subject_delegates_to_embed():
     """embed_subject calls embed with the same arguments."""
     import dino_embed

@@ -969,9 +969,9 @@ input[type="range"]::-moz-range-thumb {
           <span class="slider-val" id="valBurstPhash">12</span>
         </div>
         <div class="slider-row">
-          <span class="slider-label" title="Min embedding similarity to stay in the same burst">Emb. cosine</span>
-          <input type="range" min="0" max="100" value="80" step="1" id="slBurstEmb" oninput="onGroupingChange(this)">
-          <span class="slider-val" id="valBurstEmb">0.80</span>
+          <span class="slider-label" title="Max embedding distance — higher tolerates more visually different shots in the same burst">Emb. distance</span>
+          <input type="range" min="0" max="100" value="20" step="1" id="slBurstEmb" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valBurstEmb">0.20</span>
         </div>
       </div>
 
@@ -1107,7 +1107,7 @@ input[type="range"]::-moz-range-thumb {
     <button onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary);color:var(--text-muted);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
     <div class="grm-res-control" title="Image resolution — higher = slower but better for pixel-peeping">
       <label style="font-size:12px;color:var(--text-muted);">Res:</label>
-      <input type="range" id="grmResSlider" min="0" max="3" step="1" value="0" oninput="grmSetResolution(this.value)">
+      <input type="range" id="grmResSlider" min="0" max="3" step="1" value="3" oninput="grmSetResolution(this.value)">
       <span id="grmResLabel" style="font-size:11px;color:var(--text-dim);min-width:140px;">1920 · preview</span>
     </div>
     <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
@@ -1140,7 +1140,7 @@ var GRM_RES_STOPS = [
   {size: 3840, label: '4K',   kind: 'preview'},
   {size: 0,    label: 'Original', kind: 'original'}
 ];
-var grmResolutionIdx = 0;
+var grmResolutionIdx = 3;
 
 function grmPhotoUrl(photoId) {
   var stop = GRM_RES_STOPS[grmResolutionIdx];
@@ -1455,7 +1455,7 @@ var SCORING_DEFAULTS = {
 };
 var GROUPING_DEFAULTS = {
   hard_cut_score: 42, merge_score: 62,
-  burst_time_gap: 3, burst_phash_threshold: 12, burst_embedding_threshold: 80,
+  burst_time_gap: 3, burst_phash_threshold: 12, burst_embedding_threshold: 20,
 };
 
 /* Load slider defaults from server config (overrides hard-coded values above) */
@@ -1475,7 +1475,8 @@ var GROUPING_DEFAULTS = {
     GROUPING_DEFAULTS.merge_score = Math.round((p.merge_score != null ? p.merge_score : 0.62) * 100);
     GROUPING_DEFAULTS.burst_time_gap = p.burst_time_gap != null ? p.burst_time_gap : 3;
     GROUPING_DEFAULTS.burst_phash_threshold = p.burst_phash_threshold != null ? p.burst_phash_threshold : 12;
-    GROUPING_DEFAULTS.burst_embedding_threshold = Math.round((p.burst_embedding_threshold != null ? p.burst_embedding_threshold : 0.80) * 100);
+    // Stored as cosine similarity; UI shows distance = 1 - similarity.
+    GROUPING_DEFAULTS.burst_embedding_threshold = Math.round((1 - (p.burst_embedding_threshold != null ? p.burst_embedding_threshold : 0.80)) * 100);
     applyScoringDefaults();
     applyGroupingDefaults();
   } catch(e) {
@@ -1519,7 +1520,7 @@ function getGroupingConfig() {
     merge_score: sliderVal('slEncMerge') / 100,
     burst_time_gap: sliderVal('slBurstTime'),
     burst_phash_threshold: Math.round(sliderVal('slBurstPhash')),
-    burst_embedding_threshold: sliderVal('slBurstEmb') / 100,
+    burst_embedding_threshold: 1 - sliderVal('slBurstEmb') / 100,
   };
 }
 

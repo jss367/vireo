@@ -265,35 +265,40 @@ def test_pipeline_failed_status_clears_running_pill(live_server, page):
     expect(page.locator("#pillClassify")).not_to_contain_text("Running")
 
 
-def test_pipeline_eye_keypoints_pill_will_skip_when_no_weights(live_server, page):
-    """Eye Keypoints has no enable checkbox — it's gated by whether
-    SuperAnimal weights are on disk. The fixture doesn't ship any keypoint
-    models, so /api/models/keypoints/status reports both as 'missing' and
-    the pill must show 'Will skip' (mirroring the backend preflight),
-    not 'Will run'.
-    """
+def test_pipeline_eye_keypoints_pill_will_run_by_default(live_server, page):
+    """SuperAnimal weights are auto-downloaded by pipeline_job on first run,
+    so the pill defaults to 'Will run' even on a fresh fixture with no
+    keypoint models on disk — the user is no longer expected to click a
+    Download button before starting the pipeline."""
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
-    summary = page.locator("[data-testid='pipeline-plan-summary']")
-    skip_row = summary.locator(".plan-row.will-skip .plan-stages")
-    expect(skip_row).to_contain_text("Eye Keypoints")
-    will_run_row = summary.locator(".plan-row.will-run .plan-stages")
-    expect(will_run_row).not_to_contain_text("Eye Keypoints")
-
-
-def test_pipeline_eye_keypoints_pill_will_run_when_models_ready(live_server, page):
-    """When at least one keypoint model is ready, the pill flips back to
-    'Will run'. Simulated by stubbing the status endpoint client-side and
-    re-invoking refreshKeypointsStatus."""
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    expect(page.locator("#pillEyeKeypoints")).to_be_visible()
-    page.evaluate("""
-        window._keypointModelsReady = true;
-        refreshPipelineUI();
-    """)
     expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
+
+
+def test_pipeline_eye_keypoints_toggle_off_marks_will_skip(live_server, page):
+    """Unchecking the Eye Keypoints enable checkbox flips its pill to
+    'Will skip' without affecting Group, which doesn't depend on it."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
+    page.click("#card-eyekeypoints .stage-header")
+    page.uncheck("#enableEyeKeypoints")
+    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
+    # Group does not depend on eye keypoints — it must still be runnable.
+    expect(page.locator("#pillGroup")).not_to_contain_text("Will skip")
+
+
+def test_pipeline_disabling_extract_cascades_to_eye_keypoints(live_server, page):
+    """Eye Keypoints needs masks from Extract, so toggling Extract off must
+    uncheck and disable the Eye Keypoints checkbox alongside Group."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.click("#card-extract .stage-header")
+    page.uncheck("#enableExtract")
+    ek = page.locator("#enableEyeKeypoints")
+    expect(ek).not_to_be_checked()
+    expect(ek).to_be_disabled()
+    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
 
 
 def test_pipeline_shared_card_not_done_until_all_substages_complete(live_server, page):

@@ -1075,6 +1075,8 @@ def test_pipeline_page_init_api(app_and_db):
     assert 'sam2_variant' in pc
     assert 'dinov2_variant' in pc
     assert 'proxy_longest_edge' in pc
+    # Pipeline page renders the eye-keypoints opt-in checkbox from this flag.
+    assert 'eye_detect_enabled' in pc
     # total_photos should match our fixture data (3 photos)
     assert data['total_photos'] == 3
 
@@ -1093,24 +1095,6 @@ def test_pipeline_page_init_includes_recent_destinations(app_and_db):
         data = resp.get_json()
         assert "recent_destinations" in data
         assert data["recent_destinations"] == ["/photos/out1", "/photos/out2"]
-
-
-def test_pipeline_page_init_includes_stages_block(app_and_db):
-    """page-init returns the new `stages` dict with per-stage counts."""
-    app, db = app_and_db
-    client = app.test_client()
-    resp = client.get('/api/pipeline/page-init')
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert "stages" in data
-    stages = data["stages"]
-    for key in ["scan", "previews", "detect", "classify", "eye_kp", "group"]:
-        assert key in stages, f"missing stage {key}"
-    assert "extract" not in stages  # deferred to Phase 3
-    # backwards compat — old fields still present
-    assert "has_detections" in data
-    assert "has_masks" in data
-    assert "has_sharpness" in data
 
 
 def test_templates_jinja_free_except_includes():
@@ -3547,3 +3531,234 @@ def test_precompute_embeddings_rejects_timm_models(app_and_db, monkeypatch):
     job = runner.get(job_id)
     assert job["status"] == "failed"
     assert any("fixed class head" in e for e in (job.get("errors") or []))
+
+
+# ---------------------------------------------------------------------------
+# /api/storage/masks endpoints
+# ---------------------------------------------------------------------------
+
+def _seed_masks(db, tmp_path):
+    """Insert a few photo_masks rows + on-disk files for storage tests.
+
+    Layout:
+      photo 1: sam2-small (active), sam2-large
+      photo 2: sam2-small
+    Returns the masks directory path.
+    """
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir(exist_ok=True)
+    pids = [r["id"] for r in db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 2"
+    ).fetchall()]
+    p1, p2 = pids[0], pids[1]
+
+    for pid, var, size in [
+        (p1, "sam2-small", 100),
+        (p1, "sam2-large", 200),
+        (p2, "sam2-small", 150),
+    ]:
+        f = masks_dir / f"{pid}.{var}.png"
+        f.write_bytes(b"x" * size)
+        db.upsert_photo_mask(
+            photo_id=pid, variant=var, path=str(f),
+            detector_model="megadetector-v6",
+            prompt_x=0, prompt_y=0, prompt_w=10, prompt_h=10,
+        )
+    # Both photos get an active variant set: this mirrors what the
+    # pipeline always does after upsert_photo_mask, so the seed reflects
+    # realistic state. delete_inactive_masks now skips photos with NULL
+    # active (the partial-state case) rather than treating them as
+    # entirely-inactive.
+    db.set_active_mask_variant(p1, "sam2-small")
+    db.set_active_mask_variant(p2, "sam2-small")
+    return masks_dir, p1, p2
+
+
+def test_api_storage_masks_returns_summary(app_and_db, tmp_path):
+    app, db = app_and_db
+    _seed_masks(db, tmp_path)
+    client = app.test_client()
+    r = client.get("/api/storage/masks")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert "variants" in data
+    assert "total_bytes" in data
+    assert "stale_count" in data
+    assert "path" in data
+    by_var = {v["variant"]: v for v in data["variants"]}
+    assert by_var["sam2-small"]["count"] == 2
+    assert by_var["sam2-small"]["active_count"] == 2
+    assert by_var["sam2-large"]["count"] == 1
+    assert by_var["sam2-large"]["active_count"] == 0
+    assert data["total_bytes"] == 100 + 200 + 150
+
+
+def test_api_storage_masks_empty(app_and_db):
+    app, _db = app_and_db
+    client = app.test_client()
+    r = client.get("/api/storage/masks")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["variants"] == []
+    assert data["total_bytes"] == 0
+    assert data["stale_count"] == 0
+
+
+def test_api_storage_masks_delete_variant(app_and_db, tmp_path):
+    app, db = app_and_db
+    masks_dir, _p1, _p2 = _seed_masks(db, tmp_path)
+    client = app.test_client()
+    # sam2-large is not active anywhere — should delete fine.
+    r = client.post(
+        "/api/storage/masks/delete-variant",
+        json={"variant": "sam2-large"},
+    )
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert body["deleted"] == 1
+    # File removed
+    assert not any(p.name.endswith(".sam2-large.png") for p in masks_dir.iterdir())
+    # Row removed
+    n = db.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks WHERE variant='sam2-large'"
+    ).fetchone()[0]
+    assert n == 0
+
+
+def test_api_storage_masks_delete_variant_refuses_active(app_and_db, tmp_path):
+    app, db = app_and_db
+    _seed_masks(db, tmp_path)
+    client = app.test_client()
+    # sam2-small is active for photo 1 — should refuse with 400.
+    r = client.post(
+        "/api/storage/masks/delete-variant",
+        json={"variant": "sam2-small"},
+    )
+    assert r.status_code == 400
+    body = r.get_json()
+    assert "active" in body["error"].lower()
+
+
+def test_api_storage_masks_delete_variant_requires_name(app_and_db):
+    app, _db = app_and_db
+    client = app.test_client()
+    r = client.post("/api/storage/masks/delete-variant", json={})
+    assert r.status_code == 400
+    assert "variant" in r.get_json()["error"].lower()
+
+
+def test_api_storage_masks_delete_inactive(app_and_db, tmp_path):
+    app, db = app_and_db
+    _seed_masks(db, tmp_path)
+    client = app.test_client()
+    r = client.post("/api/storage/masks/delete-inactive")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    # We seeded 3 rows; both photos have sam2-small active. The only
+    # inactive row is photo1's sam2-large.
+    assert body["deleted"] == 1
+    n = db.conn.execute("SELECT COUNT(*) FROM photo_masks").fetchone()[0]
+    assert n == 2
+
+
+def test_api_storage_masks_delete_stale(app_and_db, tmp_path):
+    app, db = app_and_db
+    masks_dir, p1, _p2 = _seed_masks(db, tmp_path)
+    # Add a detection that matches sam2-small's prompt for p1, so it's not stale.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (?, 'megadetector-v6', 0, 0, 10, 10, 0.9, 'animal')",
+        (p1,),
+    )
+    db.conn.commit()
+    # Add a mask whose prompt does NOT match any detection — stale.
+    f = masks_dir / f"{p1}.sam3-small.png"
+    f.write_bytes(b"x" * 50)
+    db.upsert_photo_mask(
+        photo_id=p1, variant="sam3-small", path=str(f),
+        detector_model="megadetector-v6",
+        prompt_x=999, prompt_y=999, prompt_w=10, prompt_h=10,
+    )
+    client = app.test_client()
+    r = client.post("/api/storage/masks/delete-stale")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert body["deleted"] >= 1
+    # The stale sam3-small row is gone.
+    n = db.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks WHERE variant='sam3-small'"
+    ).fetchone()[0]
+    assert n == 0
+
+
+def test_storage_masks_uses_global_threshold_not_active_workspace(
+    app_and_db, tmp_path
+):
+    """``/api/storage/masks`` and ``/api/storage/masks/delete-stale``
+    are global-storage endpoints, so their stale set must not depend on
+    which workspace is active. Concretely: a permissive workspace
+    (detector_confidence=0.1) has a matching low-confidence detection
+    keeping the mask fresh; a strict workspace
+    (detector_confidence=0.5) would consider that detection invisible
+    and the mask stale. Switching to the strict workspace must NOT
+    cause the storage endpoint to count or delete this mask, because
+    it's still valid under the permissive workspace's settings.
+    """
+    app, db = app_and_db
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir(exist_ok=True)
+    pid = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    # One detection at 0.3 confidence — visible to a 0.1 floor, hidden
+    # by a 0.5 floor.
+    db.conn.execute(
+        "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
+        "box_w, box_h, detector_confidence, category) "
+        "VALUES (?, 'megadetector-v6', 0.10, 0.10, 0.10, 0.10, 0.30, 'animal')",
+        (pid,),
+    )
+    f = masks_dir / f"{pid}.sam2-small.png"
+    f.write_bytes(b"x" * 50)
+    db.upsert_photo_mask(
+        photo_id=pid, variant="sam2-small", path=str(f),
+        detector_model="megadetector-v6",
+        prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
+    )
+    db.conn.commit()
+    permissive = db.create_workspace(
+        "permissive", config_overrides={"detector_confidence": 0.1}
+    )
+    strict = db.create_workspace(
+        "strict", config_overrides={"detector_confidence": 0.5}
+    )
+    # Activate the strict workspace. Pre-fix this would push stale_count
+    # to 1 (and delete-stale would delete the mask) because the endpoint
+    # used the active workspace's 0.5 floor.
+    db.set_active_workspace(strict)
+    client = app.test_client()
+    r = client.get("/api/storage/masks")
+    assert r.status_code == 200
+    assert r.get_json()["stale_count"] == 0, (
+        "global storage view should not flip stale_count when the active "
+        "workspace tightens its detector threshold; another workspace "
+        "still considers the mask fresh"
+    )
+    r = client.post("/api/storage/masks/delete-stale")
+    assert r.status_code == 200
+    assert r.get_json()["deleted"] == 0
+    # Mask + DB row still there.
+    assert f.exists()
+    n = db.conn.execute(
+        "SELECT COUNT(*) FROM photo_masks WHERE photo_id=? AND variant=?",
+        (pid, "sam2-small"),
+    ).fetchone()[0]
+    assert n == 1
+    # Symmetry: switching to permissive doesn't change the answer either.
+    db.set_active_workspace(permissive)
+    r = client.get("/api/storage/masks")
+    assert r.get_json()["stale_count"] == 0

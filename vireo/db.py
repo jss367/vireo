@@ -256,6 +256,7 @@ class Database:
                 phash_crop               TEXT,
                 noise_estimate           REAL,
                 dino_embedding_variant   TEXT,
+                active_mask_variant      TEXT,
                 focal_length             REAL,
                 burst_id                 TEXT,
                 file_hash                TEXT,
@@ -321,6 +322,7 @@ class Database:
                 tabs            TEXT,
                 created_at      TEXT DEFAULT (datetime('now')),
                 last_opened_at  TEXT,
+                pinned_at       TEXT,
                 last_grouped_at         INTEGER,
                 last_group_fingerprint  TEXT
             );
@@ -359,6 +361,37 @@ class Database:
                 detector_confidence REAL,
                 category            TEXT,
                 created_at          TEXT DEFAULT (datetime('now'))
+            );
+
+            -- subject_size is declared REAL because compute_all_quality_features
+            -- stores it as a fraction in [0, 1]. SQLite's flexible type affinity
+            -- means existing databases that pre-date this fix (where the column
+            -- was declared INTEGER) still tolerate REAL values without an
+            -- ALTER, so we don't bother emitting a migration for the column
+            -- type — only fresh DBs see the corrected declaration.
+            -- prompt_* are declared REAL because detections.box_* are
+            -- normalized values in [0, 1] and any int truncation would
+            -- collapse every prompt to (0, 0, 0, 0). SQLite's column
+            -- type affinity already accepts REAL into INTEGER-declared
+            -- columns, so older DBs created with INTEGER continue to
+            -- store the new REAL prompts verbatim — no migration is
+            -- needed; legacy rows with prompt_x = 0 will simply be
+            -- detected as stale on the next pipeline run.
+            CREATE TABLE IF NOT EXISTS photo_masks (
+                photo_id          INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                variant           TEXT    NOT NULL,
+                path              TEXT    NOT NULL,
+                created_at        INTEGER NOT NULL,
+                detector_model    TEXT    NOT NULL,
+                prompt_x          REAL    NOT NULL,
+                prompt_y          REAL    NOT NULL,
+                prompt_w          REAL    NOT NULL,
+                prompt_h          REAL    NOT NULL,
+                subject_size      REAL,
+                subject_tenengrad REAL,
+                bg_tenengrad      REAL,
+                crop_complete     REAL,
+                PRIMARY KEY (photo_id, variant)
             );
 
             CREATE TABLE IF NOT EXISTS predictions (
@@ -643,6 +676,13 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE workspaces ADD COLUMN last_group_fingerprint TEXT"
             )
+        # Migration: add `pinned_at` for the alphabetical-with-pinned-on-top
+        # workspace dropdown. NULL means unpinned; an ISO timestamp marks the
+        # workspace as pinned.
+        try:
+            self.conn.execute("SELECT pinned_at FROM workspaces LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE workspaces ADD COLUMN pinned_at TEXT")
         # Migration: working-copy failure markers. Backfill (and the inline
         # scan extraction) record a failure here when extract_working_copy
         # returns False, gated by file_mtime so a user-replaced file retries
@@ -685,6 +725,56 @@ class Database:
             )
             self.conn.execute(
                 "INSERT INTO db_meta(key, value) VALUES ('eye_kp_fingerprint_backfill', '1')"
+            )
+        try:
+            self.conn.execute("SELECT active_mask_variant FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos ADD COLUMN active_mask_variant TEXT"
+            )
+
+        # Backfill pre-existing photos with mask_path set on the photos
+        # row but no row in photo_masks. They get migrated to
+        # variant='unknown' with a sentinel prompt; detector_model='unknown'
+        # + prompt=-1 mean the staleness check will treat these masks as
+        # stale on the next pipeline run, so they get regenerated against
+        # whatever SAM2 variant the user has configured.
+        #
+        # Resumable: gating only on the per-photo NOT EXISTS clause means
+        # a startup crash partway through (e.g. after inserting some
+        # 'unknown' rows but before completing) still finishes the rest
+        # of the legacy photos on the next startup. An earlier outer
+        # ``if total_unknown_rows == 0`` guard caused remaining photos
+        # to be skipped forever, leaving orphaned mask_path values that
+        # variant-aware APIs and cleanup logic couldn't see.
+        try:
+            rows = self.conn.execute(
+                "SELECT p.id, p.mask_path, p.subject_size, "
+                "p.subject_tenengrad, p.bg_tenengrad, p.crop_complete "
+                "FROM photos p "
+                "WHERE p.mask_path IS NOT NULL "
+                "  AND NOT EXISTS ("
+                "    SELECT 1 FROM photo_masks pm WHERE pm.photo_id = p.id"
+                "  )"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        now = int(time.time())
+        for r in rows:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO photo_masks "
+                "(photo_id, variant, path, created_at, detector_model, "
+                "prompt_x, prompt_y, prompt_w, prompt_h, "
+                "subject_size, subject_tenengrad, bg_tenengrad, crop_complete) "
+                "VALUES (?, 'unknown', ?, ?, 'unknown', -1, -1, -1, -1, ?, ?, ?, ?)",
+                (r["id"], r["mask_path"], now,
+                 r["subject_size"], r["subject_tenengrad"],
+                 r["bg_tenengrad"], r["crop_complete"]),
+            )
+            self.conn.execute(
+                "UPDATE photos SET active_mask_variant='unknown' "
+                "WHERE id=? AND active_mask_variant IS NULL",
+                (r["id"],),
             )
         self.conn.commit()
 
@@ -786,13 +876,15 @@ class Database:
         ).fetchone()
 
     def get_workspaces(self):
-        """Return all workspaces ordered by last_opened_at desc."""
+        """Return all workspaces, pinned first then alphabetical."""
         return self.conn.execute(
-            "SELECT * FROM workspaces ORDER BY last_opened_at DESC"
+            "SELECT * FROM workspaces "
+            "ORDER BY (pinned_at IS NULL), LOWER(name)"
         ).fetchall()
 
     def update_workspace(self, workspace_id, name=None, config_overrides=_UNSET,
-                         ui_state=_UNSET, last_opened_at=None):
+                         ui_state=_UNSET, last_opened_at=None,
+                         pinned_at=_UNSET):
         """Update workspace fields. Only provided args are updated.
 
         For config_overrides and ui_state, pass None to clear the value
@@ -812,6 +904,9 @@ class Database:
         if last_opened_at is not None:
             updates.append("last_opened_at = ?")
             params.append(last_opened_at)
+        if pinned_at is not _UNSET:
+            updates.append("pinned_at = ?")
+            params.append(pinned_at)
         if not updates:
             return
         params.append(workspace_id)
@@ -842,6 +937,57 @@ class Database:
             return _deep_merge(global_config, overrides)
         except (json.JSONDecodeError, TypeError):
             return global_config
+
+    def min_detector_confidence_across_workspaces(self, global_config):
+        """Return the minimum effective ``detector_confidence`` across all
+        workspaces.
+
+        Used by global mask-storage endpoints (``/api/storage/masks`` and
+        ``/api/storage/masks/delete-stale``). Stale-mask scoring depends
+        on the floor under which a detection is treated as too noisy to
+        re-extract from. Picking the *active* workspace's floor would
+        mean switching workspaces changes the global deletion set —
+        masks valid under another workspace's lower floor could be
+        deleted just because the user happened to be in a stricter
+        workspace at the moment. The minimum is the most permissive
+        view: a mask is only considered globally stale when **no**
+        workspace would still consider it fresh.
+        """
+        from config import _deep_merge
+
+        default = global_config.get("detector_confidence", 0.2)
+        try:
+            default = float(default)
+        except (TypeError, ValueError):
+            default = 0.2
+        workspaces = self.get_workspaces()
+        if not workspaces:
+            return default
+        values = []
+        for ws in workspaces:
+            overrides_raw = ws["config_overrides"]
+            if not overrides_raw:
+                values.append(default)
+                continue
+            try:
+                overrides = (
+                    json.loads(overrides_raw)
+                    if isinstance(overrides_raw, str)
+                    else overrides_raw
+                )
+            except (json.JSONDecodeError, TypeError):
+                values.append(default)
+                continue
+            if not isinstance(overrides, dict):
+                values.append(default)
+                continue
+            merged = _deep_merge(global_config, overrides)
+            v = merged.get("detector_confidence", default)
+            try:
+                values.append(float(v))
+            except (TypeError, ValueError):
+                values.append(default)
+        return min(values) if values else default
 
     def get_subject_types(self) -> set[str]:
         """Return the keyword types that count as 'identified' for the active
@@ -2577,130 +2723,156 @@ class Database:
             "sharpness": row["sharpness"] or 0,
         }
 
-    def pipeline_stage_counts(self):
-        """Per-stage counts for the active workspace, used by the pipeline
-        page to render accurate "Will run / Resume / Already done /
-        Outdated" pills. See docs/plans/2026-05-01-pipeline-status-makeover-design.md.
+    def _scope_clause(self, photo_ids, table_alias="p"):
+        """Build a (clause, params) pair to scope a query to photo_ids.
 
-        Extract is intentionally omitted - that block depends on PR #736
-        (per-variant photo_masks) and lands in Phase 3.
+        Returns ('', []) when photo_ids is None (whole-workspace scope).
+        Returns (' AND p.id IN (NULL)', []) for an empty set, which is the
+        intentional "no photos in scope" sentinel — callers asked for
+        "this collection" and the collection resolved to zero photos.
+        """
+        if photo_ids is None:
+            return "", []
+        ids = list(photo_ids)
+        if not ids:
+            return f" AND {table_alias}.id IN (NULL)", []
+        placeholders = ",".join("?" for _ in ids)
+        return f" AND {table_alias}.id IN ({placeholders})", ids
+
+    def count_real_detections_in_scope(self, photo_ids=None, min_conf=None):
+        """Count (photos_with_real_dets, total_real_dets) for the workspace.
+
+        "Real" excludes detector_model='full-image' synthetic anchors.
+        ``photo_ids`` scopes to a collection (set/list of ids); None = whole
+        workspace.
+
+        Used by the pipeline plan to compute classify scope.
+        """
+        ws = self._ws_id()
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(*) AS total_dets,
+                       COUNT(DISTINCT d.photo_id) AS photos_with_dets
+                FROM detections d
+                JOIN photos p ON p.id = d.photo_id
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                WHERE d.detector_model != 'full-image'
+                  AND d.detector_confidence >= ?{scope_sql}""",
+            (ws, min_conf, *scope_params),
+        ).fetchone()
+        return {
+            "photos_with_dets": row["photos_with_dets"] or 0,
+            "total_dets": row["total_dets"] or 0,
+        }
+
+    def count_classify_pending_pairs(
+        self, classifier_model, labels_fingerprint,
+        photo_ids=None, min_conf=None,
+    ):
+        """Count detections in scope that lack a classifier_runs row for
+        (classifier_model, labels_fingerprint).
+
+        Mirrors the gate in classify_job._classify_photos: a real detection
+        with no row in classifier_runs for the given (model, fp) is one
+        unit of pending work for the next classify run.
+        """
+        ws = self._ws_id()
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(*) AS pending
+                FROM detections d
+                JOIN photos p ON p.id = d.photo_id
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                LEFT JOIN classifier_runs cr
+                  ON cr.detection_id = d.id
+                 AND cr.classifier_model = ?
+                 AND cr.labels_fingerprint = ?
+                WHERE d.detector_model != 'full-image'
+                  AND d.detector_confidence >= ?
+                  AND cr.detection_id IS NULL{scope_sql}""",
+            (ws, classifier_model, labels_fingerprint, min_conf, *scope_params),
+        ).fetchone()
+        return row["pending"] or 0
+
+    def count_photos_pending_masks(self, photo_ids=None, min_conf=None):
+        """Return (pending, eligible) for the extract-masks stage.
+
+        eligible = photos in scope with at least one real detection above the
+            workspace's effective detector_confidence
+        pending  = eligible photos whose mask_path IS NULL
+
+        Mirrors extract_masks_stage's per-photo gate (which keys solely on
+        mask_path being unset for photos with non-full-image detections).
+        """
+        ws = self._ws_id()
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT
+                  COUNT(DISTINCT p.id) AS eligible,
+                  COUNT(DISTINCT CASE WHEN p.mask_path IS NULL THEN p.id END)
+                    AS pending
+                FROM photos p
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN detections d
+                  ON d.photo_id = p.id
+                 AND d.detector_model != 'full-image'
+                 AND d.detector_confidence >= ?
+                WHERE 1=1{scope_sql}""",
+            (ws, min_conf, *scope_params),
+        ).fetchone()
+        return {
+            "eligible": row["eligible"] or 0,
+            "pending": row["pending"] or 0,
+        }
+
+    def count_eye_keypoint_eligible(self, photo_ids=None):
+        """Count photos eligible for the eye-keypoint stage, ignoring the
+        ``eye_tenengrad IS NULL`` idempotency gate.
+
+        Eligibility = mask present + at least one non-synthetic detection
+        above min_conf + at least one prediction on that detection. Matches
+        the join shape of ``list_photos_for_eye_keypoint_stage`` minus the
+        "not yet processed" filter, so the plan can distinguish "no
+        eligible photos" from "all eligible photos already processed".
         """
         import config as cfg
-        from pipeline import EYE_KP_FINGERPRINT_VERSION, compute_group_fingerprint
         ws = self._ws_id()
-        effective = self.get_effective_config(cfg.load())
-        min_conf = effective.get("detector_confidence", 0.2)
-
-        # eligible_total + scan.done + previews.done in one pass
-        scan_row = self.conn.execute(
-            """SELECT
-                  COUNT(*) AS eligible,
-                  SUM(CASE WHEN p.timestamp IS NOT NULL AND p.width IS NOT NULL
-                           THEN 1 ELSE 0 END) AS scan_done,
-                  SUM(CASE WHEN p.thumb_path IS NOT NULL THEN 1 ELSE 0 END) AS previews_done
-               FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-              WHERE wf.workspace_id = ?""",
-            (ws,),
+        min_conf = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2,
+        )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT p.id) AS n
+                FROM photos p
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN detections d
+                  ON d.photo_id = p.id
+                 AND d.detector_model != 'full-image'
+                 AND d.detector_confidence >= ?
+                JOIN predictions pr ON pr.detection_id = d.id
+                WHERE p.mask_path IS NOT NULL{scope_sql}""",
+            (ws, min_conf, *scope_params),
         ).fetchone()
-        eligible = scan_row["eligible"] or 0
-
-        # detect.done - distinct photos with at least one above-threshold non-full-image
-        # detection in this workspace.
-        detect_done = self.conn.execute(
-            """SELECT COUNT(DISTINCT d.photo_id)
-                 FROM detections d
-                 JOIN photos p ON p.id = d.photo_id
-                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                WHERE wf.workspace_id = ?
-                  AND d.detector_confidence >= ?
-                  AND d.detector_model != 'full-image'""",
-            (ws, min_conf),
-        ).fetchone()[0] or 0
-
-        # classify.done / .stale - uses classifier_runs + current model + fp.
-        # If the user has never selected a classifier model the count is 0;
-        # the UI then renders "Will run" naturally.
-        pipe_cfg = effective.get("pipeline", {})
-        cur_model = pipe_cfg.get("classifier_model", "")
-        cur_labels_fp = pipe_cfg.get("labels_fingerprint", "")  # set by classifier loader
-        classify_done = 0
-        classify_stale = 0
-        if cur_model and cur_labels_fp:
-            classify_done = self.conn.execute(
-                """SELECT COUNT(DISTINCT d.photo_id)
-                     FROM detections d
-                     JOIN classifier_runs cr ON cr.detection_id = d.id
-                     JOIN photos p ON p.id = d.photo_id
-                     JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                    WHERE wf.workspace_id = ?
-                      AND cr.classifier_model = ?
-                      AND cr.labels_fingerprint = ?
-                      AND d.detector_confidence >= ?
-                      AND d.detector_model != 'full-image'""",
-                (ws, cur_model, cur_labels_fp, min_conf),
-            ).fetchone()[0] or 0
-            classify_stale = self.conn.execute(
-                """SELECT COUNT(DISTINCT d.photo_id)
-                     FROM detections d
-                     JOIN classifier_runs cr ON cr.detection_id = d.id
-                     JOIN photos p ON p.id = d.photo_id
-                     JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                    WHERE wf.workspace_id = ?
-                      AND (cr.classifier_model != ? OR cr.labels_fingerprint != ?)
-                      AND d.detector_confidence >= ?
-                      AND d.detector_model != 'full-image'""",
-                (ws, cur_model, cur_labels_fp, min_conf),
-            ).fetchone()[0] or 0
-            # Phase 1 approximation: subtract done from stale to avoid
-            # double-counting photos with both matching and non-matching runs.
-            # May undercount when a photo has BOTH (rare); acceptable here
-            # because the UI only uses these for coarse "outdated?" signals.
-            classify_stale = max(0, classify_stale - classify_done)
-
-        # eye_kp.done / .stale
-        eye_done = self.conn.execute(
-            """SELECT COUNT(*)
-                 FROM photos p
-                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                WHERE wf.workspace_id = ?
-                  AND p.eye_tenengrad IS NOT NULL
-                  AND p.eye_kp_fingerprint = ?""",
-            (ws, EYE_KP_FINGERPRINT_VERSION),
-        ).fetchone()[0] or 0
-        eye_stale = self.conn.execute(
-            """SELECT COUNT(*)
-                 FROM photos p
-                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                WHERE wf.workspace_id = ?
-                  AND p.eye_tenengrad IS NOT NULL
-                  AND (p.eye_kp_fingerprint IS NULL OR p.eye_kp_fingerprint != ?)""",
-            (ws, EYE_KP_FINGERPRINT_VERSION),
-        ).fetchone()[0] or 0
-
-        # group state
-        gs_row = self.conn.execute(
-            "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
-            (ws,),
-        ).fetchone()
-        cur_group_fp = compute_group_fingerprint(effective)
-        last_at = gs_row["last_grouped_at"] if gs_row else None
-        last_fp = gs_row["last_group_fingerprint"] if gs_row else None
-        group_computed = last_fp is not None
-        group_stale = group_computed and last_fp != cur_group_fp
-
-        return {
-            "scan":     {"done": scan_row["scan_done"] or 0,    "stale": 0, "eligible_total": eligible, "total": eligible},
-            "previews": {"done": scan_row["previews_done"] or 0, "stale": 0, "eligible_total": eligible, "total": eligible},
-            "detect":   {"done": detect_done, "stale": 0, "eligible_total": eligible, "total": eligible,
-                         "fingerprint": "megadetector-v6"},
-            "classify": {"done": classify_done, "stale": classify_stale, "eligible_total": eligible, "total": eligible,
-                         "fingerprint": f"{cur_model}|{cur_labels_fp}" if cur_model else None},
-            "eye_kp":   {"done": eye_done, "stale": eye_stale, "eligible_total": eligible, "total": eligible,
-                         "fingerprint": EYE_KP_FINGERPRINT_VERSION},
-            "group":    {"computed": group_computed, "stale": group_stale,
-                         "last_at": last_at, "fingerprint": cur_group_fp},
-        }
+        return row["n"] or 0
 
     def get_dashboard_stats(self):
         """Return aggregate statistics for the dashboard."""
@@ -3762,11 +3934,348 @@ class Database:
         )
         commit_with_retry(self.conn)
 
-    def update_photo_mask(self, photo_id, mask_path):
-        """Store the mask file path for a photo."""
+    def get_photo_mask(self, photo_id, variant):
+        row = self.conn.execute(
+            "SELECT * FROM photo_masks WHERE photo_id=? AND variant=?",
+            (photo_id, variant),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_masks_for_photo(self, photo_id):
+        rows = self.conn.execute(
+            "SELECT * FROM photo_masks WHERE photo_id=? ORDER BY created_at DESC",
+            (photo_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_active_mask_variant(self, photo_id, variant, _commit=True):
+        """Mark `variant` as active for `photo_id` and denormalize its
+        fields into the photos row (mask_path + per-mask features) so
+        downstream readers (scoring, pipeline) see the active mask.
+
+        ``_commit=False`` lets bulk callers (e.g. the
+        ``/api/pipeline/active-mask-variant`` endpoint) batch many
+        per-photo updates into a single commit, instead of paying a WAL
+        fsync per photo. Bulk callers MUST call ``commit_with_retry``
+        themselves once the loop completes.
+        """
+        row = self.conn.execute(
+            "SELECT path, subject_size, subject_tenengrad, bg_tenengrad, "
+            "crop_complete FROM photo_masks WHERE photo_id=? AND variant=?",
+            (photo_id, variant),
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"No photo_masks row for photo {photo_id} variant {variant!r}"
+            )
         self.conn.execute(
-            "UPDATE photos SET mask_path=? WHERE id=?",
-            (mask_path, photo_id),
+            "UPDATE photos SET mask_path=?, active_mask_variant=?, "
+            "subject_size=?, subject_tenengrad=?, bg_tenengrad=?, "
+            "crop_complete=? WHERE id=?",
+            (row["path"], variant, row["subject_size"],
+             row["subject_tenengrad"], row["bg_tenengrad"],
+             row["crop_complete"], photo_id),
+        )
+        if _commit:
+            commit_with_retry(self.conn)
+
+    def _masks_dir_real(self):
+        """Realpath of the masks directory, used as the containment root
+        for cleanup deletes. Returns None for ``:memory:`` databases or
+        when the parent directory can't be resolved (in which case the
+        caller refuses to delete files by stored path).
+        """
+        if self._db_path == ":memory:":
+            return None
+        parent = os.path.dirname(self._db_path)
+        if not parent:
+            return None
+        return os.path.realpath(os.path.join(parent, "masks"))
+
+    def _safe_remove_mask_file(self, path):
+        """``os.remove`` ``path`` only if it resolves inside the masks
+        directory. The user-triggerable storage cleanup endpoints feed
+        ``photo_masks.path`` straight into this; without the realpath
+        containment check, a corrupted or migrated row pointing at
+        ``/etc/...`` could cause arbitrary file deletion. Mirrors the
+        defense already in place on ``/api/masks/<pid>/<variant>.png``.
+        """
+        if not path:
+            return
+        masks_dir = self._masks_dir_real()
+        if masks_dir is None:
+            log.warning(
+                "Refusing to remove mask file %s (no masks dir resolved)",
+                path,
+            )
+            return
+        try:
+            abs_path = os.path.realpath(path)
+        except OSError:
+            log.warning("Failed to resolve mask path %s", path)
+            return
+        if not (abs_path == masks_dir
+                or abs_path.startswith(masks_dir + os.sep)):
+            log.warning(
+                "Refusing to remove mask file %s outside masks dir %s",
+                path, masks_dir,
+            )
+            return
+        try:
+            if os.path.isfile(abs_path):
+                os.remove(abs_path)
+        except OSError:
+            log.warning("Failed to remove mask file %s", abs_path)
+
+    def delete_masks_for_variant(self, variant):
+        """Delete all photo_masks rows + files for a variant.
+        Refuses if the variant is active for any photo (caller must
+        switch active first)."""
+        active_count = self.conn.execute(
+            "SELECT COUNT(*) FROM photos WHERE active_mask_variant=?",
+            (variant,),
+        ).fetchone()[0]
+        if active_count > 0:
+            raise ValueError(
+                f"Variant {variant!r} is active for {active_count} photo(s); "
+                "switch active variant before deleting"
+            )
+        rows = self.conn.execute(
+            "SELECT path FROM photo_masks WHERE variant=?", (variant,),
+        ).fetchall()
+        for r in rows:
+            self._safe_remove_mask_file(r["path"])
+        self.conn.execute("DELETE FROM photo_masks WHERE variant=?", (variant,))
+        commit_with_retry(self.conn)
+        return len(rows)
+
+    def delete_inactive_masks(self):
+        """Delete all photo_masks rows + files except the active variant
+        per photo. Returns the number of rows deleted.
+
+        Photos whose ``active_mask_variant IS NULL`` are skipped entirely
+        (we never delete the only mask we know about). The user must
+        promote a variant to active first via the pipeline page; the
+        sentinel migration variant ``'unknown'`` is set as active for
+        legacy photos, so this is only the partial-state case where a
+        prior pipeline run wrote ``photo_masks`` but crashed before
+        ``set_active_mask_variant`` ran.
+        """
+        rows = self.conn.execute(
+            "SELECT pm.photo_id, pm.variant, pm.path FROM photo_masks pm "
+            "JOIN photos p ON p.id = pm.photo_id "
+            "WHERE p.active_mask_variant IS NOT NULL "
+            "  AND p.active_mask_variant != pm.variant"
+        ).fetchall()
+        for r in rows:
+            self._safe_remove_mask_file(r["path"])
+            self.conn.execute(
+                "DELETE FROM photo_masks WHERE photo_id=? AND variant=?",
+                (r["photo_id"], r["variant"]),
+            )
+        commit_with_retry(self.conn)
+        return len(rows)
+
+    def find_stale_masks(self, detector_confidence=None):
+        """Return photo_masks rows whose stored prompt no longer matches
+        the photo's current primary detection (highest-confidence,
+        non full-image).
+
+        A mask is fresh only if its stored ``(detector_model, prompt_*)``
+        equals the photo's primary detection — the single
+        highest-confidence non-``full-image`` row. Matching against any
+        detection (e.g., a low-confidence secondary box still carrying
+        the old coordinates, or another retained model's row) would
+        leave stale cache entries lingering after detector/model
+        changes, so we pick exactly one primary row per photo and
+        require the prompt to equal that row.
+
+        Tie-break: when multiple detections share the maximum
+        confidence, both this query and the extraction code in
+        ``api_job_extract_masks`` / ``get_detections`` resolve to the
+        smallest ``detections.id`` (insertion order). Using
+        ``MAX(detector_confidence)`` here would leave the primary
+        ambiguous on ties — a mask matching either tied row could be
+        treated as fresh even though extraction is now using the other
+        one. ``ORDER BY detector_confidence DESC, id ASC LIMIT 1`` keeps
+        stale-detection and extraction in sync.
+
+        ``detector_confidence`` is an optional workspace floor (the same
+        threshold both extraction paths apply when picking detections to
+        run SAM on). When provided, detections below the floor are
+        invisible to this query, so masks whose prompt only matches a
+        below-threshold box — i.e. masks the pipeline would no longer
+        regenerate from that detection — are correctly flagged stale.
+        Without this filter, raising ``detector_confidence`` left the
+        storage card under-counting stale masks and ``delete_stale_masks``
+        leaving them on disk.
+        """
+        if detector_confidence is None:
+            conf_pred = ""
+            params = ()
+        else:
+            conf_pred = " AND d2.detector_confidence >= ?"
+            params = (detector_confidence,)
+        rows = self.conn.execute(
+            f"""
+            SELECT pm.photo_id, pm.variant, pm.path,
+                   pm.detector_model, pm.prompt_x, pm.prompt_y,
+                   pm.prompt_w, pm.prompt_h
+              FROM photo_masks pm
+             WHERE NOT EXISTS (
+                SELECT 1 FROM detections d
+                 WHERE d.id = (
+                       SELECT d2.id
+                         FROM detections d2
+                        WHERE d2.photo_id = pm.photo_id
+                          AND d2.detector_model != 'full-image'
+                          {conf_pred}
+                        ORDER BY d2.detector_confidence DESC, d2.id ASC
+                        LIMIT 1
+                   )
+                   AND d.detector_model = pm.detector_model
+                   AND d.box_x = pm.prompt_x
+                   AND d.box_y = pm.prompt_y
+                   AND d.box_w = pm.prompt_w
+                   AND d.box_h = pm.prompt_h
+             )
+            """,
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_stale_masks(self, detector_confidence=None):
+        """Remove rows + files for masks whose prompt no longer matches
+        the current primary detection. Skips active variants (caller can
+        re-run them through the pipeline instead of dropping the
+        currently-displayed mask).
+
+        ``detector_confidence`` is forwarded to :meth:`find_stale_masks`
+        so the deletion set matches the count the storage card shows.
+        """
+        stale = self.find_stale_masks(detector_confidence=detector_confidence)
+        deleted = 0
+        for s in stale:
+            is_active = self.conn.execute(
+                "SELECT 1 FROM photos WHERE id=? AND active_mask_variant=?",
+                (s["photo_id"], s["variant"]),
+            ).fetchone()
+            if is_active:
+                continue
+            self._safe_remove_mask_file(s["path"])
+            self.conn.execute(
+                "DELETE FROM photo_masks WHERE photo_id=? AND variant=?",
+                (s["photo_id"], s["variant"]),
+            )
+            deleted += 1
+        commit_with_retry(self.conn)
+        return deleted
+
+    def mask_variant_coverage(self):
+        """Per-variant photo coverage in the **active workspace**.
+
+        photo_masks rows are global (a single mask file is shared across
+        workspaces), but the pipeline page wants workspace-scoped numbers
+        so a user with a small workspace doesn't see counts dominated by
+        photos they can't see. For each variant present in photo_masks,
+        return the count of distinct workspace photos that have a row for
+        that variant, plus the count of those that also have it active.
+
+        Returns: list of dicts {variant, count, active_count} ordered by
+        variant name. Variants with zero workspace photos are omitted.
+        """
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """
+            SELECT pm.variant,
+                   COUNT(DISTINCT pm.photo_id) AS count,
+                   SUM(CASE WHEN p.active_mask_variant = pm.variant
+                            THEN 1 ELSE 0 END) AS active_count
+              FROM photo_masks pm
+              JOIN photos p ON p.id = pm.photo_id
+              JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+             WHERE wf.workspace_id = ?
+             GROUP BY pm.variant
+             ORDER BY pm.variant
+            """,
+            (ws,),
+        ).fetchall()
+        return [
+            {"variant": r["variant"],
+             "count": r["count"] or 0,
+             "active_count": r["active_count"] or 0}
+            for r in rows
+        ]
+
+    def mask_variants_summary(self):
+        """Per-variant summary: count, total bytes (best-effort, sums
+        on-disk file sizes), and active_count.
+
+        Returns: list of dicts ordered by variant name.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT pm.variant,
+                   COUNT(*) AS count,
+                   SUM(CASE WHEN p.active_mask_variant = pm.variant
+                            THEN 1 ELSE 0 END) AS active_count
+              FROM photo_masks pm
+              JOIN photos p ON p.id = pm.photo_id
+             GROUP BY pm.variant
+             ORDER BY pm.variant
+            """
+        ).fetchall()
+        out = []
+        for r in rows:
+            paths = self.conn.execute(
+                "SELECT path FROM photo_masks WHERE variant=?", (r["variant"],),
+            ).fetchall()
+            total = 0
+            for pr in paths:
+                try:
+                    if pr["path"] and os.path.isfile(pr["path"]):
+                        total += os.path.getsize(pr["path"])
+                except OSError:
+                    pass
+            out.append({
+                "variant": r["variant"],
+                "count": r["count"],
+                "active_count": r["active_count"],
+                "bytes": total,
+            })
+        return out
+
+    def upsert_photo_mask(
+        self, photo_id, variant, path,
+        detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
+        subject_size=None, subject_tenengrad=None,
+        bg_tenengrad=None, crop_complete=None,
+    ):
+        """Insert or replace a mask row for (photo_id, variant)."""
+        self.conn.execute(
+            """
+            INSERT INTO photo_masks (
+                photo_id, variant, path, created_at,
+                detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
+                subject_size, subject_tenengrad, bg_tenengrad, crop_complete
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(photo_id, variant) DO UPDATE SET
+                path=excluded.path,
+                created_at=excluded.created_at,
+                detector_model=excluded.detector_model,
+                prompt_x=excluded.prompt_x,
+                prompt_y=excluded.prompt_y,
+                prompt_w=excluded.prompt_w,
+                prompt_h=excluded.prompt_h,
+                subject_size=excluded.subject_size,
+                subject_tenengrad=excluded.subject_tenengrad,
+                bg_tenengrad=excluded.bg_tenengrad,
+                crop_complete=excluded.crop_complete
+            """,
+            (photo_id, variant, path, int(time.time()),
+             detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
+             subject_size, subject_tenengrad, bg_tenengrad, crop_complete),
         )
         commit_with_retry(self.conn)
 
@@ -3856,7 +4365,7 @@ class Database:
                     WHERE p.folder_id IN ({placeholders})
                       AND p.mask_path IS NULL
                       AND d.detector_confidence >= ?
-                    ORDER BY p.id, d.detector_confidence DESC""",
+                    ORDER BY p.id, d.detector_confidence DESC, d.id ASC""",
                 [ws_id, *folder_ids, min_conf],
             ).fetchall()
         else:
@@ -3870,7 +4379,7 @@ class Database:
                    WHERE wf.workspace_id = ?
                      AND p.mask_path IS NULL
                      AND d.detector_confidence >= ?
-                   ORDER BY p.id, d.detector_confidence DESC""",
+                   ORDER BY p.id, d.detector_confidence DESC, d.id ASC""",
                 (ws_id, min_conf),
             ).fetchall()
 
@@ -6227,7 +6736,12 @@ class Database:
         if detector_model is not None:
             q += " AND detector_model = ?"
             params.append(detector_model)
-        q += " ORDER BY detector_confidence DESC"
+        # Explicit ``id ASC`` tie-break so callers that take the first
+        # row (mask extraction's primary detection picker) agree with
+        # ``find_stale_masks`` on which row is the primary when two
+        # detections share the maximum confidence. Without this,
+        # SQLite's row order on ties is implementation-defined.
+        q += " ORDER BY detector_confidence DESC, id ASC"
         return self.conn.execute(q, params).fetchall()
 
     def get_detections_for_photos(self, photo_ids, min_conf=None,

@@ -11,6 +11,7 @@ import logging.handlers
 import math
 import os
 import queue
+import re
 import subprocess
 import sys
 import time
@@ -20,7 +21,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import places
-from db import KEYWORD_TYPES, Database
+from db import KEYWORD_TYPES, Database, commit_with_retry
 from flask import (
     Flask,
     Response,
@@ -1201,17 +1202,50 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "has_detections": pipeline_counts["detections"],
             "has_masks": pipeline_counts["masks"],
             "has_sharpness": pipeline_counts["sharpness"],
-            "stages": db.pipeline_stage_counts(),
             "taxonomy_available": taxonomy_available,
             "pipeline_config": {
                 "sam2_variant": pipeline_cfg.get("sam2_variant", "sam2-small"),
                 "dinov2_variant": pipeline_cfg.get("dinov2_variant", "vit-b14"),
                 "proxy_longest_edge": pipeline_cfg.get("proxy_longest_edge", 1536),
+                "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", True),
             },
+            "mask_variant_coverage": db.mask_variant_coverage(),
             "results": results,
             "workspace_overrides": ws_overrides,
             "recent_destinations": effective_cfg.get("ingest", {}).get("recent_destinations", []),
         })
+
+    @app.route("/api/pipeline/plan", methods=["POST"])
+    def api_pipeline_plan():
+        """Return the per-stage plan for the pipeline given current UI selections.
+
+        Truth source for the Pipeline page's status pills + plan summary —
+        each stage's state ("Will run", "Will skip", "Already done") and
+        its summary text are computed from the same gates the actual
+        pipeline job uses, so the user is never told a stage is done when
+        it isn't (or vice versa).
+
+        Body mirrors a subset of the /api/jobs/pipeline body so the page
+        can pass through the same selections the user is staging.
+        """
+        from pipeline_plan import PipelinePlanParams, compute_plan
+
+        body = request.get_json(silent=True) or {}
+        params = PipelinePlanParams(
+            collection_id=body.get("collection_id"),
+            exclude_photo_ids=body.get("exclude_photo_ids") or [],
+            skip_classify=bool(body.get("skip_classify")),
+            skip_extract_masks=bool(body.get("skip_extract_masks")),
+            skip_eye_keypoints=bool(body.get("skip_eye_keypoints")),
+            skip_regroup=bool(body.get("skip_regroup")),
+            model_ids=body.get("model_ids") or (
+                [body["model_id"]] if body.get("model_id") else []
+            ),
+            labels_files=body.get("labels_files") or [],
+            reclassify=bool(body.get("reclassify")),
+        )
+        db = _get_db()
+        return jsonify(compute_plan(db, params, db_path))
 
     @app.route("/api/folders")
     def api_folders():
@@ -3005,6 +3039,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return jsonify({"ok": True, "workspace": dict(ws), "restore_path": restore_path})
 
+    @app.route("/api/workspaces/<int:ws_id>/pin", methods=["POST"])
+    def api_pin_workspace(ws_id):
+        db = _get_db()
+        ws = db.get_workspace(ws_id)
+        if not ws:
+            return json_error("Workspace not found", 404)
+        body = request.get_json(silent=True) or {}
+        pinned = body.get("pinned", True)
+        if not isinstance(pinned, bool):
+            return json_error("`pinned` must be a boolean")
+        from datetime import datetime
+        db.update_workspace(
+            ws_id,
+            pinned_at=datetime.now().isoformat() if pinned else None,
+        )
+        return jsonify(dict(db.get_workspace(ws_id)))
+
     @app.route("/api/workspaces/<int:ws_id>/folders", methods=["GET"])
     def api_workspace_folders(ws_id):
         db = _get_db()
@@ -3878,60 +3929,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "dinov2_known": dinov2_variant in DINOV2_VARIANTS,
         })
 
-    # --- Eye-focus keypoint model download (opt-in) ---
-    _ALLOWED_KEYPOINT_MODELS = (
-        "superanimal-quadruped",
-        "superanimal-bird",
-        "rtmpose-animal",
-    )
-
-    @app.route("/api/models/keypoints/status")
-    def api_keypoints_status():
-        """Return download state for each eye-focus keypoint model."""
-        import keypoints as kp
-
-        return jsonify({
-            name.replace("-", "_"): kp.weights_status(name)
-            for name in _ALLOWED_KEYPOINT_MODELS
-        })
-
-    @app.route(
-        "/api/models/keypoints/<model_name>/download",
-        methods=["POST"],
-    )
-    def api_keypoints_download(model_name):
-        """Trigger a background download of the named keypoint model.
-
-        Rejects unknown model names so a bad argument can't be coerced into
-        an arbitrary HuggingFace fetch. Returns immediately; the client
-        polls /api/models/keypoints/status to observe progress.
-        """
-        import threading
-
-        import keypoints as kp
-
-        if model_name not in _ALLOWED_KEYPOINT_MODELS:
-            return json_error(f"unknown keypoint model {model_name!r}", 400)
-
-        current = kp.weights_status(model_name)
-        if current in ("ready", "downloading"):
-            return jsonify({"status": current})
-
-        def _download():
-            kp._download_state[model_name] = "downloading"
-            try:
-                kp.ensure_keypoint_weights(model_name)
-                kp._download_state[model_name] = "idle"
-            except Exception as exc:
-                log.warning(
-                    "Keypoint weights download failed for %s: %s",
-                    model_name, exc,
-                )
-                kp._download_state[model_name] = "failed"
-
-        threading.Thread(target=_download, daemon=True).start()
-        return jsonify({"status": "downloading"})
-
     @app.route("/api/system/install-exiftool", methods=["POST"])
     def api_install_exiftool():
         """Install exiftool via Homebrew."""
@@ -4583,6 +4580,78 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "hf_cache": {"size": hf_size, "path": hf_cache, "models": hf_models},
             }
         )
+
+    @app.route("/api/storage/masks")
+    def api_storage_masks():
+        """Per-variant SAM mask summary (counts, bytes, active counts)
+        plus stale-mask count for the storage dashboard."""
+        import config as cfg
+
+        db = _get_db()
+        # Storage is global across all workspaces, so the stale floor
+        # must be too. Using the active workspace's detector_confidence
+        # would make stale_count flip when the user switches workspaces
+        # and let masks valid under another workspace's lower floor
+        # show up as stale. The minimum across workspaces is the most
+        # permissive view: only mark a mask stale when no workspace
+        # would still consider it fresh.
+        min_detector_conf = db.min_detector_confidence_across_workspaces(
+            cfg.load()
+        )
+        variants = db.mask_variants_summary()
+        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
+        masks_dir = os.path.join(os.path.dirname(db_path), "masks")
+        return jsonify({
+            "variants": variants,
+            "total_bytes": sum(v["bytes"] for v in variants),
+            "stale_count": len(stale),
+            "path": masks_dir,
+        })
+
+    @app.route("/api/storage/masks/delete-variant", methods=["POST"])
+    def api_storage_masks_delete_variant():
+        """Delete all photo_masks rows + files for the given variant.
+        Returns 400 when the variant is currently active for any photo.
+        """
+        body = request.get_json(silent=True) or {}
+        variant = body.get("variant", "")
+        if not variant:
+            return json_error("variant required")
+        db = _get_db()
+        try:
+            n = db.delete_masks_for_variant(variant)
+        except ValueError as e:
+            return json_error(str(e), 400)
+        log.info("Deleted %d masks for variant %s", n, variant)
+        return jsonify({"ok": True, "deleted": n})
+
+    @app.route("/api/storage/masks/delete-inactive", methods=["POST"])
+    def api_storage_masks_delete_inactive():
+        """Delete all non-active variant masks across all photos."""
+        db = _get_db()
+        n = db.delete_inactive_masks()
+        log.info("Deleted %d inactive-variant masks", n)
+        return jsonify({"ok": True, "deleted": n})
+
+    @app.route("/api/storage/masks/delete-stale", methods=["POST"])
+    def api_storage_masks_delete_stale():
+        """Delete masks whose stored prompt no longer matches the current
+        primary detection. Skips active variants."""
+        import config as cfg
+
+        db = _get_db()
+        # Mirror /api/storage/masks: the deletion set must be a function
+        # of the data, not of which workspace happens to be active.
+        # Using the cross-workspace minimum keeps the count and the
+        # delete in sync and prevents deleting masks that another
+        # workspace's lower detector_confidence would still consider
+        # fresh.
+        min_detector_conf = db.min_detector_confidence_across_workspaces(
+            cfg.load()
+        )
+        n = db.delete_stale_masks(detector_confidence=min_detector_conf)
+        log.info("Deleted %d stale masks", n)
+        return jsonify({"ok": True, "deleted": n})
 
     @app.route("/api/storage/files")
     def api_storage_files():
@@ -9057,12 +9126,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         sam2_variant = pipeline_cfg.get("sam2_variant", "sam2-small")
         dinov2_variant = pipeline_cfg.get("dinov2_variant", "vit-b14")
         proxy_longest_edge = pipeline_cfg.get("proxy_longest_edge", 1536)
+        # Workspace-effective detector_confidence floor. Both the
+        # collection branch (via get_detections) and the workspace SQL
+        # below filter on this so we don't run SAM/DINO on noisy
+        # below-threshold boxes — matching get_photos_missing_masks.
+        min_detector_conf = effective_cfg.get("detector_confidence", 0.2)
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
-            from dino_embed import embed_global, embed_subject, embedding_to_blob
+            import numpy as np
+            from dino_embed import embed, embed_batch, embedding_to_blob
             from masking import (
                 crop_completeness,
                 crop_subject,
@@ -9078,33 +9153,89 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             masks_dir = os.path.join(os.path.dirname(db_path), "masks")
             os.makedirs(masks_dir, exist_ok=True)
 
-            # Get photos that have detections but no masks
+            # Get photos that have a real (non full-image) detection. The
+            # legacy `mask_path IS NULL` gate would silently skip every
+            # photo whose stored mask was made by a *different* SAM
+            # variant — leaving photo_masks empty for the configured
+            # variant. The per-photo cache check inside the loop below
+            # against photo_masks(photo_id, sam2_variant) handles
+            # "already cached for this variant" correctly.
             if collection_id:
                 coll_photos = thread_db.get_collection_photos(
                     collection_id, per_page=999999
                 )
-                # Filter to photos with detections but no masks. Detection
-                # threshold is resolved at read time from the workspace's
-                # effective config (detections table is global now).
                 photos = []
                 for p in coll_photos:
-                    if p["mask_path"]:
-                        continue
-                    dets = thread_db.get_detections(p["id"])
+                    dets = [
+                        d for d in thread_db.get_detections(
+                            p["id"], min_conf=min_detector_conf,
+                        )
+                        if d["detector_model"] != "full-image"
+                    ]
                     if dets:
                         det = dets[0]
                         photos.append({
                             "id": p["id"],
                             "folder_id": p["folder_id"],
                             "filename": p["filename"],
+                            "detector_model": det["detector_model"],
                             "detection_box": json.dumps({
                                 "x": det["box_x"], "y": det["box_y"],
                                 "w": det["box_w"], "h": det["box_h"],
                             }),
                             "detection_conf": det["detector_confidence"],
+                            # Full-precision REAL prompt — see pipeline_job
+                            # for the rationale; int() would truncate the
+                            # normalized [0,1] bbox to (0,0,0,0) and break
+                            # cache invalidation on bbox change.
+                            "prompt": (
+                                det["box_x"], det["box_y"],
+                                det["box_w"], det["box_h"],
+                            ),
                         })
             else:
-                photos = thread_db.get_photos_missing_masks()
+                # All workspace photos with at least one real
+                # (non full-image) detection. Direct SQL keeps this
+                # one round-trip to SQLite per workspace; the per-photo
+                # cache check inside the loop handles "skip when
+                # already masked for this variant".
+                ws_id = thread_db._active_workspace_id
+                rows = thread_db.conn.execute(
+                    """SELECT p.id, p.folder_id, p.filename,
+                              d.detector_model,
+                              d.box_x, d.box_y, d.box_w, d.box_h,
+                              d.detector_confidence
+                         FROM photos p
+                         JOIN workspace_folders wf
+                              ON wf.folder_id = p.folder_id
+                         JOIN detections d ON d.photo_id = p.id
+                        WHERE wf.workspace_id = ?
+                          AND d.detector_model != 'full-image'
+                          AND d.detector_confidence >= ?
+                        ORDER BY p.id, d.detector_confidence DESC, d.id ASC""",
+                    (ws_id, min_detector_conf),
+                ).fetchall()
+                seen = set()
+                photos = []
+                for r in rows:
+                    if r["id"] in seen:
+                        continue
+                    seen.add(r["id"])
+                    photos.append({
+                        "id": r["id"],
+                        "folder_id": r["folder_id"],
+                        "filename": r["filename"],
+                        "detector_model": r["detector_model"],
+                        "detection_box": json.dumps({
+                            "x": r["box_x"], "y": r["box_y"],
+                            "w": r["box_w"], "h": r["box_h"],
+                        }),
+                        "detection_conf": r["detector_confidence"],
+                        "prompt": (
+                            r["box_x"], r["box_y"],
+                            r["box_w"], r["box_h"],
+                        ),
+                    })
 
             folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
             total = len(photos)
@@ -9119,6 +9250,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 image_path = os.path.join(folder_path, photo["filename"])
 
                 try:
+                    # Cache hit: photo_masks already has a row for
+                    # (photo, configured variant) AND its stored prompt
+                    # + detector still match the current primary
+                    # detection AND the file is on disk. Skip SAM and
+                    # just (re-)activate the cached mask.
+                    existing = thread_db.get_photo_mask(
+                        photo_id, sam2_variant,
+                    )
+                    if existing is not None:
+                        cached_prompt = (
+                            existing["prompt_x"], existing["prompt_y"],
+                            existing["prompt_w"], existing["prompt_h"],
+                        )
+                        if (existing["detector_model"]
+                                == photo["detector_model"]
+                                and cached_prompt == photo["prompt"]
+                                and existing["path"]
+                                and os.path.isfile(existing["path"])):
+                            thread_db.set_active_mask_variant(
+                                photo_id, sam2_variant,
+                            )
+                            masked += 1
+                            runner.push_event(
+                                job["id"],
+                                "progress",
+                                {
+                                    "current": i + 1,
+                                    "total": total,
+                                    "current_file": photo["filename"],
+                                    "rate": round(
+                                        (i + 1) / max(
+                                            time.time() - job["_start_time"], 0.01,
+                                        ),
+                                        1,
+                                    ),
+                                    "phase": "Extracting features (SAM2 + DINOv2)",
+                                },
+                            )
+                            continue
+
                     # Load working-resolution proxy
                     proxy = render_proxy(image_path, longest_edge=proxy_longest_edge)
                     if proxy is None:
@@ -9136,30 +9307,77 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         skipped += 1
                         continue
 
-                    # Save mask PNG
-                    mask_path = save_mask(mask, masks_dir, photo_id)
+                    # Save mask PNG (per SAM variant; one file per variant)
+                    mask_path = save_mask(
+                        mask, masks_dir, photo_id, sam2_variant,
+                    )
 
                     # Compute crop completeness + all quality features
                     completeness = crop_completeness(mask)
                     features = compute_all_quality_features(proxy, mask)
 
-                    # Compute DINOv2 embeddings
+                    # Compute DINOv2 embeddings — one batched call when both
+                    # subject and global are needed, since DINOv2 is CPU-only
+                    # for external-data ONNX exports and per-call overhead is
+                    # the bottleneck.
                     subject_crop = crop_subject(proxy, mask, margin=0.15)
-                    subj_emb_blob = None
-                    global_emb_blob = None
                     if subject_crop is not None:
-                        subj_emb = embed_subject(subject_crop, variant=dinov2_variant)
-                        subj_emb_blob = embedding_to_blob(subj_emb)
-                    global_emb = embed_global(proxy, variant=dinov2_variant)
-                    global_emb_blob = embedding_to_blob(global_emb)
+                        embs = embed_batch(
+                            [subject_crop, proxy], variant=dinov2_variant,
+                        )
+                        subj_emb_blob = embedding_to_blob(embs[0])
+                        global_emb_blob = embedding_to_blob(embs[1])
+                    else:
+                        subj_emb_blob = None
+                        global_emb_blob = embedding_to_blob(
+                            embed(proxy, variant=dinov2_variant),
+                        )
 
-                    # Update DB with mask path, completeness, features, and embeddings
-                    thread_db.update_photo_pipeline_features(
-                        photo_id,
-                        mask_path=mask_path,
-                        crop_complete=completeness,
-                        **features,
+                    # Per-mask features: pop them out of `features` so
+                    # they land on the photo_masks row and not on the
+                    # photos row directly. set_active_mask_variant
+                    # denormalizes them back into photos for downstream
+                    # readers.
+                    mask_subject_tenengrad = features.pop(
+                        "subject_tenengrad", None,
                     )
+                    mask_bg_tenengrad = features.pop("bg_tenengrad", None)
+                    # Mask-derived subject_size: fraction of frame
+                    # covered by the boolean mask.
+                    total_pixels = float(mask.size)
+                    if total_pixels > 0:
+                        mask_subject_size = float(
+                            np.count_nonzero(mask) / total_pixels
+                        )
+                    else:
+                        mask_subject_size = None
+
+                    thread_db.upsert_photo_mask(
+                        photo_id=photo_id,
+                        variant=sam2_variant,
+                        path=mask_path,
+                        detector_model=photo["detector_model"],
+                        prompt_x=photo["prompt"][0],
+                        prompt_y=photo["prompt"][1],
+                        prompt_w=photo["prompt"][2],
+                        prompt_h=photo["prompt"][3],
+                        subject_size=mask_subject_size,
+                        subject_tenengrad=mask_subject_tenengrad,
+                        bg_tenengrad=mask_bg_tenengrad,
+                        crop_complete=completeness,
+                    )
+                    thread_db.set_active_mask_variant(
+                        photo_id, sam2_variant,
+                    )
+                    # Remaining (non-mask) per-photo features still land
+                    # on the photos row. mask_path / crop_complete /
+                    # subject_tenengrad / bg_tenengrad / subject_size
+                    # flow via set_active_mask_variant above and are
+                    # intentionally NOT passed here.
+                    if features:
+                        thread_db.update_photo_pipeline_features(
+                            photo_id, **features,
+                        )
                     thread_db.update_photo_embeddings(
                         photo_id,
                         dino_subject_embedding=subj_emb_blob,
@@ -9373,6 +9591,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_classify=body.get("skip_classify", False),
             download_taxonomy=body.get("download_taxonomy", True),
             skip_extract_masks=body.get("skip_extract_masks", False),
+            skip_eye_keypoints=body.get("skip_eye_keypoints", False),
             skip_regroup=body.get("skip_regroup", False),
             preview_max_size=body.get("preview_max_size", 1920),
             exclude_paths=set(body.get("exclude_paths", [])) or None,
@@ -9748,12 +9967,109 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/masks/<filename>")
     def serve_mask(filename):
-        """Serve mask PNG files."""
+        """Serve mask PNG files.
+
+        Legacy callers (e.g. ``openInspect`` in pipeline_review.html) still
+        request ``/masks/{photo_id}.png``. Variant-aware extraction now
+        writes ``{photo_id}.{variant}.png``, so when the literal filename
+        isn't on disk and the request looks like ``{photo_id}.png``, fall
+        back to the photo's active mask via ``photo_masks`` so the inspect
+        panel keeps working without a round-trip API call.
+        """
         masks_dir = os.path.join(os.path.dirname(db_path), "masks")
         mask_path = os.path.join(masks_dir, filename)
         if os.path.exists(mask_path):
             return send_from_directory(masks_dir, filename)
+
+        m = re.match(r"^(\d+)\.png$", filename)
+        if m:
+            pid = int(m.group(1))
+            db = _get_db()
+            row = db.conn.execute(
+                "SELECT active_mask_variant FROM photos WHERE id=?", (pid,)
+            ).fetchone()
+            active = row["active_mask_variant"] if row else None
+            if active:
+                mask = db.get_photo_mask(pid, active)
+                if mask and mask.get("path"):
+                    masks_dir_real = os.path.realpath(masks_dir)
+                    abs_path = os.path.realpath(mask["path"])
+                    if (
+                        (abs_path == masks_dir_real
+                            or abs_path.startswith(masks_dir_real + os.sep))
+                        and os.path.isfile(abs_path)
+                    ):
+                        return send_from_directory(
+                            masks_dir_real,
+                            os.path.relpath(abs_path, masks_dir_real),
+                        )
         return "", 404
+
+    @app.route("/api/photos/<int:pid>/masks")
+    def api_photo_masks(pid):
+        """List a photo's available SAM mask variants and the active one.
+
+        Powers the lightbox variant-toggle dropdown: the UI fetches this
+        when opening / navigating to a photo and builds one option per
+        returned variant plus a default "active" option.
+        """
+        db = _get_db()
+        masks = db.list_masks_for_photo(pid)
+        row = db.conn.execute(
+            "SELECT active_mask_variant FROM photos WHERE id=?", (pid,)
+        ).fetchone()
+        active = row["active_mask_variant"] if row else None
+        return jsonify({
+            "photo_id": pid,
+            "active": active,
+            "variants": [
+                {
+                    "variant": m["variant"],
+                    "url": f"/api/masks/{pid}/{m['variant']}.png",
+                    "created_at": m["created_at"],
+                }
+                for m in masks
+            ],
+        })
+
+    # Variant strings live in URLs and must not be path-traversal vectors.
+    # Allow only alnum / dash / underscore — covers every variant we
+    # actually emit (sam2-small, sam2-large, sam3-small, unknown) and
+    # excludes `.`, `/`, and `..` outright.
+    _MASK_VARIANT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+    @app.route("/api/masks/<int:pid>/<variant>.png")
+    def api_serve_mask(pid, variant):
+        """Serve the mask file recorded on the ``photo_masks`` row.
+
+        Reads the stored ``photo_masks.path`` instead of reconstructing
+        ``{pid}.{variant}.png`` so migrated legacy masks (backfilled as
+        ``variant='unknown'`` pointing at the old ``{pid}.png`` filename)
+        remain viewable in the lightbox.
+
+        Defense in depth: the variant must (1) match the conservative
+        whitelist regex, (2) correspond to an actual ``photo_masks`` row,
+        and (3) the stored path must resolve inside the masks directory
+        (so an attacker-controlled or corrupted DB row can't escape).
+        """
+        if not _MASK_VARIANT_RE.match(variant):
+            return "", 404
+        db = _get_db()
+        mask = db.get_photo_mask(pid, variant)
+        if mask is None or not mask.get("path"):
+            return "", 404
+        masks_dir = os.path.realpath(
+            os.path.join(os.path.dirname(db_path), "masks")
+        )
+        abs_path = os.path.realpath(mask["path"])
+        if not (abs_path == masks_dir
+                or abs_path.startswith(masks_dir + os.sep)):
+            return "", 404
+        if not os.path.isfile(abs_path):
+            return "", 404
+        return send_from_directory(
+            masks_dir, os.path.relpath(abs_path, masks_dir)
+        )
 
     @app.route("/api/pipeline/reflow", methods=["POST"])
     def api_pipeline_reflow():
@@ -10031,6 +10347,70 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.update_workspace(db._active_workspace_id, config_overrides=current_overrides)
 
         return jsonify({"pipeline": pipeline_section, "status": "saved"})
+
+    @app.route("/api/pipeline/active-mask-variant", methods=["POST"])
+    def api_pipeline_active_mask_variant():
+        """Switch the active mask variant for every photo in the workspace
+        that has a row for ``variant`` in ``photo_masks``.
+
+        This is the bulk version of ``Database.set_active_mask_variant``:
+        it walks the workspace's photos, finds the ones with a mask row
+        for the requested variant, and denormalizes that variant's
+        path/features into the ``photos`` row so downstream readers
+        (scoring, lightbox overlay) see the new active mask.
+
+        Body: ``{"variant": "<sam2-variant>"}``.
+        Refuses ``"unknown"`` because it's a migration sentinel, not a
+        user-selectable variant.
+        """
+        body = request.get_json(silent=True) or {}
+        variant = (body.get("variant") or "").strip()
+        if not variant:
+            return json_error("variant required")
+        if variant == "unknown":
+            return json_error(
+                "'unknown' is a migration sentinel and cannot be set active",
+                400,
+            )
+        db = _get_db()
+        ws = db._ws_id()
+        rows = db.conn.execute(
+            """
+            SELECT pm.photo_id
+              FROM photo_masks pm
+              JOIN photos p ON p.id = pm.photo_id
+              JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+             WHERE wf.workspace_id = ? AND pm.variant = ?
+            """,
+            (ws, variant),
+        ).fetchall()
+        updated = 0
+        # Batch: skip the per-row commit_with_retry inside
+        # set_active_mask_variant and commit once after the loop. A
+        # workspace with 10K photos would otherwise pay 10K WAL fsyncs
+        # per request — multiple seconds with no progress indicator.
+        for r in rows:
+            try:
+                db.set_active_mask_variant(
+                    r["photo_id"], variant, _commit=False,
+                )
+                updated += 1
+            except ValueError as e:
+                # Race: row was deleted between SELECT and UPDATE. Skip
+                # rather than 500 — the user just asked to "make this
+                # the active variant where possible". Log the skip so
+                # the cause is visible if the count looks off.
+                log.warning(
+                    "active-mask-variant skip photo %d: %s",
+                    r["photo_id"], e,
+                )
+                continue
+        commit_with_retry(db.conn)
+        log.info(
+            "Switched active mask variant to %s for %d workspace photo(s)",
+            variant, updated,
+        )
+        return jsonify({"ok": True, "updated": updated})
 
     @app.route("/api/culling/results")
     def api_culling_results():

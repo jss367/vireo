@@ -482,6 +482,41 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   pointer-events: none;
   box-sizing: border-box;
 }
+/* SAM mask overlay sits on top of #lightboxImg inside .lightbox-transform
+   so it inherits the same transform (zoom + pan). Pointer-events disabled
+   so click-to-zoom on the underlying image still works. */
+.lb-mask-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  mix-blend-mode: multiply;
+  opacity: 0.5;
+  pointer-events: none;
+  display: none;
+}
+.lb-mask-overlay.show { display: block; }
+.lb-mask-controls {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0,0,0,0.6);
+  border: 1px solid var(--text-faint);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.lb-mask-controls.has-variants { display: inline-flex; }
+.lb-mask-controls select {
+  background: rgba(0,0,0,0.4);
+  color: var(--text-primary);
+  border: 1px solid var(--text-faint);
+  border-radius: 3px;
+  font-size: 12px;
+  padding: 1px 4px;
+}
 /* Crosshair over the detected eye keypoint. Scales with the image via
    position:% — parent .lightbox-transform absorbs the zoom transform. */
 .lb-eye-crosshair {
@@ -890,11 +925,25 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .ws-menu-item {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 12px; cursor: pointer; font-size: 13px;
-  color: var(--text-secondary);
+  color: var(--text-secondary); gap: 8px;
 }
 .ws-menu-item:hover { background: var(--bg-tertiary); }
 .ws-menu-item.active { color: var(--accent); }
+.ws-menu-item .ws-item-name {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ws-menu-item .ws-item-right {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+}
 .ws-menu-item .ws-item-check { font-size: 14px; }
+.ws-menu-item .ws-pin-btn {
+  background: none; border: none; padding: 0 2px; cursor: pointer;
+  color: var(--text-muted); font-size: 13px; line-height: 1;
+  opacity: 0; transition: opacity 0.1s;
+}
+.ws-menu-item:hover .ws-pin-btn { opacity: 0.6; }
+.ws-menu-item .ws-pin-btn:hover { opacity: 1 !important; color: var(--accent); }
+.ws-menu-item .ws-pin-btn.is-pinned { opacity: 1; color: var(--accent); }
 .ws-menu-divider { border-top: 1px solid var(--border-primary); margin: 4px 0; }
 .ws-menu-action {
   display: block; width: 100%; text-align: left; background: none; border: none;
@@ -1307,7 +1356,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       <span class="ws-arrow">&#9662;</span>
     </button>
     <div class="ws-menu" id="wsMenu">
-      <div class="ws-menu-header">Workspaces</div>
       <div id="wsMenuList"></div>
       <div class="ws-menu-divider"></div>
       <button class="ws-menu-action" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
@@ -2469,23 +2517,81 @@ function closeWsDropdownOutside(e) {
   }
 }
 
+function renderWsItem(ws, activeId) {
+  var isActive = ws.id === activeId;
+  var isPinned = !!ws.pinned_at;
+  var div = document.createElement('div');
+  div.className = 'ws-menu-item' + (isActive ? ' active' : '');
+  // Title is "Unpin" if pinned, "Pin" if not. Filled star for pinned, outline for unpinned.
+  div.innerHTML =
+    '<span class="ws-item-name">' + wsEscapeHtml(ws.name) + '</span>' +
+    '<span class="ws-item-right">' +
+      (isActive ? '<span class="ws-item-check">&#10003;</span>' : '') +
+      '<button class="ws-pin-btn' + (isPinned ? ' is-pinned' : '') + '" ' +
+        'title="' + (isPinned ? 'Unpin' : 'Pin') + ' workspace" ' +
+        'data-ws-id="' + ws.id + '" data-pinned="' + (isPinned ? '1' : '0') + '">' +
+        (isPinned ? '&#9733;' : '&#9734;') +
+      '</button>' +
+    '</span>';
+  div.onclick = function(e) {
+    // Pin button clicks are handled separately and must not switch workspaces.
+    // e.target can be a text node in some browsers; walk up to the nearest Element first.
+    var t = e.target;
+    if (t && t.nodeType !== 1) t = t.parentElement;
+    if (t && t.closest && t.closest('.ws-pin-btn')) return;
+    switchWorkspace(ws.id, ws.name);
+  };
+  var pinBtn = div.querySelector('.ws-pin-btn');
+  pinBtn.onclick = function(e) {
+    e.stopPropagation();
+    toggleWorkspacePin(ws.id, !isPinned);
+  };
+  return div;
+}
+
 async function loadWorkspaceMenu() {
   try {
     var workspaces = await safeFetch('/api/workspaces', {}, { toast: false });
     var active = await safeFetch('/api/workspaces/active', {}, { toast: false });
     var list = document.getElementById('wsMenuList');
     list.innerHTML = '';
-    workspaces.forEach(function(ws) {
-      var isActive = ws.id === active.id;
-      var div = document.createElement('div');
-      div.className = 'ws-menu-item' + (isActive ? ' active' : '');
-      div.innerHTML = wsEscapeHtml(ws.name) +
-        (isActive ? ' <span class="ws-item-check">&#10003;</span>' : '');
-      div.onclick = function() { switchWorkspace(ws.id, ws.name); };
-      list.appendChild(div);
-    });
+    var pinned = workspaces.filter(function(w) { return !!w.pinned_at; });
+    var unpinned = workspaces.filter(function(w) { return !w.pinned_at; });
+    function addHeader(text) {
+      var h = document.createElement('div');
+      h.className = 'ws-menu-header';
+      h.textContent = text;
+      list.appendChild(h);
+    }
+    if (pinned.length > 0) {
+      addHeader('Pinned');
+      pinned.forEach(function(ws) { list.appendChild(renderWsItem(ws, active.id)); });
+      if (unpinned.length > 0) {
+        var divider = document.createElement('div');
+        divider.className = 'ws-menu-divider';
+        list.appendChild(divider);
+        addHeader('Workspaces');
+      }
+    } else {
+      addHeader('Workspaces');
+    }
+    unpinned.forEach(function(ws) { list.appendChild(renderWsItem(ws, active.id)); });
   } catch(e) {
     console.error('Failed to load workspaces', e);
+  }
+}
+
+async function toggleWorkspacePin(wsId, pinned) {
+  try {
+    await safeFetch('/api/workspaces/' + wsId + '/pin', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ pinned: pinned })
+    }, { toast: false });
+    // Re-render with updated grouping/order.
+    await loadWorkspaceMenu();
+  } catch(e) {
+    console.error('Failed to toggle pin', e);
   }
 }
 
@@ -2584,6 +2690,7 @@ async function createWorkspace() {
     <span class="lightbox-zoom-badge" id="lightboxZoomBadge" style="display:none;">1:1</span>
     <div class="lightbox-transform" id="lightboxTransform">
       <img id="lightboxImg" src="" alt="">
+      <img id="lightboxMaskOverlay" class="lb-mask-overlay" src="" alt="">
       <div id="lightboxDetections" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
       <div id="lightboxEye" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;"></div>
     </div>
@@ -2594,6 +2701,10 @@ async function createWorkspace() {
     <button id="lightboxToggleBoxes" onclick="event.stopPropagation(); toggleLightboxBoxes();" style="background:rgba(0,0,0,0.6);color:var(--text-secondary);border:1px solid var(--text-faint);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Toggle detection boxes (b)">
       Hide Boxes
     </button>
+    <span class="lb-mask-controls" id="lightboxMaskControls" onclick="event.stopPropagation();" title="SAM mask overlay">
+      <span>Mask:</span>
+      <select id="lightboxMaskSelect" onchange="event.stopPropagation(); _lbOnMaskVariantChange();"></select>
+    </span>
     <button id="lightboxNotWildlife" onclick="event.stopPropagation(); lightboxNotWildlife();" style="background:rgba(0,0,0,0.6);color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Mark as Landscape — drops out of Needs Identification and stops the classifier">
       Not Wildlife
     </button>
@@ -2758,6 +2869,122 @@ function _lbLoadDetections(photoId) {
     .catch(function() {});
 }
 
+/* ---- SAM mask overlay ---------------------------------------------------
+ * The lightbox lets the user A/B-compare SAM mask variants without
+ * changing which one drives downstream scoring. The dropdown defaults
+ * to "active" (whatever photos.active_mask_variant points at) and lists
+ * one option per variant the photo has under photo_masks. Selecting a
+ * variant only swaps the overlay src; it never POSTs back to the server.
+ *
+ * Pages that don't surface masks at all (e.g. browse before the pipeline
+ * has run) still get the lightbox — the dropdown stays hidden until at
+ * least one variant comes back from /api/photos/<id>/masks, mirroring
+ * how the detection-box toggle stays present but inert when there are
+ * no detections.
+ */
+var _lbMaskActiveVariant = null;     // name of the photo's currently-active variant
+var _lbMaskAvailable = [];           // [{variant, url, created_at}, ...]
+
+function _lbResetMaskOverlay() {
+  var img = document.getElementById('lightboxMaskOverlay');
+  if (img) { img.classList.remove('show'); img.removeAttribute('src'); }
+  var ctrls = document.getElementById('lightboxMaskControls');
+  if (ctrls) ctrls.classList.remove('has-variants');
+  var sel = document.getElementById('lightboxMaskSelect');
+  if (sel) sel.innerHTML = '';
+  _lbMaskActiveVariant = null;
+  _lbMaskAvailable = [];
+}
+
+function _lbApplyMaskUrl(url) {
+  // Set the overlay's src and reveal it. If url is empty/null, hide
+  // the overlay (e.g. the photo has no mask for the chosen variant).
+  var img = document.getElementById('lightboxMaskOverlay');
+  if (!img) return;
+  if (!url) {
+    img.classList.remove('show');
+    img.removeAttribute('src');
+    return;
+  }
+  // onerror guards against the file being deleted out from under us
+  // between the /api/photos/<id>/masks call and the GET. The DB row
+  // exists but the file is gone → silently hide instead of leaving a
+  // broken-image icon over the photo.
+  img.onerror = function() { img.classList.remove('show'); };
+  img.onload = function() { img.classList.add('show'); };
+  img.src = url;
+}
+
+function _lbOnMaskVariantChange() {
+  var sel = document.getElementById('lightboxMaskSelect');
+  if (!sel) return;
+  var choice = sel.value;
+  if (choice === '__active__') {
+    if (!_lbMaskActiveVariant) {
+      // No active variant → nothing to overlay.
+      _lbApplyMaskUrl(null);
+      return;
+    }
+    var match = _lbMaskAvailable.find(function(v) {
+      return v.variant === _lbMaskActiveVariant;
+    });
+    _lbApplyMaskUrl(match ? match.url : null);
+    return;
+  }
+  var picked = _lbMaskAvailable.find(function(v) { return v.variant === choice; });
+  _lbApplyMaskUrl(picked ? picked.url : null);
+}
+
+function _lbLoadMaskVariants(photoId) {
+  // Fetch the photo's available mask variants and populate the
+  // dropdown. Defaults the selection to "active" (which displays the
+  // photo's active_mask_variant overlay if one exists).
+  var sel = document.getElementById('lightboxMaskSelect');
+  var ctrls = document.getElementById('lightboxMaskControls');
+  if (!sel || !ctrls) return;
+  // Reset before the async fetch resolves so a fast nav doesn't show
+  // stale options for the previous photo.
+  _lbResetMaskOverlay();
+
+  fetch('/api/photos/' + photoId + '/masks')
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
+      // Bail if the user navigated to a different photo while the
+      // request was in flight.
+      if (!data || _lightboxCurrentId !== photoId) return;
+      _lbMaskActiveVariant = data.active || null;
+      _lbMaskAvailable = data.variants || [];
+      if (_lbMaskAvailable.length === 0) {
+        // No masks for this photo — keep the control hidden.
+        return;
+      }
+      // Build options: "active" first, then one per variant. Variant
+      // names come from workspace config and must be treated as
+      // untrusted — render via DOM APIs so a name containing HTML
+      // can't escape into the page as stored DOM XSS.
+      var activeLabel = _lbMaskActiveVariant
+        ? 'active (' + _lbMaskActiveVariant + ')'
+        : 'active (n/a)';
+      sel.textContent = '';
+      var activeOpt = document.createElement('option');
+      activeOpt.value = '__active__';
+      activeOpt.textContent = activeLabel;
+      sel.appendChild(activeOpt);
+      _lbMaskAvailable.forEach(function(v) {
+        var opt = document.createElement('option');
+        opt.value = v.variant;
+        opt.textContent = v.variant;
+        sel.appendChild(opt);
+      });
+      sel.value = '__active__';
+      ctrls.classList.add('has-variants');
+      // Apply the default ("active") overlay so the user sees something
+      // the moment masks become available.
+      _lbOnMaskVariantChange();
+    })
+    .catch(function() { /* network error → leave control hidden */ });
+}
+
 function openLightbox(photoId, filename, photoList) {
   var alreadyOpen = !!window._lbEscToken;
   if (alreadyOpen) Keymap.popEsc(window._lbEscToken);
@@ -2844,6 +3071,11 @@ function openLightbox(photoId, filename, photoList) {
   // Fetch and render detection bounding boxes
   _lbLoadDetections(photoId);
   _lbApplyBoxesVisibility();
+
+  // Fetch the photo's SAM mask variants and (if any) populate the
+  // overlay-variant dropdown. Hidden when the photo has no masks, so
+  // pages that don't run the pipeline still get the lightbox unchanged.
+  _lbLoadMaskVariants(photoId);
 
   // Show position indicator if navigating a list
   var counter = document.getElementById('lightboxCounter');
@@ -2998,6 +3230,9 @@ function closeLightbox(e) {
   document.getElementById('lightboxZoomBadge').style.display = 'none';
   var detContainer = document.getElementById('lightboxDetections');
   if (detContainer) detContainer.innerHTML = '';
+  // Drop the mask overlay too — otherwise reopening on a photo with
+  // no masks would leave the previous photo's mask painted across it.
+  _lbResetMaskOverlay();
   if (wasOpen) Keymap.unlockBodyScroll();
 }
 
@@ -4538,7 +4773,7 @@ function formatDuration(seconds) {
       var lastDone = activeJobs.filter(function(j) { return j.status !== 'running'; })[0];
       if (lastDone) {
         container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. Last run: ' +
-          bpEscape(lastDone.type) + ' ' + (lastDone.status === 'completed' ? '\u2713' : '\u2717') +
+          bpEscape(window.formatJobType(lastDone.type)) + ' ' + (lastDone.status === 'completed' ? '\u2713' : '\u2717') +
           ' <a href="/jobs" style="color:var(--accent);text-decoration:none;">View history \u2192</a></div>';
       } else {
         container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. ' +
@@ -4580,7 +4815,7 @@ function formatDuration(seconds) {
       }
       html += '<div class="bp-compact-job" style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;">';
       html += '<span style="width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;"></span>';
-      html += '<span style="font-weight:600;text-transform:capitalize;">' + bpEscape(j.type) + '</span>';
+      html += '<span style="font-weight:600;">' + bpEscape(window.formatJobType(j.type)) + '</span>';
       if (phase) html += '<span style="color:var(--text-muted);">\u2014 ' + bpEscape(phase) + '</span>';
       if (detail) html += '<span style="color:var(--text-muted);font-variant-numeric:tabular-nums;">' + detail + '</span>';
       html += '<a href="/jobs" style="margin-left:auto;color:var(--accent);text-decoration:none;font-size:11px;white-space:nowrap;">View \u2192</a>';
@@ -4602,7 +4837,7 @@ function formatDuration(seconds) {
 
     summary.classList.remove('idle');
     var j = running[0];
-    var text = j.type;
+    var text = window.formatJobType(j.type);
     if (j.progress && j.progress.phase) {
       text += ' — ' + j.progress.phase;
     }
@@ -4682,6 +4917,18 @@ function formatDuration(seconds) {
     div.appendChild(document.createTextNode(String(str)));
     return div.innerHTML;
   }
+
+  // Convert internal job-type identifiers like "new_images_walk" or
+  // "duplicate-scan" into a user-facing label ("New Images Walk", "Duplicate
+  // Scan"). Exposed on window so per-page scripts (e.g. jobs.html) can reuse it.
+  window.formatJobType = function(type) {
+    if (!type) return '';
+    return String(type)
+      .split(/[-_]+/)
+      .filter(function(w) { return w.length > 0; })
+      .map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1); })
+      .join(' ');
+  };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
