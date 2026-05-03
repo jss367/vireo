@@ -318,6 +318,55 @@ def test_count_extract_stale_filters_by_variant(tmp_path):
     assert db.count_extract_stale("sam2-large") == 1
 
 
+def test_count_extract_stale_ignores_photos_without_primary_detection(tmp_path):
+    """Photos with only ``full-image`` detections aren't eligible for
+    extract — a stale ``photo_masks`` row left over from a prior detector
+    run must not inflate ``count_extract_stale``, otherwise the stage
+    stays flagged Outdated/Will run indefinitely in mixed workspaces."""
+    db, folder_id = _make_db(tmp_path)
+    pid = db.add_photo(
+        folder_id=folder_id, filename="anchor.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+          "confidence": 1.0, "category": "anchor"}],
+        detector_model="full-image",
+    )
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/a.png', 0, 'megadetector-v6', "
+        "0.1, 0.1, 0.5, 0.5)",
+        (pid,),
+    )
+    db.conn.commit()
+    assert db.count_extract_stale("sam2-small") == 0
+
+
+def test_count_extract_stale_ignores_photos_below_confidence_floor(tmp_path):
+    """A photo whose only non-full-image detection sits below the
+    workspace ``detector_confidence`` floor is not eligible for extract
+    (extraction skips it). A leftover mask on such a photo shouldn't
+    count as stale work to redo — the pipeline wouldn't redo it."""
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg", conf=0.05)
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/a.png', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",
+        (pid,),
+    )
+    db.conn.commit()
+    # detector_confidence floor of 0.2 means the 0.05-conf detection is
+    # invisible; the photo has no eligible primary, so no stale work.
+    assert db.count_extract_stale("sam2-small", detector_confidence=0.2) == 0
+    # Lower the floor and the same photo's prompt mismatch reappears.
+    assert db.count_extract_stale("sam2-small", detector_confidence=0.0) == 1
+
+
 # -------- compute_plan: classify --------
 
 def _params(**kwargs):

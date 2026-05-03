@@ -2911,6 +2911,14 @@ class Database:
         floor). Filtered by ``sam2_variant`` so a stale mask under a
         different variant doesn't pollute the count for the currently
         configured variant.
+
+        Photos without a current primary detection (no non-full-image
+        detection at or above ``detector_confidence``) are excluded:
+        they aren't eligible for the extract stage, so a leftover
+        ``photo_masks`` row from a prior detector run isn't "stale work
+        to redo" — it's just an orphan that storage cleanup handles.
+        Counting those would inflate ``detail.stale`` and keep the
+        stage flagged Outdated/Will run forever in mixed workspaces.
         """
         import config as cfg
         ws = self._ws_id()
@@ -2926,6 +2934,12 @@ class Database:
                 JOIN workspace_folders wf
                   ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                WHERE pm.variant = ?
+                 AND EXISTS (
+                    SELECT 1 FROM detections d0
+                     WHERE d0.photo_id = pm.photo_id
+                       AND d0.detector_model != 'full-image'
+                       AND d0.detector_confidence >= ?
+                 )
                  AND NOT EXISTS (
                     SELECT 1 FROM detections d
                      WHERE d.id = (
@@ -2943,7 +2957,8 @@ class Database:
                        AND d.box_w = pm.prompt_w
                        AND d.box_h = pm.prompt_h
                  ){scope_sql}""",
-            (ws, sam2_variant, detector_confidence, *scope_params),
+            (ws, sam2_variant, detector_confidence, detector_confidence,
+             *scope_params),
         ).fetchone()
         return row["n"] or 0
 
