@@ -283,6 +283,211 @@ def test_load_results_missing(tmp_path):
     assert load_results(str(tmp_path), workspace_id=999) is None
 
 
+# -- compute_review_readiness --
+
+
+def test_compute_review_readiness_empty_workspace(tmp_path):
+    """No photos in the workspace → state='empty'."""
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    db = Database(str(tmp_path / "test.db"))
+    out = compute_review_readiness(db)
+    assert out["state"] == "empty"
+    assert out["total_photos"] == 0
+    assert out["missing_required"] == []
+    assert out["enhancing_missing"] == []
+
+
+def test_compute_review_readiness_no_masks(tmp_path):
+    """Photos exist but none have masks → state='insufficient',
+    'masks' listed in missing_required."""
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    base_time = datetime(2026, 3, 20, 10, 0, 0)
+    for i in range(5):
+        ts = base_time + timedelta(seconds=i * 2)
+        db.add_photo(
+            fid, f"photo{i}.jpg", ".jpg", 1000, 1.0,
+            timestamp=ts.isoformat(), width=4000, height=3000,
+        )
+
+    out = compute_review_readiness(db)
+    assert out["state"] == "insufficient"
+    assert "masks" in out["missing_required"]
+    assert out["total_photos"] == 5
+    assert out["with_masks"] == 0
+
+
+def test_compute_review_readiness_masks_present_no_eye(tmp_path):
+    """Masks present for all photos, no eye keypoints →
+    state='computable', 'eye_keypoints' in enhancing_missing."""
+    from pipeline import compute_review_readiness
+
+    # _setup_db_with_photos populates masks, embeddings, and predictions
+    # for every photo but does NOT set eye_x — exactly the "computable
+    # but enhancing inputs missing" state we want to assert against.
+    db, _ids = _setup_db_with_photos(tmp_path)
+    out = compute_review_readiness(db)
+    assert out["state"] == "computable"
+    assert out["with_masks"] > 0
+    assert out["with_masks"] == out["total_photos"]
+    assert "eye_keypoints" in out["enhancing_missing"]
+
+
+def test_compute_review_readiness_full_features(tmp_path):
+    """All upstream features present including eye keypoints →
+    state='computable', enhancing_missing empty."""
+    from pipeline import compute_review_readiness
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    # Backfill eye keypoints for every photo so coverage is 100%.
+    for enc_ids in ids:
+        for pid in enc_ids:
+            db.update_photo_pipeline_features(
+                pid,
+                eye_x=0.5,
+                eye_y=0.5,
+                eye_conf=0.9,
+                eye_tenengrad=200.0,
+            )
+
+    out = compute_review_readiness(db)
+    assert out["state"] == "computable"
+    assert out["enhancing_missing"] == []
+
+
+def test_compute_review_readiness_at_mask_threshold_boundary(tmp_path):
+    """Mask coverage exactly at the 25% threshold → state='computable'.
+
+    Pins the contract that the comparison is strict ``<`` (not ``<=``):
+    with 4 photos and 1 having a mask, coverage is 1/4 = 25%, which is
+    *at* threshold and must classify as computable. Drop one mask (0/4)
+    and the same workspace must classify as insufficient. If the
+    comparison flips to ``<=``, the boundary case becomes insufficient
+    and the first assertion below fails.
+    """
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    base_time = datetime(2026, 3, 20, 10, 0, 0)
+    pids = []
+    for i in range(4):
+        ts = base_time + timedelta(seconds=i * 2)
+        pid = db.add_photo(
+            fid, f"photo{i}.jpg", ".jpg", 1000, 1.0,
+            timestamp=ts.isoformat(), width=4000, height=3000,
+        )
+        pids.append(pid)
+
+    # Exactly one mask out of four → 25% coverage, at the threshold.
+    db.update_photo_pipeline_features(pids[0], mask_path=f"/masks/{pids[0]}.png")
+
+    out = compute_review_readiness(db)
+    assert out["state"] == "computable"
+    assert out["total_photos"] == 4
+    assert out["with_masks"] == 1
+    assert "masks" not in out["missing_required"]
+    # Fix 1 contract: when masks-partial would be redundant with a
+    # required-masks block we suppress it, but here masks is NOT required
+    # (we're at threshold) so the partial signal is informative and present.
+    assert "masks_partial" in out["enhancing_missing"]
+
+    # Asymmetric companion: drop the only mask → 0/4, below threshold.
+    db.update_photo_pipeline_features(pids[0], mask_path=None)
+    out_below = compute_review_readiness(db)
+    assert out_below["state"] == "insufficient"
+    assert out_below["with_masks"] == 0
+    assert "masks" in out_below["missing_required"]
+    # Fix 1 contract: when masks is in missing_required we must NOT
+    # also surface the redundant masks_partial enhancing signal.
+    assert "masks_partial" not in out_below["enhancing_missing"]
+
+
+def test_compute_review_readiness_below_threshold_uses_ceiling(tmp_path):
+    """Coverage strictly below the threshold must classify as insufficient
+    even when ``int(total * threshold)`` would floor the required count
+    down to a value the actual coverage happens to meet.
+
+    Concrete case: 5 photos, 1 with a mask = 20% coverage. Against the
+    default 25% threshold, ``int(5 * 0.25) == 1`` would let 1 mask pass;
+    the ceiling form ``ceil(5 * 0.25) == 2`` correctly requires 2 and
+    classifies the workspace as insufficient.
+    """
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    base_time = datetime(2026, 3, 20, 10, 0, 0)
+    pids = []
+    for i in range(5):
+        ts = base_time + timedelta(seconds=i * 2)
+        pid = db.add_photo(
+            fid, f"photo{i}.jpg", ".jpg", 1000, 1.0,
+            timestamp=ts.isoformat(), width=4000, height=3000,
+        )
+        pids.append(pid)
+
+    # 1 mask out of 5 → 20% coverage, strictly below the 25% threshold.
+    db.update_photo_pipeline_features(pids[0], mask_path=f"/masks/{pids[0]}.png")
+
+    out = compute_review_readiness(db)
+    assert out["state"] == "insufficient"
+    assert out["with_masks"] == 1
+    assert "masks" in out["missing_required"]
+
+
+def test_compute_review_readiness_variant_aware_embeddings(tmp_path):
+    """Switching DINOv2 variants must drop stale embeddings from coverage.
+
+    Pins the contract that embedding readiness mirrors the variant rule
+    in ``load_photo_features._embedding_usable``: a workspace whose
+    embeddings were all written under ``vit-b14`` (768-dim) must report
+    zero usable embeddings when readiness is asked for under ``vit-l14``
+    (1024-dim), and the user-facing ``enhancing_missing`` must surface
+    the gap so the degraded banner explains the silent quality drop.
+
+    Without this, after a variant switch the readiness pane would claim
+    full embedding coverage while ``/api/pipeline/regroup-live`` actually
+    runs without a single usable embedding.
+    """
+    from pipeline import compute_review_readiness
+
+    # _setup_db_with_photos writes 768-dim embeddings (vit-b14 shape) but
+    # leaves dino_embedding_variant NULL via update_photo_embeddings.
+    db, _ids = _setup_db_with_photos(tmp_path)
+
+    # Same variant as the stored byte-length — NULL stored variant slips
+    # through the dim-match branch, so coverage is full.
+    out_match = compute_review_readiness(db, dinov2_variant="vit-b14")
+    assert out_match["with_embeddings"] == out_match["total_photos"]
+    assert "embeddings" not in out_match["enhancing_missing"]
+
+    # Mismatched variant — 768-dim embeddings can't be reused as 1024-dim,
+    # so they must NOT count as usable and must surface in the gap list.
+    out_mismatch = compute_review_readiness(db, dinov2_variant="vit-l14")
+    assert out_mismatch["with_embeddings"] == 0
+    assert "embeddings" in out_mismatch["enhancing_missing"]
+
+    # Stamp the variant explicitly: a row marked vit-b14 must NOT count
+    # under a vit-l14 readiness check even though byte-length doesn't
+    # match either — the explicit-variant branch wins.
+    pid = _ids[0][0]
+    db.conn.execute(
+        "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
+        ("vit-b14", pid),
+    )
+    db.conn.commit()
+    out_explicit_mismatch = compute_review_readiness(db, dinov2_variant="vit-l14")
+    assert out_explicit_mismatch["with_embeddings"] == 0
+
+
 def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
     """save_results must preserve an existing miss_computed_at marker
     when the caller's results dict doesn't carry one. reflow and

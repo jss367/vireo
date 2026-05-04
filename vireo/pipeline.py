@@ -11,6 +11,7 @@ Entry points:
 
 import json
 import logging
+import math
 import os
 from collections import defaultdict
 
@@ -667,6 +668,136 @@ def load_results_raw(cache_dir, workspace_id):
         return None
     with open(path) as f:
         return json.load(f)
+
+
+def _count_usable_embeddings(db, expected_variant):
+    """Count workspace photos whose stored DINO embedding is usable under
+    ``expected_variant`` — i.e. the same rule ``load_photo_features`` applies
+    via :func:`_embedding_usable`. Without ``expected_variant`` we accept any
+    non-null embedding (back-compat for callers that don't know the variant).
+    """
+    ws = db._ws_id()
+    if expected_variant is None:
+        row = db.conn.execute(
+            """SELECT COUNT(*) AS n
+               FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id
+                             AND f.status IN ('ok', 'partial')
+               WHERE wf.workspace_id = ?
+                 AND p.dino_subject_embedding IS NOT NULL""",
+            (ws,),
+        ).fetchone()
+        return row["n"] or 0
+
+    try:
+        from dino_embed import get_embedding_dim
+        expected_bytes = get_embedding_dim(expected_variant) * 4
+    except Exception:
+        # Unknown variant — only the exact-match branch can pass.
+        row = db.conn.execute(
+            """SELECT COUNT(*) AS n
+               FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id
+                             AND f.status IN ('ok', 'partial')
+               WHERE wf.workspace_id = ?
+                 AND p.dino_subject_embedding IS NOT NULL
+                 AND p.dino_embedding_variant = ?""",
+            (ws, expected_variant),
+        ).fetchone()
+        return row["n"] or 0
+
+    row = db.conn.execute(
+        """SELECT COUNT(*) AS n
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+           JOIN folders f ON f.id = p.folder_id
+                         AND f.status IN ('ok', 'partial')
+           WHERE wf.workspace_id = ?
+             AND p.dino_subject_embedding IS NOT NULL
+             AND (p.dino_embedding_variant = ?
+                  OR (p.dino_embedding_variant IS NULL
+                      AND length(p.dino_subject_embedding) = ?))""",
+        (ws, expected_variant, expected_bytes),
+    ).fetchone()
+    return row["n"] or 0
+
+
+def compute_review_readiness(db, mask_threshold=0.25, dinov2_variant=None):
+    """Classify whether the pipeline review page can render meaningful results.
+
+    The Group stage of the pipeline is purely computational and reads
+    features already cached in the DB. A "ready" workspace has the
+    grouping cache already on disk; a "computable" workspace has enough
+    features that calling /api/pipeline/regroup-live would produce a
+    useful triage view; an "insufficient" workspace has too few masks
+    for the result to be anything but a wall of REJECTs.
+
+    Args:
+        db: Database with active workspace
+        mask_threshold: minimum fraction of photos that must have masks
+            for the result to be computable (default 25%)
+        dinov2_variant: currently configured DINOv2 variant name (e.g.
+            ``"vit-b14"``). When set, embedding coverage is computed using
+            the same variant-compatibility rule as ``load_photo_features``
+            — embeddings stored under a mismatched variant don't count.
+            Without this, after a user switches DINO variants stale
+            embeddings would be reported as complete and the review page
+            would silently render with no usable embeddings.
+
+    Returns:
+        {
+            "state": "ready" | "computable" | "insufficient" | "empty",
+            "total_photos": int,
+            "with_masks": int,
+            "with_sharpness": int,
+            "with_embeddings": int,
+            "with_eye_keypoints": int,
+            "with_predictions": int,
+            "missing_required": list[str],   # stages that block computation
+            "enhancing_missing": list[str],  # stages that would improve quality
+        }
+    """
+    cov = db.get_coverage_stats()
+    total = cov["total"]
+    usable_embeddings = _count_usable_embeddings(db, dinov2_variant)
+    out = {
+        "state": "empty",
+        "total_photos": total,
+        "with_masks": cov["mask"],
+        "with_sharpness": cov["subject_sharpness"],
+        "with_embeddings": usable_embeddings,
+        "with_eye_keypoints": cov["eye"],
+        "with_predictions": cov["classified"],
+        "missing_required": [],
+        "enhancing_missing": [],
+    }
+    if total == 0:
+        return out
+
+    # Required: enough photos have masks (otherwise pipeline rejects all).
+    # Use ceiling so the gate honors the documented minimum fraction — e.g.
+    # 1 mask out of 5 (20%) must classify as insufficient against a 25%
+    # threshold, not slip through because int() floored 1.25 down to 1.
+    if cov["mask"] < max(1, math.ceil(total * mask_threshold)):
+        out["state"] = "insufficient"
+        out["missing_required"].append("masks")
+        # Still surface enhancing_missing so the diagnostic is complete
+    else:
+        out["state"] = "computable"
+
+    # Enhancing: per-stage gaps that would improve quality if filled
+    if cov["mask"] < total and "masks" not in out["missing_required"]:
+        out["enhancing_missing"].append("masks_partial")
+    if usable_embeddings < total:
+        out["enhancing_missing"].append("embeddings")
+    if cov["eye"] < total:
+        out["enhancing_missing"].append("eye_keypoints")
+    if cov["classified"] < total:
+        out["enhancing_missing"].append("species_predictions")
+
+    return out
 
 
 def rebuild_species_predictions(results, photo_ids):

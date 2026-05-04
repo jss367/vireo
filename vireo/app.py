@@ -1167,7 +1167,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         total_photos = db.count_photos()
 
         import config as cfg
-        from pipeline import load_results
+        from pipeline import compute_review_readiness, load_results
         cache_dir = os.path.dirname(db_path)
         results = load_results(cache_dir, db._active_workspace_id)
         if results and results.get("photos"):
@@ -1182,8 +1182,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f, r = flag_map.get(p["id"], ("none", 0))
                 p["flag"] = f
                 p["rating"] = r
+
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
+
+        # Variant must match the active DINOv2 variant so embedding coverage
+        # reflects what /api/pipeline/regroup-live would actually consume —
+        # mismatched-variant embeddings are dropped at load time, so counting
+        # them here would lie about readiness.
+        review_readiness = compute_review_readiness(
+            db, dinov2_variant=pipeline_cfg.get("dinov2_variant"),
+        )
+        if results is not None:
+            # Cache exists — even if features have changed underneath,
+            # the page can render. enhancing_missing still reflects the
+            # current gap so the degraded banner can surface accurately.
+            review_readiness["state"] = "ready"
+            # When the cache lets the page render, missing_required no
+            # longer represents a block — fold any blocking gaps into
+            # enhancing_missing so the degraded banner surfaces them.
+            for missing in review_readiness["missing_required"]:
+                if missing == "masks" and "masks_partial" not in review_readiness["enhancing_missing"]:
+                    review_readiness["enhancing_missing"].insert(0, "masks_partial")
+            review_readiness["missing_required"] = []
 
         ws = db.get_workspace(db._active_workspace_id)
         ws_overrides = {}
@@ -1215,6 +1236,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             },
             "mask_variant_coverage": db.mask_variant_coverage(),
             "results": results,
+            "review_readiness": review_readiness,
             "workspace_overrides": ws_overrides,
             "recent_destinations": effective_cfg.get("ingest", {}).get("recent_destinations", []),
         })
