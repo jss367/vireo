@@ -353,6 +353,23 @@ input[type="range"]::-moz-range-thumb {
   margin-top: 8px;
 }
 .reset-btn:hover { background: var(--bg-tertiary); }
+.button-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.button-row .reset-btn { margin-top: 0; }
+.save-btn {
+  display: inline-block;
+  padding: 4px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--bg-primary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.save-btn:hover { filter: brightness(1.1); }
 
 /* Inspection panel */
 .inspect-overlay {
@@ -937,26 +954,85 @@ input[type="range"]::-moz-range-thumb {
       <button class="reset-btn" onclick="resetScoringDefaults()">Reset to defaults</button>
     </div>
 
-    <div class="sidebar-section" id="sidebarGrouping" style="display:none">
-      <div class="sidebar-title">Grouping Thresholds</div>
+    <div class="sidebar-section" id="sidebarGrouping">
+      <div class="sidebar-title">Grouping Algorithm</div>
 
-      <div class="slider-section-header">Encounters</div>
-      <div class="slider-section-hint">Control how photos are split and merged into encounters</div>
+      <div class="slider-section-header">Encounter cut — signal weights</div>
+      <div class="slider-section-hint">How much each signal contributes to the similarity score between adjacent photos. Re-normalized over signals that have data.</div>
       <div class="slider-group">
         <div class="slider-row">
-          <span class="slider-label" title="Similarity below this splits photos into separate encounters">Cut score</span>
+          <span class="slider-label" title="Weight of time-proximity in S_enc">Time</span>
+          <input type="range" min="0" max="100" value="35" step="1" id="slWTime" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valWTime">0.35</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label" title="Weight of DINO subject embedding">Subject embed</span>
+          <input type="range" min="0" max="100" value="35" step="1" id="slWSubj" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valWSubj">0.35</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label" title="Weight of DINO global embedding">Global embed</span>
+          <input type="range" min="0" max="100" value="15" step="1" id="slWGlobal" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valWGlobal">0.15</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label" title="Weight of per-photo species agreement (Bhattacharyya overlap of top-5)">Species</span>
+          <input type="range" min="0" max="100" value="10" step="1" id="slWSpecies" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valWSpecies">0.10</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label" title="Weight of GPS + focal length similarity">Meta (GPS+FL)</span>
+          <input type="range" min="0" max="100" value="5" step="1" id="slWMeta" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valWMeta">0.05</span>
+        </div>
+      </div>
+
+      <div class="slider-section-header">Encounter cut — thresholds</div>
+      <div class="slider-group">
+        <div class="slider-row">
+          <span class="slider-label" title="Time constant for time-similarity decay (seconds). Lower = closer-in-time pairs needed.">τ time (s)</span>
+          <input type="range" min="5" max="120" value="40" step="1" id="slTauEnc" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valTauEnc">40</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label" title="Force a cut if the gap between two photos exceeds this (seconds)">Hard cut: time</span>
+          <input type="range" min="30" max="600" value="180" step="10" id="slHardCutTime" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valHardCutTime">180</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label" title="Force a cut if S_enc drops below this">Hard cut: score</span>
           <input type="range" min="0" max="100" value="42" step="1" id="slEncCut" oninput="onGroupingChange(this)">
           <span class="slider-val" id="valEncCut">0.42</span>
         </div>
         <div class="slider-row">
-          <span class="slider-label" title="Similarity above this merges neighboring segments back together">Merge score</span>
+          <span class="slider-label" title="Soft-cut threshold: 2 of last 3 scores below this triggers a cut">Soft cut: score</span>
+          <input type="range" min="0" max="100" value="52" step="1" id="slSoftCut" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valSoftCut">0.52</span>
+        </div>
+      </div>
+
+      <div class="slider-section-header">Encounter merge</div>
+      <div class="slider-section-hint">Stitch adjacent microsegments back together if they look like the same encounter</div>
+      <div class="slider-group">
+        <div class="slider-row">
+          <span class="slider-label" title="Merge if S_seg between segments exceeds this">Merge score</span>
           <input type="range" min="0" max="100" value="62" step="1" id="slEncMerge" oninput="onGroupingChange(this)">
           <span class="slider-val" id="valEncMerge">0.62</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label" title="Only consider merge if time gap ≤ this (seconds)">Max gap (s)</span>
+          <input type="range" min="5" max="300" value="60" step="5" id="slMergeMaxGap" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valMergeMaxGap">60</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label" title="Time decay constant for merge gap scoring">τ merge (s)</span>
+          <input type="range" min="5" max="120" value="20" step="1" id="slMergeTau" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valMergeTau">20</span>
         </div>
       </div>
 
       <div class="slider-section-header">Bursts</div>
-      <div class="slider-section-hint">Group rapid-fire shots of the same subject within encounters</div>
+      <div class="slider-section-hint">Group rapid-fire shots within an encounter</div>
       <div class="slider-group">
         <div class="slider-row">
           <span class="slider-label" title="Max seconds between consecutive shots to stay in the same burst">Time gap (s)</span>
@@ -969,13 +1045,16 @@ input[type="range"]::-moz-range-thumb {
           <span class="slider-val" id="valBurstPhash">12</span>
         </div>
         <div class="slider-row">
-          <span class="slider-label" title="Max embedding distance — higher tolerates more visually different shots in the same burst">Emb. distance</span>
+          <span class="slider-label" title="Max embedding distance — higher tolerates more visually different shots">Emb. distance</span>
           <input type="range" min="0" max="100" value="20" step="1" id="slBurstEmb" oninput="onGroupingChange(this)">
           <span class="slider-val" id="valBurstEmb">0.20</span>
         </div>
       </div>
 
-      <button class="reset-btn" onclick="resetGroupingDefaults()">Reset to defaults</button>
+      <div class="button-row">
+        <button class="reset-btn" onclick="resetGroupingDefaults()">Reset</button>
+        <button class="save-btn" onclick="saveGroupingDefaults()">Save as default</button>
+      </div>
     </div>
 
     <div class="sidebar-section">
@@ -1454,7 +1533,13 @@ var SCORING_DEFAULTS = {
   burst_lambda: 85, burst_max_keep: 3, encounter_lambda: 70, encounter_max_keep: 5,
 };
 var GROUPING_DEFAULTS = {
-  hard_cut_score: 42, merge_score: 62,
+  // Weights (stored as 0-100 for slider; converted to 0..1 fraction in getGroupingConfig)
+  w_time: 35, w_subj: 35, w_global: 15, w_species: 10, w_meta: 5,
+  // Cut thresholds
+  tau_enc: 40, hard_cut_time: 180, hard_cut_score: 42, soft_cut_score: 52,
+  // Merge
+  merge_score: 62, merge_max_gap: 60, merge_tau: 20,
+  // Bursts
   burst_time_gap: 3, burst_phash_threshold: 12, burst_embedding_threshold: 20,
 };
 
@@ -1471,8 +1556,18 @@ var GROUPING_DEFAULTS = {
     SCORING_DEFAULTS.burst_max_keep = p.burst_max_keep != null ? p.burst_max_keep : 3;
     SCORING_DEFAULTS.encounter_lambda = Math.round((p.encounter_lambda != null ? p.encounter_lambda : 0.70) * 100);
     SCORING_DEFAULTS.encounter_max_keep = p.encounter_max_keep != null ? p.encounter_max_keep : 5;
+    GROUPING_DEFAULTS.w_time = Math.round((p.w_time != null ? p.w_time : 0.35) * 100);
+    GROUPING_DEFAULTS.w_subj = Math.round((p.w_subj != null ? p.w_subj : 0.35) * 100);
+    GROUPING_DEFAULTS.w_global = Math.round((p.w_global != null ? p.w_global : 0.15) * 100);
+    GROUPING_DEFAULTS.w_species = Math.round((p.w_species != null ? p.w_species : 0.10) * 100);
+    GROUPING_DEFAULTS.w_meta = Math.round((p.w_meta != null ? p.w_meta : 0.05) * 100);
+    GROUPING_DEFAULTS.tau_enc = p.tau_enc != null ? p.tau_enc : 40;
+    GROUPING_DEFAULTS.hard_cut_time = p.hard_cut_time != null ? p.hard_cut_time : 180;
     GROUPING_DEFAULTS.hard_cut_score = Math.round((p.hard_cut_score != null ? p.hard_cut_score : 0.42) * 100);
+    GROUPING_DEFAULTS.soft_cut_score = Math.round((p.soft_cut_score != null ? p.soft_cut_score : 0.52) * 100);
     GROUPING_DEFAULTS.merge_score = Math.round((p.merge_score != null ? p.merge_score : 0.62) * 100);
+    GROUPING_DEFAULTS.merge_max_gap = p.merge_max_gap != null ? p.merge_max_gap : 60;
+    GROUPING_DEFAULTS.merge_tau = p.merge_tau != null ? p.merge_tau : 20;
     GROUPING_DEFAULTS.burst_time_gap = p.burst_time_gap != null ? p.burst_time_gap : 3;
     GROUPING_DEFAULTS.burst_phash_threshold = p.burst_phash_threshold != null ? p.burst_phash_threshold : 12;
     // Stored as cosine similarity; UI shows distance = 1 - similarity.
@@ -1493,8 +1588,14 @@ function updateSliderDisplay(slider) {
   var id = slider.id;
   var valEl = document.getElementById('val' + id.substring(2));
   if (!valEl) return;
-  // Integer sliders (keep counts, time, phash)
-  if (['slBurstKeep','slEncKeep','slBurstTime','slBurstPhash'].indexOf(id) >= 0) {
+  // Integer sliders (raw values, not /100): keep counts, raw seconds, phash distance
+  var INT_SLIDERS = [
+    'slBurstKeep','slEncKeep',
+    'slBurstTime','slBurstPhash',
+    'slTauEnc','slHardCutTime',
+    'slMergeMaxGap','slMergeTau',
+  ];
+  if (INT_SLIDERS.indexOf(id) >= 0) {
     valEl.textContent = slider.value;
   } else {
     valEl.textContent = (slider.value / 100).toFixed(2);
@@ -1515,12 +1616,24 @@ function getScoringConfig() {
 }
 
 function getGroupingConfig() {
+  function pct(id) { return parseFloat(document.getElementById(id).value) / 100.0; }
+  function num(id) { return parseFloat(document.getElementById(id).value); }
   return {
-    hard_cut_score: sliderVal('slEncCut') / 100,
-    merge_score: sliderVal('slEncMerge') / 100,
-    burst_time_gap: sliderVal('slBurstTime'),
-    burst_phash_threshold: Math.round(sliderVal('slBurstPhash')),
-    burst_embedding_threshold: 1 - sliderVal('slBurstEmb') / 100,
+    w_time: pct('slWTime'),
+    w_subj: pct('slWSubj'),
+    w_global: pct('slWGlobal'),
+    w_species: pct('slWSpecies'),
+    w_meta: pct('slWMeta'),
+    tau_enc: num('slTauEnc'),
+    hard_cut_time: num('slHardCutTime'),
+    hard_cut_score: pct('slEncCut'),
+    soft_cut_score: pct('slSoftCut'),
+    merge_score: pct('slEncMerge'),
+    merge_max_gap: num('slMergeMaxGap'),
+    merge_tau: num('slMergeTau'),
+    burst_time_gap: num('slBurstTime'),
+    burst_phash_dist: num('slBurstPhash'),
+    burst_emb_dist: pct('slBurstEmb'),
   };
 }
 
@@ -1623,11 +1736,26 @@ function resetScoringDefaults() {
 }
 
 function applyGroupingDefaults() {
-  document.getElementById('slEncCut').value = GROUPING_DEFAULTS.hard_cut_score;
-  document.getElementById('slEncMerge').value = GROUPING_DEFAULTS.merge_score;
-  document.getElementById('slBurstTime').value = GROUPING_DEFAULTS.burst_time_gap;
-  document.getElementById('slBurstPhash').value = GROUPING_DEFAULTS.burst_phash_threshold;
-  document.getElementById('slBurstEmb').value = GROUPING_DEFAULTS.burst_embedding_threshold;
+  function setVal(id, v) { var el = document.getElementById(id); if (el) el.value = v; }
+  // Weights (slider values 0..100)
+  setVal('slWTime', GROUPING_DEFAULTS.w_time);
+  setVal('slWSubj', GROUPING_DEFAULTS.w_subj);
+  setVal('slWGlobal', GROUPING_DEFAULTS.w_global);
+  setVal('slWSpecies', GROUPING_DEFAULTS.w_species);
+  setVal('slWMeta', GROUPING_DEFAULTS.w_meta);
+  // Cut thresholds
+  setVal('slTauEnc', GROUPING_DEFAULTS.tau_enc);
+  setVal('slHardCutTime', GROUPING_DEFAULTS.hard_cut_time);
+  setVal('slEncCut', GROUPING_DEFAULTS.hard_cut_score);
+  setVal('slSoftCut', GROUPING_DEFAULTS.soft_cut_score);
+  // Merge
+  setVal('slEncMerge', GROUPING_DEFAULTS.merge_score);
+  setVal('slMergeMaxGap', GROUPING_DEFAULTS.merge_max_gap);
+  setVal('slMergeTau', GROUPING_DEFAULTS.merge_tau);
+  // Bursts
+  setVal('slBurstTime', GROUPING_DEFAULTS.burst_time_gap);
+  setVal('slBurstPhash', GROUPING_DEFAULTS.burst_phash_threshold);
+  setVal('slBurstEmb', GROUPING_DEFAULTS.burst_embedding_threshold);
   document.querySelectorAll('.sidebar-section input[type="range"]').forEach(function(sl) {
     updateSliderDisplay(sl);
   });
@@ -1636,6 +1764,17 @@ function applyGroupingDefaults() {
 function resetGroupingDefaults() {
   applyGroupingDefaults();
   doRegroupLive();
+}
+
+function saveGroupingDefaults() {
+  var config = getGroupingConfig();
+  safeFetch('/api/pipeline/save-grouping-defaults', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({pipeline: config}),
+  })
+  .then(function() { showToast('Saved as defaults', 'success'); })
+  .catch(function() { /* error toast already shown by safeFetch */ });
 }
 
 // -- Photo inspection --
