@@ -1137,26 +1137,6 @@ function initPipelinePage() {
     .then(function(data) {
       var cfg = data.pipeline_config;
 
-      // Stage 1: Source — mark complete if any downstream stage has data
-      if (data.has_detections || data.has_masks || data.results) {
-        document.getElementById('numSource').classList.add('complete');
-      }
-
-      // Stage 2: Classify
-      if (data.has_detections) {
-        document.getElementById('numClassify').classList.add('complete');
-        document.getElementById('txtDetections').textContent =
-          data.has_detections + ' detections';
-      }
-
-      // Stage 3: Extract
-      if (data.has_masks) {
-        document.getElementById('numExtract').classList.add('complete');
-        var txt = data.has_masks + ' masks';
-        if (data.has_sharpness) txt += ', ' + data.has_sharpness + ' sharpness';
-        document.getElementById('txtMasks').textContent = txt;
-      }
-
       // Hide taxonomy checkbox if already downloaded
       if (data.taxonomy_available) {
         var taxWrap = document.getElementById('chkDownloadTaxonomy').closest('div');
@@ -1179,10 +1159,6 @@ function initPipelinePage() {
       _savedModelConfig.sam2_variant = cfg.sam2_variant;
       _savedModelConfig.dinov2_variant = cfg.dinov2_variant;
       _savedModelConfig.proxy_longest_edge = cfg.proxy_longest_edge;
-
-      // Update pipeline state
-      _pipelineState.hasDetections = !!data.has_detections;
-      _pipelineState.hasMasks = !!data.has_masks;
 
       updateCardStates();
       if (typeof updateReadiness === 'function') updateReadiness();
@@ -2553,6 +2529,29 @@ function _updatePipelineStageUI(p) {
       numEl.className = 'stage-num running';
       _runningStages[cardSuffix2] = true;
       _setPill(cardSuffix2, 'running');
+      // Override pill with the live X/Y count for the card's running
+      // substage. The event top-level p.current/p.total is the WEIGHTED
+      // OVERALL pipeline progress (see note around line 2586) and would
+      // make every concurrently-running card show the same number, so
+      // counts are read straight from stages[stageName]. Cards whose
+      // running substage hasn't reported a total yet (spin-up phases,
+      // Group's terminal step) keep the static "Running…" label rather
+      // than showing a misleading "Running… 0 / 0".
+      var subStages = _cardToStages[cardSuffix2] || [];
+      var stageDone = 0, stageTot = 0;
+      for (var i = 0; i < subStages.length; i++) {
+        var info = stages[subStages[i]] || {};
+        if (info.status !== 'running') continue;
+        var t = info.total || 0;
+        if (t > stageTot) {
+          stageTot = t;
+          stageDone = (info.count || 0) + (info.cached || 0);
+        }
+      }
+      if (stageTot > 0) {
+        _setPill(cardSuffix2, 'running',
+                 'Running… ' + stageDone + ' / ' + stageTot);
+      }
       var card = document.getElementById('card-' + cardSuffix2.toLowerCase());
       if (card) card.classList.add('expanded');
     } else if (a.failed) {
@@ -2721,7 +2720,6 @@ function _onPipelineComplete(result) {
     var cls = stageResults.classify;
     var predCount = cls.predictions_stored || cls.total || 0;
     document.getElementById('txtDetections').textContent = predCount + ' detections';
-    _pipelineState.hasDetections = true;
     var statusCls = document.getElementById('statusClassify');
     var fillCls = document.getElementById('fillClassify');
     if (fillCls) fillCls.style.width = '100%';
@@ -2736,7 +2734,6 @@ function _onPipelineComplete(result) {
     if (ext.masks_created) extSummary.push(ext.masks_created + ' masks');
     if (ext.scored_count) extSummary.push(ext.scored_count + ' sharpness');
     document.getElementById('txtMasks').textContent = extSummary.join(', ');
-    _pipelineState.hasMasks = true;
     var statusExt = document.getElementById('statusExtract');
     var fillExt = document.getElementById('fillExtract');
     if (fillExt) fillExt.style.width = '100%';
@@ -3139,7 +3136,6 @@ async function runClassifyStep(collectionId) {
     status.textContent = 'Done!';
     status.className = 'status-msg ok';
     document.getElementById('txtDetections').textContent = totalPredictions + ' detections';
-    _pipelineState.hasDetections = true;
     return true;
   } else {
     num.className = 'stage-num';
@@ -3407,7 +3403,6 @@ async function runExtractStep(collectionId) {
               if (r.scored_count) summary.push(r.scored_count + ' sharpness');
               document.getElementById('txtMasks').textContent = summary.join(', ');
             }
-            _pipelineState.hasMasks = true;
             resolve(true);
           } else {
             status.textContent = 'Failed';
@@ -3439,8 +3434,6 @@ function toggleCard(name) {
 
 // Mutable pipeline state — updated after each job completes
 var _pipelineState = {
-  hasDetections: false,
-  hasMasks: false,
 };
 
 // --- Pipeline plan & status pills ---
@@ -3754,10 +3747,7 @@ function schedulePlanRefresh() {
 }
 
 function updateCardStates() {
-  // Auto-expand the next card based on prior data, then refresh pills + plan.
-  if (_pipelineState.hasDetections && !_pipelineState.hasMasks) {
-    document.getElementById('card-extract').classList.add('expanded');
-  }
+  // Refresh pills + plan.
   updateStartButton();
   refreshPipelineUI();
 }

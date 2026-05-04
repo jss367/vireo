@@ -2696,42 +2696,6 @@ class Database:
             out.append(entry)
         return out
 
-    def get_pipeline_feature_counts(self):
-        """Return counts of photos with masks, detections, and sharpness data.
-
-        Detections are global: the per-workspace scope comes from
-        ``workspace_folders``, and low-confidence rows are filtered out at
-        read time using the workspace-effective ``detector_confidence``.
-        """
-        import config as cfg
-        ws = self._ws_id()
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
-        row = self.conn.execute(
-            """SELECT
-                SUM(CASE WHEN p.mask_path IS NOT NULL THEN 1 ELSE 0 END) as masks,
-                SUM(CASE WHEN p.subject_tenengrad IS NOT NULL THEN 1 ELSE 0 END) as sharpness
-            FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?""",
-            (ws,),
-        ).fetchone()
-        det_count = self.conn.execute(
-            """SELECT COUNT(DISTINCT d.photo_id)
-               FROM detections d
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?""",
-            (ws, min_conf),
-        ).fetchone()[0]
-        return {
-            "masks": row["masks"] or 0,
-            "detections": det_count or 0,
-            "sharpness": row["sharpness"] or 0,
-        }
-
     def _scope_clause(self, photo_ids, table_alias="p"):
         """Build a (clause, params) pair to scope a query to photo_ids.
 

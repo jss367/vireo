@@ -1065,9 +1065,6 @@ def test_pipeline_page_init_api(app_and_db):
     assert resp.status_code == 200
     data = resp.get_json()
     assert 'total_photos' in data
-    assert 'has_detections' in data
-    assert 'has_masks' in data
-    assert 'has_sharpness' in data
     assert 'pipeline_config' in data
     assert 'results' in data
     # Verify pipeline_config has expected keys
