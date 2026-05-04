@@ -11,6 +11,7 @@ Entry points:
 
 import json
 import logging
+import math
 import os
 from collections import defaultdict
 
@@ -713,8 +714,11 @@ def compute_review_readiness(db, mask_threshold=0.25):
     if total == 0:
         return out
 
-    # Required: enough photos have masks (otherwise pipeline rejects all)
-    if cov["mask"] < max(1, int(total * mask_threshold)):
+    # Required: enough photos have masks (otherwise pipeline rejects all).
+    # Use ceiling so the gate honors the documented minimum fraction — e.g.
+    # 1 mask out of 5 (20%) must classify as insufficient against a 25%
+    # threshold, not slip through because int() floored 1.25 down to 1.
+    if cov["mask"] < max(1, math.ceil(total * mask_threshold)):
         out["state"] = "insufficient"
         out["missing_required"].append("masks")
         # Still surface enhancing_missing so the diagnostic is complete

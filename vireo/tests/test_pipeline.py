@@ -409,6 +409,40 @@ def test_compute_review_readiness_at_mask_threshold_boundary(tmp_path):
     assert "masks_partial" not in out_below["enhancing_missing"]
 
 
+def test_compute_review_readiness_below_threshold_uses_ceiling(tmp_path):
+    """Coverage strictly below the threshold must classify as insufficient
+    even when ``int(total * threshold)`` would floor the required count
+    down to a value the actual coverage happens to meet.
+
+    Concrete case: 5 photos, 1 with a mask = 20% coverage. Against the
+    default 25% threshold, ``int(5 * 0.25) == 1`` would let 1 mask pass;
+    the ceiling form ``ceil(5 * 0.25) == 2`` correctly requires 2 and
+    classifies the workspace as insufficient.
+    """
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    base_time = datetime(2026, 3, 20, 10, 0, 0)
+    pids = []
+    for i in range(5):
+        ts = base_time + timedelta(seconds=i * 2)
+        pid = db.add_photo(
+            fid, f"photo{i}.jpg", ".jpg", 1000, 1.0,
+            timestamp=ts.isoformat(), width=4000, height=3000,
+        )
+        pids.append(pid)
+
+    # 1 mask out of 5 → 20% coverage, strictly below the 25% threshold.
+    db.update_photo_pipeline_features(pids[0], mask_path=f"/masks/{pids[0]}.png")
+
+    out = compute_review_readiness(db)
+    assert out["state"] == "insufficient"
+    assert out["with_masks"] == 1
+    assert "masks" in out["missing_required"]
+
+
 def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
     """save_results must preserve an existing miss_computed_at marker
     when the caller's results dict doesn't carry one. reflow and
