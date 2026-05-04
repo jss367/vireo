@@ -163,7 +163,7 @@ def sim_meta(photo_a, photo_b):
         return sim_fl
 
 
-def compute_s_enc(photo_a, photo_b, config=None):
+def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
     """Compute the combined encounter similarity score S_enc(a, b).
 
     Args:
@@ -176,9 +176,12 @@ def compute_s_enc(photo_a, photo_b, config=None):
             - focal_length: float or None
             - burst_id: str or None (camera burst ID)
         config: optional dict overriding DEFAULTS
+        return_components: when True, return (score, components_dict) where
+            components_dict maps each signal name to {value, weight, used}.
 
     Returns:
-        float — similarity score (higher = more likely same encounter)
+        float — similarity score (higher = more likely same encounter), or
+        (float, dict) when return_components is True.
     """
     cfg = {**DEFAULTS, **(config or {})}
 
@@ -192,34 +195,43 @@ def compute_s_enc(photo_a, photo_b, config=None):
     sp = sim_species(photo_a.get("species_top5"), photo_b.get("species_top5"))
     sm = sim_meta(photo_a, photo_b)
 
-    # Check which terms are available for renormalization
-    weights = {}
-    if dt != float("inf"):
-        weights["time"] = cfg["w_time"]
-    if photo_a.get("dino_subject_embedding") is not None and photo_b.get("dino_subject_embedding") is not None:
-        weights["subj"] = cfg["w_subj"]
-    if photo_a.get("dino_global_embedding") is not None and photo_b.get("dino_global_embedding") is not None:
-        weights["global"] = cfg["w_global"]
-    if photo_a.get("species_top5") and photo_b.get("species_top5"):
-        weights["species"] = cfg["w_species"]
-    # Meta always contributes (even if 0)
-    weights["meta"] = cfg["w_meta"]
-
-    total_weight = sum(weights.values())
-    if total_weight == 0:
-        return 0.0
-
-    scores = {
-        "time": st,
-        "subj": ss,
-        "global": sg,
-        "species": sp,
-        "meta": sm,
+    used = {
+        "time": dt != float("inf"),
+        "subj": (photo_a.get("dino_subject_embedding") is not None
+                 and photo_b.get("dino_subject_embedding") is not None),
+        "global": (photo_a.get("dino_global_embedding") is not None
+                   and photo_b.get("dino_global_embedding") is not None),
+        "species": bool(photo_a.get("species_top5") and photo_b.get("species_top5")),
+        # Meta always contributes (even if 0)
+        "meta": True,
     }
+    weight_keys = {
+        "time": "w_time",
+        "subj": "w_subj",
+        "global": "w_global",
+        "species": "w_species",
+        "meta": "w_meta",
+    }
+    values = {"time": st, "subj": ss, "global": sg, "species": sp, "meta": sm}
 
-    # Renormalized weighted sum
-    s_enc = sum(weights.get(k, 0) * scores[k] for k in scores) / total_weight
-    return s_enc
+    total_weight = sum(cfg[weight_keys[k]] for k, u in used.items() if u)
+    if total_weight == 0:
+        s_enc = 0.0
+    else:
+        s_enc = sum(cfg[weight_keys[k]] * values[k] for k, u in used.items() if u) / total_weight
+
+    if not return_components:
+        return s_enc
+
+    components = {
+        k: {
+            "value": float(values[k]),
+            "weight": float(cfg[weight_keys[k]]),
+            "used": bool(used[k]),
+        }
+        for k in values
+    }
+    return s_enc, components
 
 
 # -- Pass 1: Cut timeline into microsegments (Section 2.2) --

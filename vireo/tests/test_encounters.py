@@ -495,3 +495,25 @@ def test_segment_encounters_with_merge():
     # Should be 1 encounter (identical embeddings, close in time)
     assert len(encounters) == 1
     assert encounters[0]["photo_count"] == 4
+
+
+def test_compute_s_enc_returns_components_when_asked():
+    from encounters import compute_s_enc
+    photo_a = {
+        "timestamp": "2026-03-07T11:32:04",
+        "latitude": 33.7, "longitude": -118.0,
+        "focal_length": 600.0,
+    }
+    photo_b = {
+        "timestamp": "2026-03-07T11:32:09",
+        "latitude": 33.7, "longitude": -118.0,
+        "focal_length": 600.0,
+    }
+    score, components = compute_s_enc(photo_a, photo_b, return_components=True)
+    assert isinstance(score, float)
+    assert set(components.keys()) >= {"time", "subj", "global", "species", "meta"}
+    # Each component is a dict {value, weight, used}
+    assert components["time"]["value"] >= 0.0
+    assert components["time"]["weight"] == 0.35  # default w_time
+    assert components["time"]["used"] is True   # both photos have timestamps
+    assert components["species"]["used"] is False  # neither has species_top5
