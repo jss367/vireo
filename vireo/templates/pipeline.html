@@ -2553,6 +2553,15 @@ function _updatePipelineStageUI(p) {
       numEl.className = 'stage-num running';
       _runningStages[cardSuffix2] = true;
       _setPill(cardSuffix2, 'running');
+      // Override pill with the live X/Y count when this SSE event carries
+      // them. Stages that emit progress without counts (e.g. spin-up phases,
+      // Group's terminal step) keep the static "Running…" label rather than
+      // showing a misleading "Running… 0 / 0".
+      if (typeof p.current === 'number' && typeof p.total === 'number'
+          && p.total > 0) {
+        _setPill(cardSuffix2, 'running',
+                 'Running… ' + p.current + ' / ' + p.total);
+      }
       var card = document.getElementById('card-' + cardSuffix2.toLowerCase());
       if (card) card.classList.add('expanded');
     } else if (a.failed) {
