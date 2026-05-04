@@ -371,6 +371,28 @@ input[type="range"]::-moz-range-thumb {
 }
 .save-btn:hover { filter: brightness(1.1); }
 
+/* Algorithm trace panel */
+.algo-trace { font-size: 11px; line-height: 1.35; margin-bottom: 8px; }
+.algo-trace .trace-row {
+  display: grid; grid-template-columns: 1fr auto auto; gap: 6px;
+  padding: 3px 4px; border-bottom: 1px solid var(--border-primary);
+  align-items: baseline;
+}
+.algo-trace .trace-row.cut { background: rgba(220, 50, 50, 0.10); }
+.algo-trace .trace-row.merged-back { background: rgba(80, 160, 80, 0.10); }
+.algo-trace .trace-row.kept { }
+.algo-trace .trace-decision { font-weight: 600; }
+.algo-trace .trace-components {
+  font-size: 10px; color: var(--text-dim); padding: 2px 4px 6px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.algo-trace .trace-empty {
+  font-size: 11px; color: var(--text-dim); font-style: italic; padding: 4px;
+}
+.encounter-card.focused {
+  border-left: 3px solid var(--accent);
+}
+
 /* Inspection panel */
 .inspect-overlay {
   display: none;
@@ -1051,6 +1073,10 @@ input[type="range"]::-moz-range-thumb {
         </div>
       </div>
 
+      <div class="slider-section-header">Trace &mdash; focused encounter</div>
+      <div class="slider-section-hint" id="traceFocusLabel">Click an encounter to see how it was formed</div>
+      <div id="algorithmTrace" class="algo-trace"></div>
+
       <div class="button-row">
         <button class="reset-btn" onclick="resetGroupingDefaults()">Reset</button>
         <button class="save-btn" onclick="saveGroupingDefaults()">Save as default</button>
@@ -1296,6 +1322,71 @@ function encounterMatchesSpecies(enc) {
 
 // -- Rendering --
 
+var _focusedEncounterIdx = null;
+
+function setFocusedEncounter(idx) {
+  _focusedEncounterIdx = idx;
+  document.querySelectorAll('.encounter-card.focused').forEach(function(el) {
+    el.classList.remove('focused');
+  });
+  var card = document.querySelector('.encounter-card[data-encounter-index="' + idx + '"]');
+  if (card) card.classList.add('focused');
+  renderAlgorithmTrace();
+}
+
+function renderAlgorithmTrace() {
+  var panel = document.getElementById('algorithmTrace');
+  var label = document.getElementById('traceFocusLabel');
+  if (!panel) return;
+  if (_focusedEncounterIdx === null || !pipelineResults || !pipelineResults.encounters) {
+    panel.innerHTML = '';
+    if (label) label.textContent = 'Click an encounter to see how it was formed';
+    return;
+  }
+  var enc = pipelineResults.encounters[_focusedEncounterIdx];
+  if (!enc) {
+    panel.innerHTML = '';
+    if (label) label.textContent = 'Click an encounter to see how it was formed';
+    return;
+  }
+  if (!enc.trace || enc.trace.length === 0) {
+    panel.innerHTML = '<div class="trace-empty">Single-photo encounter &mdash; no internal cut points.</div>';
+    if (label) label.textContent = 'Encounter ' + (_focusedEncounterIdx + 1);
+    return;
+  }
+  if (label) {
+    label.textContent = 'Encounter ' + (_focusedEncounterIdx + 1) + ' — ' + enc.trace.length + ' adjacent pair' + (enc.trace.length > 1 ? 's' : '');
+  }
+  var html = '';
+  enc.trace.forEach(function(t, i) {
+    var rowCls = 'trace-row';
+    if (t.decision && t.decision.indexOf('cut_') === 0) rowCls += ' cut';
+    else if (t.decision === 'merged_back') rowCls += ' merged-back';
+    else rowCls += ' kept';
+    var dt = (t.dt_seconds === null || t.dt_seconds === undefined) ? '∞' : t.dt_seconds.toFixed(1) + 's';
+    var score = (typeof t.score === 'number') ? t.score.toFixed(3) : '-';
+    var decision = t.decision || '?';
+    html += '<div class="' + rowCls + '">';
+    html += '<span>pair ' + (i + 1) + ' · ' + dt + '</span>';
+    html += '<span>S=' + score + '</span>';
+    html += '<span class="trace-decision">' + decision + '</span>';
+    html += '</div>';
+    if (t.components) {
+      var parts = [];
+      ['time', 'subj', 'global', 'species', 'meta'].forEach(function(k) {
+        var c = t.components[k];
+        if (!c) return;
+        var marker = c.used ? '' : '·';
+        var v = (typeof c.value === 'number') ? c.value.toFixed(2) : '-';
+        var w = (typeof c.weight === 'number') ? c.weight.toFixed(2) : '-';
+        parts.push(k + marker + '=' + v + '×' + w);
+      });
+      html += '<div class="trace-components">' + parts.join(' · ') + '</div>';
+    }
+  });
+  panel.innerHTML = html;
+}
+
 function renderResults() {
   if (!pipelineResults) return;
   var container = document.getElementById('encountersContainer');
@@ -1379,8 +1470,9 @@ function renderResults() {
 
     var encKey = encounterKey(enc);
     var isCollapsed = encKey != null && collapsedEncounters.has(encKey);
-    html += '<div class="encounter-card">';
-    html += '<div class="encounter-header">';
+    var focusedCls = (_focusedEncounterIdx === ei) ? ' focused' : '';
+    html += '<div class="encounter-card' + focusedCls + '" data-encounter-index="' + ei + '">';
+    html += '<div class="encounter-header" onclick="setFocusedEncounter(' + ei + ')">';
     html += '<span class="encounter-chevron' + (isCollapsed ? ' collapsed' : '') + '" id="encChev' + ei + '" onclick="toggleEncounter(' + ei + ')">&#9660;</span>';
     html += renderSpeciesWidget(enc, ei, 'encounter', null);
     html += '<span class="encounter-meta" onclick="toggleEncounter(' + ei + ')" style="cursor:pointer;flex:1;">';
@@ -1440,6 +1532,18 @@ function renderResults() {
   });
 
   container.innerHTML = html;
+
+  // Focus management: auto-focus first encounter on initial render; clamp on regroup.
+  var encs = pipelineResults.encounters || [];
+  if (encs.length === 0) {
+    _focusedEncounterIdx = null;
+    renderAlgorithmTrace();
+  } else if (_focusedEncounterIdx === null || _focusedEncounterIdx >= encs.length) {
+    setFocusedEncounter(0);
+  } else {
+    // Re-apply focus highlight (DOM was rebuilt) and refresh trace panel.
+    setFocusedEncounter(_focusedEncounterIdx);
+  }
 }
 
 function renderPhotoCard(p, encIdx, burstIdx) {
