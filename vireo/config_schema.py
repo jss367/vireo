@@ -503,6 +503,12 @@ SCHEMA = {
         "label": "Diversity weight: metadata",
         "desc": "Weight of metadata component in diversity score.",
     },
+    "pipeline.tau_enc": {
+        "type": "float", "min": 0.0, "max": 86400.0, "step": 1.0,
+        "category": "Pipeline", "scope": "both",
+        "label": "Encounter: time constant tau (s)",
+        "desc": "Time constant for the sim_time decay between adjacent photos — smaller values make the time signal fall off faster.",
+    },
     "pipeline.hard_cut_time": {
         "type": "float", "min": 0.0, "max": 86400.0, "step": 1.0,
         "category": "Pipeline", "scope": "both",
@@ -532,6 +538,12 @@ SCHEMA = {
         "category": "Pipeline", "scope": "both",
         "label": "Encounter: merge max gap (s)",
         "desc": "Maximum time gap that still allows a merge.",
+    },
+    "pipeline.merge_tau": {
+        "type": "float", "min": 0.0, "max": 86400.0, "step": 1.0,
+        "category": "Pipeline", "scope": "both",
+        "label": "Encounter: merge time constant tau (s)",
+        "desc": "Time constant for the merge gap decay — smaller values make the merge signal fall off faster as the gap between segments grows.",
     },
     "pipeline.extract_full_metadata": {
         "type": "bool",
