@@ -1352,8 +1352,16 @@ function renderAlgorithmTrace() {
     if (label) label.textContent = 'Click an encounter to see how it was formed';
     return;
   }
-  if (!enc.trace || enc.trace.length === 0) {
-    panel.innerHTML = '<div class="trace-empty">Single-photo encounter &mdash; no internal cut points.</div>';
+  if (!enc.trace) {
+    panel.innerHTML = '<div class="trace-empty">Trace not available &mdash; drag a slider to recompute.</div>';
+    if (label) label.textContent = 'Encounter ' + (_focusedEncounterIdx + 1);
+    return;
+  }
+  if (enc.trace.length === 0) {
+    var emptyMsg = (enc.photo_count <= 1)
+      ? 'Single-photo encounter &mdash; no internal cut points.'
+      : 'No adjacent-pair scores (encounter has no internal pairs).';
+    panel.innerHTML = '<div class="trace-empty">' + emptyMsg + '</div>';
     if (label) label.textContent = 'Encounter ' + (_focusedEncounterIdx + 1);
     return;
   }

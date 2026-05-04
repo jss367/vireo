@@ -10199,6 +10199,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         rejected = [k for k in new_pipeline if k not in allowed]
         if rejected:
             return json_error(f"unknown keys: {rejected}")
+        # Hold the same lock as the settings write paths so a concurrent
+        # autosave from /api/settings doesn't clobber half of one update.
         with _settings_write_lock:
             raw = cfg.load()
             raw.setdefault("pipeline", {}).update(new_pipeline)
@@ -10243,6 +10245,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             enc["photo_count"] = len(enc["photo_ids"])
             enc["burst_count"] = len(bursts)
             enc["species_predictions"] = rebuild_species_predictions(results, enc["photo_ids"])
+            # Pair indices in trace reference the original photo composition;
+            # drop it so the algorithm-trace panel renders an honest "needs
+            # recompute" state instead of stale rows.
+            enc.pop("trace", None)
             # Recalculate remaining burst predictions too
             for b in bursts:
                 b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
@@ -10323,6 +10329,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         enc["burst_count"] = len(bursts)
         # Recalculate encounter-level predictions
         enc["species_predictions"] = rebuild_species_predictions(results, enc["photo_ids"])
+        # Encounter composition didn't change but burst structure did; trace
+        # is pair-level only, so it remains valid. No trace mutation needed.
 
         # Update summary
         results["summary"]["burst_count"] = sum(
