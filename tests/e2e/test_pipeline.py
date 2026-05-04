@@ -163,12 +163,16 @@ def test_pipeline_plan_summary_lists_stages(live_server, page):
     page.goto(f"{url}/pipeline")
     summary = page.locator("[data-testid='pipeline-plan-summary']")
     expect(summary).to_be_visible()
-    will_run = summary.locator(".plan-row.will-run .plan-stages")
-    # Extract & Group will run; Classify will not (Already done from seed).
-    expect(will_run).to_contain_text("Extract Features")
-    expect(will_run).to_contain_text("Group & Score")
-    done_prior = summary.locator(".plan-row.done-prior .plan-stages")
-    expect(done_prior).to_contain_text("Classify")
+    # Extract & Group will run; Classify is done-prior (seed has classifier_runs).
+    expect(
+        summary.locator(".plan-stage-row.will-run", has_text="Extract Features")
+    ).to_be_visible()
+    expect(
+        summary.locator(".plan-stage-row.will-run", has_text="Group & Score")
+    ).to_be_visible()
+    expect(
+        summary.locator(".plan-stage-row.done-prior", has_text="Classify")
+    ).to_be_visible()
 
 
 def test_pipeline_plan_summary_updates_on_toggle(live_server, page):
@@ -177,10 +181,10 @@ def test_pipeline_plan_summary_updates_on_toggle(live_server, page):
     page.click("#card-classify .stage-header")
     page.uncheck("#enableClassify")
     summary = page.locator("[data-testid='pipeline-plan-summary']")
-    skip_row = summary.locator(".plan-row.will-skip .plan-stages")
-    expect(skip_row).to_contain_text("Classify")
-    expect(skip_row).to_contain_text("Extract Features")
-    expect(skip_row).to_contain_text("Group & Score")
+    for label in ("Classify", "Extract Features", "Group & Score"):
+        expect(
+            summary.locator(".plan-stage-row.will-skip", has_text=label)
+        ).to_be_visible()
 
 
 def test_pipeline_concurrent_running_stages_keep_running_pill(live_server, page):
