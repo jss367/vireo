@@ -3762,3 +3762,94 @@ def test_storage_masks_uses_global_threshold_not_active_workspace(
     db.set_active_workspace(permissive)
     r = client.get("/api/storage/masks")
     assert r.get_json()["stale_count"] == 0
+
+
+def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
+    """/api/pipeline/regroup-live response should expose the per-cut-point
+    trace on each multi-photo encounter so the pipeline-review sidebar can
+    render the "how was this encounter formed" panel.
+    """
+    from datetime import datetime, timedelta
+
+    import numpy as np
+    from db import Database
+    from dino_embed import embedding_to_blob
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    base_time = datetime(2026, 3, 20, 10, 0, 0)
+    # Two encounters of 3 photos each, separated by 5 minutes (hard time cut).
+    for enc_idx in range(2):
+        emb_base = np.zeros(768, dtype=np.float32)
+        emb_base[enc_idx * 100: enc_idx * 100 + 100] = 1.0
+        emb_base = emb_base / np.linalg.norm(emb_base)
+        enc_offset = enc_idx * 300
+        for i in range(3):
+            ts = base_time + timedelta(seconds=enc_offset + i * 2)
+            pid = db.add_photo(
+                fid, f"enc{enc_idx}_p{i}.jpg", ".jpg", 1000, 1.0,
+                timestamp=ts.isoformat(), width=4000, height=3000,
+            )
+            emb = emb_base + np.random.RandomState(pid).randn(768).astype(np.float32) * 0.01
+            emb = emb / np.linalg.norm(emb)
+            db.update_photo_pipeline_features(
+                pid,
+                mask_path=f"/masks/{pid}.png",
+                subject_tenengrad=200 + i * 50,
+                bg_tenengrad=30 + i * 5,
+                crop_complete=0.85 + i * 0.03,
+                bg_separation=50.0 - i * 10,
+                subject_clip_high=0.01,
+                subject_clip_low=0.01,
+                subject_y_median=120.0,
+                phash_crop=f"{pid:016x}",
+            )
+            db.update_photo_embeddings(
+                pid,
+                dino_subject_embedding=embedding_to_blob(emb),
+                dino_global_embedding=embedding_to_blob(emb),
+            )
+            db.update_photo_quality(pid, subject_size=0.08 + i * 0.02)
+            det_ids = db.save_detections(pid, [
+                {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
+            ], detector_model="megadetector")
+            species = "robin" if enc_idx == 0 else "eagle"
+            db.add_prediction(det_ids[0], species, 0.9 - i * 0.05, "bioclip", category="match")
+    db.close()
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
+    client = app.test_client()
+
+    resp = client.post("/api/pipeline/regroup-live", json={"config": {}})
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert "encounters" in data
+    assert len(data["encounters"]) >= 1, data
+    multi_photo = [e for e in data["encounters"] if e["photo_count"] >= 2]
+    assert multi_photo, "test setup should yield at least one multi-photo encounter"
+    for enc in multi_photo:
+        assert "trace" in enc, f"trace missing on encounter: {enc.keys()}"
+        assert len(enc["trace"]) == enc["photo_count"] - 1, (
+            f"trace len {len(enc['trace'])} != photo_count-1 {enc['photo_count']-1}"
+        )
+        sample = enc["trace"][0]
+        assert "score" in sample
+        assert "decision" in sample
+        assert "components" in sample

@@ -10152,7 +10152,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not photos:
             return json_error("No photos with pipeline features", 404)
 
-        results = run_full_pipeline(photos, config=pipeline_cfg)
+        # emit_trace=True so the pipeline-review sidebar's algorithm-trace
+        # panel can show per-cut-point details for each encounter. Cost is
+        # negligible (~300B per adjacent pair).
+        results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
 
         # Carry the miss-recomputation marker through so the review UI's
         # "Review misses" shortcut stays visible after a threshold
