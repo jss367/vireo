@@ -28,19 +28,33 @@ Two small loose ends from the original Phase 2-4 vision still ship value:
 
 ## Design — Task A
 
-Hook in `_updatePipelineStageUI(p)` at `vireo/templates/pipeline.html:2440-2442`. After the existing transition block that calls `_setPill(suffix, 'running')`, conditionally override the pill text:
+Hook in `_updatePipelineStageUI(p)` inside the per-card `cardAgg` loop, after the existing `_setPill(suffix, 'running')` call. Override the pill text using the **per-stage** `count`/`total` from `stages[stageName]`, NOT the event top-level `p.current`/`p.total`:
 
 ```javascript
-if (a.running && typeof p.current === 'number' && typeof p.total === 'number'
-    && p.total > 0) {
-  _setPill(suffix, 'running', 'Running… ' + p.current + ' / ' + p.total);
+var subStages = _cardToStages[cardSuffix2] || [];
+var stageDone = 0, stageTot = 0;
+for (var i = 0; i < subStages.length; i++) {
+  var info = stages[subStages[i]] || {};
+  if (info.status !== 'running') continue;
+  var t = info.total || 0;
+  if (t > stageTot) {
+    stageTot = t;
+    stageDone = (info.count || 0) + (info.cached || 0);
+  }
+}
+if (stageTot > 0) {
+  _setPill(cardSuffix2, 'running',
+           'Running… ' + stageDone + ' / ' + stageTot);
 }
 ```
 
+Why **not** use `p.current`/`p.total`: those are the WEIGHTED OVERALL pipeline progress (see `pipeline_job._progress_event` and the existing comment around line 2586). Concurrent cards (e.g. scan + thumbnails) would all show the same global number — `Running… 6 / 38` on every running card — instead of their own per-stage progress. The per-stage counts live in `stages[stageName].count` / `.total` and reach the UI via the SSE event's `stages` snapshot.
+
 Why this shape:
 - Reuses `_setPill`'s existing `text` override path. No new infrastructure.
-- Conditional on `current/total` presence — stages that don't emit granular progress (Group, EyeKeypoints today) keep showing static "Running…" rather than a misleading "Running… 0 / 0".
-- One hook, every stage that emits progress data benefits. Classify, Extract, Scan & Import already emit `current/total`.
+- Iterates the card's mapped substages and picks the running one with the highest `total`. Multi-substage cards (Previews ← thumbnails + previews; Classify ← model_loader + classify) end up showing the substage actually doing photo-level work (the model_loader phase has no count, so it falls through to the static label until classify takes over).
+- Stages that emit progress without counts (Group's terminal step, model-load spin-up) keep the static "Running…" rather than a misleading "Running… 0 / 0".
+- For Classify, the count includes cache hits (`count + cached`) so the pill matches the progress bar's combined `inferred · cached / total` story.
 - Format `X / Y` not `X / Y (16%)`. The progress bar already shows percentage; the pill complements without duplicating.
 
 The static "Running…" label in `_formatPillLabel` stays as the fallback for `_setPill('running')` calls without a text override.

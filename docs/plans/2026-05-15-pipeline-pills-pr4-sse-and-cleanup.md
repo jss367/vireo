@@ -50,23 +50,37 @@ if (a.running) {
 }
 ```
 
-**Step 2: Add a sibling block right after it that overrides the pill text when SSE carries `current/total`**
+**Step 2: Add a sibling block right after the `_setPill(suffix, 'running')` call that overrides the pill text using per-stage counts**
 
-Replace the block with:
+The event top-level `p.current`/`p.total` is the WEIGHTED OVERALL pipeline progress (see `pipeline_job._progress_event` and the existing comment around line 2586) — using it would make every concurrently-running card show the same number. Read per-stage counts from `stages[stageName]` instead. Replace the block with:
 
 ```javascript
 if (a.running) {
   numEl.className = 'stage-num running';
   _runningStages[cardSuffix2] = true;
   _setPill(cardSuffix2, 'running');
-  // Override pill with the live X/Y count when this SSE event carries
-  // them. Stages that emit progress without counts (e.g. spin-up phases,
-  // Group's terminal step) keep the static "Running…" label rather than
-  // showing a misleading "Running… 0 / 0".
-  if (typeof p.current === 'number' && typeof p.total === 'number'
-      && p.total > 0) {
+  // Override pill with the live X/Y count for the card's running
+  // substage. The event top-level p.current/p.total is the WEIGHTED
+  // OVERALL pipeline progress (see note around line 2586) and would
+  // make every concurrently-running card show the same number, so
+  // counts are read straight from stages[stageName]. Cards whose
+  // running substage hasn't reported a total yet (spin-up phases,
+  // Group's terminal step) keep the static "Running…" label rather
+  // than showing a misleading "Running… 0 / 0".
+  var subStages = _cardToStages[cardSuffix2] || [];
+  var stageDone = 0, stageTot = 0;
+  for (var i = 0; i < subStages.length; i++) {
+    var info = stages[subStages[i]] || {};
+    if (info.status !== 'running') continue;
+    var t = info.total || 0;
+    if (t > stageTot) {
+      stageTot = t;
+      stageDone = (info.count || 0) + (info.cached || 0);
+    }
+  }
+  if (stageTot > 0) {
     _setPill(cardSuffix2, 'running',
-             'Running… ' + p.current + ' / ' + p.total);
+             'Running… ' + stageDone + ' / ' + stageTot);
   }
   var card = document.getElementById('card-' + cardSuffix2.toLowerCase());
   if (card) card.classList.add('expanded');
