@@ -10181,8 +10181,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_pipeline_save_grouping_defaults():
         """Persist current grouping weights/thresholds to the global config.
 
-        Whitelists known grouping keys so the endpoint can't be used to mutate
-        unrelated config. Returns the new pipeline payload that was saved.
+        Whitelists known grouping keys and validates each value's type and
+        range so a bad payload (e.g. {"hard_cut_time": "abc"}) can't poison
+        the persistent config and crash future grouping/scoring math.
+        Returns the new pipeline payload that was saved.
         """
         import config as cfg
 
@@ -10190,22 +10192,56 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         new_pipeline = body.get("pipeline", {})
         if not isinstance(new_pipeline, dict):
             return json_error("pipeline must be an object")
-        allowed = {
-            "w_time", "w_subj", "w_global", "w_species", "w_meta",
-            "tau_enc", "hard_cut_time", "hard_cut_score", "soft_cut_score",
-            "merge_score", "merge_max_gap", "merge_tau",
-            "burst_time_gap", "burst_phash_threshold", "burst_embedding_threshold",
+        # (kind, min, max). kind="unit" → 0..1 float; "score" → 0..1 float;
+        # "seconds" → non-negative float; "phash" → 0..256 int (8x8 phash =
+        # 64 bits, 256 leaves headroom for future hash sizes).
+        schema = {
+            "w_time": ("unit", 0.0, 1.0),
+            "w_subj": ("unit", 0.0, 1.0),
+            "w_global": ("unit", 0.0, 1.0),
+            "w_species": ("unit", 0.0, 1.0),
+            "w_meta": ("unit", 0.0, 1.0),
+            "tau_enc": ("seconds", 0.0, 86400.0),
+            "hard_cut_time": ("seconds", 0.0, 86400.0),
+            "hard_cut_score": ("score", 0.0, 1.0),
+            "soft_cut_score": ("score", 0.0, 1.0),
+            "merge_score": ("score", 0.0, 1.0),
+            "merge_max_gap": ("seconds", 0.0, 86400.0),
+            "merge_tau": ("seconds", 0.0, 86400.0),
+            "burst_time_gap": ("seconds", 0.0, 86400.0),
+            "burst_phash_threshold": ("phash", 0, 256),
+            "burst_embedding_threshold": ("score", 0.0, 1.0),
         }
-        rejected = [k for k in new_pipeline if k not in allowed]
+        rejected = [k for k in new_pipeline if k not in schema]
         if rejected:
             return json_error(f"unknown keys: {rejected}")
+        coerced = {}
+        for k, raw_v in new_pipeline.items():
+            kind, lo, hi = schema[k]
+            if isinstance(raw_v, bool):
+                # bool is an int subclass — reject explicitly so True/False
+                # don't silently succeed for numeric keys.
+                return json_error(f"{k} must be a number, got bool")
+            if kind == "phash":
+                if not isinstance(raw_v, int):
+                    return json_error(f"{k} must be an integer")
+                v = raw_v
+            else:
+                if not isinstance(raw_v, (int, float)):
+                    return json_error(f"{k} must be a number")
+                v = float(raw_v)
+                if v != v or v in (float("inf"), float("-inf")):
+                    return json_error(f"{k} must be finite")
+            if v < lo or v > hi:
+                return json_error(f"{k} out of range [{lo}, {hi}]")
+            coerced[k] = v
         # Hold the same lock as the settings write paths so a concurrent
         # autosave from /api/settings doesn't clobber half of one update.
         with _settings_write_lock:
             raw = cfg.load()
-            raw.setdefault("pipeline", {}).update(new_pipeline)
+            raw.setdefault("pipeline", {}).update(coerced)
             cfg.save(raw)
-        return jsonify({"saved": new_pipeline})
+        return jsonify({"saved": coerced})
 
     @app.route("/api/pipeline/detach-burst", methods=["POST"])
     def api_pipeline_detach_burst():
