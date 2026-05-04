@@ -924,6 +924,21 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     files_to_process = []
     processed_count = 0
     try:
+        # Eagerly register the explicit scan targets so they end up linked
+        # to the active workspace even when zero photos are inserted (e.g.
+        # every file is in skip_paths because the photos are already in
+        # the global photos table). Without this, importing a folder
+        # whose contents are already known silently skipped the
+        # workspace_folders link and the folder never became visible in
+        # the active workspace. Inside the try so a DB failure here still
+        # routes through the partial-status recovery path.
+        _ensure_folder(root_path)
+        if restrict_dirs is not None:
+            for d in restrict_dirs:
+                dp = Path(d)
+                if dp.is_dir():
+                    _ensure_folder(dp)
+
         for image_path in image_files:
             stat = image_path.stat()
             file_mtime = stat.st_mtime
