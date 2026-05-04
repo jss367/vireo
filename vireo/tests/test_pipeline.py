@@ -443,6 +443,51 @@ def test_compute_review_readiness_below_threshold_uses_ceiling(tmp_path):
     assert "masks" in out["missing_required"]
 
 
+def test_compute_review_readiness_variant_aware_embeddings(tmp_path):
+    """Switching DINOv2 variants must drop stale embeddings from coverage.
+
+    Pins the contract that embedding readiness mirrors the variant rule
+    in ``load_photo_features._embedding_usable``: a workspace whose
+    embeddings were all written under ``vit-b14`` (768-dim) must report
+    zero usable embeddings when readiness is asked for under ``vit-l14``
+    (1024-dim), and the user-facing ``enhancing_missing`` must surface
+    the gap so the degraded banner explains the silent quality drop.
+
+    Without this, after a variant switch the readiness pane would claim
+    full embedding coverage while ``/api/pipeline/regroup-live`` actually
+    runs without a single usable embedding.
+    """
+    from pipeline import compute_review_readiness
+
+    # _setup_db_with_photos writes 768-dim embeddings (vit-b14 shape) but
+    # leaves dino_embedding_variant NULL via update_photo_embeddings.
+    db, _ids = _setup_db_with_photos(tmp_path)
+
+    # Same variant as the stored byte-length — NULL stored variant slips
+    # through the dim-match branch, so coverage is full.
+    out_match = compute_review_readiness(db, dinov2_variant="vit-b14")
+    assert out_match["with_embeddings"] == out_match["total_photos"]
+    assert "embeddings" not in out_match["enhancing_missing"]
+
+    # Mismatched variant — 768-dim embeddings can't be reused as 1024-dim,
+    # so they must NOT count as usable and must surface in the gap list.
+    out_mismatch = compute_review_readiness(db, dinov2_variant="vit-l14")
+    assert out_mismatch["with_embeddings"] == 0
+    assert "embeddings" in out_mismatch["enhancing_missing"]
+
+    # Stamp the variant explicitly: a row marked vit-b14 must NOT count
+    # under a vit-l14 readiness check even though byte-length doesn't
+    # match either — the explicit-variant branch wins.
+    pid = _ids[0][0]
+    db.conn.execute(
+        "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
+        ("vit-b14", pid),
+    )
+    db.conn.commit()
+    out_explicit_mismatch = compute_review_readiness(db, dinov2_variant="vit-l14")
+    assert out_explicit_mismatch["with_embeddings"] == 0
+
+
 def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
     """save_results must preserve an existing miss_computed_at marker
     when the caller's results dict doesn't carry one. reflow and

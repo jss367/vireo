@@ -1183,7 +1183,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 p["flag"] = f
                 p["rating"] = r
 
-        review_readiness = compute_review_readiness(db)
+        effective_cfg = db.get_effective_config(cfg.load())
+        pipeline_cfg = effective_cfg.get("pipeline", {})
+
+        # Variant must match the active DINOv2 variant so embedding coverage
+        # reflects what /api/pipeline/regroup-live would actually consume —
+        # mismatched-variant embeddings are dropped at load time, so counting
+        # them here would lie about readiness.
+        review_readiness = compute_review_readiness(
+            db, dinov2_variant=pipeline_cfg.get("dinov2_variant"),
+        )
         if results is not None:
             # Cache exists — even if features have changed underneath,
             # the page can render. enhancing_missing still reflects the
@@ -1196,9 +1205,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if missing == "masks" and "masks_partial" not in review_readiness["enhancing_missing"]:
                     review_readiness["enhancing_missing"].insert(0, "masks_partial")
             review_readiness["missing_required"] = []
-
-        effective_cfg = db.get_effective_config(cfg.load())
-        pipeline_cfg = effective_cfg.get("pipeline", {})
 
         ws = db.get_workspace(db._active_workspace_id)
         ws_overrides = {}
