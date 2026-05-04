@@ -112,6 +112,34 @@ def test_count_classify_pending_excludes_recorded_runs(tmp_path):
     assert db.count_classify_pending_pairs("OtherModel", "fp1") == 2
 
 
+def test_count_classify_stale_zero_when_no_runs(tmp_path):
+    from labels_fingerprint import TOL_SENTINEL
+    db, folder_id = _make_db(tmp_path)
+    _add_photo_with_detection(db, folder_id, "a.jpg")
+    assert db.count_classify_stale("BioCLIP-2", TOL_SENTINEL) == 0
+
+
+def test_count_classify_stale_zero_when_current_run_present(tmp_path):
+    """A detection with a row matching current (model, fp) is done,
+    not stale — even if older rows under different fingerprints exist."""
+    from labels_fingerprint import TOL_SENTINEL
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    assert db.count_classify_stale("BioCLIP-2", TOL_SENTINEL) == 0
+
+
+def test_count_classify_stale_counts_old_only_runs(tmp_path):
+    """A detection with a row for current model under a stale fingerprint
+    AND no row matching current fingerprint is stale."""
+    from labels_fingerprint import TOL_SENTINEL
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
+    assert db.count_classify_stale("BioCLIP-2", TOL_SENTINEL) == 1
+
+
 def test_count_photos_pending_masks(tmp_path):
     db, folder_id = _make_db(tmp_path)
     pid_unmasked, _ = _add_photo_with_detection(db, folder_id, "no_mask.jpg")
@@ -172,6 +200,200 @@ def test_count_eye_keypoint_eligible_requires_mask_and_prediction(tmp_path):
     db.conn.commit()
 
     assert db.count_eye_keypoint_eligible() == 1
+
+
+def test_count_eye_keypoint_stale_zero_when_all_current(tmp_path):
+    """No stale photos when every eligible row's eye_kp_fingerprint
+    matches the current EYE_KP_FINGERPRINT_VERSION."""
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
+    db, folder_id = _make_db(tmp_path)
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png', "
+        "eye_tenengrad=12.0, eye_kp_fingerprint=? WHERE id=?",
+        (EYE_KP_FINGERPRINT_VERSION, pid),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
+        (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
+    )
+    db.conn.commit()
+    assert db.count_eye_keypoint_stale() == 0
+
+
+def test_count_eye_keypoint_stale_counts_old_fingerprint(tmp_path):
+    """A photo with eye_tenengrad set under an old fingerprint counts
+    as stale; the planner will use this to flip Outdated."""
+    from labels_fingerprint import TOL_SENTINEL
+    db, folder_id = _make_db(tmp_path)
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png', "
+        "eye_tenengrad=12.0, eye_kp_fingerprint='superanimal-old' WHERE id=?",
+        (pid,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
+        (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
+    )
+    db.conn.commit()
+    assert db.count_eye_keypoint_stale() == 1
+
+
+def test_count_eye_keypoint_stale_ignores_never_processed(tmp_path):
+    """Photos with eye_tenengrad IS NULL are 'never processed', not stale.
+    Stale specifically means 'previously processed under different
+    settings that no longer match'."""
+    from labels_fingerprint import TOL_SENTINEL
+    db, folder_id = _make_db(tmp_path)
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
+        (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
+    )
+    db.conn.commit()
+    assert db.count_eye_keypoint_stale() == 0
+
+
+def test_count_extract_stale_zero_when_no_masks(tmp_path):
+    db, folder_id = _make_db(tmp_path)
+    _add_photo_with_detection(db, folder_id, "a.jpg")
+    assert db.count_extract_stale("sam2-small") == 0
+
+
+def test_count_extract_stale_zero_when_prompt_matches(tmp_path):
+    """A mask whose stored prompt matches the photo's primary detection
+    is fresh — not stale."""
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    # Stored prompt matches the detection's box (0.1, 0.1, 0.5, 0.5)
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/a.png', 0, 'megadetector-v6', "
+        "0.1, 0.1, 0.5, 0.5)",
+        (pid,),
+    )
+    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
+    db.conn.commit()
+    assert db.count_extract_stale("sam2-small") == 0
+
+
+def test_count_extract_stale_counts_prompt_mismatch(tmp_path):
+    """A mask whose stored prompt does NOT match the photo's primary
+    detection (e.g., re-detection produced a different bbox) is stale."""
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/a.png', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",  # bbox mismatches detection (0.1,0.1,0.5,0.5)
+        (pid,),
+    )
+    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
+    db.conn.commit()
+    assert db.count_extract_stale("sam2-small") == 1
+
+
+def test_count_extract_stale_filters_by_variant(tmp_path):
+    """Stale masks for a different variant don't count toward the
+    configured variant's staleness."""
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-large', '/m/a.png', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",
+        (pid,),
+    )
+    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
+    db.conn.commit()
+    assert db.count_extract_stale("sam2-small") == 0
+    assert db.count_extract_stale("sam2-large") == 1
+
+
+def test_count_extract_stale_excludes_photos_with_null_mask_path(tmp_path):
+    """A photo in an interrupted state — photo_masks row inserted but
+    photos.mask_path still NULL — is already counted as ``pending`` by
+    ``count_photos_pending_masks``. Counting it again as stale here
+    would double-count when ``_extract_plan`` does ``pending + stale``,
+    pushing ``detail.pending`` past ``eligible`` and producing a wrong
+    "N to redo" + progress bar in the pipeline UI.
+    """
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/a.png', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",  # mismatches the detection
+        (pid,),
+    )
+    # Note: mask_path on photos is NOT set — represents an interrupted
+    # extract run that inserted a photo_masks row before updating
+    # photos.mask_path.
+    db.conn.commit()
+    assert db.count_photos_pending_masks()["pending"] == 1
+    assert db.count_extract_stale("sam2-small") == 0
+
+
+def test_count_extract_stale_ignores_photos_without_primary_detection(tmp_path):
+    """Photos with only ``full-image`` detections aren't eligible for
+    extract — a stale ``photo_masks`` row left over from a prior detector
+    run must not inflate ``count_extract_stale``, otherwise the stage
+    stays flagged Outdated/Will run indefinitely in mixed workspaces."""
+    db, folder_id = _make_db(tmp_path)
+    pid = db.add_photo(
+        folder_id=folder_id, filename="anchor.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+          "confidence": 1.0, "category": "anchor"}],
+        detector_model="full-image",
+    )
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/a.png', 0, 'megadetector-v6', "
+        "0.1, 0.1, 0.5, 0.5)",
+        (pid,),
+    )
+    db.conn.commit()
+    assert db.count_extract_stale("sam2-small") == 0
+
+
+def test_count_extract_stale_ignores_photos_below_confidence_floor(tmp_path):
+    """A photo whose only non-full-image detection sits below the
+    workspace ``detector_confidence`` floor is not eligible for extract
+    (extraction skips it). A leftover mask on such a photo shouldn't
+    count as stale work to redo — the pipeline wouldn't redo it."""
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg", conf=0.05)
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/a.png', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",
+        (pid,),
+    )
+    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
+    db.conn.commit()
+    # detector_confidence floor of 0.2 means the 0.05-conf detection is
+    # invisible; the photo has no eligible primary, so no stale work.
+    assert db.count_extract_stale("sam2-small", detector_confidence=0.2) == 0
+    # Lower the floor and the same photo's prompt mismatch reappears.
+    assert db.count_extract_stale("sam2-small", detector_confidence=0.0) == 1
 
 
 # -------- compute_plan: classify --------
@@ -464,6 +686,84 @@ def test_classify_plan_exposes_pending_and_eligible_mixed_blocked_and_done(
     )
 
 
+def test_classify_plan_emits_fingerprint_outdated_when_stale(
+    tmp_path, monkeypatch,
+):
+    """A detection classified under fp_old + no current-fp row → outdated."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    detail = plan["stages"]["Classify"]["detail"]
+    assert detail["stale"] == 1
+    assert detail["fingerprint_outdated"] is True
+
+
+def test_classify_plan_no_outdated_flag_when_current(
+    tmp_path, monkeypatch,
+):
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    detail = plan["stages"]["Classify"]["detail"]
+    assert detail["stale"] == 0
+    assert not detail.get("fingerprint_outdated")
+
+
+def test_classify_plan_reclassify_suppresses_outdated(
+    tmp_path, monkeypatch,
+):
+    """Reclassify is a user override, not a settings-change signal —
+    don't render as 'Outdated' even though all pairs will redo."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
+
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+
+    plan = compute_plan(
+        db, _params(model_ids=["m1"], reclassify=True),
+        str(tmp_path / "test.db"),
+    )
+    detail = plan["stages"]["Classify"]["detail"]
+    assert not detail.get("fingerprint_outdated"), (
+        "reclassify is user-explicit; outdated flag should stay off so "
+        "pill says 'Re-classify' not 'Outdated'"
+    )
+
+
 # -------- compute_plan: extract --------
 
 def test_extract_plan_will_skip_when_disabled(tmp_path):
@@ -502,6 +802,128 @@ def test_extract_plan_will_run_when_some_photos_missing_masks(tmp_path):
     assert extract["state"] == "will-run"
     assert extract["detail"]["pending"] == 1
     assert extract["detail"]["eligible"] == 2
+
+
+def test_extract_plan_emits_fingerprint_outdated_when_stale(tmp_path):
+    """When the configured sam2_variant has stale masks (prompt mismatch),
+    surface fingerprint_outdated + stale count so the UI shows Outdated."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    # Mask under default sam2_variant ('sam2-small') with mismatched prompt.
+    # mask_path is set so the photo is "complete" — without it the photo
+    # would already be in `pending` and stale wouldn't apply (see
+    # test_count_extract_stale_excludes_photos_with_null_mask_path).
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/a.png', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",
+        (pid,),
+    )
+    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
+    db.conn.commit()
+    plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
+    detail = plan["stages"]["Extract"]["detail"]
+    assert detail["stale"] == 1
+    assert detail["fingerprint_outdated"] is True
+
+
+def test_extract_plan_pending_includes_stale_when_all_masked(tmp_path):
+    """When every eligible photo already has an active mask but some
+    stored prompts no longer match the current detection, ``detail.pending``
+    must reflect the stale work the stage will redo. Otherwise the pill UI
+    (``pending || eligible``) collapses to ``eligible`` and the progress
+    bar (``eligible - pending``) renders 100% — both incorrect for a
+    stage that is about to re-extract masks for the stale photos.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    # Two eligible photos: one fresh, one stale. Both already have an
+    # active mask (mask_path set), so count_photos_pending_masks reports
+    # pending=0.
+    pid_fresh, _ = _add_photo_with_detection(db, folder_id, "fresh.jpg")
+    pid_stale, _ = _add_photo_with_detection(db, folder_id, "stale.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/fresh.png' WHERE id=?",
+        (pid_fresh,),
+    )
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/stale.png' WHERE id=?",
+        (pid_stale,),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/fresh.png', 0, 'megadetector-v6', "
+        "0.1, 0.1, 0.5, 0.5)",  # matches detection
+        (pid_fresh,),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/stale.png', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",  # mismatched prompt
+        (pid_stale,),
+    )
+    db.conn.commit()
+
+    plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
+    extract = plan["stages"]["Extract"]
+    assert extract["state"] == "will-run"
+    detail = extract["detail"]
+    assert detail["eligible"] == 2
+    assert detail["stale"] == 1
+    assert detail["pending"] == 1, (
+        "stale work must be reflected in pending so pill text + bar are "
+        "accurate; got "
+        f"pending={detail['pending']}, stale={detail['stale']}"
+    )
+    assert detail["fingerprint_outdated"] is True
+
+
+def test_extract_plan_pending_does_not_double_count_interrupted_state(tmp_path):
+    """Interrupted extract: a ``photo_masks`` row was inserted but
+    ``photos.mask_path`` is still NULL. The photo is one unit of work,
+    not two — ``detail.pending`` must not exceed ``eligible`` and the
+    progress bar must stay sane.
+
+    Before the disjoint-by-construction fix, ``count_extract_stale``
+    counted this photo and ``count_photos_pending_masks`` also counted
+    it, so ``work = pending + stale`` produced ``pending=2`` for one
+    eligible photo — a 0/2 progress bar and "2 to redo" pill on a
+    single-photo workspace.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "interrupted.jpg")
+    # photo_masks row exists with stale prompt, but mask_path is still NULL.
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '/m/i.png', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",
+        (pid,),
+    )
+    db.conn.commit()
+
+    plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
+    extract = plan["stages"]["Extract"]
+    assert extract["state"] == "will-run"
+    detail = extract["detail"]
+    assert detail["eligible"] == 1
+    assert detail["pending"] == 1, (
+        "interrupted photo must count as one unit of work, not two; got "
+        f"pending={detail['pending']}, stale={detail['stale']}"
+    )
+    assert detail["pending"] <= detail["eligible"], (
+        "detail.pending must never exceed eligible (would render "
+        f">100% progress); got pending={detail['pending']}, "
+        f"eligible={detail['eligible']}"
+    )
+    # The photo is in pending (mask_path NULL), not stale — so the
+    # planner reports stale=0 for this case.
+    assert detail["stale"] == 0
 
 
 # -------- compute_plan: eye keypoints --------
@@ -641,6 +1063,67 @@ def test_eye_keypoints_plan_will_run_when_some_pending(tmp_path, monkeypatch):
     assert eye["state"] == "will-run"
     assert eye["detail"]["pending"] == 1
     assert eye["detail"]["eligible"] == 2
+
+
+def test_eye_keypoints_plan_emits_fingerprint_outdated_when_stale(
+    tmp_path, monkeypatch,
+):
+    """The planner must surface fingerprint_outdated + a stale count when
+    any eligible photo has a non-current eye_kp_fingerprint. PR #748's
+    pill formatter renders this as 'Outdated (N to redo)' + amber bar."""
+    import pipeline as pipeline_mod
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png', "
+        "eye_tenengrad=12.0, eye_kp_fingerprint='superanimal-old' WHERE id=?",
+        (pid,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
+        (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
+    )
+    db.conn.commit()
+    plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
+    detail = plan["stages"]["EyeKeypoints"]["detail"]
+    assert detail["stale"] == 1
+    assert detail["fingerprint_outdated"] is True
+
+
+def test_eye_keypoints_plan_no_outdated_flag_when_all_current(
+    tmp_path, monkeypatch,
+):
+    """No stale photos → flag absent (or False), pill stays 'Already done'."""
+    import pipeline as pipeline_mod
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png', "
+        "eye_tenengrad=12.0, eye_kp_fingerprint=? WHERE id=?",
+        (EYE_KP_FINGERPRINT_VERSION, pid),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) VALUES (?, ?, ?, ?, ?)",
+        (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
+    )
+    db.conn.commit()
+    plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
+    detail = plan["stages"]["EyeKeypoints"]["detail"]
+    assert detail["stale"] == 0
+    assert not detail.get("fingerprint_outdated")
 
 
 # -------- compute_plan: regroup --------

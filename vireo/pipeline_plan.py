@@ -120,7 +120,10 @@ def _classify_plan(db, params, photo_ids):
         return {
             "state": "will-skip",
             "summary": "Disabled — stage will be skipped",
-            "detail": {"pending": 0, "eligible": 0},
+            "detail": {
+                "pending": 0, "eligible": 0,
+                "stale": 0, "fingerprint_outdated": False,
+            },
         }
 
     models = _resolve_models(params.model_ids)
@@ -128,7 +131,10 @@ def _classify_plan(db, params, photo_ids):
         return {
             "state": "will-skip",
             "summary": "No models selected — stage will be skipped",
-            "detail": {"pending": 0, "eligible": 0},
+            "detail": {
+                "pending": 0, "eligible": 0,
+                "stale": 0, "fingerprint_outdated": False,
+            },
         }
 
     label_resolution = _resolve_labels_for_models(models, params.labels_files, db)
@@ -141,6 +147,21 @@ def _classify_plan(db, params, photo_ids):
         1 for m in models if not label_resolution[m["id"]].get("blocked")
     )
     eligible = total_dets * unblocked_count
+
+    stale_total = 0
+    if total_dets > 0 and not params.reclassify:
+        for m in models:
+            info = label_resolution[m["id"]]
+            if info.get("blocked"):
+                continue
+            fp = info["fingerprint"]
+            stale_total += db.count_classify_stale(
+                classifier_model=m["name"],
+                labels_fingerprint=fp,
+                photo_ids=photo_ids,
+            )
+    # Reclassify is a user override, not a settings-change signal.
+    fingerprint_outdated = stale_total > 0 and not params.reclassify
 
     if total_dets == 0:
         return {
@@ -155,6 +176,8 @@ def _classify_plan(db, params, photo_ids):
                 "models": [m["name"] for m in models],
                 "pending": 0,
                 "eligible": 0,
+                "stale": stale_total,
+                "fingerprint_outdated": fingerprint_outdated,
             },
         }
 
@@ -195,6 +218,8 @@ def _classify_plan(db, params, photo_ids):
                 "blocked_models": blocked,
                 "pending": 0,
                 "eligible": 0,
+                "stale": stale_total,
+                "fingerprint_outdated": fingerprint_outdated,
             },
         }
 
@@ -212,6 +237,8 @@ def _classify_plan(db, params, photo_ids):
                 "models": [m["name"] for m in models],
                 "pending": 0,
                 "eligible": eligible,
+                "stale": stale_total,
+                "fingerprint_outdated": fingerprint_outdated,
             },
         }
 
@@ -237,13 +264,15 @@ def _classify_plan(db, params, photo_ids):
         "photos_with_dets": photos_with_dets,
         "pending": pending_total,
         "eligible": eligible,
+        "stale": stale_total,
+        "fingerprint_outdated": fingerprint_outdated,
     }
     if blocked:
         detail["blocked_models"] = blocked
     return {"state": "will-run", "summary": summary, "detail": detail}
 
 
-def _extract_plan(db, params, photo_ids):
+def _extract_plan(db, params, photo_ids, pipeline_cfg):
     if params.skip_extract_masks:
         return {
             "state": "will-skip",
@@ -252,6 +281,8 @@ def _extract_plan(db, params, photo_ids):
     counts = db.count_photos_pending_masks(photo_ids)
     eligible = counts["eligible"]
     pending = counts["pending"]
+    sam2_variant = pipeline_cfg.get("sam2_variant", "sam2-small")
+    stale = db.count_extract_stale(sam2_variant, photo_ids)
     if eligible == 0:
         return {
             "state": "will-run",
@@ -259,24 +290,39 @@ def _extract_plan(db, params, photo_ids):
                 "Will run after classify produces detections "
                 "(no eligible photos yet)"
             ),
-            "detail": {"eligible": 0, "pending": 0},
+            "detail": {"eligible": 0, "pending": 0,
+                       "stale": 0, "fingerprint_outdated": False},
         }
-    if pending == 0:
+    if pending == 0 and stale == 0:
         return {
             "state": "done-prior",
             "summary": (
                 f"Masks present for all {eligible} eligible "
                 f"photo{_plural(eligible)}"
             ),
-            "detail": {"eligible": eligible, "pending": 0},
+            "detail": {"eligible": eligible, "pending": 0,
+                       "stale": 0, "fingerprint_outdated": False},
         }
+    # Stale masks (stored prompt no longer matches current detection) are
+    # work the stage will redo, just like photos with no mask at all.
+    # Roll them into ``pending`` so the UI's pill text ("N to redo") and
+    # progress bar (`(eligible - pending) / eligible`) reflect the actual
+    # work — otherwise stale-only states render as "0 to redo" + 100% bar.
+    # The two sets are disjoint by construction: pending requires
+    # ``mask_path IS NULL`` while ``count_extract_stale`` requires
+    # ``mask_path IS NOT NULL``. Without that gate, a photo in an
+    # interrupted state (photo_masks row inserted but mask_path not
+    # yet updated) would land in both buckets and inflate work past
+    # eligible.
+    work = pending + stale
     return {
         "state": "will-run",
         "summary": (
-            f"Will extract masks for {pending} "
-            f"photo{_plural(pending)} ({eligible} eligible)"
+            f"Will extract masks for {work} "
+            f"photo{_plural(work)} ({eligible} eligible)"
         ),
-        "detail": {"eligible": eligible, "pending": pending},
+        "detail": {"eligible": eligible, "pending": work,
+                   "stale": stale, "fingerprint_outdated": stale > 0},
     }
 
 
@@ -297,6 +343,7 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg):
 
     pending = len(db.list_photos_for_eye_keypoint_stage(photo_ids=photo_ids))
     eligible = db.count_eye_keypoint_eligible(photo_ids)
+    stale = db.count_eye_keypoint_stale(photo_ids)
     processed = max(eligible - pending, 0)
 
     if eligible == 0:
@@ -306,7 +353,12 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg):
                 "Will run after upstream produces masks + species "
                 "predictions (no eligible photos yet)"
             ),
-            "detail": {"eligible": 0, "pending": 0},
+            "detail": {
+                "eligible": 0,
+                "pending": 0,
+                "stale": stale,
+                "fingerprint_outdated": stale > 0,
+            },
         }
     if pending == 0:
         return {
@@ -315,7 +367,13 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg):
                 f"Eye keypoints present for all {eligible} eligible "
                 f"photo{_plural(eligible)}"
             ),
-            "detail": {"eligible": eligible, "pending": 0, "processed": processed},
+            "detail": {
+                "eligible": eligible,
+                "pending": 0,
+                "processed": processed,
+                "stale": stale,
+                "fingerprint_outdated": stale > 0,
+            },
         }
     return {
         "state": "will-run",
@@ -323,7 +381,13 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg):
             f"Will run on {pending} photo{_plural(pending)} "
             f"({processed} of {eligible} already processed)"
         ),
-        "detail": {"eligible": eligible, "pending": pending, "processed": processed},
+        "detail": {
+            "eligible": eligible,
+            "pending": pending,
+            "processed": processed,
+            "stale": stale,
+            "fingerprint_outdated": stale > 0,
+        },
     }
 
 
@@ -423,7 +487,7 @@ def compute_plan(db, params, db_path):
             photo_ids = {pid for pid in photo_ids if pid not in excl}
 
     classify = _classify_plan(db, params, photo_ids)
-    extract = _extract_plan(db, params, photo_ids)
+    extract = _extract_plan(db, params, photo_ids, pipeline_cfg)
     eye = _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg)
     upstream_will_run = any(
         s["state"] == "will-run" for s in (classify, extract, eye)

@@ -2815,6 +2815,52 @@ class Database:
         ).fetchone()
         return row["pending"] or 0
 
+    def count_classify_stale(
+        self, classifier_model, labels_fingerprint,
+        photo_ids=None, min_conf=None,
+    ):
+        """Count detections in scope that have a stale classifier_runs row
+        for ``classifier_model`` (some non-current fingerprint) AND no row
+        matching the current ``labels_fingerprint``.
+
+        A detection with a current-fp row is "done" (not stale). A
+        detection with no row at all is "never processed" (counted by
+        :meth:`count_classify_pending_pairs`, not here). The stale set is
+        their disjoint complement: previously processed under settings
+        that no longer match.
+        """
+        ws = self._ws_id()
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT d.id) AS n
+                FROM detections d
+                JOIN photos p ON p.id = d.photo_id
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               WHERE d.detector_model != 'full-image'
+                 AND d.detector_confidence >= ?
+                 AND EXISTS (
+                    SELECT 1 FROM classifier_runs cr_stale
+                     WHERE cr_stale.detection_id = d.id
+                       AND cr_stale.classifier_model = ?
+                       AND cr_stale.labels_fingerprint != ?
+                 )
+                 AND NOT EXISTS (
+                    SELECT 1 FROM classifier_runs cr_cur
+                     WHERE cr_cur.detection_id = d.id
+                       AND cr_cur.classifier_model = ?
+                       AND cr_cur.labels_fingerprint = ?
+                 ){scope_sql}""",
+            (ws, min_conf, classifier_model, labels_fingerprint,
+             classifier_model, labels_fingerprint, *scope_params),
+        ).fetchone()
+        return row["n"] or 0
+
     def count_photos_pending_masks(self, photo_ids=None, min_conf=None):
         """Return (pending, eligible) for the extract-masks stage.
 
@@ -2852,6 +2898,80 @@ class Database:
             "pending": row["pending"] or 0,
         }
 
+    def count_extract_stale(self, sam2_variant, photo_ids=None,
+                             detector_confidence=None):
+        """Count photos in scope that "look done" (``photos.mask_path``
+        is set) but whose ``photo_masks`` row for ``sam2_variant`` has a
+        stored prompt that no longer matches the photo's primary
+        detection.
+
+        Reuses the staleness predicate from ``find_stale_masks`` — a
+        mask is fresh only when its stored ``(detector_model,
+        prompt_xywh)`` equals the highest-confidence non-full-image
+        detection on the same photo (with optional ``detector_confidence``
+        floor). Filtered by ``sam2_variant`` so a stale mask under a
+        different variant doesn't pollute the count for the currently
+        configured variant.
+
+        Photos without a current primary detection (no non-full-image
+        detection at or above ``detector_confidence``) are excluded:
+        they aren't eligible for the extract stage, so a leftover
+        ``photo_masks`` row from a prior detector run isn't "stale work
+        to redo" — it's just an orphan that storage cleanup handles.
+        Counting those would inflate ``detail.stale`` and keep the
+        stage flagged Outdated/Will run forever in mixed workspaces.
+
+        The ``photos.mask_path IS NOT NULL`` gate keeps this count
+        disjoint from ``count_photos_pending_masks``'s ``pending``
+        (``mask_path IS NULL``). Photos with ``mask_path IS NULL`` are
+        already pending — they will be re-extracted regardless of
+        whether their ``photo_masks`` row's prompt matches — so
+        counting them here would double-count when a planner combines
+        ``pending + stale`` as total work.
+        """
+        import config as cfg
+        ws = self._ws_id()
+        if detector_confidence is None:
+            detector_confidence = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT pm.photo_id) AS n
+                FROM photo_masks pm
+                JOIN photos p ON p.id = pm.photo_id
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               WHERE pm.variant = ?
+                 AND p.mask_path IS NOT NULL
+                 AND EXISTS (
+                    SELECT 1 FROM detections d0
+                     WHERE d0.photo_id = pm.photo_id
+                       AND d0.detector_model != 'full-image'
+                       AND d0.detector_confidence >= ?
+                 )
+                 AND NOT EXISTS (
+                    SELECT 1 FROM detections d
+                     WHERE d.id = (
+                           SELECT d2.id
+                             FROM detections d2
+                            WHERE d2.photo_id = pm.photo_id
+                              AND d2.detector_model != 'full-image'
+                              AND d2.detector_confidence >= ?
+                            ORDER BY d2.detector_confidence DESC, d2.id ASC
+                            LIMIT 1
+                       )
+                       AND d.detector_model = pm.detector_model
+                       AND d.box_x = pm.prompt_x
+                       AND d.box_y = pm.prompt_y
+                       AND d.box_w = pm.prompt_w
+                       AND d.box_h = pm.prompt_h
+                 ){scope_sql}""",
+            (ws, sam2_variant, detector_confidence, detector_confidence,
+             *scope_params),
+        ).fetchone()
+        return row["n"] or 0
+
     def count_eye_keypoint_eligible(self, photo_ids=None):
         """Count photos eligible for the eye-keypoint stage, ignoring the
         ``eye_tenengrad IS NULL`` idempotency gate.
@@ -2880,6 +3000,42 @@ class Database:
                 JOIN predictions pr ON pr.detection_id = d.id
                 WHERE p.mask_path IS NOT NULL{scope_sql}""",
             (ws, min_conf, *scope_params),
+        ).fetchone()
+        return row["n"] or 0
+
+    def count_eye_keypoint_stale(self, photo_ids=None):
+        """Count photos in scope whose eye_tenengrad is set under a
+        non-current eye_kp_fingerprint. Mirrors
+        ``count_eye_keypoint_eligible``'s join shape (workspace + mask +
+        detection + prediction) and adds the staleness predicate.
+
+        A NULL fingerprint on a row with eye_tenengrad set is treated as
+        stale — only the migration backfill should produce that state,
+        and even there the user is expected to re-run after a model
+        change to restamp.
+        """
+        import config as cfg
+        from pipeline import EYE_KP_FINGERPRINT_VERSION
+        ws = self._ws_id()
+        min_conf = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2,
+        )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT p.id) AS n
+                FROM photos p
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN detections d
+                  ON d.photo_id = p.id
+                 AND d.detector_model != 'full-image'
+                 AND d.detector_confidence >= ?
+                JOIN predictions pr ON pr.detection_id = d.id
+                WHERE p.mask_path IS NOT NULL
+                  AND p.eye_tenengrad IS NOT NULL
+                  AND (p.eye_kp_fingerprint IS NULL
+                       OR p.eye_kp_fingerprint != ?){scope_sql}""",
+            (ws, min_conf, EYE_KP_FINGERPRINT_VERSION, *scope_params),
         ).fetchone()
         return row["n"] or 0
 
