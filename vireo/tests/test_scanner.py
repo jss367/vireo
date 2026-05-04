@@ -2141,3 +2141,63 @@ def test_scan_mp_method_is_spawn_when_frozen(monkeypatch):
         # the same process see the dev-mode value.
         monkeypatch.delattr(sys, "frozen", raising=False)
         importlib.reload(scanner)
+
+
+def test_scan_links_root_when_all_files_skipped(tmp_path):
+    """Scanning a folder where every file is in skip_paths still links the
+    folder to the active workspace.
+
+    Repro for the bug where importing folders whose photos are already in
+    the global photos table left those folders unlinked from the active
+    workspace — the scanner's per-photo loop never ran, so _ensure_folder
+    (which auto-links via db.add_folder) never fired.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['a.jpg', 'b.jpg']})
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+
+    skip = {os.path.join(root, 'a.jpg'), os.path.join(root, 'b.jpg')}
+    scan(root, db, skip_paths=skip)
+
+    linked = {f["path"] for f in db.get_workspace_folders(ws_id)}
+    assert root in linked, (
+        f"Folder {root} should be linked to the active workspace even when "
+        f"all files were skipped. Linked folders: {linked}"
+    )
+
+
+def test_scan_links_restrict_dirs_when_all_files_skipped(tmp_path):
+    """Scanning with restrict_dirs links each restrict_dir to the active
+    workspace, even when 0 files in those dirs survive skip_paths.
+
+    Mirrors the ingest path where ``do_scan`` is called with
+    ``restrict_dirs`` containing folders that already hold duplicates of
+    the source files; per the comment in pipeline_job.py, those folders
+    must end up linked to the active workspace.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        'sub1': ['a.jpg'],
+        'sub2': ['b.jpg'],
+    })
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+
+    sub1 = os.path.join(root, 'sub1')
+    sub2 = os.path.join(root, 'sub2')
+    skip = {os.path.join(sub1, 'a.jpg'), os.path.join(sub2, 'b.jpg')}
+    scan(root, db, skip_paths=skip, restrict_dirs=[sub1, sub2])
+
+    linked = {f["path"] for f in db.get_workspace_folders(ws_id)}
+    assert sub1 in linked and sub2 in linked, (
+        f"Both restrict_dirs should be linked. Linked folders: {linked}"
+    )
