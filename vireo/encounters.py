@@ -163,7 +163,7 @@ def sim_meta(photo_a, photo_b):
         return sim_fl
 
 
-def compute_s_enc(photo_a, photo_b, config=None):
+def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
     """Compute the combined encounter similarity score S_enc(a, b).
 
     Args:
@@ -176,9 +176,12 @@ def compute_s_enc(photo_a, photo_b, config=None):
             - focal_length: float or None
             - burst_id: str or None (camera burst ID)
         config: optional dict overriding DEFAULTS
+        return_components: when True, return (score, components_dict) where
+            components_dict maps each signal name to {value, weight, used}.
 
     Returns:
-        float — similarity score (higher = more likely same encounter)
+        float — similarity score (higher = more likely same encounter), or
+        (float, dict) when return_components is True.
     """
     cfg = {**DEFAULTS, **(config or {})}
 
@@ -192,52 +195,68 @@ def compute_s_enc(photo_a, photo_b, config=None):
     sp = sim_species(photo_a.get("species_top5"), photo_b.get("species_top5"))
     sm = sim_meta(photo_a, photo_b)
 
-    # Check which terms are available for renormalization
-    weights = {}
-    if dt != float("inf"):
-        weights["time"] = cfg["w_time"]
-    if photo_a.get("dino_subject_embedding") is not None and photo_b.get("dino_subject_embedding") is not None:
-        weights["subj"] = cfg["w_subj"]
-    if photo_a.get("dino_global_embedding") is not None and photo_b.get("dino_global_embedding") is not None:
-        weights["global"] = cfg["w_global"]
-    if photo_a.get("species_top5") and photo_b.get("species_top5"):
-        weights["species"] = cfg["w_species"]
-    # Meta always contributes (even if 0)
-    weights["meta"] = cfg["w_meta"]
-
-    total_weight = sum(weights.values())
-    if total_weight == 0:
-        return 0.0
-
-    scores = {
-        "time": st,
-        "subj": ss,
-        "global": sg,
-        "species": sp,
-        "meta": sm,
+    used = {
+        "time": dt != float("inf"),
+        "subj": (photo_a.get("dino_subject_embedding") is not None
+                 and photo_b.get("dino_subject_embedding") is not None),
+        "global": (photo_a.get("dino_global_embedding") is not None
+                   and photo_b.get("dino_global_embedding") is not None),
+        "species": bool(photo_a.get("species_top5") and photo_b.get("species_top5")),
+        # Meta always contributes (even if 0)
+        "meta": True,
     }
+    weight_keys = {
+        "time": "w_time",
+        "subj": "w_subj",
+        "global": "w_global",
+        "species": "w_species",
+        "meta": "w_meta",
+    }
+    values = {"time": st, "subj": ss, "global": sg, "species": sp, "meta": sm}
 
-    # Renormalized weighted sum
-    s_enc = sum(weights.get(k, 0) * scores[k] for k in scores) / total_weight
-    return s_enc
+    total_weight = sum(cfg[weight_keys[k]] for k, u in used.items() if u)
+    if total_weight == 0:
+        s_enc = 0.0
+    else:
+        s_enc = sum(cfg[weight_keys[k]] * values[k] for k, u in used.items() if u) / total_weight
+
+    if not return_components:
+        return s_enc
+
+    components = {
+        k: {
+            "value": float(values[k]),
+            "weight": float(cfg[weight_keys[k]]),
+            "used": bool(used[k]),
+        }
+        for k in values
+    }
+    return s_enc, components
 
 
 # -- Pass 1: Cut timeline into microsegments (Section 2.2) --
 
 
-def cut_microsegments(photos, config=None):
+def cut_microsegments(photos, config=None, emit_trace=False):
     """Sort photos by timestamp and cut into microsegments.
 
     Args:
         photos: list of photo dicts (see compute_s_enc for required keys)
         config: optional dict overriding DEFAULTS
+        emit_trace: when True, return (segments, trace) where each trace
+            entry is {pair_index, score, dt_seconds, decision, components,
+            thresholds}. Decisions: kept, cut_time, cut_score, cut_soft,
+            burst_id_kept.
 
     Returns:
-        list of lists (each inner list is a microsegment of photo dicts)
+        list of lists (each inner list is a microsegment of photo dicts), or
+        (segments, trace) when emit_trace is True.
     """
     cfg = {**DEFAULTS, **(config or {})}
 
     if len(photos) <= 1:
+        if emit_trace:
+            return ([photos] if photos else []), []
         return [photos] if photos else []
 
     # Sort by timestamp
@@ -246,52 +265,66 @@ def cut_microsegments(photos, config=None):
         key=lambda p: _parse_timestamp(p.get("timestamp")) or datetime.min,
     )
 
-    # Compute pairwise S_enc scores
-    scores = []
-    for i in range(len(sorted_photos) - 1):
-        s = compute_s_enc(sorted_photos[i], sorted_photos[i + 1], config=cfg)
-        scores.append(s)
-
-    # Determine cut points
     cuts = set()
     recent_scores = []  # sliding window for soft cut detection
+    trace = [] if emit_trace else None
 
-    for i, score in enumerate(scores):
+    for i in range(len(sorted_photos) - 1):
+        if emit_trace:
+            score, components = compute_s_enc(
+                sorted_photos[i], sorted_photos[i + 1], config=cfg, return_components=True
+            )
+        else:
+            score = compute_s_enc(sorted_photos[i], sorted_photos[i + 1], config=cfg)
+            components = None
+
         ts_a = _parse_timestamp(sorted_photos[i].get("timestamp"))
         ts_b = _parse_timestamp(sorted_photos[i + 1].get("timestamp"))
         dt = _time_delta_seconds(ts_a, ts_b)
 
-        # Hard rule: shared camera burst ID → no cut
         bid_a = sorted_photos[i].get("burst_id")
         bid_b = sorted_photos[i + 1].get("burst_id")
+        decision = None
+
         if bid_a is not None and bid_b is not None and bid_a == bid_b:
+            decision = "burst_id_kept"
             recent_scores.append(score)
             if len(recent_scores) > 3:
                 recent_scores.pop(0)
-            continue
-
-        # Hard cut: time gap
-        if dt > cfg["hard_cut_time"]:
+        elif dt > cfg["hard_cut_time"]:
             cuts.add(i)
             recent_scores = []
-            continue
-
-        # Hard cut: low score
-        if score < cfg["hard_cut_score"]:
+            decision = "cut_time"
+        elif score < cfg["hard_cut_score"]:
             cuts.add(i)
             recent_scores = []
-            continue
+            decision = "cut_score"
+        else:
+            recent_scores.append(score)
+            if len(recent_scores) > 3:
+                recent_scores.pop(0)
+            if len(recent_scores) >= 3:
+                below = sum(1 for s in recent_scores if s < cfg["soft_cut_score"])
+                if below >= 2:
+                    cuts.add(i)
+                    recent_scores = []
+                    decision = "cut_soft"
+            if decision is None:
+                decision = "kept"
 
-        # Soft cut: gradual drift (2 of last 3 scores below threshold)
-        recent_scores.append(score)
-        if len(recent_scores) > 3:
-            recent_scores.pop(0)
-        if len(recent_scores) >= 3:
-            below = sum(1 for s in recent_scores if s < cfg["soft_cut_score"])
-            if below >= 2:
-                cuts.add(i)
-                recent_scores = []
-                continue
+        if emit_trace:
+            trace.append({
+                "pair_index": i,
+                "score": float(score),
+                "dt_seconds": float(dt) if dt != float("inf") else None,
+                "decision": decision,
+                "components": components,
+                "thresholds": {
+                    "hard_cut_time": cfg["hard_cut_time"],
+                    "hard_cut_score": cfg["hard_cut_score"],
+                    "soft_cut_score": cfg["soft_cut_score"],
+                },
+            })
 
     # Build segments from cut points
     segments = []
@@ -300,8 +333,11 @@ def cut_microsegments(photos, config=None):
         segments.append(sorted_photos[start: i + 1])
         start = i + 1
     segments.append(sorted_photos[start:])
+    segments = [seg for seg in segments if seg]
 
-    return [seg for seg in segments if seg]
+    if emit_trace:
+        return segments, trace
+    return segments
 
 
 # -- Pass 2: Merge neighboring microsegments (Section 2.3) --
@@ -404,27 +440,44 @@ def merge_microsegments(segments, config=None):
     Returns:
         list of merged segments
     """
+    merged, _ = _merge_microsegments_with_map(segments, config=config)
+    return merged
+
+
+def _merge_microsegments_with_map(segments, config=None):
+    """Like merge_microsegments but also returns a per-merged-segment count
+    of how many original microsegments were fused into it.
+
+    Returns:
+        (merged_segments, counts) where counts[i] is the number of original
+        microsegments that ended up inside merged_segments[i].
+    """
     cfg = {**DEFAULTS, **(config or {})}
 
     if len(segments) <= 1:
-        return segments
+        return list(segments), [1] * len(segments)
 
     merged = [segments[0]]
+    counts = [1]
     for seg in segments[1:]:
         last_a = _segment_timestamp(merged[-1], "last")
         first_b = _segment_timestamp(seg, "first")
         gap = _time_delta_seconds(last_a, first_b)
 
+        did_merge = False
         if gap <= cfg["merge_max_gap"]:
             s_seg = compute_s_seg(merged[-1], seg, config=cfg)
             if s_seg > cfg["merge_score"]:
                 # Merge: extend the last segment
                 merged[-1] = merged[-1] + seg
-                continue
+                counts[-1] += 1
+                did_merge = True
 
-        merged.append(seg)
+        if not did_merge:
+            merged.append(seg)
+            counts.append(1)
 
-    return merged
+    return merged, counts
 
 
 # -- Encounter-level species label (Section 2.4) --
@@ -461,12 +514,17 @@ def encounter_species_label(photos):
 # -- Full encounter segmentation pipeline --
 
 
-def segment_encounters(photos, config=None):
+def segment_encounters(photos, config=None, emit_trace=False):
     """Run the full two-pass encounter segmentation pipeline.
 
     Args:
         photos: list of photo dicts with all required features
         config: optional dict overriding DEFAULTS
+        emit_trace: when True, attach a per-encounter `trace` field — a list
+            of cut-point trace entries that fall inside that encounter (after
+            potential microsegment fusion). Boundary entries between two
+            microsegments that ended up in the same merged encounter are
+            re-tagged with decision="merged_back".
 
     Returns:
         list of encounter dicts, each with:
@@ -474,22 +532,39 @@ def segment_encounters(photos, config=None):
             - species: (name, confidence) tuple
             - photo_count: int
             - time_range: (first_timestamp, last_timestamp) or (None, None)
+            - trace: (only when emit_trace) list of trace dicts for the
+              internal adjacent pairs of this encounter
     """
     # Pass 1: Cut into microsegments
-    microsegments = cut_microsegments(photos, config=config)
+    if emit_trace:
+        microsegments, full_trace = cut_microsegments(
+            photos, config=config, emit_trace=True
+        )
+    else:
+        microsegments = cut_microsegments(photos, config=config)
+        full_trace = None
     log.info("Pass 1: %d microsegments from %d photos", len(microsegments), len(photos))
 
     # Pass 2: Merge neighbors
-    merged = merge_microsegments(microsegments, config=config)
+    if emit_trace:
+        merged, merge_counts = _merge_microsegments_with_map(
+            microsegments, config=config
+        )
+    else:
+        merged = merge_microsegments(microsegments, config=config)
+        merge_counts = None
     log.info("Pass 2: %d encounters after merging", len(merged))
 
     # Build encounter objects
     encounters = []
-    for seg in merged:
+    pair_cursor = 0  # index into full_trace
+    micro_cursor = 0  # index into microsegments
+
+    for enc_idx, seg in enumerate(merged):
         species = encounter_species_label(seg)
         first_ts = _segment_timestamp(seg, "first")
         last_ts = _segment_timestamp(seg, "last")
-        encounters.append({
+        enc = {
             "photos": seg,
             "species": species,
             "photo_count": len(seg),
@@ -497,6 +572,30 @@ def segment_encounters(photos, config=None):
                 first_ts.isoformat() if first_ts else None,
                 last_ts.isoformat() if last_ts else None,
             ),
-        })
+        }
+        if emit_trace:
+            n_micros = merge_counts[enc_idx]
+            enc_trace = []
+            for k in range(n_micros):
+                m = microsegments[micro_cursor]
+                # Internal pairs of this microsegment (one fewer than its photo count)
+                for _ in range(len(m) - 1):
+                    enc_trace.append(full_trace[pair_cursor])
+                    pair_cursor += 1
+                micro_cursor += 1
+                # Boundary pair after this microsegment
+                if pair_cursor < len(full_trace):
+                    if k < n_micros - 1:
+                        # This boundary lives inside the same merged encounter:
+                        # re-tag as merged_back (post-merge truth).
+                        boundary = dict(full_trace[pair_cursor])
+                        boundary["decision"] = "merged_back"
+                        enc_trace.append(boundary)
+                        pair_cursor += 1
+                    else:
+                        # Boundary belongs to the gap between encounters; skip.
+                        pair_cursor += 1
+            enc["trace"] = enc_trace
+        encounters.append(enc)
 
     return encounters

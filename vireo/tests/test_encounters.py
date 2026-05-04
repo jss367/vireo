@@ -495,3 +495,123 @@ def test_segment_encounters_with_merge():
     # Should be 1 encounter (identical embeddings, close in time)
     assert len(encounters) == 1
     assert encounters[0]["photo_count"] == 4
+
+
+def test_compute_s_enc_returns_components_when_asked():
+    from encounters import compute_s_enc
+    photo_a = {
+        "timestamp": "2026-03-07T11:32:04",
+        "latitude": 33.7, "longitude": -118.0,
+        "focal_length": 600.0,
+    }
+    photo_b = {
+        "timestamp": "2026-03-07T11:32:09",
+        "latitude": 33.7, "longitude": -118.0,
+        "focal_length": 600.0,
+    }
+    score, components = compute_s_enc(photo_a, photo_b, return_components=True)
+    assert isinstance(score, float)
+    assert set(components.keys()) >= {"time", "subj", "global", "species", "meta"}
+    # Each component is a dict {value, weight, used}
+    assert components["time"]["value"] >= 0.0
+    assert components["time"]["weight"] == 0.35  # default w_time
+    assert components["time"]["used"] is True   # both photos have timestamps
+    assert components["species"]["used"] is False  # neither has species_top5
+
+
+def test_cut_microsegments_emits_trace():
+    import pytest
+    from encounters import cut_microsegments
+    # 3 photos: two close-in-time, one far apart -> hard time cut between #2 and #3
+    photos = [
+        {"timestamp": "2026-03-07T11:32:00", "latitude": 33.7, "longitude": -118.0, "focal_length": 600.0},
+        {"timestamp": "2026-03-07T11:32:05", "latitude": 33.7, "longitude": -118.0, "focal_length": 600.0},
+        {"timestamp": "2026-03-07T11:40:00", "latitude": 33.7, "longitude": -118.0, "focal_length": 600.0},
+    ]
+    segments, trace = cut_microsegments(photos, emit_trace=True)
+    assert len(segments) == 2  # cut between #2 and #3
+    assert len(trace) == 2  # one entry per adjacent pair
+    # Pair 0->1: kept (small gap, no cut)
+    assert trace[0]["pair_index"] == 0
+    assert trace[0]["decision"] == "kept"
+    assert trace[0]["dt_seconds"] == 5.0
+    assert "components" in trace[0]
+    # Pair 1->2: hard time cut
+    assert trace[1]["pair_index"] == 1
+    assert trace[1]["decision"] == "cut_time"
+    assert trace[1]["dt_seconds"] == 475.0
+    # Internal consistency: per-pair score == weighted sum over USED components
+    for entry in trace:
+        comps = entry["components"]
+        used_items = [c for c in comps.values() if c["used"]]
+        total_weight = sum(c["weight"] for c in used_items)
+        if total_weight > 0:
+            expected = sum(c["value"] * c["weight"] for c in used_items) / total_weight
+        else:
+            expected = 0.0
+        assert entry["score"] == pytest.approx(expected, abs=1e-9)
+
+
+def test_cut_microsegments_emits_cut_score_decision():
+    """A pair whose S_enc falls below hard_cut_score is tagged 'cut_score'."""
+    from encounters import cut_microsegments
+    # Two photos with tight time gap (so dt < hard_cut_time) but force the
+    # hard_cut_score above the achievable score so the cut fires.
+    photos = [
+        {"timestamp": "2026-03-07T11:32:00", "latitude": 33.7, "longitude": -118.0, "focal_length": 600.0},
+        {"timestamp": "2026-03-07T11:32:05", "latitude": 33.7, "longitude": -118.0, "focal_length": 600.0},
+    ]
+    segments, trace = cut_microsegments(photos, config={"hard_cut_score": 1.5}, emit_trace=True)
+    assert len(segments) == 2
+    assert len(trace) == 1
+    assert trace[0]["decision"] == "cut_score"
+
+
+def test_cut_microsegments_emits_burst_id_kept_decision():
+    """When both photos share a burst_id, the pair is tagged 'burst_id_kept'."""
+    from encounters import cut_microsegments
+    photos = [
+        {"timestamp": "2026-03-07T11:32:00", "latitude": 33.7, "longitude": -118.0,
+         "focal_length": 600.0, "burst_id": "B1"},
+        {"timestamp": "2026-03-07T11:32:05", "latitude": 33.7, "longitude": -118.0,
+         "focal_length": 600.0, "burst_id": "B1"},
+    ]
+    # Even with a punishing hard_cut_score, the burst_id short-circuit should win.
+    segments, trace = cut_microsegments(photos, config={"hard_cut_score": 1.5}, emit_trace=True)
+    assert len(segments) == 1
+    assert len(trace) == 1
+    assert trace[0]["decision"] == "burst_id_kept"
+
+
+def test_segment_encounters_attaches_trace_to_each_encounter():
+    from encounters import segment_encounters
+    # 4 photos: two pairs separated by big time gap -> 2 encounters of 2 photos each
+    photos = [
+        {"timestamp": "2026-03-07T11:32:00", "latitude": 33.7, "longitude": -118.0, "focal_length": 600.0},
+        {"timestamp": "2026-03-07T11:32:05", "latitude": 33.7, "longitude": -118.0, "focal_length": 600.0},
+        {"timestamp": "2026-03-07T11:50:00", "latitude": 33.7, "longitude": -118.0, "focal_length": 600.0},
+        {"timestamp": "2026-03-07T11:50:05", "latitude": 33.7, "longitude": -118.0, "focal_length": 600.0},
+    ]
+    encounters = segment_encounters(photos, emit_trace=True)
+    assert len(encounters) == 2
+    for enc in encounters:
+        assert "trace" in enc
+        # 2 photos -> 1 internal pair
+        assert len(enc["trace"]) == 1
+        assert enc["trace"][0]["decision"] == "kept"
+
+
+def test_segment_encounters_marks_merged_back_boundaries():
+    """When two microsegments get merged, the boundary pair should be tagged merged_back."""
+    from encounters import segment_encounters
+    photos = [
+        {"timestamp": f"2026-03-07T11:32:0{i}", "latitude": 33.7, "longitude": -118.0, "focal_length": 600.0}
+        for i in range(4)
+    ]
+    cfg = {"hard_cut_score": 1.5, "merge_score": -1.0, "merge_max_gap": 60.0}
+    encounters = segment_encounters(photos, config=cfg, emit_trace=True)
+    assert len(encounters) == 1  # all merged back
+    enc = encounters[0]
+    decisions = [t["decision"] for t in enc["trace"]]
+    # 3 internal pairs across 4 microsegments: 3 of them are boundaries that got merged_back
+    assert decisions.count("merged_back") == 3

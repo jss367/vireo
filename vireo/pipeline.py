@@ -309,12 +309,13 @@ def load_photo_features(db, collection_id=None, config=None,
     return photos
 
 
-def run_grouping(photos, config=None):
+def run_grouping(photos, config=None, emit_trace=False):
     """Run encounter segmentation + burst clustering (Stages 2-3).
 
     Args:
         photos: list of photo dicts from load_photo_features()
         config: optional dict with pipeline thresholds
+        emit_trace: if True, attach per-cut-point trace to each encounter dict
 
     Returns:
         list of encounter dicts, each with 'bursts' key
@@ -322,7 +323,7 @@ def run_grouping(photos, config=None):
     from bursts import segment_bursts_for_encounters
     from encounters import segment_encounters
 
-    encounters = segment_encounters(photos, config=config)
+    encounters = segment_encounters(photos, config=config, emit_trace=emit_trace)
     encounters = segment_bursts_for_encounters(encounters, config=config)
 
     total_bursts = sum(e.get("burst_count", 0) for e in encounters)
@@ -356,12 +357,13 @@ def run_triage(encounters, config=None):
     return encounters, all_photos
 
 
-def run_full_pipeline(photos, config=None):
+def run_full_pipeline(photos, config=None, emit_trace=False):
     """Run the full pipeline: grouping → scoring → triage (Stages 2-6).
 
     Args:
         photos: list of photo dicts from load_photo_features()
         config: optional dict with all pipeline thresholds
+        emit_trace: if True, attach per-cut-point trace to each encounter dict
 
     Returns:
         dict with:
@@ -369,7 +371,7 @@ def run_full_pipeline(photos, config=None):
             photos: flat list of all photos with labels
             summary: dict with counts
     """
-    encounters = run_grouping(photos, config=config)
+    encounters = run_grouping(photos, config=config, emit_trace=emit_trace)
     encounters, all_photos = run_triage(encounters, config=config)
 
     summary = _make_summary(encounters, all_photos)
@@ -568,6 +570,11 @@ def serialize_results(results):
             "time_range": enc.get("time_range"),
             "photo_ids": [p["id"] for p in photos_list],
         }
+        # Surface per-cut-point trace when run_full_pipeline was invoked with
+        # emit_trace=True (e.g. from /api/pipeline/regroup-live so the
+        # pipeline-review sidebar can show how each encounter was formed).
+        if "trace" in enc:
+            s_enc["trace"] = enc["trace"]
         if "bursts" in enc:
             s_enc["bursts"] = []
             for burst in enc["bursts"]:

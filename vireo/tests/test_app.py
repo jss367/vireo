@@ -1374,6 +1374,111 @@ def test_pipeline_detach_photo(app_and_db):
     assert "Eagle" in new_species
 
 
+def test_pipeline_detach_burst_clears_stale_trace(app_and_db):
+    """detach-burst must drop the source encounter's per-pair trace because
+    pairs involving the detached photos are no longer present in the
+    encounter — leaving the old trace would surface stale decisions in the
+    review sidebar."""
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                "species": ["Robin", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 2,
+                "time_range": [None, None],
+                "photo_ids": [1, 2, 3],
+                "trace": [
+                    {"i": 0, "j": 1, "decision": "keep", "score": 0.7},
+                    {"i": 1, "j": 2, "decision": "keep", "score": 0.6},
+                ],
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [3], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg", "species_top5": [["Robin", 0.9, "m1"]]},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg", "species_top5": [["Robin", 0.85, "m1"]]},
+            {"id": 3, "label": "REVIEW", "filename": "c.jpg", "species_top5": [["Eagle", 0.8, "m1"]]},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 2,
+                     "keep_count": 2, "review_count": 1, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/pipeline/detach-burst",
+                       json={"encounter_index": 0, "burst_index": 1})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Source encounter should no longer carry the pre-detach trace.
+    assert "trace" not in data["encounters"][0]
+    # New encounter created from detached burst has no trace either.
+    assert "trace" not in data["encounters"][1]
+
+
+def test_pipeline_detach_photo_preserves_trace(app_and_db):
+    """detach-photo only restructures bursts within the encounter — the
+    encounter's photo set and ordering is unchanged, so the per-pair trace
+    (which describes adjacent-photo decisions) remains valid and should
+    not be discarded."""
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    trace = [
+        {"i": 0, "j": 1, "decision": "keep", "score": 0.7},
+        {"i": 1, "j": 2, "decision": "keep", "score": 0.6},
+    ]
+    results = {
+        "encounters": [
+            {
+                "species": ["Robin", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 1,
+                "time_range": [None, None],
+                "photo_ids": [1, 2, 3],
+                "trace": trace,
+                "bursts": [
+                    {"photo_ids": [1, 2, 3], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg", "species_top5": [["Robin", 0.9, "m1"]]},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg", "species_top5": [["Robin", 0.85, "m1"]]},
+            {"id": 3, "label": "REVIEW", "filename": "c.jpg", "species_top5": [["Eagle", 0.8, "m1"]]},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 1,
+                     "keep_count": 2, "review_count": 1, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/pipeline/detach-photo",
+                       json={"encounter_index": 0, "burst_index": 0, "photo_id": 3})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["encounters"][0]["trace"] == trace
+
+
 def test_encounter_species_auto_detaches_mixed_burst(app_and_db):
     """Confirming a burst to a species different from its encounter auto-detaches it."""
     import json as _json
@@ -1435,6 +1540,66 @@ def test_encounter_species_auto_detaches_mixed_burst(app_and_db):
     assert eagle_enc["photo_ids"] == [3]
     assert eagle_enc["species_confirmed"] is True
     assert eagle_enc["confirmed_species"] == "Golden Eagle"
+
+
+def test_encounter_species_auto_detach_clears_stale_trace(app_and_db):
+    """Auto-detach mutates encounter photo_ids; the trace (keyed to original
+    composition) must be dropped so the algorithm-trace panel doesn't render
+    pair indices that no longer match the post-detach photo set."""
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                "species": ["Bald Eagle", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [{"species": "Bald Eagle", "count": 3, "models": []}],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 2,
+                "time_range": ["2024-06-10T09:00:00", "2024-06-10T09:05:00"],
+                "photo_ids": [1, 2, 3],
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [3], "species_predictions": [], "species_override": None},
+                ],
+                # Pre-existing trace from the original 3-photo grouping.
+                "trace": [
+                    {"pair_index": 0, "score": 0.8, "decision": "kept", "components": {},
+                     "thresholds": {}, "dt_seconds": 2.0},
+                    {"pair_index": 1, "score": 0.5, "decision": "kept", "components": {},
+                     "thresholds": {}, "dt_seconds": 298.0},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg", "timestamp": "2024-06-10T09:00:00", "species_top5": [["Bald Eagle", 0.9, "m1"]]},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg", "timestamp": "2024-06-10T09:00:02", "species_top5": [["Bald Eagle", 0.9, "m1"]]},
+            {"id": 3, "label": "REVIEW", "filename": "c.jpg", "timestamp": "2024-06-10T09:05:00", "species_top5": [["Golden Eagle", 0.6, "m1"]]},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 2,
+                     "keep_count": 2, "review_count": 1, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Golden Eagle", "photo_ids": [3], "burst_index": 1})
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    bald_enc = next(e for e in body["encounters"] if 1 in e["photo_ids"])
+    golden_enc = next(e for e in body["encounters"] if 3 in e["photo_ids"])
+    # The source encounter had its composition changed — trace must be gone.
+    assert "trace" not in bald_enc, "auto-detach left stale trace on source encounter"
+    # The new encounter created from the detached burst was never grouped, so
+    # it has no trace either (correct — would be misleading otherwise).
+    assert "trace" not in golden_enc
 
 
 def test_encounter_species_confirm_single_burst_does_not_detach(app_and_db):
@@ -3759,3 +3924,237 @@ def test_storage_masks_uses_global_threshold_not_active_workspace(
     db.set_active_workspace(permissive)
     r = client.get("/api/storage/masks")
     assert r.get_json()["stale_count"] == 0
+
+
+def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
+    """/api/pipeline/regroup-live response should expose the per-cut-point
+    trace on each multi-photo encounter so the pipeline-review sidebar can
+    render the "how was this encounter formed" panel.
+    """
+    from datetime import datetime, timedelta
+
+    import numpy as np
+    from db import Database
+    from dino_embed import embedding_to_blob
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    base_time = datetime(2026, 3, 20, 10, 0, 0)
+    # Two encounters of 3 photos each, separated by 5 minutes (hard time cut).
+    for enc_idx in range(2):
+        emb_base = np.zeros(768, dtype=np.float32)
+        emb_base[enc_idx * 100: enc_idx * 100 + 100] = 1.0
+        emb_base = emb_base / np.linalg.norm(emb_base)
+        enc_offset = enc_idx * 300
+        for i in range(3):
+            ts = base_time + timedelta(seconds=enc_offset + i * 2)
+            pid = db.add_photo(
+                fid, f"enc{enc_idx}_p{i}.jpg", ".jpg", 1000, 1.0,
+                timestamp=ts.isoformat(), width=4000, height=3000,
+            )
+            emb = emb_base + np.random.RandomState(pid).randn(768).astype(np.float32) * 0.01
+            emb = emb / np.linalg.norm(emb)
+            db.update_photo_pipeline_features(
+                pid,
+                mask_path=f"/masks/{pid}.png",
+                subject_tenengrad=200 + i * 50,
+                bg_tenengrad=30 + i * 5,
+                crop_complete=0.85 + i * 0.03,
+                bg_separation=50.0 - i * 10,
+                subject_clip_high=0.01,
+                subject_clip_low=0.01,
+                subject_y_median=120.0,
+                phash_crop=f"{pid:016x}",
+            )
+            db.update_photo_embeddings(
+                pid,
+                dino_subject_embedding=embedding_to_blob(emb),
+                dino_global_embedding=embedding_to_blob(emb),
+            )
+            db.update_photo_quality(pid, subject_size=0.08 + i * 0.02)
+            det_ids = db.save_detections(pid, [
+                {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
+            ], detector_model="megadetector")
+            species = "robin" if enc_idx == 0 else "eagle"
+            db.add_prediction(det_ids[0], species, 0.9 - i * 0.05, "bioclip", category="match")
+    db.close()
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
+    client = app.test_client()
+
+    resp = client.post("/api/pipeline/regroup-live", json={"config": {}})
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert "encounters" in data
+    assert len(data["encounters"]) >= 1, data
+    multi_photo = [e for e in data["encounters"] if e["photo_count"] >= 2]
+    assert multi_photo, "test setup should yield at least one multi-photo encounter"
+    for enc in multi_photo:
+        assert "trace" in enc, f"trace missing on encounter: {enc.keys()}"
+        assert len(enc["trace"]) == enc["photo_count"] - 1, (
+            f"trace len {len(enc['trace'])} != photo_count-1 {enc['photo_count']-1}"
+        )
+        sample = enc["trace"][0]
+        assert "score" in sample
+        assert "decision" in sample
+        assert "components" in sample
+
+
+def test_save_grouping_defaults_persists_to_config(tmp_path, monkeypatch):
+    """POST /api/pipeline/save-grouping-defaults should persist whitelisted
+    grouping keys into the global config file via cfg.save()."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
+    client = app.test_client()
+
+    payload = {"pipeline": {"w_species": 0.40, "hard_cut_score": 0.55, "tau_enc": 30.0}}
+    resp = client.post("/api/pipeline/save-grouping-defaults", json=payload)
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body.get("saved") == payload["pipeline"]
+
+    saved = cfg.load()
+    assert saved["pipeline"]["w_species"] == 0.40
+    assert saved["pipeline"]["hard_cut_score"] == 0.55
+    assert saved["pipeline"]["tau_enc"] == 30.0
+
+
+def test_save_grouping_defaults_recovers_from_corrupt_pipeline_section(tmp_path, monkeypatch):
+    """If a hand-edit left config.json with a non-dict pipeline value, the
+    endpoint should overwrite it cleanly rather than crash with AttributeError
+    inside .update()."""
+    import json as _json
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    # Pre-seed config.json with a corrupt pipeline value (string, not dict).
+    with open(cfg.CONFIG_PATH, "w") as f:
+        _json.dump({"pipeline": "oops-i-edited-this-by-hand"}, f)
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
+    client = app.test_client()
+
+    resp = client.post("/api/pipeline/save-grouping-defaults",
+                       json={"pipeline": {"w_species": 0.40}})
+    assert resp.status_code == 200, resp.get_json()
+    saved = cfg.load()
+    assert saved["pipeline"]["w_species"] == 0.40
+
+
+def test_save_grouping_defaults_rejects_bad_values(tmp_path, monkeypatch):
+    """POST /api/pipeline/save-grouping-defaults must reject invalid types or
+    out-of-range values before they corrupt the persistent config."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
+    client = app.test_client()
+
+    # Wrong type for a numeric field.
+    resp = client.post(
+        "/api/pipeline/save-grouping-defaults",
+        json={"pipeline": {"hard_cut_time": "abc"}},
+    )
+    assert resp.status_code == 400
+    # Out-of-range weight (must be 0..1).
+    resp = client.post(
+        "/api/pipeline/save-grouping-defaults",
+        json={"pipeline": {"w_species": 1.5}},
+    )
+    assert resp.status_code == 400
+    # Negative threshold.
+    resp = client.post(
+        "/api/pipeline/save-grouping-defaults",
+        json={"pipeline": {"hard_cut_score": -0.1}},
+    )
+    assert resp.status_code == 400
+    # bool should not satisfy "must be a number" silently.
+    resp = client.post(
+        "/api/pipeline/save-grouping-defaults",
+        json={"pipeline": {"w_time": True}},
+    )
+    assert resp.status_code == 400
+    # NaN / inf must be rejected.
+    resp = client.post(
+        "/api/pipeline/save-grouping-defaults",
+        json={"pipeline": {"tau_enc": float("inf")}},
+    )
+    assert resp.status_code == 400
+    # phash threshold must be int, not float.
+    resp = client.post(
+        "/api/pipeline/save-grouping-defaults",
+        json={"pipeline": {"burst_phash_threshold": 12.5}},
+    )
+    assert resp.status_code == 400
+
+    # No bad payload should have been written to disk — for any key we
+    # attempted to corrupt, the persisted value is still a valid number
+    # (either the default fell through, or the load merge filled it).
+    saved = cfg.load()
+    pipe = saved.get("pipeline", {})
+    if "hard_cut_time" in pipe:
+        assert isinstance(pipe["hard_cut_time"], (int, float))
+    if "w_species" in pipe:
+        assert isinstance(pipe["w_species"], (int, float))
+        assert 0.0 <= pipe["w_species"] <= 1.0
+    if "hard_cut_score" in pipe:
+        assert isinstance(pipe["hard_cut_score"], (int, float))
+        assert 0.0 <= pipe["hard_cut_score"] <= 1.0
+    if "w_time" in pipe:
+        assert isinstance(pipe["w_time"], (int, float))
+        assert pipe["w_time"] is not True  # bool guard
+    if "tau_enc" in pipe:
+        import math as _math
+        assert isinstance(pipe["tau_enc"], (int, float))
+        assert _math.isfinite(pipe["tau_enc"])
+    if "burst_phash_threshold" in pipe:
+        assert isinstance(pipe["burst_phash_threshold"], int)

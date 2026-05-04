@@ -266,6 +266,10 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         for b in bursts:
             b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
         enc["time_range"] = _compute_time_range(photos_by_id, remaining)
+        # Pair indices in trace reference the original composition; drop it
+        # so the algorithm-trace panel renders an honest "needs recompute"
+        # state instead of stale rows.
+        enc.pop("trace", None)
 
     detached["species_predictions"] = rebuild_species_predictions(results, detached_ids)
 
@@ -279,6 +283,8 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         target["species_predictions"] = rebuild_species_predictions(
             results, target["photo_ids"]
         )
+        # Same reason as above — target's trace no longer matches its photo set.
+        target.pop("trace", None)
         t_min, t_max = target.get("time_range") or [None, None]
         d_min, d_max = detached_range
         mins = [x for x in (t_min, d_min) if x is not None]
@@ -9506,7 +9512,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 {"phase": "Grouping encounters and bursts", "current": 1, "total": 3},
             )
 
-            results = run_full_pipeline(photos, config=pipeline_cfg)
+            # emit_trace=True so the pipeline-review sidebar's algorithm-trace
+            # panel can show per-cut-point details for each encounter on the
+            # very first load (not only after the user drags a live-tuning
+            # slider). Cost is negligible (~300B per adjacent pair).
+            results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
             summary = results.get("summary", {})
             runner.update_step(job["id"], "group", status="completed",
                                summary=f"{summary.get('encounters', 0)} encounters")
@@ -10126,7 +10136,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not photos:
             return json_error("No photos with pipeline features", 404)
 
-        encounters = run_grouping(photos, config=pipeline_cfg)
+        # emit_trace=True so the pipeline-review sidebar's algorithm-trace
+        # panel can show per-cut-point details for each encounter on the
+        # very first load (not only after the user drags a live-tuning
+        # slider). Cost is negligible (~300B per adjacent pair).
+        encounters = run_grouping(photos, config=pipeline_cfg, emit_trace=True)
         results = reflow(encounters, config=pipeline_cfg)
 
         # Carry the miss-recomputation marker through so the review UI's
@@ -10170,7 +10184,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not photos:
             return json_error("No photos with pipeline features", 404)
 
-        results = run_full_pipeline(photos, config=pipeline_cfg)
+        # emit_trace=True so the pipeline-review sidebar's algorithm-trace
+        # panel can show per-cut-point details for each encounter. Cost is
+        # negligible (~300B per adjacent pair).
+        results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
 
         # Carry the miss-recomputation marker through so the review UI's
         # "Review misses" shortcut stays visible after a threshold
@@ -10183,6 +10200,82 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         save_results(results, cache_dir, db._active_workspace_id)
 
         return jsonify(serialize_results(results))
+
+    @app.route("/api/pipeline/save-grouping-defaults", methods=["POST"])
+    def api_pipeline_save_grouping_defaults():
+        """Persist current grouping weights/thresholds to the global config.
+
+        Whitelists known grouping keys and validates each value's type and
+        range so a bad payload (e.g. {"hard_cut_time": "abc"}) can't poison
+        the persistent config and crash future grouping/scoring math.
+        Returns the new pipeline payload that was saved.
+        """
+        import config as cfg
+
+        body = request.get_json(silent=True) or {}
+        new_pipeline = body.get("pipeline", {})
+        if not isinstance(new_pipeline, dict):
+            return json_error("pipeline must be an object")
+        # (kind, min, max). kind="unit" → 0..1 float; "score" → 0..1 float;
+        # "seconds" → non-negative float; "phash" → 0..256 int (8x8 phash =
+        # 64 bits, 256 leaves headroom for future hash sizes).
+        schema = {
+            "w_time": ("unit", 0.0, 1.0),
+            "w_subj": ("unit", 0.0, 1.0),
+            "w_global": ("unit", 0.0, 1.0),
+            "w_species": ("unit", 0.0, 1.0),
+            "w_meta": ("unit", 0.0, 1.0),
+            "tau_enc": ("seconds", 0.0, 86400.0),
+            "hard_cut_time": ("seconds", 0.0, 86400.0),
+            "hard_cut_score": ("score", 0.0, 1.0),
+            "soft_cut_score": ("score", 0.0, 1.0),
+            "merge_score": ("score", 0.0, 1.0),
+            "merge_max_gap": ("seconds", 0.0, 86400.0),
+            "merge_tau": ("seconds", 0.0, 86400.0),
+            "burst_time_gap": ("seconds", 0.0, 86400.0),
+            "burst_phash_threshold": ("phash", 0, 256),
+            "burst_embedding_threshold": ("score", 0.0, 1.0),
+        }
+        rejected = [k for k in new_pipeline if k not in schema]
+        if rejected:
+            return json_error(f"unknown keys: {rejected}")
+        coerced = {}
+        for k, raw_v in new_pipeline.items():
+            kind, lo, hi = schema[k]
+            if isinstance(raw_v, bool):
+                # bool is an int subclass — reject explicitly so True/False
+                # don't silently succeed for numeric keys.
+                return json_error(f"{k} must be a number, got bool")
+            if kind == "phash":
+                if not isinstance(raw_v, int):
+                    return json_error(f"{k} must be an integer")
+                v = raw_v
+            else:
+                if not isinstance(raw_v, (int, float)):
+                    return json_error(f"{k} must be a number")
+                v = float(raw_v)
+                if v != v or v in (float("inf"), float("-inf")):
+                    return json_error(f"{k} must be finite")
+            if v < lo or v > hi:
+                return json_error(f"{k} out of range [{lo}, {hi}]")
+            coerced[k] = v
+        # Hold the same lock as the settings write paths so a concurrent
+        # autosave from /api/settings doesn't clobber half of one update.
+        # Use the raw on-disk file (no DEFAULTS merge) so we only persist
+        # the keys the user actually set — otherwise cfg.save would pin
+        # every default to its current value and block future upgrades.
+        with _settings_write_lock:
+            raw = _read_raw_config_file()
+            # If a hand-edit left raw["pipeline"] as a non-dict (string, list,
+            # etc.), setdefault would return it as-is and .update would raise
+            # AttributeError. Normalize to a dict — the endpoint's job is to
+            # write a clean pipeline section, so a corrupt one should be
+            # replaced rather than crash the save.
+            if not isinstance(raw.get("pipeline"), dict):
+                raw["pipeline"] = {}
+            raw["pipeline"].update(coerced)
+            cfg.save(raw)
+        return jsonify({"saved": coerced})
 
     @app.route("/api/pipeline/detach-burst", methods=["POST"])
     def api_pipeline_detach_burst():
@@ -10222,6 +10315,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             enc["photo_count"] = len(enc["photo_ids"])
             enc["burst_count"] = len(bursts)
             enc["species_predictions"] = rebuild_species_predictions(results, enc["photo_ids"])
+            # Pair indices in trace reference the original photo composition;
+            # drop it so the algorithm-trace panel renders an honest "needs
+            # recompute" state instead of stale rows.
+            enc.pop("trace", None)
             # Recalculate remaining burst predictions too
             for b in bursts:
                 b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
@@ -10302,6 +10399,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         enc["burst_count"] = len(bursts)
         # Recalculate encounter-level predictions
         enc["species_predictions"] = rebuild_species_predictions(results, enc["photo_ids"])
+        # Encounter composition didn't change but burst structure did; trace
+        # is pair-level only, so it remains valid. No trace mutation needed.
 
         # Update summary
         results["summary"]["burst_count"] = sum(

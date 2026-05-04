@@ -6215,7 +6215,7 @@ def test_pipeline_regroup_stamps_workspace_group_fingerprint(tmp_path, monkeypat
     # Stub run_full_pipeline + save_results so regroup completes deterministically.
     import pipeline as pipeline_mod
 
-    def _ok_run(photos, config=None):
+    def _ok_run(photos, config=None, emit_trace=False):
         return {"summary": {"groups": 1}, "photos": photos}
 
     def _no_save(results, cache_dir, workspace_id):
@@ -6285,7 +6285,7 @@ def test_pipeline_regroup_does_not_stamp_for_partial_run(tmp_path, monkeypatch):
 
     import pipeline as pipeline_mod
 
-    def _ok_run(photos, config=None):
+    def _ok_run(photos, config=None, emit_trace=False):
         return {"summary": {"groups": 1}, "photos": photos}
 
     monkeypatch.setattr(pipeline_mod, "run_full_pipeline", _ok_run)
@@ -6357,7 +6357,7 @@ def test_pipeline_regroup_invalidates_stamp_on_partial_run(tmp_path, monkeypatch
     import pipeline as pipeline_mod
     monkeypatch.setattr(
         pipeline_mod, "run_full_pipeline",
-        lambda photos, config=None: {"summary": {"groups": 1}, "photos": photos},
+        lambda photos, config=None, emit_trace=False: {"summary": {"groups": 1}, "photos": photos},
     )
     monkeypatch.setattr(pipeline_mod, "save_results",
                         lambda results, cache_dir, workspace_id: None)

@@ -3063,7 +3063,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                    summary="No photos to group")
                 return
 
-            results = run_full_pipeline(photos, config=pipeline_cfg)
+            results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
             cache_dir = os.path.dirname(db_path)
             save_results(results, cache_dir, workspace_id)
 
