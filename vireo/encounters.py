@@ -237,19 +237,26 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
 # -- Pass 1: Cut timeline into microsegments (Section 2.2) --
 
 
-def cut_microsegments(photos, config=None):
+def cut_microsegments(photos, config=None, emit_trace=False):
     """Sort photos by timestamp and cut into microsegments.
 
     Args:
         photos: list of photo dicts (see compute_s_enc for required keys)
         config: optional dict overriding DEFAULTS
+        emit_trace: when True, return (segments, trace) where each trace
+            entry is {pair_index, score, dt_seconds, decision, components,
+            thresholds}. Decisions: kept, cut_time, cut_score, cut_soft,
+            burst_id_kept.
 
     Returns:
-        list of lists (each inner list is a microsegment of photo dicts)
+        list of lists (each inner list is a microsegment of photo dicts), or
+        (segments, trace) when emit_trace is True.
     """
     cfg = {**DEFAULTS, **(config or {})}
 
     if len(photos) <= 1:
+        if emit_trace:
+            return ([photos] if photos else []), []
         return [photos] if photos else []
 
     # Sort by timestamp
@@ -258,52 +265,66 @@ def cut_microsegments(photos, config=None):
         key=lambda p: _parse_timestamp(p.get("timestamp")) or datetime.min,
     )
 
-    # Compute pairwise S_enc scores
-    scores = []
-    for i in range(len(sorted_photos) - 1):
-        s = compute_s_enc(sorted_photos[i], sorted_photos[i + 1], config=cfg)
-        scores.append(s)
-
-    # Determine cut points
     cuts = set()
     recent_scores = []  # sliding window for soft cut detection
+    trace = [] if emit_trace else None
 
-    for i, score in enumerate(scores):
+    for i in range(len(sorted_photos) - 1):
+        if emit_trace:
+            score, components = compute_s_enc(
+                sorted_photos[i], sorted_photos[i + 1], config=cfg, return_components=True
+            )
+        else:
+            score = compute_s_enc(sorted_photos[i], sorted_photos[i + 1], config=cfg)
+            components = None
+
         ts_a = _parse_timestamp(sorted_photos[i].get("timestamp"))
         ts_b = _parse_timestamp(sorted_photos[i + 1].get("timestamp"))
         dt = _time_delta_seconds(ts_a, ts_b)
 
-        # Hard rule: shared camera burst ID → no cut
         bid_a = sorted_photos[i].get("burst_id")
         bid_b = sorted_photos[i + 1].get("burst_id")
+        decision = None
+
         if bid_a is not None and bid_b is not None and bid_a == bid_b:
+            decision = "burst_id_kept"
             recent_scores.append(score)
             if len(recent_scores) > 3:
                 recent_scores.pop(0)
-            continue
-
-        # Hard cut: time gap
-        if dt > cfg["hard_cut_time"]:
+        elif dt > cfg["hard_cut_time"]:
             cuts.add(i)
             recent_scores = []
-            continue
-
-        # Hard cut: low score
-        if score < cfg["hard_cut_score"]:
+            decision = "cut_time"
+        elif score < cfg["hard_cut_score"]:
             cuts.add(i)
             recent_scores = []
-            continue
+            decision = "cut_score"
+        else:
+            recent_scores.append(score)
+            if len(recent_scores) > 3:
+                recent_scores.pop(0)
+            if len(recent_scores) >= 3:
+                below = sum(1 for s in recent_scores if s < cfg["soft_cut_score"])
+                if below >= 2:
+                    cuts.add(i)
+                    recent_scores = []
+                    decision = "cut_soft"
+            if decision is None:
+                decision = "kept"
 
-        # Soft cut: gradual drift (2 of last 3 scores below threshold)
-        recent_scores.append(score)
-        if len(recent_scores) > 3:
-            recent_scores.pop(0)
-        if len(recent_scores) >= 3:
-            below = sum(1 for s in recent_scores if s < cfg["soft_cut_score"])
-            if below >= 2:
-                cuts.add(i)
-                recent_scores = []
-                continue
+        if emit_trace:
+            trace.append({
+                "pair_index": i,
+                "score": float(score),
+                "dt_seconds": float(dt) if dt != float("inf") else None,
+                "decision": decision,
+                "components": components,
+                "thresholds": {
+                    "hard_cut_time": cfg["hard_cut_time"],
+                    "hard_cut_score": cfg["hard_cut_score"],
+                    "soft_cut_score": cfg["soft_cut_score"],
+                },
+            })
 
     # Build segments from cut points
     segments = []
@@ -312,8 +333,11 @@ def cut_microsegments(photos, config=None):
         segments.append(sorted_photos[start: i + 1])
         start = i + 1
     segments.append(sorted_photos[start:])
+    segments = [seg for seg in segments if seg]
 
-    return [seg for seg in segments if seg]
+    if emit_trace:
+        return segments, trace
+    return segments
 
 
 # -- Pass 2: Merge neighboring microsegments (Section 2.3) --

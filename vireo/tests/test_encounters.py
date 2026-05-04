@@ -517,3 +517,36 @@ def test_compute_s_enc_returns_components_when_asked():
     assert components["time"]["weight"] == 0.35  # default w_time
     assert components["time"]["used"] is True   # both photos have timestamps
     assert components["species"]["used"] is False  # neither has species_top5
+
+
+def test_cut_microsegments_emits_trace():
+    import pytest
+    from encounters import cut_microsegments
+    # 3 photos: two close-in-time, one far apart -> hard time cut between #2 and #3
+    photos = [
+        {"timestamp": "2026-03-07T11:32:00", "latitude": 33.7, "longitude": -118.0, "focal_length": 600.0},
+        {"timestamp": "2026-03-07T11:32:05", "latitude": 33.7, "longitude": -118.0, "focal_length": 600.0},
+        {"timestamp": "2026-03-07T11:40:00", "latitude": 33.7, "longitude": -118.0, "focal_length": 600.0},
+    ]
+    segments, trace = cut_microsegments(photos, emit_trace=True)
+    assert len(segments) == 2  # cut between #2 and #3
+    assert len(trace) == 2  # one entry per adjacent pair
+    # Pair 0->1: kept (small gap, no cut)
+    assert trace[0]["pair_index"] == 0
+    assert trace[0]["decision"] == "kept"
+    assert trace[0]["dt_seconds"] == 5.0
+    assert "components" in trace[0]
+    # Pair 1->2: hard time cut
+    assert trace[1]["pair_index"] == 1
+    assert trace[1]["decision"] == "cut_time"
+    assert trace[1]["dt_seconds"] == 475.0
+    # Internal consistency: per-pair score == weighted sum over USED components
+    for entry in trace:
+        comps = entry["components"]
+        used_items = [c for c in comps.values() if c["used"]]
+        total_weight = sum(c["weight"] for c in used_items)
+        if total_weight > 0:
+            expected = sum(c["value"] * c["weight"] for c in used_items) / total_weight
+        else:
+            expected = 0.0
+        assert entry["score"] == pytest.approx(expected, abs=1e-9)
