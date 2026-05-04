@@ -9488,7 +9488,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 {"phase": "Grouping encounters and bursts", "current": 1, "total": 3},
             )
 
-            results = run_full_pipeline(photos, config=pipeline_cfg)
+            # emit_trace=True so the pipeline-review sidebar's algorithm-trace
+            # panel can show per-cut-point details for each encounter on the
+            # very first load (not only after the user drags a live-tuning
+            # slider). Cost is negligible (~300B per adjacent pair).
+            results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
             summary = results.get("summary", {})
             runner.update_step(job["id"], "group", status="completed",
                                summary=f"{summary.get('encounters', 0)} encounters")
@@ -10108,7 +10112,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not photos:
             return json_error("No photos with pipeline features", 404)
 
-        encounters = run_grouping(photos, config=pipeline_cfg)
+        # emit_trace=True so the pipeline-review sidebar's algorithm-trace
+        # panel can show per-cut-point details for each encounter on the
+        # very first load (not only after the user drags a live-tuning
+        # slider). Cost is negligible (~300B per adjacent pair).
+        encounters = run_grouping(photos, config=pipeline_cfg, emit_trace=True)
         results = reflow(encounters, config=pipeline_cfg)
 
         # Carry the miss-recomputation marker through so the review UI's

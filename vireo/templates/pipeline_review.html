@@ -390,7 +390,10 @@ input[type="range"]::-moz-range-thumb {
   font-size: 11px; color: var(--text-dim); font-style: italic; padding: 4px;
 }
 .encounter-card.focused {
-  border-left: 3px solid var(--accent);
+  /* Inset shadow instead of widening border-left from 1px → 3px:
+     keeps the 1px border on all sides so the content position and
+     rounded corners don't shift by 2px when focus changes. */
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 /* Inspection panel */
@@ -1439,6 +1442,10 @@ function renderResults() {
   ce = document.getElementById('countReject'); if (ce) ce.textContent = ' (' + (counts.REJECT||0) + ')';
 
   var html = '';
+  // Track which encounter indices actually produced a card so focus
+  // management below can pick a *visible* encounter (not one that was
+  // filtered out by species filter, hide-confirmed, or label filter).
+  var renderedIndices = [];
   pipelineResults.encounters.forEach(function(enc, ei) {
     var timeRange = '';
     if (enc.time_range && enc.time_range[0]) {
@@ -1467,6 +1474,8 @@ function renderResults() {
       return activeFilter === 'all' || p.label === activeFilter;
     });
     if (!hasVisible) return;
+
+    renderedIndices.push(ei);
 
     var encKey = encounterKey(enc);
     var isCollapsed = encKey != null && collapsedEncounters.has(encKey);
@@ -1533,13 +1542,17 @@ function renderResults() {
 
   container.innerHTML = html;
 
-  // Focus management: auto-focus first encounter on initial render; clamp on regroup.
-  var encs = pipelineResults.encounters || [];
-  if (encs.length === 0) {
+  // Focus management: only focus encounters that are actually rendered.
+  // If we focused an index that got filtered out (species/hide-confirmed/
+  // label filter), the trace panel would show data for a card the user
+  // can't see, with no .focused highlight visible anywhere — confusing.
+  if (renderedIndices.length === 0) {
     _focusedEncounterIdx = null;
     renderAlgorithmTrace();
-  } else if (_focusedEncounterIdx === null || _focusedEncounterIdx >= encs.length) {
-    setFocusedEncounter(0);
+  } else if (_focusedEncounterIdx === null || renderedIndices.indexOf(_focusedEncounterIdx) === -1) {
+    // No focus yet, or current focus is hidden — fall back to the first
+    // visible encounter.
+    setFocusedEncounter(renderedIndices[0]);
   } else {
     // Re-apply focus highlight (DOM was rebuilt) and refresh trace panel.
     setFocusedEncounter(_focusedEncounterIdx);
