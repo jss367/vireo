@@ -10199,9 +10199,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         rejected = [k for k in new_pipeline if k not in allowed]
         if rejected:
             return json_error(f"unknown keys: {rejected}")
-        raw = cfg.load()
-        raw.setdefault("pipeline", {}).update(new_pipeline)
-        cfg.save(raw)
+        with _settings_write_lock:
+            raw = cfg.load()
+            raw.setdefault("pipeline", {}).update(new_pipeline)
+            cfg.save(raw)
         return jsonify({"saved": new_pipeline})
 
     @app.route("/api/pipeline/detach-burst", methods=["POST"])
