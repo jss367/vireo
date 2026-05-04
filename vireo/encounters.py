@@ -440,27 +440,44 @@ def merge_microsegments(segments, config=None):
     Returns:
         list of merged segments
     """
+    merged, _ = _merge_microsegments_with_map(segments, config=config)
+    return merged
+
+
+def _merge_microsegments_with_map(segments, config=None):
+    """Like merge_microsegments but also returns a per-merged-segment count
+    of how many original microsegments were fused into it.
+
+    Returns:
+        (merged_segments, counts) where counts[i] is the number of original
+        microsegments that ended up inside merged_segments[i].
+    """
     cfg = {**DEFAULTS, **(config or {})}
 
     if len(segments) <= 1:
-        return segments
+        return list(segments), [1] * len(segments)
 
     merged = [segments[0]]
+    counts = [1]
     for seg in segments[1:]:
         last_a = _segment_timestamp(merged[-1], "last")
         first_b = _segment_timestamp(seg, "first")
         gap = _time_delta_seconds(last_a, first_b)
 
+        did_merge = False
         if gap <= cfg["merge_max_gap"]:
             s_seg = compute_s_seg(merged[-1], seg, config=cfg)
             if s_seg > cfg["merge_score"]:
                 # Merge: extend the last segment
                 merged[-1] = merged[-1] + seg
-                continue
+                counts[-1] += 1
+                did_merge = True
 
-        merged.append(seg)
+        if not did_merge:
+            merged.append(seg)
+            counts.append(1)
 
-    return merged
+    return merged, counts
 
 
 # -- Encounter-level species label (Section 2.4) --
@@ -497,12 +514,17 @@ def encounter_species_label(photos):
 # -- Full encounter segmentation pipeline --
 
 
-def segment_encounters(photos, config=None):
+def segment_encounters(photos, config=None, emit_trace=False):
     """Run the full two-pass encounter segmentation pipeline.
 
     Args:
         photos: list of photo dicts with all required features
         config: optional dict overriding DEFAULTS
+        emit_trace: when True, attach a per-encounter `trace` field — a list
+            of cut-point trace entries that fall inside that encounter (after
+            potential microsegment fusion). Boundary entries between two
+            microsegments that ended up in the same merged encounter are
+            re-tagged with decision="merged_back".
 
     Returns:
         list of encounter dicts, each with:
@@ -510,22 +532,39 @@ def segment_encounters(photos, config=None):
             - species: (name, confidence) tuple
             - photo_count: int
             - time_range: (first_timestamp, last_timestamp) or (None, None)
+            - trace: (only when emit_trace) list of trace dicts for the
+              internal adjacent pairs of this encounter
     """
     # Pass 1: Cut into microsegments
-    microsegments = cut_microsegments(photos, config=config)
+    if emit_trace:
+        microsegments, full_trace = cut_microsegments(
+            photos, config=config, emit_trace=True
+        )
+    else:
+        microsegments = cut_microsegments(photos, config=config)
+        full_trace = None
     log.info("Pass 1: %d microsegments from %d photos", len(microsegments), len(photos))
 
     # Pass 2: Merge neighbors
-    merged = merge_microsegments(microsegments, config=config)
+    if emit_trace:
+        merged, merge_counts = _merge_microsegments_with_map(
+            microsegments, config=config
+        )
+    else:
+        merged = merge_microsegments(microsegments, config=config)
+        merge_counts = None
     log.info("Pass 2: %d encounters after merging", len(merged))
 
     # Build encounter objects
     encounters = []
-    for seg in merged:
+    pair_cursor = 0  # index into full_trace
+    micro_cursor = 0  # index into microsegments
+
+    for enc_idx, seg in enumerate(merged):
         species = encounter_species_label(seg)
         first_ts = _segment_timestamp(seg, "first")
         last_ts = _segment_timestamp(seg, "last")
-        encounters.append({
+        enc = {
             "photos": seg,
             "species": species,
             "photo_count": len(seg),
@@ -533,6 +572,30 @@ def segment_encounters(photos, config=None):
                 first_ts.isoformat() if first_ts else None,
                 last_ts.isoformat() if last_ts else None,
             ),
-        })
+        }
+        if emit_trace:
+            n_micros = merge_counts[enc_idx]
+            enc_trace = []
+            for k in range(n_micros):
+                m = microsegments[micro_cursor]
+                # Internal pairs of this microsegment (one fewer than its photo count)
+                for _ in range(len(m) - 1):
+                    enc_trace.append(full_trace[pair_cursor])
+                    pair_cursor += 1
+                micro_cursor += 1
+                # Boundary pair after this microsegment
+                if pair_cursor < len(full_trace):
+                    if k < n_micros - 1:
+                        # This boundary lives inside the same merged encounter:
+                        # re-tag as merged_back (post-merge truth).
+                        boundary = dict(full_trace[pair_cursor])
+                        boundary["decision"] = "merged_back"
+                        enc_trace.append(boundary)
+                        pair_cursor += 1
+                    else:
+                        # Boundary belongs to the gap between encounters; skip.
+                        pair_cursor += 1
+            enc["trace"] = enc_trace
+        encounters.append(enc)
 
     return encounters
