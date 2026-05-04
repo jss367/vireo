@@ -1163,7 +1163,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_pipeline_page_init():
         """Combined endpoint for pipeline page initial load."""
         db = _get_db()
-        pipeline_counts = db.get_pipeline_feature_counts()
         total_photos = db.count_photos()
 
         import config as cfg
@@ -1203,9 +1202,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return jsonify({
             "total_photos": total_photos,
-            "has_detections": pipeline_counts["detections"],
-            "has_masks": pipeline_counts["masks"],
-            "has_sharpness": pipeline_counts["sharpness"],
             "taxonomy_available": taxonomy_available,
             "pipeline_config": {
                 "sam2_variant": pipeline_cfg.get("sam2_variant", "sam2-small"),

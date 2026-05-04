@@ -1301,68 +1301,6 @@ def _make_workspace_with_photos(tmp_path, photo_overrides=None):
     return db, photo_ids
 
 
-# --- Cluster 1: Pipeline Feature Counts ---
-
-def test_get_pipeline_feature_counts_empty(tmp_path):
-    """Returns zeros when no photos have pipeline features."""
-    db, _ = _make_workspace_with_photos(tmp_path, [{}])
-    counts = db.get_pipeline_feature_counts()
-    assert counts['masks'] == 0
-    assert counts['detections'] == 0
-    assert counts['sharpness'] == 0
-
-
-def test_get_pipeline_feature_counts_with_data(tmp_path):
-    """Returns correct counts for each pipeline feature."""
-    db, pids = _make_workspace_with_photos(tmp_path, [
-        {'mask_path': '/mask/1.png', 'subject_tenengrad': 42.0},
-        {'mask_path': '/mask/2.png'},
-        {},
-        {},
-    ])
-    # Create detections for first two photos (replaces old detection_box column)
-    db.save_detections(pids[0], [
-        {"box": {"x": 0, "y": 0, "w": 100, "h": 100}, "confidence": 0.9, "category": "animal"}
-    ], detector_model="MDV6")
-    db.save_detections(pids[2], [
-        {"box": {"x": 10, "y": 10, "w": 50, "h": 50}, "confidence": 0.8, "category": "animal"}
-    ], detector_model="MDV6")
-    counts = db.get_pipeline_feature_counts()
-    assert counts['masks'] == 2
-    assert counts['detections'] == 2
-    assert counts['sharpness'] == 1
-
-
-def test_get_pipeline_feature_counts_workspace_scoped(tmp_path):
-    """Only counts photos in the active workspace's folders."""
-    from db import Database
-    db = Database(str(tmp_path / "test.db"))
-    ws1 = db.ensure_default_workspace()
-    db.set_active_workspace(ws1)
-
-    f1 = db.add_folder('/photos1', name='photos1')
-    db.add_workspace_folder(ws1, f1)
-    db.add_photo(folder_id=f1, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.conn.execute("UPDATE photos SET mask_path = '/m' WHERE filename = 'a.jpg'")
-    db.conn.commit()
-
-    # Create second workspace with different folder
-    ws2 = db.create_workspace('WS2')
-    f2 = db.add_folder('/photos2', name='photos2')
-    db.add_workspace_folder(ws2, f2)
-    db.set_active_workspace(ws2)
-    db.add_photo(folder_id=f2, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-
-    # WS2 should have 0 masks
-    counts = db.get_pipeline_feature_counts()
-    assert counts['masks'] == 0
-
-    # WS1 should have 1 mask
-    db.set_active_workspace(ws1)
-    counts = db.get_pipeline_feature_counts()
-    assert counts['masks'] == 1
-
-
 # --- Cluster 2: Dashboard Stats ---
 
 def test_get_dashboard_stats_empty(tmp_path):
