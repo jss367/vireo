@@ -10169,6 +10169,33 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return jsonify(serialize_results(results))
 
+    @app.route("/api/pipeline/save-grouping-defaults", methods=["POST"])
+    def api_pipeline_save_grouping_defaults():
+        """Persist current grouping weights/thresholds to the global config.
+
+        Whitelists known grouping keys so the endpoint can't be used to mutate
+        unrelated config. Returns the new pipeline payload that was saved.
+        """
+        import config as cfg
+
+        body = request.get_json(silent=True) or {}
+        new_pipeline = body.get("pipeline", {})
+        if not isinstance(new_pipeline, dict):
+            return json_error("pipeline must be an object")
+        allowed = {
+            "w_time", "w_subj", "w_global", "w_species", "w_meta",
+            "tau_enc", "hard_cut_time", "hard_cut_score", "soft_cut_score",
+            "merge_score", "merge_max_gap", "merge_tau",
+            "burst_time_gap", "burst_phash_dist", "burst_emb_dist",
+        }
+        rejected = [k for k in new_pipeline if k not in allowed]
+        if rejected:
+            return json_error(f"unknown keys: {rejected}")
+        raw = cfg.load()
+        raw.setdefault("pipeline", {}).update(new_pipeline)
+        cfg.save(raw)
+        return jsonify({"saved": new_pipeline})
+
     @app.route("/api/pipeline/detach-burst", methods=["POST"])
     def api_pipeline_detach_burst():
         """Detach a burst from its encounter, creating a new standalone encounter."""

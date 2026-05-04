@@ -3853,3 +3853,34 @@ def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
         assert "score" in sample
         assert "decision" in sample
         assert "components" in sample
+
+
+def test_save_grouping_defaults_persists_to_config(tmp_path, monkeypatch):
+    """POST /api/pipeline/save-grouping-defaults should persist whitelisted
+    grouping keys into the global config file via cfg.save()."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
+    client = app.test_client()
+
+    payload = {"pipeline": {"w_species": 0.40, "hard_cut_score": 0.55, "tau_enc": 30.0}}
+    resp = client.post("/api/pipeline/save-grouping-defaults", json=payload)
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body.get("saved") == payload["pipeline"]
+
+    saved = cfg.load()
+    assert saved["pipeline"]["w_species"] == 0.40
+    assert saved["pipeline"]["hard_cut_score"] == 0.55
+    assert saved["pipeline"]["tau_enc"] == 30.0
