@@ -10186,7 +10186,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "w_time", "w_subj", "w_global", "w_species", "w_meta",
             "tau_enc", "hard_cut_time", "hard_cut_score", "soft_cut_score",
             "merge_score", "merge_max_gap", "merge_tau",
-            "burst_time_gap", "burst_phash_dist", "burst_emb_dist",
+            "burst_time_gap", "burst_phash_threshold", "burst_embedding_threshold",
         }
         rejected = [k for k in new_pipeline if k not in allowed]
         if rejected:
