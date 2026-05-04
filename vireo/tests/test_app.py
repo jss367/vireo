@@ -4129,6 +4129,18 @@ def test_save_grouping_defaults_rejects_bad_values(tmp_path, monkeypatch):
         json={"pipeline": {"tau_enc": float("inf")}},
     )
     assert resp.status_code == 400
+    # Zero for tau constants would crash encounters.sim_time
+    # (exp(-dt/tau) divides by tau) — must be rejected.
+    resp = client.post(
+        "/api/pipeline/save-grouping-defaults",
+        json={"pipeline": {"tau_enc": 0.0}},
+    )
+    assert resp.status_code == 400
+    resp = client.post(
+        "/api/pipeline/save-grouping-defaults",
+        json={"pipeline": {"merge_tau": 0.0}},
+    )
+    assert resp.status_code == 400
     # phash threshold must be int, not float.
     resp = client.post(
         "/api/pipeline/save-grouping-defaults",

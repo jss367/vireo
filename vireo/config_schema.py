@@ -503,6 +503,14 @@ SCHEMA = {
         "label": "Diversity weight: metadata",
         "desc": "Weight of metadata component in diversity score.",
     },
+    "pipeline.tau_enc": {
+        # Min is strictly positive: encounters.sim_time divides by tau, so
+        # zero would crash scoring with ZeroDivisionError on any finite dt.
+        "type": "float", "min": 1.0, "max": 86400.0, "step": 1.0,
+        "category": "Pipeline", "scope": "both",
+        "label": "Encounter: time constant tau (s)",
+        "desc": "Time constant for the sim_time decay between adjacent photos — smaller values make the time signal fall off faster.",
+    },
     "pipeline.hard_cut_time": {
         "type": "float", "min": 0.0, "max": 86400.0, "step": 1.0,
         "category": "Pipeline", "scope": "both",
@@ -532,6 +540,14 @@ SCHEMA = {
         "category": "Pipeline", "scope": "both",
         "label": "Encounter: merge max gap (s)",
         "desc": "Maximum time gap that still allows a merge.",
+    },
+    "pipeline.merge_tau": {
+        # Min is strictly positive: encounters merge math divides by merge_tau
+        # (exp(-gap / merge_tau)), so zero would crash with ZeroDivisionError.
+        "type": "float", "min": 1.0, "max": 86400.0, "step": 1.0,
+        "category": "Pipeline", "scope": "both",
+        "label": "Encounter: merge time constant tau (s)",
+        "desc": "Time constant for the merge gap decay — smaller values make the merge signal fall off faster as the gap between segments grows.",
     },
     "pipeline.extract_full_metadata": {
         "type": "bool",

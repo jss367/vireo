@@ -92,11 +92,13 @@ DEFAULTS = {
         "w_global": 0.15,
         "w_species": 0.10,
         "w_meta": 0.05,
+        "tau_enc": 40.0,
         "hard_cut_time": 180.0,
         "hard_cut_score": 0.42,
         "soft_cut_score": 0.52,
         "merge_score": 0.62,
         "merge_max_gap": 60.0,
+        "merge_tau": 20.0,
         "extract_full_metadata": True,
     },
     # --- Ingest (import from external source) ---
