@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import threading
@@ -7,6 +8,38 @@ from PIL import Image
 from werkzeug.serving import make_server
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'vireo'))
+
+
+def _seed_classifier_model(home_dir):
+    """Stage a fake bioclip-2 model on disk + active selection in models.json.
+
+    The pipeline page's plan endpoint resolves model state via models.get_models(),
+    which only reports a model as "downloaded" when its files are actually
+    present. With no model registered, _classify_plan returns "Will skip"
+    regardless of seeded predictions — masking the user-facing intent the
+    tests verify ("Already done" when classifications exist). bioclip-2's
+    model_str is in tol_supported, so the plan resolves the labels
+    fingerprint to TOL_SENTINEL even with no label sets configured.
+    """
+    model_dir = os.path.join(home_dir, ".vireo", "models", "bioclip-2")
+    os.makedirs(model_dir)
+    for fname in (
+        "image_encoder.onnx",
+        "image_encoder.onnx.data",
+        "text_encoder.onnx",
+        "text_encoder.onnx.data",
+        "tokenizer.json",
+        "config.json",
+        "tol_embeddings.npy",
+        "tol_classes.json",
+    ):
+        with open(os.path.join(model_dir, fname), "w") as f:
+            f.write("")
+    # Mark verify-skipped so get_models() reports state="unverified" → downloaded.
+    with open(os.path.join(model_dir, ".verify_skipped"), "w") as f:
+        f.write("test")
+    with open(os.path.join(home_dir, ".vireo", "models.json"), "w") as f:
+        json.dump({"models": [], "active_model": "bioclip-2"}, f)
 
 
 def seed_e2e_data(db, thumb_dir):
@@ -43,7 +76,10 @@ def seed_e2e_data(db, thumb_dir):
 
     db.create_workspace("Field Work")
 
-    # Add detections and predictions so the review page has content
+    # Add detections and predictions so the review page has content. Also
+    # record classifier_runs so the pipeline plan reports Classify as
+    # "Already done" — the table the plan consults, distinct from predictions.
+    from labels_fingerprint import TOL_SENTINEL
     species_for_photo = [
         "Red-tailed Hawk", "Red-tailed Hawk", "Red-tailed Hawk",
         "American Robin", "American Robin",
@@ -57,7 +93,14 @@ def seed_e2e_data(db, thumb_dir):
             detection_id=det_ids[0],
             species=species,
             confidence=0.92,
-            model="test-classifier",
+            model="BioCLIP-2",
+            labels_fingerprint=TOL_SENTINEL,
+        )
+        db.record_classifier_run(
+            detection_id=det_ids[0],
+            classifier_model="BioCLIP-2",
+            labels_fingerprint=TOL_SENTINEL,
+            prediction_count=1,
         )
 
     return {"photos": photos, "folders": [f1, f2]}
@@ -74,6 +117,17 @@ def live_server(tmp_path, monkeypatch):
     from db import Database
 
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    # Pin models.py paths to tmp_path so a model staged for the test is
+    # resolvable regardless of when models.py was first imported in the session.
+    import models
+    monkeypatch.setattr(
+        models, "CONFIG_PATH", str(tmp_path / ".vireo" / "models.json"),
+    )
+    monkeypatch.setattr(
+        models, "DEFAULT_MODELS_DIR", str(tmp_path / ".vireo" / "models"),
+    )
+    _seed_classifier_model(str(tmp_path))
 
     db_path = str(tmp_path / "test.db")
     thumb_dir = str(tmp_path / "thumbs")
