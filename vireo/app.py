@@ -266,6 +266,10 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         for b in bursts:
             b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
         enc["time_range"] = _compute_time_range(photos_by_id, remaining)
+        # Pair indices in trace reference the original composition; drop it
+        # so the algorithm-trace panel renders an honest "needs recompute"
+        # state instead of stale rows.
+        enc.pop("trace", None)
 
     detached["species_predictions"] = rebuild_species_predictions(results, detached_ids)
 
@@ -279,6 +283,8 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         target["species_predictions"] = rebuild_species_predictions(
             results, target["photo_ids"]
         )
+        # Same reason as above — target's trace no longer matches its photo set.
+        target.pop("trace", None)
         t_min, t_max = target.get("time_range") or [None, None]
         d_min, d_max = detached_range
         mins = [x for x in (t_min, d_min) if x is not None]
@@ -10237,8 +10243,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             coerced[k] = v
         # Hold the same lock as the settings write paths so a concurrent
         # autosave from /api/settings doesn't clobber half of one update.
+        # Use the raw on-disk file (no DEFAULTS merge) so we only persist
+        # the keys the user actually set — otherwise cfg.save would pin
+        # every default to its current value and block future upgrades.
         with _settings_write_lock:
-            raw = cfg.load()
+            raw = _read_raw_config_file()
             raw.setdefault("pipeline", {}).update(coerced)
             cfg.save(raw)
         return jsonify({"saved": coerced})

@@ -1545,6 +1545,66 @@ def test_encounter_species_auto_detaches_mixed_burst(app_and_db):
     assert eagle_enc["confirmed_species"] == "Golden Eagle"
 
 
+def test_encounter_species_auto_detach_clears_stale_trace(app_and_db):
+    """Auto-detach mutates encounter photo_ids; the trace (keyed to original
+    composition) must be dropped so the algorithm-trace panel doesn't render
+    pair indices that no longer match the post-detach photo set."""
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                "species": ["Bald Eagle", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [{"species": "Bald Eagle", "count": 3, "models": []}],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 2,
+                "time_range": ["2024-06-10T09:00:00", "2024-06-10T09:05:00"],
+                "photo_ids": [1, 2, 3],
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [3], "species_predictions": [], "species_override": None},
+                ],
+                # Pre-existing trace from the original 3-photo grouping.
+                "trace": [
+                    {"pair_index": 0, "score": 0.8, "decision": "kept", "components": {},
+                     "thresholds": {}, "dt_seconds": 2.0},
+                    {"pair_index": 1, "score": 0.5, "decision": "kept", "components": {},
+                     "thresholds": {}, "dt_seconds": 298.0},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg", "timestamp": "2024-06-10T09:00:00", "species_top5": [["Bald Eagle", 0.9, "m1"]]},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg", "timestamp": "2024-06-10T09:00:02", "species_top5": [["Bald Eagle", 0.9, "m1"]]},
+            {"id": 3, "label": "REVIEW", "filename": "c.jpg", "timestamp": "2024-06-10T09:05:00", "species_top5": [["Golden Eagle", 0.6, "m1"]]},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 2,
+                     "keep_count": 2, "review_count": 1, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Golden Eagle", "photo_ids": [3], "burst_index": 1})
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    bald_enc = next(e for e in body["encounters"] if 1 in e["photo_ids"])
+    golden_enc = next(e for e in body["encounters"] if 3 in e["photo_ids"])
+    # The source encounter had its composition changed — trace must be gone.
+    assert "trace" not in bald_enc, "auto-detach left stale trace on source encounter"
+    # The new encounter created from the detached burst was never grouped, so
+    # it has no trace either (correct — would be misleading otherwise).
+    assert "trace" not in golden_enc
+
+
 def test_encounter_species_confirm_single_burst_does_not_detach(app_and_db):
     """Confirming the only burst in an encounter does not detach (nothing to split from)."""
     import json as _json
