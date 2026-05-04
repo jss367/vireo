@@ -270,6 +270,22 @@ def test_validate_float_enforces_range():
         validate_value("classification_threshold", 1.5)
 
 
+def test_validate_rejects_zero_for_tau_constants():
+    # tau_enc and merge_tau are denominators in encounters scoring
+    # (exp(-dt/tau)) — zero would crash with ZeroDivisionError. Schema
+    # minima must be strictly positive so /api/settings/* can't persist
+    # a value that later breaks scoring.
+    from config_schema import ValidationError, validate_value
+
+    with pytest.raises(ValidationError):
+        validate_value("pipeline.tau_enc", 0.0)
+    with pytest.raises(ValidationError):
+        validate_value("pipeline.merge_tau", 0.0)
+    # Sanity: a typical positive value still validates.
+    assert validate_value("pipeline.tau_enc", 40.0) == 40.0
+    assert validate_value("pipeline.merge_tau", 20.0) == 20.0
+
+
 def test_validate_float_rejects_nan():
     from config_schema import ValidationError, validate_value
 
