@@ -10248,7 +10248,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # every default to its current value and block future upgrades.
         with _settings_write_lock:
             raw = _read_raw_config_file()
-            raw.setdefault("pipeline", {}).update(coerced)
+            # If a hand-edit left raw["pipeline"] as a non-dict (string, list,
+            # etc.), setdefault would return it as-is and .update would raise
+            # AttributeError. Normalize to a dict — the endpoint's job is to
+            # write a clean pipeline section, so a corrupt one should be
+            # replaced rather than crash the save.
+            if not isinstance(raw.get("pipeline"), dict):
+                raw["pipeline"] = {}
+            raw["pipeline"].update(coerced)
             cfg.save(raw)
         return jsonify({"saved": coerced})
 

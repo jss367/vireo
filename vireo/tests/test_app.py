@@ -4051,6 +4051,38 @@ def test_save_grouping_defaults_persists_to_config(tmp_path, monkeypatch):
     assert saved["pipeline"]["tau_enc"] == 30.0
 
 
+def test_save_grouping_defaults_recovers_from_corrupt_pipeline_section(tmp_path, monkeypatch):
+    """If a hand-edit left config.json with a non-dict pipeline value, the
+    endpoint should overwrite it cleanly rather than crash with AttributeError
+    inside .update()."""
+    import json as _json
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    # Pre-seed config.json with a corrupt pipeline value (string, not dict).
+    with open(cfg.CONFIG_PATH, "w") as f:
+        _json.dump({"pipeline": "oops-i-edited-this-by-hand"}, f)
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
+    client = app.test_client()
+
+    resp = client.post("/api/pipeline/save-grouping-defaults",
+                       json={"pipeline": {"w_species": 0.40}})
+    assert resp.status_code == 200, resp.get_json()
+    saved = cfg.load()
+    assert saved["pipeline"]["w_species"] == 0.40
+
+
 def test_save_grouping_defaults_rejects_bad_values(tmp_path, monkeypatch):
     """POST /api/pipeline/save-grouping-defaults must reject invalid types or
     out-of-range values before they corrupt the persistent config."""
