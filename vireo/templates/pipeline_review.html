@@ -3158,7 +3158,14 @@ function grmCardMouseMove(e) {
   if (!_grmDragging.moved) return;
   // Use the actual displayed scale so dx/dy in screen pixels translate to
   // pre-scale offset units that, when re-scaled, follow the cursor 1:1.
-  var scale = grmBaseScale() * _grmZoomMultiplier;
+  // Must mirror _grmComputeCardTransform's hover/non-hover branch: after a
+  // zoom-in followed by mouseleave (grmLoupeReset clears _grmLastHoverX) the
+  // card is displayed at cover-fit while _grmZoomMultiplier stays >1, so a
+  // naive `coverFit * multiplier` denominator would shrink drag motion by
+  // that factor and pans would jump when hover resumes.
+  var coverFit = grmCardCoverFit(_grmDragging.card);
+  var hovering = _grmLastHoverX != null;
+  var scale = hovering ? Math.max(coverFit, coverFit * _grmZoomMultiplier) : coverFit;
   var z = scale > 0.01 ? scale : 1;
   var newTx = _grmDragging.origTx + dx / z;
   var newTy = _grmDragging.origTy + dy / z;
