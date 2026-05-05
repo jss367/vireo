@@ -1,0 +1,175 @@
+"""Verify burst-loupe strip imgs are laid out at natural source-pixel size.
+
+This guards the WKWebView quality regression: when a strip <img> is laid
+out at 180x120 and then scaled up via `transform: scale(N)`, browsers
+rasterize the layer at 180x120 first and bilinearly upscale. The fix is
+to give each <img> inline width/height equal to its served source-pixel
+dimensions and use transform-scale only to shrink it into the viewport.
+
+These tests assert the layout invariant (img CSS width == naturalWidth)
+rather than visual pixel quality, since the latter is hard to test
+deterministically across browser engines.
+"""
+import os
+
+import pytest
+from PIL import Image
+from playwright.sync_api import expect
+
+
+def _seed_burst_with_real_photos(db, thumb_dir, group_id="grp-natural-1",
+                                  model="BioCLIP-2"):
+    """Seed three Red-tailed Hawk predictions with on-disk photos that have
+    real width/height metadata. Photos are 600x400 jpeg so /photos/<id>/original
+    yields a small but real image whose naturalWidth/Height we can assert.
+    """
+    rows = db.conn.execute(
+        """SELECT pr.id, d.photo_id, p.folder_id, p.filename
+             FROM predictions pr
+             JOIN detections d ON d.id = pr.detection_id
+             JOIN photos p ON p.id = d.photo_id
+            WHERE pr.species = 'Red-tailed Hawk'
+              AND pr.classifier_model = ?""",
+        (model,),
+    ).fetchall()
+    if not rows:
+        return 0
+    total = len(rows)
+    ws_id = db._active_workspace_id
+    for i, row in enumerate(rows):
+        db.conn.execute(
+            """INSERT INTO prediction_review
+                 (prediction_id, workspace_id, status,
+                  group_id, vote_count, total_votes)
+               VALUES (?, ?, 'pending', ?, ?, ?)
+               ON CONFLICT(prediction_id, workspace_id)
+               DO UPDATE SET group_id = excluded.group_id,
+                             vote_count = excluded.vote_count,
+                             total_votes = excluded.total_votes""",
+            (row["id"], ws_id, group_id, total, total),
+        )
+        db.conn.execute(
+            """UPDATE photos
+                 SET quality_score = ?, subject_sharpness = ?,
+                     width = ?, height = ?
+               WHERE id = ?""",
+            (0.5 + 0.1 * i, 100 + 10 * i, 600, 400, row["photo_id"]),
+        )
+    db.conn.commit()
+    return total
+
+
+def _ensure_photo_files_on_disk(db, tmp_path):
+    """The /photos/<id>/original endpoint reads from disk, so we need real
+    files at the photo paths. Write 600x400 JPEGs.
+    """
+    rows = db.conn.execute(
+        """SELECT p.id, p.filename, f.path
+             FROM photos p
+             JOIN folders f ON f.id = p.folder_id
+            WHERE p.filename LIKE 'hawk%'"""
+    ).fetchall()
+    base = str(tmp_path / "hawk_photos")
+    os.makedirs(base, exist_ok=True)
+    for row in rows:
+        # The folder.path in the seed is /photos/park, but that doesn't exist
+        # on the test machine. Patch it to a real tmp dir.
+        new_dir = base
+        new_path = os.path.join(new_dir, row["filename"])
+        Image.new("RGB", (600, 400), color=(80, 120, 160)).save(new_path, "JPEG")
+        db.conn.execute(
+            "UPDATE folders SET path = ? WHERE id = (SELECT folder_id FROM photos WHERE id = ?)",
+            (new_dir, row["id"]),
+        )
+    db.conn.commit()
+
+
+def _open_burst_modal(page):
+    trigger = page.locator("button[data-group-id]").first
+    expect(trigger).to_be_visible()
+    trigger.click()
+    page.locator("#grmOverlay .grm-card[data-photo-id]").first.wait_for(
+        state="visible", timeout=2000
+    )
+
+
+def test_burst_card_img_laid_out_at_natural_size(live_server, page, tmp_path):
+    """After upgrading the strip to original (via wheel zoom), each <img>
+    should have inline CSS width/height equal to the server's served image
+    dimensions. This proves the rasterized layer is at full source size
+    instead of being upscaled from a tiny tile.
+    """
+    db = live_server["db"]
+    n = _seed_burst_with_real_photos(db, tmp_path)
+    if n < 1:
+        pytest.skip("could not seed burst group")
+    _ensure_photo_files_on_disk(db, tmp_path)
+
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    page.wait_for_load_state("networkidle")
+    _open_burst_modal(page)
+
+    # Trigger a wheel zoom on the loupe so the strip upgrades to /original.
+    loupe = page.locator("#grmLoupeImg")
+    loupe.dispatch_event("wheel", {"deltaY": -100, "clientX": 200, "clientY": 200})
+
+    # Wait for at least one card img to load at the original.
+    page.wait_for_function(
+        """() => {
+          const imgs = document.querySelectorAll('.grm-card img');
+          return Array.from(imgs).some(img => img.complete && img.naturalWidth > 100);
+        }""",
+        timeout=4000,
+    )
+
+    # Assert: the card img's inline style.width matches its naturalWidth.
+    result = page.evaluate(
+        """() => {
+          const imgs = document.querySelectorAll('.grm-card img');
+          return Array.from(imgs).map(img => ({
+            inlineW: img.style.width,
+            inlineH: img.style.height,
+            naturalW: img.naturalWidth,
+            naturalH: img.naturalHeight,
+            complete: img.complete,
+          }));
+        }"""
+    )
+    assert result, "no .grm-card imgs found"
+    # At least one fully-loaded img should have inline dims matching naturalWidth.
+    matched = [
+        r for r in result
+        if r["complete"] and r["naturalW"] > 0
+        and r["inlineW"] == f"{r['naturalW']}px"
+        and r["inlineH"] == f"{r['naturalH']}px"
+    ]
+    assert matched, (
+        f"no card img has inline width matching naturalWidth — got {result}. "
+        "This means the layer is being rasterized at the wrong size, which "
+        "is the WKWebView upscaling bug this fix is meant to prevent."
+    )
+
+
+def test_burst_card_box_is_180x120(live_server, page, tmp_path):
+    """The 180x120 viewport stays the visible card box; the natural-size
+    <img> inside is clipped via overflow:hidden on .grm-card-img-box.
+    """
+    db = live_server["db"]
+    n = _seed_burst_with_real_photos(db, tmp_path)
+    if n < 1:
+        pytest.skip("could not seed burst group")
+    _ensure_photo_files_on_disk(db, tmp_path)
+
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    page.wait_for_load_state("networkidle")
+    _open_burst_modal(page)
+
+    # The image-box wrapper should be exactly 180x120.
+    box = page.locator(".grm-card .grm-card-img-box").first
+    expect(box).to_be_visible()
+    bbox = box.bounding_box()
+    assert bbox is not None
+    assert abs(bbox["width"] - 180) < 1, f"box width {bbox['width']} != 180"
+    assert abs(bbox["height"] - 120) < 1, f"box height {bbox['height']} != 120"
