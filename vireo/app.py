@@ -10225,13 +10225,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "w_global": ("unit", 0.0, 1.0),
             "w_species": ("unit", 0.0, 1.0),
             "w_meta": ("unit", 0.0, 1.0),
-            "tau_enc": ("seconds", 0.0, 86400.0),
+            # tau_enc and merge_tau are denominators in encounters scoring
+            # (exp(-dt/tau), exp(-gap/merge_tau)) — must be strictly positive
+            # to avoid ZeroDivisionError when scoring runs against the saved
+            # config.
+            "tau_enc": ("seconds", 1.0, 86400.0),
             "hard_cut_time": ("seconds", 0.0, 86400.0),
             "hard_cut_score": ("score", 0.0, 1.0),
             "soft_cut_score": ("score", 0.0, 1.0),
             "merge_score": ("score", 0.0, 1.0),
             "merge_max_gap": ("seconds", 0.0, 86400.0),
-            "merge_tau": ("seconds", 0.0, 86400.0),
+            "merge_tau": ("seconds", 1.0, 86400.0),
             "burst_time_gap": ("seconds", 0.0, 86400.0),
             "burst_phash_threshold": ("phash", 0, 256),
             "burst_embedding_threshold": ("score", 0.0, 1.0),
