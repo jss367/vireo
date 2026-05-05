@@ -438,11 +438,24 @@
   }
   .grm-reset-offsets-btn.visible { display: inline-block; }
   .grm-reset-offsets-btn:hover { color: var(--text-primary, #E0F0F0); }
-  .grm-card img {
-    width: 100%;
-    aspect-ratio: 3/2;
-    object-fit: cover;
+  /* Card image is laid out at its natural source-pixel size and then scaled
+   * down via CSS transform into the 180x120 viewport. Laying out at natural
+   * size forces the browser to rasterize the layer at full source resolution,
+   * so detail survives the transform — instead of being bilinearly upsampled
+   * from a tiny pre-scale bitmap (the WKWebView burst-loupe quality bug). */
+  .grm-card-img-box {
+    width: 180px;
+    height: 120px;
+    position: relative;
+    overflow: hidden;
+  }
+  .grm-card-img-box img {
+    position: absolute;
+    top: 0;
+    left: 0;
     display: block;
+    transform-origin: 0 0;
+    /* Inline style.width / style.height set per-card in JS to natural size. */
   }
   .grm-card-info {
     padding: 6px 8px;
@@ -1376,13 +1389,17 @@ var grmState = { groupId: null, model: null, items: [], picks: new Set(), reject
 function openGroupReview(groupId, model) {
   grmState = { groupId: groupId, model: model, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null, upgraded: false };
   _grmLoupeLocked = false;
-  // Reset zoom state so a high zoom from a prior burst doesn't leak into this modal.
-  _grmZoomLevel = 4;
+  // Reset zoom state so a high zoom from a prior burst doesn't leak in. With
+  // the natural-size layout, _grmZoomLevel is now a multiplier above
+  // cover-fit (1 = no zoom).
+  _grmZoomLevel = 1;
   _grmOffsets = {};
   _grmDragging = null;
   _grmSuppressNextClick = false;
   _grmLoupeLastX = 50;
   _grmLoupeLastY = 50;
+  _grmLoupeHovering = false;
+  _grmPendingSnap = false;
   grmRefreshResetAllVisibility();
   document.getElementById('grmOverlay').classList.add('open');
   loadGroupData(groupId);
@@ -1451,11 +1468,17 @@ function renderGroupModal() {
     var src = grmState.upgraded
       ? '/photos/' + it.photo_id + '/original'
       : '/thumbnails/' + it.photo_id + '.jpg';
+    var nat = _grmReviewNaturalDims(it, grmState.upgraded);
+    var imgStyle = 'width:' + nat.w + 'px;height:' + nat.h + 'px;';
     return '<div class="' + cls + '" data-photo-id="' + it.photo_id + '" data-pred-id="' + it.id + '"' +
+      ' data-nat-w="' + nat.w + '" data-nat-h="' + nat.h + '"' +
       ' onmousedown="grmCardMouseDown(event)"' +
       ' onclick="grmCardClick(event, ' + it.photo_id + ')"' +
       ' ondblclick="grmCardDblClick(event)">' +
-      '<img src="' + src + '" loading="lazy" draggable="false">' +
+      '<div class="grm-card-img-box">' +
+      '<img src="' + src + '" style="' + imgStyle + '"' +
+        ' onload="grmCardImgLoaded(this)" loading="lazy" draggable="false">' +
+      '</div>' +
       '<div class="grm-card-info">' +
         '<div class="grm-card-species">' + escapeHtml(it.species || '') + ' <span style="font-weight:400;color:var(--text-dim,#888);">' + confPct + '%</span></div>' +
         '<div class="grm-card-scores">Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span></div>' +
@@ -1499,14 +1522,13 @@ function renderGroupModal() {
 
   document.getElementById('grmCount').textContent = pickItems.length + ' picks, ' + rejectItems.length + ' rejects, ' + candidateItems.length + ' unsorted';
 
-  // Re-apply offset indicators and — if the loupe is currently zoomed — the
-  // per-card transforms, since innerHTML wipes them on every re-render.
+  // Re-apply offset indicators and the per-card transforms — cover-fit
+  // always needs an explicit transform now that <img>s are laid out at
+  // natural source-pixel size. innerHTML wipes inline styles each render.
   document.querySelectorAll('.grm-card').forEach(function(card) {
     _grmUpdateIndicator(card);
   });
-  if (_grmLoupeLocked) {
-    _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
-  }
+  _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
   grmRefreshResetAllVisibility();
 }
 
@@ -1555,12 +1577,19 @@ function renderLoupePreds(item) {
   }).join('');
 }
 
-var _grmZoomLevel = 4;
+// Multiplier above each card's cover-fit scale. 1 = cover-fit (no zoom);
+// values past 1 zoom in towards CSS 1:1 and beyond to device 1:1 on Retina.
+var _grmZoomLevel = 1;
+// Card thumbnails are 180px wide x 120px tall (3:2). The image inside is
+// laid out at the served photo's natural pixel dimensions; transform-scale
+// shrinks it to fit the viewport.
+var GRM_CARD_W = 180;
+var GRM_CARD_H = 120;
 var _grmLoupeLocked = false;
-// Per-photo pan offsets, in pre-scale CSS pixels of the thumbnail img box.
-// Because we apply `scale(z) translate(tx, ty)`, the translate is in the
-// unscaled coordinate space, which is a fixed fraction of the underlying
-// image — so offsets remain correct as zoom level changes.
+// Per-photo pan offsets, in pre-scale CSS pixels (i.e. image-coordinate
+// pixels). Because we apply `translate(tx, ty) scale(s)` with offsets baked
+// into the translate as `off * s`, pans stay locked to the same pixel of
+// the underlying image as the shared zoom changes.
 var _grmOffsets = {};
 var _grmDragging = null;
 var _grmSuppressNextClick = false;
@@ -1570,55 +1599,109 @@ var _grmSuppressNextClick = false;
 // actions still render sensibly.
 var _grmLoupeLastX = 50;
 var _grmLoupeLastY = 50;
+// Whether the loupe has received a real hover (vs. just the centre default).
+// Used to decide between cover-fit (no-hover) and zoom (hover) per card.
+var _grmLoupeHovering = false;
+// True when grmSnapOneToOne is awaiting the selected card's natural dims
+// (the original image is still loading and may be EXIF-rotated relative to
+// stored item.width/height). grmCardImgLoaded finishes the snap once it
+// reconciles dims so the 1:1 zoom is computed against the axes the browser
+// actually paints.
+var _grmPendingSnap = false;
+
+// Natural-size dims for one card. When the strip is still on the 400px
+// thumbnail, we use a 400px-fit; once upgraded to /original we use the
+// stored width/height.
+function _grmReviewNaturalDims(item, upgraded) {
+  if (upgraded) {
+    var W = (item && item.width) ? item.width : 1800;
+    var H = (item && item.height) ? item.height : 1200;
+    return { w: W, h: H };
+  }
+  // 400px thumbnail: longest side fits to 400 while preserving aspect ratio.
+  // Falls back to a 3:2 box when dims are unknown so the card still looks right.
+  var W2 = (item && item.width) ? item.width : 600;
+  var H2 = (item && item.height) ? item.height : 400;
+  var longest = Math.max(W2, H2);
+  if (longest > 400) {
+    var r = 400 / longest;
+    W2 = Math.round(W2 * r);
+    H2 = Math.round(H2 * r);
+  }
+  return { w: W2, h: H2 };
+}
 
 function _grmUpgradeStripToOriginal() {
   // Swap every strip card from the 400px thumbnail to the full-resolution
   // original so zoom actually reveals sensor detail. Idempotent per modal open.
+  // Also relayout each <img> at the original's natural pixel size so the
+  // browser rasterizes the layer at full resolution instead of bilinearly
+  // upsampling the 400px thumbnail bitmap (the WKWebView quality bug).
   if (grmState.upgraded) return;
   grmState.upgraded = true;
   document.querySelectorAll('.grm-card').forEach(function(card) {
     var pid = card.getAttribute('data-photo-id');
     var img = card.querySelector('img');
-    if (pid && img) img.src = '/photos/' + pid + '/original';
+    if (!pid || !img) return;
+    var item = grmState.items.find(function(it) { return String(it.photo_id) === String(pid); });
+    var nat = _grmReviewNaturalDims(item, true);
+    card.dataset.natW = nat.w;
+    card.dataset.natH = nat.h;
+    img.style.width = nat.w + 'px';
+    img.style.height = nat.h + 'px';
+    img.src = '/photos/' + pid + '/original';
   });
+  _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
 }
 
-function _grmOneToOneScale() {
-  // Cards use object-fit: cover in a 3:2 box, so the on-screen base scale is
-  // max(boxW/imgW, boxH/imgH). The CSS transform factor that makes one source
-  // pixel equal one screen pixel is the inverse: min(imgW/boxW, imgH/boxH).
-  // Using width only would overshoot for images wider than 3:2 and undershoot
-  // for taller ones — misleading pixel detail either way.
-  var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
-  if (!item || !item.width || !item.height) return null;
-  // Prefer the selected photo's img so naturalWidth/Height (if loaded) reflect
-  // the axes the browser actually paints.
-  var sample = document.querySelector('.grm-card[data-photo-id="' + grmState.selected + '"] img')
-             || document.querySelector('.grm-card img');
-  if (!sample || !sample.offsetWidth || !sample.offsetHeight) return null;
-  // Stored item.width/height are pre-EXIF-orientation (same as in
-  // _lbRecomputeNativeZoom). For 90°-rotated JPEGs the browser swaps axes on
-  // render, so comparing stored aspect against the loaded image's aspect tells
-  // us whether to swap the stored dims before computing the 1:1 factor.
-  var imgW = item.width, imgH = item.height;
-  if (sample.naturalWidth && sample.naturalHeight) {
-    var storedAspect = item.width / item.height;
-    var renderedAspect = sample.naturalWidth / sample.naturalHeight;
-    if (Math.abs(storedAspect - renderedAspect) > Math.abs((1 / storedAspect) - renderedAspect)) {
-      imgW = item.height;
-      imgH = item.width;
-    }
+function grmCardImgLoaded(img) {
+  // Reconcile declared natural dims against what the browser actually decoded
+  // (NEFs may fall back to an embedded JPEG of a different size; EXIF-rotated
+  // JPEGs render with swapped axes vs. our stored pre-orientation dims).
+  if (!img || !img.naturalWidth || !img.naturalHeight) return;
+  var card = img.closest('.grm-card');
+  if (!card) return;
+  var declaredW = parseFloat(card.dataset.natW) || 0;
+  var declaredH = parseFloat(card.dataset.natH) || 0;
+  if (img.naturalWidth !== declaredW || img.naturalHeight !== declaredH) {
+    card.dataset.natW = img.naturalWidth;
+    card.dataset.natH = img.naturalHeight;
+    img.style.width = img.naturalWidth + 'px';
+    img.style.height = img.naturalHeight + 'px';
+    _grmApplyCardTransform(card);
   }
-  return Math.min(imgW / sample.offsetWidth, imgH / sample.offsetHeight);
+  // If the user pressed `1` before this card's natural dims were known,
+  // finish the snap now that we have the axes the browser actually paints.
+  // Without this, EXIF-rotated photos snap to a multiplier computed from
+  // pre-orientation (swapped) dims and land at the wrong zoom level.
+  if (_grmPendingSnap && grmState && grmState.selected != null
+      && String(card.dataset.photoId) === String(grmState.selected)) {
+    _grmPendingSnap = false;
+    _grmFinishSnap();
+  }
+}
+
+// Multiplier that, applied on top of cover-fit, yields a displayed scale of
+// 1.0 (i.e. one source pixel = one CSS pixel) for the selected card. With
+// the natural-size img layout, displayed scale = coverFit * multiplier, so
+// CSS 1:1 is reached at multiplier = 1 / coverFit.
+function _grmOneToOneMultiplier() {
+  if (!grmState || !grmState.selected) return null;
+  var card = document.querySelector('.grm-card[data-photo-id="' + grmState.selected + '"]');
+  if (!card) return null;
+  var coverFit = _grmCardCoverFit(card);
+  if (!coverFit) return null;
+  return 1 / coverFit;
 }
 
 function _grmMaxZoom() {
-  // Per selected photo, cap at the factor that reaches true 1:1. Falls back to
-  // 12 (the historical cap) when dimensions are unknown so we never zoom less
-  // than before.
-  var factor = _grmOneToOneScale();
-  if (factor == null) return 12;
-  return Math.max(12, Math.ceil(factor));
+  // Allow zooming past CSS 1:1 by × DPR so the user can reach one source
+  // pixel per device pixel on Retina displays — the actual pixel-peep target.
+  // Falls back to 12 when dims are unknown so we never zoom less than before.
+  var oneToOne = _grmOneToOneMultiplier();
+  var dpr = window.devicePixelRatio || 1;
+  if (oneToOne == null) return 12;
+  return Math.max(12, Math.ceil(oneToOne * dpr));
 }
 
 function grmLoupeToggleLock(e) {
@@ -1643,6 +1726,7 @@ function grmLoupeMove(e) {
   var y = ((e.clientY - rect.top) / rect.height) * 100;
   _grmLoupeLastX = x;
   _grmLoupeLastY = y;
+  _grmLoupeHovering = true;
 
   // Update crosshairs
   document.getElementById('grmCrosshairH').style.top = y + '%';
@@ -1654,35 +1738,70 @@ function grmLoupeMove(e) {
   _grmApplyAllCardTransforms(x, y);
 }
 
+function _grmCardCoverFit(card) {
+  var W = parseFloat(card.dataset.natW) || GRM_CARD_W;
+  var H = parseFloat(card.dataset.natH) || GRM_CARD_H;
+  return Math.max(GRM_CARD_W / W, GRM_CARD_H / H);
+}
+
+function _grmComputeCardTransform(card, hoverX, hoverY, hovering) {
+  var W = parseFloat(card.dataset.natW) || GRM_CARD_W;
+  var H = parseFloat(card.dataset.natH) || GRM_CARD_H;
+  var coverFit = Math.max(GRM_CARD_W / W, GRM_CARD_H / H);
+  var s = coverFit;
+  if (hovering) {
+    s = Math.max(coverFit, coverFit * _grmZoomLevel);
+  }
+  var hx = hovering ? (hoverX / 100) : 0.5;
+  var hy = hovering ? (hoverY / 100) : 0.5;
+  var baseTx = hx * (GRM_CARD_W - W * s);
+  var baseTy = hy * (GRM_CARD_H - H * s);
+  var off = _grmOffsets[card.dataset.photoId] || { tx: 0, ty: 0 };
+  // Pan offsets are in pre-scale (image-coordinate) CSS pixels; convert to
+  // card-coordinate pixels by multiplying by the displayed scale.
+  var tx = baseTx + off.tx * s;
+  var ty = baseTy + off.ty * s;
+  return {
+    transform: 'translate(' + tx + 'px, ' + ty + 'px) scale(' + s + ')',
+    scale: s,
+    zoomed: hovering,
+  };
+}
+
 function _grmApplyAllCardTransforms(x, y) {
+  var hovering = _grmLoupeHovering || _grmLoupeLocked;
   document.querySelectorAll('.grm-card').forEach(function(card) {
     var img = card.querySelector('img');
     if (!img) return;
-    var off = _grmOffsets[card.dataset.photoId] || { tx: 0, ty: 0 };
-    img.style.transformOrigin = x + '% ' + y + '%';
-    img.style.transform = 'scale(' + _grmZoomLevel + ') translate(' + off.tx + 'px, ' + off.ty + 'px)';
-    card.classList.add('zoomed');
+    var t = _grmComputeCardTransform(card, x, y, hovering);
+    img.style.transform = t.transform;
+    if (hovering) card.classList.add('zoomed');
+    else card.classList.remove('zoomed');
   });
 }
 
 function _grmApplyCardTransform(card) {
   var img = card.querySelector('img');
   if (!img) return;
-  var off = _grmOffsets[card.dataset.photoId] || { tx: 0, ty: 0 };
-  if (card.classList.contains('zoomed')) {
-    img.style.transform = 'scale(' + _grmZoomLevel + ') translate(' + off.tx + 'px, ' + off.ty + 'px)';
-  }
+  var hovering = card.classList.contains('zoomed');
+  var t = _grmComputeCardTransform(card, _grmLoupeLastX, _grmLoupeLastY, hovering);
+  img.style.transform = t.transform;
 }
 
 function grmLoupeZoom(e) {
   e.preventDefault();
+  // Wheel input is an explicit override of any pending 1:1 snap.
+  _grmPendingSnap = false;
   var max = _grmMaxZoom();
+  // Multiplicative zoom: each tick scales by 1.25, so reaching 30x (a
+  // typical CSS 1:1 multiplier for a 5400px image) takes ~16 ticks.
   if (e.deltaY < 0) {
-    _grmZoomLevel = Math.min(max, _grmZoomLevel + 1);
+    _grmZoomLevel = Math.min(max, _grmZoomLevel * 1.25);
   } else {
-    _grmZoomLevel = Math.max(1, _grmZoomLevel - 1);
+    _grmZoomLevel = Math.max(1, _grmZoomLevel / 1.25);
   }
   _grmUpgradeStripToOriginal();
+  _grmLoupeHovering = true;
   // Update origin from the wheel event even when locked so zoom follows cursor.
   var rect = e.currentTarget.getBoundingClientRect();
   _grmLoupeLastX = ((e.clientX - rect.left) / rect.width) * 100;
@@ -1693,22 +1812,46 @@ function grmLoupeZoom(e) {
 }
 
 function grmSnapOneToOne() {
-  // Lightroom-style 1:1: zoom factor that makes one source pixel == one screen pixel.
-  var factor = _grmOneToOneScale();
-  if (factor == null) return;
+  // Lightroom-style 1:1: zoom factor that makes one source pixel == one CSS pixel.
+  // Upgrade to original-resolution dims first so the multiplier is computed
+  // against full natW/natH, not the 400px thumbnail layout.
   _grmUpgradeStripToOriginal();
-  _grmZoomLevel = Math.max(1, Math.round(factor));
+  // For EXIF-rotated photos, item.width/height are pre-orientation while the
+  // browser paints with swapped axes. Defer the multiplier until the original
+  // <img> has loaded and grmCardImgLoaded has reconciled data-nat-w/h with
+  // naturalWidth/naturalHeight, so the snap lands at true 1:1.
+  var card = grmState.selected
+    ? document.querySelector('.grm-card[data-photo-id="' + grmState.selected + '"]')
+    : null;
+  var img = card ? card.querySelector('img') : null;
+  if (img && img.complete && img.naturalWidth && img.naturalHeight) {
+    var dw = parseFloat(card.dataset.natW) || 0;
+    var dh = parseFloat(card.dataset.natH) || 0;
+    if (img.naturalWidth === dw && img.naturalHeight === dh) {
+      _grmPendingSnap = false;
+      _grmFinishSnap();
+      return;
+    }
+  }
+  _grmPendingSnap = true;
+}
+
+function _grmFinishSnap() {
+  var mult = _grmOneToOneMultiplier();
+  if (mult == null) return;
+  _grmZoomLevel = Math.max(1, mult);
+  _grmLoupeHovering = true;
   _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
 }
 
 function grmLoupeReset() {
   if (_grmLoupeLocked) return;
   if (_grmDragging) return;
-  document.querySelectorAll('.grm-card img').forEach(function(img) {
-    img.style.transform = '';
-    img.style.transformOrigin = '';
-    img.parentElement.classList.remove('zoomed');
-  });
+  // Re-apply transforms in their default (cover-fit, centred) state. We
+  // can't just clear `style.transform` because the natural-size <img> needs
+  // a scale-down transform at all times to fit the 180x120 viewport.
+  _grmLoupeHovering = false;
+  _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
 }
 
 function grmCardMouseDown(e) {
@@ -1746,7 +1889,12 @@ function grmCardMouseMove(e) {
     _grmDragging.card.classList.add('dragging');
   }
   if (!_grmDragging.moved) return;
-  var z = Math.max(1, _grmZoomLevel);
+  // Convert screen-pixel drag delta to image-coordinate (pre-scale CSS)
+  // pixels by dividing by the displayed scale of the dragged card.
+  var coverFit = _grmCardCoverFit(_grmDragging.card);
+  var hovering = _grmLoupeHovering || _grmLoupeLocked;
+  var s = hovering ? Math.max(coverFit, coverFit * _grmZoomLevel) : coverFit;
+  var z = s > 0.001 ? s : 1;
   var newTx = _grmDragging.origTx + dx / z;
   var newTy = _grmDragging.origTy + dy / z;
   _grmOffsets[_grmDragging.photoId] = { tx: newTx, ty: newTy };

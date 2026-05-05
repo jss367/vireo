@@ -855,11 +855,24 @@ input[type="range"]::-moz-range-thumb {
 }
 .grm-reset-offsets-btn.visible { display: inline-block; }
 .grm-reset-offsets-btn:hover { color: var(--text-primary); }
-.grm-card img {
-  width: 100%;
-  aspect-ratio: 3/2;
-  object-fit: cover;
+/* Card image is laid out at its natural source-pixel size and then scaled
+ * down via CSS transform into the 180x120 viewport. Laying out at natural
+ * size forces the browser to rasterize the layer at full source resolution,
+ * so detail survives the transform — instead of being bilinearly upsampled
+ * from a tiny pre-scale bitmap (the WKWebView burst-loupe quality bug). */
+.grm-card-img-box {
+  width: 180px;
+  height: 120px;
+  position: relative;
+  overflow: hidden;
+}
+.grm-card-img-box img {
+  position: absolute;
+  top: 0;
+  left: 0;
   display: block;
+  transform-origin: 0 0;
+  /* Inline style.width / style.height set per-card in JS to natural size. */
 }
 .grm-card-info {
   padding: 6px 8px;
@@ -1338,19 +1351,30 @@ function grmUpdateResLabel() {
 
 function grmSetResolution(idx) {
   grmResolutionIdx = parseInt(idx, 10) || 0;
-  // Update card image sources in place (preserves zoom transforms so the
-  // loupe stays locked on the current region while the slider drags).
+  // Update card image sources AND natural-size layout in place. Preserving
+  // the zoom transforms keeps the loupe locked on the current region while
+  // the slider drags. Each card's <img> is laid out at the new served
+  // resolution so the rasterized layer matches what's actually being served.
   document.querySelectorAll('#grmOverlay .grm-card').forEach(function(card) {
     var pid = parseInt(card.getAttribute('data-photo-id'), 10);
     if (!pid) return;
     var img = card.querySelector('img');
-    if (img) img.src = grmPhotoUrl(pid);
+    if (!img) return;
+    var photo = grmState && grmState.items
+      ? grmState.items.find(function(p) { return p.id === pid; })
+      : null;
+    var nat = grmNaturalDims(photo);
+    card.dataset.natW = nat.w;
+    card.dataset.natH = nat.h;
+    img.style.width = nat.w + 'px';
+    img.style.height = nat.h + 'px';
+    img.src = grmPhotoUrl(pid);
   });
   if (grmState && grmState.selected) {
     var loupe = document.getElementById('grmLoupePhoto');
     if (loupe) loupe.src = grmPhotoUrl(grmState.selected);
   }
-  // Re-apply card transforms so the zoom factor matches the new 1:1 scale.
+  // Re-apply card transforms so cover-fit snaps to the new natural size.
   grmApplyCardTransforms();
   grmUpdateResLabel();
 }
@@ -2732,12 +2756,16 @@ function renderGroupModal() {
     if (p.flag === 'flagged') flagHtml = '<span class="photo-flag-badge flag-flagged" style="bottom:auto;top:4px;left:4px;">P</span>';
     else if (p.flag === 'rejected') flagHtml = '<span class="photo-flag-badge flag-rejected" style="bottom:auto;top:4px;left:4px;">X</span>';
 
+    var nat = grmNaturalDims(p);
+    var imgStyle = 'width:' + nat.w + 'px;height:' + nat.h + 'px;';
     return '<div class="' + cls + '" data-photo-id="' + p.id + '"' +
+        ' data-nat-w="' + nat.w + '" data-nat-h="' + nat.h + '"' +
         ' onmousedown="grmCardMouseDown(event)"' +
         ' onclick="grmCardClick(event, ' + p.id + ')"' +
         ' ondblclick="grmCardDblClick(event)">' +
-      '<div style="position:relative;">' +
-        '<img src="' + grmPhotoUrl(p.id) + '" loading="lazy" draggable="false">' +
+      '<div class="grm-card-img-box">' +
+        '<img src="' + grmPhotoUrl(p.id) + '" style="' + imgStyle + '"' +
+          ' onload="grmCardImgLoaded(this)" loading="lazy" draggable="false">' +
         flagHtml +
       '</div>' +
       '<div class="grm-card-info">' +
@@ -2764,14 +2792,13 @@ function renderGroupModal() {
 
   document.getElementById('grmCount').textContent = pickItems.length + ' picks, ' + rejectItems.length + ' rejects, ' + candidateItems.length + ' unsorted';
 
-  // Re-apply offset indicators and — if the loupe is currently zoomed — the
-  // per-card transforms, since innerHTML wipes them on every re-render.
+  // Re-apply offset indicators and the per-card transforms (cover-fit always
+  // needs an explicit transform now that <img>s are laid out at natural
+  // source-pixel size). innerHTML wipes inline styles on every re-render.
   document.querySelectorAll('#grmOverlay .grm-card').forEach(function(card) {
     _grmUpdateIndicator(card);
   });
-  if (_grmLastHoverX != null) {
-    grmApplyCardTransforms();
-  }
+  grmApplyCardTransforms();
   grmRefreshResetAllVisibility();
 }
 
@@ -2911,52 +2938,131 @@ var _grmOffsets = {};
 var _grmDragging = null;
 var _grmSuppressNextClick = false;
 
-function grmBaseScale() {
-  // 1:1 source-to-display scale for the current resolution stop, assuming
-  // all cards share the first photo's aspect ratio (true for a burst).
+// Compute the served image's natural dimensions for the current resolution
+// slider stop. The browser will lay the <img> out at exactly these CSS
+// pixels, so the transform-scale layer is rasterized at full source size
+// instead of upscaled from a 180x120 tile (the WKWebView quality bug).
+//
+// Returns expected dims; on image load `grmCardImgLoaded` reconciles against
+// the actual `naturalWidth/Height` (which can differ for NEFs that fall back
+// to an embedded JPEG of a different size).
+function grmNaturalDims(photo) {
   var stop = GRM_RES_STOPS[grmResolutionIdx];
-  var photo = grmState && grmState.selected
-    ? grmState.items.find(function(p) { return p.id === grmState.selected; })
-    : (grmState && grmState.items[0]);
-  if (!photo || !photo.width || !photo.height) return 4;
-  var W = photo.width, H = photo.height;
+  // Sensible defaults when photo dims are unknown — match the historical
+  // 3:2 cover-fit so the card still looks right before metadata loads.
+  var W = (photo && photo.width) ? photo.width : 1800;
+  var H = (photo && photo.height) ? photo.height : 1200;
   if (stop.kind !== 'original') {
     var longest = Math.max(W, H);
     if (longest > stop.size) {
       var r = stop.size / longest;
-      W = W * r;
-      H = H * r;
+      W = Math.round(W * r);
+      H = Math.round(H * r);
     }
   }
-  var coverRatio = Math.max(GRM_CARD_W / W, GRM_CARD_H / H);
-  return 1 / coverRatio;
+  return { w: W, h: H };
+}
+
+// Cover-fit scale for one card: the smallest scale at which the image still
+// covers the 180x120 viewport. Matches the prior "no-zoom" visible state.
+function grmCardCoverFit(card) {
+  var W = parseFloat(card.dataset.natW) || GRM_CARD_W;
+  var H = parseFloat(card.dataset.natH) || GRM_CARD_H;
+  return Math.max(GRM_CARD_W / W, GRM_CARD_H / H);
+}
+
+// Effective max for `_grmZoomMultiplier`. Multiplier=1 = cover-fit (today's
+// default visual). To reach 1:1 source-to-CSS we need multiplier ~ 1/coverFit
+// (e.g. ~30 for a 5400px-wide image). To reach 1:1 source-to-DEVICE pixels
+// (true pixel-peep on a Retina display), multiplier ~ DPR/coverFit.
+function grmMaxZoomMultiplier() {
+  var dpr = window.devicePixelRatio || 1;
+  var card = document.querySelector('#grmOverlay .grm-card');
+  if (!card) return 30 * dpr;
+  var coverFit = grmCardCoverFit(card);
+  if (!coverFit) return 30 * dpr;
+  return Math.max(3, dpr / coverFit);
+}
+
+// Compute the transform for one card. Returns the CSS transform string and
+// flags whether the user is in the zoomed (hover) state.
+function _grmComputeCardTransform(card) {
+  var W = parseFloat(card.dataset.natW) || GRM_CARD_W;
+  var H = parseFloat(card.dataset.natH) || GRM_CARD_H;
+  var coverFit = Math.max(GRM_CARD_W / W, GRM_CARD_H / H);
+  var hovering = _grmLastHoverX != null;
+  // Scale: cover-fit when not hovering; cover-fit * multiplier when hovering.
+  // Floor at coverFit so a fractional multiplier never reveals card background.
+  var s = coverFit;
+  if (hovering) {
+    s = Math.max(coverFit, coverFit * _grmZoomMultiplier);
+  }
+  // Hover-anchor: cursor at fractional position f of the loupe maps to the
+  // same fractional position in the source image. Place pixel (f*W, f*H) of
+  // the image at card pixel (f*180, f*120). Default (no hover) = centre.
+  var hx = hovering ? (_grmLastHoverX / 100) : 0.5;
+  var hy = hovering ? (_grmLastHoverY / 100) : 0.5;
+  var baseTx = hx * (GRM_CARD_W - W * s);
+  var baseTy = hy * (GRM_CARD_H - H * s);
+  var off = _grmOffsets[card.dataset.photoId] || { tx: 0, ty: 0 };
+  // User pan offsets are stored in pre-scale (image-coordinate) CSS pixels,
+  // so they translate by `off * s` in card-coordinate pixels after the scale.
+  var tx = baseTx + off.tx * s;
+  var ty = baseTy + off.ty * s;
+  return {
+    transform: 'translate(' + tx + 'px, ' + ty + 'px) scale(' + s + ')',
+    scale: s,
+    zoomed: hovering,
+  };
 }
 
 function grmApplyCardTransforms() {
-  if (_grmLastHoverX == null) return;
-  var scale = grmBaseScale() * _grmZoomMultiplier;
-  var origin = _grmLastHoverX + '% ' + _grmLastHoverY + '%';
   document.querySelectorAll('#grmOverlay .grm-card').forEach(function(card) {
     var img = card.querySelector('img');
     if (!img) return;
-    var off = _grmOffsets[card.dataset.photoId] || { tx: 0, ty: 0 };
-    img.style.transformOrigin = origin;
-    // scale × translate: translate is in pre-scale CSS pixels, so per-photo
-    // pan offsets stay correct as the shared zoom changes.
-    img.style.transform = 'scale(' + scale + ') translate(' + off.tx + 'px, ' + off.ty + 'px)';
-    img.parentElement.classList.add('zoomed');
+    var t = _grmComputeCardTransform(card);
+    img.style.transform = t.transform;
+    var box = img.parentElement;
+    if (box) box.classList.toggle('zoomed', t.zoomed);
   });
 }
 
 function _grmApplyCardTransform(card) {
-  if (_grmLastHoverX == null) return;
   var img = card.querySelector('img');
   if (!img) return;
-  var off = _grmOffsets[card.dataset.photoId] || { tx: 0, ty: 0 };
-  var scale = grmBaseScale() * _grmZoomMultiplier;
-  img.style.transformOrigin = _grmLastHoverX + '% ' + _grmLastHoverY + '%';
-  img.style.transform = 'scale(' + scale + ') translate(' + off.tx + 'px, ' + off.ty + 'px)';
-  img.parentElement.classList.add('zoomed');
+  var t = _grmComputeCardTransform(card);
+  img.style.transform = t.transform;
+  var box = img.parentElement;
+  if (box) box.classList.toggle('zoomed', t.zoomed);
+}
+
+// `grmBaseScale()` retained for any external callers / tests. Reports the
+// effective display scale for the currently selected card.
+function grmBaseScale() {
+  var card = grmState && grmState.selected
+    ? document.querySelector('#grmOverlay .grm-card[data-photo-id="' + grmState.selected + '"]')
+    : document.querySelector('#grmOverlay .grm-card');
+  if (!card) return 1;
+  return grmCardCoverFit(card);
+}
+
+// Reconcile an `<img>`'s declared size against the dimensions the browser
+// actually decoded. Some NEFs fall back to an embedded JPEG that differs
+// from the stored width/height; the natural-size layout must use the truth
+// or the rasterized layer will be the wrong resolution.
+function grmCardImgLoaded(img) {
+  if (!img || !img.naturalWidth || !img.naturalHeight) return;
+  var card = img.closest('.grm-card');
+  if (!card) return;
+  var declaredW = parseFloat(card.dataset.natW) || 0;
+  var declaredH = parseFloat(card.dataset.natH) || 0;
+  if (img.naturalWidth !== declaredW || img.naturalHeight !== declaredH) {
+    card.dataset.natW = img.naturalWidth;
+    card.dataset.natH = img.naturalHeight;
+    img.style.width = img.naturalWidth + 'px';
+    img.style.height = img.naturalHeight + 'px';
+    _grmApplyCardTransform(card);
+  }
 }
 
 function grmLoupeToggleLock(e) {
@@ -2990,8 +3096,12 @@ function grmLoupeMove(e) {
 
 function grmLoupeZoom(e) {
   e.preventDefault();
+  // Multiplier=1 = cover-fit (no zoom). Allow scaling up well past 1.0 to
+  // reach 1:1 source-to-CSS pixels and beyond to 1:1 source-to-DEVICE pixels
+  // on Retina (DPR) displays — the actual pixel-peep target.
+  var max = grmMaxZoomMultiplier();
   if (e.deltaY < 0) {
-    _grmZoomMultiplier = Math.min(3, _grmZoomMultiplier * 1.25);
+    _grmZoomMultiplier = Math.min(max, _grmZoomMultiplier * 1.25);
   } else {
     _grmZoomMultiplier = Math.max(0.33, _grmZoomMultiplier / 1.25);
   }
@@ -3003,11 +3113,10 @@ function grmLoupeReset() {
   if (_grmDragging) return;
   _grmLastHoverX = null;
   _grmLastHoverY = null;
-  document.querySelectorAll('#grmOverlay .grm-card img').forEach(function(img) {
-    img.style.transform = '';
-    img.style.transformOrigin = '';
-    img.parentElement.classList.remove('zoomed');
-  });
+  // Re-apply transforms in their default (non-hovered, cover-fit, centred)
+  // state. We can't just clear `style.transform` because the natural-size
+  // <img> needs a scale-down transform at all times to fit the 180x120 box.
+  grmApplyCardTransforms();
 }
 
 /* --- Per-photo pan (drag a thumbnail to nudge it within its panel) --- */
@@ -3049,7 +3158,14 @@ function grmCardMouseMove(e) {
   if (!_grmDragging.moved) return;
   // Use the actual displayed scale so dx/dy in screen pixels translate to
   // pre-scale offset units that, when re-scaled, follow the cursor 1:1.
-  var scale = grmBaseScale() * _grmZoomMultiplier;
+  // Must mirror _grmComputeCardTransform's hover/non-hover branch: after a
+  // zoom-in followed by mouseleave (grmLoupeReset clears _grmLastHoverX) the
+  // card is displayed at cover-fit while _grmZoomMultiplier stays >1, so a
+  // naive `coverFit * multiplier` denominator would shrink drag motion by
+  // that factor and pans would jump when hover resumes.
+  var coverFit = grmCardCoverFit(_grmDragging.card);
+  var hovering = _grmLastHoverX != null;
+  var scale = hovering ? Math.max(coverFit, coverFit * _grmZoomMultiplier) : coverFit;
   var z = scale > 0.01 ? scale : 1;
   var newTx = _grmDragging.origTx + dx / z;
   var newTy = _grmDragging.origTy + dy / z;
