@@ -1794,9 +1794,11 @@ function grmLoupeZoom(e) {
 
 function grmSnapOneToOne() {
   // Lightroom-style 1:1: zoom factor that makes one source pixel == one CSS pixel.
+  // Upgrade to original-resolution dims first so the multiplier is computed
+  // against full natW/natH, not the 400px thumbnail layout.
+  _grmUpgradeStripToOriginal();
   var mult = _grmOneToOneMultiplier();
   if (mult == null) return;
-  _grmUpgradeStripToOriginal();
   _grmZoomLevel = Math.max(1, mult);
   _grmLoupeHovering = true;
   _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
