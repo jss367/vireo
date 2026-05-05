@@ -1399,6 +1399,7 @@ function openGroupReview(groupId, model) {
   _grmLoupeLastX = 50;
   _grmLoupeLastY = 50;
   _grmLoupeHovering = false;
+  _grmPendingSnap = false;
   grmRefreshResetAllVisibility();
   document.getElementById('grmOverlay').classList.add('open');
   loadGroupData(groupId);
@@ -1601,6 +1602,12 @@ var _grmLoupeLastY = 50;
 // Whether the loupe has received a real hover (vs. just the centre default).
 // Used to decide between cover-fit (no-hover) and zoom (hover) per card.
 var _grmLoupeHovering = false;
+// True when grmSnapOneToOne is awaiting the selected card's natural dims
+// (the original image is still loading and may be EXIF-rotated relative to
+// stored item.width/height). grmCardImgLoaded finishes the snap once it
+// reconciles dims so the 1:1 zoom is computed against the axes the browser
+// actually paints.
+var _grmPendingSnap = false;
 
 // Natural-size dims for one card. When the strip is still on the 400px
 // thumbnail, we use a 400px-fit; once upgraded to /original we use the
@@ -1649,7 +1656,8 @@ function _grmUpgradeStripToOriginal() {
 
 function grmCardImgLoaded(img) {
   // Reconcile declared natural dims against what the browser actually decoded
-  // (NEFs may fall back to an embedded JPEG of a different size).
+  // (NEFs may fall back to an embedded JPEG of a different size; EXIF-rotated
+  // JPEGs render with swapped axes vs. our stored pre-orientation dims).
   if (!img || !img.naturalWidth || !img.naturalHeight) return;
   var card = img.closest('.grm-card');
   if (!card) return;
@@ -1661,6 +1669,15 @@ function grmCardImgLoaded(img) {
     img.style.width = img.naturalWidth + 'px';
     img.style.height = img.naturalHeight + 'px';
     _grmApplyCardTransform(card);
+  }
+  // If the user pressed `1` before this card's natural dims were known,
+  // finish the snap now that we have the axes the browser actually paints.
+  // Without this, EXIF-rotated photos snap to a multiplier computed from
+  // pre-orientation (swapped) dims and land at the wrong zoom level.
+  if (_grmPendingSnap && grmState && grmState.selected != null
+      && String(card.dataset.photoId) === String(grmState.selected)) {
+    _grmPendingSnap = false;
+    _grmFinishSnap();
   }
 }
 
@@ -1773,6 +1790,8 @@ function _grmApplyCardTransform(card) {
 
 function grmLoupeZoom(e) {
   e.preventDefault();
+  // Wheel input is an explicit override of any pending 1:1 snap.
+  _grmPendingSnap = false;
   var max = _grmMaxZoom();
   // Multiplicative zoom: each tick scales by 1.25, so reaching 30x (a
   // typical CSS 1:1 multiplier for a 5400px image) takes ~16 ticks.
@@ -1797,6 +1816,27 @@ function grmSnapOneToOne() {
   // Upgrade to original-resolution dims first so the multiplier is computed
   // against full natW/natH, not the 400px thumbnail layout.
   _grmUpgradeStripToOriginal();
+  // For EXIF-rotated photos, item.width/height are pre-orientation while the
+  // browser paints with swapped axes. Defer the multiplier until the original
+  // <img> has loaded and grmCardImgLoaded has reconciled data-nat-w/h with
+  // naturalWidth/naturalHeight, so the snap lands at true 1:1.
+  var card = grmState.selected
+    ? document.querySelector('.grm-card[data-photo-id="' + grmState.selected + '"]')
+    : null;
+  var img = card ? card.querySelector('img') : null;
+  if (img && img.complete && img.naturalWidth && img.naturalHeight) {
+    var dw = parseFloat(card.dataset.natW) || 0;
+    var dh = parseFloat(card.dataset.natH) || 0;
+    if (img.naturalWidth === dw && img.naturalHeight === dh) {
+      _grmPendingSnap = false;
+      _grmFinishSnap();
+      return;
+    }
+  }
+  _grmPendingSnap = true;
+}
+
+function _grmFinishSnap() {
   var mult = _grmOneToOneMultiplier();
   if (mult == null) return;
   _grmZoomLevel = Math.max(1, mult);
