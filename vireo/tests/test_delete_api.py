@@ -453,3 +453,68 @@ def test_api_batch_delete_disk_permanent_with_photo_ids(app_and_db, tmp_path):
     assert data["trashed"] == 1
     assert not os.path.exists(real_file)
     assert db.get_photo(pid) is None
+
+
+def test_delete_photos_prunes_pipeline_cache(app_and_db):
+    """Deleting photos strips them from the pipeline review cache so
+    they don't render as blank cards on the pipeline review page."""
+    app, db = app_and_db
+    photos = db.get_photos()
+    pid_to_delete = photos[0]["id"]
+    surviving_ids = [p["id"] for p in photos[1:]]
+
+    cache_dir = os.path.dirname(db._db_path)
+    cache_path = os.path.join(
+        cache_dir, f"pipeline_results_ws{db._active_workspace_id}.json"
+    )
+    cache = {
+        "encounters": [{
+            "species": None,
+            "photo_count": len(photos),
+            "burst_count": 1,
+            "photo_ids": [p["id"] for p in photos],
+            "bursts": [{
+                "photo_ids": [p["id"] for p in photos],
+                "species_predictions": [],
+                "species_override": None,
+            }],
+        }],
+        "photos": [{"id": p["id"], "label": "KEEP"} for p in photos],
+        "summary": {
+            "total_photos": len(photos),
+            "encounter_count": 1,
+            "burst_count": 1,
+            "keep_count": len(photos),
+            "review_count": 0,
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    with open(cache_path, "w") as f:
+        json.dump(cache, f)
+
+    db.delete_photos([pid_to_delete])
+
+    with open(cache_path) as f:
+        pruned = json.load(f)
+    assert [p["id"] for p in pruned["photos"]] == surviving_ids
+    assert pruned["encounters"][0]["photo_ids"] == surviving_ids
+    assert pruned["encounters"][0]["bursts"][0]["photo_ids"] == surviving_ids
+    assert pruned["encounters"][0]["photo_count"] == len(surviving_ids)
+    assert pruned["summary"]["total_photos"] == len(surviving_ids)
+    assert pruned["summary"]["keep_count"] == len(surviving_ids)
+
+
+def test_delete_photos_no_pipeline_cache_does_not_raise(app_and_db):
+    """delete_photos succeeds even when no pipeline cache file exists."""
+    app, db = app_and_db
+    photos = db.get_photos()
+
+    cache_dir = os.path.dirname(db._db_path)
+    cache_path = os.path.join(
+        cache_dir, f"pipeline_results_ws{db._active_workspace_id}.json"
+    )
+    assert not os.path.exists(cache_path)
+
+    result = db.delete_photos([photos[0]["id"]])
+    assert result["deleted"] == 1

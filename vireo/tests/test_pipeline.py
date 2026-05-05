@@ -283,6 +283,152 @@ def test_load_results_missing(tmp_path):
     assert load_results(str(tmp_path), workspace_id=999) is None
 
 
+# -- prune_results --
+
+
+def _write_cache(cache_dir, workspace_id, data):
+    path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
+    with open(path, "w") as f:
+        json.dump(data, f)
+    return path
+
+
+def _sample_cache():
+    return {
+        "encounters": [
+            {
+                "species": "American Robin",
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 2,
+                "time_range": ["2026-03-20T10:00:00", "2026-03-20T10:00:04"],
+                "photo_ids": [1, 2, 3],
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [3], "species_predictions": [], "species_override": None},
+                ],
+            },
+            {
+                "species": "Blue Jay",
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 2,
+                "burst_count": 1,
+                "time_range": ["2026-03-20T10:05:00", "2026-03-20T10:05:02"],
+                "photo_ids": [4, 5],
+                "bursts": [
+                    {"photo_ids": [4, 5], "species_predictions": [], "species_override": None},
+                ],
+            },
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "rarity_protected": False},
+            {"id": 2, "label": "REJECT", "rarity_protected": False},
+            {"id": 3, "label": "REVIEW", "rarity_protected": True},
+            {"id": 4, "label": "KEEP", "rarity_protected": False},
+            {"id": 5, "label": "REJECT", "rarity_protected": False},
+        ],
+        "summary": {
+            "total_photos": 5,
+            "encounter_count": 2,
+            "burst_count": 3,
+            "keep_count": 2,
+            "review_count": 1,
+            "reject_count": 2,
+            "rarity_protected": 1,
+        },
+    }
+
+
+def test_prune_results_removes_deleted_ids(tmp_path):
+    """Deleted photo IDs are stripped from photos and encounter/burst photo_ids."""
+    from pipeline import load_results, prune_results
+
+    _write_cache(str(tmp_path), 1, _sample_cache())
+    changed = prune_results(str(tmp_path), 1, [2, 5])
+
+    assert changed is True
+    loaded = load_results(str(tmp_path), 1)
+    assert [p["id"] for p in loaded["photos"]] == [1, 3, 4]
+    assert loaded["encounters"][0]["photo_ids"] == [1, 3]
+    assert loaded["encounters"][1]["photo_ids"] == [4]
+    assert loaded["encounters"][0]["bursts"][0]["photo_ids"] == [1]
+    assert loaded["encounters"][0]["bursts"][1]["photo_ids"] == [3]
+    assert loaded["encounters"][1]["bursts"][0]["photo_ids"] == [4]
+
+
+def test_prune_results_drops_empty_encounters_and_bursts(tmp_path):
+    """An encounter (or burst) whose every photo was deleted is dropped."""
+    from pipeline import load_results, prune_results
+
+    _write_cache(str(tmp_path), 1, _sample_cache())
+    # Delete the entire second encounter and the second burst of the first.
+    prune_results(str(tmp_path), 1, [3, 4, 5])
+
+    loaded = load_results(str(tmp_path), 1)
+    assert len(loaded["encounters"]) == 1
+    assert loaded["encounters"][0]["photo_ids"] == [1, 2]
+    assert len(loaded["encounters"][0]["bursts"]) == 1
+    assert loaded["encounters"][0]["bursts"][0]["photo_ids"] == [1, 2]
+
+
+def test_prune_results_recomputes_counts(tmp_path):
+    """photo_count, burst_count, and summary are recomputed from survivors."""
+    from pipeline import load_results, prune_results
+
+    _write_cache(str(tmp_path), 1, _sample_cache())
+    prune_results(str(tmp_path), 1, [2, 5])
+
+    loaded = load_results(str(tmp_path), 1)
+    assert loaded["encounters"][0]["photo_count"] == 2
+    assert loaded["encounters"][0]["burst_count"] == 2
+    assert loaded["encounters"][1]["photo_count"] == 1
+    assert loaded["encounters"][1]["burst_count"] == 1
+
+    summary = loaded["summary"]
+    assert summary["total_photos"] == 3
+    assert summary["encounter_count"] == 2
+    assert summary["burst_count"] == 3
+    assert summary["keep_count"] == 2
+    assert summary["review_count"] == 1
+    assert summary["reject_count"] == 0
+    assert summary["rarity_protected"] == 1
+
+
+def test_prune_results_no_overlap_returns_false(tmp_path):
+    """If no deleted IDs intersect the cache, the file is unchanged."""
+    from pipeline import prune_results
+
+    path = _write_cache(str(tmp_path), 1, _sample_cache())
+    mtime = os.path.getmtime(path)
+
+    changed = prune_results(str(tmp_path), 1, [99, 100])
+
+    assert changed is False
+    assert os.path.getmtime(path) == mtime
+
+
+def test_prune_results_missing_cache_is_noop(tmp_path):
+    """No cache file → prune_results returns False, does not raise."""
+    from pipeline import prune_results
+
+    assert prune_results(str(tmp_path), 1, [1, 2, 3]) is False
+
+
+def test_prune_results_empty_id_list(tmp_path):
+    """Empty deleted-id list → no-op."""
+    from pipeline import prune_results
+
+    path = _write_cache(str(tmp_path), 1, _sample_cache())
+    mtime = os.path.getmtime(path)
+
+    assert prune_results(str(tmp_path), 1, []) is False
+    assert os.path.getmtime(path) == mtime
+
+
 # -- compute_review_readiness --
 
 

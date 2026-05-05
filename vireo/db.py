@@ -3979,6 +3979,19 @@ class Database:
             # files should re-surface as "new" on the next read.
             if affected_folder_ids:
                 self.invalidate_new_images_cache_for_folders(affected_folder_ids)
+
+        # Prune the pipeline review cache so deleted photos don't render as
+        # blank cards on the pipeline review page.
+        if all_ids and self._db_path != ":memory:" and self._active_workspace_id:
+            try:
+                from pipeline import prune_results
+                prune_results(
+                    os.path.dirname(self._db_path),
+                    self._active_workspace_id,
+                    all_ids,
+                )
+            except Exception:
+                log.exception("Failed to prune pipeline cache after delete")
         return {"deleted": len(all_ids), "files": files}
 
     # ------------------------------------------------------------------

@@ -664,6 +664,73 @@ def load_results(cache_dir, workspace_id):
         return json.load(f)
 
 
+def prune_results(cache_dir, workspace_id, deleted_ids):
+    """Remove deleted photo IDs from the cached pipeline results in place.
+
+    Strips the IDs from the top-level photos list, every encounter's
+    photo_ids, and every burst's photo_ids. Encounters and bursts that
+    end up empty are dropped. photo_count, burst_count, and the
+    top-level summary are recomputed from survivors so the review page
+    reflects the current state.
+
+    Returns True if the cache was rewritten, False if nothing changed
+    (no cache file, empty input, or no overlap with the cache).
+    """
+    if not deleted_ids:
+        return False
+    path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
+    if not os.path.exists(path):
+        return False
+    with open(path) as f:
+        data = json.load(f)
+
+    deleted = set(deleted_ids)
+    cached_ids = {p.get("id") for p in data.get("photos", [])}
+    if cached_ids.isdisjoint(deleted):
+        return False
+
+    data["photos"] = [p for p in data.get("photos", []) if p.get("id") not in deleted]
+
+    pruned_encounters = []
+    for enc in data.get("encounters", []):
+        enc["photo_ids"] = [pid for pid in enc.get("photo_ids", []) if pid not in deleted]
+        if "bursts" in enc:
+            kept_bursts = []
+            for burst in enc["bursts"]:
+                burst["photo_ids"] = [
+                    pid for pid in burst.get("photo_ids", []) if pid not in deleted
+                ]
+                if burst["photo_ids"]:
+                    kept_bursts.append(burst)
+            enc["bursts"] = kept_bursts
+            enc["burst_count"] = len(kept_bursts)
+        if not enc["photo_ids"]:
+            continue
+        enc["photo_count"] = len(enc["photo_ids"])
+        pruned_encounters.append(enc)
+    data["encounters"] = pruned_encounters
+
+    photos = data["photos"]
+    summary = data.get("summary") or {}
+    summary["total_photos"] = len(photos)
+    summary["encounter_count"] = len(pruned_encounters)
+    summary["burst_count"] = sum(e.get("burst_count", 0) for e in pruned_encounters)
+    summary["keep_count"] = sum(1 for p in photos if p.get("label") == "KEEP")
+    summary["review_count"] = sum(1 for p in photos if p.get("label") == "REVIEW")
+    summary["reject_count"] = sum(1 for p in photos if p.get("label") == "REJECT")
+    summary["rarity_protected"] = sum(1 for p in photos if p.get("rarity_protected"))
+    data["summary"] = summary
+
+    with open(path, "w") as f:
+        json.dump(data, f)
+    log.info(
+        "Pipeline cache pruned at %s: removed %d photo(s)",
+        path,
+        len(cached_ids & deleted),
+    )
+    return True
+
+
 def load_results_raw(cache_dir, workspace_id):
     """Load raw (already serialized) pipeline results JSON dict.
 
