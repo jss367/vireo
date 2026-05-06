@@ -1518,6 +1518,12 @@ async function showCollectionModal() {
   collectionRules = [];
   document.getElementById('rulePreview').textContent = '';
   document.getElementById('collectionName').value = '';
+  // Clear the rule-row DOM before awaiting the dropdown fetches. Without
+  // this, a slow/failed fetch leaves the previous session's <select>s
+  // visible and interactive while collectionRules is already empty, so
+  // changing one fires updateRule(idx, ...) against an undefined row and
+  // throws.
+  renderRules();
   document.getElementById('collectionModal').classList.add('open');
   // Fetch the dropdown sources before adding the first rule row so the
   // initial render already has data — otherwise the user sees an empty
