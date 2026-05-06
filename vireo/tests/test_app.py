@@ -4224,3 +4224,14 @@ def test_collection_preview_rejects_malformed_rules(app_and_db):
     )
     assert resp.status_code == 400
     assert "error" in resp.get_json()
+
+    # Top-level JSON that isn't an object (list, number, string) must also
+    # return 400 — the route reads `body.get("rules", ...)`, which would
+    # otherwise raise AttributeError and surface as a 500.
+    for bad_body in ([], [1, 2, 3], 5, "hello"):
+        resp = client.post(
+            "/api/collections/preview",
+            json=bad_body,
+        )
+        assert resp.status_code == 400, f"expected 400 for body {bad_body!r}"
+        assert "error" in resp.get_json()

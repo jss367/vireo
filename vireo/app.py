@@ -2798,7 +2798,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """
         import sqlite3
         db = _get_db()
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        # Flask returns top-level JSON lists/numbers/strings as-is, so guard
+        # against `body.get(...)` raising AttributeError on non-object payloads
+        # (e.g. a client posting `[]` directly). Treat missing body as {}.
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return json_error("request body must be a JSON object", 400)
         rules = body.get("rules", [])
         try:
             count = db.count_photos_for_rules(rules)
