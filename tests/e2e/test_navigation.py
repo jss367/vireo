@@ -185,9 +185,19 @@ def test_palette_arrow_keys_change_selection(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/browse")
     page.keyboard.press("Meta+K")
-    # Empty query → all 20 pages, selected=top
+    # openCommandPalette refreshes tab state asynchronously before rendering,
+    # so wait for the first selected row instead of querying immediately.
+    page.wait_for_selector(".cmd-palette-result.selected", timeout=3000)
     first = page.eval_on_selector(".cmd-palette-result.selected", "el => el.dataset.navId")
     page.keyboard.press("ArrowDown")
+    page.wait_for_function(
+        "prev => {"
+        "  const el = document.querySelector('.cmd-palette-result.selected');"
+        "  return el && el.dataset.navId !== prev;"
+        "}",
+        arg=first,
+        timeout=3000,
+    )
     second = page.eval_on_selector(".cmd-palette-result.selected", "el => el.dataset.navId")
     assert first != second
 
