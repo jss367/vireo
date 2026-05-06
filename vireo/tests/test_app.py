@@ -49,6 +49,43 @@ def test_api_folders(app_and_db):
     assert '/photos/2024' in paths
 
 
+def test_api_photos_extensions_returns_distinct_lowercased(app_and_db):
+    """GET /api/photos/extensions returns sorted, lowercased, workspace-scoped extensions."""
+    app, db = app_and_db
+    # Fixture seeds three .jpg photos. Add a mixed-case + raw to verify
+    # collapsing and sorting.
+    fid = db.get_folder_tree()[0]['id']
+    db.add_photo(folder_id=fid, filename='upper.JPG', extension='.JPG',
+                 file_size=1, file_mtime=99.0)
+    db.add_photo(folder_id=fid, filename='raw.nef', extension='.nef',
+                 file_size=1, file_mtime=99.0)
+
+    client = app.test_client()
+    resp = client.get('/api/photos/extensions')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data == ['.jpg', '.nef']
+
+
+def test_api_photos_extensions_scoped_to_active_workspace(app_and_db):
+    """Extensions from another workspace's folders don't leak into the response."""
+    app, db = app_and_db
+    default_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    other_fid = db.add_folder('/other/photos', name='other')
+    db.add_photo(folder_id=other_fid, filename='only.cr2', extension='.cr2',
+                 file_size=1, file_mtime=1.0)
+    db.set_active_workspace(default_ws)
+
+    client = app.test_client()
+    resp = client.get('/api/photos/extensions')
+    assert resp.status_code == 200
+    # .cr2 belongs to "Other" workspace and must not appear here.
+    assert '.cr2' not in resp.get_json()
+    assert '.jpg' in resp.get_json()
+
+
 def test_api_coverage(app_and_db):
     """GET /api/coverage returns workspace-level and per-folder coverage."""
     app, db = app_and_db

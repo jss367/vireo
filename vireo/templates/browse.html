@@ -1465,6 +1465,12 @@ async function filterByCollection(id) {
 
 /* ---------- Collection Modal ---------- */
 var collectionRules = [];
+// Cached dropdown sources for the rule editor. Filled on first modal open
+// and reused across rule rows so toggling field=Extension or field=Folder
+// doesn't refetch on every render. Re-fetched each time the modal opens
+// so newly-imported folders/extensions show up without a page reload.
+var collectionExtensions = [];
+var collectionFolders = [];
 
 /* Valid ops per field — must mirror vireo/db.py::_build_collection_query.
    The UI only shows ops the backend handles; non-matching combos used to
@@ -1495,6 +1501,8 @@ function defaultValueForRule(field, op) {
   if (field === 'color_label') return 'red';
   if (field === 'flag') return 'flagged';
   if (field === 'rating') return 0;
+  if (field === 'extension') return collectionExtensions[0] || '';
+  if (field === 'folder') return (collectionFolders[0] && collectionFolders[0].path) || '';
   if (field === 'timestamp') {
     if (op === 'between') return ['', ''];
     if (op === 'recent_days') return 7;
@@ -1502,16 +1510,31 @@ function defaultValueForRule(field, op) {
   return '';
 }
 
-function showCollectionModal() {
+async function showCollectionModal() {
   // Cancel any pending/in-flight preview from a previous session before
   // resetting state — otherwise a stale response can land on the DOM and
   // briefly show the previous rule set's count in the freshly opened modal.
   resetPreviewState();
   collectionRules = [];
   document.getElementById('rulePreview').textContent = '';
-  addRuleRow();
   document.getElementById('collectionName').value = '';
   document.getElementById('collectionModal').classList.add('open');
+  // Fetch the dropdown sources before adding the first rule row so the
+  // initial render already has data — otherwise the user sees an empty
+  // <select> until they click off and back on. safeFetch already parses
+  // JSON for us (see _navbar.html), so the resolved values are arrays.
+  try {
+    var [exts, folders] = await Promise.all([
+      safeFetch('/api/photos/extensions'),
+      safeFetch('/api/folders'),
+    ]);
+    collectionExtensions = Array.isArray(exts) ? exts : [];
+    collectionFolders = Array.isArray(folders) ? folders : [];
+  } catch (e) {
+    collectionExtensions = [];
+    collectionFolders = [];
+  }
+  addRuleRow();
 }
 
 function hideCollectionModal() {
@@ -1645,6 +1668,43 @@ function renderRuleValueInput(r, i) {
         '<option value="flagged"' + (r.value==='flagged'?' selected':'') + '>Pick</option>' +
         '<option value="rejected"' + (r.value==='rejected'?' selected':'') + '>Reject</option>' +
         '<option value="none"' + (r.value==='none'?' selected':'') + '>No flag</option>' +
+      '</select>';
+  }
+  if (r.field === 'extension') {
+    // Extension dropdown is sourced from /api/photos/extensions for the
+    // active workspace. If the current rule value isn't in that list
+    // (legacy rule, freshly switched field), include it as a sticky
+    // option so the user can see+keep it instead of having it silently
+    // snap to the first known extension on next render.
+    return '<select onchange="updateRule(' + i + ',\'value\',this.value)" style="flex:1;">' +
+        (collectionExtensions.length === 0
+          ? '<option value="">(no extensions yet — scan a folder)</option>'
+          : '') +
+        (r.value && collectionExtensions.indexOf(r.value) === -1
+          ? '<option value="' + escapeAttr(String(r.value)) + '" selected>' + escapeHtml(String(r.value)) + '</option>'
+          : '') +
+        collectionExtensions.map(function(ext) {
+          return '<option value="' + escapeAttr(ext) + '"' + (r.value===ext?' selected':'') + '>' + escapeHtml(ext) + '</option>';
+        }).join('') +
+      '</select>';
+  }
+  if (r.field === 'folder') {
+    // Folder dropdown shows the path (full path is the value the
+    // backend matches with f.path LIKE ?). Display is the path too —
+    // basenames collide across folders and a smart-collection author
+    // can't disambiguate "January" between /2023/January and /2024.
+    var paths = collectionFolders.map(function(f){ return f.path; });
+    var stickyFolder = (r.value && paths.indexOf(r.value) === -1)
+      ? '<option value="' + escapeAttr(String(r.value)) + '" selected>' + escapeHtml(String(r.value)) + '</option>'
+      : '';
+    return '<select onchange="updateRule(' + i + ',\'value\',this.value)" style="flex:1;">' +
+        (collectionFolders.length === 0
+          ? '<option value="">(no folders in this workspace)</option>'
+          : '') +
+        stickyFolder +
+        collectionFolders.map(function(f) {
+          return '<option value="' + escapeAttr(f.path) + '"' + (r.value===f.path?' selected':'') + '>' + escapeHtml(f.path) + '</option>';
+        }).join('') +
       '</select>';
   }
   if (r.field === 'timestamp') {

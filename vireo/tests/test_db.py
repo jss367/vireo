@@ -10897,3 +10897,68 @@ def test_set_workspace_group_state_overwrites(tmp_path):
     ).fetchone()
     assert row["last_grouped_at"] == 2
     assert row["last_group_fingerprint"] == "new"
+
+
+def test_get_workspace_extensions_returns_distinct_lowercased(tmp_path):
+    """Extensions are returned distinct, lowercased, sorted, scoped to ws."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='b.JPG', extension='.JPG',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='c.nef', extension='.nef',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='d.cr2', extension='.cr2',
+                 file_size=1, file_mtime=1.0)
+
+    exts = db.get_workspace_extensions()
+    # Lowercased (so .jpg and .JPG collapse), distinct, sorted.
+    assert exts == ['.cr2', '.jpg', '.nef']
+
+
+def test_get_workspace_extensions_scoped_to_active_workspace(tmp_path):
+    """Extensions from another workspace's folders must not leak in."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    default_ws = db._active_workspace_id
+    f_default = db.add_folder('/a', name='a')
+    db.add_photo(folder_id=f_default, filename='x.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    f_other = db.add_folder('/b', name='b')
+    db.add_photo(folder_id=f_other, filename='y.nef', extension='.nef',
+                 file_size=1, file_mtime=1.0)
+
+    # Active = other_ws
+    assert db.get_workspace_extensions() == ['.nef']
+
+    db.set_active_workspace(default_ws)
+    assert db.get_workspace_extensions() == ['.jpg']
+
+
+def test_get_workspace_extensions_skips_null_and_empty(tmp_path):
+    """Photos with NULL/empty extension don't surface as an empty option."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/p', name='p')
+    db.add_photo(folder_id=fid, filename='ok.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    # Force a NULL/empty row directly — add_photo doesn't normally let
+    # this happen but historical scans may have produced rows with no
+    # extension and we don't want them to render as a blank dropdown
+    # option that would silently match nothing in _build_collection_query.
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size, file_mtime) "
+        "VALUES (?, 'no_ext', NULL, 1, 1.0)", (fid,)
+    )
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size, file_mtime) "
+        "VALUES (?, 'empty_ext', '', 1, 1.0)", (fid,)
+    )
+    db.conn.commit()
+
+    assert db.get_workspace_extensions() == ['.jpg']
