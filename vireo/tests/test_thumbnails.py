@@ -529,6 +529,55 @@ def test_serve_thumbnail_404s_when_source_is_unreadable(tmp_path, monkeypatch):
     assert resp.status_code == 404
 
 
+def test_serve_thumbnail_resolves_when_folder_status_is_missing(tmp_path, monkeypatch):
+    """The self-heal must use the photo's actual folder path even when
+    the folder's status is ``'missing'``. ``get_folder_tree()`` filters
+    out ``'missing'`` folders, which would leave the canonical-path
+    helper with an empty mapping and silently fall back to
+    ``os.path.join('', photo['filename'])`` — a CWD-relative path.
+
+    A request can land on this code path while a network mount briefly
+    flaps (the health loop flips status to ``'missing'``) or before the
+    next health pass clears a transient state. Resolving CWD-relative
+    is wrong in either case: at best the request 404s nondeterministically,
+    at worst it persists a thumbnail derived from an unrelated file with
+    the same basename in the server's working directory.
+    """
+    app, db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+
+    # Mark the photo's folder as missing — but the source file is still
+    # on disk (the canonical case is a flapping mount, not a real
+    # delete). The route must still resolve via the actual folder path.
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    # Sanity: get_folder_tree (the prior lookup) would now omit this
+    # folder, forcing the buggy CWD fallback.
+    assert db.get_folder_tree() == [], (
+        "precondition: folder is filtered out of the workspace tree once "
+        "marked missing — the bug we're guarding against"
+    )
+
+    # Pollute CWD with a same-named file that contains different bytes
+    # so a CWD-relative resolution would silently feed unrelated pixels
+    # into the thumbnail (and persist it to disk under photo_id.jpg).
+    cwd_decoy_dir = tmp_path / "cwd"
+    cwd_decoy_dir.mkdir()
+    decoy = cwd_decoy_dir / "bird.jpg"
+    Image.new("RGB", (800, 600), (10, 250, 10)).save(str(decoy), "JPEG")
+    monkeypatch.chdir(str(cwd_decoy_dir))
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 200, (
+        "self-heal must resolve via the photo's folder regardless of "
+        f"folder status, got {resp.status_code}"
+    )
+    assert resp.data[:2] == b"\xff\xd8"
+    assert os.path.exists(os.path.join(thumb_dir, f"{pid}.jpg"))
+
+
 def test_serve_thumbnail_404s_for_photo_outside_active_workspace(tmp_path, monkeypatch):
     """The route must 404 when the photo exists in the DB but its folder
     isn't linked to the active workspace. Without workspace scoping,

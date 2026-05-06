@@ -8755,7 +8755,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from image_loader import get_canonical_image_path
         from thumbnails import generate_thumbnail
         vireo_dir = os.path.dirname(thumb_dir)
-        folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+        # Look up the photo's folder path directly rather than via
+        # ``get_folder_tree()``: the tree filter excludes folders whose
+        # status is ``'missing'``, which would leave the canonical-path
+        # helper with an empty mapping and silently fall back to
+        # ``os.path.join('', photo['filename'])`` — a CWD-relative path
+        # that could read or persist a thumbnail derived from an
+        # unrelated same-named file in the server's working directory.
+        # Workspace membership is already enforced above via
+        # ``get_photo(verify_workspace=True)``, so a direct ``get_folder``
+        # lookup here is safe and status-agnostic.
+        folder_row = db.get_folder(photo["folder_id"])
+        folders = (
+            {folder_row["id"]: folder_row["path"]} if folder_row else {}
+        )
         try:
             source = get_canonical_image_path(photo, vireo_dir, folders)
             result = generate_thumbnail(photo_id, source, thumb_dir)
