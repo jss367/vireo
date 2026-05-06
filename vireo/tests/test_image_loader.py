@@ -214,6 +214,21 @@ def test_raw_fallback_log_claims_full_output_only_when_embedded_matches_sensor(
     msgs = [r.message for r in caplog.records]
     assert not any("full camera output" in m for m in msgs), msgs
 
+    # Case 3: embedded shares the sensor's long edge but is cropped on the
+    # short edge (e.g. 6000×3376 preview against a 6000×4000 sensor). A
+    # long-edge-only check would mislabel this as full output; we want
+    # both axes verified.
+    _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((6000, 3376)),
+        sensor_size=(6000, 4000),
+        postprocess_error=rawpy.LibRawFileUnsupportedError(b'unsupported'),
+    ))
+    with caplog.at_level(logging.INFO, logger='image_loader'):
+        caplog.clear()
+        load_image(str(nef), max_size=8000)
+    msgs = [r.message for r in caplog.records]
+    assert not any("full camera output" in m for m in msgs), msgs
+
 
 def test_raw_uses_postprocess_when_embedded_too_small(tmp_path, monkeypatch):
     """When embedded JPEG is smaller than max_size, RAW decode is used."""

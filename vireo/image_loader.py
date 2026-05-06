@@ -214,15 +214,21 @@ def _load_raw(path, max_size):
         except Exception as e:
             if embedded is not None:
                 # Only claim "full camera output" when the embedded JPEG
-                # actually matches the sensor's active dimensions (e.g.
-                # Nikon HE*/TicoRAW). For other failures the embedded may
-                # be a smaller preview and the fallback is a real
-                # degradation — don't paper over it.
-                sensor_long = max(raw.sizes.width, raw.sizes.height)
-                embedded_long = max(embedded.size)
-                qualifier = (", full camera output"
-                             if sensor_long and embedded_long >= sensor_long
-                             else "")
+                # actually matches the sensor's active dimensions on both
+                # axes (e.g. Nikon HE*/TicoRAW). A long-edge-only check
+                # would still mislabel cropped/aspect-mismatched previews
+                # like 6000×3376 against a 6000×4000 sensor.
+                sensor_dims = sorted(
+                    (raw.sizes.width, raw.sizes.height), reverse=True
+                )
+                embedded_dims = sorted(embedded.size, reverse=True)
+                qualifier = (
+                    ", full camera output"
+                    if sensor_dims[0]
+                    and embedded_dims[0] >= sensor_dims[0]
+                    and embedded_dims[1] >= sensor_dims[1]
+                    else ""
+                )
                 log.info(
                     "libraw cannot decode %s (%s); using embedded JPEG "
                     "(%dx%d%s)",
