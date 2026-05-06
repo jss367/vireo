@@ -432,12 +432,21 @@ def test_prune_results_empty_id_list(tmp_path):
 # -- prune_missing_photos --
 
 
-def _make_db_with_ids(tmp_path, ids):
-    """Create a minimal Database with photo rows whose ids match ``ids``."""
+def _make_db_with_ids(tmp_path, ids, workspace_id=1, link_folder=True):
+    """Create a minimal Database with photo rows whose ids match ``ids``.
+
+    ``link_folder`` controls whether the photo folder is registered with
+    ``workspace_id`` via ``workspace_folders``. ``add_folder`` auto-links
+    to the active workspace, so when False we explicitly remove the link
+    to simulate a folder that exists in the photos table but is not
+    visible in the workspace.
+    """
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
+    if not link_folder:
+        db.remove_workspace_folder(workspace_id, fid)
     for pid in ids:
         # add_photo auto-assigns id, so we override via raw SQL after
         # insertion to pin the row to the desired id.
@@ -485,6 +494,28 @@ def test_prune_missing_photos_no_cache_is_noop(tmp_path):
 
     db = _make_db_with_ids(tmp_path, [1])
     assert prune_missing_photos(str(tmp_path), 999, db) is False
+
+
+def test_prune_missing_photos_drops_ids_in_unlinked_folder(tmp_path):
+    """Photos that exist in the table but whose folder isn't linked to
+    the workspace are pruned just like hard-deleted rows. Without this,
+    unlinking a folder leaves orphan cards on the review page and the
+    thumbnail self-heal route still 404s because thumbnail source
+    resolution is itself workspace-scoped."""
+    from pipeline import load_results, prune_missing_photos
+
+    _write_cache(str(tmp_path), 1, _sample_cache())
+    # Photos 1..5 exist in the photos table, but their folder is NOT
+    # linked to workspace 1 (link_folder=False), so the workspace can't
+    # actually see any of them.
+    db = _make_db_with_ids(tmp_path, [1, 2, 3, 4, 5], link_folder=False)
+
+    changed = prune_missing_photos(str(tmp_path), 1, db)
+    assert changed is True
+
+    loaded = load_results(str(tmp_path), 1)
+    assert loaded["photos"] == []
+    assert loaded["encounters"] == []
 
 
 # -- compute_review_readiness --

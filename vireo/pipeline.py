@@ -665,7 +665,7 @@ def load_results(cache_dir, workspace_id):
 
 
 def prune_missing_photos(cache_dir, workspace_id, db):
-    """Self-heal pass: drop cached photo IDs that no longer exist in the DB.
+    """Self-heal pass: drop cached photo IDs no longer visible in the workspace.
 
     The pipeline review page renders a card per cached photo and requests
     ``/thumbnails/<id>.jpg`` for each. When a photo was deleted before
@@ -675,6 +675,12 @@ def prune_missing_photos(cache_dir, workspace_id, db):
     the cache should therefore reconcile against the DB and quietly drop
     IDs that are no longer present, so an old cache converges to clean
     state on the next read.
+
+    Presence is scoped to the active workspace via ``workspace_folders``:
+    a photo whose folder has been unlinked from this workspace is treated
+    the same as a hard-deleted row. Otherwise unlinking a folder leaves
+    orphan cards behind and ``/thumbnails/<id>.jpg`` regen still fails
+    because thumbnail source resolution itself is workspace-scoped.
 
     Returns True if the cache was rewritten, False otherwise.
     """
@@ -688,7 +694,10 @@ def prune_missing_photos(cache_dir, workspace_id, db):
         return False
     placeholders = ",".join("?" * len(cached_ids))
     rows = db.conn.execute(
-        f"SELECT id FROM photos WHERE id IN ({placeholders})", cached_ids
+        f"""SELECT p.id FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
+        (workspace_id, *cached_ids),
     ).fetchall()
     present = {row["id"] for row in rows}
     missing = [pid for pid in cached_ids if pid not in present]
