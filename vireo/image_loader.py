@@ -193,7 +193,8 @@ def _load_raw(path, max_size):
 
     1. Try the embedded JPEG preview; use it if it's big enough for max_size.
     2. Otherwise demosaic via rawpy.postprocess().
-    3. If postprocess fails, fall back to the embedded JPEG (even if small).
+    3. If postprocess raises (e.g. libraw 0.22 can't decode Nikon HE*/TicoRAW),
+       fall back to the embedded JPEG even if smaller than max_size.
     """
     import rawpy
 
@@ -212,9 +213,26 @@ def _load_raw(path, max_size):
             return _postprocess_raw(raw, max_size)
         except Exception as e:
             if embedded is not None:
+                # Only claim "full camera output" when the embedded JPEG
+                # actually matches the sensor's active dimensions on both
+                # axes (e.g. Nikon HE*/TicoRAW). A long-edge-only check
+                # would still mislabel cropped/aspect-mismatched previews
+                # like 6000×3376 against a 6000×4000 sensor.
+                sensor_dims = sorted(
+                    (raw.sizes.width, raw.sizes.height), reverse=True
+                )
+                embedded_dims = sorted(embedded.size, reverse=True)
+                qualifier = (
+                    ", full camera output"
+                    if sensor_dims[0]
+                    and embedded_dims[0] >= sensor_dims[0]
+                    and embedded_dims[1] >= sensor_dims[1]
+                    else ""
+                )
                 log.info(
-                    "RAW decode failed for %s, using embedded JPEG (%dx%d): %s",
-                    path, embedded.size[0], embedded.size[1], e,
+                    "libraw cannot decode %s (%s); using embedded JPEG "
+                    "(%dx%d%s)",
+                    path, e, embedded.size[0], embedded.size[1], qualifier,
                 )
                 return embedded
             raise
