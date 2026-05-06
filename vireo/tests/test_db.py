@@ -10995,3 +10995,28 @@ def test_collection_extension_rule_matches_case_insensitively(tmp_path):
     )
     names_not = sorted(p['filename'] for p in db.get_collection_photos(cid_not))
     assert names_not == ['raw.nef']
+
+
+def test_get_workspace_extensions_excludes_missing_folders(tmp_path):
+    """An extension only present in a missing folder must not appear in the
+    dropdown.
+
+    `_build_collection_query` joins folders with `status IN ('ok',
+    'partial')`, so an extension surfaced from a missing-folder photo
+    would silently match zero rows when used in a rule — exactly the
+    failure mode this dropdown exists to prevent.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid_ok = db.add_folder('/ok', name='ok')
+    fid_gone = db.add_folder('/gone', name='gone')
+    db.add_photo(folder_id=fid_ok, filename='a.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid_gone, filename='b.cr2', extension='.cr2',
+                 file_size=1, file_mtime=1.0)
+
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_gone,))
+    db.conn.commit()
+
+    # .cr2 lives only in the missing folder — must be filtered out.
+    assert db.get_workspace_extensions() == ['.jpg']

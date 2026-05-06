@@ -1228,12 +1228,21 @@ class Database:
         UI never has to think about case, and storing-side variations
         (``.jpg`` vs ``.JPG`` from older imports) collapse into one option.
         Empty/NULL extensions are skipped.
+
+        Folders whose status is not ``'ok'`` or ``'partial'`` are excluded so
+        the dropdown stays consistent with ``_build_collection_query``, which
+        joins on the same status filter. Otherwise an extension found only in
+        a missing folder would appear as a selectable option but match zero
+        photos when used in a rule — exactly the silent-failure mode this
+        change is meant to prevent.
         """
         ws = self._ws_id()
         rows = self.conn.execute(
             """SELECT DISTINCT LOWER(p.extension) AS ext
                FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id
+                              AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
                  AND p.extension IS NOT NULL
                  AND p.extension != ''
