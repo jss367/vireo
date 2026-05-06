@@ -4170,3 +4170,48 @@ def test_save_grouping_defaults_rejects_bad_values(tmp_path, monkeypatch):
         assert _math.isfinite(pipe["tau_enc"])
     if "burst_phash_threshold" in pipe:
         assert isinstance(pipe["burst_phash_threshold"], int)
+
+
+def test_collection_preview_returns_match_count(app_and_db):
+    """POST /api/collections/preview returns the count of photos that
+    would match an unsaved rules list. Powers the smart-collection
+    modal's live "Matches: N photos" readout.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    collections_before = len(db.get_collections())
+
+    # The fixture creates 3 photos; p1 has rating=3, p3 has rating=5.
+    # Empty rules -> all photos in workspace.
+    resp = client.post("/api/collections/preview", json={"rules": []})
+    assert resp.status_code == 200
+    assert resp.get_json()["count"] == 3
+
+    # rating >= 4 -> only p3 (rating=5).
+    resp = client.post(
+        "/api/collections/preview",
+        json={"rules": [{"field": "rating", "op": ">=", "value": 4}]},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["count"] == 1
+
+    # No collection row was persisted as a side effect of previewing.
+    assert len(db.get_collections()) == collections_before
+
+
+def test_collection_preview_rejects_malformed_rules(app_and_db):
+    """Malformed rules return 400, not 500 — the route must not crash on
+    untrusted input from the modal.
+    """
+    app, _db = app_and_db
+    client = app.test_client()
+
+    resp = client.post("/api/collections/preview", json={"rules": "not a list"})
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+    resp = client.post(
+        "/api/collections/preview",
+        json={"rules": [{"op": "is", "value": 5}]},  # missing 'field'
+    )
+    assert resp.status_code == 400

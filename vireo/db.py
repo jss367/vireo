@@ -7801,6 +7801,21 @@ class Database:
             return None
 
         rules = json.loads(row["rules"])
+        return self._build_query_from_rules(rules)
+
+    def _build_query_from_rules(self, rules):
+        """Build SQL clauses from a rules list (not yet persisted).
+
+        Returns (folder_join, join_clause, where, params). Raises ValueError on
+        malformed input — callers that accept rules from untrusted sources
+        (e.g. the live-preview API) should catch and surface a 400.
+        """
+        if not isinstance(rules, list):
+            raise ValueError("rules must be a list")
+        for r in rules:
+            if not isinstance(r, dict) or "field" not in r:
+                raise ValueError("each rule must be an object with a 'field'")
+
         conditions = []
         params = []
         need_keyword_join = False
@@ -8048,6 +8063,22 @@ class Database:
             return 0
 
         folder_join, join_clause, where, params = parts
+        query = f"""
+            SELECT COUNT(DISTINCT p.id) FROM photos p
+            {folder_join}
+            {join_clause}
+            {where}
+        """
+        return self.conn.execute(query, params).fetchone()[0]
+
+    def count_photos_for_rules(self, rules):
+        """Return the number of photos in the active workspace that match
+        an unsaved rules list. Used by the smart-collection modal preview.
+
+        Raises ValueError on malformed input (propagated from
+        ``_build_query_from_rules``).
+        """
+        folder_join, join_clause, where, params = self._build_query_from_rules(rules)
         query = f"""
             SELECT COUNT(DISTINCT p.id) FROM photos p
             {folder_join}

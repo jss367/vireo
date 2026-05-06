@@ -594,6 +594,56 @@ def test_collection_photos_keyword_rule(tmp_path):
     assert photos[0]['filename'] == 'hawk.jpg'
 
 
+def test_count_photos_for_rules_unsaved(tmp_path):
+    """count_photos_for_rules evaluates a rules list directly (without
+    persisting it to the collections table) so the smart-collection modal
+    can show a live match count as the user edits rules.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='good.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='ok.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p3 = db.add_photo(folder_id=fid, filename='bad.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    db.update_photo_rating(p1, 5)
+    db.update_photo_rating(p2, 4)
+    db.update_photo_rating(p3, 1)
+
+    # No rules -> matches every photo in the workspace.
+    assert db.count_photos_for_rules([]) == 3
+
+    # rating >= 4 -> two of three.
+    assert db.count_photos_for_rules(
+        [{"field": "rating", "op": ">=", "value": 4}]
+    ) == 2
+
+    # No saved collection row was created.
+    assert len(db.get_collections()) == 0
+
+
+def test_count_photos_for_rules_rejects_malformed_input(tmp_path):
+    """The preview helper raises on input that isn't a list of rule dicts —
+    the API route relies on this to return a 400 instead of 500.
+    """
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    with pytest.raises(ValueError):
+        db.count_photos_for_rules("not a list")
+    with pytest.raises(ValueError):
+        db.count_photos_for_rules([{"op": "is", "value": 5}])  # missing field
+    with pytest.raises(ValueError):
+        db.count_photos_for_rules(["not a dict"])
+
+
 def test_collection_untagged_rule(tmp_path):
     """get_collection_photos filters by keyword_count equals 0."""
     import json

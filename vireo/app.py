@@ -2788,6 +2788,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         cid = db.add_collection(name, json.dumps(rules))
         return jsonify({"ok": True, "id": cid})
 
+    @app.route("/api/collections/preview", methods=["POST"])
+    def api_collection_preview():
+        """Live count of photos that would match an unsaved rules list.
+
+        Body: {"rules": [...]}. Returns {"count": N}. Used by the smart-
+        collection modal to show "Matches: N photos" as the user edits
+        rules. Returns 400 on malformed rules.
+        """
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        rules = body.get("rules", [])
+        try:
+            count = db.count_photos_for_rules(rules)
+        except ValueError as e:
+            return json_error(str(e), 400)
+        return jsonify({"count": count})
+
     @app.route("/api/collections/<int:collection_id>", methods=["DELETE"])
     def api_delete_collection(collection_id):
         db = _get_db()
