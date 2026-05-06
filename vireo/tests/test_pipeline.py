@@ -518,6 +518,70 @@ def test_prune_missing_photos_drops_ids_in_unlinked_folder(tmp_path):
     assert loaded["encounters"] == []
 
 
+def test_prune_missing_photos_chunks_large_id_lists(tmp_path):
+    """Cache with more entries than SQLite's bound-parameter cap
+    (``SQLITE_LIMIT_VARIABLE_NUMBER``, default 999 in production builds)
+    must not raise ``OperationalError: too many SQL variables``. Without
+    chunking, a large workspace would regress from a recoverable
+    stale-cache state to a hard 500 on ``GET /api/pipeline/results``.
+
+    The local ``sqlite3`` build often ships with a much higher default
+    (e.g. 250k), which would mask the bug. Force the limit down with
+    ``Connection.setlimit`` so the chunking path is actually exercised.
+    """
+    import sqlite3
+
+    from pipeline import load_results, prune_missing_photos
+
+    # 1500 cached ids — half present, half not.
+    n = 1500
+    present_ids = list(range(1, n // 2 + 1))
+    missing_ids = list(range(n // 2 + 1, n + 1))
+    cache = {
+        "encounters": [
+            {
+                "species": "Robin",
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": n,
+                "burst_count": 1,
+                "time_range": ["2026-03-20T10:00:00", "2026-03-20T10:00:01"],
+                "photo_ids": present_ids + missing_ids,
+                "bursts": [
+                    {"photo_ids": present_ids + missing_ids, "species_predictions": [], "species_override": None},
+                ],
+            },
+        ],
+        "photos": [
+            {"id": pid, "label": "KEEP", "rarity_protected": False}
+            for pid in present_ids + missing_ids
+        ],
+        "summary": {
+            "total_photos": n,
+            "encounter_count": 1,
+            "burst_count": 1,
+            "keep_count": n,
+            "review_count": 0,
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    _write_cache(str(tmp_path), 1, cache)
+    db = _make_db_with_ids(tmp_path, present_ids)
+
+    # Force the bound-parameter limit below n so the unchunked code path
+    # would raise OperationalError. The chunking implementation uses 900
+    # per query, so a cap of 999 lets each chunk through.
+    db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+
+    changed = prune_missing_photos(str(tmp_path), 1, db)
+    assert changed is True
+
+    loaded = load_results(str(tmp_path), 1)
+    assert [p["id"] for p in loaded["photos"]] == present_ids
+
+
 # -- compute_review_readiness --
 
 

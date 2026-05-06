@@ -682,6 +682,12 @@ def prune_missing_photos(cache_dir, workspace_id, db):
     orphan cards behind and ``/thumbnails/<id>.jpg`` regen still fails
     because thumbnail source resolution itself is workspace-scoped.
 
+    The ``IN (...)`` lookup is chunked to stay under SQLite's default
+    bound-parameter cap (``SQLITE_LIMIT_VARIABLE_NUMBER``, typically 999):
+    a workspace cache with more entries than that would otherwise raise
+    ``OperationalError: too many SQL variables`` and turn a recoverable
+    stale-cache state into a hard 500 on ``GET /api/pipeline/results``.
+
     Returns True if the cache was rewritten, False otherwise.
     """
     path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
@@ -692,14 +698,18 @@ def prune_missing_photos(cache_dir, workspace_id, db):
     cached_ids = [p.get("id") for p in data.get("photos", []) if p.get("id") is not None]
     if not cached_ids:
         return False
-    placeholders = ",".join("?" * len(cached_ids))
-    rows = db.conn.execute(
-        f"""SELECT p.id FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
-        (workspace_id, *cached_ids),
-    ).fetchall()
-    present = {row["id"] for row in rows}
+    _CHUNK = 900
+    present: set = set()
+    for i in range(0, len(cached_ids), _CHUNK):
+        chunk = cached_ids[i : i + _CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        rows = db.conn.execute(
+            f"""SELECT p.id FROM photos p
+                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
+            (workspace_id, *chunk),
+        ).fetchall()
+        present.update(row["id"] for row in rows)
     missing = [pid for pid in cached_ids if pid not in present]
     if not missing:
         return False
