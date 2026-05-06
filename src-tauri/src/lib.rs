@@ -1,3 +1,4 @@
+mod config;
 mod menu;
 mod sidecar;
 mod tray;
@@ -5,6 +6,20 @@ mod updater;
 use sidecar::SidecarState;
 use tauri::{Manager, RunEvent};
 use tauri::window::{ProgressBarState, ProgressBarStatus};
+use tauri_plugin_opener::OpenerExt;
+
+/// Open the given URL in the user's default web browser.
+///
+/// Logs failures rather than propagating them — failing to open a browser
+/// shouldn't crash the app; the user can still reach the UI by clicking
+/// the tray icon menu item.
+fn open_in_browser(app: &tauri::AppHandle, url: &str) {
+    if let Err(e) = app.opener().open_url(url, None::<&str>) {
+        log::error!("Failed to open browser at {}: {}", url, e);
+    } else {
+        log::info!("Opened default browser at {}", url);
+    }
+}
 
 #[tauri::command]
 fn get_server_port(state: tauri::State<'_, SidecarState>) -> u16 {
@@ -44,6 +59,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Read the user's launch-time config (~/.vireo/config.json).
+            // Failures fall back to defaults — see config::load_launch_config.
+            let launch_cfg = config::load_launch_config();
+            let browser_mode = launch_cfg.open_in_browser();
+
             if cfg!(debug_assertions) {
                 // In dev mode, don't spawn sidecar — developer runs Flask manually
                 app.handle().plugin(
@@ -62,9 +82,14 @@ pub fn run() {
                     Ok(state) => {
                         let port = state.port;
                         app.manage(state);
-                        if let Some(window) = app.get_webview_window("main") {
-                            let url = format!("http://127.0.0.1:{}", port);
-                            let _ = window.navigate(url.parse().unwrap());
+                        // Only navigate the WKWebView when we're actually
+                        // going to show it. In browser mode the window is
+                        // about to be hidden/closed anyway.
+                        if !browser_mode {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let url = format!("http://127.0.0.1:{}", port);
+                                let _ = window.navigate(url.parse().unwrap());
+                            }
                         }
                     }
                     Err(e) => {
@@ -80,7 +105,22 @@ pub fn run() {
             app.set_menu(menu)?;
 
             let port = app.state::<SidecarState>().port;
-            tray::create_tray(app.handle(), port)?;
+            tray::create_tray(app.handle(), port, browser_mode)?;
+
+            // The main window is created with `visible: false` (see
+            // tauri.conf.json) so we can decide here whether to show it
+            // (classic mode) or leave it hidden (browser mode) — avoids a
+            // visible flash before we'd otherwise hide it.
+            if browser_mode {
+                // Sidecar is healthy by this point — start_sidecar blocks
+                // on /api/health in production, and in dev the developer's
+                // Flask is presumed already running.
+                let url = format!("http://127.0.0.1:{}", port);
+                open_in_browser(app.handle(), &url);
+            } else if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
 
             // Background update checks (production only)
             if !cfg!(debug_assertions) {
@@ -127,9 +167,18 @@ pub fn run() {
                 return;
             }
 
-            // Navigation items — evaluate JS in the main webview
+            // Navigation items — evaluate JS in the main webview, or in
+            // browser mode open the route in the user's default browser.
             if let Some(route) = menu::route_for_id(id) {
-                if let Some(window) = app.get_webview_window("main") {
+                let browser_mode = app
+                    .try_state::<tray::TrayMode>()
+                    .map(|m| m.browser_mode)
+                    .unwrap_or(false);
+                if browser_mode {
+                    let port = app.state::<SidecarState>().port;
+                    let url = format!("http://127.0.0.1:{}{}", port, route);
+                    open_in_browser(app, &url);
+                } else if let Some(window) = app.get_webview_window("main") {
                     let js = format!("window.location.href = '{}'", route);
                     if let Err(e) = window.eval(&js) {
                         log::error!("Failed to navigate to {}: {}", route, e);
