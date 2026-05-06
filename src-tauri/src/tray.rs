@@ -7,6 +7,7 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+use tauri_plugin_opener::OpenerExt;
 
 #[derive(Deserialize)]
 struct JobsResponse {
@@ -25,15 +26,31 @@ pub struct TrayPollState {
     pub stop: Arc<AtomicBool>,
 }
 
+/// Whether the app launched in browser mode. Stored in Tauri state so the
+/// menu-event handler (which only gets an `AppHandle`) can branch correctly
+/// without re-reading the config file.
+pub struct TrayMode {
+    pub browser_mode: bool,
+    /// Sidecar port — used to construct the URL we hand to the browser.
+    pub port: u16,
+}
+
 /// Menu item IDs
 const SHOW_WINDOW: &str = "show_window";
 const HIDE_WINDOW: &str = "hide_window";
+const OPEN_IN_BROWSER: &str = "open_in_browser";
 const JOB_STATUS: &str = "job_status";
 const QUIT: &str = "quit";
 
 /// Build the tray icon with its context menu and start job polling.
-pub fn create_tray(app: &AppHandle, port: u16) -> tauri::Result<()> {
-    let menu = build_menu(app, "No active jobs")?;
+///
+/// `browser_mode` swaps the "Show / Hide Window" pair for a single
+/// "Open in browser" item, since the WKWebView window is intentionally
+/// hidden in that mode and showing it would be confusing.
+pub fn create_tray(app: &AppHandle, port: u16, browser_mode: bool) -> tauri::Result<()> {
+    app.manage(TrayMode { browser_mode, port });
+
+    let menu = build_menu(app, "No active jobs", browser_mode)?;
 
     TrayIconBuilder::with_id("main-tray")
         .icon(app.default_window_icon().unwrap().clone())
@@ -44,7 +61,8 @@ pub fn create_tray(app: &AppHandle, port: u16) -> tauri::Result<()> {
             handle_menu_event(app, event.id().as_ref());
         })
         .on_tray_icon_event(|tray, event| {
-            // Left-click on the tray icon: show and focus the window
+            // Left-click on the tray icon: show and focus the window, or
+            // re-open the browser if we're in browser mode.
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
@@ -52,7 +70,7 @@ pub fn create_tray(app: &AppHandle, port: u16) -> tauri::Result<()> {
             } = event
             {
                 let app = tray.app_handle();
-                show_main_window(app);
+                activate_ui(app);
             }
         })
         .build(app)?;
@@ -66,15 +84,33 @@ pub fn create_tray(app: &AppHandle, port: u16) -> tauri::Result<()> {
 }
 
 /// Build (or rebuild) the tray context menu with a given job status string.
-pub fn build_menu(app: &AppHandle, job_status: &str) -> tauri::Result<Menu<tauri::Wry>> {
-    let show = MenuItem::with_id(app, SHOW_WINDOW, "Show Window", true, None::<&str>)?;
-    let hide = MenuItem::with_id(app, HIDE_WINDOW, "Hide Window", true, None::<&str>)?;
+pub fn build_menu(
+    app: &AppHandle,
+    job_status: &str,
+    browser_mode: bool,
+) -> tauri::Result<Menu<tauri::Wry>> {
     let sep1 = PredefinedMenuItem::separator(app)?;
     let jobs = MenuItem::with_id(app, JOB_STATUS, job_status, false, None::<&str>)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, QUIT, "Quit Vireo", true, None::<&str>)?;
 
-    Menu::with_items(app, &[&show, &hide, &sep1, &jobs, &sep2, &quit])
+    if browser_mode {
+        // Browser-launch mode: there is no app window to show or hide, so
+        // we offer a single "Open in browser" item that re-opens the URL
+        // (handy if the user closed the tab).
+        let open = MenuItem::with_id(
+            app,
+            OPEN_IN_BROWSER,
+            "Open in browser",
+            true,
+            None::<&str>,
+        )?;
+        Menu::with_items(app, &[&open, &sep1, &jobs, &sep2, &quit])
+    } else {
+        let show = MenuItem::with_id(app, SHOW_WINDOW, "Show Window", true, None::<&str>)?;
+        let hide = MenuItem::with_id(app, HIDE_WINDOW, "Hide Window", true, None::<&str>)?;
+        Menu::with_items(app, &[&show, &hide, &sep1, &jobs, &sep2, &quit])
+    }
 }
 
 /// Handle a menu item click.
@@ -82,6 +118,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
     match id {
         SHOW_WINDOW => show_main_window(app),
         HIDE_WINDOW => hide_main_window(app),
+        OPEN_IN_BROWSER => open_ui_in_browser(app),
         QUIT => {
             // Stop the polling thread
             if let Some(poll_state) = app.try_state::<TrayPollState>() {
@@ -113,6 +150,40 @@ fn hide_main_window(app: &AppHandle) {
     }
 }
 
+/// Open (or re-open) the UI in the user's default browser.
+///
+/// In browser mode this is what the tray's left-click and "Open in browser"
+/// menu item do. Most browsers will focus an existing tab pointed at the
+/// same origin rather than opening a duplicate; if not, the user gets a
+/// fresh tab — either way they end up looking at the UI.
+fn open_ui_in_browser(app: &AppHandle) {
+    let port = match app.try_state::<TrayMode>() {
+        Some(mode) => mode.port,
+        None => {
+            log::error!("TrayMode not initialised; cannot open browser");
+            return;
+        }
+    };
+    let url = format!("http://127.0.0.1:{}", port);
+    if let Err(e) = app.opener().open_url(&url, None::<&str>) {
+        log::error!("Failed to open browser at {}: {}", url, e);
+    }
+}
+
+/// Activate the UI: show the main window, or open the browser, depending
+/// on which launch mode we're in.
+fn activate_ui(app: &AppHandle) {
+    let browser_mode = app
+        .try_state::<TrayMode>()
+        .map(|m| m.browser_mode)
+        .unwrap_or(false);
+    if browser_mode {
+        open_ui_in_browser(app);
+    } else {
+        show_main_window(app);
+    }
+}
+
 /// Query the Flask backend for running jobs.
 fn fetch_running_job_count(port: u16) -> usize {
     let url = format!("http://127.0.0.1:{}/api/jobs", port);
@@ -139,8 +210,12 @@ fn fetch_running_job_count(port: u16) -> usize {
 
 /// Rebuild the tray menu with updated job status text.
 fn update_tray_menu(app: &AppHandle, job_status: &str) {
+    let browser_mode = app
+        .try_state::<TrayMode>()
+        .map(|m| m.browser_mode)
+        .unwrap_or(false);
     if let Some(tray) = app.tray_by_id("main-tray") {
-        match build_menu(app, job_status) {
+        match build_menu(app, job_status, browser_mode) {
             Ok(menu) => {
                 let _ = tray.set_menu(Some(menu));
             }

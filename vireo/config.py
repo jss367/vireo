@@ -33,6 +33,11 @@ DEFAULTS = {
     "darktable_style": "",
     "darktable_output_format": "jpg",
     "darktable_output_dir": "",
+    # When true, the Tauri desktop wrapper opens this UI in the user's
+    # default web browser on launch instead of creating its WKWebView
+    # window. The Flask sidecar and tray icon still run as usual.
+    # Read by `src-tauri/src/lib.rs` at startup; takes effect after restart.
+    "open_in_browser": False,
     # --- Subject identification ---
     # Keyword types that count as "identifying" a photo for queue/classifier
     # purposes. Photos with at least one keyword of one of these types drop

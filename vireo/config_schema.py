@@ -167,6 +167,17 @@ SCHEMA = {
         "label": "Browse card fields",
         "desc": "Which metadata badges appear on each photo card in browse.",
     },
+    "open_in_browser": {
+        "type": "bool",
+        "category": "Display", "scope": "global",
+        "label": "Open in default browser on launch (skip the app window)",
+        "desc": (
+            "Desktop app only. When enabled, launching Vireo opens this UI "
+            "in your default web browser instead of the in-app window. "
+            "The Flask backend and tray icon keep running. "
+            "Takes effect after restart."
+        ),
+    },
 
     # --- Subject identification -------------------------------------------
     # Workspace-overridable. Photos with at least one keyword of one of

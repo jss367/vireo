@@ -318,6 +318,16 @@
         <span style="font-size:13px;color:var(--text-primary);min-width:42px;" id="cfgBrowseThumbVal">220px</span>
       </div>
     </div>
+    <div class="setting-row">
+      <div class="setting-label">
+        Open in default browser on launch (skip the app window)
+        <small>When enabled, launching Vireo opens this UI in your default web browser. The app keeps running as a menu-bar/tray icon. Takes effect after restart. (Only meaningful in the desktop app build.)</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="checkbox" id="cfgOpenInBrowser"
+               onchange="saveConfig()" style="accent-color:var(--accent);">
+      </div>
+    </div>
   </div>
 
   <!-- Browse Grid -->
@@ -1220,6 +1230,7 @@ async function loadConfig() {
     var bt = cfg.browse_thumb_default != null ? cfg.browse_thumb_default : 220;
     document.getElementById('cfgBrowseThumbDefault').value = bt;
     document.getElementById('cfgBrowseThumbVal').textContent = bt + 'px';
+    document.getElementById('cfgOpenInBrowser').checked = cfg.open_in_browser === true;
     // Load browse card fields
     loadCardFieldCheckboxes(cfg.browse_card_fields || ["filename", "rating", "flag", "sharpness"]);
     // Load detection settings
@@ -1402,6 +1413,7 @@ function saveConfig() {
           preview_quality: parseInt(document.getElementById('cfgPreviewQuality').value, 10) || 90,
           preview_cache_max_mb: Math.max(0, parseInt(document.getElementById('cfgPreviewCacheMaxMb').value, 10) || 0),
           browse_thumb_default: parseInt(document.getElementById('cfgBrowseThumbDefault').value, 10) || 220,
+          open_in_browser: document.getElementById('cfgOpenInBrowser').checked,
           browse_card_fields: getSelectedCardFields(),
           detector_confidence: parseInt(document.getElementById('cfgDetectorConf').value, 10) / 100,
           detection_padding: parseInt(document.getElementById('cfgDetectionPadding').value, 10) / 100,

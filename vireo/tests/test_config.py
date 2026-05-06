@@ -361,3 +361,34 @@ def test_google_maps_api_key_default_is_empty(tmp_path, monkeypatch):
     import config as cfg
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
     assert cfg.load().get("google_maps_api_key") == ""
+
+
+def test_open_in_browser_default_is_false(tmp_path, monkeypatch):
+    """open_in_browser defaults to False so the Tauri wrapper keeps its
+    classic in-window behavior unless the user opts in."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    assert cfg.DEFAULTS["open_in_browser"] is False
+    assert cfg.load().get("open_in_browser") is False
+
+
+def test_open_in_browser_round_trip(tmp_path, monkeypatch):
+    """Setting open_in_browser persists to disk and reloads as a real bool.
+
+    The Rust side reads ~/.vireo/config.json directly with serde_json, so the
+    value must round-trip as a JSON boolean (not a truthy int or string)."""
+    import json as _json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.set("open_in_browser", True)
+    assert cfg.get("open_in_browser") is True
+
+    # Confirm it serialises as a bare JSON boolean — what Rust's serde_json
+    # will deserialise into bool.
+    with open(cfg.CONFIG_PATH) as f:
+        on_disk = _json.load(f)
+    assert on_disk["open_in_browser"] is True
+
+    cfg.set("open_in_browser", False)
+    assert cfg.get("open_in_browser") is False
