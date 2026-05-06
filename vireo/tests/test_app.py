@@ -4235,3 +4235,56 @@ def test_collection_preview_rejects_malformed_rules(app_and_db):
         )
         assert resp.status_code == 400, f"expected 400 for body {bad_body!r}"
         assert "error" in resp.get_json()
+
+
+def test_collection_preview_rejects_invalid_json(app_and_db):
+    """Syntactically broken JSON returns 400 — silent=True would otherwise
+    coerce it to None and the route would happily return a 200 match count
+    for a request the client never actually made successfully.
+    """
+    app, _db = app_and_db
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/collections/preview",
+        data="{not valid json",
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+    # An empty body, however, is still valid — equivalent to {} — and should
+    # match every photo in the workspace (the same behavior as {"rules": []}).
+    resp = client.post(
+        "/api/collections/preview",
+        data="",
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    assert "count" in resp.get_json()
+
+
+def test_collection_preview_does_not_mask_db_failures(app_and_db, monkeypatch):
+    """Real backend faults from sqlite3 must surface as 5xx — not be
+    rewritten as 400 by the route's exception handler. Catching the base
+    sqlite3.Error here would hide locked-DB / OperationalError incidents.
+    """
+    import sqlite3
+    from db import Database
+
+    app, _db = app_and_db
+    client = app.test_client()
+
+    # Patch the class so the per-request Database instance built by
+    # _get_db() is affected too — the route does not share the fixture's
+    # instance.
+    def boom(self, _rules):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Database, "count_photos_for_rules", boom)
+
+    resp = client.post("/api/collections/preview", json={"rules": []})
+    # Flask's default for an unhandled exception is 500; the important thing
+    # is that it's *not* a 400, which would mislabel a backend fault as a
+    # client error.
+    assert resp.status_code >= 500

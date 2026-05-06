@@ -2794,25 +2794,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         Body: {"rules": [...]}. Returns {"count": N}. Used by the smart-
         collection modal to show "Matches: N photos" as the user edits
-        rules. Returns 400 on malformed rules.
+        rules. Returns 400 on malformed rules or syntactically invalid JSON.
         """
-        import sqlite3
         db = _get_db()
-        body = request.get_json(silent=True)
+        # Parse the body manually rather than calling request.get_json(silent=True),
+        # because silent=True collapses three different states into None (no
+        # body, wrong Content-Type, malformed JSON), and we want malformed
+        # JSON to surface as a 400 rather than be silently treated as {}.
+        raw = request.get_data(cache=False)
+        if not raw:
+            body = {}
+        else:
+            try:
+                body = json.loads(raw)
+            except ValueError:
+                return json_error("request body must be valid JSON", 400)
         # Flask returns top-level JSON lists/numbers/strings as-is, so guard
         # against `body.get(...)` raising AttributeError on non-object payloads
-        # (e.g. a client posting `[]` directly). Treat missing body as {}.
-        if body is None:
-            body = {}
-        elif not isinstance(body, dict):
+        # (e.g. a client posting `[]` directly).
+        if not isinstance(body, dict):
             return json_error("request body must be a JSON object", 400)
         rules = body.get("rules", [])
         try:
             count = db.count_photos_for_rules(rules)
-        except (ValueError, TypeError, sqlite3.Error) as e:
-            # ValueError comes from explicit validation; TypeError /
-            # sqlite3.Error are belt-and-suspenders for malformed inputs that
-            # slip past validation and would otherwise surface as a 500.
+        except ValueError as e:
+            # Validation in _build_query_from_rules raises ValueError for every
+            # input shape SQLite could not bind, so we don't need to catch
+            # sqlite3 errors here — letting them surface as 5xx keeps real
+            # backend faults (locked DB, OperationalError, etc.) from being
+            # misclassified as client errors.
             return json_error(str(e), 400)
         return jsonify({"count": count})
 
