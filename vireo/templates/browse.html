@@ -1467,6 +1467,10 @@ async function filterByCollection(id) {
 var collectionRules = [];
 
 function showCollectionModal() {
+  // Cancel any pending/in-flight preview from a previous session before
+  // resetting state — otherwise a stale response can land on the DOM and
+  // briefly show the previous rule set's count in the freshly opened modal.
+  resetPreviewState();
   collectionRules = [];
   document.getElementById('rulePreview').textContent = '';
   addRuleRow();
@@ -1475,6 +1479,7 @@ function showCollectionModal() {
 }
 
 function hideCollectionModal() {
+  resetPreviewState();
   document.getElementById('collectionModal').classList.remove('open');
 }
 
@@ -1513,6 +1518,17 @@ var _previewSeq = 0;
 function schedulePreviewUpdate() {
   if (_previewTimer) clearTimeout(_previewTimer);
   _previewTimer = setTimeout(updatePreviewNow, 250);
+}
+
+function resetPreviewState() {
+  // Bump the sequence so any in-flight fetch's response is discarded as
+  // stale, and cancel any pending debounced call. Used when the modal
+  // opens or closes so a previous session can't write into a new one.
+  if (_previewTimer) {
+    clearTimeout(_previewTimer);
+    _previewTimer = null;
+  }
+  _previewSeq++;
 }
 
 async function updatePreviewNow() {
