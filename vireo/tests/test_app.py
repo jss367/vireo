@@ -4215,3 +4215,12 @@ def test_collection_preview_rejects_malformed_rules(app_and_db):
         json={"rules": [{"op": "is", "value": 5}]},  # missing 'field'
     )
     assert resp.status_code == 400
+
+    # A value that SQLite can't bind as a parameter (e.g. a nested object)
+    # must also surface as 400 rather than a 500 from sqlite3.InterfaceError.
+    resp = client.post(
+        "/api/collections/preview",
+        json={"rules": [{"field": "rating", "op": ">=", "value": {"x": 1}}]},
+    )
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()

@@ -642,6 +642,16 @@ def test_count_photos_for_rules_rejects_malformed_input(tmp_path):
         db.count_photos_for_rules([{"op": "is", "value": 5}])  # missing field
     with pytest.raises(ValueError):
         db.count_photos_for_rules(["not a dict"])
+    # Reject value types SQLite cannot bind as a parameter — without this
+    # the preview route surfaces a sqlite3.InterfaceError as a 500.
+    with pytest.raises(ValueError):
+        db.count_photos_for_rules(
+            [{"field": "rating", "op": ">=", "value": {"nested": 1}}]
+        )
+    with pytest.raises(ValueError):
+        db.count_photos_for_rules(
+            [{"field": "photo_ids", "op": "is", "value": [1, {"nested": 1}]}]
+        )
 
 
 def test_collection_untagged_rule(tmp_path):

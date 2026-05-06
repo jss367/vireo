@@ -1519,10 +1519,10 @@ async function updatePreviewNow() {
   _previewTimer = null;
   var el = document.getElementById('rulePreview');
   if (!el) return;
-  if (!collectionRules.length) {
-    el.textContent = '';
-    return;
-  }
+  // An empty rules list is a valid save state — it matches every photo in
+  // the workspace — so we still query the API rather than blanking the
+  // preview text. Otherwise removing all rule rows would hide the count
+  // for what is actually a "match all photos" save.
   // Coerce numeric fields the same way saveCollection() does, so the
   // preview matches what would be saved.
   var rules = collectionRules.map(function(r) {

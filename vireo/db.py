@@ -7815,6 +7815,19 @@ class Database:
         for r in rules:
             if not isinstance(r, dict) or "field" not in r:
                 raise ValueError("each rule must be an object with a 'field'")
+            # Values are bound directly as SQL parameters, so reject anything
+            # SQLite can't bind (dicts, nested lists). Without this the preview
+            # route would surface a sqlite3.InterfaceError as a 500 on inputs
+            # like {"value": {"foo": 1}}.
+            val = r.get("value")
+            if val is None or isinstance(val, (str, int, float, bool)):
+                continue
+            if isinstance(val, list):
+                for item in val:
+                    if item is not None and not isinstance(item, (str, int, float, bool)):
+                        raise ValueError("rule list values must be scalars")
+                continue
+            raise ValueError("rule value must be a scalar or list of scalars")
 
         conditions = []
         params = []

@@ -2796,12 +2796,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         collection modal to show "Matches: N photos" as the user edits
         rules. Returns 400 on malformed rules.
         """
+        import sqlite3
         db = _get_db()
         body = request.get_json(silent=True) or {}
         rules = body.get("rules", [])
         try:
             count = db.count_photos_for_rules(rules)
-        except ValueError as e:
+        except (ValueError, TypeError, sqlite3.Error) as e:
+            # ValueError comes from explicit validation; TypeError /
+            # sqlite3.Error are belt-and-suspenders for malformed inputs that
+            # slip past validation and would otherwise surface as a 500.
             return json_error(str(e), 400)
         return jsonify({"count": count})
 
