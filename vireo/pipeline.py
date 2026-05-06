@@ -664,6 +664,62 @@ def load_results(cache_dir, workspace_id):
         return json.load(f)
 
 
+def prune_missing_photos(cache_dir, workspace_id, db):
+    """Self-heal pass: drop cached photo IDs no longer visible in the workspace.
+
+    The pipeline review page renders a card per cached photo and requests
+    ``/thumbnails/<id>.jpg`` for each. When a photo was deleted before
+    ``prune_results`` was wired into ``db.delete_photos`` (commit 5ad83fa),
+    the cache file kept its ID, the page rendered an orphan card, and the
+    thumbnail route correctly 404'd because the photo row is gone. Reading
+    the cache should therefore reconcile against the DB and quietly drop
+    IDs that are no longer present, so an old cache converges to clean
+    state on the next read.
+
+    Presence is scoped to the active workspace via ``workspace_folders``:
+    a photo whose folder has been unlinked from this workspace is treated
+    the same as a hard-deleted row. Otherwise unlinking a folder leaves
+    orphan cards behind and ``/thumbnails/<id>.jpg`` regen still fails
+    because thumbnail source resolution itself is workspace-scoped.
+
+    The ``IN (...)`` lookup is chunked to stay under SQLite's default
+    bound-parameter cap (``SQLITE_LIMIT_VARIABLE_NUMBER``, typically 999):
+    a workspace cache with more entries than that would otherwise raise
+    ``OperationalError: too many SQL variables`` and turn a recoverable
+    stale-cache state into a hard 500 on ``GET /api/pipeline/results``.
+
+    Returns True if the cache was rewritten, False otherwise.
+    """
+    path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
+    if not os.path.exists(path):
+        return False
+    with open(path) as f:
+        data = json.load(f)
+    cached_ids = [p.get("id") for p in data.get("photos", []) if p.get("id") is not None]
+    if not cached_ids:
+        return False
+    _CHUNK = 900
+    present: set = set()
+    for i in range(0, len(cached_ids), _CHUNK):
+        chunk = cached_ids[i : i + _CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        rows = db.conn.execute(
+            f"""SELECT p.id FROM photos p
+                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
+            (workspace_id, *chunk),
+        ).fetchall()
+        present.update(row["id"] for row in rows)
+    missing = [pid for pid in cached_ids if pid not in present]
+    if not missing:
+        return False
+    log.info(
+        "Pipeline cache for ws%s references %d deleted photo(s); pruning",
+        workspace_id, len(missing),
+    )
+    return prune_results(cache_dir, workspace_id, missing)
+
+
 def prune_results(cache_dir, workspace_id, deleted_ids):
     """Remove deleted photo IDs from the cached pipeline results in place.
 

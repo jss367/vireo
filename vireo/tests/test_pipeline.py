@@ -429,6 +429,159 @@ def test_prune_results_empty_id_list(tmp_path):
     assert os.path.getmtime(path) == mtime
 
 
+# -- prune_missing_photos --
+
+
+def _make_db_with_ids(tmp_path, ids, workspace_id=1, link_folder=True):
+    """Create a minimal Database with photo rows whose ids match ``ids``.
+
+    ``link_folder`` controls whether the photo folder is registered with
+    ``workspace_id`` via ``workspace_folders``. ``add_folder`` auto-links
+    to the active workspace, so when False we explicitly remove the link
+    to simulate a folder that exists in the photos table but is not
+    visible in the workspace.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    if not link_folder:
+        db.remove_workspace_folder(workspace_id, fid)
+    for pid in ids:
+        # add_photo auto-assigns id, so we override via raw SQL after
+        # insertion to pin the row to the desired id.
+        actual = db.add_photo(fid, f"p{pid}.jpg", ".jpg", 1000, 1.0)
+        if actual != pid:
+            db.conn.execute("UPDATE photos SET id=? WHERE id=?", (pid, actual))
+    db.conn.commit()
+    return db
+
+
+def test_prune_missing_photos_drops_deleted_ids(tmp_path):
+    """IDs in the cache but absent from the photos table are pruned."""
+    from pipeline import load_results, prune_missing_photos
+
+    _write_cache(str(tmp_path), 1, _sample_cache())
+    # photos table has only ids {1, 3}; cache references {1..5}
+    db = _make_db_with_ids(tmp_path, [1, 3])
+
+    changed = prune_missing_photos(str(tmp_path), 1, db)
+    assert changed is True
+
+    loaded = load_results(str(tmp_path), 1)
+    assert [p["id"] for p in loaded["photos"]] == [1, 3]
+    assert loaded["encounters"][0]["photo_ids"] == [1, 3]
+    # second encounter (ids 4, 5) is fully gone
+    assert len(loaded["encounters"]) == 1
+
+
+def test_prune_missing_photos_noop_when_all_present(tmp_path):
+    """If every cached id exists in the DB, the cache is untouched."""
+    from pipeline import prune_missing_photos
+
+    path = _write_cache(str(tmp_path), 1, _sample_cache())
+    mtime = os.path.getmtime(path)
+    db = _make_db_with_ids(tmp_path, [1, 2, 3, 4, 5])
+
+    changed = prune_missing_photos(str(tmp_path), 1, db)
+    assert changed is False
+    assert os.path.getmtime(path) == mtime
+
+
+def test_prune_missing_photos_no_cache_is_noop(tmp_path):
+    """No cache file → returns False, does not raise."""
+    from pipeline import prune_missing_photos
+
+    db = _make_db_with_ids(tmp_path, [1])
+    assert prune_missing_photos(str(tmp_path), 999, db) is False
+
+
+def test_prune_missing_photos_drops_ids_in_unlinked_folder(tmp_path):
+    """Photos that exist in the table but whose folder isn't linked to
+    the workspace are pruned just like hard-deleted rows. Without this,
+    unlinking a folder leaves orphan cards on the review page and the
+    thumbnail self-heal route still 404s because thumbnail source
+    resolution is itself workspace-scoped."""
+    from pipeline import load_results, prune_missing_photos
+
+    _write_cache(str(tmp_path), 1, _sample_cache())
+    # Photos 1..5 exist in the photos table, but their folder is NOT
+    # linked to workspace 1 (link_folder=False), so the workspace can't
+    # actually see any of them.
+    db = _make_db_with_ids(tmp_path, [1, 2, 3, 4, 5], link_folder=False)
+
+    changed = prune_missing_photos(str(tmp_path), 1, db)
+    assert changed is True
+
+    loaded = load_results(str(tmp_path), 1)
+    assert loaded["photos"] == []
+    assert loaded["encounters"] == []
+
+
+def test_prune_missing_photos_chunks_large_id_lists(tmp_path):
+    """Cache with more entries than SQLite's bound-parameter cap
+    (``SQLITE_LIMIT_VARIABLE_NUMBER``, default 999 in production builds)
+    must not raise ``OperationalError: too many SQL variables``. Without
+    chunking, a large workspace would regress from a recoverable
+    stale-cache state to a hard 500 on ``GET /api/pipeline/results``.
+
+    The local ``sqlite3`` build often ships with a much higher default
+    (e.g. 250k), which would mask the bug. Force the limit down with
+    ``Connection.setlimit`` so the chunking path is actually exercised.
+    """
+    import sqlite3
+
+    from pipeline import load_results, prune_missing_photos
+
+    # 1500 cached ids — half present, half not.
+    n = 1500
+    present_ids = list(range(1, n // 2 + 1))
+    missing_ids = list(range(n // 2 + 1, n + 1))
+    cache = {
+        "encounters": [
+            {
+                "species": "Robin",
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": n,
+                "burst_count": 1,
+                "time_range": ["2026-03-20T10:00:00", "2026-03-20T10:00:01"],
+                "photo_ids": present_ids + missing_ids,
+                "bursts": [
+                    {"photo_ids": present_ids + missing_ids, "species_predictions": [], "species_override": None},
+                ],
+            },
+        ],
+        "photos": [
+            {"id": pid, "label": "KEEP", "rarity_protected": False}
+            for pid in present_ids + missing_ids
+        ],
+        "summary": {
+            "total_photos": n,
+            "encounter_count": 1,
+            "burst_count": 1,
+            "keep_count": n,
+            "review_count": 0,
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    _write_cache(str(tmp_path), 1, cache)
+    db = _make_db_with_ids(tmp_path, present_ids)
+
+    # Force the bound-parameter limit below n so the unchunked code path
+    # would raise OperationalError. The chunking implementation uses 900
+    # per query, so a cap of 999 lets each chunk through.
+    db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+
+    changed = prune_missing_photos(str(tmp_path), 1, db)
+    assert changed is True
+
+    loaded = load_results(str(tmp_path), 1)
+    assert [p["id"] for p in loaded["photos"]] == present_ids
+
+
 # -- compute_review_readiness --
 
 
