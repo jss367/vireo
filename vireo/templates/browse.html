@@ -1466,6 +1466,42 @@ async function filterByCollection(id) {
 /* ---------- Collection Modal ---------- */
 var collectionRules = [];
 
+/* Valid ops per field — must mirror vireo/db.py::_build_collection_query.
+   The UI only shows ops the backend handles; non-matching combos used to
+   silently produce zero matches. */
+var FIELD_OPS = {
+  keyword:     ['is', 'is not', 'contains', 'not_contains'],
+  rating:      ['is', 'is not', '>=', '<='],
+  flag:        ['is', 'is not'],
+  color_label: ['is', 'is not'],
+  extension:   ['is', 'is not'],
+  folder:      ['under', 'not_under'],
+  timestamp:   ['between', 'recent_days'],
+};
+var OP_LABELS = {
+  'is':           'is',
+  'is not':       'is not',
+  'contains':     'contains',
+  'not_contains': 'does not contain',
+  '>=':           '>=',
+  '<=':           '<=',
+  'under':        'under',
+  'not_under':    'not under',
+  'between':      'between',
+  'recent_days':  'in the last',
+};
+
+function defaultValueForRule(field, op) {
+  if (field === 'color_label') return 'red';
+  if (field === 'flag') return 'flagged';
+  if (field === 'rating') return 0;
+  if (field === 'timestamp') {
+    if (op === 'between') return ['', ''];
+    if (op === 'recent_days') return 7;
+  }
+  return '';
+}
+
 function showCollectionModal() {
   // Cancel any pending/in-flight preview from a previous session before
   // resetting state — otherwise a stale response can land on the DOM and
@@ -1495,20 +1531,42 @@ function removeRule(idx) {
 }
 
 function updateRule(idx, key, val) {
-  collectionRules[idx][key] = val;
+  var r = collectionRules[idx];
   if (key === 'field') {
-    if (val === 'color_label') {
-      collectionRules[idx].op = 'is';
-      collectionRules[idx].value = 'red';
-    } else if (val === 'flag') {
-      collectionRules[idx].op = 'is';
+    r.field = val;
+    var ops = FIELD_OPS[val] || [];
+    // If current op isn't valid for the new field, default to the field's
+    // first listed op. Otherwise keep the user's selection.
+    if (ops.indexOf(r.op) === -1) {
+      r.op = ops[0] || '';
+    }
+    r.value = defaultValueForRule(val, r.op);
+    renderRules();
+    return;
+  }
+  if (key === 'op') {
+    r.op = val;
+    // For timestamp, the value shape depends on the op. Reset on switch.
+    if (r.field === 'timestamp') {
+      r.value = defaultValueForRule(r.field, val);
     }
     renderRules();
-  } else {
-    // Field changes already trigger renderRules() above (which schedules a
-    // preview); for op/value changes, just refresh the count.
-    schedulePreviewUpdate();
+    return;
   }
+  if (key === 'value_from' && r.field === 'timestamp' && r.op === 'between') {
+    if (!Array.isArray(r.value)) r.value = ['', ''];
+    r.value = [val, r.value[1] || ''];
+    schedulePreviewUpdate();
+    return;
+  }
+  if (key === 'value_to' && r.field === 'timestamp' && r.op === 'between') {
+    if (!Array.isArray(r.value)) r.value = ['', ''];
+    r.value = [r.value[0] || '', val];
+    schedulePreviewUpdate();
+    return;
+  }
+  r[key] = val;
+  schedulePreviewUpdate();
 }
 
 /* ---------- Live match-count preview ---------- */
@@ -1543,7 +1601,15 @@ async function updatePreviewNow() {
   // preview matches what would be saved.
   var rules = collectionRules.map(function(r) {
     var val = r.value;
-    if (r.field === 'rating') val = parseInt(val, 10) || 0;
+    if (r.field === 'rating') {
+      val = parseInt(val, 10) || 0;
+    } else if (r.field === 'timestamp' && r.op === 'recent_days') {
+      val = parseInt(val, 10) || 0;
+    } else if (r.field === 'timestamp' && r.op === 'between') {
+      var from = Array.isArray(val) ? (val[0] || '') : '';
+      var to   = Array.isArray(val) ? (val[1] || '') : '';
+      val = [from, to];
+    }
     return {field: r.field, op: r.op, value: val};
   });
   var seq = ++_previewSeq;
@@ -1564,9 +1630,52 @@ async function updatePreviewNow() {
   }
 }
 
+function renderRuleValueInput(r, i) {
+  if (r.field === 'color_label') {
+    return '<select onchange="updateRule(' + i + ',\'value\',this.value)" style="flex:1;">' +
+        '<option value="red"' + (r.value==='red'?' selected':'') + '>Red</option>' +
+        '<option value="yellow"' + (r.value==='yellow'?' selected':'') + '>Yellow</option>' +
+        '<option value="green"' + (r.value==='green'?' selected':'') + '>Green</option>' +
+        '<option value="blue"' + (r.value==='blue'?' selected':'') + '>Blue</option>' +
+        '<option value="purple"' + (r.value==='purple'?' selected':'') + '>Purple</option>' +
+      '</select>';
+  }
+  if (r.field === 'flag') {
+    return '<select onchange="updateRule(' + i + ',\'value\',this.value)" style="flex:1;">' +
+        '<option value="flagged"' + (r.value==='flagged'?' selected':'') + '>Pick</option>' +
+        '<option value="rejected"' + (r.value==='rejected'?' selected':'') + '>Reject</option>' +
+        '<option value="none"' + (r.value==='none'?' selected':'') + '>No flag</option>' +
+      '</select>';
+  }
+  if (r.field === 'timestamp') {
+    if (r.op === 'between') {
+      var from = Array.isArray(r.value) ? (r.value[0] || '') : '';
+      var to   = Array.isArray(r.value) ? (r.value[1] || '') : '';
+      return '<div style="flex:1;display:flex;gap:6px;align-items:center;">' +
+          '<input type="date" value="' + escapeAttr(from) + '" onchange="updateRule(' + i + ',\'value_from\',this.value)" style="flex:1;">' +
+          '<span style="color:var(--text-ghost);font-size:11px;">and</span>' +
+          '<input type="date" value="' + escapeAttr(to) + '" onchange="updateRule(' + i + ',\'value_to\',this.value)" style="flex:1;">' +
+        '</div>';
+    }
+    if (r.op === 'recent_days') {
+      var n = (typeof r.value === 'number' || (typeof r.value === 'string' && r.value !== '')) ? r.value : 7;
+      return '<div style="flex:1;display:flex;gap:6px;align-items:center;">' +
+          '<input type="number" min="1" value="' + escapeAttr(String(n)) + '" onchange="updateRule(' + i + ',\'value\',this.value)" style="width:80px;">' +
+          '<span style="color:var(--text-ghost);font-size:11px;">days</span>' +
+        '</div>';
+    }
+  }
+  return '<input type="text" value="' + escapeAttr(String(r.value == null ? '' : r.value)) + '" onchange="updateRule(' + i + ',\'value\',this.value)" placeholder="value" style="flex:1;">';
+}
+
 function renderRules() {
   var html = '';
   collectionRules.forEach(function(r, i) {
+    var ops = FIELD_OPS[r.field] || [];
+    var opOptions = ops.map(function(op) {
+      var label = OP_LABELS[op] || op;
+      return '<option value="' + escapeAttr(op) + '"' + (r.op===op?' selected':'') + '>' + escapeHtml(label) + '</option>';
+    }).join('');
     html += '<div class="rule-row">' +
       '<select onchange="updateRule(' + i + ',\'field\',this.value)">' +
         '<option value="keyword"' + (r.field==='keyword'?' selected':'') + '>Keyword</option>' +
@@ -1578,24 +1687,9 @@ function renderRules() {
         '<option value="timestamp"' + (r.field==='timestamp'?' selected':'') + '>Date</option>' +
       '</select>' +
       '<select onchange="updateRule(' + i + ',\'op\',this.value)">' +
-        '<option value="is"' + (r.op==='is'?' selected':'') + '>is</option>' +
-        '<option value="is not"' + (r.op==='is not'?' selected':'') + '>is not</option>' +
-        '<option value="contains"' + (r.op==='contains'?' selected':'') + '>contains</option>' +
-        '<option value="not_contains"' + (r.op==='not_contains'?' selected':'') + '>does not contain</option>' +
-        '<option value=">="' + (r.op==='>='?' selected':'') + '>&gt;=</option>' +
-        '<option value="<="' + (r.op==='<='?' selected':'') + '>&lt;=</option>' +
-        '<option value="under"' + (r.op==='under'?' selected':'') + '>under</option>' +
-        '<option value="not_under"' + (r.op==='not_under'?' selected':'') + '>not under</option>' +
+        opOptions +
       '</select>' +
-      (r.field === 'color_label'
-        ? '<select onchange="updateRule(' + i + ',\'value\',this.value)" style="flex:1;">' +
-            '<option value="red"' + (r.value==='red'?' selected':'') + '>Red</option>' +
-            '<option value="yellow"' + (r.value==='yellow'?' selected':'') + '>Yellow</option>' +
-            '<option value="green"' + (r.value==='green'?' selected':'') + '>Green</option>' +
-            '<option value="blue"' + (r.value==='blue'?' selected':'') + '>Blue</option>' +
-            '<option value="purple"' + (r.value==='purple'?' selected':'') + '>Purple</option>' +
-          '</select>'
-        : '<input type="' + (r.field === 'timestamp' ? 'date' : 'text') + '" value="' + escapeAttr(String(r.value)) + '" onchange="updateRule(' + i + ',\'value\',this.value)" placeholder="value" style="flex:1;">') +
+      renderRuleValueInput(r, i) +
       '<span class="remove-rule" onclick="removeRule(' + i + ')">&times;</span>' +
     '</div>';
   });
@@ -1607,10 +1701,19 @@ async function saveCollection() {
   var name = document.getElementById('collectionName').value.trim();
   if (!name) return;
 
-  // Convert string values to numbers where appropriate
+  // Convert string values to numbers / lists where the backend expects them.
+  // See vireo/db.py::_build_collection_query for the per-field/op shapes.
   var rules = collectionRules.map(function(r) {
     var val = r.value;
-    if (r.field === 'rating') val = parseInt(val, 10) || 0;
+    if (r.field === 'rating') {
+      val = parseInt(val, 10) || 0;
+    } else if (r.field === 'timestamp' && r.op === 'recent_days') {
+      val = parseInt(val, 10) || 0;
+    } else if (r.field === 'timestamp' && r.op === 'between') {
+      var from = Array.isArray(val) ? (val[0] || '') : '';
+      var to   = Array.isArray(val) ? (val[1] || '') : '';
+      val = [from, to];
+    }
     return {field: r.field, op: r.op, value: val};
   });
 
