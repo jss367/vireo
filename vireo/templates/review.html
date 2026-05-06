@@ -1522,6 +1522,8 @@ function renderGroupModal() {
 
   document.getElementById('grmCount').textContent = pickItems.length + ' picks, ' + rejectItems.length + ' rejects, ' + candidateItems.length + ' unsorted';
 
+  grmUpdateApplyLabel();
+
   // Re-apply offset indicators and the per-card transforms — cover-fit
   // always needs an explicit transform now that <img>s are laid out at
   // natural source-pixel size. innerHTML wipes inline styles each render.
@@ -2033,6 +2035,19 @@ function grmRemoveFromGroup() {
   renderGroupModal();
 }
 
+function grmUpdateApplyLabel() {
+  var btn = document.getElementById('grmApplyBtn');
+  if (!btn) return;
+  var picks = grmState.picks ? grmState.picks.size : 0;
+  var rejects = grmState.rejects ? grmState.rejects.size : 0;
+  var speciesEl = document.getElementById('grmSpecies');
+  var species = speciesEl ? (speciesEl.value || '').trim() : '';
+  var parts = [];
+  if (picks > 0) parts.push('Flag ' + picks + (species ? ' as ' + species : ''));
+  if (rejects > 0) parts.push('Reject ' + rejects);
+  btn.textContent = parts.length ? parts.join(' · ') + ' & Close' : 'Apply & Close';
+}
+
 async function grmApply() {
   var species = document.getElementById('grmSpecies').value.trim();
   try {
@@ -2131,10 +2146,10 @@ document.addEventListener('keydown', function(e) {
   </div>
   <div class="grm-footer">
     <label style="font-size:12px;color:var(--text-muted,#888);">Consensus species:</label>
-    <input type="text" id="grmSpecies" style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
+    <input type="text" id="grmSpecies" oninput="grmUpdateApplyLabel()" style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
     <button onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary,#14374E);color:var(--text-muted,#888);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
     <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; 1 = 1:1 zoom &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
-    <button onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;">Apply & Close</button>
+    <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;">Apply & Close</button>
   </div>
 </div>
 
