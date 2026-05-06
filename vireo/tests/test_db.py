@@ -10962,3 +10962,36 @@ def test_get_workspace_extensions_skips_null_and_empty(tmp_path):
     db.conn.commit()
 
     assert db.get_workspace_extensions() == ['.jpg']
+
+
+def test_collection_extension_rule_matches_case_insensitively(tmp_path):
+    """Extension rule must match photos regardless of stored case.
+
+    The dropdown only offers lowercased options, but older imports can
+    leave .JPG (mixed case) in the photos table. SQLite's = is
+    case-sensitive, so without LOWER() on both sides a rule saved as
+    .jpg silently misses .JPG photos.
+    """
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='lower.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='upper.JPG', extension='.JPG',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='raw.nef', extension='.nef',
+                 file_size=1, file_mtime=1.0)
+
+    cid = db.add_collection(
+        'JPGs', json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
+    )
+    names = sorted(p['filename'] for p in db.get_collection_photos(cid))
+    assert names == ['lower.jpg', 'upper.JPG']
+
+    cid_not = db.add_collection(
+        'NotJPG', json.dumps([{"field": "extension", "op": "is not", "value": ".jpg"}])
+    )
+    names_not = sorted(p['filename'] for p in db.get_collection_photos(cid_not))
+    assert names_not == ['raw.nef']

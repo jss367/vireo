@@ -8026,11 +8026,16 @@ class Database:
                     conditions.append("p.timestamp >= datetime('now', ?)")
                     params.append(f"-{value} days")
             elif field == "extension":
+                # Match case-insensitively: get_workspace_extensions() returns
+                # lowercased options, but photos imported by older scans may
+                # have stored mixed-case extensions (.JPG vs .jpg). SQLite's
+                # default = / != is case-sensitive, so without LOWER() a
+                # rule saved as ".jpg" would silently miss .JPG rows.
                 if op in ("equals", "is"):
-                    conditions.append("p.extension = ?")
+                    conditions.append("LOWER(p.extension) = LOWER(?)")
                     params.append(value)
                 elif op == "is not":
-                    conditions.append("p.extension != ?")
+                    conditions.append("LOWER(p.extension) != LOWER(?)")
                     params.append(value)
             elif field in (
                 "taxonomy_kingdom",
