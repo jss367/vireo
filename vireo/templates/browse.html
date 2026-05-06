@@ -1540,6 +1540,17 @@ async function showCollectionModal() {
     collectionExtensions = [];
     collectionFolders = [];
   }
+  // Backfill any extension/folder rules added during the await: they got
+  // value '' from defaultValueForRule because the source lists were empty.
+  // After fetch, the <select> visually picks the first option but state
+  // still holds '', so save/preview would run with an empty filter.
+  collectionRules.forEach(function(r) {
+    if (r.field === 'extension' && !r.value) {
+      r.value = collectionExtensions[0] || '';
+    } else if (r.field === 'folder' && !r.value) {
+      r.value = (collectionFolders[0] && collectionFolders[0].path) || '';
+    }
+  });
   // Only seed the initial row if the user hasn't already added one (or
   // dismissed the modal) during the await. Without this guard, a user who
   // clicks "+ Add Rule" while the fetch is in flight gets a phantom
