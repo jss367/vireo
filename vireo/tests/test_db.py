@@ -652,6 +652,26 @@ def test_count_photos_for_rules_rejects_malformed_input(tmp_path):
         db.count_photos_for_rules(
             [{"field": "photo_ids", "op": "is", "value": [1, {"nested": 1}]}]
         )
+    # Scalar-only fields must reject list values; otherwise SQLite raises
+    # ProgrammingError ("type 'list' is not supported") at bind time.
+    for field, op in [
+        ("rating", ">="),
+        ("flag", "is"),
+        ("extension", "is"),
+        ("color_label", "is"),
+    ]:
+        with pytest.raises(ValueError):
+            db.count_photos_for_rules(
+                [{"field": field, "op": op, "value": [1]}]
+            )
+    # ...but list-accepting fields still work.
+    assert db.count_photos_for_rules(
+        [{"field": "photo_ids", "op": "is", "value": [1, 2, 3]}]
+    ) == 0
+    assert db.count_photos_for_rules(
+        [{"field": "timestamp", "op": "between",
+          "value": ["2020-01-01", "2020-12-31"]}]
+    ) == 0
 
 
 def test_collection_untagged_rule(tmp_path):

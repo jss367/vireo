@@ -7812,22 +7812,28 @@ class Database:
         """
         if not isinstance(rules, list):
             raise ValueError("rules must be a list")
+        # Only photo_ids and timestamp/between consume list values; every other
+        # field binds `value` as a single SQL parameter, so a list there raises
+        # sqlite3.ProgrammingError ("type 'list' is not supported"). Without
+        # this distinction the preview route would surface those as 500s on
+        # inputs like {"field":"rating","value":[4]}.
         for r in rules:
             if not isinstance(r, dict) or "field" not in r:
                 raise ValueError("each rule must be an object with a 'field'")
-            # Values are bound directly as SQL parameters, so reject anything
-            # SQLite can't bind (dicts, nested lists). Without this the preview
-            # route would surface a sqlite3.InterfaceError as a 500 on inputs
-            # like {"value": {"foo": 1}}.
+            field = r.get("field")
+            op = r.get("op")
             val = r.get("value")
-            if val is None or isinstance(val, (str, int, float, bool)):
-                continue
+            list_allowed = field == "photo_ids" or (field == "timestamp" and op == "between")
             if isinstance(val, list):
+                if not list_allowed:
+                    raise ValueError(f"rule field {field!r} does not accept a list value")
                 for item in val:
                     if item is not None and not isinstance(item, (str, int, float, bool)):
                         raise ValueError("rule list values must be scalars")
                 continue
-            raise ValueError("rule value must be a scalar or list of scalars")
+            if val is None or isinstance(val, (str, int, float, bool)):
+                continue
+            raise ValueError("rule value must be a scalar")
 
         conditions = []
         params = []
