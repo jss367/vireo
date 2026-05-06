@@ -1467,13 +1467,19 @@ async function filterByCollection(id) {
 var collectionRules = [];
 
 function showCollectionModal() {
+  // Cancel any pending/in-flight preview from a previous session before
+  // resetting state — otherwise a stale response can land on the DOM and
+  // briefly show the previous rule set's count in the freshly opened modal.
+  resetPreviewState();
   collectionRules = [];
+  document.getElementById('rulePreview').textContent = '';
   addRuleRow();
   document.getElementById('collectionName').value = '';
   document.getElementById('collectionModal').classList.add('open');
 }
 
 function hideCollectionModal() {
+  resetPreviewState();
   document.getElementById('collectionModal').classList.remove('open');
 }
 
@@ -1498,6 +1504,63 @@ function updateRule(idx, key, val) {
       collectionRules[idx].op = 'is';
     }
     renderRules();
+  } else {
+    // Field changes already trigger renderRules() above (which schedules a
+    // preview); for op/value changes, just refresh the count.
+    schedulePreviewUpdate();
+  }
+}
+
+/* ---------- Live match-count preview ---------- */
+var _previewTimer = null;
+var _previewSeq = 0;
+
+function schedulePreviewUpdate() {
+  if (_previewTimer) clearTimeout(_previewTimer);
+  _previewTimer = setTimeout(updatePreviewNow, 250);
+}
+
+function resetPreviewState() {
+  // Bump the sequence so any in-flight fetch's response is discarded as
+  // stale, and cancel any pending debounced call. Used when the modal
+  // opens or closes so a previous session can't write into a new one.
+  if (_previewTimer) {
+    clearTimeout(_previewTimer);
+    _previewTimer = null;
+  }
+  _previewSeq++;
+}
+
+async function updatePreviewNow() {
+  _previewTimer = null;
+  var el = document.getElementById('rulePreview');
+  if (!el) return;
+  // An empty rules list is a valid save state — it matches every photo in
+  // the workspace — so we still query the API rather than blanking the
+  // preview text. Otherwise removing all rule rows would hide the count
+  // for what is actually a "match all photos" save.
+  // Coerce numeric fields the same way saveCollection() does, so the
+  // preview matches what would be saved.
+  var rules = collectionRules.map(function(r) {
+    var val = r.value;
+    if (r.field === 'rating') val = parseInt(val, 10) || 0;
+    return {field: r.field, op: r.op, value: val};
+  });
+  var seq = ++_previewSeq;
+  try {
+    var data = await safeFetch('/api/collections/preview', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rules: rules}),
+    }, {toast: false});
+    if (seq !== _previewSeq) return;  // stale response
+    if (data && typeof data.count === 'number') {
+      el.textContent = 'Matches: ' + data.count + ' photo' + (data.count === 1 ? '' : 's');
+    } else {
+      el.textContent = '';
+    }
+  } catch (e) {
+    if (seq === _previewSeq) el.textContent = '';
   }
 }
 
@@ -1537,6 +1600,7 @@ function renderRules() {
     '</div>';
   });
   document.getElementById('ruleRows').innerHTML = html;
+  schedulePreviewUpdate();
 }
 
 async function saveCollection() {

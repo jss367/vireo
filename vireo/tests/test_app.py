@@ -4170,3 +4170,134 @@ def test_save_grouping_defaults_rejects_bad_values(tmp_path, monkeypatch):
         assert _math.isfinite(pipe["tau_enc"])
     if "burst_phash_threshold" in pipe:
         assert isinstance(pipe["burst_phash_threshold"], int)
+
+
+def test_collection_preview_returns_match_count(app_and_db):
+    """POST /api/collections/preview returns the count of photos that
+    would match an unsaved rules list. Powers the smart-collection
+    modal's live "Matches: N photos" readout.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    collections_before = len(db.get_collections())
+
+    # The fixture creates 3 photos; p1 has rating=3, p3 has rating=5.
+    # Empty rules -> all photos in workspace.
+    resp = client.post("/api/collections/preview", json={"rules": []})
+    assert resp.status_code == 200
+    assert resp.get_json()["count"] == 3
+
+    # rating >= 4 -> only p3 (rating=5).
+    resp = client.post(
+        "/api/collections/preview",
+        json={"rules": [{"field": "rating", "op": ">=", "value": 4}]},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["count"] == 1
+
+    # No collection row was persisted as a side effect of previewing.
+    assert len(db.get_collections()) == collections_before
+
+
+def test_collection_preview_rejects_malformed_rules(app_and_db):
+    """Malformed rules return 400, not 500 — the route must not crash on
+    untrusted input from the modal.
+    """
+    app, _db = app_and_db
+    client = app.test_client()
+
+    resp = client.post("/api/collections/preview", json={"rules": "not a list"})
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+    resp = client.post(
+        "/api/collections/preview",
+        json={"rules": [{"op": "is", "value": 5}]},  # missing 'field'
+    )
+    assert resp.status_code == 400
+
+    # A value that SQLite can't bind as a parameter (e.g. a nested object)
+    # must also surface as 400 rather than a 500 from sqlite3.InterfaceError.
+    resp = client.post(
+        "/api/collections/preview",
+        json={"rules": [{"field": "rating", "op": ">=", "value": {"x": 1}}]},
+    )
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+    # Scalar-only fields must reject list values up front; otherwise SQLite
+    # raises ProgrammingError at bind time and the route would 500.
+    for field, op in [("rating", ">="), ("flag", "is"),
+                      ("extension", "is"), ("color_label", "is")]:
+        resp = client.post(
+            "/api/collections/preview",
+            json={"rules": [{"field": field, "op": op, "value": [1]}]},
+        )
+        assert resp.status_code == 400, (
+            f"expected 400 for list value on {field!r}/{op!r}"
+        )
+        assert "error" in resp.get_json()
+
+    # Top-level JSON that isn't an object (list, number, string) must also
+    # return 400 — the route reads `body.get("rules", ...)`, which would
+    # otherwise raise AttributeError and surface as a 500.
+    for bad_body in ([], [1, 2, 3], 5, "hello"):
+        resp = client.post(
+            "/api/collections/preview",
+            json=bad_body,
+        )
+        assert resp.status_code == 400, f"expected 400 for body {bad_body!r}"
+        assert "error" in resp.get_json()
+
+
+def test_collection_preview_rejects_invalid_json(app_and_db):
+    """Syntactically broken JSON returns 400 — silent=True would otherwise
+    coerce it to None and the route would happily return a 200 match count
+    for a request the client never actually made successfully.
+    """
+    app, _db = app_and_db
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/collections/preview",
+        data="{not valid json",
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+    # An empty body, however, is still valid — equivalent to {} — and should
+    # match every photo in the workspace (the same behavior as {"rules": []}).
+    resp = client.post(
+        "/api/collections/preview",
+        data="",
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    assert "count" in resp.get_json()
+
+
+def test_collection_preview_does_not_mask_db_failures(app_and_db, monkeypatch):
+    """Real backend faults from sqlite3 must surface as 5xx — not be
+    rewritten as 400 by the route's exception handler. Catching the base
+    sqlite3.Error here would hide locked-DB / OperationalError incidents.
+    """
+    import sqlite3
+    from db import Database
+
+    app, _db = app_and_db
+    client = app.test_client()
+
+    # Patch the class so the per-request Database instance built by
+    # _get_db() is affected too — the route does not share the fixture's
+    # instance.
+    def boom(self, _rules):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Database, "count_photos_for_rules", boom)
+
+    resp = client.post("/api/collections/preview", json={"rules": []})
+    # Flask's default for an unhandled exception is 500; the important thing
+    # is that it's *not* a 400, which would mislabel a backend fault as a
+    # client error.
+    assert resp.status_code >= 500

@@ -7801,6 +7801,40 @@ class Database:
             return None
 
         rules = json.loads(row["rules"])
+        return self._build_query_from_rules(rules)
+
+    def _build_query_from_rules(self, rules):
+        """Build SQL clauses from a rules list (not yet persisted).
+
+        Returns (folder_join, join_clause, where, params). Raises ValueError on
+        malformed input — callers that accept rules from untrusted sources
+        (e.g. the live-preview API) should catch and surface a 400.
+        """
+        if not isinstance(rules, list):
+            raise ValueError("rules must be a list")
+        # Only photo_ids and timestamp/between consume list values; every other
+        # field binds `value` as a single SQL parameter, so a list there raises
+        # sqlite3.ProgrammingError ("type 'list' is not supported"). Without
+        # this distinction the preview route would surface those as 500s on
+        # inputs like {"field":"rating","value":[4]}.
+        for r in rules:
+            if not isinstance(r, dict) or "field" not in r:
+                raise ValueError("each rule must be an object with a 'field'")
+            field = r.get("field")
+            op = r.get("op")
+            val = r.get("value")
+            list_allowed = field == "photo_ids" or (field == "timestamp" and op == "between")
+            if isinstance(val, list):
+                if not list_allowed:
+                    raise ValueError(f"rule field {field!r} does not accept a list value")
+                for item in val:
+                    if item is not None and not isinstance(item, (str, int, float, bool)):
+                        raise ValueError("rule list values must be scalars")
+                continue
+            if val is None or isinstance(val, (str, int, float, bool)):
+                continue
+            raise ValueError("rule value must be a scalar")
+
         conditions = []
         params = []
         need_keyword_join = False
@@ -8048,6 +8082,22 @@ class Database:
             return 0
 
         folder_join, join_clause, where, params = parts
+        query = f"""
+            SELECT COUNT(DISTINCT p.id) FROM photos p
+            {folder_join}
+            {join_clause}
+            {where}
+        """
+        return self.conn.execute(query, params).fetchone()[0]
+
+    def count_photos_for_rules(self, rules):
+        """Return the number of photos in the active workspace that match
+        an unsaved rules list. Used by the smart-collection modal preview.
+
+        Raises ValueError on malformed input (propagated from
+        ``_build_query_from_rules``).
+        """
+        folder_join, join_clause, where, params = self._build_query_from_rules(rules)
         query = f"""
             SELECT COUNT(DISTINCT p.id) FROM photos p
             {folder_join}
