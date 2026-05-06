@@ -53,6 +53,7 @@ dev = [
     "pytest-timeout>=2.3",
     "pytest-xdist>=3.6",
     "ruff>=0.11",
+    "pre-commit>=3.5",
 ]
 
 [tool.setuptools.packages.find]

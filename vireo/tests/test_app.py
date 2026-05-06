@@ -4283,6 +4283,7 @@ def test_collection_preview_does_not_mask_db_failures(app_and_db, monkeypatch):
     sqlite3.Error here would hide locked-DB / OperationalError incidents.
     """
     import sqlite3
+
     from db import Database
 
     app, _db = app_and_db
