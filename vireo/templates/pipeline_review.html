@@ -1332,12 +1332,18 @@ function grmUpdateResLabel() {
   if (!el) return;
   var stop = GRM_RES_STOPS[grmResolutionIdx];
   var dims = '';
+  var mpStr = '';
   var photo = grmState && grmState.selected
     ? grmState.items.find(function(p) { return p.id === grmState.selected; })
     : (grmState && grmState.items[0]);
   if (photo && photo.width && photo.height) {
     if (stop.kind === 'original') {
       dims = photo.width + '×' + photo.height;
+      // Show megapixels alongside the dimensions so users can tell at a
+      // glance why two shots in the same library zoom to different
+      // "Original" sizes — e.g. Nikon DX-crop ~19 MP vs FX ~45 MP.
+      var mp = (photo.width * photo.height) / 1e6;
+      mpStr = (mp >= 10 ? mp.toFixed(0) : mp.toFixed(1)) + ' MP';
     } else {
       var longest = Math.max(photo.width, photo.height);
       var scale = longest > stop.size ? stop.size / longest : 1;
@@ -1346,7 +1352,8 @@ function grmUpdateResLabel() {
       dims = w + '×' + h;
     }
   }
-  el.textContent = (dims ? dims + ' · ' : stop.label + ' · ') + stop.kind;
+  var prefix = dims ? dims : stop.label;
+  el.textContent = prefix + ' · ' + (mpStr ? mpStr + ' · ' : '') + stop.kind;
 }
 
 function grmSetResolution(idx) {
