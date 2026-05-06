@@ -193,10 +193,8 @@ def _load_raw(path, max_size):
 
     1. Try the embedded JPEG preview; use it if it's big enough for max_size.
     2. Otherwise demosaic via rawpy.postprocess().
-    3. If libraw can't decode this RAW variant (e.g. Nikon HE*/TicoRAW on
-       libraw 0.22), use the embedded JPEG. Modern Nikon bodies write the
-       full camera-output JPEG as the embedded preview, so this is not a
-       degradation — it's the same pixels the camera produced.
+    3. If postprocess raises (e.g. libraw 0.22 can't decode Nikon HE*/TicoRAW),
+       fall back to the embedded JPEG even if smaller than max_size.
     """
     import rawpy
 
@@ -215,10 +213,20 @@ def _load_raw(path, max_size):
             return _postprocess_raw(raw, max_size)
         except Exception as e:
             if embedded is not None:
+                # Only claim "full camera output" when the embedded JPEG
+                # actually matches the sensor's active dimensions (e.g.
+                # Nikon HE*/TicoRAW). For other failures the embedded may
+                # be a smaller preview and the fallback is a real
+                # degradation — don't paper over it.
+                sensor_long = max(raw.sizes.width, raw.sizes.height)
+                embedded_long = max(embedded.size)
+                qualifier = (", full camera output"
+                             if sensor_long and embedded_long >= sensor_long
+                             else "")
                 log.info(
                     "libraw cannot decode %s (%s); using embedded JPEG "
-                    "(%dx%d, full camera output)",
-                    path, e, embedded.size[0], embedded.size[1],
+                    "(%dx%d%s)",
+                    path, e, embedded.size[0], embedded.size[1], qualifier,
                 )
                 return embedded
             raise
