@@ -746,6 +746,63 @@ def test_collection_timestamp_between_subsec(tmp_path):
     assert len(photos) == 2
 
 
+def test_collection_timestamp_rules_match_ui_shape(tmp_path):
+    """Date rule values arrive in the shape the rule modal now serializes:
+    'between' as a [YYYY-MM-DD, YYYY-MM-DD] list, 'recent_days' as an int."""
+    import json
+    from datetime import datetime, timedelta
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+
+    # Five photos spanning more than 30 days, including ones on the bare
+    # date boundaries the UI's <input type="date"> emits.
+    db.add_photo(folder_id=fid, filename='before.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0,
+                 timestamp='2024-06-09T23:59:59')
+    db.add_photo(folder_id=fid, filename='start.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0,
+                 timestamp='2024-06-10T00:00:01')
+    db.add_photo(folder_id=fid, filename='middle.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0,
+                 timestamp='2024-06-15T12:00:00')
+    db.add_photo(folder_id=fid, filename='end.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0,
+                 timestamp='2024-06-20T23:59:59.500000')
+    db.add_photo(folder_id=fid, filename='after.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0,
+                 timestamp='2024-06-21T00:00:01')
+
+    # 'between' with bare YYYY-MM-DD bounds (the literal output of two
+    # <input type="date"> fields). Both endpoints must be inclusive,
+    # including sub-second timestamps on the upper bound.
+    between_rules = [{
+        "field": "timestamp", "op": "between",
+        "value": ["2024-06-10", "2024-06-20"],
+    }]
+    cid_between = db.add_collection('Mid June', json.dumps(between_rules))
+    matched = {p['filename'] for p in db.get_collection_photos(cid_between)}
+    assert matched == {'start.jpg', 'middle.jpg', 'end.jpg'}
+
+    # 'recent_days' with an integer value (the literal output of the
+    # number input + parseInt in saveCollection()).
+    recent_ts = (datetime.now() - timedelta(days=3)).isoformat()
+    old_ts = (datetime.now() - timedelta(days=20)).isoformat()
+    db.add_photo(folder_id=fid, filename='days_recent.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0, timestamp=recent_ts)
+    db.add_photo(folder_id=fid, filename='days_old.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0, timestamp=old_ts)
+
+    recent_rules = [{"field": "timestamp", "op": "recent_days", "value": 7}]
+    cid_recent = db.add_collection('Last week', json.dumps(recent_rules))
+    matched_recent = {p['filename'] for p in db.get_collection_photos(cid_recent)}
+    assert 'days_recent.jpg' in matched_recent
+    assert 'days_old.jpg' not in matched_recent
+
+
 def test_collection_has_species_rule(tmp_path):
     """get_collection_photos filters by has_species rule."""
     import json
