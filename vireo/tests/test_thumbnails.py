@@ -527,3 +527,32 @@ def test_serve_thumbnail_404s_when_source_is_unreadable(tmp_path, monkeypatch):
     client = app.test_client()
     resp = client.get(f"/thumbnails/{pid}.jpg")
     assert resp.status_code == 404
+
+
+def test_serve_thumbnail_404s_for_photo_outside_active_workspace(tmp_path, monkeypatch):
+    """The route must 404 when the photo exists in the DB but its folder
+    isn't linked to the active workspace. Without workspace scoping,
+    ``get_canonical_image_path`` would receive an empty folders dict
+    (``get_folder_tree`` is workspace-scoped) and fall back to a CWD-
+    relative path — which could read or persist a thumbnail derived from
+    an unrelated same-named file on the server. Same-filename collision
+    across workspaces is not exotic: every Lightroom export produces
+    files like ``DSC_0001.jpg``."""
+    app, db, pid, _thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+
+    # Spin up a second workspace that does NOT have the photo's folder
+    # linked, and make it the active one. The photo row still exists,
+    # but it is invisible from this workspace. Persisting
+    # ``last_opened_at`` is what the per-request ``Database`` instance
+    # uses to pick the active workspace on init, so the route inherits
+    # the switch.
+    other_ws = db.create_workspace("Other")
+    db.update_workspace(other_ws, last_opened_at="2030-01-01T00:00:00Z")
+    db.set_active_workspace(other_ws)
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+    assert resp.status_code == 404, (
+        "thumbnail self-heal must not serve a photo that the active "
+        "workspace cannot see"
+    )

@@ -8733,10 +8733,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "", 404
 
         db = _get_db()
-        photo = db.get_photo(photo_id)
+        # Workspace-scoped lookup: a thumbnail URL only makes sense for a
+        # photo the active workspace can actually see. Without this scope,
+        # ``get_canonical_image_path`` would receive an empty folders dict
+        # for a cross-workspace photo and fall back to
+        # ``os.path.join('', photo['filename'])`` — i.e. a path resolved
+        # against the server's CWD — which could read or persist a
+        # thumbnail derived from an unrelated same-named file.
+        photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
-            # Stale URL — the photo was deleted. Caller (e.g. a cached
-            # pipeline_results JSON) is out of sync. 404 is the right
+            # Stale URL — the photo was deleted, or it lives in a folder
+            # that isn't linked to this workspace. 404 is the right
             # answer; cache pruning is the upstream fix (PR #758).
             return "", 404
 
