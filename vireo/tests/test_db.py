@@ -10897,3 +10897,126 @@ def test_set_workspace_group_state_overwrites(tmp_path):
     ).fetchone()
     assert row["last_grouped_at"] == 2
     assert row["last_group_fingerprint"] == "new"
+
+
+def test_get_workspace_extensions_returns_distinct_lowercased(tmp_path):
+    """Extensions are returned distinct, lowercased, sorted, scoped to ws."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='b.JPG', extension='.JPG',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='c.nef', extension='.nef',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='d.cr2', extension='.cr2',
+                 file_size=1, file_mtime=1.0)
+
+    exts = db.get_workspace_extensions()
+    # Lowercased (so .jpg and .JPG collapse), distinct, sorted.
+    assert exts == ['.cr2', '.jpg', '.nef']
+
+
+def test_get_workspace_extensions_scoped_to_active_workspace(tmp_path):
+    """Extensions from another workspace's folders must not leak in."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    default_ws = db._active_workspace_id
+    f_default = db.add_folder('/a', name='a')
+    db.add_photo(folder_id=f_default, filename='x.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    f_other = db.add_folder('/b', name='b')
+    db.add_photo(folder_id=f_other, filename='y.nef', extension='.nef',
+                 file_size=1, file_mtime=1.0)
+
+    # Active = other_ws
+    assert db.get_workspace_extensions() == ['.nef']
+
+    db.set_active_workspace(default_ws)
+    assert db.get_workspace_extensions() == ['.jpg']
+
+
+def test_get_workspace_extensions_skips_null_and_empty(tmp_path):
+    """Photos with NULL/empty extension don't surface as an empty option."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/p', name='p')
+    db.add_photo(folder_id=fid, filename='ok.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    # Force a NULL/empty row directly — add_photo doesn't normally let
+    # this happen but historical scans may have produced rows with no
+    # extension and we don't want them to render as a blank dropdown
+    # option that would silently match nothing in _build_collection_query.
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size, file_mtime) "
+        "VALUES (?, 'no_ext', NULL, 1, 1.0)", (fid,)
+    )
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size, file_mtime) "
+        "VALUES (?, 'empty_ext', '', 1, 1.0)", (fid,)
+    )
+    db.conn.commit()
+
+    assert db.get_workspace_extensions() == ['.jpg']
+
+
+def test_collection_extension_rule_matches_case_insensitively(tmp_path):
+    """Extension rule must match photos regardless of stored case.
+
+    The dropdown only offers lowercased options, but older imports can
+    leave .JPG (mixed case) in the photos table. SQLite's = is
+    case-sensitive, so without LOWER() on both sides a rule saved as
+    .jpg silently misses .JPG photos.
+    """
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='lower.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='upper.JPG', extension='.JPG',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='raw.nef', extension='.nef',
+                 file_size=1, file_mtime=1.0)
+
+    cid = db.add_collection(
+        'JPGs', json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
+    )
+    names = sorted(p['filename'] for p in db.get_collection_photos(cid))
+    assert names == ['lower.jpg', 'upper.JPG']
+
+    cid_not = db.add_collection(
+        'NotJPG', json.dumps([{"field": "extension", "op": "is not", "value": ".jpg"}])
+    )
+    names_not = sorted(p['filename'] for p in db.get_collection_photos(cid_not))
+    assert names_not == ['raw.nef']
+
+
+def test_get_workspace_extensions_excludes_missing_folders(tmp_path):
+    """An extension only present in a missing folder must not appear in the
+    dropdown.
+
+    `_build_collection_query` joins folders with `status IN ('ok',
+    'partial')`, so an extension surfaced from a missing-folder photo
+    would silently match zero rows when used in a rule — exactly the
+    failure mode this dropdown exists to prevent.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid_ok = db.add_folder('/ok', name='ok')
+    fid_gone = db.add_folder('/gone', name='gone')
+    db.add_photo(folder_id=fid_ok, filename='a.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid_gone, filename='b.cr2', extension='.cr2',
+                 file_size=1, file_mtime=1.0)
+
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_gone,))
+    db.conn.commit()
+
+    # .cr2 lives only in the missing folder — must be filtered out.
+    assert db.get_workspace_extensions() == ['.jpg']

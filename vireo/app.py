@@ -1281,6 +1281,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         folders = db.get_folder_tree()
         return jsonify([dict(f) for f in folders])
 
+    @app.route("/api/photos/extensions")
+    def api_photos_extensions():
+        """Return the distinct lowercased file extensions present in the
+        active workspace, sorted.
+
+        The smart-collection rule editor uses this to populate the value
+        dropdown for the Extension field. Free-text was silent-failure
+        prone — typing ``JPG`` matched nothing because rows are stored as
+        ``.jpg``.
+        """
+        db = _get_db()
+        return jsonify(db.get_workspace_extensions())
+
     @app.route("/api/folders/missing")
     def api_folders_missing():
         db = _get_db()
