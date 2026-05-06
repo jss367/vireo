@@ -1540,7 +1540,19 @@ async function showCollectionModal() {
     collectionExtensions = [];
     collectionFolders = [];
   }
-  addRuleRow();
+  // Only seed the initial row if the user hasn't already added one (or
+  // dismissed the modal) during the await. Without this guard, a user who
+  // clicks "+ Add Rule" while the fetch is in flight gets a phantom
+  // keyword/contains/"" row tacked on when fetches resolve, silently
+  // changing the saved collection's semantics.
+  if (collectionRules.length === 0 &&
+      document.getElementById('collectionModal').classList.contains('open')) {
+    addRuleRow();
+  } else {
+    // Re-render so any rows added during the await (which were drawn with
+    // empty extension/folder dropdowns) pick up the freshly-fetched data.
+    renderRules();
+  }
 }
 
 function hideCollectionModal() {
