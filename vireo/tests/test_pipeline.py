@@ -429,6 +429,64 @@ def test_prune_results_empty_id_list(tmp_path):
     assert os.path.getmtime(path) == mtime
 
 
+# -- prune_missing_photos --
+
+
+def _make_db_with_ids(tmp_path, ids):
+    """Create a minimal Database with photo rows whose ids match ``ids``."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    for pid in ids:
+        # add_photo auto-assigns id, so we override via raw SQL after
+        # insertion to pin the row to the desired id.
+        actual = db.add_photo(fid, f"p{pid}.jpg", ".jpg", 1000, 1.0)
+        if actual != pid:
+            db.conn.execute("UPDATE photos SET id=? WHERE id=?", (pid, actual))
+    db.conn.commit()
+    return db
+
+
+def test_prune_missing_photos_drops_deleted_ids(tmp_path):
+    """IDs in the cache but absent from the photos table are pruned."""
+    from pipeline import load_results, prune_missing_photos
+
+    _write_cache(str(tmp_path), 1, _sample_cache())
+    # photos table has only ids {1, 3}; cache references {1..5}
+    db = _make_db_with_ids(tmp_path, [1, 3])
+
+    changed = prune_missing_photos(str(tmp_path), 1, db)
+    assert changed is True
+
+    loaded = load_results(str(tmp_path), 1)
+    assert [p["id"] for p in loaded["photos"]] == [1, 3]
+    assert loaded["encounters"][0]["photo_ids"] == [1, 3]
+    # second encounter (ids 4, 5) is fully gone
+    assert len(loaded["encounters"]) == 1
+
+
+def test_prune_missing_photos_noop_when_all_present(tmp_path):
+    """If every cached id exists in the DB, the cache is untouched."""
+    from pipeline import prune_missing_photos
+
+    path = _write_cache(str(tmp_path), 1, _sample_cache())
+    mtime = os.path.getmtime(path)
+    db = _make_db_with_ids(tmp_path, [1, 2, 3, 4, 5])
+
+    changed = prune_missing_photos(str(tmp_path), 1, db)
+    assert changed is False
+    assert os.path.getmtime(path) == mtime
+
+
+def test_prune_missing_photos_no_cache_is_noop(tmp_path):
+    """No cache file → returns False, does not raise."""
+    from pipeline import prune_missing_photos
+
+    db = _make_db_with_ids(tmp_path, [1])
+    assert prune_missing_photos(str(tmp_path), 999, db) is False
+
+
 # -- compute_review_readiness --
 
 

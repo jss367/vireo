@@ -8697,34 +8697,89 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/thumbnails/<filename>")
     def serve_thumbnail(filename):
+        """Serve a 400px JPEG thumbnail for a photo, regenerating on miss.
+
+        Self-heal: if the thumbnail file is missing on disk but the photo
+        still exists in the database, we (re)generate the thumbnail in
+        the request thread, persist ``photos.thumb_path`` so the coverage
+        dashboard sees it, and serve it. The user never sees a broken
+        image when the source is recoverable — matching the project's
+        "no rm -rf fixes; the app self-heals" rule.
+
+        404s remain when:
+          * the filename isn't ``<int>.jpg`` (malformed request);
+          * the photo no longer exists in the DB (stale cache from a
+            previous delete — handled by ``pipeline.prune_results``
+            going forward);
+          * the source image is unreadable (e.g. RAW decode failure).
+            ``generate_thumbnail`` already logs the underlying cause.
+        """
         def _send_cached(directory, fname):
             resp = make_response(send_from_directory(directory, fname))
             resp.cache_control.public = True
             resp.cache_control.max_age = 24 * 60 * 60  # 1 day
             return resp
 
-        thumb_path = os.path.join(app.config["THUMB_CACHE_DIR"], filename)
+        thumb_dir = app.config["THUMB_CACHE_DIR"]
+        thumb_path = os.path.join(thumb_dir, filename)
         if os.path.exists(thumb_path):
-            return _send_cached(app.config["THUMB_CACHE_DIR"], filename)
+            return _send_cached(thumb_dir, filename)
 
-        # Try to generate on the fly
+        # Self-heal path: regenerate on miss when the photo still exists.
         try:
             photo_id = int(filename.replace(".jpg", ""))
-            db = _get_db()
-            photo = db.conn.execute(
-                "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
-                (photo_id,),
-            ).fetchone()
-            if photo:
-                from thumbnails import generate_thumbnail
-                source = os.path.join(photo["path"], photo["filename"])
-                result = generate_thumbnail(photo_id, source, app.config["THUMB_CACHE_DIR"])
-                if result:
-                    return _send_cached(app.config["THUMB_CACHE_DIR"], filename)
-        except Exception:
-            pass
+        except ValueError:
+            log.warning("Thumbnail request with non-numeric filename: %s", filename)
+            return "", 404
 
-        return "", 404
+        db = _get_db()
+        photo = db.get_photo(photo_id)
+        if not photo:
+            # Stale URL — the photo was deleted. Caller (e.g. a cached
+            # pipeline_results JSON) is out of sync. 404 is the right
+            # answer; cache pruning is the upstream fix (PR #758).
+            return "", 404
+
+        # Resolve source via the canonical-path helper so we prefer the
+        # JPEG working copy over the original RAW. This makes the
+        # self-heal work for cameras whose RAW format libraw cannot
+        # decode (the working copy was extracted from the embedded JPEG
+        # at scan time).
+        from image_loader import get_canonical_image_path
+        from thumbnails import generate_thumbnail
+        vireo_dir = os.path.dirname(thumb_dir)
+        folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+        try:
+            source = get_canonical_image_path(photo, vireo_dir, folders)
+            result = generate_thumbnail(photo_id, source, thumb_dir)
+        except Exception:
+            log.exception(
+                "Thumbnail self-heal failed for photo %s (source=%s)",
+                photo_id, photo["filename"],
+            )
+            return "", 404
+
+        if not result:
+            # generate_thumbnail logged the reason (unreadable source,
+            # unsupported format, etc.). Nothing else to do here.
+            return "", 404
+
+        # Persist on-disk presence so the dashboard's coverage query
+        # (`thumb_path IS NOT NULL`) reflects this regeneration. Stored
+        # value is the bare filename, matching ``thumbnails.generate_all``.
+        try:
+            db.conn.execute(
+                "UPDATE photos SET thumb_path=? WHERE id=?",
+                (f"{photo_id}.jpg", photo_id),
+            )
+            db.conn.commit()
+        except Exception:
+            # Coverage column drift is recoverable via the backfill job;
+            # don't fail the request if the UPDATE racks up a transient
+            # SQLite error.
+            log.exception("Failed to persist thumb_path for photo %s", photo_id)
+
+        return _send_cached(thumb_dir, filename)
 
     @app.route("/api/species/<path:species_name>/clusters")
     def api_species_clusters(species_name):
@@ -9957,10 +10012,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/pipeline/results")
     def api_pipeline_results():
         """Return the most recent pipeline triage results for the active workspace."""
-        from pipeline import load_results
+        from pipeline import load_results, prune_missing_photos
 
         db = _get_db()
         cache_dir = os.path.dirname(db_path)
+        # Self-heal: caches written before commit 5ad83fa (which wired
+        # cache pruning into db.delete_photos) can still reference photos
+        # that were deleted afterwards through other paths. Reconcile
+        # against the DB at read time so the review page never renders
+        # orphan cards that 404 on /thumbnails/<id>.jpg.
+        prune_missing_photos(cache_dir, db._active_workspace_id, db)
         results = load_results(cache_dir, db._active_workspace_id)
         if results is None:
             return json_error("No pipeline results found. Run regroup first.", 404)

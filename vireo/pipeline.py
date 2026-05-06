@@ -664,6 +664,43 @@ def load_results(cache_dir, workspace_id):
         return json.load(f)
 
 
+def prune_missing_photos(cache_dir, workspace_id, db):
+    """Self-heal pass: drop cached photo IDs that no longer exist in the DB.
+
+    The pipeline review page renders a card per cached photo and requests
+    ``/thumbnails/<id>.jpg`` for each. When a photo was deleted before
+    ``prune_results`` was wired into ``db.delete_photos`` (commit 5ad83fa),
+    the cache file kept its ID, the page rendered an orphan card, and the
+    thumbnail route correctly 404'd because the photo row is gone. Reading
+    the cache should therefore reconcile against the DB and quietly drop
+    IDs that are no longer present, so an old cache converges to clean
+    state on the next read.
+
+    Returns True if the cache was rewritten, False otherwise.
+    """
+    path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
+    if not os.path.exists(path):
+        return False
+    with open(path) as f:
+        data = json.load(f)
+    cached_ids = [p.get("id") for p in data.get("photos", []) if p.get("id") is not None]
+    if not cached_ids:
+        return False
+    placeholders = ",".join("?" * len(cached_ids))
+    rows = db.conn.execute(
+        f"SELECT id FROM photos WHERE id IN ({placeholders})", cached_ids
+    ).fetchall()
+    present = {row["id"] for row in rows}
+    missing = [pid for pid in cached_ids if pid not in present]
+    if not missing:
+        return False
+    log.info(
+        "Pipeline cache for ws%s references %d deleted photo(s); pruning",
+        workspace_id, len(missing),
+    )
+    return prune_results(cache_dir, workspace_id, missing)
+
+
 def prune_results(cache_dir, workspace_id, deleted_ids):
     """Remove deleted photo IDs from the cached pipeline results in place.
 

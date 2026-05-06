@@ -337,3 +337,193 @@ def test_thumb_path_backfill_candidate_count_counts_unsynced(tmp_path):
     db.conn.commit()
 
     assert thumb_path_backfill_candidate_count(db, cache_dir) == 2
+
+
+# -- Route-level self-heal tests --
+#
+# The /thumbnails/<id>.jpg route must regenerate on miss instead of
+# 404-ing whenever the photo still exists in the DB and the source
+# image is readable. A blank card on the encounter grid is a UX
+# black-box (CORE_PHILOSOPHY: no black boxes), and the project's
+# self-healing-app rule (feedback_self_healing_app.md) says the app
+# should detect and repair broken cache state, not surface it.
+
+def _make_app_with_real_photo(tmp_path, monkeypatch, filename="bird.jpg"):
+    """Build a Flask app + DB with one real photo whose source file exists.
+
+    Returns (app, db, photo_id, thumb_dir).
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(
+        models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"),
+    )
+    monkeypatch.setattr(
+        models, "CONFIG_PATH", str(tmp_path / "models.json"),
+    )
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src = photos_dir / filename
+    Image.new("RGB", (800, 600), (180, 90, 40)).save(str(src), "JPEG", quality=85)
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename=filename, extension=".jpg",
+        file_size=os.path.getsize(src),
+        file_mtime=os.path.getmtime(src),
+        width=800, height=600,
+    )
+
+    app = create_app(
+        db_path=db_path, thumb_cache_dir=str(thumb_dir),
+        api_token="test-token-123",
+    )
+    return app, db, pid, str(thumb_dir)
+
+
+def test_serve_thumbnail_regenerates_on_cache_miss(tmp_path, monkeypatch):
+    """When the thumbnail JPEG is missing on disk but the photo exists,
+    the route must regenerate it and serve it — never 404 — and the
+    file must persist for next time. This is the encounter-grid card
+    self-heal path: a wiped or never-populated cache should not leave
+    blank tiles."""
+    app, db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+    thumb_file = os.path.join(thumb_dir, f"{pid}.jpg")
+    assert not os.path.exists(thumb_file), "precondition: cache miss"
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 200, (
+        f"thumbnail route should self-heal on miss, got {resp.status_code}"
+    )
+    assert resp.mimetype in ("image/jpeg", "image/jpg")
+    # Body must be a real JPEG (SOI marker = FF D8).
+    assert resp.data[:2] == b"\xff\xd8", "response body is not a JPEG"
+
+    # Persisted: the file is now on disk for future requests.
+    assert os.path.exists(thumb_file), "regenerated thumbnail must be saved to disk"
+
+    # And photos.thumb_path is set so the dashboard's coverage query
+    # reflects the heal.
+    row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id=?", (pid,)
+    ).fetchone()
+    assert row["thumb_path"] == f"{pid}.jpg"
+
+
+def test_serve_thumbnail_serves_cached_without_regenerating(tmp_path, monkeypatch):
+    """When the file is already on disk, the route must not re-decode the
+    source — that would burn CPU on every encounter-grid scroll."""
+    app, _db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+
+    # Pre-populate with a sentinel image whose bytes we recognise.
+    thumb_file = os.path.join(thumb_dir, f"{pid}.jpg")
+    Image.new("RGB", (50, 50), (1, 2, 3)).save(thumb_file, "JPEG", quality=70)
+    sentinel_size = os.path.getsize(thumb_file)
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 200
+    # The cached file must have been served unmodified.
+    assert os.path.getsize(thumb_file) == sentinel_size
+
+
+def test_serve_thumbnail_404s_for_deleted_photo(tmp_path, monkeypatch):
+    """When the photo is gone from the DB (stale URL from a cached
+    pipeline_results JSON), the route correctly 404s. There is nothing
+    to regenerate."""
+    app, db, pid, _thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+    db.conn.execute("DELETE FROM photos WHERE id=?", (pid,))
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 404
+
+
+def test_serve_thumbnail_404s_for_non_numeric_filename(tmp_path, monkeypatch):
+    """Garbage URLs (e.g. /thumbnails/foo.jpg) must 404 cleanly without
+    raising — defends the route against arbitrary path probes."""
+    app, *_ = _make_app_with_real_photo(tmp_path, monkeypatch)
+    client = app.test_client()
+    resp = client.get("/thumbnails/not-a-number.jpg")
+    assert resp.status_code == 404
+
+
+def test_serve_thumbnail_prefers_working_copy_over_source(tmp_path, monkeypatch):
+    """When a working copy exists, the self-heal must use it instead of
+    the original. This matters for RAW formats whose original cannot be
+    decoded by libraw — the working copy was extracted from the embedded
+    JPEG at scan time and is the only readable source."""
+    app, db, pid, thumb_dir = _make_app_with_real_photo(
+        tmp_path, monkeypatch, filename="bird.jpg",
+    )
+
+    # Replace the original on disk with garbage so any attempt to decode
+    # it fails. The working copy is the only readable source.
+    photos_row = db.conn.execute(
+        "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (pid,),
+    ).fetchone()
+    original_path = os.path.join(photos_row["path"], photos_row["filename"])
+    with open(original_path, "wb") as f:
+        f.write(b"not a real image")
+
+    # Stage a working copy at the canonical location.
+    vireo_dir = os.path.dirname(thumb_dir)
+    wc_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(wc_dir, exist_ok=True)
+    wc_path = os.path.join(wc_dir, f"{pid}.jpg")
+    Image.new("RGB", (1024, 768), (50, 200, 50)).save(wc_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{pid}.jpg", pid),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 200, (
+        "self-heal should fall through to the working copy when the "
+        "original is unreadable"
+    )
+    assert resp.data[:2] == b"\xff\xd8"
+    assert os.path.exists(os.path.join(thumb_dir, f"{pid}.jpg"))
+
+
+def test_serve_thumbnail_404s_when_source_is_unreadable(tmp_path, monkeypatch):
+    """When neither the original nor a working copy is readable, the
+    route must 404 (not 500). generate_thumbnail logs the cause."""
+    app, db, pid, _thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+
+    # Make the only source unreadable.
+    photos_row = db.conn.execute(
+        "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (pid,),
+    ).fetchone()
+    original_path = os.path.join(photos_row["path"], photos_row["filename"])
+    with open(original_path, "wb") as f:
+        f.write(b"not a real image")
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+    assert resp.status_code == 404
