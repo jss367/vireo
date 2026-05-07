@@ -2581,13 +2581,37 @@ class Database:
         ).fetchone()[0]
 
     def count_keywords(self):
-        """Return count of keywords used by photos in the active workspace."""
+        """Return count of keywords used by photos in the active workspace.
+
+        Filters out keywords whose only photos sit in folders flagged
+        ``'missing'``. For the dashboard's headline (which must agree with
+        the unfiltered top_keywords chart in ``get_dashboard_stats``), use
+        ``count_keywords_in_workspace`` instead.
+        """
         return self.conn.execute(
             """SELECT COUNT(DISTINCT pk.keyword_id)
                FROM photo_keywords pk
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+               WHERE wf.workspace_id = ?""",
+            (self._ws_id(),),
+        ).fetchone()[0]
+
+    def count_keywords_in_workspace(self):
+        """Return count of keywords used by photos in the active workspace,
+        including photos in folders flagged ``'missing'``.
+
+        Pairs with the unfiltered ``top_keywords`` query in
+        ``get_dashboard_stats`` so the dashboard's Keywords headline can't
+        disagree with the Top Species / Other Keywords charts when a drive
+        is unmounted (e.g. headline says 0 while charts list keywords).
+        """
+        return self.conn.execute(
+            """SELECT COUNT(DISTINCT pk.keyword_id)
+               FROM photo_keywords pk
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                WHERE wf.workspace_id = ?""",
             (self._ws_id(),),
         ).fetchone()[0]

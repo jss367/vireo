@@ -7030,13 +7030,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # stays honest when an external drive is unmounted instead of
         # collapsing to 0. ``accessible_photo_count`` is the actionable
         # subset; when it's lower, the dashboard surfaces the gap.
+        # ``keyword_count`` likewise reports inventory-wide so the Keywords
+        # card agrees with the Top Species / Other Keywords charts (which
+        # also count photos in missing folders).
         return jsonify(
             {
                 "photo_count": db.count_photos_in_workspace(),
                 "accessible_photo_count": db.count_photos(),
                 "missing_folder_count": len(db.get_missing_folders()),
                 "folder_count": db.count_folders(),
-                "keyword_count": db.count_keywords(),
+                "keyword_count": db.count_keywords_in_workspace(),
                 "pending_changes": db.count_pending_changes(),
                 "db_size": db_size,
                 "thumb_cache_size": thumb_size,

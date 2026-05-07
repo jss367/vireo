@@ -5524,6 +5524,37 @@ def test_count_photos_in_workspace_includes_missing(tmp_path):
     assert db.count_photos_in_workspace() == 2
 
 
+def test_count_keywords_in_workspace_includes_missing(tmp_path):
+    """count_keywords_in_workspace counts keywords regardless of folder
+    status, so the dashboard's Keywords headline agrees with its Top
+    Species / Other Keywords charts (both populated from photos in any
+    folder, including 'missing'). Without this, the two widgets contradict
+    each other on the same page when a drive unmounts.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=1000, file_mtime=1.0)
+    k1 = db.add_keyword("Cardinal")
+    k2 = db.add_keyword("Sparrow")
+    db.tag_photo(pid, k1)
+    db.tag_photo(pid, k2)
+
+    assert db.count_keywords() == 2
+    assert db.count_keywords_in_workspace() == 2
+
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    # count_keywords filters missing folders; the inventory-wide count does not
+    assert db.count_keywords() == 0
+    assert db.count_keywords_in_workspace() == 2
+
+
 def test_count_photos_in_workspace_scoped_to_active_workspace(tmp_path):
     """count_photos_in_workspace is workspace-scoped — photos in other
     workspaces' folders don't bleed into the count.

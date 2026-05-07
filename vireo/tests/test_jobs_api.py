@@ -193,6 +193,12 @@ def test_scan_status_photo_count_includes_missing_folders(app_and_db):
         "headline photo_count must reflect inventory, not just accessible"
     assert after['accessible_photo_count'] == 0
     assert after['missing_folder_count'] >= 1
+    # Keywords headline must agree with the dashboard's top_keywords chart
+    # (which also includes photos in missing folders). The fixture tags two
+    # keywords on photos that all sit in folders we just flagged 'missing',
+    # so the unfiltered count should still see them.
+    assert after['keyword_count'] == base['keyword_count'], \
+        "keyword_count must be inventory-wide, not accessible-only"
 
 
 def test_ingest_job_starts(app_and_db, tmp_path):
