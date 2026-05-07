@@ -2538,11 +2538,35 @@ class Database:
         return {row["id"]: row for row in rows}
 
     def count_photos(self):
-        """Return photo count for the active workspace."""
+        """Return photo count for the active workspace.
+
+        Filters out photos whose folder is flagged ``'missing'`` so callers
+        like browse/cull/move see only photos they can actually act on. For
+        a total inventory that survives an unmounted drive (e.g. the
+        dashboard's headline number), use ``count_photos_in_workspace``.
+        """
         return self.conn.execute(
             """SELECT COUNT(*) FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+               WHERE wf.workspace_id = ?""",
+            (self._ws_id(),),
+        ).fetchone()[0]
+
+    def count_photos_in_workspace(self):
+        """Return total photo count for the active workspace, including
+        photos in folders flagged ``'missing'``.
+
+        The dashboard wants this number — when a drive unmounts, the photos
+        are still part of the workspace's inventory, just temporarily
+        inaccessible. Falling back to ``count_photos`` (which filters out
+        missing folders) makes the dashboard say "0 photos" for an
+        established workspace, hiding the fact that the data is fine and
+        only the volume is offline.
+        """
+        return self.conn.execute(
+            """SELECT COUNT(*) FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                WHERE wf.workspace_id = ?""",
             (self._ws_id(),),
         ).fetchone()[0]
@@ -3235,13 +3259,17 @@ class Database:
             "detector_confidence", 0.2
         )
 
+        # The four pure-metadata aggregates below (top_keywords,
+        # photos_by_month, rating_dist, flag_dist) intentionally don't filter
+        # on folder status. They read DB-resident metadata that doesn't depend
+        # on disk access, so an unmounted drive shouldn't blank the charts —
+        # the dashboard should still describe the full workspace inventory.
         top_keywords = self.conn.execute(
             """SELECT k.name, k.is_species, COUNT(pk.photo_id) as photo_count
                FROM keywords k
                JOIN photo_keywords pk ON pk.keyword_id = k.id
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
                GROUP BY k.id
                ORDER BY photo_count DESC
@@ -3253,7 +3281,6 @@ class Database:
             """SELECT substr(p.timestamp, 1, 7) as month, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE p.timestamp IS NOT NULL AND wf.workspace_id = ?
             GROUP BY month
             ORDER BY month""",
@@ -3264,7 +3291,6 @@ class Database:
             """SELECT p.rating, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ?
             GROUP BY p.rating
             ORDER BY p.rating""",
@@ -3275,7 +3301,6 @@ class Database:
             """SELECT p.flag, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ?
             GROUP BY p.flag""",
             (ws,),
@@ -3333,11 +3358,12 @@ class Database:
             (ws, min_conf),
         ).fetchone()[0]
 
+        # photos_by_hour and quality_dist are also pure-metadata aggregates;
+        # see the comment above the top_keywords block for the rationale.
         photos_by_hour = self.conn.execute(
             """SELECT CAST(substr(p.timestamp, 12, 2) AS INTEGER) as hour, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE p.timestamp IS NOT NULL AND length(p.timestamp) >= 13 AND wf.workspace_id = ?
             GROUP BY hour
             ORDER BY hour""",
@@ -3353,7 +3379,6 @@ class Database:
                 COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ?
             GROUP BY bucket
             ORDER BY bucket""",
@@ -3361,12 +3386,16 @@ class Database:
         ).fetchall()
 
         # min_conf already hoisted at top of get_dashboard_stats.
+        # No folder-status filter — detections persist in the DB regardless
+        # of disk presence, and prediction_status / classified_count above
+        # don't filter either, so detected_count must match to keep the
+        # dashboard's classified-vs-detected ratio internally consistent
+        # when a folder is offline.
         detected_count = self.conn.execute(
             """SELECT COUNT(DISTINCT d.photo_id)
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
                  AND d.detector_confidence >= ?""",
             (ws, min_conf),

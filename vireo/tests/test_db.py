@@ -5493,6 +5493,94 @@ def test_missing_folder_photos_hidden_from_browse(tmp_path):
     assert photos[0]["filename"] == "visible.jpg"
 
 
+def test_count_photos_in_workspace_includes_missing(tmp_path):
+    """count_photos_in_workspace counts photos regardless of folder status,
+    so the dashboard's headline total stays honest when a drive unmounts.
+
+    count_photos() filters to ok/partial folders (right for browse/cull/etc.,
+    where you can only act on accessible photos). The dashboard wants the
+    full inventory, including photos whose folders are temporarily offline.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid_ok = db.add_folder("/ok/folder", name="ok")
+    fid_gone = db.add_folder("/gone/folder", name="gone")
+    db.add_photo(folder_id=fid_ok, filename="visible.jpg", extension=".jpg",
+                 file_size=1000, file_mtime=1.0)
+    db.add_photo(folder_id=fid_gone, filename="hidden.jpg", extension=".jpg",
+                 file_size=1000, file_mtime=1.0)
+
+    assert db.count_photos() == 2
+    assert db.count_photos_in_workspace() == 2
+
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_gone,))
+    db.conn.commit()
+
+    # count_photos hides missing-folder photos, but the total inventory does not
+    assert db.count_photos() == 1
+    assert db.count_photos_in_workspace() == 2
+
+
+def test_count_photos_in_workspace_scoped_to_active_workspace(tmp_path):
+    """count_photos_in_workspace is workspace-scoped — photos in other
+    workspaces' folders don't bleed into the count.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    ws_b = db.create_workspace("OtherWS")
+
+    db.set_active_workspace(ws_a)
+    fid = db.add_folder("/some/folder", name="folder")
+    db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                 file_size=1000, file_mtime=1.0)
+
+    assert db.count_photos_in_workspace() == 1
+    db.set_active_workspace(ws_b)
+    assert db.count_photos_in_workspace() == 0
+
+
+def test_dashboard_stats_metadata_survives_missing_folders(tmp_path):
+    """get_dashboard_stats's pure-DB aggregates (top_keywords, photos_by_month,
+    rating_dist, flag_dist) read metadata that doesn't depend on disk access,
+    so they should still populate when folders are flagged 'missing'. Without
+    this, unmounting a drive blanks the entire stats page even though all the
+    underlying data is still in the database.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid = db.add_folder("/photos", name="photos")
+    p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                      file_size=1000, file_mtime=1.0,
+                      timestamp="2024-01-15T12:00:00")
+    p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                      file_size=1000, file_mtime=1.0,
+                      timestamp="2024-02-15T12:00:00")
+    db.update_photo_rating(p1, 4)
+    db.update_photo_rating(p2, 3)
+
+    # Sanity: stats populated when folder is ok.
+    stats = db.get_dashboard_stats()
+    assert len(stats["photos_by_month"]) == 2
+    assert len(stats["rating_distribution"]) >= 1
+
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    # Metadata aggregates still populated — they don't depend on disk presence.
+    stats = db.get_dashboard_stats()
+    assert len(stats["photos_by_month"]) == 2, \
+        "photos_by_month went empty when folder marked missing"
+    assert len(stats["rating_distribution"]) >= 1, \
+        "rating_distribution went empty when folder marked missing"
+
+
 def test_missing_folder_hidden_from_folder_tree(tmp_path):
     """Missing folders don't appear in get_folder_tree."""
     from db import Database

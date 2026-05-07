@@ -185,6 +185,7 @@ body { padding-bottom: 36px; }
       <div class="stat-card">
         <div class="stat-number" id="photoCount">-</div>
         <div class="stat-label">Photos</div>
+        <div id="offlinePhotoNote" style="display:none;font-size:11px;color:var(--warning);margin-top:4px;line-height:1.3;"></div>
       </div>
       <div class="stat-card" id="folderCard" style="cursor:pointer;" onclick="toggleFolderDetail()">
         <div class="stat-number" id="folderCount">-</div>
@@ -373,16 +374,42 @@ async function loadCoverage() {
   try {
     var data = await safeFetch('/api/coverage', {}, { toast: false });
     _coverageFolders = data.folders || [];
-    renderCoverage(container, data.overall || {total: 0});
+    var overall = data.overall || {total: 0};
+    // When ``overall.total`` is 0, we need to know whether the workspace
+    // is genuinely empty or whether all its folders are offline so we
+    // can pick the right empty-state copy. ``/api/scan/status`` carries
+    // that signal; only pay for the extra fetch on the empty branch.
+    var offlineCtx = null;
+    if ((overall.total || 0) === 0) {
+      try {
+        var status = await safeFetch('/api/scan/status', {}, { toast: false });
+        if ((status.photo_count || 0) > 0 && (status.missing_folder_count || 0) > 0) {
+          offlineCtx = {
+            offline_photos: (status.photo_count || 0) - (status.accessible_photo_count || 0),
+            missing_folders: status.missing_folder_count || 0,
+          };
+        }
+      } catch (_) { /* fall through to default empty-state */ }
+    }
+    renderCoverage(container, overall, offlineCtx);
   } catch(e) {
     container.innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load coverage.</span>';
   }
 }
 
-function renderCoverage(container, stats) {
+function renderCoverage(container, stats, offlineCtx) {
   var total = stats.total || 0;
   if (total === 0) {
-    container.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No photos in this workspace.</span>';
+    // ``stats.total`` counts photos in 'ok'/'partial' folders only, so it
+    // hits 0 both for an empty workspace and for one whose folders are
+    // entirely offline. ``offlineCtx`` (set by ``loadCoverage`` when
+    // ``/api/scan/status`` shows missing folders) disambiguates so the
+    // empty-state copy doesn't contradict the headline.
+    container.innerHTML = offlineCtx
+      ? '<span style="color:var(--text-ghost);font-size:13px;">'
+        + offlineCtx.offline_photos.toLocaleString()
+        + ' photos are in offline folders — mount the storage to see processing coverage.</span>'
+      : '<span style="color:var(--text-ghost);font-size:13px;">No photos in this workspace.</span>';
     return;
   }
   var html = '';
@@ -844,6 +871,22 @@ async function loadDashboard() {
     document.getElementById('folderCount').textContent = d.folder_count.toLocaleString();
     document.getElementById('keywordCount').textContent = d.keyword_count.toLocaleString();
     document.getElementById('pendingCount').textContent = d.pending_changes.toLocaleString();
+
+    // When some photos sit in offline (unmounted) folders, the headline count
+    // now includes them — surface the gap explicitly so the user knows why
+    // coverage bars dipped and what to mount to bring them back online.
+    var note = document.getElementById('offlinePhotoNote');
+    var total = d.photo_count || 0;
+    var accessible = (typeof d.accessible_photo_count === 'number') ? d.accessible_photo_count : total;
+    var missingFolders = d.missing_folder_count || 0;
+    if (accessible < total && missingFolders > 0) {
+      var offline = total - accessible;
+      var fs = missingFolders === 1 ? '' : 's';
+      note.textContent = offline.toLocaleString() + ' in ' + missingFolders + ' offline folder' + fs;
+      note.style.display = 'block';
+    } else {
+      note.style.display = 'none';
+    }
   } catch(e) {}
 }
 
