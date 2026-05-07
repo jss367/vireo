@@ -2894,8 +2894,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             })
 
         # Stale: a (current model, fingerprint) in the DB whose fingerprint
-        # is not currently on disk and isn't TOL.
+        # is not currently on disk and isn't TOL. Single-file fingerprints
+        # come from the label_sets above; merged-set fingerprints come from
+        # the labels_fingerprints sidecar (one row per distinct merge the
+        # classify job has ever produced). A merged row is current if all
+        # its sources still exist and re-merging them reproduces the same
+        # fingerprint; otherwise the contents drifted and it's stale.
         current_fps = {ls["fingerprint"] for ls in label_sets} | {TOL_SENTINEL}
+        for row in db.get_labels_fingerprints():
+            sources = row.get("sources") or []
+            if len(sources) <= 1:
+                continue  # single-file already covered by label_sets
+            if not all(os.path.exists(s) for s in sources):
+                continue
+            try:
+                merged = []
+                for s in sources:
+                    with open(s) as fh:
+                        merged.extend(ln.strip() for ln in fh if ln.strip())
+            except OSError:
+                continue
+            if compute_fingerprint(merged) == row["fingerprint"]:
+                current_fps.add(row["fingerprint"])
         stale = []
         for (model_name, fp), p in db_pairs.items():
             if model_name not in registry_names:

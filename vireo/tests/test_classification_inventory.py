@@ -201,6 +201,40 @@ def test_median_top1_confidence_sample(db):
     assert pair["median_sample_size"] >= 1
 
 
+def test_median_top1_sample_is_unbiased_by_detection_id(db):
+    """The capped median sample must not deterministically pick the oldest
+    detection IDs. Detection IDs are auto-incremented chronologically, so
+    a deterministic-by-ID sample under-represents recent runs and biases
+    the median.
+
+    Setup: 50 low-conf detections (older IDs) followed by 200 high-conf
+    (newer IDs). Sample 50 per pair.
+      - Deterministic-by-ID: picks the 50 oldest → all conf 0.1 →
+        median 0.1.
+      - Random: ~20% of population is low, so ~10 of 50 sampled are
+        low → median 0.9.
+    """
+    ws_id, photos = _seed_workspace(db, n_photos=1)
+    photo = photos[0]
+    for _ in range(50):
+        d = _add_detection(db, photo)
+        _record_run(db, d, "M", "fp")
+        _add_prediction(db, d, "M", "fp", "X", 0.1)
+    for _ in range(200):
+        d = _add_detection(db, photo)
+        _record_run(db, d, "M", "fp")
+        _add_prediction(db, d, "M", "fp", "X", 0.9)
+
+    inv = db.get_classification_inventory(ws_id, min_conf=0.2,
+                                           median_sample_per_pair=50)
+    pair = inv["pairs"][0]
+    # Random median is 0.9 with overwhelming probability; deterministic-by-ID
+    # bias would pin it at 0.1.
+    assert pair["median_top1_conf"] > 0.5, (
+        f"median {pair['median_top1_conf']} indicates biased sampling"
+    )
+
+
 def test_median_top1_uses_max_per_detection(db):
     """A detection with multiple species predictions: median uses the top-1 (max conf)."""
     ws_id, photos = _seed_workspace(db, n_photos=1)
@@ -391,6 +425,41 @@ def test_endpoint_dedupes_label_files_with_same_fingerprint(
         for p in m["pairs"]:
             if p["fingerprint"] == fp:
                 assert p["classified_dets"] <= 1
+
+
+def test_endpoint_merged_fingerprint_not_stale(app_and_db, tmp_path, monkeypatch):
+    """A classify run with multiple label files merged produces a fingerprint
+    of the union — that fingerprint matches no single ``.txt`` file but is
+    still current as long as the source files exist and their content
+    matches what was hashed. The labels_fingerprints sidecar records
+    the (fingerprint, sources) pair; the inventory must consult it so
+    merged-labels runs don't get marked stale.
+    """
+    from labels_fingerprint import compute_fingerprint
+    app, db = app_and_db
+    photo_row = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()
+    det = _add_detection(db, photo_row["id"])
+
+    paths = _setup_labels_dir(tmp_path, monkeypatch, [
+        ("birds", ["Robin", "Sparrow"]),
+        ("reptiles", ["Lizard"]),
+    ])
+    merged = sorted({"Robin", "Sparrow", "Lizard"})
+    merged_fp = compute_fingerprint(merged)
+    _record_run(db, det, "BioCLIP-2.5", merged_fp)
+    _add_prediction(db, det, "BioCLIP-2.5", merged_fp, "Robin", 0.7)
+    db.upsert_labels_fingerprint(
+        fingerprint=merged_fp,
+        display_name="birds.txt, reptiles.txt",
+        sources=[paths["birds"], paths["reptiles"]],
+        label_count=len(merged),
+    )
+
+    client = app.test_client()
+    resp = client.get("/api/workspace/classification-inventory")
+    body = resp.get_json()
+    stale_fps = {s["fingerprint"] for s in body["stale"]}
+    assert merged_fp not in stale_fps
 
 
 def test_endpoint_stale_count_uses_prediction_rows(app_and_db, tmp_path, monkeypatch):

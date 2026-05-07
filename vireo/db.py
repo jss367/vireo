@@ -2987,7 +2987,10 @@ class Database:
         """
         # Top-1 per (detection, model, fp) — predictions UNIQUE on
         # (detection_id, classifier_model, labels_fingerprint, species), so
-        # MAX(confidence) within that group is the top-1 confidence.
+        # MAX(confidence) within that group is the top-1 confidence. The
+        # outer window orders by RANDOM() so the per-pair cap picks an
+        # unbiased sample rather than the oldest detection IDs (which would
+        # under-represent recent reclassifications and bias the median).
         # Cap rows per (model, fp) pair in SQL via ROW_NUMBER so a workspace
         # with millions of predictions doesn't materialize them all in Python.
         rows = self.conn.execute(
@@ -2998,7 +3001,7 @@ class Database:
                         top1,
                         ROW_NUMBER() OVER (
                           PARTITION BY classifier_model, labels_fingerprint
-                          ORDER BY detection_id
+                          ORDER BY RANDOM()
                         ) AS rn
                  FROM (
                    SELECT pr.classifier_model      AS classifier_model,
@@ -6955,6 +6958,34 @@ class Database:
             for r in rows:
                 matched.add(r["photo_id"])
         return len(matched)
+
+    def get_labels_fingerprints(self):
+        """Return all rows from the labels_fingerprints sidecar.
+
+        Each row records the (fingerprint, sources, label_count) triple a
+        classify run wrote — single-file runs list one source, merged-set
+        runs list several. Used by the inventory endpoint to identify
+        merged fingerprints that are still current (sources on disk and
+        unchanged) so they don't get marked stale.
+        """
+        import json
+        rows = self.conn.execute(
+            "SELECT fingerprint, display_name, sources_json, label_count "
+            "FROM labels_fingerprints"
+        ).fetchall()
+        out = []
+        for r in rows:
+            try:
+                sources = json.loads(r["sources_json"] or "[]")
+            except (TypeError, ValueError):
+                sources = []
+            out.append({
+                "fingerprint": r["fingerprint"],
+                "display_name": r["display_name"],
+                "sources": sources,
+                "label_count": r["label_count"],
+            })
+        return out
 
     def upsert_labels_fingerprint(self, fingerprint, display_name, sources, label_count):
         import json
