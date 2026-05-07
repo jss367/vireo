@@ -2799,6 +2799,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "fingerprint": compute_fingerprint(species),
             })
 
+        # Dedupe by fingerprint: duplicate-content files (rename/copy) share a
+        # fingerprint and the same db_pair stats. Emitting both rows would
+        # double-count subtotals and inflate pending coverage. Keep the
+        # alphabetically-first name as the canonical representative.
+        deduped_by_fp = {}
+        for ls in sorted(label_sets, key=lambda x: x["name"].lower()):
+            deduped_by_fp.setdefault(ls["fingerprint"], ls)
+        label_sets = list(deduped_by_fp.values())
+
         # Available models: include all known classifier models even if not yet
         # downloaded — gives the user visibility into "if you downloaded iNat21
         # this would be N detections of work." Custom models registered without

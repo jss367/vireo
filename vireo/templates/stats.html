@@ -556,7 +556,10 @@ function renderInvPairRow(model, p, mi) {
       p.median_top1_conf.toFixed(2) + '</span>';
   }
   var actions = '';
-  if (model.id && (p.status === 'never_run' || p.status === 'partial' || p.status === 'stale')) {
+  // Only render the Run deep-link if the model is downloaded — pipeline
+  // model checkboxes are populated from downloaded models only, so a deep
+  // link to a not-downloaded model is a dead end (nothing to pre-select).
+  if (model.id && model.downloaded && (p.status === 'never_run' || p.status === 'partial' || p.status === 'stale')) {
     var labelsParam = '';
     if (p.label_set_path) {
       labelsParam = '&labels=' + encodeURIComponent(p.label_set_path);

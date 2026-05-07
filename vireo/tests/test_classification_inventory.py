@@ -342,3 +342,52 @@ def test_endpoint_grand_total(app_and_db, tmp_path, monkeypatch):
     gt = body["grand_total"]
     assert gt["classified_dets"] >= 1
     assert gt["total_predictions_rows"] >= 1
+
+
+def test_endpoint_dedupes_label_files_with_same_fingerprint(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Two label files with identical content (same fingerprint) must produce
+    one inventory row per model — emitting both would double-count the shared
+    db_pair stats in subtotals and grand totals.
+    """
+    app, db = app_and_db
+    photo_row = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()
+    det = _add_detection(db, photo_row["id"])
+
+    # Two label files with identical species → identical fingerprint.
+    _setup_labels_dir(tmp_path, monkeypatch, [
+        ("birds", ["Robin", "Sparrow"]),
+        ("birds_copy", ["Robin", "Sparrow"]),
+    ])
+
+    # Pre-record a run + prediction against the shared fingerprint so the
+    # double-count would be observable in the totals.
+    from labels_fingerprint import compute_fingerprint
+    fp = compute_fingerprint(["Robin", "Sparrow"])
+    _record_run(db, det, "BioCLIP-2.5", fp)
+    _add_prediction(db, det, "BioCLIP-2.5", fp, "Robin", 0.9)
+
+    client = app.test_client()
+    resp = client.get("/api/workspace/classification-inventory")
+    body = resp.get_json()
+
+    # For each non-legacy model, the duplicate fingerprint should appear only
+    # once across that model's label-set rows.
+    for m in body["models"]:
+        if m.get("legacy"):
+            continue
+        non_intrinsic = [p for p in m["pairs"] if not p.get("is_intrinsic")]
+        fps = [p["fingerprint"] for p in non_intrinsic]
+        assert len(fps) == len(set(fps)), (
+            f"{m['name']} has duplicate fingerprints: {fps}"
+        )
+
+    # The grand total counts each detection at most once per (model, fp);
+    # without dedup, classified_dets would be inflated by the duplicate row.
+    for m in body["models"]:
+        if m.get("legacy"):
+            continue
+        for p in m["pairs"]:
+            if p["fingerprint"] == fp:
+                assert p["classified_dets"] <= 1
