@@ -160,6 +160,45 @@ def test_scan_status_includes_extended_stats(app_and_db):
     assert 'keyword_count' in data
     assert 'db_size' in data
     assert 'thumb_cache_size' in data
+    assert 'accessible_photo_count' in data
+    assert 'missing_folder_count' in data
+
+
+def test_scan_status_photo_count_includes_missing_folders(app_and_db):
+    """When a folder is flagged 'missing' (e.g. external drive unmounted),
+    /api/scan/status reports the workspace's full inventory in
+    ``photo_count`` and the actionable subset in ``accessible_photo_count``.
+
+    Without this split, the dashboard's headline number collapses to 0 for
+    any workspace whose photos live on an unmounted volume — even though
+    the data is intact in the DB.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    resp = client.get('/api/scan/status')
+    base = resp.get_json()
+    assert base['photo_count'] == 3
+    assert base['accessible_photo_count'] == 3
+    assert base['missing_folder_count'] == 0
+
+    # Mark every folder in the workspace as missing — simulates the
+    # external-drive-not-mounted case.
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    resp = client.get('/api/scan/status')
+    after = resp.get_json()
+    assert after['photo_count'] == 3, \
+        "headline photo_count must reflect inventory, not just accessible"
+    assert after['accessible_photo_count'] == 0
+    assert after['missing_folder_count'] >= 1
+    # Keywords headline must agree with the dashboard's top_keywords chart
+    # (which also includes photos in missing folders). The fixture tags two
+    # keywords on photos that all sit in folders we just flagged 'missing',
+    # so the unfiltered count should still see them.
+    assert after['keyword_count'] == base['keyword_count'], \
+        "keyword_count must be inventory-wide, not accessible-only"
 
 
 def test_ingest_job_starts(app_and_db, tmp_path):

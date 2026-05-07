@@ -2728,7 +2728,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_stats():
         db = _get_db()
         stats = db.get_dashboard_stats()
-        stats["total_photos"] = db.count_photos()
+        # ``total_photos`` is the workspace's full inventory (includes photos
+        # whose folders are currently flagged 'missing'), so the dashboard's
+        # headline number stays honest when a drive is unmounted.
+        # ``accessible_photos`` is the subset that's actually reachable right
+        # now — when this is lower, the UI surfaces the gap with a banner.
+        stats["total_photos"] = db.count_photos_in_workspace()
+        stats["accessible_photos"] = db.count_photos()
+        stats["missing_folder_count"] = len(db.get_missing_folders())
         return jsonify(stats)
 
     @app.route("/api/coverage")
@@ -7018,11 +7025,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if os.path.isfile(fp):
                     thumb_size += os.path.getsize(fp)
 
+        # ``photo_count`` is the workspace's total inventory (includes photos
+        # in folders flagged 'missing'), so the dashboard's headline number
+        # stays honest when an external drive is unmounted instead of
+        # collapsing to 0. ``accessible_photo_count`` is the actionable
+        # subset; when it's lower, the dashboard surfaces the gap.
+        # ``keyword_count`` likewise reports inventory-wide so the Keywords
+        # card agrees with the Top Species / Other Keywords charts (which
+        # also count photos in missing folders).
         return jsonify(
             {
-                "photo_count": db.count_photos(),
+                "photo_count": db.count_photos_in_workspace(),
+                "accessible_photo_count": db.count_photos(),
+                "missing_folder_count": len(db.get_missing_folders()),
                 "folder_count": db.count_folders(),
-                "keyword_count": db.count_keywords(),
+                "keyword_count": db.count_keywords_in_workspace(),
                 "pending_changes": db.count_pending_changes(),
                 "db_size": db_size,
                 "thumb_cache_size": thumb_size,
