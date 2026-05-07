@@ -601,6 +601,65 @@ def test_segment_encounters_attaches_trace_to_each_encounter():
         assert enc["trace"][0]["decision"] == "kept"
 
 
+def test_trace_includes_pair_photo_ids_and_filenames():
+    """Trace entries surface which two photos formed the pair, so the
+    review UI can render filenames + thumbs and let the user click through.
+    """
+    from encounters import cut_microsegments
+    photos = [
+        {"id": 11, "filename": "DSC_1384.NEF",
+         "timestamp": "2026-03-07T11:32:00", "focal_length": 600.0},
+        {"id": 22, "filename": "DSC_1385.NEF",
+         "timestamp": "2026-03-07T11:32:05", "focal_length": 600.0},
+    ]
+    _, trace = cut_microsegments(photos, emit_trace=True)
+    assert len(trace) == 1
+    assert trace[0]["photo_a_id"] == 11
+    assert trace[0]["photo_b_id"] == 22
+    assert trace[0]["photo_a_filename"] == "DSC_1384.NEF"
+    assert trace[0]["photo_b_filename"] == "DSC_1385.NEF"
+
+
+def test_components_flag_which_photo_is_missing_each_signal():
+    """Each component tags missing_a / missing_b so the UI can say
+    "missing on DSC_1385" instead of just rendering a bare dot. This is
+    what makes the half-processed-photo case actionable in the trace.
+    """
+    import numpy as np
+    from encounters import compute_s_enc
+
+    subj_emb = np.ones(128, dtype=np.float32)
+    photo_a = {
+        "id": 1, "filename": "A.NEF",
+        "timestamp": "2026-03-07T11:32:00",
+        "focal_length": 600.0,
+        "dino_subject_embedding": subj_emb,
+        "dino_global_embedding": subj_emb,
+        "species_top5": [("Western Bluebird", 0.9)],
+    }
+    photo_b = {
+        "id": 2, "filename": "B.NEF",
+        "timestamp": "2026-03-07T11:32:05",
+        "focal_length": 600.0,
+        # subj/global embeddings + species deliberately absent on B
+    }
+    _, components = compute_s_enc(photo_a, photo_b, return_components=True)
+    # Subj signal present on A, missing on B
+    assert components["subj"]["used"] is False
+    assert components["subj"]["missing_a"] is False
+    assert components["subj"]["missing_b"] is True
+    # Same for global and species
+    assert components["global"]["missing_a"] is False
+    assert components["global"]["missing_b"] is True
+    assert components["species"]["missing_a"] is False
+    assert components["species"]["missing_b"] is True
+    # Time and meta both present on both photos
+    assert components["time"]["missing_a"] is False
+    assert components["time"]["missing_b"] is False
+    assert components["meta"]["missing_a"] is False
+    assert components["meta"]["missing_b"] is False
+
+
 def test_segment_encounters_marks_merged_back_boundaries():
     """When two microsegments get merged, the boundary pair should be tagged merged_back."""
     from encounters import segment_encounters
