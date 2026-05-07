@@ -671,6 +671,7 @@ var currentModel = 'all';
 var currentCollection = 'all';
 var currentSort = 'filename';
 var minConfidence = 0;
+var currentLabelsFingerprint = null;  // set from ?labels_fingerprint= URL param
 var availableModels = [];
 var collectionPhotoIds = null;  // null = no filter
 var thumbSize = 400;
@@ -742,8 +743,42 @@ async function switchCollection(val) {
 }
 
 /* ---------- Bootstrap ---------- */
+applyReviewQueryParams();
 loadPredictions();
 loadCollectionFilter();
+
+function applyReviewQueryParams() {
+  var qs = new URLSearchParams(window.location.search);
+  var qsModel = qs.get('model');
+  var qsFp = qs.get('labels_fingerprint');
+  if (qsModel) currentModel = qsModel;
+  if (qsFp) currentLabelsFingerprint = qsFp;
+}
+
+function renderFingerprintFilterPill() {
+  var existing = document.getElementById('fpFilterPill');
+  if (existing) existing.remove();
+  if (!currentLabelsFingerprint) return;
+  var bar = document.querySelector('.toolbar') || document.body;
+  var pill = document.createElement('div');
+  pill.id = 'fpFilterPill';
+  pill.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:3px 10px;' +
+    'border-radius:12px;background:color-mix(in srgb,var(--accent) 15%,transparent);' +
+    'color:var(--accent);font-size:12px;margin:6px 0;';
+  pill.innerHTML = 'Filtered to fingerprint <code>' +
+    currentLabelsFingerprint.substring(0, 12) +
+    '</code> <a href="#" id="fpFilterClear" style="color:inherit;text-decoration:none;">×</a>';
+  bar.parentNode.insertBefore(pill, bar.nextSibling);
+  document.getElementById('fpFilterClear').addEventListener('click', function(e) {
+    e.preventDefault();
+    currentLabelsFingerprint = null;
+    var url = new URL(window.location.href);
+    url.searchParams.delete('labels_fingerprint');
+    window.history.replaceState({}, '', url.toString());
+    pill.remove();
+    renderAll();
+  });
+}
 
 async function loadPredictions() {
   document.getElementById('loading').style.display = 'block';
@@ -783,6 +818,7 @@ async function loadPredictions() {
 /* ---------- Render ---------- */
 function renderAll() {
   renderModelFilter();
+  renderFingerprintFilterPill();
   renderStats();
   renderTabs();
   renderButtons();
@@ -881,6 +917,13 @@ function getVisibleItems() {
   // Filter by model
   if (currentModel !== 'all') {
     filtered = filtered.filter(function(p) { return p.model === currentModel; });
+  }
+
+  // Filter by label-set fingerprint (from dashboard inventory's Inspect link)
+  if (currentLabelsFingerprint) {
+    filtered = filtered.filter(function(p) {
+      return p.labels_fingerprint === currentLabelsFingerprint;
+    });
   }
 
   // Filter by status tab
