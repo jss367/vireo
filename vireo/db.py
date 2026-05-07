@@ -2858,6 +2858,175 @@ class Database:
         ).fetchone()
         return row["n"] or 0
 
+    def get_classification_inventory(self, workspace_id, min_conf=None,
+                                     median_sample_per_pair=2000):
+        """Per-(model × fingerprint) coverage stats for ``workspace_id``.
+
+        Returns::
+
+            {
+              "total_real_detections": int,
+              "pairs": [
+                {
+                  "classifier_model": str,
+                  "labels_fingerprint": str,
+                  "classified_dets": int,
+                  "photos_covered": int,
+                  "last_run": str | None,
+                  "predictions_count": int,
+                  "median_top1_conf": float | None,
+                  "median_sample_size": int,
+                }
+              ],
+              "total_predictions_rows": int,
+            }
+
+        Caller (the endpoint) is responsible for joining this against the
+        on-disk model registry / label files to identify never-run, stale,
+        and legacy combinations.
+        """
+        if min_conf is None:
+            import config as cfg
+            saved_active = self._active_workspace_id
+            try:
+                self._active_workspace_id = workspace_id
+                min_conf = self.get_effective_config(cfg.load()).get(
+                    "detector_confidence", 0.2,
+                )
+            finally:
+                self._active_workspace_id = saved_active
+
+        # Scalar: total real detections in scope.
+        total_row = self.conn.execute(
+            """SELECT COUNT(*) AS n
+               FROM detections d
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               WHERE d.detector_model != 'full-image'
+                 AND d.detector_confidence >= ?""",
+            (workspace_id, min_conf),
+        ).fetchone()
+        total_real_detections = total_row["n"] or 0
+
+        # Per-pair aggregates from classifier_runs joined to in-scope detections.
+        pair_rows = self.conn.execute(
+            """SELECT cr.classifier_model      AS classifier_model,
+                      cr.labels_fingerprint    AS labels_fingerprint,
+                      COUNT(DISTINCT cr.detection_id) AS classified_dets,
+                      COUNT(DISTINCT d.photo_id)      AS photos_covered,
+                      MAX(cr.run_at)           AS last_run
+               FROM classifier_runs cr
+               JOIN detections d ON d.id = cr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               WHERE d.detector_model != 'full-image'
+                 AND d.detector_confidence >= ?
+               GROUP BY cr.classifier_model, cr.labels_fingerprint""",
+            (workspace_id, min_conf),
+        ).fetchall()
+
+        # Per-pair predictions row count (so the grand total can sum it).
+        pred_count_rows = self.conn.execute(
+            """SELECT pr.classifier_model      AS classifier_model,
+                      pr.labels_fingerprint    AS labels_fingerprint,
+                      COUNT(*)                 AS n
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               WHERE d.detector_model != 'full-image'
+                 AND d.detector_confidence >= ?
+               GROUP BY pr.classifier_model, pr.labels_fingerprint""",
+            (workspace_id, min_conf),
+        ).fetchall()
+        pred_counts = {
+            (r["classifier_model"], r["labels_fingerprint"]): r["n"]
+            for r in pred_count_rows
+        }
+
+        # Median top-1 confidence per pair, via a sampled top-1-per-detection set.
+        # Bounded by median_sample_per_pair to keep total work small.
+        medians = self._sampled_top1_medians(
+            workspace_id, min_conf, median_sample_per_pair,
+        )
+
+        pairs = []
+        for r in pair_rows:
+            key = (r["classifier_model"], r["labels_fingerprint"])
+            med, sample_size = medians.get(key, (None, 0))
+            pairs.append({
+                "classifier_model": r["classifier_model"],
+                "labels_fingerprint": r["labels_fingerprint"],
+                "classified_dets": r["classified_dets"] or 0,
+                "photos_covered": r["photos_covered"] or 0,
+                "last_run": r["last_run"],
+                "predictions_count": pred_counts.get(key, 0),
+                "median_top1_conf": med,
+                "median_sample_size": sample_size,
+            })
+
+        total_pred_rows = sum(pred_counts.values())
+
+        return {
+            "total_real_detections": total_real_detections,
+            "pairs": pairs,
+            "total_predictions_rows": total_pred_rows,
+        }
+
+    def _sampled_top1_medians(self, workspace_id, min_conf, sample_per_pair):
+        """Return {(model, fingerprint): (median, sample_size)} from a sampled
+        set of top-1-per-detection prediction confidences.
+
+        SQLite has no built-in median; we pull a per-pair sample (at most
+        ``sample_per_pair`` rows) of the max confidence per (detection, model,
+        fingerprint) tuple and median in Python. Sampling is fine for the UX
+        signal — if classified_dets is small, the sample is the whole set.
+        """
+        # Top-1 per (detection, model, fp) — predictions UNIQUE on
+        # (detection_id, classifier_model, labels_fingerprint, species), so
+        # MAX(confidence) within that group is the top-1 confidence.
+        rows = self.conn.execute(
+            """SELECT pr.classifier_model      AS classifier_model,
+                      pr.labels_fingerprint    AS labels_fingerprint,
+                      MAX(pr.confidence)       AS top1
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               WHERE d.detector_model != 'full-image'
+                 AND d.detector_confidence >= ?
+                 AND pr.confidence IS NOT NULL
+               GROUP BY pr.classifier_model, pr.labels_fingerprint, pr.detection_id""",
+            (workspace_id, min_conf),
+        ).fetchall()
+
+        # Bucket by pair, cap each bucket at sample_per_pair.
+        buckets = {}
+        for r in rows:
+            key = (r["classifier_model"], r["labels_fingerprint"])
+            bucket = buckets.setdefault(key, [])
+            if len(bucket) < sample_per_pair:
+                bucket.append(r["top1"])
+
+        out = {}
+        for key, vals in buckets.items():
+            if not vals:
+                out[key] = (None, 0)
+                continue
+            vals_sorted = sorted(vals)
+            n = len(vals_sorted)
+            mid = n // 2
+            if n % 2 == 1:
+                med = vals_sorted[mid]
+            else:
+                med = (vals_sorted[mid - 1] + vals_sorted[mid]) / 2.0
+            out[key] = (float(med), n)
+        return out
+
     def count_photos_pending_masks(self, photo_ids=None, min_conf=None):
         """Return (pending, eligible) for the extract-masks stage.
 
