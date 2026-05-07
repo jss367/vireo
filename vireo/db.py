@@ -2977,37 +2977,49 @@ class Database:
         }
 
     def _sampled_top1_medians(self, workspace_id, min_conf, sample_per_pair):
-        """Return {(model, fingerprint): (median, sample_size)} from a sampled
-        set of top-1-per-detection prediction confidences.
+        """Return {(model, fingerprint): (median, sample_size)} from a randomly
+        sampled set of top-1-per-detection prediction confidences.
 
         SQLite has no built-in median; we pull a per-pair sample (at most
         ``sample_per_pair`` rows) of the max confidence per (detection, model,
         fingerprint) tuple and median in Python. Sampling is fine for the UX
         signal — if classified_dets is small, the sample is the whole set.
         """
-        # Top-1 per (detection, model, fp) — predictions UNIQUE on
-        # (detection_id, classifier_model, labels_fingerprint, species), so
-        # MAX(confidence) within that group is the top-1 confidence. The
-        # outer window orders by RANDOM() so the per-pair cap picks an
-        # unbiased sample rather than the oldest detection IDs (which would
-        # under-represent recent reclassifications and bias the median).
-        # Cap rows per (model, fp) pair in SQL via ROW_NUMBER so a workspace
-        # with millions of predictions doesn't materialize them all in Python.
-        rows = self.conn.execute(
-            """SELECT classifier_model, labels_fingerprint, top1
-               FROM (
-                 SELECT classifier_model,
-                        labels_fingerprint,
-                        top1,
-                        ROW_NUMBER() OVER (
-                          PARTITION BY classifier_model, labels_fingerprint
-                          ORDER BY RANDOM()
-                        ) AS rn
-                 FROM (
-                   SELECT pr.classifier_model      AS classifier_model,
-                          pr.labels_fingerprint    AS labels_fingerprint,
-                          pr.detection_id          AS detection_id,
-                          MAX(pr.confidence)       AS top1
+        # Strategy: a single ROW_NUMBER scan would still have to evaluate the
+        # window over every grouped (model, fp, detection) top-1 row across
+        # the whole workspace before WHERE rn ≤ N filters anything — on
+        # millions of predictions that materialization dominates. Instead,
+        # cheaply enumerate the (model, fp) pairs that have any in-scope
+        # prediction (DISTINCT ~tens of rows), then run one bounded query
+        # per pair so SQLite can honor the LIMIT and stop reading after
+        # ``sample_per_pair`` rows per pair.
+        pair_rows = self.conn.execute(
+            """SELECT DISTINCT pr.classifier_model      AS classifier_model,
+                               pr.labels_fingerprint    AS labels_fingerprint
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id
+                AND wf.workspace_id = ?
+               WHERE d.detector_model != 'full-image'
+                 AND d.detector_confidence >= ?
+                 AND pr.confidence IS NOT NULL""",
+            (workspace_id, min_conf),
+        ).fetchall()
+
+        out = {}
+        for pr_row in pair_rows:
+            model = pr_row["classifier_model"]
+            fp = pr_row["labels_fingerprint"]
+            # Top-1 per (detection) — predictions UNIQUE on (detection_id,
+            # classifier_model, labels_fingerprint, species), so MAX(confidence)
+            # within that GROUP is the top-1. ORDER BY RANDOM() makes the
+            # capped sample unbiased (a deterministic order would skew toward
+            # the earliest or latest detection IDs and bias the reported
+            # median when confidence drifts after reclassification).
+            rows = self.conn.execute(
+                """SELECT MAX(pr.confidence) AS top1
                    FROM predictions pr
                    JOIN detections d ON d.id = pr.detection_id
                    JOIN photos p ON p.id = d.photo_id
@@ -3016,25 +3028,17 @@ class Database:
                     AND wf.workspace_id = ?
                    WHERE d.detector_model != 'full-image'
                      AND d.detector_confidence >= ?
+                     AND pr.classifier_model = ?
+                     AND pr.labels_fingerprint = ?
                      AND pr.confidence IS NOT NULL
-                   GROUP BY pr.classifier_model, pr.labels_fingerprint,
-                            pr.detection_id
-                 )
-               )
-               WHERE rn <= ?""",
-            (workspace_id, min_conf, sample_per_pair),
-        ).fetchall()
-
-        # Bucket by pair (already capped at sample_per_pair by SQL).
-        buckets = {}
-        for r in rows:
-            key = (r["classifier_model"], r["labels_fingerprint"])
-            buckets.setdefault(key, []).append(r["top1"])
-
-        out = {}
-        for key, vals in buckets.items():
+                   GROUP BY pr.detection_id
+                   ORDER BY RANDOM()
+                   LIMIT ?""",
+                (workspace_id, min_conf, model, fp, sample_per_pair),
+            ).fetchall()
+            vals = [r["top1"] for r in rows if r["top1"] is not None]
             if not vals:
-                out[key] = (None, 0)
+                out[(model, fp)] = (None, 0)
                 continue
             vals_sorted = sorted(vals)
             n = len(vals_sorted)
@@ -3043,7 +3047,7 @@ class Database:
                 med = vals_sorted[mid]
             else:
                 med = (vals_sorted[mid - 1] + vals_sorted[mid]) / 2.0
-            out[key] = (float(med), n)
+            out[(model, fp)] = (float(med), n)
         return out
 
     def count_photos_pending_masks(self, photo_ids=None, min_conf=None):

@@ -248,6 +248,32 @@ def test_median_top1_uses_max_per_detection(db):
     assert pair["median_top1_conf"] == pytest.approx(0.85, abs=0.001)
 
 
+def test_median_sample_per_pair_capped_in_sql(db):
+    """The per-pair median sample must apply LIMIT in SQL — not pull every
+    grouped top-1 row to Python first.
+
+    The reported ``median_sample_size`` reflects exactly the rows the helper
+    materialized. Seed many detections for one pair and request a small
+    cap; the size must equal the cap, not the population. Without a per-
+    pair SQL LIMIT the helper would materialize all 200 rows before any
+    truncation and ``sample_size`` would be 200.
+    """
+    ws_id, photos = _seed_workspace(db, n_photos=1)
+    for _ in range(200):
+        d = _add_detection(db, photos[0])
+        _record_run(db, d, "M", "fp")
+        _add_prediction(db, d, "M", "fp", "X", 0.5)
+
+    inv = db.get_classification_inventory(
+        ws_id, min_conf=0.2, median_sample_per_pair=10,
+    )
+    pair = inv["pairs"][0]
+    assert pair["median_sample_size"] == 10, (
+        f"sample_per_pair=10 should cap at 10, got "
+        f"{pair['median_sample_size']} (LIMIT not applied per pair in SQL)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoint-level tests: /api/workspace/classification-inventory
 # ---------------------------------------------------------------------------
