@@ -1,7 +1,7 @@
 {
   "name": "vireo",
   "private": true,
-  "version": "0.8.42",
+  "version": "0.8.43",
   "scripts": {
     "tauri": "tauri"
   },
