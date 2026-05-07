@@ -195,13 +195,31 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
     sp = sim_species(photo_a.get("species_top5"), photo_b.get("species_top5"))
     sm = sim_meta(photo_a, photo_b)
 
+    # Per-component missing flags: which photo (if any) lacks the signal.
+    # Used by the trace UI to surface "compute embeddings on photo B" hints
+    # without conflating a missing signal with an explicitly-zeroed weight.
+    has_subj_a = photo_a.get("dino_subject_embedding") is not None
+    has_subj_b = photo_b.get("dino_subject_embedding") is not None
+    has_global_a = photo_a.get("dino_global_embedding") is not None
+    has_global_b = photo_b.get("dino_global_embedding") is not None
+    has_species_a = bool(photo_a.get("species_top5"))
+    has_species_b = bool(photo_b.get("species_top5"))
+    has_time_a = ts_a is not None
+    has_time_b = ts_b is not None
+
+    missing = {
+        "time": (not has_time_a, not has_time_b),
+        "subj": (not has_subj_a, not has_subj_b),
+        "global": (not has_global_a, not has_global_b),
+        "species": (not has_species_a, not has_species_b),
+        "meta": (False, False),
+    }
+
     used = {
         "time": dt != float("inf"),
-        "subj": (photo_a.get("dino_subject_embedding") is not None
-                 and photo_b.get("dino_subject_embedding") is not None),
-        "global": (photo_a.get("dino_global_embedding") is not None
-                   and photo_b.get("dino_global_embedding") is not None),
-        "species": bool(photo_a.get("species_top5") and photo_b.get("species_top5")),
+        "subj": has_subj_a and has_subj_b,
+        "global": has_global_a and has_global_b,
+        "species": has_species_a and has_species_b,
         # Meta always contributes (even if 0)
         "meta": True,
     }
@@ -228,6 +246,8 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
             "value": float(values[k]),
             "weight": float(cfg[weight_keys[k]]),
             "used": bool(used[k]),
+            "missing_a": bool(missing[k][0]),
+            "missing_b": bool(missing[k][1]),
         }
         for k in values
     }
@@ -315,6 +335,10 @@ def cut_microsegments(photos, config=None, emit_trace=False):
         if emit_trace:
             trace.append({
                 "pair_index": i,
+                "photo_a_id": sorted_photos[i].get("id"),
+                "photo_b_id": sorted_photos[i + 1].get("id"),
+                "photo_a_filename": sorted_photos[i].get("filename"),
+                "photo_b_filename": sorted_photos[i + 1].get("filename"),
                 "score": float(score),
                 "dt_seconds": float(dt) if dt != float("inf") else None,
                 "decision": decision,

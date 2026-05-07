@@ -416,16 +416,41 @@ input[type="range"]::-moz-range-thumb {
 .algo-trace { font-size: 11px; line-height: 1.35; margin-bottom: 8px; }
 .algo-trace .trace-row {
   display: grid; grid-template-columns: 1fr auto auto; gap: 6px;
-  padding: 3px 4px; border-bottom: 1px solid var(--border-primary);
+  padding: 3px 4px;
   align-items: baseline;
 }
 .algo-trace .trace-row.cut { background: rgba(220, 50, 50, 0.10); }
 .algo-trace .trace-row.merged-back { background: rgba(80, 160, 80, 0.10); }
 .algo-trace .trace-row.kept { }
 .algo-trace .trace-decision { font-weight: 600; }
+.algo-trace .trace-pair-photos {
+  display: flex; gap: 8px; align-items: center;
+  padding: 4px 4px 6px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.algo-trace .trace-pair-photo {
+  display: flex; gap: 6px; align-items: center;
+  cursor: pointer; min-width: 0; flex: 1;
+}
+.algo-trace .trace-pair-photo img {
+  width: 36px; height: 28px; object-fit: cover;
+  border-radius: 3px; border: 1px solid var(--border-primary);
+  flex-shrink: 0;
+}
+.algo-trace .trace-pair-photo .name {
+  font-size: 10px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.algo-trace .trace-pair-photo:hover .name { color: var(--text-primary); }
+.algo-trace .trace-pair-arrow {
+  color: var(--text-muted); font-size: 11px; flex-shrink: 0;
+}
 .algo-trace .trace-components {
   font-size: 10px; color: var(--text-dim); padding: 2px 4px 6px;
-  border-bottom: 1px solid var(--border-primary);
+}
+.algo-trace .trace-component-missing {
+  color: rgba(220, 140, 60, 0.85);
+  font-style: italic;
 }
 .algo-trace .trace-empty {
   font-size: 11px; color: var(--text-dim); font-style: italic; padding: 4px;
@@ -1457,6 +1482,31 @@ function renderAlgorithmTrace() {
   if (label) {
     label.textContent = 'Encounter ' + (_focusedEncounterIdx + 1) + ' — ' + enc.trace.length + ' adjacent pair' + (enc.trace.length > 1 ? 's' : '');
   }
+  var photoMap = {};
+  (pipelineResults.photos || []).forEach(function(p) { photoMap[p.id] = p; });
+  function escapeHtml(s) {
+    if (s == null) return '';
+    var d = document.createElement('div');
+    d.textContent = String(s);
+    return d.innerHTML;
+  }
+  function shortName(fname) {
+    if (!fname) return '';
+    var dot = fname.lastIndexOf('.');
+    return dot > 0 ? fname.slice(0, dot) : fname;
+  }
+  function pairPhotoHtml(pid, fallbackName) {
+    var p = photoMap[pid] || {};
+    var name = shortName(p.filename || fallbackName || '');
+    var label = name || ('Photo ' + (pid != null ? pid : '?'));
+    if (pid == null) {
+      return '<div class="trace-pair-photo"><span class="name">' + escapeHtml(label) + '</span></div>';
+    }
+    return '<div class="trace-pair-photo" onclick="openInspect(' + pid + ')" title="' + escapeHtml(p.filename || label) + '">'
+      + '<img src="/thumbnails/' + pid + '.jpg" loading="lazy" alt="">'
+      + '<span class="name">' + escapeHtml(label) + '</span>'
+      + '</div>';
+  }
   var html = '';
   enc.trace.forEach(function(t, i) {
     var rowCls = 'trace-row';
@@ -1471,15 +1521,43 @@ function renderAlgorithmTrace() {
     html += '<span>S=' + score + '</span>';
     html += '<span class="trace-decision">' + decision + '</span>';
     html += '</div>';
+    // Pair photos: filenames + tiny thumbs so the user can see *which*
+    // two photos this row scored, and click through to inspect either.
+    html += '<div class="trace-pair-photos">';
+    html += pairPhotoHtml(t.photo_a_id, t.photo_a_filename);
+    html += '<span class="trace-pair-arrow">→</span>';
+    html += pairPhotoHtml(t.photo_b_id, t.photo_b_filename);
+    html += '</div>';
     if (t.components) {
+      var nameA = shortName((photoMap[t.photo_a_id] || {}).filename || t.photo_a_filename || 'A');
+      var nameB = shortName((photoMap[t.photo_b_id] || {}).filename || t.photo_b_filename || 'B');
       var parts = [];
       ['time', 'subj', 'global', 'species', 'meta'].forEach(function(k) {
         var c = t.components[k];
         if (!c) return;
-        var marker = c.used ? '' : '·';
         var v = (typeof c.value === 'number') ? c.value.toFixed(2) : '-';
         var w = (typeof c.weight === 'number') ? c.weight.toFixed(2) : '-';
-        parts.push(k + marker + '=' + v + '×' + w);
+        if (!c.used) {
+          // Distinguish "missing data" from a zero-weighted component.
+          // Both are unused, but only the former is actionable (compute
+          // the missing signal); the latter means the user dialled it out.
+          var weightZero = !(c.weight > 0);
+          if (weightZero) {
+            // Component is intentionally turned off — render in muted form
+            // without a "missing" annotation.
+            parts.push(k + '=' + v + '×' + w);
+          } else {
+            var who;
+            if (c.missing_a && c.missing_b) who = 'both';
+            else if (c.missing_a) who = nameA;
+            else if (c.missing_b) who = nameB;
+            else who = '?';
+            parts.push('<span class="trace-component-missing">' + escapeHtml(k)
+              + '=missing on ' + escapeHtml(who) + ' (w=' + w + ')</span>');
+          }
+        } else {
+          parts.push(k + '=' + v + '×' + w);
+        }
       });
       html += '<div class="trace-components">' + parts.join(' · ') + '</div>';
     }
