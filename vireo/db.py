@@ -2988,29 +2988,45 @@ class Database:
         # Top-1 per (detection, model, fp) — predictions UNIQUE on
         # (detection_id, classifier_model, labels_fingerprint, species), so
         # MAX(confidence) within that group is the top-1 confidence.
+        # Cap rows per (model, fp) pair in SQL via ROW_NUMBER so a workspace
+        # with millions of predictions doesn't materialize them all in Python.
         rows = self.conn.execute(
-            """SELECT pr.classifier_model      AS classifier_model,
-                      pr.labels_fingerprint    AS labels_fingerprint,
-                      MAX(pr.confidence)       AS top1
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-               WHERE d.detector_model != 'full-image'
-                 AND d.detector_confidence >= ?
-                 AND pr.confidence IS NOT NULL
-               GROUP BY pr.classifier_model, pr.labels_fingerprint, pr.detection_id""",
-            (workspace_id, min_conf),
+            """SELECT classifier_model, labels_fingerprint, top1
+               FROM (
+                 SELECT classifier_model,
+                        labels_fingerprint,
+                        top1,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY classifier_model, labels_fingerprint
+                          ORDER BY detection_id
+                        ) AS rn
+                 FROM (
+                   SELECT pr.classifier_model      AS classifier_model,
+                          pr.labels_fingerprint    AS labels_fingerprint,
+                          pr.detection_id          AS detection_id,
+                          MAX(pr.confidence)       AS top1
+                   FROM predictions pr
+                   JOIN detections d ON d.id = pr.detection_id
+                   JOIN photos p ON p.id = d.photo_id
+                   JOIN workspace_folders wf
+                     ON wf.folder_id = p.folder_id
+                    AND wf.workspace_id = ?
+                   WHERE d.detector_model != 'full-image'
+                     AND d.detector_confidence >= ?
+                     AND pr.confidence IS NOT NULL
+                   GROUP BY pr.classifier_model, pr.labels_fingerprint,
+                            pr.detection_id
+                 )
+               )
+               WHERE rn <= ?""",
+            (workspace_id, min_conf, sample_per_pair),
         ).fetchall()
 
-        # Bucket by pair, cap each bucket at sample_per_pair.
+        # Bucket by pair (already capped at sample_per_pair by SQL).
         buckets = {}
         for r in rows:
             key = (r["classifier_model"], r["labels_fingerprint"])
-            bucket = buckets.setdefault(key, [])
-            if len(bucket) < sample_per_pair:
-                bucket.append(r["top1"])
+            buckets.setdefault(key, []).append(r["top1"])
 
         out = {}
         for key, vals in buckets.items():

@@ -2801,10 +2801,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Available models: include all known classifier models even if not yet
         # downloaded — gives the user visibility into "if you downloaded iNat21
-        # this would be N detections of work."
+        # this would be N detections of work." Custom models registered without
+        # an explicit model_type default to bioclip (same as classify/pipeline).
         all_models = [
             m for m in get_models()
-            if m.get("model_type") in ("bioclip", "timm")
+            if m.get("model_type", "bioclip") in ("bioclip", "timm")
         ]
 
         models_out = []

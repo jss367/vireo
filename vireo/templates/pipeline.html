@@ -1239,7 +1239,10 @@ function applyClassifyQueryParams() {
     var wantLabels = new Set(qsLabels.split(',').map(function(s) { return s.trim(); }).filter(Boolean));
     document.querySelectorAll('.labels-run-cb').forEach(function(cb) {
       // Match by full path or by basename (the inventory passes basenames).
-      var base = cb.value.split('/').pop();
+      // Split on both POSIX (/) and Windows (\) separators so deep links work
+      // regardless of OS.
+      var parts = cb.value.split(/[/\\]/);
+      var base = parts[parts.length - 1];
       cb.checked = wantLabels.has(cb.value) || wantLabels.has(base);
     });
   }
