@@ -2902,10 +2902,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 continue  # legacy, already grouped
             if fp in current_fps:
                 continue
+            # The stale UI labels this column "Predictions", so report rows
+            # from `predictions` (one per species) rather than distinct
+            # detection IDs from `classifier_runs`. A top-k run with k species
+            # per detection would otherwise undercount stale work.
             stale.append({
                 "model": model_name,
                 "fingerprint": fp,
-                "stale_count": p.get("classified_dets", 0),
+                "stale_count": p.get("predictions_count", 0),
                 "last_run": p.get("last_run"),
             })
 

@@ -391,3 +391,30 @@ def test_endpoint_dedupes_label_files_with_same_fingerprint(
         for p in m["pairs"]:
             if p["fingerprint"] == fp:
                 assert p["classified_dets"] <= 1
+
+
+def test_endpoint_stale_count_uses_prediction_rows(app_and_db, tmp_path, monkeypatch):
+    """Stale rows are rendered with a "Predictions" column header in the UI,
+    so ``stale_count`` must reflect prediction rows (which can be multiple
+    per detection — one per species in a top-k result), not distinct
+    detection IDs.
+    """
+    app, db = app_and_db
+    photo_row = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()
+    det = _add_detection(db, photo_row["id"])
+    # Run on a fingerprint that does not match any current label file →
+    # this becomes a stale entry. Three species predictions on the one
+    # detection: prediction count = 3, distinct detection count = 1.
+    _record_run(db, det, "BioCLIP-2.5", "obsolete_fp")
+    _add_prediction(db, det, "BioCLIP-2.5", "obsolete_fp", "Robin", 0.7)
+    _add_prediction(db, det, "BioCLIP-2.5", "obsolete_fp", "Sparrow", 0.2)
+    _add_prediction(db, det, "BioCLIP-2.5", "obsolete_fp", "Wren", 0.1)
+
+    _setup_labels_dir(tmp_path, monkeypatch, [("birds", ["Robin"])])
+
+    client = app.test_client()
+    resp = client.get("/api/workspace/classification-inventory")
+    body = resp.get_json()
+    stale = [s for s in body["stale"] if s["fingerprint"] == "obsolete_fp"]
+    assert len(stale) == 1
+    assert stale[0]["stale_count"] == 3

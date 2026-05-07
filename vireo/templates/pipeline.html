@@ -1226,17 +1226,21 @@ function initPipelinePage() {
 // actually clicks Run.
 function applyClassifyQueryParams() {
   var qs = new URLSearchParams(window.location.search);
-  var qsModels = qs.get('models');
-  var qsLabels = qs.get('labels');
-  if (!qsModels && !qsLabels) return;
-  if (qsModels) {
-    var wantModels = new Set(qsModels.split(',').map(function(s) { return s.trim(); }).filter(Boolean));
+  // Use getAll() so multiple selections come through as repeated params
+  // (?models=a&models=b). Splitting a single decoded value on commas would
+  // mishandle filenames or IDs that contain a literal comma — get() decodes
+  // %2C back to ',' before any split would run.
+  var qsModels = qs.getAll('models').filter(Boolean);
+  var qsLabels = qs.getAll('labels').filter(Boolean);
+  if (qsModels.length === 0 && qsLabels.length === 0) return;
+  if (qsModels.length > 0) {
+    var wantModels = new Set(qsModels);
     document.querySelectorAll('.model-checkbox').forEach(function(cb) {
       cb.checked = wantModels.has(cb.value);
     });
   }
-  if (qsLabels) {
-    var wantLabels = new Set(qsLabels.split(',').map(function(s) { return s.trim(); }).filter(Boolean));
+  if (qsLabels.length > 0) {
+    var wantLabels = new Set(qsLabels);
     document.querySelectorAll('.labels-run-cb').forEach(function(cb) {
       // Match by full path or by basename (the inventory passes basenames).
       // Split on both POSIX (/) and Windows (\) separators so deep links work
