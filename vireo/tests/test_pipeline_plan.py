@@ -2103,6 +2103,14 @@ def test_import_plan_hash_duplicate_does_not_link_source_folder(tmp_path, monkey
     its source folder is never walked by the post-import scan (only the
     destination is). So Scan must NOT report the source folder as
     "needs linking" for hash-dup-only paths.
+
+    BUT: scan is still not a no-op. The post-ingest scan walks the
+    destination folders that hold the existing copies (and walks the
+    entire destination root if those copies live elsewhere), which can
+    link previously-unseen destination folders to the active workspace.
+    The plan must report will-run with a summary that names this
+    destination-side work — claiming "done-prior" would lie about real
+    state changes the user is about to trigger.
     """
     from db import Database
     from pipeline_plan import compute_plan
@@ -2127,10 +2135,53 @@ def test_import_plan_hash_duplicate_does_not_link_source_folder(tmp_path, monkey
         str(tmp_path / "test.db"),
     )
     scan = plan["stages"]["Scan"]
-    # Every file is hash-skipped → scan is genuinely a no-op (ingest
-    # walks nothing new and links no source folder).
+    # Source folder isn't walked (ingest skips the file entirely), so
+    # ``unlinked_folders`` for source paths stays 0.
     assert scan["detail"]["unlinked_folders"] == 0, scan
-    assert scan["state"] == "done-prior", scan
+    # But the destination is walked, so plan must surface will-run.
+    assert scan["state"] == "will-run", scan
+    assert scan["detail"]["hash_duplicates"] == 1, scan
+    assert "hash-duplicate" in scan["summary"], scan
+    assert "destination" in scan["summary"], scan
+
+
+def test_import_plan_hash_duplicate_with_unlinked_source_folder(tmp_path, monkeypatch):
+    """Mixed signal: some import paths are hash dups (copy mode skips them
+    + walks destination), and one path resolves to an existing photo whose
+    source folder isn't linked to the active workspace yet (scan will link
+    it). The plan must surface BOTH reasons in the summary so the user
+    sees what mutates and isn't told a misleading "Already done".
+    """
+    from db import Database
+    from pipeline_plan import compute_plan
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.create_workspace("WorkspaceA")
+    db._active_workspace_id = ws_a
+    # Existing photo at /cards/A/IMG_OLD.NEF — its folder is in WorkspaceA
+    # only. Re-importing into WorkspaceB will link /cards/A here.
+    fid_a = db.add_folder("/cards/A")
+    db.add_photo(folder_id=fid_a, filename="IMG_OLD.NEF",
+                 extension=".nef", file_size=1, file_mtime=1.0)
+    db._active_workspace_id = db.create_workspace("WorkspaceB")
+
+    plan = compute_plan(
+        db,
+        _import_params(
+            ["/cards/A/IMG_OLD.NEF", "/cards/B/IMG_HASH.NEF"],
+            hash_duplicate_paths=["/cards/B/IMG_HASH.NEF"],
+            skip_classify=True, skip_extract_masks=True,
+            skip_eye_keypoints=True, skip_regroup=True,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    scan = plan["stages"]["Scan"]
+    assert scan["state"] == "will-run", scan
+    assert scan["detail"]["unlinked_folders"] >= 1, scan
+    assert scan["detail"]["hash_duplicates"] == 1, scan
+    # Summary must mention both the source-link work and the
+    # destination-walk work, so the user knows what's about to mutate.
+    assert "hash-duplicate" in scan["summary"], scan
+    assert "destination" in scan["summary"], scan
 
 
 def test_api_pipeline_plan_rejects_oversized_hash_duplicate_paths(app_and_db):

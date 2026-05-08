@@ -643,7 +643,8 @@ def _empty_import_plan():
     }
 
 
-def _scan_plan(params, new_count, known_count, unlinked_folder_count):
+def _scan_plan(params, new_count, known_count, unlinked_folder_count,
+               hash_dup_count=0):
     """Plan entry for Scan & Import — only emitted in import / new-images modes.
 
     Honest answer for the user's "what will this run do" question: how many
@@ -661,9 +662,22 @@ def _scan_plan(params, new_count, known_count, unlinked_folder_count):
     case would lie about user-visible state changes (the photos becoming
     visible in this workspace), violating CORE_PHILOSOPHY.md's
     transparency rule.
+
+    ``hash_dup_count`` covers a copy-mode-only failure mode: even when
+    ``unlinked_folder_count == 0`` for the source paths (because we
+    excluded hash-dup parents from that calculation — ingest will skip
+    those source files, so source folders aren't walked), the post-ingest
+    scan in ``run_pipeline_job`` walks the *destination* folders that hold
+    the existing copies (and walks the entire destination root if those
+    copies live elsewhere). That can still link destination folders to the
+    active workspace and surface previously-unseen photos here. So we
+    cannot claim "done-prior" when hash dups are in play, even if every
+    other signal points to a no-op — the plan must report will-run with a
+    summary that names the destination-side work the user is about to
+    trigger.
     """
     total = new_count + known_count
-    if new_count == 0 and unlinked_folder_count == 0:
+    if new_count == 0 and unlinked_folder_count == 0 and hash_dup_count == 0:
         return {
             "state": "done-prior",
             "summary": (
@@ -674,17 +688,41 @@ def _scan_plan(params, new_count, known_count, unlinked_folder_count):
                 "eligible": total, "pending": 0,
                 "new_photos": 0, "already_known": known_count,
                 "unlinked_folders": 0,
+                "hash_duplicates": 0,
             },
         }
     if new_count == 0:
-        # All files known globally but folder(s) not attached to the active
-        # workspace yet — scan will link them, making the photos visible
-        # here. That's real work, even though no new photo rows are added.
-        summary = (
-            f"All {total} file{_plural(total)} already imported elsewhere — "
-            f"scan will link {unlinked_folder_count} "
-            f"folder{_plural(unlinked_folder_count)} to this workspace"
-        )
+        # All source files already known globally. Two reasons this still
+        # isn't a no-op, either of which is enough to flip to will-run:
+        #   - unlinked_folder_count > 0: source folder(s) not yet attached
+        #     to the active workspace, scan will link them via add_folder.
+        #   - hash_dup_count > 0: copy-mode hash dedup. ingest skips the
+        #     source file but the post-ingest scan walks destination
+        #     folders (or the destination root) to attach any duplicate
+        #     destination folders here.
+        if hash_dup_count > 0 and unlinked_folder_count > 0:
+            summary = (
+                f"All {total} file{_plural(total)} already imported "
+                f"({hash_dup_count} hash-duplicate"
+                f"{_plural(hash_dup_count)}) — scan will link "
+                f"{unlinked_folder_count} source "
+                f"folder{_plural(unlinked_folder_count)} and walk the "
+                f"import destination for any duplicate folders"
+            )
+        elif hash_dup_count > 0:
+            summary = (
+                f"All {total} file{_plural(total)} already imported "
+                f"({hash_dup_count} hash-duplicate"
+                f"{_plural(hash_dup_count)}) — scan will walk the "
+                f"import destination to link any duplicate folders to "
+                f"this workspace"
+            )
+        else:
+            summary = (
+                f"All {total} file{_plural(total)} already imported "
+                f"elsewhere — scan will link {unlinked_folder_count} "
+                f"folder{_plural(unlinked_folder_count)} to this workspace"
+            )
         return {
             "state": "will-run",
             "summary": summary,
@@ -694,6 +732,7 @@ def _scan_plan(params, new_count, known_count, unlinked_folder_count):
                 "new_photos": 0,
                 "already_known": known_count,
                 "unlinked_folders": unlinked_folder_count,
+                "hash_duplicates": hash_dup_count,
             },
         }
     if known_count == 0:
@@ -714,6 +753,7 @@ def _scan_plan(params, new_count, known_count, unlinked_folder_count):
             "new_photos": new_count,
             "already_known": known_count,
             "unlinked_folders": unlinked_folder_count,
+            "hash_duplicates": hash_dup_count,
         },
     }
 
@@ -757,6 +797,7 @@ def compute_plan(db, params, db_path):
     new_count = 0
     known_count = 0
     unlinked_folder_count = 0
+    hash_dup_count = 0
     if params.collection_id is not None:
         from pipeline import _resolve_collection_photo_ids
         photo_ids = _resolve_collection_photo_ids(db, params.collection_id)
@@ -802,6 +843,7 @@ def compute_plan(db, params, db_path):
         ) - known_at_path_set
         known_count = len(known) + len(hash_dup_paths)
         new_count = len(unique_paths) - known_count
+        hash_dup_count = len(hash_dup_paths)
         # photos_by_paths is global — a path is "known" even when the
         # photo's folder belongs to a different workspace. scanner.scan
         # would still attach those folders to the active workspace via
@@ -831,6 +873,7 @@ def compute_plan(db, params, db_path):
     if params.source_paths is not None:
         stages["Scan"] = _scan_plan(
             params, new_count, known_count, unlinked_folder_count,
+            hash_dup_count,
         )
 
     return {
