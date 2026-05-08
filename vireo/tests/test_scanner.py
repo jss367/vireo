@@ -2357,3 +2357,77 @@ def test_scan_restrict_dirs_surfaces_permission_denied(tmp_path, monkeypatch):
     assert any(forbidden in p for p in denied), (
         f"denied restrict_dir not reported via callback. got: {denied}"
     )
+
+
+def test_scan_restrict_dirs_raises_permission_error_without_callback(
+    tmp_path, monkeypatch,
+):
+    """Without ``permission_error_callback``, a denied restrict_dir must still
+    raise PermissionError — *not* be silently swallowed.
+
+    Regression: pipeline_job's repair scan calls ``do_scan(..., restrict_dirs=
+    [folder_path])`` without a callback and wraps it in
+    ``except (OSError, RuntimeError)`` to count unreachable folders. An
+    earlier fix caught PermissionError and unconditionally `continue`d,
+    which silently turned denied folders into "successfully repaired" —
+    a black-box regression. Partial-success is opt-in via the callback;
+    every other caller must keep the loud failure semantics they had.
+    """
+    import errno as _errno
+    from pathlib import Path as _Path
+
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'forbidden': ['hidden.jpg']})
+    forbidden = os.path.join(root, 'forbidden')
+
+    real_iterdir = _Path.iterdir
+
+    def fake_iterdir(self):
+        if str(self) == forbidden:
+            raise PermissionError(
+                _errno.EACCES, "Permission denied", str(self),
+            )
+        return real_iterdir(self)
+
+    monkeypatch.setattr(_Path, "iterdir", fake_iterdir)
+
+    db = Database(str(tmp_path / "test.db"))
+    with pytest.raises(PermissionError):
+        scan(root, db, restrict_dirs=[forbidden])
+
+
+def test_scan_recursive_raises_permission_error_without_callback(
+    tmp_path, monkeypatch,
+):
+    """Without ``permission_error_callback``, a denied subdir during a
+    recursive walk must raise PermissionError. The os.walk ``onerror``
+    callback re-raises so the failure is visible to the caller — silent
+    "Found 0 images" is the very black-box behavior this stack was
+    refactored to eliminate.
+    """
+    import errno as _errno
+
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['ok.jpg'], 'forbidden': ['hidden.jpg']})
+    forbidden = os.path.join(root, 'forbidden')
+
+    real_scandir = os.scandir
+
+    def fake_scandir(path, *args, **kwargs):
+        if os.fspath(path) == forbidden:
+            raise PermissionError(
+                _errno.EACCES, "Permission denied", forbidden,
+            )
+        return real_scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", fake_scandir)
+
+    db = Database(str(tmp_path / "test.db"))
+    with pytest.raises(PermissionError):
+        scan(root, db)

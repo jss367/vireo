@@ -822,6 +822,16 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # log so we don't mask unexpected I/O problems. Defined here
     # (not nested in a branch) so the restrict_dirs path below can
     # also surface denials through the same callback.
+    #
+    # Partial-success (skip the denied dir, keep scanning siblings)
+    # is *opt-in* via permission_error_callback. Without a callback,
+    # re-raise the PermissionError: existing OSError-aware callers
+    # (e.g. pipeline_job repair scan's `except (OSError, RuntimeError)`
+    # unreachable counter) rely on the failure to surface, and silent
+    # skipping would let a denied folder be reported as successfully
+    # repaired. Callers that want to continue past denials must pass
+    # the callback to acknowledge they've taken responsibility for
+    # streaming the denial somewhere actionable.
     def _on_walk_error(err):
         if err.errno in (errno.EPERM, errno.EACCES):
             denied = err.filename or str(root_path)
@@ -831,8 +841,10 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 "→ Files and Folders / Removable Volumes) needs to "
                 "grant Vireo access.", denied,
             )
-            if permission_error_callback:
+            if permission_error_callback is not None:
                 permission_error_callback(denied)
+                return
+            raise err
         else:
             log.warning("os.walk error at %s: %s", err.filename, err)
 
@@ -844,11 +856,15 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             dp = Path(d)
             if dp.is_dir():
                 # iterdir() raises PermissionError when the kernel refuses
-                # enumeration (macOS TCC EPERM, POSIX EACCES). Without this
-                # try/except the whole pipeline scan stage aborts on the
-                # first denied dir; route through _on_walk_error so the
-                # denial is surfaced via permission_error_callback the same
-                # way the recursive path does.
+                # enumeration (macOS TCC EPERM, POSIX EACCES). Route through
+                # _on_walk_error so denials are surfaced via
+                # permission_error_callback the same way the recursive path
+                # does. _on_walk_error re-raises when no callback is
+                # registered, so callers like pipeline_job's repair scan
+                # (which counts unreachable folders via `except OSError`)
+                # keep their failure semantics; only callers that opted in
+                # to partial-success by passing the callback fall through to
+                # `continue`.
                 try:
                     entries = list(dp.iterdir())
                 except PermissionError as e:
