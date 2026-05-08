@@ -630,15 +630,27 @@ def _empty_import_plan():
     }
 
 
-def _scan_plan(params, new_count, known_count):
+def _scan_plan(params, new_count, known_count, unlinked_folder_count):
     """Plan entry for Scan & Import — only emitted in import / new-images modes.
 
     Honest answer for the user's "what will this run do" question: how many
-    files will it actually ingest (creating photo rows), and how many were
-    already in Vireo from a prior import (no-op for those).
+    files will it actually ingest (creating photo rows), how many were
+    already in Vireo from a prior import (no-op for those), and — when
+    every file is already known — whether the scan would still mutate the
+    active workspace by linking previously-unseen folders to it.
+
+    ``unlinked_folder_count`` is the count of distinct parent directories
+    of the import set whose folder rows are not yet linked to the active
+    workspace. ``scanner.scan`` calls ``_ensure_folder`` (which auto-links
+    via ``add_folder``) for every walked directory, so a non-zero value
+    means scan is *not* a no-op even when ``new_count == 0`` — it will
+    insert ``workspace_folders`` rows. Reporting "Already done" in that
+    case would lie about user-visible state changes (the photos becoming
+    visible in this workspace), violating CORE_PHILOSOPHY.md's
+    transparency rule.
     """
     total = new_count + known_count
-    if new_count == 0:
+    if new_count == 0 and unlinked_folder_count == 0:
         return {
             "state": "done-prior",
             "summary": (
@@ -648,6 +660,27 @@ def _scan_plan(params, new_count, known_count):
             "detail": {
                 "eligible": total, "pending": 0,
                 "new_photos": 0, "already_known": known_count,
+                "unlinked_folders": 0,
+            },
+        }
+    if new_count == 0:
+        # All files known globally but folder(s) not attached to the active
+        # workspace yet — scan will link them, making the photos visible
+        # here. That's real work, even though no new photo rows are added.
+        summary = (
+            f"All {total} file{_plural(total)} already imported elsewhere — "
+            f"scan will link {unlinked_folder_count} "
+            f"folder{_plural(unlinked_folder_count)} to this workspace"
+        )
+        return {
+            "state": "will-run",
+            "summary": summary,
+            "detail": {
+                "eligible": total,
+                "pending": 0,
+                "new_photos": 0,
+                "already_known": known_count,
+                "unlinked_folders": unlinked_folder_count,
             },
         }
     if known_count == 0:
@@ -667,6 +700,7 @@ def _scan_plan(params, new_count, known_count):
             "pending": new_count,
             "new_photos": new_count,
             "already_known": known_count,
+            "unlinked_folders": unlinked_folder_count,
         },
     }
 
@@ -709,6 +743,7 @@ def compute_plan(db, params, db_path):
     photo_ids = None
     new_count = 0
     known_count = 0
+    unlinked_folder_count = 0
     if params.collection_id is not None:
         from pipeline import _resolve_collection_photo_ids
         photo_ids = _resolve_collection_photo_ids(db, params.collection_id)
@@ -735,6 +770,14 @@ def compute_plan(db, params, db_path):
         photo_ids = set(known.values())
         known_count = len(known)
         new_count = len(unique_paths) - known_count
+        # photos_by_paths is global — a path is "known" even when the
+        # photo's folder belongs to a different workspace. scanner.scan
+        # would still attach those folders to the active workspace via
+        # add_folder/_ensure_folder, so a "done-prior" Scan claim would
+        # be false in that case. Count parent dirs not yet linked here.
+        unlinked_folder_count = db.workspace_unlinked_folder_count(
+            {os.path.dirname(p) for p in unique_paths}
+        )
 
     classify = _classify_plan(db, params, photo_ids, new_count)
     extract = _extract_plan(db, params, photo_ids, pipeline_cfg, new_count)
@@ -751,7 +794,9 @@ def compute_plan(db, params, db_path):
         "Group": regroup,
     }
     if params.source_paths is not None:
-        stages["Scan"] = _scan_plan(params, new_count, known_count)
+        stages["Scan"] = _scan_plan(
+            params, new_count, known_count, unlinked_folder_count,
+        )
 
     return {
         "stages": stages,

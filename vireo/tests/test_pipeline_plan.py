@@ -89,6 +89,48 @@ def test_photos_by_paths_ignores_workspace_membership(tmp_path):
     assert db.photos_by_paths(["/cards/a/x.jpg"]) == {"/cards/a/x.jpg": pid}
 
 
+def test_workspace_unlinked_folder_count_counts_unlinked(tmp_path):
+    """The helper must report folders not linked to the active workspace.
+
+    Three cases must all count as "unlinked":
+      - folder row exists but is linked only to a different workspace,
+      - folder row exists and is linked to no workspace,
+      - folder row does not exist at all (a brand-new directory).
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_other = db.create_workspace("Other")
+    ws_active = db.create_workspace("Active")
+
+    fid_other = db.add_folder("/cards/other-ws-only")
+    db.add_workspace_folder(ws_other, fid_other)
+    db.add_folder("/cards/orphan")  # no workspace link at all
+    fid_shared = db.add_folder("/cards/shared")
+    db.add_workspace_folder(ws_other, fid_shared)
+    db.add_workspace_folder(ws_active, fid_shared)
+
+    db._active_workspace_id = ws_active
+
+    assert db.workspace_unlinked_folder_count([
+        "/cards/other-ws-only",  # linked only to Other
+        "/cards/orphan",         # linked to nothing
+        "/cards/shared",         # linked to Active
+        "/cards/never-seen",     # no folder row at all
+    ]) == 3
+
+
+def test_workspace_unlinked_folder_count_dedupes_and_handles_empty(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db._active_workspace_id = db.create_workspace("Active")
+    fid = db.add_folder("/cards/a")
+    db.add_workspace_folder(db._active_workspace_id, fid)
+
+    assert db.workspace_unlinked_folder_count([]) == 0
+    assert db.workspace_unlinked_folder_count(["/cards/a", "/cards/a"]) == 0
+    assert db.workspace_unlinked_folder_count(["/cards/x", "/cards/x"]) == 1
+
+
 def test_count_real_detections_in_scope_excludes_full_image(tmp_path):
     """Synthetic full-image rows must not inflate the classify scope.
 
@@ -1680,6 +1722,79 @@ def test_import_plan_all_known_scan_is_done_prior(tmp_path):
     assert scan["state"] == "done-prior"
     assert scan["detail"]["new_photos"] == 0
     assert scan["detail"]["already_known"] == 1
+    assert scan["detail"]["unlinked_folders"] == 0
+
+
+def test_import_plan_all_known_but_folder_unlinked_to_active_workspace(tmp_path):
+    """Files known globally but whose folder is not yet linked to the
+    active workspace must NOT report Scan as done-prior.
+
+    Re-importing files that were indexed in another workspace lands in
+    this branch. ``scanner.scan`` calls ``_ensure_folder`` for every
+    walked directory, and ``add_folder`` auto-links to the active
+    workspace via ``workspace_folders`` — so the next pipeline run will
+    mutate workspace state by attaching the folder (and thereby making
+    those photos visible here). Claiming "Already done" hides that work
+    from the user, exactly the misleading-pill failure
+    CORE_PHILOSOPHY.md prohibits.
+    """
+    from db import Database
+    from pipeline_plan import compute_plan
+    db = Database(str(tmp_path / "test.db"))
+
+    # Photos imported under workspace A.
+    ws_a = db.create_workspace("WorkspaceA")
+    db._active_workspace_id = ws_a
+    fid = db.add_folder("/cards/A")  # auto-linked to WorkspaceA
+    db.add_photo(folder_id=fid, filename="IMG_001.NEF",
+                 extension=".nef", file_size=1, file_mtime=1.0)
+
+    # Switch active workspace to a fresh B that has no link to /cards/A.
+    db._active_workspace_id = db.create_workspace("WorkspaceB")
+
+    plan = compute_plan(
+        db,
+        _import_params(
+            ["/cards/A/IMG_001.NEF"],
+            skip_classify=True, skip_extract_masks=True,
+            skip_eye_keypoints=True, skip_regroup=True,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    scan = plan["stages"]["Scan"]
+    # Scan must run — it will INSERT INTO workspace_folders for /cards/A.
+    assert scan["state"] == "will-run", scan
+    assert scan["detail"]["new_photos"] == 0
+    assert scan["detail"]["already_known"] == 1
+    assert scan["detail"]["unlinked_folders"] == 1
+    # Summary must name the linking work, not pretend it's a no-op.
+    assert "elsewhere" in scan["summary"].lower()
+    assert "link" in scan["summary"].lower()
+
+
+def test_import_plan_all_known_with_folder_linked_stays_done_prior(tmp_path):
+    """Same workspace re-import: folder is linked to the active workspace,
+    so scan really is a no-op. The unlinked-folder check must not flip
+    these into will-run.
+    """
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    fid = db.add_folder("/cards/A")  # auto-links to active WS
+    db.add_photo(folder_id=fid, filename="IMG_001.NEF",
+                 extension=".nef", file_size=1, file_mtime=1.0)
+
+    plan = compute_plan(
+        db,
+        _import_params(
+            ["/cards/A/IMG_001.NEF"],
+            skip_classify=True, skip_extract_masks=True,
+            skip_eye_keypoints=True, skip_regroup=True,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    scan = plan["stages"]["Scan"]
+    assert scan["state"] == "done-prior", scan
+    assert scan["detail"]["unlinked_folders"] == 0
 
 
 def test_import_plan_emits_scan_only_for_import_mode(tmp_path):

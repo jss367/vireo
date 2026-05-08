@@ -2813,6 +2813,47 @@ class Database:
                     out[os.path.join(dir_path, r["filename"])] = r["id"]
         return out
 
+    def workspace_unlinked_folder_count(self, folder_paths):
+        """Count distinct paths in ``folder_paths`` whose folders are not
+        linked to the active workspace.
+
+        A folder path is "unlinked" when either no row exists in ``folders``
+        for that path or a row exists but no ``workspace_folders`` entry
+        connects it to the active workspace.
+
+        Used by the import-mode pipeline plan to decide whether a scan over
+        already-imported files would be a real no-op for the active
+        workspace. ``scanner.scan`` calls ``_ensure_folder`` (which calls
+        ``add_folder``) for each walked directory, and ``add_folder``
+        auto-links the folder to the active workspace via
+        ``workspace_folders``. So when the user re-imports files that were
+        indexed in a different workspace, scan still mutates state by
+        attaching folders to the active workspace — and the plan must
+        report that as ``will-run`` instead of claiming ``done-prior``.
+        """
+        if not folder_paths:
+            return 0
+        ws = self._ws_id()
+        unique = list({p for p in folder_paths if p})
+        if not unique:
+            return 0
+        BATCH = 800
+        linked = set()
+        for i in range(0, len(unique), BATCH):
+            chunk = unique[i:i + BATCH]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT f.path
+                    FROM folders f
+                    JOIN workspace_folders wf
+                      ON wf.folder_id = f.id AND wf.workspace_id = ?
+                    WHERE f.path IN ({placeholders})""",
+                (ws, *chunk),
+            ).fetchall()
+            for r in rows:
+                linked.add(r["path"])
+        return len(unique) - len(linked)
+
     def _scope_clause(self, photo_ids, table_alias="p"):
         """Build a (clause, params) pair to scope a query to photo_ids.
 
