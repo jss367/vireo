@@ -1604,6 +1604,10 @@ function renderPreview() {
   updatePreviewCounts();
   // Reapply cached duplicate markers after DOM rebuild
   if (Object.keys(_duplicateResults).length > 0) applyDuplicateVisuals();
+  // Preview content drives the import-mode plan (which paths are selected).
+  // Refresh debounced — folder-level and select-all checkboxes call us in
+  // bursts, and we'd rather not POST to /api/pipeline/plan on every click.
+  schedulePlanRefresh();
 }
 
 function checkForDuplicates() {
@@ -3706,10 +3710,13 @@ function refreshPipelineUI() {
 // subset of /api/jobs/pipeline the plan needs to make accurate decisions.
 function _buildPlanBody() {
   var body = {};
-  // Source: only "existing collection" mode lets us scope the plan to a
-  // concrete photo set. For import / new-images modes the photo set
-  // doesn't exist yet, so leave collection_id null and let the plan
-  // describe whole-workspace counts.
+  // Source mode determines how the backend scopes the plan:
+  //   - 'collection': scope = collection's photo ids (real per-photo status).
+  //   - 'import' / 'new_images': send the SELECTED preview file paths so
+  //     the backend can split them into already-known-vs-new and report
+  //     truthful counts. Without this the plan falls back to whole-workspace
+  //     counts, which renders "Already done" for an import into a
+  //     non-empty workspace — exactly the bug we're fixing.
   if (_sourceMode === 'collection') {
     var picker = document.getElementById('collectionPicker');
     var cid = picker && picker.value ? parseInt(picker.value, 10) : NaN;
@@ -3720,6 +3727,20 @@ function _buildPlanBody() {
         if (!_previewSelected[f.path] && f.photo_id) excludedIds.push(f.photo_id);
       });
       if (excludedIds.length) body.exclude_photo_ids = excludedIds;
+    }
+  } else if ((_sourceMode === 'import' || _sourceMode === 'new_images')
+             && _previewData && _previewData.files && _previewSelected) {
+    // Send only the selected paths — the user can deselect duplicates
+    // or specific files in the preview, and the plan should reflect
+    // the actual run scope, not the whole-folder discovery.
+    var selectedPaths = [];
+    _previewData.files.forEach(function(f) {
+      if (_previewSelected[f.path]) selectedPaths.push(f.path);
+    });
+    // Mirror the backend cap (50k); above this the plan endpoint rejects
+    // the request rather than silently truncate, so do the same client-side.
+    if (selectedPaths.length && selectedPaths.length <= 50000) {
+      body.source_paths = selectedPaths;
     }
   }
 

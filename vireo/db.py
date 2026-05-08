@@ -2777,6 +2777,42 @@ class Database:
             out.append(entry)
         return out
 
+    def photos_by_paths(self, paths):
+        """Return {abs_path: photo_id} for any of ``paths`` already in DB.
+
+        Photos are global (not workspace-scoped), so the import-mode plan
+        can ask "do these files already exist in Vireo?" without caring
+        which workspace owns the folder. Paths missing from the result are
+        genuinely new and the next pipeline run will create photo rows for
+        them — that's what makes "Will run (N)" honest in import mode.
+
+        Splits the input by directory so the SQL stays a single
+        ``WHERE f.path = ? AND p.filename IN (...)`` per directory and
+        respects SQLite's parameter cap.
+        """
+        if not paths:
+            return {}
+        by_dir = {}
+        for p in paths:
+            by_dir.setdefault(os.path.dirname(p), []).append(os.path.basename(p))
+
+        out = {}
+        BATCH = 800  # leave headroom under SQLite's default 999-param cap
+        for dir_path, fnames in by_dir.items():
+            for i in range(0, len(fnames), BATCH):
+                chunk = fnames[i:i + BATCH]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = self.conn.execute(
+                    f"""SELECT p.id, p.filename
+                        FROM photos p
+                        JOIN folders f ON f.id = p.folder_id
+                        WHERE f.path = ? AND p.filename IN ({placeholders})""",
+                    (dir_path, *chunk),
+                ).fetchall()
+                for r in rows:
+                    out[os.path.join(dir_path, r["filename"])] = r["id"]
+        return out
+
     def _scope_clause(self, photo_ids, table_alias="p"):
         """Build a (clause, params) pair to scope a query to photo_ids.
 

@@ -38,6 +38,57 @@ def _add_photo_with_detection(db, folder_id, filename, conf=0.9,
 
 # -------- db helpers --------
 
+def test_photos_by_paths_returns_known_and_omits_unknown(tmp_path):
+    """photos_by_paths is the lookup that lets import-mode plan split a
+    preview file list into 'already in DB' vs 'truly new'. Known paths
+    must come back keyed by absolute path; unknown paths must be absent.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid_a = db.add_folder("/cards/a")
+    fid_b = db.add_folder("/cards/b")
+    pid_a1 = db.add_photo(folder_id=fid_a, filename="IMG_001.NEF",
+                          extension=".nef", file_size=1, file_mtime=1.0)
+    pid_b1 = db.add_photo(folder_id=fid_b, filename="IMG_900.JPG",
+                          extension=".jpg", file_size=1, file_mtime=1.0)
+
+    result = db.photos_by_paths([
+        "/cards/a/IMG_001.NEF",         # known
+        "/cards/a/IMG_NEW.NEF",         # unknown (new file, same folder)
+        "/cards/b/IMG_900.JPG",         # known (different folder)
+        "/cards/never/IMG_000.JPG",     # unknown (folder not in DB)
+    ])
+    assert result == {
+        "/cards/a/IMG_001.NEF": pid_a1,
+        "/cards/b/IMG_900.JPG": pid_b1,
+    }
+
+
+def test_photos_by_paths_handles_empty_input(tmp_path):
+    """Empty list must short-circuit, not run a SELECT with zero
+    placeholders (which is malformed SQL)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    assert db.photos_by_paths([]) == {}
+
+
+def test_photos_by_paths_ignores_workspace_membership(tmp_path):
+    """Photos are global; the lookup must find a known photo even when
+    its folder is not in the active workspace. Otherwise re-importing
+    into a different workspace would mis-classify already-imported
+    files as 'new'.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/cards/a")
+    pid = db.add_photo(folder_id=fid, filename="x.jpg",
+                       extension=".jpg", file_size=1, file_mtime=1.0)
+    # Active workspace has no folders (the import target is a fresh ws).
+    db._active_workspace_id = db.create_workspace("Other")
+
+    assert db.photos_by_paths(["/cards/a/x.jpg"]) == {"/cards/a/x.jpg": pid}
+
+
 def test_count_real_detections_in_scope_excludes_full_image(tmp_path):
     """Synthetic full-image rows must not inflate the classify scope.
 
@@ -1365,3 +1416,269 @@ def test_api_pipeline_plan_collection_scope(app_and_db):
     data = resp.get_json()
     assert data["stages"]["Extract"]["state"] == "will-run"
     assert data["stages"]["Extract"]["detail"]["eligible"] == 0
+
+
+# -------- compute_plan: import-mode honesty --------
+#
+# These tests pin the core bug fix: when the user is about to import a
+# brand-new SD card, every per-photo stage must report "will run" with a
+# count that reflects the about-to-be-imported files — *not* "Already
+# done" derived from the active workspace's existing photos. A pill that
+# says "Already done" must mean the next run is genuinely a no-op.
+
+def _import_params(paths, **kwargs):
+    """Helper: compute_plan params for an import run with the given paths.
+
+    Defaults skip eye-keypoints + regroup so tests can focus on the
+    classify/extract scope without setting up label fixtures."""
+    from pipeline_plan import PipelinePlanParams
+    return PipelinePlanParams(
+        source_paths=list(paths),
+        skip_eye_keypoints=kwargs.pop("skip_eye_keypoints", True),
+        skip_regroup=kwargs.pop("skip_regroup", True),
+        **kwargs,
+    )
+
+
+def _stub_models(monkeypatch):
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+
+def test_import_plan_all_new_files_flips_classify_to_will_run(tmp_path, monkeypatch):
+    """The bug we're fixing: workspace has fully-classified detections,
+    user points at a brand-new folder. Classify must say "will run", not
+    "Already done"."""
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _stub_models(monkeypatch)
+    # Existing scope: one detection, already classified — would be
+    # "done-prior" without imports.
+    _, did = _add_photo_with_detection(db, folder_id, "existing.jpg")
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+
+    new_paths = ["/cards/A/IMG_001.NEF", "/cards/A/IMG_002.NEF"]
+    plan = compute_plan(
+        db,
+        _import_params(new_paths, model_ids=["m1"]),
+        str(tmp_path / "test.db"),
+    )
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "will-run"
+    assert classify["detail"]["new_photos"] == 2
+    assert classify["detail"]["pending"] == 2
+    assert "2 new" in classify["summary"]
+
+
+def test_import_plan_all_new_files_flips_extract_to_will_run(tmp_path):
+    """Extract pill on a brand-new import: every file is a new photo that
+    will need a mask once the detector produces detections, so the pill
+    must show "Will run (N)" with N = the import count, not 0 or "Already
+    done"."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    # Background: workspace has a fully-masked photo. Without source_paths
+    # the plan would report this as "done-prior". With source_paths, the
+    # scope is the import only — so the existing photo doesn't pollute the
+    # numbers (it's not what this run is touching).
+    pid, _ = _add_photo_with_detection(db, folder_id, "existing.jpg")
+    db.conn.execute("UPDATE photos SET mask_path='/m/x.png' WHERE id=?", (pid,))
+    db.conn.commit()
+
+    plan = compute_plan(
+        db,
+        _import_params(
+            ["/cards/A/IMG_001.NEF", "/cards/A/IMG_002.NEF",
+             "/cards/A/IMG_003.NEF"],
+            skip_classify=True,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    extract = plan["stages"]["Extract"]
+    assert extract["state"] == "will-run"
+    assert extract["detail"]["new_photos"] == 3
+    # Scope = import (3 new) only. The unrelated existing photo isn't
+    # being processed by this run and must not be included.
+    assert extract["detail"]["eligible"] == 3
+    assert extract["detail"]["pending"] == 3
+
+
+def test_import_plan_known_files_with_pending_masks_combine(tmp_path):
+    """Mixed scope: the user re-points at a partly-imported folder where
+    one already-known photo has a detection but no mask yet, plus a
+    new file. Extract must report the combined work — masks for the
+    pending known + masks for the new — so the pill is honest about
+    what the run will actually do.
+    """
+    from pipeline_plan import compute_plan
+    db, _folder = _make_db(tmp_path)
+    fid_card = db.add_folder("/cards/A")
+    db.add_workspace_folder(db._active_workspace_id, fid_card)
+    pid_known, _ = _add_photo_with_detection(db, fid_card, "IMG_001.NEF")
+    # IMG_001.NEF: known, has detection, no mask → eligible=1, pending=1.
+    paths = ["/cards/A/IMG_001.NEF", "/cards/A/IMG_002.NEF"]
+    plan = compute_plan(
+        db,
+        _import_params(paths, skip_classify=True),
+        str(tmp_path / "test.db"),
+    )
+    extract = plan["stages"]["Extract"]
+    assert extract["state"] == "will-run"
+    assert extract["detail"]["eligible"] == 2  # 1 known + 1 new
+    assert extract["detail"]["pending"] == 2   # both need masks
+    assert extract["detail"]["new_photos"] == 1
+
+
+def test_import_plan_does_not_leak_active_workspace_state(tmp_path):
+    """The headline bug: active workspace has tons of "done" work, and
+    the user starts an import. Without source_paths the plan describes
+    the active workspace (→ "Already done"). With source_paths the plan
+    describes the import — every per-photo stage flips to will-run.
+
+    This is the regression guard for the user-reported bug.
+    """
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    # Fully-classified detection + masked photo in the active workspace.
+    pid, did = _add_photo_with_detection(db, folder_id, "old.jpg")
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    db.conn.execute("UPDATE photos SET mask_path='/m/old.png' WHERE id=?", (pid,))
+    db.conn.commit()
+
+    # Without source_paths → plan is whole-workspace (the old buggy
+    # behaviour), so Extract reports done-prior.
+    baseline = compute_plan(
+        db,
+        _params(skip_classify=True, skip_eye_keypoints=True, skip_regroup=True),
+        str(tmp_path / "test.db"),
+    )
+    assert baseline["stages"]["Extract"]["state"] == "done-prior"
+
+    # With source_paths for a fresh import → plan is scoped to those
+    # paths, Extract flips to will-run.
+    fixed = compute_plan(
+        db,
+        _import_params(
+            ["/cards/A/IMG_001.NEF", "/cards/A/IMG_002.NEF"],
+            skip_classify=True,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert fixed["stages"]["Extract"]["state"] == "will-run"
+    assert fixed["stages"]["Extract"]["detail"]["pending"] == 2
+
+
+def test_import_plan_partial_overlap_counts_only_truly_new(tmp_path, monkeypatch):
+    """If half the preview's files are already in the DB (the user
+    re-pointed at an SD card they previously imported), the plan must
+    count only the truly-new ones as new work — re-importing an existing
+    file is a no-op."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _stub_models(monkeypatch)
+    # Two existing photos in DB at /cards/A/...
+    fid_card = db.add_folder("/cards/A")
+    db.add_photo(folder_id=fid_card, filename="IMG_001.NEF",
+                 extension=".nef", file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid_card, filename="IMG_002.NEF",
+                 extension=".nef", file_size=1, file_mtime=1.0)
+
+    paths = [
+        "/cards/A/IMG_001.NEF",  # known
+        "/cards/A/IMG_002.NEF",  # known
+        "/cards/A/IMG_003.NEF",  # new
+        "/cards/A/IMG_004.NEF",  # new
+    ]
+    plan = compute_plan(
+        db,
+        _import_params(paths, model_ids=["m1"]),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["scope"]["new_count"] == 2
+    assert plan["scope"]["known_count"] == 2
+    assert plan["stages"]["Scan"]["state"] == "will-run"
+    assert plan["stages"]["Scan"]["detail"]["new_photos"] == 2
+    assert plan["stages"]["Scan"]["detail"]["already_known"] == 2
+
+
+def test_import_plan_all_known_scan_is_done_prior(tmp_path):
+    """If every preview file is already in the DB, Scan reports done-prior
+    (the run will be a no-op for the scan step). Other stages reflect
+    real status of those known photos as scope."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    fid_card = db.add_folder("/cards/A")
+    db.add_photo(folder_id=fid_card, filename="IMG_001.NEF",
+                 extension=".nef", file_size=1, file_mtime=1.0)
+
+    plan = compute_plan(
+        db,
+        _import_params(
+            ["/cards/A/IMG_001.NEF"],
+            skip_classify=True,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    scan = plan["stages"]["Scan"]
+    assert scan["state"] == "done-prior"
+    assert scan["detail"]["new_photos"] == 0
+    assert scan["detail"]["already_known"] == 1
+
+
+def test_import_plan_emits_scan_only_for_import_mode(tmp_path):
+    """Scan plan entry is import/new-images specific. Whole-workspace and
+    collection-scoped plans must not emit it (the JS renders a default
+    'will run' for unknown stages, which is fine for those modes)."""
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+
+    plan = compute_plan(
+        db,
+        _params(
+            skip_classify=True, skip_extract_masks=True,
+            skip_eye_keypoints=True, skip_regroup=True,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert "Scan" not in plan["stages"]
+    assert plan["scope"]["new_count"] == 0
+
+
+def test_api_pipeline_plan_rejects_oversized_source_paths(app_and_db):
+    """Defense in depth at the API boundary — a misbehaving client that
+    POSTs hundreds of thousands of paths should get 400, not silent
+    truncation (which would mis-classify the dropped files as new)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={
+            "source_paths": ["/x/" + str(i) for i in range(50001)],
+            "skip_classify": True, "skip_extract_masks": True,
+            "skip_eye_keypoints": True, "skip_regroup": True,
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_api_pipeline_plan_rejects_non_list_source_paths(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={
+            "source_paths": "/single/path.nef",  # str, not list
+            "skip_classify": True, "skip_extract_masks": True,
+            "skip_eye_keypoints": True, "skip_regroup": True,
+        },
+    )
+    assert resp.status_code == 400
