@@ -144,6 +144,56 @@ def test_load_photo_features_no_predictions(tmp_path):
     assert photos[0]["species_top5"] == []
 
 
+def test_load_photo_features_subject_absent_from_current_detections(tmp_path):
+    """subject_absent must be derived from this run's detections vs the
+    current detector_confidence threshold — NOT from the stored
+    miss_no_subject column. Regroup runs before miss in the pipeline, so
+    miss_no_subject reflects the *previous* run (or NULL on first run);
+    relying on it would make the asymmetric-no-subject penalty lag by a
+    run and go stale on threshold changes.
+    """
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    # Photo A: real detection at conf 0.9 (well above default 0.2 threshold)
+    pid_a = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
+    db.save_detections(pid_a, [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
+    ], detector_model="megadetector")
+    # Stamp stale miss flags from a hypothetical prior run that would
+    # WRONGLY mark this photo as no-subject. The current-detection
+    # derivation must ignore them.
+    db.conn.execute(
+        "UPDATE photos SET miss_no_subject=1, "
+        "miss_computed_at='2026-01-01T00:00:00' WHERE id=?",
+        (pid_a,),
+    )
+
+    # Photo B: only sub-threshold detections (the 1761 case from apr2026)
+    pid_b = db.add_photo(fid, "b.jpg", ".jpg", 100, 1.0)
+    db.save_detections(pid_b, [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.05, "h": 0.05}, "confidence": 0.03},
+    ], detector_model="megadetector")
+    # Conversely, leave miss flags NULL on B — this is what the very first
+    # pipeline run on a new workspace looks like. The new derivation must
+    # still mark B subject_absent based on the live detection check.
+    db.conn.commit()
+
+    photos = load_photo_features(db)
+    by_id = {p["id"]: p for p in photos}
+
+    assert by_id[pid_a]["subject_absent"] is False, (
+        "stale miss_no_subject=1 must not override a live high-conf detection"
+    )
+    assert by_id[pid_b]["subject_absent"] is True, (
+        "no detection above threshold must mark subject_absent=True even "
+        "when miss_computed_at IS NULL"
+    )
+
+
 # -- run_grouping --
 
 

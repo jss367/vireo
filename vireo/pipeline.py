@@ -32,8 +32,7 @@ _PIPELINE_PHOTO_COLS = """
     p.dino_embedding_variant,
     p.focal_length, p.burst_id, p.noise_estimate,
     p.flag, p.rating,
-    p.eye_x, p.eye_y, p.eye_conf, p.eye_tenengrad,
-    p.miss_no_subject, p.miss_computed_at
+    p.eye_x, p.eye_y, p.eye_conf, p.eye_tenengrad
 """
 
 
@@ -262,17 +261,20 @@ def load_photo_features(db, collection_id=None, config=None,
                        "w": det["w"], "h": det["h"]}
             det_conf = det["detection_conf"]
 
-        # subject_absent: the detector ran (miss_computed_at IS NOT NULL)
-        # AND found no animal above threshold (miss_no_subject=1). This is
-        # information — encounters.compute_s_enc treats an asymmetric
-        # absent/present pair as actively dissimilar instead of dropping
-        # the missing subject embedding from the weighted average.
-        # `miss_computed_at IS NULL` means the miss stage hasn't run yet
-        # for this photo, so we leave subject_absent=False (uncomputed).
-        subject_absent = (
-            row["miss_computed_at"] is not None
-            and bool(row["miss_no_subject"])
-        )
+        # subject_absent: no detection passes the workspace's effective
+        # `detector_confidence` threshold this run. This is information —
+        # encounters.compute_s_enc treats an asymmetric absent/present pair
+        # as actively dissimilar instead of dropping the missing subject
+        # embedding from the weighted average.
+        #
+        # Derived from the same detection-vs-threshold check the miss stage
+        # uses (compute_misses_for_workspace), reading the detections table
+        # directly. We can't read photos.miss_no_subject here because
+        # regroup runs BEFORE miss in the pipeline (detect → classify →
+        # regroup → miss), so that column reflects the *previous* run's
+        # threshold + detections — stale on first runs (NULL) and after any
+        # threshold or detection change.
+        subject_absent = pid not in primary_det_by_photo
 
         photos.append({
             "id": pid,
