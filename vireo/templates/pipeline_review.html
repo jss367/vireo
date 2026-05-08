@@ -430,6 +430,10 @@ input[type="range"]::-moz-range-thumb {
 .algo-trace .trace-empty {
   font-size: 11px; color: var(--text-dim); font-style: italic; padding: 4px;
 }
+.algo-trace .trace-thresholds {
+  font-size: 10px; color: var(--text-dim);
+  padding: 2px 4px 6px; border-bottom: 1px solid var(--border-primary);
+}
 .encounter-card.focused {
   /* Inset shadow instead of widening border-left from 1px → 3px:
      keeps the 1px border on all sides so the content position and
@@ -1458,6 +1462,16 @@ function renderAlgorithmTrace() {
     label.textContent = 'Encounter ' + (_focusedEncounterIdx + 1) + ' — ' + enc.trace.length + ' adjacent pair' + (enc.trace.length > 1 ? 's' : '');
   }
   var html = '';
+  var thr = enc.trace[0] && enc.trace[0].thresholds;
+  if (thr) {
+    var thrParts = [];
+    if (typeof thr.hard_cut_score === 'number') thrParts.push('hard_cut_score=' + thr.hard_cut_score.toFixed(2));
+    if (typeof thr.soft_cut_score === 'number') thrParts.push('soft_cut_score=' + thr.soft_cut_score.toFixed(2));
+    if (typeof thr.hard_cut_time === 'number') thrParts.push('hard_cut_time=' + thr.hard_cut_time + 's');
+    if (thrParts.length) {
+      html += '<div class="trace-thresholds">cut if: ' + thrParts.join(' · ') + '</div>';
+    }
+  }
   enc.trace.forEach(function(t, i) {
     var rowCls = 'trace-row';
     if (t.decision && t.decision.indexOf('cut_') === 0) rowCls += ' cut';
