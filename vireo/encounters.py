@@ -191,16 +191,27 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
 
     # subject_absent=True means the detector ran and confirmed there is no
     # animal in this frame — that's *information*, not a missing feature.
-    # When one side is subject-absent and the other is not, the subj/species
-    # signals must contribute an active 0 with full weight rather than be
-    # dropped from the renormalized average. Otherwise meta=1.0 (same lens)
-    # carries an asymmetric pair past the merge threshold purely on time.
+    #
+    # Three cases:
+    #   - asymmetric (one side absent, one present): subj/species contribute
+    #     an active 0 with full weight. Otherwise meta=1.0 (same lens) would
+    #     renormalize and merge an unrelated subjectless pair into the
+    #     encounter on time alone.
+    #   - both absent: subj/species are NEUTRAL — drop the signal. Crucially
+    #     this must hold even when stale embeddings/species are still cached
+    #     on the photo rows from a prior run (e.g. user raised the detector
+    #     threshold, re-ran regroup, but DINO/predictions weren't re-written).
+    #     Reading them here would re-activate similarity and pull the
+    #     encounter back together, contradicting the detector's "no animal"
+    #     verdict.
+    #   - neither absent: standard cached-feature similarity.
     absent_a = bool(photo_a.get("subject_absent"))
     absent_b = bool(photo_b.get("subject_absent"))
     asymmetric_subject = absent_a != absent_b
+    both_absent = absent_a and absent_b
 
     st = sim_time(dt, tau=cfg["tau_enc"])
-    if asymmetric_subject:
+    if asymmetric_subject or both_absent:
         ss = 0.0
         sp = 0.0
     else:
@@ -244,10 +255,15 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
         "time": dt != float("inf"),
         # Asymmetric subject_absent ⇒ subj/species are USED (active 0).
         # Both-sides absent drops the signal — two subjectless frames carry
-        # no evidence either way.
-        "subj": asymmetric_subject or (has_subj_a and has_subj_b),
+        # no evidence either way (and this overrides any stale cached
+        # embeddings/species; see the absent-handling block above).
+        "subj": asymmetric_subject or (
+            has_subj_a and has_subj_b and not both_absent
+        ),
         "global": has_global_a and has_global_b,
-        "species": asymmetric_subject or (has_species_a and has_species_b),
+        "species": asymmetric_subject or (
+            has_species_a and has_species_b and not both_absent
+        ),
         # Meta always contributes (even if 0)
         "meta": True,
     }

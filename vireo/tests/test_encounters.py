@@ -792,6 +792,49 @@ def test_compute_s_enc_subject_absent_both_sides_drops_signal():
     assert components["species"]["used"] is False
 
 
+def test_compute_s_enc_both_absent_ignores_stale_cached_features():
+    """Both photos subject_absent BUT both still carry stale embeddings
+    and species from a prior run (e.g. user raised detector_confidence,
+    re-ran regroup; load_photo_features now flags both as subject_absent
+    while old features remain on the photo rows). The neutral "no
+    evidence either way" rule must hold — we must NOT re-activate
+    similarity from stale features and pull the encounter back together.
+    """
+    import numpy as np
+    from encounters import compute_s_enc
+
+    stale_emb = np.ones(128, dtype=np.float32)
+    stale_species = [("Ruddy Duck", 0.9, "m1")]
+    photo_a = {
+        "timestamp": "2026-04-04T10:30:07",
+        "focal_length": 600.0,
+        "subject_absent": True,
+        # Cached from the pre-threshold-change run — must be ignored.
+        "dino_subject_embedding": stale_emb,
+        "species_top5": stale_species,
+    }
+    photo_b = {
+        "timestamp": "2026-04-04T10:30:08",
+        "focal_length": 600.0,
+        "subject_absent": True,
+        "dino_subject_embedding": stale_emb,
+        "species_top5": stale_species,
+    }
+    _, components = compute_s_enc(photo_a, photo_b, return_components=True)
+    assert components["subj"]["used"] is False, (
+        "stale subject embedding must not contribute when both photos are "
+        "subject_absent — the detector ran and confirmed empty, that's "
+        "neutral evidence not similarity"
+    )
+    assert components["subj"]["value"] == 0.0
+    assert components["species"]["used"] is False
+    assert components["species"]["value"] == 0.0
+    # absent flags still marked, so the trace UI renders the muted
+    # "neutral (no subject on both)" message.
+    assert components["subj"]["absent_a"] is True
+    assert components["subj"]["absent_b"] is True
+
+
 def test_compute_s_enc_uncomputed_still_drops_signal():
     """Regression: when subject features are simply not yet computed
     (no `subject_absent` flag, no embedding), we must still drop the
