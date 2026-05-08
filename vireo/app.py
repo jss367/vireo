@@ -10329,24 +10329,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             r["photo_id"] for r in det_rows
             if r["n"] > 0 and (r["max_conf"] or 0) < det_conf_threshold
         ]
+        # Load the pipeline cache before the all-skipped early return: the
+        # client's confirmSpecies fallback (templates/pipeline_review.html
+        # ~L2620) treats a successful response without ``encounters`` as a
+        # local-confirmation and sets ``species_confirmed=true`` itself.
+        # Returning the unchanged cache here keeps the encounter's confirmed
+        # state consistent with what actually happened on the server (i.e.,
+        # nothing).
+        from pipeline import load_results_raw, save_results_raw
+
+        cache_dir = os.path.dirname(db_path)
+        cached = load_results_raw(cache_dir, db._active_workspace_id)
         if skipped_photo_ids:
             skipped_set = set(skipped_photo_ids)
             photo_ids = [pid for pid in photo_ids if pid not in skipped_set]
             if not photo_ids:
-                return jsonify({
+                resp_body = {
                     "ok": True,
                     "species": species,
                     "photo_count": 0,
                     "skipped_photo_ids": skipped_photo_ids,
                     "previous_species": None,
-                })
-
-        # Look up the previous species (if any) from the pipeline cache before
-        # mutating. We reuse the same cached dict to write the update below.
-        from pipeline import load_results_raw, save_results_raw
-
-        cache_dir = os.path.dirname(db_path)
-        cached = load_results_raw(cache_dir, db._active_workspace_id)
+                }
+                if cached:
+                    resp_body["encounters"] = cached.get("encounters", [])
+                    resp_body["summary"] = cached.get("summary", {})
+                return jsonify(resp_body)
         previous_species = None
         target_enc = None
         target_enc_idx = None

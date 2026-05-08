@@ -362,6 +362,70 @@ def test_encounter_species_skips_sub_threshold_photos(app_and_db):
     )
 
 
+def test_encounter_species_all_skipped_returns_cached_encounters(app_and_db):
+    """When every submitted photo is sub-threshold, the response must still
+    include ``encounters`` from the cached pipeline results. Without that,
+    the client's confirmSpecies fallback (templates/pipeline_review.html)
+    interprets the successful response as a local-confirmation and sets
+    ``species_confirmed=true`` on the encounter — even though the server
+    did nothing.
+    """
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
+    p_noise = photos[0]["id"]
+
+    db.save_detections(
+        p_noise,
+        [{"box": {"x": 0.01, "y": 0.01, "w": 0.98, "h": 0.98},
+          "confidence": 0.02, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    sentinel_summary = {"total_photos": 999}
+    sentinel_encounters = [
+        {
+            "species": ["Sparrow", 0.8],
+            "confirmed_species": None,
+            "species_confirmed": False,
+            "photo_count": 1,
+            "photo_ids": [p_noise],
+            "bursts": [],
+            "species_predictions": [],
+        },
+    ]
+    os.makedirs(cache_dir, exist_ok=True)
+    with open(os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json"), "w") as fh:
+        _json.dump(
+            {"encounters": sentinel_encounters, "summary": sentinel_summary},
+            fh,
+        )
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Mountain Chickadee", "photo_ids": [p_noise]},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["photo_count"] == 0
+    assert data["skipped_photo_ids"] == [p_noise]
+    # The cached encounters/summary must be echoed so the client doesn't
+    # locally mark the encounter confirmed.
+    assert "encounters" in data, (
+        "all-skipped response must include encounters so the client doesn't "
+        "fall through to the local-confirm branch"
+    )
+    assert data["encounters"][0]["species_confirmed"] is False, (
+        "encounter must remain unconfirmed in the response — nothing was "
+        "actually tagged"
+    )
+    assert data["summary"] == sentinel_summary
+
+
 def test_encounter_species_updates_pipeline_cache(app_and_db):
     """POST /api/encounters/species updates species_confirmed in pipeline cache."""
     import json as _json
