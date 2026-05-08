@@ -32,7 +32,8 @@ _PIPELINE_PHOTO_COLS = """
     p.dino_embedding_variant,
     p.focal_length, p.burst_id, p.noise_estimate,
     p.flag, p.rating,
-    p.eye_x, p.eye_y, p.eye_conf, p.eye_tenengrad
+    p.eye_x, p.eye_y, p.eye_conf, p.eye_tenengrad,
+    p.miss_no_subject, p.miss_computed_at
 """
 
 
@@ -261,6 +262,18 @@ def load_photo_features(db, collection_id=None, config=None,
                        "w": det["w"], "h": det["h"]}
             det_conf = det["detection_conf"]
 
+        # subject_absent: the detector ran (miss_computed_at IS NOT NULL)
+        # AND found no animal above threshold (miss_no_subject=1). This is
+        # information — encounters.compute_s_enc treats an asymmetric
+        # absent/present pair as actively dissimilar instead of dropping
+        # the missing subject embedding from the weighted average.
+        # `miss_computed_at IS NULL` means the miss stage hasn't run yet
+        # for this photo, so we leave subject_absent=False (uncomputed).
+        subject_absent = (
+            row["miss_computed_at"] is not None
+            and bool(row["miss_no_subject"])
+        )
+
         photos.append({
             "id": pid,
             "folder_id": row["folder_id"],
@@ -286,6 +299,7 @@ def load_photo_features(db, collection_id=None, config=None,
             "dino_global_embedding": global_emb,
             "species_top5": species_by_photo.get(pid, []),
             "confirmed_species": confirmed_by_photo.get(pid),
+            "subject_absent": subject_absent,
             "focal_length": row["focal_length"],
             "burst_id": row["burst_id"],
             "noise_estimate": row["noise_estimate"],

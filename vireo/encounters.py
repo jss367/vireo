@@ -189,10 +189,24 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
     ts_b = _parse_timestamp(photo_b.get("timestamp"))
     dt = _time_delta_seconds(ts_a, ts_b)
 
+    # subject_absent=True means the detector ran and confirmed there is no
+    # animal in this frame — that's *information*, not a missing feature.
+    # When one side is subject-absent and the other is not, the subj/species
+    # signals must contribute an active 0 with full weight rather than be
+    # dropped from the renormalized average. Otherwise meta=1.0 (same lens)
+    # carries an asymmetric pair past the merge threshold purely on time.
+    absent_a = bool(photo_a.get("subject_absent"))
+    absent_b = bool(photo_b.get("subject_absent"))
+    asymmetric_subject = absent_a != absent_b
+
     st = sim_time(dt, tau=cfg["tau_enc"])
-    ss = sim_embedding(photo_a.get("dino_subject_embedding"), photo_b.get("dino_subject_embedding"))
+    if asymmetric_subject:
+        ss = 0.0
+        sp = 0.0
+    else:
+        ss = sim_embedding(photo_a.get("dino_subject_embedding"), photo_b.get("dino_subject_embedding"))
+        sp = sim_species(photo_a.get("species_top5"), photo_b.get("species_top5"))
     sg = sim_embedding(photo_a.get("dino_global_embedding"), photo_b.get("dino_global_embedding"))
-    sp = sim_species(photo_a.get("species_top5"), photo_b.get("species_top5"))
     sm = sim_meta(photo_a, photo_b)
 
     # Per-component missing flags: which photo (if any) lacks the signal.
@@ -207,19 +221,33 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
     has_time_a = ts_a is not None
     has_time_b = ts_b is not None
 
+    # `missing` = "we don't know yet"; `absent` = "we ran the detector and
+    # there was no animal." Trace consumers render these differently:
+    # missing prompts "embed this photo", absent is itself the reason
+    # the encounter cut.
     missing = {
         "time": (not has_time_a, not has_time_b),
-        "subj": (not has_subj_a, not has_subj_b),
+        "subj": (not has_subj_a and not absent_a, not has_subj_b and not absent_b),
         "global": (not has_global_a, not has_global_b),
-        "species": (not has_species_a, not has_species_b),
+        "species": (not has_species_a and not absent_a, not has_species_b and not absent_b),
+        "meta": (False, False),
+    }
+    absent = {
+        "time": (False, False),
+        "subj": (absent_a, absent_b),
+        "global": (False, False),
+        "species": (absent_a, absent_b),
         "meta": (False, False),
     }
 
     used = {
         "time": dt != float("inf"),
-        "subj": has_subj_a and has_subj_b,
+        # Asymmetric subject_absent ⇒ subj/species are USED (active 0).
+        # Both-sides absent drops the signal — two subjectless frames carry
+        # no evidence either way.
+        "subj": asymmetric_subject or (has_subj_a and has_subj_b),
         "global": has_global_a and has_global_b,
-        "species": has_species_a and has_species_b,
+        "species": asymmetric_subject or (has_species_a and has_species_b),
         # Meta always contributes (even if 0)
         "meta": True,
     }
@@ -248,6 +276,8 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
             "used": bool(used[k]),
             "missing_a": bool(missing[k][0]),
             "missing_b": bool(missing[k][1]),
+            "absent_a": bool(absent[k][0]),
+            "absent_b": bool(absent[k][1]),
         }
         for k in values
     }

@@ -716,3 +716,135 @@ def test_segment_encounters_marks_merged_back_boundaries():
     decisions = [t["decision"] for t in enc["trace"]]
     # 3 internal pairs across 4 microsegments: 3 of them are boundaries that got merged_back
     assert decisions.count("merged_back") == 3
+
+
+# -- subject_absent: detector ran and found nothing --
+#
+# When one photo has a subject and the other has been classified
+# `miss_no_subject` (detector ran, found no animal), that asymmetry is
+# real evidence the two frames don't share an encounter. The grouper
+# must count it as such, not silently drop the signal.
+
+
+def test_compute_s_enc_subject_absent_asymmetric_actively_dissimilar():
+    """A→has subject, B→subject_absent: subj/species contribute 0.0 with
+    full weight (signal *used*), instead of being dropped from the
+    weighted average. Otherwise meta=1.0 (same lens) renormalizes to a
+    misleading high score."""
+    import numpy as np
+    from encounters import compute_s_enc
+
+    subj_emb = np.ones(128, dtype=np.float32)
+    photo_a = {
+        "timestamp": "2026-04-04T10:29:36",
+        "focal_length": 600.0,
+        "dino_subject_embedding": subj_emb,
+        "dino_global_embedding": subj_emb,
+        "species_top5": [("Ruddy Duck", 0.9, "m1")],
+        "subject_absent": False,
+    }
+    photo_b = {
+        "timestamp": "2026-04-04T10:30:07",  # 31 s later
+        "focal_length": 600.0,
+        # No subject features — detector ran and found nothing
+        "subject_absent": True,
+    }
+    score, components = compute_s_enc(photo_a, photo_b, return_components=True)
+
+    # subj is now USED (active 0), not silently dropped
+    assert components["subj"]["used"] is True
+    assert components["subj"]["value"] == 0.0
+    assert components["subj"]["absent_b"] is True
+    assert components["subj"]["absent_a"] is False
+    assert components["subj"]["missing_b"] is False  # not "missing", actively absent
+
+    # Same for species
+    assert components["species"]["used"] is True
+    assert components["species"]["value"] == 0.0
+    assert components["species"]["absent_b"] is True
+
+    # And the headline score is below hard_cut_score — meta=1.0 can't
+    # rescue it anymore.
+    assert score < 0.42, (
+        f"asymmetric subject_absent should land below hard_cut_score (0.42); "
+        f"got {score:.3f}"
+    )
+
+
+def test_compute_s_enc_subject_absent_both_sides_drops_signal():
+    """Both photos subject_absent: subj/species are *neutral* (drop and
+    renormalize, like the uncomputed case). Two subjectless frames could
+    still belong to the same encounter — we have no evidence either way."""
+    from encounters import compute_s_enc
+
+    photo_a = {
+        "timestamp": "2026-04-04T10:30:07",
+        "focal_length": 600.0,
+        "subject_absent": True,
+    }
+    photo_b = {
+        "timestamp": "2026-04-04T10:30:08",  # tight gap
+        "focal_length": 600.0,
+        "subject_absent": True,
+    }
+    _, components = compute_s_enc(photo_a, photo_b, return_components=True)
+    assert components["subj"]["used"] is False
+    assert components["species"]["used"] is False
+
+
+def test_compute_s_enc_uncomputed_still_drops_signal():
+    """Regression: when subject features are simply not yet computed
+    (no `subject_absent` flag, no embedding), we must still drop the
+    signal and renormalize. Otherwise mid-pipeline runs penalize photos
+    whose embeddings haven't been written yet."""
+    import numpy as np
+    from encounters import compute_s_enc
+
+    subj_emb = np.ones(128, dtype=np.float32)
+    photo_a = {
+        "timestamp": "2026-04-04T10:29:36",
+        "focal_length": 600.0,
+        "dino_subject_embedding": subj_emb,
+        "dino_global_embedding": subj_emb,
+        "species_top5": [("Ruddy Duck", 0.9, "m1")],
+    }
+    photo_b = {
+        "timestamp": "2026-04-04T10:29:37",
+        "focal_length": 600.0,
+        # No subject_absent flag and no features — "not computed yet"
+    }
+    _, components = compute_s_enc(photo_a, photo_b, return_components=True)
+    assert components["subj"]["used"] is False
+    assert components["species"]["used"] is False
+    assert components["subj"]["missing_b"] is True
+    assert components["subj"]["absent_b"] is False
+
+
+def test_segment_encounters_cuts_at_subject_absent_asymmetry():
+    """End-to-end: a Ruddy-Duck-like burst followed by 5 subjectless
+    frames at +31 s should split into two encounters, not be glued
+    together by meta=1.0 dominance."""
+    import numpy as np
+    from encounters import segment_encounters
+
+    subj_emb = np.ones(128, dtype=np.float32)
+    photos = [
+        # 6 duck frames in a tight burst
+        {"id": i, "timestamp": f"2026-04-04T10:29:3{i}", "focal_length": 600.0,
+         "dino_subject_embedding": subj_emb, "dino_global_embedding": subj_emb,
+         "species_top5": [("Ruddy Duck", 0.9, "m1")], "subject_absent": False}
+        for i in range(0, 6)
+    ] + [
+        # 5 subject-absent frames 31+ s later (what 1761..1765 looked like)
+        {"id": 100 + i, "timestamp": f"2026-04-04T10:30:0{i}", "focal_length": 600.0,
+         "subject_absent": True}
+        for i in range(0, 5)
+    ]
+    encounters = segment_encounters(photos)
+    assert len(encounters) >= 2, (
+        f"expected at least 2 encounters across the subject-absent boundary; "
+        f"got {len(encounters)} of sizes "
+        f"{[e['photo_count'] for e in encounters]}"
+    )
+    # The first encounter should not absorb the subjectless frames.
+    assert encounters[0]["photo_count"] == 6
