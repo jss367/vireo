@@ -109,7 +109,14 @@ pub fn build_menu(
     } else {
         let show = MenuItem::with_id(app, SHOW_WINDOW, "Show Window", true, None::<&str>)?;
         let hide = MenuItem::with_id(app, HIDE_WINDOW, "Hide Window", true, None::<&str>)?;
-        Menu::with_items(app, &[&show, &hide, &sep1, &jobs, &sep2, &quit])
+        let open = MenuItem::with_id(
+            app,
+            OPEN_IN_BROWSER,
+            "Open in Browser",
+            true,
+            None::<&str>,
+        )?;
+        Menu::with_items(app, &[&show, &hide, &open, &sep1, &jobs, &sep2, &quit])
     }
 }
 
@@ -150,12 +157,15 @@ fn hide_main_window(app: &AppHandle) {
     }
 }
 
-/// Open (or re-open) the UI in the user's default browser.
+/// Open (or re-open) the UI in the user's default browser, and hide the
+/// app window if it's currently shown.
 ///
 /// In browser mode this is what the tray's left-click and "Open in browser"
-/// menu item do. Most browsers will focus an existing tab pointed at the
-/// same origin rather than opening a duplicate; if not, the user gets a
-/// fresh tab — either way they end up looking at the UI.
+/// menu item do (the window is already hidden, so the hide call is a no-op).
+/// In window mode it doubles as a runtime "flip to browser" — the user gets
+/// the UI in their browser and the WKWebView window goes away so they aren't
+/// looking at two copies. Most browsers focus an existing tab on the same
+/// origin rather than opening a duplicate.
 fn open_ui_in_browser(app: &AppHandle) {
     let port = match app.try_state::<TrayMode>() {
         Some(mode) => mode.port,
@@ -167,6 +177,9 @@ fn open_ui_in_browser(app: &AppHandle) {
     let url = format!("http://127.0.0.1:{}", port);
     if let Err(e) = app.opener().open_url(&url, None::<&str>) {
         log::error!("Failed to open browser at {}: {}", url, e);
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
     }
 }
 

@@ -167,6 +167,19 @@ pub fn run() {
                 return;
             }
 
+            // "Open in Browser" — flip from the WKWebView to the user's
+            // default browser at runtime. Does not persist; it's a one-shot
+            // flip for this session.
+            if id == menu::ids::OPEN_IN_BROWSER {
+                let port = app.state::<SidecarState>().port;
+                let url = format!("http://127.0.0.1:{}", port);
+                open_in_browser(app, &url);
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+                return;
+            }
+
             // Navigation items — evaluate JS in the main webview, or in
             // browser mode open the route in the user's default browser.
             if let Some(route) = menu::route_for_id(id) {
