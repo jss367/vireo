@@ -2777,6 +2777,83 @@ class Database:
             out.append(entry)
         return out
 
+    def photos_by_paths(self, paths):
+        """Return {abs_path: photo_id} for any of ``paths`` already in DB.
+
+        Photos are global (not workspace-scoped), so the import-mode plan
+        can ask "do these files already exist in Vireo?" without caring
+        which workspace owns the folder. Paths missing from the result are
+        genuinely new and the next pipeline run will create photo rows for
+        them — that's what makes "Will run (N)" honest in import mode.
+
+        Splits the input by directory so the SQL stays a single
+        ``WHERE f.path = ? AND p.filename IN (...)`` per directory and
+        respects SQLite's parameter cap.
+        """
+        if not paths:
+            return {}
+        by_dir = {}
+        for p in paths:
+            by_dir.setdefault(os.path.dirname(p), []).append(os.path.basename(p))
+
+        out = {}
+        BATCH = 800  # leave headroom under SQLite's default 999-param cap
+        for dir_path, fnames in by_dir.items():
+            for i in range(0, len(fnames), BATCH):
+                chunk = fnames[i:i + BATCH]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = self.conn.execute(
+                    f"""SELECT p.id, p.filename
+                        FROM photos p
+                        JOIN folders f ON f.id = p.folder_id
+                        WHERE f.path = ? AND p.filename IN ({placeholders})""",
+                    (dir_path, *chunk),
+                ).fetchall()
+                for r in rows:
+                    out[os.path.join(dir_path, r["filename"])] = r["id"]
+        return out
+
+    def workspace_unlinked_folder_count(self, folder_paths):
+        """Count distinct paths in ``folder_paths`` whose folders are not
+        linked to the active workspace.
+
+        A folder path is "unlinked" when either no row exists in ``folders``
+        for that path or a row exists but no ``workspace_folders`` entry
+        connects it to the active workspace.
+
+        Used by the import-mode pipeline plan to decide whether a scan over
+        already-imported files would be a real no-op for the active
+        workspace. ``scanner.scan`` calls ``_ensure_folder`` (which calls
+        ``add_folder``) for each walked directory, and ``add_folder``
+        auto-links the folder to the active workspace via
+        ``workspace_folders``. So when the user re-imports files that were
+        indexed in a different workspace, scan still mutates state by
+        attaching folders to the active workspace — and the plan must
+        report that as ``will-run`` instead of claiming ``done-prior``.
+        """
+        if not folder_paths:
+            return 0
+        ws = self._ws_id()
+        unique = list({p for p in folder_paths if p})
+        if not unique:
+            return 0
+        BATCH = 800
+        linked = set()
+        for i in range(0, len(unique), BATCH):
+            chunk = unique[i:i + BATCH]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT f.path
+                    FROM folders f
+                    JOIN workspace_folders wf
+                      ON wf.folder_id = f.id AND wf.workspace_id = ?
+                    WHERE f.path IN ({placeholders})""",
+                (ws, *chunk),
+            ).fetchall()
+            for r in rows:
+                linked.add(r["path"])
+        return len(unique) - len(linked)
+
     def _scope_clause(self, photo_ids, table_alias="p"):
         """Build a (clause, params) pair to scope a query to photo_ids.
 

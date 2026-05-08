@@ -1304,6 +1304,50 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from pipeline_plan import PipelinePlanParams, compute_plan
 
         body = request.get_json(silent=True) or {}
+        # source_paths bounds the request. A Z8 SD card can hold ~5k RAWs;
+        # 50k is a generous ceiling that keeps the JSON body well under
+        # Flask's defaults while covering realistic multi-card imports.
+        # Beyond it the plan endpoint refuses rather than truncate, since
+        # a silently-truncated list would mis-classify late files as new.
+        #
+        # An explicit empty list is *not* the same as a missing key: the
+        # frontend sends ``[]`` when the user is in import mode and has
+        # deselected every preview file (a genuine no-op import). Falling
+        # back to whole-workspace scope in that case would re-introduce
+        # the misleading "Already done" pills this endpoint exists to
+        # prevent. So preserve None vs [] all the way through.
+        if "source_paths" in body:
+            source_paths = body.get("source_paths")
+            if not isinstance(source_paths, list):
+                return json_error("source_paths must be a list", 400)
+            if len(source_paths) > 50000:
+                return json_error(
+                    f"source_paths too large ({len(source_paths)} > 50000)", 400,
+                )
+            if not all(isinstance(p, str) for p in source_paths):
+                return json_error("source_paths entries must be strings", 400)
+        else:
+            source_paths = None
+        # hash_duplicate_paths is the frontend's pre-computed set of source
+        # paths that ingest() will skip via the file_hash global-dedup gate
+        # (copy mode + skip_duplicates=True). Same shape/limits as
+        # source_paths; the planner subtracts these from new_count so the
+        # plan doesn't overstate work for hash-skipped files.
+        if "hash_duplicate_paths" in body:
+            hash_duplicate_paths = body.get("hash_duplicate_paths")
+            if not isinstance(hash_duplicate_paths, list):
+                return json_error("hash_duplicate_paths must be a list", 400)
+            if len(hash_duplicate_paths) > 50000:
+                return json_error(
+                    f"hash_duplicate_paths too large "
+                    f"({len(hash_duplicate_paths)} > 50000)", 400,
+                )
+            if not all(isinstance(p, str) for p in hash_duplicate_paths):
+                return json_error(
+                    "hash_duplicate_paths entries must be strings", 400,
+                )
+        else:
+            hash_duplicate_paths = None
         params = PipelinePlanParams(
             collection_id=body.get("collection_id"),
             exclude_photo_ids=body.get("exclude_photo_ids") or [],
@@ -1316,6 +1360,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ),
             labels_files=body.get("labels_files") or [],
             reclassify=bool(body.get("reclassify")),
+            source_paths=source_paths,
+            hash_duplicate_paths=hash_duplicate_paths,
         )
         db = _get_db()
         return jsonify(compute_plan(db, params, db_path))
@@ -5902,17 +5948,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/import/folder-preview/thumbnail")
     def api_import_folder_preview_thumbnail():
-        """Generate an on-the-fly thumbnail for a source file (not yet imported)."""
+        """Generate an on-the-fly thumbnail for a source file (not yet imported).
+
+        Cache policy: only success responses are cacheable. Failures emit
+        ``Cache-Control: no-store`` so a transient libraw I/O glitch (NAS
+        contention, network blip) doesn't pin question marks in the user's
+        preview grid for the cache lifetime — the next page load retries
+        and typically succeeds.
+        """
         file_path = request.args.get("path", "")
         if not file_path:
             return json_error("path parameter required", 400)
         if not os.path.isfile(file_path):
-            return "", 404
+            resp = make_response("", 404)
+            resp.cache_control.no_store = True
+            return resp
 
         from image_loader import load_image
         img = load_image(file_path, max_size=200)
         if img is None:
-            return "", 404
+            resp = make_response("", 404)
+            resp.cache_control.no_store = True
+            return resp
 
         import io
         buf = io.BytesIO()

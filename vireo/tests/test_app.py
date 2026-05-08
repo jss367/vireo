@@ -3534,11 +3534,56 @@ def test_api_import_folder_preview_thumbnail(app_and_db, tmp_path):
 
 
 def test_api_import_folder_preview_thumbnail_missing(app_and_db):
-    """Thumbnail endpoint returns 404 for non-existent file."""
+    """Thumbnail endpoint returns 404 for non-existent file, with
+    Cache-Control: no-store so a transient libraw / NAS hiccup doesn't
+    pin question marks in the user's preview grid for the cache lifetime.
+    """
     app, _ = app_and_db
     client = app.test_client()
     resp = client.get("/api/import/folder-preview/thumbnail?path=/no/such/file.jpg")
     assert resp.status_code == 404
+    # Browsers must NOT cache this failure — next page load should retry.
+    cc = resp.headers.get("Cache-Control", "")
+    assert "no-store" in cc, f"expected no-store on 404, got {cc!r}"
+
+
+def test_api_import_folder_preview_thumbnail_unloadable_returns_404_no_store(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """When the file exists but image_loader returns None (libraw failure,
+    unsupported format, etc.), the endpoint must 404 *without* caching —
+    the failure is often transient (NAS contention) and a cached negative
+    would block recovery on next render."""
+    app, _ = app_and_db
+    src = tmp_path / "broken.nef"
+    src.write_bytes(b"not actually a NEF")  # exists, but unloadable
+    import image_loader
+    monkeypatch.setattr(image_loader, "load_image", lambda *a, **kw: None)
+
+    client = app.test_client()
+    resp = client.get(
+        "/api/import/folder-preview/thumbnail?path=" + str(src),
+    )
+    assert resp.status_code == 404
+    assert "no-store" in resp.headers.get("Cache-Control", "")
+
+
+def test_api_import_folder_preview_thumbnail_success_is_cacheable(
+    app_and_db, tmp_path,
+):
+    """Successful thumbnail responses keep the existing 5-min cache so
+    the preview doesn't re-decode RAWs on every grid scroll."""
+    app, _ = app_and_db
+    from PIL import Image
+    src = tmp_path / "ok.jpg"
+    Image.new("RGB", (300, 200), "red").save(src)
+    client = app.test_client()
+    resp = client.get(
+        "/api/import/folder-preview/thumbnail?path=" + str(src),
+    )
+    assert resp.status_code == 200
+    cc = resp.headers.get("Cache-Control", "")
+    assert "max-age" in cc and "no-store" not in cc
 
 
 def test_api_import_folder_preview_thumbnail_no_path(app_and_db):

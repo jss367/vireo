@@ -446,3 +446,57 @@ def test_get_canonical_image_path_wc_missing_falls_back(tmp_path, caplog):
 
     assert result == "/some/folder/src.jpg"
     assert any("working copy missing" in r.message.lower() for r in caplog.records)
+
+
+# -------- transient libraw I/O retry --------
+
+def test_load_image_retries_once_on_libraw_io_error(tmp_path, monkeypatch):
+    """A NAS hiccup that fails one rawpy.imread() call typically clears
+    on retry. load_image must give the file a second chance — without it
+    the user is stuck with cached question marks until they refresh."""
+    import image_loader
+    import rawpy
+
+    src = tmp_path / "DSC_0001.NEF"
+    src.write_bytes(b"placeholder")  # need an existing file path
+
+    embedded = _jpeg_bytes((1024, 768))
+    fake = _FakeRaw(embedded_jpeg=embedded,
+                    postprocess_error=rawpy.LibRawFileUnsupportedError(
+                        b"unsupported"))
+
+    calls = {"n": 0}
+
+    def imread_flaky(_path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise rawpy.LibRawIOError(b"Input/output error")
+        return fake
+
+    monkeypatch.setattr(rawpy, "imread", imread_flaky)
+
+    img = image_loader.load_image(str(src), max_size=200)
+    assert img is not None
+    assert calls["n"] == 2  # initial + one retry
+
+
+def test_load_image_does_not_retry_on_unsupported_format(tmp_path, monkeypatch):
+    """Non-I/O libraw errors are deterministic — retrying is wasted work
+    and would slow down legitimately-bad files."""
+    import image_loader
+    import rawpy
+
+    src = tmp_path / "DSC_0002.NEF"
+    src.write_bytes(b"placeholder")
+
+    calls = {"n": 0}
+
+    def imread_unsupported(_path):
+        calls["n"] += 1
+        raise rawpy.LibRawFileUnsupportedError(b"truly bad file")
+
+    monkeypatch.setattr(rawpy, "imread", imread_unsupported)
+
+    img = image_loader.load_image(str(src), max_size=200)
+    assert img is None
+    assert calls["n"] == 1  # no retry

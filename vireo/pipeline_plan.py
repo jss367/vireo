@@ -29,6 +29,35 @@ class PipelinePlanParams:
     model_ids: list = field(default_factory=list)
     labels_files: list = field(default_factory=list)
     reclassify: bool = False
+    # Absolute file paths for an "import" / "new_images" run — i.e. the
+    # files the user is about to ingest into the active workspace.
+    # compute_plan splits these into already-known photo_ids (used as the
+    # per-stage scope, so the existing real-status queries apply) and a
+    # count of genuinely new files. New files are treated as fresh work
+    # for every per-photo stage, which is the only honest answer when
+    # the next pipeline run *will* process them — replacing the old
+    # behaviour of describing the whole active workspace's state, which
+    # made an import into a non-empty workspace render as "Already done".
+    #
+    # ``None`` = field not provided (whole-workspace scope, the existing
+    # behaviour for non-import modes). ``[]`` = import mode with every
+    # preview file deselected — a genuine no-op run, which must NOT fall
+    # back to whole-workspace scope (that would re-introduce the very
+    # misleading "Already done" pills this code exists to prevent).
+    source_paths: list | None = None
+    # Paths in ``source_paths`` that the import job will skip via the
+    # ``file_hash`` global-dedup gate (copy mode + ``skip_duplicates=True``).
+    # ``ingest()`` dedupes by hash, not by source path: a file whose hash
+    # already exists at *some* path in the photos table is skipped, even
+    # though the source path itself is unknown. Without this list, those
+    # files would land in ``new_count`` (their source path doesn't match
+    # any photo row), inflating Scan/Classify/Extract estimates for a run
+    # that will actually skip them. The frontend already pre-computes
+    # hash duplicates via /api/import/check-duplicates and passes the
+    # matched source paths back — we use that result instead of re-hashing
+    # at plan time, since hashing thousands of files synchronously inside
+    # a plan request would block the UI on every settings change.
+    hash_duplicate_paths: list | None = None
 
 
 def _plural(n, s="s"):
@@ -115,7 +144,7 @@ def _resolve_labels_for_models(models, labels_files, db):
     return out
 
 
-def _classify_plan(db, params, photo_ids):
+def _classify_plan(db, params, photo_ids, new_count=0):
     if params.skip_classify:
         return {
             "state": "will-skip",
@@ -164,18 +193,26 @@ def _classify_plan(db, params, photo_ids):
     fingerprint_outdated = stale_total > 0 and not params.reclassify
 
     if total_dets == 0:
-        return {
-            "state": "will-run",
-            "summary": (
+        if new_count > 0:
+            summary = (
+                f"Will run — {new_count} new photo{_plural(new_count)} "
+                f"to detect & classify (MegaDetector runs first)"
+            )
+        else:
+            summary = (
                 "Will run — no detections cached yet "
                 "(MegaDetector will run first)"
-            ),
+            )
+        return {
+            "state": "will-run",
+            "summary": summary,
             "detail": {
                 "total_dets": 0,
                 "photos_with_dets": 0,
                 "models": [m["name"] for m in models],
-                "pending": 0,
-                "eligible": 0,
+                "pending": new_count,
+                "eligible": new_count,
+                "new_photos": new_count,
                 "stale": stale_total,
                 "fingerprint_outdated": fingerprint_outdated,
             },
@@ -224,6 +261,29 @@ def _classify_plan(db, params, photo_ids):
         }
 
     if pending_total == 0:
+        if new_count > 0:
+            # Existing scope is fully classified, but the import will pull
+            # in N new photos that need detector + classify. Honest answer
+            # is "will run", not "Already done".
+            return {
+                "state": "will-run",
+                "summary": (
+                    f"Will run on {new_count} new "
+                    f"photo{_plural(new_count)} "
+                    f"({total_dets} existing detection"
+                    f"{_plural(total_dets)} already classified)"
+                ),
+                "detail": {
+                    "total_dets": total_dets,
+                    "photos_with_dets": photos_with_dets,
+                    "models": [m["name"] for m in models],
+                    "pending": new_count,
+                    "eligible": eligible + new_count,
+                    "new_photos": new_count,
+                    "stale": stale_total,
+                    "fingerprint_outdated": fingerprint_outdated,
+                },
+            }
         return {
             "state": "done-prior",
             "summary": (
@@ -257,22 +317,31 @@ def _classify_plan(db, params, photo_ids):
             f"Will classify {pending_total} new "
             f"pair{_plural(pending_total)} ({breakdown})"
         )
+    if new_count > 0:
+        # Mixed scope: some existing detections still to classify *and*
+        # N new photos coming in (each will get its own detections + class).
+        summary += (
+            f" + {new_count} new photo{_plural(new_count)} "
+            f"to detect & classify"
+        )
     detail = {
         "pending_pairs": pending_total,
         "per_model": pending_per_model,
         "total_dets": total_dets,
         "photos_with_dets": photos_with_dets,
-        "pending": pending_total,
-        "eligible": eligible,
+        "pending": pending_total + new_count,
+        "eligible": eligible + new_count,
         "stale": stale_total,
         "fingerprint_outdated": fingerprint_outdated,
     }
+    if new_count > 0:
+        detail["new_photos"] = new_count
     if blocked:
         detail["blocked_models"] = blocked
     return {"state": "will-run", "summary": summary, "detail": detail}
 
 
-def _extract_plan(db, params, photo_ids, pipeline_cfg):
+def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
     if params.skip_extract_masks:
         return {
             "state": "will-skip",
@@ -284,6 +353,26 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg):
     sam2_variant = pipeline_cfg.get("sam2_variant", "sam2-small")
     stale = db.count_extract_stale(sam2_variant, photo_ids)
     if eligible == 0:
+        # Without imports: classify hasn't run yet, no photos eligible —
+        # the pill renders "Will run" with no count, which is honest.
+        # With imports: bound the count by new_count so the pill says
+        # "Will run (N)" reflecting at least N about-to-be-imported photos.
+        # (Some new photos may turn out to have no detections, so this is
+        # an upper bound on extract work, not an exact promise.)
+        if new_count > 0:
+            return {
+                "state": "will-run",
+                "summary": (
+                    f"Will run after classify produces detections "
+                    f"(up to {new_count} new "
+                    f"photo{_plural(new_count)} pending)"
+                ),
+                "detail": {
+                    "eligible": new_count, "pending": new_count,
+                    "new_photos": new_count,
+                    "stale": 0, "fingerprint_outdated": False,
+                },
+            }
         return {
             "state": "will-run",
             "summary": (
@@ -293,7 +382,7 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg):
             "detail": {"eligible": 0, "pending": 0,
                        "stale": 0, "fingerprint_outdated": False},
         }
-    if pending == 0 and stale == 0:
+    if pending == 0 and stale == 0 and new_count == 0:
         return {
             "state": "done-prior",
             "summary": (
@@ -315,18 +404,36 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg):
     # yet updated) would land in both buckets and inflate work past
     # eligible.
     work = pending + stale
-    return {
-        "state": "will-run",
-        "summary": (
+    if new_count > 0:
+        # Up-to-N new imports will need masks once classify produces
+        # detections for them. Treat them as eligible+pending so the pill
+        # reflects the run's full work, not just the existing-scope stragglers.
+        summary = (
+            f"Will extract masks for {work} existing + up to "
+            f"{new_count} new photo{_plural(new_count)} "
+            f"({eligible + new_count} eligible)"
+        )
+    else:
+        summary = (
             f"Will extract masks for {work} "
             f"photo{_plural(work)} ({eligible} eligible)"
-        ),
-        "detail": {"eligible": eligible, "pending": work,
-                   "stale": stale, "fingerprint_outdated": stale > 0},
+        )
+    detail = {
+        "eligible": eligible + new_count,
+        "pending": work + new_count,
+        "stale": stale,
+        "fingerprint_outdated": stale > 0,
+    }
+    if new_count > 0:
+        detail["new_photos"] = new_count
+    return {
+        "state": "will-run",
+        "summary": summary,
+        "detail": detail,
     }
 
 
-def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg):
+def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
     if params.skip_eye_keypoints or params.skip_extract_masks:
         return {
             "state": "will-skip",
@@ -347,6 +454,22 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg):
     processed = max(eligible - pending, 0)
 
     if eligible == 0:
+        if new_count > 0:
+            return {
+                "state": "will-run",
+                "summary": (
+                    f"Will run after upstream produces masks + species "
+                    f"predictions (up to {new_count} new "
+                    f"photo{_plural(new_count)} pending)"
+                ),
+                "detail": {
+                    "eligible": new_count,
+                    "pending": new_count,
+                    "new_photos": new_count,
+                    "stale": stale,
+                    "fingerprint_outdated": stale > 0,
+                },
+            }
         return {
             "state": "will-run",
             "summary": (
@@ -360,7 +483,7 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg):
                 "fingerprint_outdated": stale > 0,
             },
         }
-    if pending == 0:
+    if pending == 0 and new_count == 0:
         return {
             "state": "done-prior",
             "summary": (
@@ -375,19 +498,30 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg):
                 "fingerprint_outdated": stale > 0,
             },
         }
-    return {
-        "state": "will-run",
-        "summary": (
+    if new_count > 0:
+        summary = (
+            f"Will run on {pending} existing + up to {new_count} new "
+            f"photo{_plural(new_count)} "
+            f"({processed} of {eligible} already processed)"
+        )
+    else:
+        summary = (
             f"Will run on {pending} photo{_plural(pending)} "
             f"({processed} of {eligible} already processed)"
-        ),
-        "detail": {
-            "eligible": eligible,
-            "pending": pending,
-            "processed": processed,
-            "stale": stale,
-            "fingerprint_outdated": stale > 0,
-        },
+        )
+    detail = {
+        "eligible": eligible + new_count,
+        "pending": pending + new_count,
+        "processed": processed,
+        "stale": stale,
+        "fingerprint_outdated": stale > 0,
+    }
+    if new_count > 0:
+        detail["new_photos"] = new_count
+    return {
+        "state": "will-run",
+        "summary": summary,
+        "detail": detail,
     }
 
 
@@ -458,18 +592,199 @@ def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg):
     }
 
 
+def _empty_import_plan():
+    """Per-stage plan when import mode is active but every preview file is
+    deselected.
+
+    The per-photo stages (Classify/Extract/EyeKeypoints/Group) are genuine
+    no-ops because they only operate on imported photos and the import
+    set is empty. Their pill must read as "no work because you've selected
+    nothing", not status derived from the active workspace.
+
+    Scan, however, is NOT a guaranteed no-op even with an empty selection:
+    in scan-in-place mode the scanner still walks ``params.sources`` and
+    only honors per-file deselection via ``skip_paths`` (so unpreviewed
+    siblings still get scanned), and in copy mode the scanner walks the
+    destination tree when no files were copied. Reporting "will-skip" for
+    Scan would lie about substantial directory walking + hashing work the
+    next run actually performs — exactly the misleading-pill failure
+    CORE_PHILOSOPHY.md prohibits. So Scan reads as "will-run" with a
+    summary that names the gap between selection and runtime behavior.
+    """
+    no_op = {
+        "state": "will-skip",
+        "summary": "No files selected — nothing to do",
+        "detail": {"pending": 0, "eligible": 0},
+    }
+    return {
+        "stages": {
+            "Scan": {
+                "state": "will-run",
+                "summary": (
+                    "Will scan source folder(s) — selection only filters "
+                    "which files import"
+                ),
+                "detail": {
+                    "eligible": 0, "pending": 0,
+                    "new_photos": 0, "already_known": 0,
+                },
+            },
+            "Classify": dict(no_op),
+            "Extract": dict(no_op),
+            "EyeKeypoints": dict(no_op),
+            "Group": dict(no_op),
+        },
+        "scope": {
+            "collection_id": None,
+            "photo_count": 0,
+            "new_count": 0,
+            "known_count": 0,
+        },
+    }
+
+
+def _scan_plan(params, new_count, known_count, unlinked_folder_count,
+               hash_dup_count=0):
+    """Plan entry for Scan & Import — only emitted in import / new-images modes.
+
+    Honest answer for the user's "what will this run do" question: how many
+    files will it actually ingest (creating photo rows), how many were
+    already in Vireo from a prior import (no-op for those), and — when
+    every file is already known — whether the scan would still mutate the
+    active workspace by linking previously-unseen folders to it.
+
+    ``unlinked_folder_count`` is the count of distinct parent directories
+    of the import set whose folder rows are not yet linked to the active
+    workspace. ``scanner.scan`` calls ``_ensure_folder`` (which auto-links
+    via ``add_folder``) for every walked directory, so a non-zero value
+    means scan is *not* a no-op even when ``new_count == 0`` — it will
+    insert ``workspace_folders`` rows. Reporting "Already done" in that
+    case would lie about user-visible state changes (the photos becoming
+    visible in this workspace), violating CORE_PHILOSOPHY.md's
+    transparency rule.
+
+    ``hash_dup_count`` covers a copy-mode-only failure mode: even when
+    ``unlinked_folder_count == 0`` for the source paths (because we
+    excluded hash-dup parents from that calculation — ingest will skip
+    those source files, so source folders aren't walked), the post-ingest
+    scan in ``run_pipeline_job`` walks the *destination* folders that hold
+    the existing copies (and walks the entire destination root if those
+    copies live elsewhere). That can still link destination folders to the
+    active workspace and surface previously-unseen photos here. So we
+    cannot claim "done-prior" when hash dups are in play, even if every
+    other signal points to a no-op — the plan must report will-run with a
+    summary that names the destination-side work the user is about to
+    trigger.
+    """
+    total = new_count + known_count
+    if new_count == 0 and unlinked_folder_count == 0 and hash_dup_count == 0:
+        return {
+            "state": "done-prior",
+            "summary": (
+                f"All {total} file{_plural(total)} already imported — "
+                f"scan will be a no-op"
+            ),
+            "detail": {
+                "eligible": total, "pending": 0,
+                "new_photos": 0, "already_known": known_count,
+                "unlinked_folders": 0,
+                "hash_duplicates": 0,
+            },
+        }
+    if new_count == 0:
+        # All source files already known globally. Two reasons this still
+        # isn't a no-op, either of which is enough to flip to will-run:
+        #   - unlinked_folder_count > 0: source folder(s) not yet attached
+        #     to the active workspace, scan will link them via add_folder.
+        #   - hash_dup_count > 0: copy-mode hash dedup. ingest skips the
+        #     source file but the post-ingest scan walks destination
+        #     folders (or the destination root) to attach any duplicate
+        #     destination folders here.
+        if hash_dup_count > 0 and unlinked_folder_count > 0:
+            summary = (
+                f"All {total} file{_plural(total)} already imported "
+                f"({hash_dup_count} hash-duplicate"
+                f"{_plural(hash_dup_count)}) — scan will link "
+                f"{unlinked_folder_count} source "
+                f"folder{_plural(unlinked_folder_count)} and walk the "
+                f"import destination for any duplicate folders"
+            )
+        elif hash_dup_count > 0:
+            summary = (
+                f"All {total} file{_plural(total)} already imported "
+                f"({hash_dup_count} hash-duplicate"
+                f"{_plural(hash_dup_count)}) — scan will walk the "
+                f"import destination to link any duplicate folders to "
+                f"this workspace"
+            )
+        else:
+            summary = (
+                f"All {total} file{_plural(total)} already imported "
+                f"elsewhere — scan will link {unlinked_folder_count} "
+                f"folder{_plural(unlinked_folder_count)} to this workspace"
+            )
+        return {
+            "state": "will-run",
+            "summary": summary,
+            "detail": {
+                "eligible": total,
+                "pending": 0,
+                "new_photos": 0,
+                "already_known": known_count,
+                "unlinked_folders": unlinked_folder_count,
+                "hash_duplicates": hash_dup_count,
+            },
+        }
+    if known_count == 0:
+        summary = (
+            f"Will import {new_count} new file{_plural(new_count)}"
+        )
+    else:
+        summary = (
+            f"Will import {new_count} new "
+            f"file{_plural(new_count)} ({known_count} already known)"
+        )
+    return {
+        "state": "will-run",
+        "summary": summary,
+        "detail": {
+            "eligible": total,
+            "pending": new_count,
+            "new_photos": new_count,
+            "already_known": known_count,
+            "unlinked_folders": unlinked_folder_count,
+            "hash_duplicates": hash_dup_count,
+        },
+    }
+
+
 def compute_plan(db, params, db_path):
     """Compute the full per-stage plan for the active workspace.
+
+    Scope resolution:
+      - ``collection_id`` set: scope is the collection's photo set.
+      - ``source_paths`` set (import / new-images mode): scope is the
+        already-known photos at those paths; truly new files (not yet in
+        the photos table) are counted separately and treated as fresh
+        work for every per-photo stage. A Scan plan entry describes the
+        new-vs-known split so the user can see what Scan will actually do.
+      - neither: whole-workspace scope (existing behaviour).
 
     Returns:
         {
             "stages": {
+                "Scan": {state, summary, detail?},   # only in import mode
                 "Classify": {state, summary, detail?},
                 "Extract": ...,
                 "EyeKeypoints": ...,
                 "Group": ...,
             },
-            "scope": {"collection_id": int | None, "photo_count": int | None},
+            "scope": {
+                "collection_id": int | None,
+                "photo_count": int | None,
+                "new_count": int,           # 0 unless source_paths set
+                "known_count": int,         # 0 unless source_paths set
+            },
         }
     """
     import config as cfg
@@ -479,32 +794,96 @@ def compute_plan(db, params, db_path):
     ws_id = db._ws_id()
 
     photo_ids = None
+    new_count = 0
+    known_count = 0
+    unlinked_folder_count = 0
+    hash_dup_count = 0
     if params.collection_id is not None:
         from pipeline import _resolve_collection_photo_ids
         photo_ids = _resolve_collection_photo_ids(db, params.collection_id)
         if params.exclude_photo_ids:
             excl = set(params.exclude_photo_ids)
             photo_ids = {pid for pid in photo_ids if pid not in excl}
+    elif params.source_paths is not None:
+        if not params.source_paths:
+            # Import / new-images mode with every preview file deselected.
+            # Per-photo stages are genuine no-ops, but Scan still walks —
+            # see _empty_import_plan() for the honesty rationale.
+            return _empty_import_plan()
+        # Import / new-images mode. Split the file set into already-known
+        # photo_ids (used as scope for real-status queries) and a count
+        # of genuinely new files (fed into each stage as fresh work).
+        # Deduplicate first: overlapping source roots (or a re-added folder
+        # in the preview) can land the same path in source_paths twice,
+        # and counting the duplicate as "new" would inflate Scan/Classify/
+        # Extract estimates and could flip Scan from "done-prior" to
+        # "will-run" misleadingly. dict.fromkeys preserves order so the
+        # downstream queries see paths in the user's preview order.
+        unique_paths = list(dict.fromkeys(params.source_paths))
+        unique_path_set = set(unique_paths)
+        known = db.photos_by_paths(unique_paths)
+        photo_ids = set(known.values())
+        known_at_path_set = set(known.keys())
+        # Hash-dedup gate (copy-mode imports with skip_duplicates=True).
+        # A file flagged here exists in the global photos table at a
+        # different path; ingest() will skip the copy, so the next run
+        # creates no new photo row for it and never touches the existing
+        # one (the post-import scan walks only the destination tree).
+        # Count it as "already known", not new. Defensive intersections:
+        #   - ``& unique_path_set`` ignores stale cache entries (the
+        #     frontend's ``_duplicateResults`` survives source-folder edits
+        #     until the next check completes; a path no longer in the
+        #     selection must not influence counts).
+        #   - subtract ``known_at_path_set`` so a file that's both an
+        #     exact-path match and a hash match isn't double-counted in
+        #     ``known_count``.
+        hash_dup_paths = (
+            set(params.hash_duplicate_paths or [])
+            & unique_path_set
+        ) - known_at_path_set
+        known_count = len(known) + len(hash_dup_paths)
+        new_count = len(unique_paths) - known_count
+        hash_dup_count = len(hash_dup_paths)
+        # photos_by_paths is global — a path is "known" even when the
+        # photo's folder belongs to a different workspace. scanner.scan
+        # would still attach those folders to the active workspace via
+        # add_folder/_ensure_folder, so a "done-prior" Scan claim would
+        # be false in that case. Count parent dirs not yet linked here.
+        # Hash-dup paths are excluded: ingest skips those files, so their
+        # parent dirs aren't walked in copy mode and we mustn't claim
+        # scan would link them.
+        unlinked_folder_count = db.workspace_unlinked_folder_count(
+            {os.path.dirname(p) for p in unique_paths if p not in hash_dup_paths}
+        )
 
-    classify = _classify_plan(db, params, photo_ids)
-    extract = _extract_plan(db, params, photo_ids, pipeline_cfg)
-    eye = _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg)
+    classify = _classify_plan(db, params, photo_ids, new_count)
+    extract = _extract_plan(db, params, photo_ids, pipeline_cfg, new_count)
+    eye = _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count)
     upstream_will_run = any(
         s["state"] == "will-run" for s in (classify, extract, eye)
     )
     regroup = _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg)
 
+    stages = {
+        "Classify": classify,
+        "Extract": extract,
+        "EyeKeypoints": eye,
+        "Group": regroup,
+    }
+    if params.source_paths is not None:
+        stages["Scan"] = _scan_plan(
+            params, new_count, known_count, unlinked_folder_count,
+            hash_dup_count,
+        )
+
     return {
-        "stages": {
-            "Classify": classify,
-            "Extract": extract,
-            "EyeKeypoints": eye,
-            "Group": regroup,
-        },
+        "stages": stages,
         "scope": {
             "collection_id": params.collection_id,
             "photo_count": (
                 len(photo_ids) if photo_ids is not None else None
             ),
+            "new_count": new_count,
+            "known_count": known_count,
         },
     }
