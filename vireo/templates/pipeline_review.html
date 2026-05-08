@@ -1544,14 +1544,24 @@ function renderAlgorithmTrace() {
         var v = (typeof c.value === 'number') ? c.value.toFixed(2) : '-';
         var w = (typeof c.weight === 'number') ? c.weight.toFixed(2) : '-';
         if (!c.used) {
-          // Distinguish "missing data" from a zero-weighted component.
-          // Both are unused, but only the former is actionable (compute
-          // the missing signal); the latter means the user dialled it out.
+          // Three reasons a component can be unused:
+          //   (1) zero weight — user dialled it out
+          //   (2) both sides subject_absent — neutral, no evidence either
+          //       way (compute_s_enc drops the signal but it's NOT a
+          //       "missing data, go embed it" prompt)
+          //   (3) feature genuinely missing on one or both sides — actionable
           var weightZero = !(c.weight > 0);
           if (weightZero) {
             // Component is intentionally turned off — render in muted form
             // without a "missing" annotation.
             parts.push(k + '=' + v + '×' + w);
+          } else if (c.absent_a && c.absent_b) {
+            // Both detectors found no subject — signal is neutral, not
+            // actionable. Render with the same muted "absent" styling
+            // we use for the asymmetric used-but-zero case so users
+            // don't go re-embed photos that legitimately have no subject.
+            parts.push('<span class="trace-component-absent">' + escapeHtml(k)
+              + '=neutral (no subject on both, w=' + w + ')</span>');
           } else {
             var who;
             if (c.missing_a && c.missing_b) who = 'both';
