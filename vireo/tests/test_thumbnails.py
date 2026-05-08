@@ -507,6 +507,56 @@ def test_serve_thumbnail_regenerates_when_cached_predates_source(
     assert os.path.getmtime(thumb_file) >= photo_mtime
 
 
+def test_serve_thumbnail_handles_race_between_exists_and_getmtime(
+    tmp_path, monkeypatch,
+):
+    """The cache-hit path checks ``os.path.exists`` then calls
+    ``os.path.getmtime`` separately. If the cached file vanishes between
+    those two syscalls — concurrent ``Clear cache`` from Settings, a
+    parallel regeneration that unlinked the stale file, an external
+    cleanup process — ``getmtime`` raises ``FileNotFoundError``. The
+    route must catch that and treat the request as a cache miss, not
+    propagate to Flask's global handler as a 500.
+
+    Simulated by monkeypatching ``os.path.getmtime`` to raise unconditionally
+    once. The route must respond 200 (regenerated) — and never 500 —
+    proving the race is handled.
+    """
+    import app as app_module
+
+    app, _db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+
+    # Stage a cached file so the ``os.path.exists`` branch is taken,
+    # but make ``getmtime`` raise as if the file disappeared between
+    # the two syscalls. Patching the symbol the route uses
+    # (``app_module.os.path.getmtime``) reaches inside the request
+    # thread without affecting test infrastructure.
+    thumb_file = os.path.join(thumb_dir, f"{pid}.jpg")
+    Image.new("RGB", (50, 50), (1, 2, 3)).save(thumb_file, "JPEG", quality=70)
+
+    real_getmtime = app_module.os.path.getmtime
+    raised = {"count": 0}
+
+    def racing_getmtime(path):
+        if path == thumb_file and raised["count"] == 0:
+            raised["count"] += 1
+            raise FileNotFoundError(2, "File not found", path)
+        return real_getmtime(path)
+
+    monkeypatch.setattr(app_module.os.path, "getmtime", racing_getmtime)
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 200, (
+        f"race between exists() and getmtime() leaked a {resp.status_code} "
+        f"to the user; the route should treat the missing file as a cache "
+        f"miss and self-heal"
+    )
+    assert resp.data[:2] == b"\xff\xd8", "response body is not a JPEG"
+    assert raised["count"] == 1, "test setup did not exercise the race"
+
+
 def test_serve_thumbnail_does_not_loop_on_future_dated_source(
     tmp_path, monkeypatch,
 ):

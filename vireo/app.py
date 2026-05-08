@@ -9145,8 +9145,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "", 404
 
         db = _get_db()
-        if os.path.exists(thumb_path):
+        # Collapse the existence + freshness probe into a single
+        # ``getmtime`` so a concurrent ``Clear cache`` (or parallel
+        # regeneration) that unlinks the file between two separate
+        # syscalls can't surface as a 500 to the user. ``FileNotFoundError``
+        # here is the cache-miss signal and falls through to the regen
+        # path below; nothing else should be silently swallowed, so we
+        # bind the exception narrowly.
+        try:
             cached_mtime = os.path.getmtime(thumb_path)
+        except FileNotFoundError:
+            cached_mtime = None
+        if cached_mtime is not None:
             row = db.conn.execute(
                 "SELECT file_mtime FROM photos WHERE id=?", (photo_id,),
             ).fetchone()
