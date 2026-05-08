@@ -4764,10 +4764,10 @@ function formatDuration(seconds) {
     var thisWs = allRunning.filter(function(j) { return j.workspace_id === _activeWsId; });
     var otherWs = allRunning.filter(function(j) { return j.workspace_id !== _activeWsId; });
 
-    // Badge counts only current workspace
-    document.getElementById('jobsBadge').textContent = thisWs.length;
+    // Badges count all running jobs across workspaces
+    document.getElementById('jobsBadge').textContent = allRunning.length;
     var navBadge = document.getElementById('navJobBadge');
-    if (navBadge) navBadge.textContent = thisWs.length > 0 ? ' (' + thisWs.length + ')' : '';
+    if (navBadge) navBadge.textContent = allRunning.length > 0 ? ' (' + allRunning.length + ')' : '';
 
     if (allRunning.length === 0) {
       var lastDone = activeJobs.filter(function(j) { return j.status !== 'running'; })[0];
@@ -4826,7 +4826,7 @@ function formatDuration(seconds) {
 
   function updateSummary() {
     var summary = document.getElementById('jobSummary');
-    var running = activeJobs.filter(function(j) { return j.status === 'running' && j.workspace_id === _activeWsId; });
+    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
 
     if (running.length === 0) {
       summary.textContent = 'No active jobs';
@@ -4862,7 +4862,7 @@ function formatDuration(seconds) {
   }
 
   function updateActivityDot() {
-    var running = activeJobs.filter(function(j) { return j.status === 'running' && j.workspace_id === _activeWsId; });
+    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
     var dot = document.getElementById('navActivityDot');
     if (dot) dot.classList.toggle('active', running.length > 0);
   }
