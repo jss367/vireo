@@ -1,7 +1,9 @@
 """Generate and manage local thumbnail cache for the photo browser."""
 
+import contextlib
 import logging
 import os
+import tempfile
 
 from image_loader import get_canonical_image_path, load_image
 
@@ -35,7 +37,21 @@ def generate_thumbnail(photo_id, source_path, cache_dir, size=THUMB_SIZE, qualit
         return None
 
     os.makedirs(cache_dir, exist_ok=True)
-    img.save(thumb_path, "JPEG", quality=quality)
+    # Atomic write: two concurrent jobs (or two iterations of the same job
+    # racing on a freshly added photo) can both see the missing thumb and
+    # call img.save() on the same path, producing a half-written or
+    # interleaved JPEG. Write to a sibling temp file then os.replace().
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{photo_id}.", suffix=".jpg.tmp", dir=cache_dir
+    )
+    os.close(fd)
+    try:
+        img.save(tmp_path, "JPEG", quality=quality)
+        os.replace(tmp_path, thumb_path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
     return thumb_path
 
 
@@ -99,6 +115,11 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
         else:
             folder_path = folders.get(photo["folder_id"], "")
             source_path = os.path.join(folder_path, photo["filename"])
+        # generate_thumbnail decodes the source image (slow for RAW). Run
+        # it before any UPDATE so no transaction is open while it runs;
+        # then commit per photo to release the writer lock between
+        # iterations and avoid blocking concurrent jobs (a parallel scan's
+        # add_photo INSERT) past the 30s busy_timeout.
         if generate_thumbnail(photo["id"], source_path, cache_dir, size=thumb_size, quality=thumb_quality) is not None:
             generated += 1
             # Record on-disk presence in the photos table so the dashboard's
@@ -109,13 +130,13 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
                 "UPDATE photos SET thumb_path=? WHERE id=?",
                 (f"{photo['id']}.jpg", photo["id"]),
             )
+            db.conn.commit()
         else:
             failed += 1
 
         if progress_callback:
             progress_callback(i + 1, total)
 
-    db.conn.commit()
     if failed:
         log.warning("Thumbnail generation: %d of %d failed", failed, total)
     result = {"generated": generated, "skipped": skipped, "failed": failed}

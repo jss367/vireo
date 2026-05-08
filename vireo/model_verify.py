@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import ssl
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -122,6 +123,38 @@ _verified_this_process: set[str] = set()
 # call retries the network check.
 _verify_error_cache: dict[str, float] = {}
 _VERIFY_ERROR_TTL = 300  # 5 minutes
+
+# Guards reads/writes of the two caches above so concurrent jobs (e.g. two
+# pipelines both verifying their model list at startup) don't observe
+# torn / inconsistent state across compound check-then-modify sequences.
+_cache_lock = threading.Lock()
+
+
+def _is_verified(model_id: str) -> bool:
+    with _cache_lock:
+        return model_id in _verified_this_process
+
+
+def _recent_error_age(model_id: str) -> float | None:
+    with _cache_lock:
+        ts = _verify_error_cache.get(model_id)
+    return None if ts is None else (time.monotonic() - ts)
+
+
+def _mark_verified(model_id: str) -> None:
+    with _cache_lock:
+        _verified_this_process.add(model_id)
+        _verify_error_cache.pop(model_id, None)
+
+
+def _mark_unverified(model_id: str) -> None:
+    with _cache_lock:
+        _verified_this_process.discard(model_id)
+
+
+def _record_error(model_id: str) -> None:
+    with _cache_lock:
+        _verify_error_cache[model_id] = time.monotonic()
 
 
 def sha256_file(path: str) -> str:
@@ -289,13 +322,13 @@ def verify_if_needed(model_id: str, model_dir: str, hf_subdir: str) -> None:
     error), records the failure time in _verify_error_cache and returns
     without writing .verify_failed so the pipeline continues fail-open.
     """
-    if model_id in _verified_this_process:
+    if _is_verified(model_id):
         return
 
     # Fail-open for recent hash-fetch failures so repeated pipeline starts
     # don't each stall for the full _FETCH_TIMEOUT on every model.
-    error_ts = _verify_error_cache.get(model_id)
-    if error_ts is not None and (time.monotonic() - error_ts) < _VERIFY_ERROR_TTL:
+    age = _recent_error_age(model_id)
+    if age is not None and age < _VERIFY_ERROR_TTL:
         return
 
     pinned = _has_pinned_revision(model_dir)
@@ -308,7 +341,7 @@ def verify_if_needed(model_id: str, model_dir: str, hf_subdir: str) -> None:
     try:
         result = verify_model(model_dir, hf_subdir)
     except VerifyError as e:
-        _verify_error_cache[model_id] = time.monotonic()
+        _record_error(model_id)
         write_verify_skipped(model_dir, str(e))
         return
 
@@ -319,8 +352,7 @@ def verify_if_needed(model_id: str, model_dir: str, hf_subdir: str) -> None:
         except OSError:
             pass
         raise ModelCorruptError(model_id, result)
-    _verified_this_process.add(model_id)
-    _verify_error_cache.pop(model_id, None)
+    _mark_verified(model_id)
     sentinel = os.path.join(model_dir, VERIFY_FAILED_SENTINEL)
     if os.path.isfile(sentinel):
         with contextlib.suppress(OSError):
@@ -339,21 +371,20 @@ def _verify_unpinned(model_id: str, model_dir: str, hf_subdir: str) -> None:
     try:
         latest_rev = fetch_latest_revision(ONNX_REPO)
     except VerifyError as e:
-        _verify_error_cache[model_id] = time.monotonic()
+        _record_error(model_id)
         write_verify_skipped(model_dir, str(e))
         return
 
     try:
         result = verify_model(model_dir, hf_subdir, revision=latest_rev)
     except VerifyError as e:
-        _verify_error_cache[model_id] = time.monotonic()
+        _record_error(model_id)
         write_verify_skipped(model_dir, str(e))
         return
 
     if result.ok:
         write_pinned_revision(model_dir, latest_rev)
-        _verified_this_process.add(model_id)
-        _verify_error_cache.pop(model_id, None)
+        _mark_verified(model_id)
         sentinel = os.path.join(model_dir, VERIFY_FAILED_SENTINEL)
         if os.path.isfile(sentinel):
             with contextlib.suppress(OSError):
@@ -367,7 +398,7 @@ def _verify_unpinned(model_id: str, model_dir: str, hf_subdir: str) -> None:
             model_id, result.mismatches, result.missing,
         )
         # Cache as checked so we don't re-warn on every pipeline start.
-        _verified_this_process.add(model_id)
+        _mark_verified(model_id)
         # Clear any stale .verify_skipped: the hash fetch succeeded this
         # time, so the old "couldn't reach HF" reason no longer reflects
         # reality. Without this, a previously-unverified model keeps
@@ -380,8 +411,9 @@ def clear_verified_cache(model_id: str) -> None:
     """Drop a model from the per-process verification cache so that the
     next call to verify_if_needed will re-hash. Called by download_model
     after a successful re-download."""
-    _verified_this_process.discard(model_id)
-    _verify_error_cache.pop(model_id, None)
+    with _cache_lock:
+        _verified_this_process.discard(model_id)
+        _verify_error_cache.pop(model_id, None)
 
 
 def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
@@ -447,7 +479,7 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
             results[model_id] = result
             if result.ok:
                 write_pinned_revision(weights_path, latest_rev)
-                _verified_this_process.add(model_id)
+                _mark_verified(model_id)
                 clear_verify_skipped(weights_path)
             else:
                 # Mismatch is ambiguous for unpinned installs — don't
@@ -458,7 +490,7 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
                 # previously-unverified model stays stuck with an
                 # outdated network-error badge and makes Retry look
                 # ineffective even though verification actually ran.
-                _verified_this_process.discard(model_id)
+                _mark_unverified(model_id)
                 clear_verify_skipped(weights_path)
             continue
 
@@ -481,8 +513,8 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
                     )
             except OSError:
                 pass
-            _verified_this_process.discard(model_id)
+            _mark_unverified(model_id)
         else:
-            _verified_this_process.add(model_id)
+            _mark_verified(model_id)
             clear_verify_skipped(weights_path)
     return results

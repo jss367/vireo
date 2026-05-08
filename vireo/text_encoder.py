@@ -6,6 +6,7 @@ Uses ONNX Runtime for inference with text encoder models stored in
 
 import logging
 import os
+import threading
 
 import numpy as np
 import onnx_runtime
@@ -14,6 +15,10 @@ log = logging.getLogger(__name__)
 
 # Cache: model_dir -> (text_session, text_input_name, tokenizer)
 _session_cache = {}
+# Serializes lookup + (slow) load + cache write so two concurrent jobs don't
+# both run the expensive ONNX session creation for the same model and race on
+# the dict assignment.
+_session_cache_lock = threading.Lock()
 
 # Map model_str identifiers to local model directory names
 _MODEL_DIR_MAP = {
@@ -61,7 +66,11 @@ def _get_text_session(model_str, pretrained_str=None):
             )
         model_dir = os.path.join(_MODELS_ROOT, dir_name)
 
-    if model_dir not in _session_cache:
+    with _session_cache_lock:
+        cached = _session_cache.get(model_dir)
+        if cached is not None:
+            return cached
+
         log.info("Loading CLIP text encoder for %s...", model_str)
         from tokenizers import Tokenizer
 
@@ -82,10 +91,10 @@ def _get_text_session(model_str, pretrained_str=None):
         input_name = session.get_inputs()[0].name
         tokenizer = Tokenizer.from_file(tokenizer_path)
 
-        _session_cache[model_dir] = (session, input_name, tokenizer)
+        entry = (session, input_name, tokenizer)
+        _session_cache[model_dir] = entry
         log.info("CLIP text encoder loaded")
-
-    return _session_cache[model_dir]
+        return entry
 
 
 def encode_text(query, model_str, pretrained_str=None):

@@ -661,17 +661,12 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
     if status_callback:
         status_callback(f"Extracting {total} working copies...")
 
-    # Commit in small batches so a long backfill streams progress out
-    # incrementally instead of holding a single transaction across 10k+ rows.
-    BATCH = 25
-    pending = 0
-
-    def _flush():
-        nonlocal pending
-        if pending:
-            commit_with_retry(db.conn)
-            pending = 0
-
+    # Commit per row so the writer lock is released between iterations.
+    # Otherwise the first UPDATE in a batch auto-opens a transaction and
+    # subsequent slow extract_working_copy() calls (RAW decode → JPEG
+    # encode, multi-second per file on a slow disk) hold the writer lock
+    # for the whole batch, starving any concurrent writer (e.g. a parallel
+    # pipeline's add_photo INSERT past the 30s busy_timeout).
     for i, row in enumerate(rows, 1):
         if cancel_check is not None and cancel_check():
             log.info("Working-copy extraction cancelled after %d/%d rows", i - 1, total)
@@ -687,7 +682,10 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
             if os.path.isfile(companion):
                 source = companion
 
-        if extract_working_copy(source, wc_abs, max_size=wc_max_size, quality=wc_quality):
+        # extract_working_copy is slow (RAW decode + JPEG encode); run it
+        # before any DB write so no transaction is open while it runs.
+        ok = extract_working_copy(source, wc_abs, max_size=wc_max_size, quality=wc_quality)
+        if ok:
             db.conn.execute(
                 "UPDATE photos SET working_copy_path=?,"
                 " working_copy_failed_at=NULL,"
@@ -714,14 +712,10 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
                 " WHERE id=?",
                 (row["file_mtime"], row["id"]),
             )
-        pending += 1
+        commit_with_retry(db.conn)
 
-        if pending >= BATCH:
-            _flush()
         if progress_callback is not None:
             progress_callback(i, total)
-
-    _flush()
 
 
 def backfill_working_copies(db, vireo_dir, progress_callback=None,

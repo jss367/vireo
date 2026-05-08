@@ -44,6 +44,7 @@ _decoder_session = None
 _sam2_variant_loaded = None
 
 _sam2_download_lock = threading.Lock()
+_sam2_session_lock = threading.Lock()
 
 
 def _sam2_model_dir(variant):
@@ -181,45 +182,51 @@ def _get_sam2_sessions(variant="sam2-small"):
     """
     global _encoder_session, _decoder_session, _sam2_variant_loaded
 
-    if (
-        _encoder_session is not None
-        and _decoder_session is not None
-        and _sam2_variant_loaded == variant
-    ):
-        return _encoder_session, _decoder_session
+    # Serialize variant swaps and first-load races. Two concurrent jobs (e.g.
+    # one classify, one mask) calling this with different variants would
+    # otherwise race on the global session assignment, leaving the trio in an
+    # inconsistent state where _sam2_variant_loaded says one thing but the
+    # sessions belong to another variant.
+    with _sam2_session_lock:
+        if (
+            _encoder_session is not None
+            and _decoder_session is not None
+            and _sam2_variant_loaded == variant
+        ):
+            return _encoder_session, _decoder_session
 
-    if variant not in SAM2_VARIANTS:
-        raise ValueError(
-            f"Unknown SAM2 variant: {variant}. "
-            f"Choose from: {list(SAM2_VARIANTS.keys())}"
+        if variant not in SAM2_VARIANTS:
+            raise ValueError(
+                f"Unknown SAM2 variant: {variant}. "
+                f"Choose from: {list(SAM2_VARIANTS.keys())}"
+            )
+
+        model_dir = os.path.join(
+            os.path.expanduser("~"), ".vireo", "models", variant
         )
+        encoder_path = os.path.join(model_dir, "image_encoder.onnx")
+        decoder_path = os.path.join(model_dir, "mask_decoder.onnx")
 
-    model_dir = os.path.join(
-        os.path.expanduser("~"), ".vireo", "models", variant
-    )
-    encoder_path = os.path.join(model_dir, "image_encoder.onnx")
-    decoder_path = os.path.join(model_dir, "mask_decoder.onnx")
+        if not os.path.isfile(encoder_path):
+            raise FileNotFoundError(
+                f"SAM2 image encoder not found at {encoder_path}. "
+                f"Download it first via the models page."
+            )
+        if not os.path.isfile(decoder_path):
+            raise FileNotFoundError(
+                f"SAM2 mask decoder not found at {decoder_path}. "
+                f"Download it first via the models page."
+            )
 
-    if not os.path.isfile(encoder_path):
-        raise FileNotFoundError(
-            f"SAM2 image encoder not found at {encoder_path}. "
-            f"Download it first via the models page."
-        )
-    if not os.path.isfile(decoder_path):
-        raise FileNotFoundError(
-            f"SAM2 mask decoder not found at {decoder_path}. "
-            f"Download it first via the models page."
-        )
+        log.info("Loading SAM2 ONNX (%s)...", variant)
+        enc_sess = onnx_runtime.create_session(encoder_path)
+        dec_sess = onnx_runtime.create_session(decoder_path)
 
-    log.info("Loading SAM2 ONNX (%s)...", variant)
-    enc_sess = onnx_runtime.create_session(encoder_path)
-    dec_sess = onnx_runtime.create_session(decoder_path)
-
-    _encoder_session = enc_sess
-    _decoder_session = dec_sess
-    _sam2_variant_loaded = variant
-    log.info("SAM2 ONNX loaded (%s)", variant)
-    return enc_sess, dec_sess
+        _encoder_session = enc_sess
+        _decoder_session = dec_sess
+        _sam2_variant_loaded = variant
+        log.info("SAM2 ONNX loaded (%s)", variant)
+        return enc_sess, dec_sess
 
 
 def generate_mask(image, detection_box, variant="sam2-small"):
