@@ -167,14 +167,20 @@ pub fn run() {
                 return;
             }
 
+            // "Open in Browser" — flip from the WKWebView to the user's
+            // default browser at runtime. Does not persist; it's a one-shot
+            // flip for this session. Routes through tray::open_ui_in_browser
+            // so the runtime mode flag flips and later menu/tray actions
+            // also route to the browser.
+            if id == menu::ids::OPEN_IN_BROWSER {
+                tray::open_ui_in_browser(app);
+                return;
+            }
+
             // Navigation items — evaluate JS in the main webview, or in
             // browser mode open the route in the user's default browser.
             if let Some(route) = menu::route_for_id(id) {
-                let browser_mode = app
-                    .try_state::<tray::TrayMode>()
-                    .map(|m| m.browser_mode)
-                    .unwrap_or(false);
-                if browser_mode {
+                if tray::is_browser_mode(app) {
                     let port = app.state::<SidecarState>().port;
                     let url = format!("http://127.0.0.1:{}{}", port, route);
                     open_in_browser(app, &url);

@@ -21,6 +21,7 @@ pub mod ids {
     pub const NAV_LOGS: &str = "nav_logs";
     pub const REPORT_ISSUE: &str = "report_issue";
     pub const CHECK_FOR_UPDATES: &str = "check_for_updates";
+    pub const OPEN_IN_BROWSER: &str = "open_in_browser_now";
 }
 
 /// Map a menu item ID to its Flask route path.
@@ -178,6 +179,12 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .build(app)?,
         );
     }
+
+    view_builder = view_builder.separator().item(
+        &MenuItemBuilder::with_id(ids::OPEN_IN_BROWSER, "Open in Browser")
+            .accelerator("CmdOrCtrl+Shift+B")
+            .build(app)?,
+    );
 
     let view_menu = view_builder.build()?;
 
