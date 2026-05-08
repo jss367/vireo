@@ -459,6 +459,179 @@ def test_serve_thumbnail_404s_for_deleted_photo(tmp_path, monkeypatch):
     assert resp.status_code == 404
 
 
+def test_serve_thumbnail_regenerates_when_cached_predates_source(
+    tmp_path, monkeypatch,
+):
+    """Reused photo IDs leave behind cached thumbnails belonging to the
+    previous tenant of that ID. ``photos.id`` is INTEGER PRIMARY KEY
+    *without* AUTOINCREMENT, so SQLite reuses the highest freed rowids
+    on the next insert. Combined with delete paths that don't clean up
+    the on-disk cache (``audit.remove_orphans``, folder consolidation,
+    companion-pair dedup in the scanner), a thumbnail at ``<id>.jpg``
+    can persist after its original photo is gone, and a *different*
+    photo later inserted at the same ID gets the stale image served on
+    every grid scroll. The route must compare the cached thumbnail's
+    mtime against the photo's ``file_mtime`` and regenerate when the
+    cache predates the source — anchoring correctness in the data
+    rather than depending on every delete site to clean up.
+    """
+    app, db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+
+    # Pre-populate a sentinel thumbnail (the "stale" tenant). Backdate it
+    # so its mtime is older than the photo's file_mtime — this is the
+    # condition the route must detect.
+    thumb_file = os.path.join(thumb_dir, f"{pid}.jpg")
+    Image.new("RGB", (50, 50), (1, 2, 3)).save(thumb_file, "JPEG", quality=70)
+    sentinel_size = os.path.getsize(thumb_file)
+    photo_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    stale_mtime = photo_mtime - 86400  # one day older than the source
+    os.utime(thumb_file, (stale_mtime, stale_mtime))
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 200
+    assert resp.data[:2] == b"\xff\xd8", "response body is not a JPEG"
+    # The stale sentinel was 50x50 at quality 70; a regenerated thumbnail
+    # of the 800x600 source at quality 85 produces a different file size.
+    # Comparing sizes is enough to prove the file was rewritten — we
+    # don't need to round-trip through PIL.
+    assert os.path.getsize(thumb_file) != sentinel_size, (
+        "stale thumbnail was served unchanged; the route did not "
+        "detect that the cached file predates the source"
+    )
+    # And the regenerated thumb's mtime is now >= file_mtime, so a
+    # subsequent request hits the fast path.
+    assert os.path.getmtime(thumb_file) >= photo_mtime
+
+
+def test_serve_thumbnail_handles_race_between_exists_and_getmtime(
+    tmp_path, monkeypatch,
+):
+    """The cache-hit path checks ``os.path.exists`` then calls
+    ``os.path.getmtime`` separately. If the cached file vanishes between
+    those two syscalls — concurrent ``Clear cache`` from Settings, a
+    parallel regeneration that unlinked the stale file, an external
+    cleanup process — ``getmtime`` raises ``FileNotFoundError``. The
+    route must catch that and treat the request as a cache miss, not
+    propagate to Flask's global handler as a 500.
+
+    Simulated by monkeypatching ``os.path.getmtime`` to raise unconditionally
+    once. The route must respond 200 (regenerated) — and never 500 —
+    proving the race is handled.
+    """
+    import app as app_module
+
+    app, _db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+
+    # Stage a cached file so the ``os.path.exists`` branch is taken,
+    # but make ``getmtime`` raise as if the file disappeared between
+    # the two syscalls. Patching the symbol the route uses
+    # (``app_module.os.path.getmtime``) reaches inside the request
+    # thread without affecting test infrastructure.
+    thumb_file = os.path.join(thumb_dir, f"{pid}.jpg")
+    Image.new("RGB", (50, 50), (1, 2, 3)).save(thumb_file, "JPEG", quality=70)
+
+    real_getmtime = app_module.os.path.getmtime
+    raised = {"count": 0}
+
+    def racing_getmtime(path):
+        if path == thumb_file and raised["count"] == 0:
+            raised["count"] += 1
+            raise FileNotFoundError(2, "File not found", path)
+        return real_getmtime(path)
+
+    monkeypatch.setattr(app_module.os.path, "getmtime", racing_getmtime)
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 200, (
+        f"race between exists() and getmtime() leaked a {resp.status_code} "
+        f"to the user; the route should treat the missing file as a cache "
+        f"miss and self-heal"
+    )
+    assert resp.data[:2] == b"\xff\xd8", "response body is not a JPEG"
+    assert raised["count"] == 1, "test setup did not exercise the race"
+
+
+def test_serve_thumbnail_does_not_loop_on_future_dated_source(
+    tmp_path, monkeypatch,
+):
+    """``photos.file_mtime`` can legitimately be in the future — files
+    copied from a machine with clock skew, archives that preserve
+    future filesystem timestamps, NEFs whose embedded metadata reflects
+    a different timezone. A naive ``cached_mtime < file_mtime`` check
+    treats every request as stale because the regenerated thumbnail's
+    own mtime defaults to ``time.time()``, which is still less than the
+    stored future ``file_mtime``. The route must break the loop after
+    regeneration so a subsequent request hits the fast path instead of
+    re-decoding the source on every grid scroll.
+    """
+    import time as _time
+
+    app, db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+    # Set the photo's file_mtime to one day in the future, simulating
+    # the clock-skew / preserved-future-timestamp case.
+    future_mtime = _time.time() + 86400
+    db.conn.execute(
+        "UPDATE photos SET file_mtime=? WHERE id=?", (future_mtime, pid),
+    )
+    db.conn.commit()
+
+    thumb_file = os.path.join(thumb_dir, f"{pid}.jpg")
+    assert not os.path.exists(thumb_file), "precondition: cache miss"
+
+    client = app.test_client()
+    # First request triggers regeneration (cache miss → self-heal path).
+    resp1 = client.get(f"/thumbnails/{pid}.jpg")
+    assert resp1.status_code == 200
+    assert os.path.exists(thumb_file)
+    after_first = os.path.getmtime(thumb_file)
+
+    # Second request must NOT regenerate. If the freshness check still
+    # fires for future-dated sources, the route would unlink the file
+    # and re-encode the source, bumping the mtime to a new ``now``.
+    resp2 = client.get(f"/thumbnails/{pid}.jpg")
+    assert resp2.status_code == 200
+    after_second = os.path.getmtime(thumb_file)
+    assert after_second == after_first, (
+        "thumbnail regenerated a second time despite being just-written; "
+        "future-dated photos.file_mtime causes an infinite regeneration "
+        "loop on every request"
+    )
+
+
+def test_serve_thumbnail_serves_cached_when_thumb_newer_than_source(
+    tmp_path, monkeypatch,
+):
+    """The stale-cache guard must not regress the common case: a thumbnail
+    generated *after* its source file was last modified is fresh and
+    must be served without re-decoding. Otherwise every grid scroll
+    burns CPU on a thumbnail re-render."""
+    app, db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+
+    thumb_file = os.path.join(thumb_dir, f"{pid}.jpg")
+    Image.new("RGB", (50, 50), (1, 2, 3)).save(thumb_file, "JPEG", quality=70)
+    sentinel_size = os.path.getsize(thumb_file)
+    photo_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    fresh_mtime = photo_mtime + 60  # generated after the source was written
+    os.utime(thumb_file, (fresh_mtime, fresh_mtime))
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 200
+    assert os.path.getsize(thumb_file) == sentinel_size, (
+        "fresh cached thumbnail was rewritten — the stale-cache guard "
+        "is firing on cache hits where it shouldn't"
+    )
+
+
 def test_serve_thumbnail_404s_for_non_numeric_filename(tmp_path, monkeypatch):
     """Garbage URLs (e.g. /thumbnails/foo.jpg) must 404 cleanly without
     raising — defends the route against arbitrary path probes."""
@@ -576,6 +749,107 @@ def test_serve_thumbnail_resolves_when_folder_status_is_missing(tmp_path, monkey
     )
     assert resp.data[:2] == b"\xff\xd8"
     assert os.path.exists(os.path.join(thumb_dir, f"{pid}.jpg"))
+
+
+def test_serve_thumbnail_does_not_unlink_cross_workspace_cache(
+    tmp_path, monkeypatch,
+):
+    """The stale-cache guard fires before any workspace check, so a
+    request for a photo outside the active workspace can still drive
+    the unlink-and-regen branch — destroying another workspace's
+    cached thumbnail as a side effect, even though the request
+    ultimately 404s. The fix is to validate workspace access before
+    mutating the cache: stale-detection is fine, but the on-disk
+    unlink must not happen until we know the active workspace owns
+    the photo. Otherwise a single ill-aimed grid scroll on
+    workspace B could wipe workspace A's thumbnails.
+    """
+    app, db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+
+    # Stage a stale cached file for the photo so the staleness guard
+    # would normally fire (cached_mtime older than file_mtime).
+    thumb_file = os.path.join(thumb_dir, f"{pid}.jpg")
+    Image.new("RGB", (50, 50), (1, 2, 3)).save(thumb_file, "JPEG", quality=70)
+    photo_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    stale_mtime = photo_mtime - 86400
+    os.utime(thumb_file, (stale_mtime, stale_mtime))
+
+    # Switch to a workspace that doesn't have the photo's folder linked.
+    other_ws = db.create_workspace("Other")
+    db.update_workspace(other_ws, last_opened_at="2030-01-01T00:00:00Z")
+    db.set_active_workspace(other_ws)
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+    assert resp.status_code == 404
+    # The other workspace's cached thumbnail must survive the request.
+    assert os.path.exists(thumb_file), (
+        "cross-workspace request unlinked another workspace's cached "
+        "thumbnail; the staleness guard must not mutate cache files "
+        "for photos the active workspace cannot see"
+    )
+
+
+def test_serve_thumbnail_does_not_pin_stale_when_unlink_fails(
+    tmp_path, monkeypatch,
+):
+    """If ``os.remove`` fails on the stale file (Windows file lock,
+    permissions, antivirus quarantine), ``generate_thumbnail`` short-
+    circuits because its destination still exists, so the stale JPEG
+    is never re-encoded. Aligning the file's mtime to the source's
+    ``file_mtime`` afterward would mark the stale image as fresh
+    forever — pinning the wrong image until manual cache clear.
+
+    The route must detect this and either skip the mtime alignment
+    (so the next request retries) or refuse to call ``generate_thumbnail``
+    when the stale file is still on disk. Either way: a request that
+    cannot rewrite the file must NOT advance its mtime.
+    """
+    import app as app_module
+
+    app, db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+
+    # Stage a stale cached file. Give it sentinel bytes so we can
+    # confirm the stale content is still on disk afterward.
+    thumb_file = os.path.join(thumb_dir, f"{pid}.jpg")
+    Image.new("RGB", (50, 50), (1, 2, 3)).save(thumb_file, "JPEG", quality=70)
+    sentinel_bytes = open(thumb_file, "rb").read()
+    photo_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    stale_mtime = photo_mtime - 86400
+    os.utime(thumb_file, (stale_mtime, stale_mtime))
+
+    # Make ``os.remove`` fail when called on this thumbnail — simulating
+    # a file lock or permission denial. Other unlink calls in the test
+    # process must keep working.
+    real_remove = app_module.os.remove
+
+    def failing_remove(path, *args, **kwargs):
+        if path == thumb_file:
+            raise PermissionError(13, "Permission denied", path)
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(app_module.os, "remove", failing_remove)
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+    assert resp.status_code == 200
+
+    # The on-disk file must still be the stale sentinel — generate_thumbnail
+    # short-circuited because os.remove couldn't drop the file.
+    assert open(thumb_file, "rb").read() == sentinel_bytes
+    # And critically, its mtime must NOT have been advanced to the
+    # source's file_mtime — that would falsely mark it fresh and pin
+    # the wrong image indefinitely. Allow equality with the original
+    # stale_mtime; the route is permitted to leave it untouched.
+    assert os.path.getmtime(thumb_file) < photo_mtime, (
+        "stale thumbnail was pinned as fresh after a failed unlink; "
+        "next request will not retry the regen and the wrong image "
+        "stays cached forever"
+    )
 
 
 def test_serve_thumbnail_404s_for_photo_outside_active_workspace(tmp_path, monkeypatch):

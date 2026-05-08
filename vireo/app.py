@@ -6031,13 +6031,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/audit/remove-orphans", methods=["POST"])
     def api_audit_remove_orphans():
+        """Drop DB rows for photos whose source file is gone from disk,
+        and unlink the cached thumbnails / previews / working copies that
+        were derived from them.
+
+        Routed through ``db.delete_photos`` rather than the older
+        ``audit.remove_orphans`` so all the FK-cascading cleanup
+        (detections, predictions, collection rules, iNat submissions)
+        runs and ``_cleanup_cached_files_for_deleted_photos`` unlinks
+        the on-disk derivatives. Skipping the cache cleanup is what
+        leaves stale ``<id>.jpg`` thumbnails behind that then attach to
+        whatever new photo later inherits the freed rowid.
+        """
         db = _get_db()
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
-        from audit import remove_orphans
+        if not photo_ids:
+            return jsonify({"ok": True, "removed": 0})
 
-        remove_orphans(db, photo_ids)
-        return jsonify({"ok": True, "removed": len(photo_ids)})
+        result = db.delete_photos(photo_ids)
+        _cleanup_cached_files_for_deleted_photos(result.get("files", []))
+        return jsonify({"ok": True, "removed": result.get("deleted", 0)})
 
     @app.route("/api/audit/import-untracked", methods=["POST"])
     def api_audit_import_untracked():
@@ -9094,6 +9108,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         image when the source is recoverable — matching the project's
         "no rm -rf fixes; the app self-heals" rule.
 
+        Stale-cache guard: ``photos.id`` is INTEGER PRIMARY KEY *without*
+        AUTOINCREMENT, so SQLite reuses the highest freed rowids on the
+        next insert. Combined with delete paths that don't unlink cached
+        files (``audit.remove_orphans``, folder consolidation in
+        ``Database.consolidate_folders``, companion-pair dedup in
+        ``scanner._merge_companion_pair``), a JPEG at ``<id>.jpg`` can
+        outlive its original photo and then be served as the thumbnail
+        for an entirely different photo that later inherits that ID.
+        Compare the cached file's mtime against the photo's
+        ``file_mtime`` and treat predates-source as a miss so the regen
+        path produces a fresh JPEG. This is correctness rooted in the
+        data, independent of whether every delete site cleans up.
+
         404s remain when:
           * the filename isn't ``<int>.jpg`` (malformed request);
           * the photo no longer exists in the DB (stale cache from a
@@ -9110,10 +9137,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         thumb_dir = app.config["THUMB_CACHE_DIR"]
         thumb_path = os.path.join(thumb_dir, filename)
-        if os.path.exists(thumb_path):
-            return _send_cached(thumb_dir, filename)
 
-        # Self-heal path: regenerate on miss when the photo still exists.
         try:
             photo_id = int(filename.replace(".jpg", ""))
         except ValueError:
@@ -9121,19 +9145,78 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "", 404
 
         db = _get_db()
-        # Workspace-scoped lookup: a thumbnail URL only makes sense for a
-        # photo the active workspace can actually see. Without this scope,
-        # ``get_canonical_image_path`` would receive an empty folders dict
-        # for a cross-workspace photo and fall back to
-        # ``os.path.join('', photo['filename'])`` — i.e. a path resolved
-        # against the server's CWD — which could read or persist a
-        # thumbnail derived from an unrelated same-named file.
+        # Workspace-scoped lookup hoisted before any cache mutation. A
+        # thumbnail URL only makes sense for a photo the active
+        # workspace can actually see, and the staleness branch below
+        # may unlink the cached file — that mutation must not run for
+        # a photo outside the active workspace, otherwise an ill-aimed
+        # request from workspace B can wipe workspace A's cache as a
+        # side effect. Doing this lookup once also lets the freshness
+        # check use ``photo["file_mtime"]`` directly instead of a
+        # separate SELECT. (Without this scope,
+        # ``get_canonical_image_path`` would also receive an empty
+        # folders dict for a cross-workspace photo and fall back to
+        # ``os.path.join('', photo['filename'])`` — a CWD-relative
+        # path that could read or persist a thumbnail derived from an
+        # unrelated same-named file.)
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
             # Stale URL — the photo was deleted, or it lives in a folder
             # that isn't linked to this workspace. 404 is the right
-            # answer; cache pruning is the upstream fix (PR #758).
+            # answer; cache pruning is the upstream fix (PR #758). We
+            # do NOT touch the cached file here — another workspace may
+            # legitimately own it.
             return "", 404
+
+        # Collapse existence + freshness probe into a single ``getmtime``
+        # so a concurrent ``Clear cache`` (or parallel regeneration) that
+        # unlinks the file between two separate syscalls can't surface as
+        # a 500. ``FileNotFoundError`` is the cache-miss signal; bind the
+        # exception narrowly so unrelated OSErrors still surface.
+        try:
+            cached_mtime = os.path.getmtime(thumb_path)
+        except FileNotFoundError:
+            cached_mtime = None
+        if cached_mtime is not None:
+            # Treat as fresh if ``file_mtime`` is unknown (legacy rows
+            # pre-mtime tracking — we have no signal to invalidate
+            # against, so prefer the fast path over false-positive
+            # regeneration).
+            fresh = (
+                photo["file_mtime"] is None
+                or cached_mtime >= photo["file_mtime"]
+            )
+            if fresh:
+                return _send_cached(thumb_dir, filename)
+            log.info(
+                "Thumbnail for photo %s is stale (cached mtime %.0f < "
+                "source file_mtime %.0f) — regenerating",
+                photo_id, cached_mtime, photo["file_mtime"],
+            )
+            # ``generate_thumbnail`` short-circuits when the destination
+            # file already exists (an "already done" optimization), so a
+            # stale copy left in place would defeat the regen path. Unlink
+            # before falling through; the regen will write a fresh JPEG
+            # at the same path.
+            try:
+                os.remove(thumb_path)
+            except OSError:
+                # If we can't unlink the stale file (Windows lock,
+                # permissions, antivirus quarantine), do NOT proceed to
+                # regen+utime: ``generate_thumbnail`` would short-circuit
+                # on the existing file and the subsequent ``os.utime``
+                # below would mark the stale image as fresh forever.
+                # Serve what's on disk this once and leave the mtime
+                # alone — next request will retry the unlink.
+                log.warning(
+                    "Could not unlink stale thumbnail %s; serving stale "
+                    "file once. Next request will retry the unlink.",
+                    thumb_path, exc_info=True,
+                )
+                return _send_cached(thumb_dir, filename)
+
+        # Self-heal path: regenerate on miss (or stale) when the photo
+        # still exists.
 
         # Resolve source via the canonical-path helper so we prefer the
         # JPEG working copy over the original RAW. This makes the
@@ -9171,6 +9254,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # generate_thumbnail logged the reason (unreadable source,
             # unsupported format, etc.). Nothing else to do here.
             return "", 404
+
+        # Peg the regenerated thumbnail's mtime to the source file_mtime
+        # so the staleness invariant — ``cached_mtime >= file_mtime`` —
+        # holds on the next request. ``generate_thumbnail`` writes with
+        # the current wall clock; if ``file_mtime`` is in the future
+        # (clock skew on the source machine, archives that preserve
+        # future filesystem timestamps), the next request would compare
+        # ``time.time() < file_mtime`` and treat the just-written file
+        # as stale, triggering a regeneration loop on every fetch. The
+        # ``photo`` dict was loaded from the row above, so its
+        # ``file_mtime`` is the canonical source-of-truth value.
+        if photo["file_mtime"] is not None:
+            try:
+                os.utime(result, (photo["file_mtime"], photo["file_mtime"]))
+            except OSError:
+                # Best-effort: a touch failure is non-fatal; the worst
+                # case is the next request regenerates again. We don't
+                # 404 the user over a chmod / quota issue.
+                log.debug(
+                    "Could not align thumb mtime to source for photo %s",
+                    photo_id, exc_info=True,
+                )
 
         # Persist on-disk presence so the dashboard's coverage query
         # (`thumb_path IS NOT NULL`) reflects this regeneration. Stored
