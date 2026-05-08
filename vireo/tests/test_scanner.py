@@ -2297,3 +2297,63 @@ def test_scan_skips_broken_symlinks(tmp_path):
     photos = {p['filename'] for p in db.get_photos(per_page=100)}
     assert 'real.jpg' in photos
     assert 'broken.jpg' not in photos
+
+
+def test_scan_restrict_dirs_surfaces_permission_denied(tmp_path, monkeypatch):
+    """The pipeline copy-mode path drives scan() with restrict_dirs. A denied
+    directory in that list must surface via permission_error_callback and not
+    abort the whole scan — accessible siblings must still be discovered.
+
+    Regression: permission_error_callback was only wired into the os.walk
+    branch (restrict_dirs is None). With restrict_dirs set, dp.iterdir()
+    raised PermissionError unhandled and the entire pipeline scan stage
+    failed with no PERMISSION_DENIED entry in job["errors"].
+
+    Mocks Path.iterdir for the locked subtree (rather than chmod 0o000) so
+    the assertion holds regardless of test-runner uid: chmod-based denial
+    silently bypasses for root, which would let the locked file slip in.
+    """
+    import errno as _errno
+    from pathlib import Path as _Path
+
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        'allowed': ['ok.jpg'],
+        'forbidden': ['hidden.jpg'],
+    })
+    allowed = os.path.join(root, 'allowed')
+    forbidden = os.path.join(root, 'forbidden')
+
+    real_iterdir = _Path.iterdir
+
+    def fake_iterdir(self):
+        if str(self) == forbidden:
+            raise PermissionError(
+                _errno.EACCES, "Permission denied", str(self),
+            )
+        return real_iterdir(self)
+
+    monkeypatch.setattr(_Path, "iterdir", fake_iterdir)
+
+    db = Database(str(tmp_path / "test.db"))
+    denied = []
+    # Must not raise; must surface the denied dir via the callback.
+    scan(
+        root, db,
+        restrict_dirs=[allowed, forbidden],
+        permission_error_callback=denied.append,
+    )
+
+    photos = {p['filename'] for p in db.get_photos(per_page=100)}
+    assert 'ok.jpg' in photos, (
+        "accessible restrict_dir entries must still be scanned"
+    )
+    assert 'hidden.jpg' not in photos, (
+        "denied restrict_dir must not yield photos"
+    )
+    assert any(forbidden in p for p in denied), (
+        f"denied restrict_dir not reported via callback. got: {denied}"
+    )

@@ -812,6 +812,30 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     if status_callback:
         status_callback("Discovering files...")
     image_files = []
+
+    # os.walk + onerror, not Path.rglob: rglob silently skips any
+    # subdir that raises during enumeration, so a TCC-denied folder
+    # turns into "Found 0 images" with no signal that anything went
+    # wrong. macOS TCC raises EPERM ("Operation not permitted");
+    # POSIX mode-bit denials raise EACCES. Both must be reported,
+    # not swallowed. Other OSError flavors are still surfaced via
+    # log so we don't mask unexpected I/O problems. Defined here
+    # (not nested in a branch) so the restrict_dirs path below can
+    # also surface denials through the same callback.
+    def _on_walk_error(err):
+        if err.errno in (errno.EPERM, errno.EACCES):
+            denied = err.filename or str(root_path)
+            log.warning(
+                "Permission denied enumerating %s — skipping. "
+                "On macOS this usually means TCC (Privacy & Security "
+                "→ Files and Folders / Removable Volumes) needs to "
+                "grant Vireo access.", denied,
+            )
+            if permission_error_callback:
+                permission_error_callback(denied)
+        else:
+            log.warning("os.walk error at %s: %s", err.filename, err)
+
     if restrict_dirs is not None:
         # Only enumerate files in the specified directories (non-recursive).
         # root is still used as the folder hierarchy root for _ensure_folder.
@@ -819,7 +843,18 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         for d in restrict_dirs:
             dp = Path(d)
             if dp.is_dir():
-                for f in dp.iterdir():
+                # iterdir() raises PermissionError when the kernel refuses
+                # enumeration (macOS TCC EPERM, POSIX EACCES). Without this
+                # try/except the whole pipeline scan stage aborts on the
+                # first denied dir; route through _on_walk_error so the
+                # denial is surfaced via permission_error_callback the same
+                # way the recursive path does.
+                try:
+                    entries = list(dp.iterdir())
+                except PermissionError as e:
+                    _on_walk_error(e)
+                    continue
+                for f in entries:
                     if (f.is_file()
                             and f.suffix.lower() in SUPPORTED_EXTENSIONS
                             and not f.name.startswith(".")
@@ -828,27 +863,6 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                                  or str(f) in restrict_files_set)):
                         image_files.append(f)
     else:
-        # os.walk + onerror, not Path.rglob: rglob silently skips any
-        # subdir that raises during enumeration, so a TCC-denied folder
-        # turns into "Found 0 images" with no signal that anything went
-        # wrong. macOS TCC raises EPERM ("Operation not permitted");
-        # POSIX mode-bit denials raise EACCES. Both must be reported,
-        # not swallowed. Other OSError flavors are still surfaced via
-        # log so we don't mask unexpected I/O problems.
-        def _on_walk_error(err):
-            if err.errno in (errno.EPERM, errno.EACCES):
-                denied = err.filename or str(root_path)
-                log.warning(
-                    "Permission denied enumerating %s — skipping. "
-                    "On macOS this usually means TCC (Privacy & Security "
-                    "→ Files and Folders / Removable Volumes) needs to "
-                    "grant Vireo access.", denied,
-                )
-                if permission_error_callback:
-                    permission_error_callback(denied)
-            else:
-                log.warning("os.walk error at %s: %s", err.filename, err)
-
         if recursive:
             checked = 0
             for dirpath, _dirnames, filenames in os.walk(
