@@ -1515,14 +1515,22 @@ function renderAlgorithmTrace() {
     html += '<span>S=' + score + '</span>';
     html += '<span class="trace-decision">' + decision + '</span>';
     html += '</div>';
+    // Caches written before commit 82b3144 lack photo_a_id/photo_b_id on
+    // trace entries. Within an encounter the i-th adjacent-pair row is
+    // photo_ids[i] → photo_ids[i+1] (cut_microsegments sorts by timestamp
+    // and segment_encounters preserves that order), so we can recover the
+    // IDs from the encounter without forcing a regroup.
+    var encPhotoIds = enc.photo_ids || [];
+    var aId = (t.photo_a_id != null) ? t.photo_a_id : (encPhotoIds[i] != null ? encPhotoIds[i] : null);
+    var bId = (t.photo_b_id != null) ? t.photo_b_id : (encPhotoIds[i + 1] != null ? encPhotoIds[i + 1] : null);
     html += '<div class="trace-pair-photos">';
-    html += pairPhotoHtml(t.photo_a_id, t.photo_a_filename);
+    html += pairPhotoHtml(aId, t.photo_a_filename);
     html += '<span class="trace-pair-arrow">→</span>';
-    html += pairPhotoHtml(t.photo_b_id, t.photo_b_filename);
+    html += pairPhotoHtml(bId, t.photo_b_filename);
     html += '</div>';
     if (t.components) {
-      var nameA = shortName((photoMap[t.photo_a_id] || {}).filename || t.photo_a_filename || 'A');
-      var nameB = shortName((photoMap[t.photo_b_id] || {}).filename || t.photo_b_filename || 'B');
+      var nameA = shortName((photoMap[aId] || {}).filename || t.photo_a_filename || 'A');
+      var nameB = shortName((photoMap[bId] || {}).filename || t.photo_b_filename || 'B');
       var parts = [];
       ['time', 'subj', 'global', 'species', 'meta'].forEach(function(k) {
         var c = t.components[k];
