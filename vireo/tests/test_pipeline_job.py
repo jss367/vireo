@@ -8341,3 +8341,70 @@ def test_detect_eye_keypoints_stage_emits_final_100pct_on_clean_run(
     assert (last_current, last_total) == (2, 2), (
         f"Expected final emit (2, 2) on clean run; got {progress_events!r}"
     )
+
+
+import pytest
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions required")
+def test_pipeline_scan_surfaces_permission_denied(tmp_path, monkeypatch):
+    """Pipeline scan stage must surface kernel-level enumeration denials
+    (EPERM / EACCES) into job["errors"] as a typed PERMISSION_DENIED entry,
+    and accessible siblings must still be scanned. Regression: real-world
+    May2026 run on /Volumes/Photography/.../2026-05-01 reported "0 photos"
+    while macOS TCC was silently blocking the read.
+    """
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_root = tmp_path / "photos"
+    ok_dir = photo_root / "ok"
+    ok_dir.mkdir(parents=True)
+    Image.new("RGB", (16, 16), "red").save(str(ok_dir / "ok.jpg"))
+
+    locked_dir = photo_root / "locked"
+    locked_dir.mkdir()
+    Image.new("RGB", (16, 16), "blue").save(str(locked_dir / "locked.jpg"))
+    os.chmod(str(locked_dir), 0o000)
+
+    try:
+        db_path = str(tmp_path / "test.db")
+        db = Database(db_path)
+        ws_id = db._active_workspace_id
+
+        params = PipelineParams(
+            source=str(photo_root),
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        )
+
+        runner = FakeRunner()
+        job = _make_job()
+
+        result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+        denied_errors = [
+            e for e in job["errors"] if "PERMISSION_DENIED" in e
+        ]
+        assert denied_errors, (
+            f"Expected PERMISSION_DENIED in job errors. got: {job['errors']}"
+        )
+        assert any(str(locked_dir) in e for e in denied_errors), (
+            f"Locked dir not named in denial. got: {denied_errors}"
+        )
+
+        db2 = Database(db_path)
+        db2.set_active_workspace(ws_id)
+        photos = db2.get_photos(per_page=100)
+        names = {p["filename"] for p in photos}
+        assert "ok.jpg" in names, "accessible photo must still be scanned"
+        assert "locked.jpg" not in names, "denied dir must not yield photos"
+
+        assert isinstance(result, dict)
+    finally:
+        os.chmod(str(locked_dir), 0o755)

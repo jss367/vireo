@@ -1,6 +1,7 @@
 """Scan folders, discover photos, read metadata, populate database."""
 
 import contextlib
+import errno
 import hashlib
 import json
 import logging
@@ -761,7 +762,7 @@ def backfill_working_copies(db, vireo_dir, progress_callback=None,
     }
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -794,6 +795,12 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             with the configured value (Flask routes, audit entry points)
             should pass it. When omitted, falls back to
             ``vireo_dir/thumbnails``.
+        permission_error_callback: optional callable(path_str) invoked
+            once per directory the kernel refuses to enumerate (EPERM
+            from macOS TCC, EACCES from POSIX mode bits). The scan
+            continues; accessible siblings are still discovered. Without
+            this hook, a denied subdir would silently produce zero hits
+            — a "Found 0 images" black box from the user's perspective.
     """
     root_path = Path(root)
     if not root_path.is_dir():
@@ -821,15 +828,60 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                                  or str(f) in restrict_files_set)):
                         image_files.append(f)
     else:
-        candidates = root_path.rglob("*") if recursive else root_path.iterdir()
-        for checked, f in enumerate(candidates, 1):
-            if checked % 500 == 0 and status_callback:
-                status_callback(f"Discovering files... ({len(image_files)} found)")
-            if (f.is_file()
-                    and f.suffix.lower() in SUPPORTED_EXTENSIONS
-                    and not f.name.startswith(".")
-                    and (skip_paths is None or str(f) not in skip_paths)):
-                image_files.append(f)
+        # os.walk + onerror, not Path.rglob: rglob silently skips any
+        # subdir that raises during enumeration, so a TCC-denied folder
+        # turns into "Found 0 images" with no signal that anything went
+        # wrong. macOS TCC raises EPERM ("Operation not permitted");
+        # POSIX mode-bit denials raise EACCES. Both must be reported,
+        # not swallowed. Other OSError flavors are still surfaced via
+        # log so we don't mask unexpected I/O problems.
+        def _on_walk_error(err):
+            if err.errno in (errno.EPERM, errno.EACCES):
+                denied = err.filename or str(root_path)
+                log.warning(
+                    "Permission denied enumerating %s — skipping. "
+                    "On macOS this usually means TCC (Privacy & Security "
+                    "→ Files and Folders / Removable Volumes) needs to "
+                    "grant Vireo access.", denied,
+                )
+                if permission_error_callback:
+                    permission_error_callback(denied)
+            else:
+                log.warning("os.walk error at %s: %s", err.filename, err)
+
+        if recursive:
+            checked = 0
+            for dirpath, _dirnames, filenames in os.walk(
+                str(root_path), onerror=_on_walk_error,
+            ):
+                for name in filenames:
+                    checked += 1
+                    if checked % 500 == 0 and status_callback:
+                        status_callback(
+                            f"Discovering files... ({len(image_files)} found)"
+                        )
+                    ext = os.path.splitext(name)[1].lower()
+                    if (ext in SUPPORTED_EXTENSIONS
+                            and not name.startswith(".")):
+                        full = os.path.join(dirpath, name)
+                        if skip_paths is None or full not in skip_paths:
+                            image_files.append(Path(full))
+        else:
+            try:
+                entries = list(root_path.iterdir())
+            except PermissionError as e:
+                _on_walk_error(e)
+                entries = []
+            for checked, f in enumerate(entries, 1):
+                if checked % 500 == 0 and status_callback:
+                    status_callback(
+                        f"Discovering files... ({len(image_files)} found)"
+                    )
+                if (f.is_file()
+                        and f.suffix.lower() in SUPPORTED_EXTENSIONS
+                        and not f.name.startswith(".")
+                        and (skip_paths is None or str(f) not in skip_paths)):
+                    image_files.append(f)
     image_files.sort()
 
     total = len(image_files)

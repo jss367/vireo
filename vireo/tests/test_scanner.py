@@ -2201,3 +2201,69 @@ def test_scan_links_restrict_dirs_when_all_files_skipped(tmp_path):
     assert sub1 in linked and sub2 in linked, (
         f"Both restrict_dirs should be linked. Linked folders: {linked}"
     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions required")
+def test_scan_surfaces_permission_denied_subdirs(tmp_path):
+    """A subdir the kernel won't let us enter must surface as a denied path,
+    not silently disappear into a 'Found 0 images' lie. Accessible siblings
+    must still be discovered.
+
+    Regression: the scan of /Volumes/Photography/.../2026-05-01 returned
+    'Found 0 images' for a folder containing 1122 NEFs because macOS TCC
+    blocked Vireo's process. Path.rglob("*") swallows PermissionError per
+    directory; switching to os.walk(onerror=...) lets us see them.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        '': ['ok.jpg'],
+        'forbidden': ['hidden.jpg'],
+    })
+
+    forbidden = os.path.join(root, 'forbidden')
+    os.chmod(forbidden, 0o000)
+    try:
+        db = Database(str(tmp_path / "test.db"))
+        denied = []
+        scan(root, db, permission_error_callback=denied.append)
+
+        photos = {p['filename'] for p in db.get_photos(per_page=100)}
+        assert 'ok.jpg' in photos, "accessible files must still be scanned"
+        assert 'hidden.jpg' not in photos, "denied dir must not yield photos"
+        assert any(forbidden in p for p in denied), (
+            f"denied path not reported via callback. got: {denied}"
+        )
+    finally:
+        os.chmod(forbidden, 0o755)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions required")
+def test_scan_continues_after_permission_denied(tmp_path):
+    """A denied subtree must not abort the scan — sibling subtrees keep being
+    walked. This is the partial-discovery property: a single locked-down
+    folder shouldn't poison an entire run."""
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        'a': ['a.jpg'],
+        'b': ['b.jpg'],
+        'c': ['c.jpg'],
+    })
+
+    locked = os.path.join(root, 'b')
+    os.chmod(locked, 0o000)
+    try:
+        db = Database(str(tmp_path / "test.db"))
+        denied = []
+        scan(root, db, permission_error_callback=denied.append)
+
+        photos = {p['filename'] for p in db.get_photos(per_page=100)}
+        assert photos == {'a.jpg', 'c.jpg'}
+        assert any(locked in p for p in denied)
+    finally:
+        os.chmod(locked, 0o755)

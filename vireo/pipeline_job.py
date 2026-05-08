@@ -817,6 +817,25 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 job["progress"]["current"] = 0
                 job["progress"]["total"] = 0
                 _update_stages(runner, job["id"], stages)
+                # Surface kernel-level enumeration denials (macOS TCC EPERM,
+                # POSIX EACCES) into job["errors"]. Without this, scanner.scan
+                # silently skipped the subtree and the scan stage finished as
+                # "completed" with 0 photos — a black-box outcome the user
+                # reads as "no photos found here" when the truth is "Vireo
+                # was denied access". Dedup per path because the walk may
+                # signal the same dir more than once.
+                denied_seen: set[str] = set()
+                def _on_denied(path: str) -> None:
+                    if path in denied_seen:
+                        return
+                    denied_seen.add(path)
+                    errors.append(
+                        f"[scan] PERMISSION_DENIED: {path} — macOS or "
+                        f"filesystem refused enumeration. On macOS open "
+                        f"System Settings → Privacy & Security → Files "
+                        f"and Folders (or Removable/Network Volumes) and "
+                        f"grant Vireo access."
+                    )
                 scanned_roots.append(params.destination)
                 do_scan(
                     params.destination, thread_db,
@@ -828,6 +847,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     restrict_dirs=restrict,
                     vireo_dir=effective_vireo_dir,
                     thumb_cache_dir=effective_thumb_cache_dir,
+                    permission_error_callback=_on_denied,
                 )
             else:
                 # Scan-in-place: scan each source folder independently.
@@ -836,6 +856,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 job["progress"]["current"] = 0
                 job["progress"]["total"] = 0
                 _update_stages(runner, job["id"], stages)
+                # See ingest branch above — same denial-surfacing rationale.
+                denied_seen: set[str] = set()
+                def _on_denied(path: str) -> None:
+                    if path in denied_seen:
+                        return
+                    denied_seen.add(path)
+                    errors.append(
+                        f"[scan] PERMISSION_DENIED: {path} — macOS or "
+                        f"filesystem refused enumeration. On macOS open "
+                        f"System Settings → Privacy & Security → Files "
+                        f"and Folders (or Removable/Network Volumes) and "
+                        f"grant Vireo access."
+                    )
                 for src_folder in sources:
                     scanned_roots.append(src_folder)
                     try:
@@ -850,6 +883,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             recursive=params.recursive,
                             vireo_dir=effective_vireo_dir,
                             thumb_cache_dir=effective_thumb_cache_dir,
+                            permission_error_callback=_on_denied,
                         )
                     finally:
                         advance_scan_acc()
