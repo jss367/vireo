@@ -581,11 +581,22 @@ def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg):
 
 def _empty_import_plan():
     """Per-stage plan when import mode is active but every preview file is
-    deselected. Every stage is honestly "no work" — not "Already done".
+    deselected.
 
-    The pill copy must read as "this run will do nothing because you've
-    selected nothing", not as a status derived from the active workspace's
-    existing data.
+    The per-photo stages (Classify/Extract/EyeKeypoints/Group) are genuine
+    no-ops because they only operate on imported photos and the import
+    set is empty. Their pill must read as "no work because you've selected
+    nothing", not status derived from the active workspace.
+
+    Scan, however, is NOT a guaranteed no-op even with an empty selection:
+    in scan-in-place mode the scanner still walks ``params.sources`` and
+    only honors per-file deselection via ``skip_paths`` (so unpreviewed
+    siblings still get scanned), and in copy mode the scanner walks the
+    destination tree when no files were copied. Reporting "will-skip" for
+    Scan would lie about substantial directory walking + hashing work the
+    next run actually performs — exactly the misleading-pill failure
+    CORE_PHILOSOPHY.md prohibits. So Scan reads as "will-run" with a
+    summary that names the gap between selection and runtime behavior.
     """
     no_op = {
         "state": "will-skip",
@@ -595,8 +606,11 @@ def _empty_import_plan():
     return {
         "stages": {
             "Scan": {
-                "state": "will-skip",
-                "summary": "No files selected — nothing to import",
+                "state": "will-run",
+                "summary": (
+                    "Will scan source folder(s) — selection only filters "
+                    "which files import"
+                ),
                 "detail": {
                     "eligible": 0, "pending": 0,
                     "new_photos": 0, "already_known": 0,
@@ -704,18 +718,23 @@ def compute_plan(db, params, db_path):
     elif params.source_paths is not None:
         if not params.source_paths:
             # Import / new-images mode with every preview file deselected.
-            # The next pipeline run is a genuine no-op — every stage is
-            # "Nothing selected", not "Already done" derived from unrelated
-            # active-workspace state. Short-circuit so the per-stage
-            # queries don't drift back into whole-workspace summaries.
+            # Per-photo stages are genuine no-ops, but Scan still walks —
+            # see _empty_import_plan() for the honesty rationale.
             return _empty_import_plan()
         # Import / new-images mode. Split the file set into already-known
         # photo_ids (used as scope for real-status queries) and a count
         # of genuinely new files (fed into each stage as fresh work).
-        known = db.photos_by_paths(params.source_paths)
+        # Deduplicate first: overlapping source roots (or a re-added folder
+        # in the preview) can land the same path in source_paths twice,
+        # and counting the duplicate as "new" would inflate Scan/Classify/
+        # Extract estimates and could flip Scan from "done-prior" to
+        # "will-run" misleadingly. dict.fromkeys preserves order so the
+        # downstream queries see paths in the user's preview order.
+        unique_paths = list(dict.fromkeys(params.source_paths))
+        known = db.photos_by_paths(unique_paths)
         photo_ids = set(known.values())
-        known_count = len(photo_ids)
-        new_count = len(params.source_paths) - known_count
+        known_count = len(known)
+        new_count = len(unique_paths) - known_count
 
     classify = _classify_plan(db, params, photo_ids, new_count)
     extract = _extract_plan(db, params, photo_ids, pipeline_cfg, new_count)

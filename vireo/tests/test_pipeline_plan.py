@@ -1610,6 +1610,54 @@ def test_import_plan_partial_overlap_counts_only_truly_new(tmp_path, monkeypatch
     assert plan["stages"]["Scan"]["detail"]["already_known"] == 2
 
 
+def test_import_plan_deduplicates_source_paths(tmp_path, monkeypatch):
+    """Overlapping source roots can land the same path in source_paths
+    twice. Counting the duplicate as 'new' would inflate Scan/Classify/
+    Extract estimates and could flip Scan from done-prior to will-run
+    misleadingly. Dedup must happen before the new-vs-known split.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _stub_models(monkeypatch)
+    fid_card = db.add_folder("/cards/A")
+    db.add_photo(folder_id=fid_card, filename="IMG_001.NEF",
+                 extension=".nef", file_size=1, file_mtime=1.0)
+
+    # All-known with duplicates: same known path repeated must NOT count
+    # as new work; Scan stays done-prior.
+    plan_all_known = compute_plan(
+        db,
+        _import_params(
+            ["/cards/A/IMG_001.NEF", "/cards/A/IMG_001.NEF"],
+            model_ids=["m1"],
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan_all_known["scope"]["new_count"] == 0
+    assert plan_all_known["scope"]["known_count"] == 1
+    assert plan_all_known["stages"]["Scan"]["state"] == "done-prior"
+
+    # Mixed with duplicates: 1 unique known + 1 unique new (each repeated).
+    # Without dedup, new_count would be 4 - 1 = 3 (wrong).
+    plan_mixed = compute_plan(
+        db,
+        _import_params(
+            [
+                "/cards/A/IMG_001.NEF",   # known
+                "/cards/A/IMG_001.NEF",   # known dup
+                "/cards/A/IMG_NEW.NEF",   # new
+                "/cards/A/IMG_NEW.NEF",   # new dup
+            ],
+            model_ids=["m1"],
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan_mixed["scope"]["new_count"] == 1
+    assert plan_mixed["scope"]["known_count"] == 1
+    assert plan_mixed["stages"]["Scan"]["detail"]["new_photos"] == 1
+    assert plan_mixed["stages"]["Scan"]["detail"]["already_known"] == 1
+
+
 def test_import_plan_all_known_scan_is_done_prior(tmp_path):
     """If every preview file is already in the DB, Scan reports done-prior
     (the run will be a no-op for the scan step). Other stages reflect
@@ -1702,14 +1750,17 @@ def test_api_pipeline_plan_rejects_non_string_source_paths_elements(app_and_db):
 
 
 def test_import_plan_empty_source_paths_is_no_op(tmp_path, monkeypatch):
-    """Import / new-images mode with every preview file deselected: the
-    next run is a genuine no-op. Every stage must read as "no work" —
-    NOT fall through to whole-workspace scope and report unrelated
-    "Already done" / "Will run" status from the active workspace.
+    """Import / new-images mode with every preview file deselected.
 
-    Regression guard for the misleading-pill bug Codex flagged: silently
-    dropping the empty source_paths field would re-introduce exactly the
-    cross-workspace status leak this code exists to prevent.
+    Per-photo stages (Classify, Extract, ...) are genuine no-ops because
+    they only operate on imported photos and the import set is empty —
+    they must not leak active-workspace state.
+
+    Scan, however, must NOT report "will-skip": the runtime still walks
+    the source/destination tree regardless of selection, so claiming a
+    no-op there violates CORE_PHILOSOPHY.md's "show what's happening"
+    rule. Scan reads as "will-run" with a summary explaining that
+    selection only affects which files import.
     """
     from labels_fingerprint import TOL_SENTINEL
     from pipeline_plan import compute_plan
@@ -1729,12 +1780,17 @@ def test_import_plan_empty_source_paths_is_no_op(tmp_path, monkeypatch):
         _import_params([], model_ids=["m1"]),
         str(tmp_path / "test.db"),
     )
-    # Every stage reports "no work" — none leak active-workspace state.
-    for name in ("Scan", "Classify", "Extract"):
+    # Per-photo stages are no-ops — none leak active-workspace state.
+    for name in ("Classify", "Extract"):
         assert plan["stages"][name]["state"] == "will-skip", (
             f"{name} leaked workspace state: {plan['stages'][name]}"
         )
         assert "no files selected" in plan["stages"][name]["summary"].lower()
+    # Scan honestly reports it will still run (directory walk + hashing),
+    # not "will-skip", since the runtime doesn't actually no-op here.
+    scan = plan["stages"]["Scan"]
+    assert scan["state"] == "will-run", scan
+    assert "scan" in scan["summary"].lower()
     assert plan["scope"]["new_count"] == 0
     assert plan["scope"]["known_count"] == 0
     assert plan["scope"]["photo_count"] == 0
@@ -1767,8 +1823,9 @@ def test_compute_plan_distinguishes_none_from_empty_source_paths(tmp_path, monke
     assert "Scan" not in whole_ws["stages"]  # not import mode
     assert whole_ws["stages"]["Extract"]["state"] == "done-prior"
 
-    # source_paths=[] → import mode, no-op run. Scan emitted; Extract
-    # is "will-skip — No files selected", NOT "done-prior".
+    # source_paths=[] → import mode. Scan emitted as will-run (runtime
+    # still walks); Extract is "will-skip — No files selected", NOT
+    # "done-prior" (would leak active-workspace state).
     empty_import = compute_plan(
         db,
         PipelinePlanParams(
@@ -1778,6 +1835,7 @@ def test_compute_plan_distinguishes_none_from_empty_source_paths(tmp_path, monke
         str(tmp_path / "test.db"),
     )
     assert "Scan" in empty_import["stages"]
+    assert empty_import["stages"]["Scan"]["state"] == "will-run"
     assert empty_import["stages"]["Extract"]["state"] == "will-skip"
 
 
@@ -1803,9 +1861,11 @@ def test_api_pipeline_plan_empty_source_paths_does_not_fall_back(app_and_db):
     )
     assert resp.status_code == 200
     data = resp.get_json()
-    # Scan stage emitted (= import mode active) and reports nothing to do.
+    # Scan stage emitted (= import mode active). It reads as "will-run"
+    # because the runtime still walks the tree regardless of selection;
+    # claiming "will-skip" would lie about substantial directory work.
     assert "Scan" in data["stages"]
-    assert data["stages"]["Scan"]["state"] == "will-skip"
+    assert data["stages"]["Scan"]["state"] == "will-run"
     assert data["scope"]["new_count"] == 0
     assert data["scope"]["known_count"] == 0
 
