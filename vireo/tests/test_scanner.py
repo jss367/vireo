@@ -2201,3 +2201,233 @@ def test_scan_links_restrict_dirs_when_all_files_skipped(tmp_path):
     assert sub1 in linked and sub2 in linked, (
         f"Both restrict_dirs should be linked. Linked folders: {linked}"
     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions required")
+def test_scan_surfaces_permission_denied_subdirs(tmp_path):
+    """A subdir the kernel won't let us enter must surface as a denied path,
+    not silently disappear into a 'Found 0 images' lie. Accessible siblings
+    must still be discovered.
+
+    Regression: the scan of /Volumes/Photography/.../2026-05-01 returned
+    'Found 0 images' for a folder containing 1122 NEFs because macOS TCC
+    blocked Vireo's process. Path.rglob("*") swallows PermissionError per
+    directory; switching to os.walk(onerror=...) lets us see them.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        '': ['ok.jpg'],
+        'forbidden': ['hidden.jpg'],
+    })
+
+    forbidden = os.path.join(root, 'forbidden')
+    os.chmod(forbidden, 0o000)
+    try:
+        db = Database(str(tmp_path / "test.db"))
+        denied = []
+        scan(root, db, permission_error_callback=denied.append)
+
+        photos = {p['filename'] for p in db.get_photos(per_page=100)}
+        assert 'ok.jpg' in photos, "accessible files must still be scanned"
+        assert 'hidden.jpg' not in photos, "denied dir must not yield photos"
+        assert any(forbidden in p for p in denied), (
+            f"denied path not reported via callback. got: {denied}"
+        )
+    finally:
+        os.chmod(forbidden, 0o755)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions required")
+def test_scan_continues_after_permission_denied(tmp_path):
+    """A denied subtree must not abort the scan — sibling subtrees keep being
+    walked. This is the partial-discovery property: a single locked-down
+    folder shouldn't poison an entire run."""
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        'a': ['a.jpg'],
+        'b': ['b.jpg'],
+        'c': ['c.jpg'],
+    })
+
+    locked = os.path.join(root, 'b')
+    os.chmod(locked, 0o000)
+    try:
+        db = Database(str(tmp_path / "test.db"))
+        denied = []
+        scan(root, db, permission_error_callback=denied.append)
+
+        photos = {p['filename'] for p in db.get_photos(per_page=100)}
+        assert photos == {'a.jpg', 'c.jpg'}
+        assert any(locked in p for p in denied)
+    finally:
+        os.chmod(locked, 0o755)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks required")
+def test_scan_skips_broken_symlinks(tmp_path):
+    """A dangling symlink with a supported extension must not abort the scan.
+
+    Regression: switching from Path.rglob (which used is_file() — False for
+    broken symlinks) to os.walk (which lists broken symlinks in `filenames`)
+    caused dangling *.jpg symlinks to be queued for processing. The pre-pass
+    then called image_path.stat() and raised FileNotFoundError, killing the
+    whole scan. os.walk-mode must filter non-files like the rglob path did.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['real.jpg']})
+    # Create a dangling symlink whose target does not exist.
+    os.symlink(
+        os.path.join(root, "missing-target.jpg"),
+        os.path.join(root, "broken.jpg"),
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    # Must not raise FileNotFoundError; must still scan the real file.
+    scan(root, db)
+
+    photos = {p['filename'] for p in db.get_photos(per_page=100)}
+    assert 'real.jpg' in photos
+    assert 'broken.jpg' not in photos
+
+
+def test_scan_restrict_dirs_surfaces_permission_denied(tmp_path, monkeypatch):
+    """The pipeline copy-mode path drives scan() with restrict_dirs. A denied
+    directory in that list must surface via permission_error_callback and not
+    abort the whole scan — accessible siblings must still be discovered.
+
+    Regression: permission_error_callback was only wired into the os.walk
+    branch (restrict_dirs is None). With restrict_dirs set, dp.iterdir()
+    raised PermissionError unhandled and the entire pipeline scan stage
+    failed with no PERMISSION_DENIED entry in job["errors"].
+
+    Mocks Path.iterdir for the locked subtree (rather than chmod 0o000) so
+    the assertion holds regardless of test-runner uid: chmod-based denial
+    silently bypasses for root, which would let the locked file slip in.
+    """
+    import errno as _errno
+    from pathlib import Path as _Path
+
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        'allowed': ['ok.jpg'],
+        'forbidden': ['hidden.jpg'],
+    })
+    allowed = os.path.join(root, 'allowed')
+    forbidden = os.path.join(root, 'forbidden')
+
+    real_iterdir = _Path.iterdir
+
+    def fake_iterdir(self):
+        if str(self) == forbidden:
+            raise PermissionError(
+                _errno.EACCES, "Permission denied", str(self),
+            )
+        return real_iterdir(self)
+
+    monkeypatch.setattr(_Path, "iterdir", fake_iterdir)
+
+    db = Database(str(tmp_path / "test.db"))
+    denied = []
+    # Must not raise; must surface the denied dir via the callback.
+    scan(
+        root, db,
+        restrict_dirs=[allowed, forbidden],
+        permission_error_callback=denied.append,
+    )
+
+    photos = {p['filename'] for p in db.get_photos(per_page=100)}
+    assert 'ok.jpg' in photos, (
+        "accessible restrict_dir entries must still be scanned"
+    )
+    assert 'hidden.jpg' not in photos, (
+        "denied restrict_dir must not yield photos"
+    )
+    assert any(forbidden in p for p in denied), (
+        f"denied restrict_dir not reported via callback. got: {denied}"
+    )
+
+
+def test_scan_restrict_dirs_raises_permission_error_without_callback(
+    tmp_path, monkeypatch,
+):
+    """Without ``permission_error_callback``, a denied restrict_dir must still
+    raise PermissionError — *not* be silently swallowed.
+
+    Regression: pipeline_job's repair scan calls ``do_scan(..., restrict_dirs=
+    [folder_path])`` without a callback and wraps it in
+    ``except (OSError, RuntimeError)`` to count unreachable folders. An
+    earlier fix caught PermissionError and unconditionally `continue`d,
+    which silently turned denied folders into "successfully repaired" —
+    a black-box regression. Partial-success is opt-in via the callback;
+    every other caller must keep the loud failure semantics they had.
+    """
+    import errno as _errno
+    from pathlib import Path as _Path
+
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'forbidden': ['hidden.jpg']})
+    forbidden = os.path.join(root, 'forbidden')
+
+    real_iterdir = _Path.iterdir
+
+    def fake_iterdir(self):
+        if str(self) == forbidden:
+            raise PermissionError(
+                _errno.EACCES, "Permission denied", str(self),
+            )
+        return real_iterdir(self)
+
+    monkeypatch.setattr(_Path, "iterdir", fake_iterdir)
+
+    db = Database(str(tmp_path / "test.db"))
+    with pytest.raises(PermissionError):
+        scan(root, db, restrict_dirs=[forbidden])
+
+
+def test_scan_recursive_raises_permission_error_without_callback(
+    tmp_path, monkeypatch,
+):
+    """Without ``permission_error_callback``, a denied subdir during a
+    recursive walk must raise PermissionError. The os.walk ``onerror``
+    callback re-raises so the failure is visible to the caller — silent
+    "Found 0 images" is the very black-box behavior this stack was
+    refactored to eliminate.
+    """
+    import errno as _errno
+
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['ok.jpg'], 'forbidden': ['hidden.jpg']})
+    forbidden = os.path.join(root, 'forbidden')
+
+    real_scandir = os.scandir
+
+    def fake_scandir(path, *args, **kwargs):
+        if os.fspath(path) == forbidden:
+            raise PermissionError(
+                _errno.EACCES, "Permission denied", forbidden,
+            )
+        return real_scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", fake_scandir)
+
+    db = Database(str(tmp_path / "test.db"))
+    with pytest.raises(PermissionError):
+        scan(root, db)
