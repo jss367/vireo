@@ -1139,11 +1139,6 @@ input[type="range"]::-moz-range-thumb {
           <span class="slider-val" id="valBurstTime">3</span>
         </div>
         <div class="slider-row">
-          <span class="slider-label" title="Max perceptual hash distance — lower means more visually similar">pHash dist</span>
-          <input type="range" min="1" max="32" value="12" step="1" id="slBurstPhash" oninput="onGroupingChange(this)">
-          <span class="slider-val" id="valBurstPhash">12</span>
-        </div>
-        <div class="slider-row">
           <span class="slider-label" title="Max embedding distance — higher tolerates more visually different shots">Emb. distance</span>
           <input type="range" min="0" max="100" value="20" step="1" id="slBurstEmb" oninput="onGroupingChange(this)">
           <span class="slider-val" id="valBurstEmb">0.20</span>
@@ -1832,7 +1827,7 @@ var GROUPING_DEFAULTS = {
   // Merge
   merge_score: 62, merge_max_gap: 60, merge_tau: 20,
   // Bursts
-  burst_time_gap: 3, burst_phash_threshold: 12, burst_embedding_threshold: 20,
+  burst_time_gap: 3, burst_embedding_threshold: 20,
 };
 
 /* Load slider defaults from server config (overrides hard-coded values above) */
@@ -1861,7 +1856,6 @@ var GROUPING_DEFAULTS = {
     GROUPING_DEFAULTS.merge_max_gap = p.merge_max_gap != null ? p.merge_max_gap : 60;
     GROUPING_DEFAULTS.merge_tau = p.merge_tau != null ? p.merge_tau : 20;
     GROUPING_DEFAULTS.burst_time_gap = p.burst_time_gap != null ? p.burst_time_gap : 3;
-    GROUPING_DEFAULTS.burst_phash_threshold = p.burst_phash_threshold != null ? p.burst_phash_threshold : 12;
     // Stored as cosine similarity; UI shows distance = 1 - similarity.
     GROUPING_DEFAULTS.burst_embedding_threshold = Math.round((1 - (p.burst_embedding_threshold != null ? p.burst_embedding_threshold : 0.80)) * 100);
     applyScoringDefaults();
@@ -1880,10 +1874,10 @@ function updateSliderDisplay(slider) {
   var id = slider.id;
   var valEl = document.getElementById('val' + id.substring(2));
   if (!valEl) return;
-  // Integer sliders (raw values, not /100): keep counts, raw seconds, phash distance
+  // Integer sliders (raw values, not /100): keep counts, raw seconds
   var INT_SLIDERS = [
     'slBurstKeep','slEncKeep',
-    'slBurstTime','slBurstPhash',
+    'slBurstTime',
     'slTauEnc','slHardCutTime',
     'slMergeMaxGap','slMergeTau',
   ];
@@ -1924,7 +1918,6 @@ function getGroupingConfig() {
     merge_max_gap: num('slMergeMaxGap'),
     merge_tau: num('slMergeTau'),
     burst_time_gap: num('slBurstTime'),
-    burst_phash_threshold: Math.round(num('slBurstPhash')),
     // UI shows distance; bursts.py expects cosine similarity = 1 - distance.
     burst_embedding_threshold: 1 - pct('slBurstEmb'),
   };
@@ -2047,7 +2040,6 @@ function applyGroupingDefaults() {
   setVal('slMergeTau', GROUPING_DEFAULTS.merge_tau);
   // Bursts
   setVal('slBurstTime', GROUPING_DEFAULTS.burst_time_gap);
-  setVal('slBurstPhash', GROUPING_DEFAULTS.burst_phash_threshold);
   setVal('slBurstEmb', GROUPING_DEFAULTS.burst_embedding_threshold);
   document.querySelectorAll('.sidebar-section input[type="range"]').forEach(function(sl) {
     updateSliderDisplay(sl);

@@ -10686,8 +10686,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(new_pipeline, dict):
             return json_error("pipeline must be an object")
         # (kind, min, max). kind="unit" → 0..1 float; "score" → 0..1 float;
-        # "seconds" → non-negative float; "phash" → 0..256 int (8x8 phash =
-        # 64 bits, 256 leaves headroom for future hash sizes).
+        # "seconds" → non-negative float.
         schema = {
             "w_time": ("unit", 0.0, 1.0),
             "w_subj": ("unit", 0.0, 1.0),
@@ -10706,7 +10705,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "merge_max_gap": ("seconds", 0.0, 86400.0),
             "merge_tau": ("seconds", 1.0, 86400.0),
             "burst_time_gap": ("seconds", 0.0, 86400.0),
-            "burst_phash_threshold": ("phash", 0, 256),
             "burst_embedding_threshold": ("score", 0.0, 1.0),
         }
         rejected = [k for k in new_pipeline if k not in schema]
@@ -10719,16 +10717,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # bool is an int subclass — reject explicitly so True/False
                 # don't silently succeed for numeric keys.
                 return json_error(f"{k} must be a number, got bool")
-            if kind == "phash":
-                if not isinstance(raw_v, int):
-                    return json_error(f"{k} must be an integer")
-                v = raw_v
-            else:
-                if not isinstance(raw_v, (int, float)):
-                    return json_error(f"{k} must be a number")
-                v = float(raw_v)
-                if v != v or v in (float("inf"), float("-inf")):
-                    return json_error(f"{k} must be finite")
+            if not isinstance(raw_v, (int, float)):
+                return json_error(f"{k} must be a number")
+            v = float(raw_v)
+            if v != v or v in (float("inf"), float("-inf")):
+                return json_error(f"{k} must be finite")
             if v < lo or v > hi:
                 return json_error(f"{k} out of range [{lo}, {hi}]")
             coerced[k] = v

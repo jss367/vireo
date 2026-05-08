@@ -448,12 +448,6 @@ SCHEMA = {
         "label": "Burst: time gap (s)",
         "desc": "Maximum time gap between frames in a burst.",
     },
-    "pipeline.burst_phash_threshold": {
-        "type": "int", "min": 0, "max": 64,
-        "category": "Pipeline", "scope": "both",
-        "label": "Burst: pHash threshold",
-        "desc": "pHash distance threshold for burst grouping.",
-    },
     "pipeline.burst_embedding_threshold": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
         "category": "Pipeline", "scope": "both",

@@ -1,8 +1,8 @@
 """Burst clustering within encounters for the culling pipeline (Stage 3).
 
 Groups near-duplicates and small pose variants into tight bursts within each
-encounter. Uses sequential cuts on time gap, crop pHash hamming distance,
-and DINOv2 crop embedding cosine similarity.
+encounter. Cuts a new burst between adjacent photos when the time gap is
+large or the DINOv2 crop embedding cosine similarity drops.
 
 All thresholds are configurable with defaults from the pipeline design doc.
 """
@@ -16,7 +16,6 @@ log = logging.getLogger(__name__)
 # Default thresholds (from design doc, subject to calibration)
 DEFAULTS = {
     "burst_time_gap": 3.0,  # seconds — cut if delta_t exceeds this
-    "burst_phash_threshold": 12,  # hamming distance — cut if exceeds this
     "burst_embedding_threshold": 0.80,  # cosine similarity — cut if below this
 }
 
@@ -32,7 +31,7 @@ def _cosine_sim(a, b):
         # Stale DINOv2 embeddings from a previous variant can reach here on
         # datasets that straddle a variant switch. Treat as "no embedding
         # signal" — same as the None branch — so the burst-cut decision
-        # falls back to time + phash instead of raising.
+        # falls back to the time gap instead of raising.
         global _warned_dim_mismatch
         if not _warned_dim_mismatch:
             log.warning(
@@ -47,22 +46,6 @@ def _cosine_sim(a, b):
     if norm_a == 0 or norm_b == 0:
         return 1.0
     return max(0.0, float(np.dot(a, b) / (norm_a * norm_b)))
-
-
-def _hamming_distance(phash_a, phash_b):
-    """Hamming distance between two hex-encoded pHash strings.
-
-    Returns:
-        int — number of differing bits, or -1 if either is None
-    """
-    if phash_a is None or phash_b is None:
-        return -1  # no hash → don't cut on this criterion
-    try:
-        int_a = int(phash_a, 16)
-        int_b = int(phash_b, 16)
-        return bin(int_a ^ int_b).count("1")
-    except (ValueError, TypeError):
-        return -1
 
 
 def _parse_timestamp(ts):
@@ -90,15 +73,13 @@ def detect_bursts(photos, config=None):
     """Detect burst boundaries within an encounter.
 
     Walk through photos in timestamp order. Cut a new burst between
-    adjacent photos (i, i+1) if ANY of these fire:
+    adjacent photos (i, i+1) if either of these fire:
       - delta_t > burst_time_gap
-      - Hamming(phash_crop_i, phash_crop_j) > burst_phash_threshold
       - cosine(dino_subject_i, dino_subject_j) < burst_embedding_threshold
 
     Args:
         photos: list of photo dicts (already within one encounter), each with:
             - timestamp: datetime or ISO string
-            - phash_crop: hex string or None
             - dino_subject_embedding: numpy array or None
         config: optional dict overriding DEFAULTS
 
@@ -126,12 +107,6 @@ def detect_bursts(photos, config=None):
         ts_b = _parse_timestamp(pb.get("timestamp"))
         dt = _time_delta_seconds(ts_a, ts_b)
         if dt > cfg["burst_time_gap"]:
-            cuts.add(i)
-            continue
-
-        # Crop pHash hamming distance
-        hamming = _hamming_distance(pa.get("phash_crop"), pb.get("phash_crop"))
-        if hamming >= 0 and hamming > cfg["burst_phash_threshold"]:
             cuts.add(i)
             continue
 

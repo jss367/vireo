@@ -4223,10 +4223,10 @@ def test_save_grouping_defaults_rejects_bad_values(tmp_path, monkeypatch):
         json={"pipeline": {"merge_tau": 0.0}},
     )
     assert resp.status_code == 400
-    # phash threshold must be int, not float.
+    # Unknown keys (e.g. removed thresholds) must be rejected.
     resp = client.post(
         "/api/pipeline/save-grouping-defaults",
-        json={"pipeline": {"burst_phash_threshold": 12.5}},
+        json={"pipeline": {"burst_phash_threshold": 12}},
     )
     assert resp.status_code == 400
 
@@ -4250,8 +4250,6 @@ def test_save_grouping_defaults_rejects_bad_values(tmp_path, monkeypatch):
         import math as _math
         assert isinstance(pipe["tau_enc"], (int, float))
         assert _math.isfinite(pipe["tau_enc"])
-    if "burst_phash_threshold" in pipe:
-        assert isinstance(pipe["burst_phash_threshold"], int)
 
 
 def test_collection_preview_returns_match_count(app_and_db):

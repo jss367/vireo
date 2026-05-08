@@ -86,7 +86,6 @@ DEFAULTS = {
         "eye_window_k": 0.08,
         "reject_eye_focus": 0.35,
         "burst_time_gap": 3.0,
-        "burst_phash_threshold": 12,
         "burst_embedding_threshold": 0.80,
         "burst_lambda": 0.85,
         "burst_max_keep": 3,
