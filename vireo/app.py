@@ -1328,6 +1328,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error("source_paths entries must be strings", 400)
         else:
             source_paths = None
+        # hash_duplicate_paths is the frontend's pre-computed set of source
+        # paths that ingest() will skip via the file_hash global-dedup gate
+        # (copy mode + skip_duplicates=True). Same shape/limits as
+        # source_paths; the planner subtracts these from new_count so the
+        # plan doesn't overstate work for hash-skipped files.
+        if "hash_duplicate_paths" in body:
+            hash_duplicate_paths = body.get("hash_duplicate_paths")
+            if not isinstance(hash_duplicate_paths, list):
+                return json_error("hash_duplicate_paths must be a list", 400)
+            if len(hash_duplicate_paths) > 50000:
+                return json_error(
+                    f"hash_duplicate_paths too large "
+                    f"({len(hash_duplicate_paths)} > 50000)", 400,
+                )
+            if not all(isinstance(p, str) for p in hash_duplicate_paths):
+                return json_error(
+                    "hash_duplicate_paths entries must be strings", 400,
+                )
+        else:
+            hash_duplicate_paths = None
         params = PipelinePlanParams(
             collection_id=body.get("collection_id"),
             exclude_photo_ids=body.get("exclude_photo_ids") or [],
@@ -1341,6 +1361,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             labels_files=body.get("labels_files") or [],
             reclassify=bool(body.get("reclassify")),
             source_paths=source_paths,
+            hash_duplicate_paths=hash_duplicate_paths,
         )
         db = _get_db()
         return jsonify(compute_plan(db, params, db_path))

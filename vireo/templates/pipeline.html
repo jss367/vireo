@@ -1671,6 +1671,14 @@ function checkForDuplicates() {
           if (document.getElementById('chkSkipDuplicates').checked) {
             if (data.duplicates) applyDuplicateVisuals();
             updateDuplicateSummary(data);
+            // Newly-discovered hash duplicates change the import scope —
+            // ingest() will skip those files, so the plan must shift them
+            // from "new" to "already known". Debounced via
+            // schedulePlanRefresh so the burst of SSE batches collapses
+            // into a single plan POST.
+            if (data.duplicates && data.duplicates.length) {
+              schedulePlanRefresh();
+            }
           }
         });
         read();
@@ -1748,6 +1756,10 @@ function onSkipDuplicatesToggle() {
   } else {
     checkForDuplicates();
   }
+  // Toggling the gate flips whether known-by-hash files count as
+  // "new" (gate off → ingest will copy them) or "known" (gate on →
+  // ingest will skip them). Either way the plan changes; refresh it.
+  schedulePlanRefresh();
 }
 
 function setupThumbnailObserver() {
@@ -3749,6 +3761,24 @@ function _buildPlanBody() {
     // plan. For oversized: the server returns 400 and the plan UI
     // clears — both accurate states.
     body.source_paths = selectedPaths;
+
+    // Copy-mode imports with skip_duplicates=true dedupe by file_hash, not
+    // by source path. The /api/import/check-duplicates SSE feed has
+    // already populated _duplicateResults with the hash-matched preview
+    // paths; pass that subset along so the plan counts those as already
+    // known instead of new (otherwise pills overstate work for files
+    // ingest() will silently skip). Only send when the duplicate gate is
+    // actually on; toggling it off must drop the field so the backend
+    // doesn't keep treating the cache as live.
+    var skipDup = document.getElementById('chkSkipDuplicates');
+    if (_copyMode && skipDup && skipDup.checked
+        && Object.keys(_duplicateResults).length > 0) {
+      var hashDupPaths = [];
+      selectedPaths.forEach(function(p) {
+        if (_duplicateResults[p]) hashDupPaths.push(p);
+      });
+      if (hashDupPaths.length) body.hash_duplicate_paths = hashDupPaths;
+    }
   }
 
   body.skip_classify       = !document.getElementById('enableClassify').checked;

@@ -2004,3 +2004,181 @@ def test_api_pipeline_plan_missing_source_paths_uses_whole_workspace(app_and_db)
     assert resp.status_code == 200
     data = resp.get_json()
     assert "Scan" not in data["stages"]
+
+
+# -------- compute_plan: copy-mode hash-dedup honesty --------
+#
+# Copy-mode imports run with skip_duplicates=True dedupe by file_hash via
+# ingest(), not by source path. The frontend pre-computes hash matches via
+# /api/import/check-duplicates and passes them back in hash_duplicate_paths.
+# These paths must count as "already known", not "new" — otherwise pills
+# overstate work for files ingest() will silently skip (the common case:
+# a card was already imported once into a different destination folder).
+
+def test_import_plan_hash_duplicates_count_as_known(tmp_path, monkeypatch):
+    """Hash-matched source paths shift from new_count to known_count, so
+    Scan/Classify/Extract estimates reflect what ingest will actually do.
+
+    Setup mirrors a real copy-mode re-import: the library has one photo at
+    a destination path; the user is re-importing two source files, one of
+    which is byte-identical to the existing photo (same hash, different
+    source path) and one of which is genuinely new. The frontend's prior
+    check-duplicates pass has flagged the matching source path.
+    """
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    _stub_models(monkeypatch)
+
+    plan = compute_plan(
+        db,
+        _import_params(
+            ["/cards/SD/IMG_DUP.NEF", "/cards/SD/IMG_NEW.NEF"],
+            hash_duplicate_paths=["/cards/SD/IMG_DUP.NEF"],
+            model_ids=["m1"],
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["scope"]["new_count"] == 1, plan["scope"]
+    assert plan["scope"]["known_count"] == 1, plan["scope"]
+    scan = plan["stages"]["Scan"]
+    assert scan["detail"]["new_photos"] == 1
+    assert scan["detail"]["already_known"] == 1
+
+
+def test_import_plan_hash_duplicates_outside_selection_ignored(tmp_path, monkeypatch):
+    """``_duplicateResults`` survives source-folder edits; a path in
+    hash_duplicate_paths that's no longer in source_paths is a stale
+    cache entry and must NOT influence counts.
+    """
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    _stub_models(monkeypatch)
+
+    plan = compute_plan(
+        db,
+        _import_params(
+            ["/cards/SD/IMG_NEW.NEF"],  # one selected, all new
+            hash_duplicate_paths=[
+                "/cards/SD/IMG_NEW.NEF",      # NOT a dup but in cache (stale)
+                "/cards/SD/IMG_OLD.NEF",      # not even in source_paths
+            ],
+            model_ids=["m1"],
+        ),
+        str(tmp_path / "test.db"),
+    )
+    # IMG_NEW is in source_paths AND in hash_duplicate_paths, so it's
+    # counted as known. IMG_OLD isn't in source_paths so it's ignored.
+    assert plan["scope"]["new_count"] == 0
+    assert plan["scope"]["known_count"] == 1
+
+
+def test_import_plan_hash_dup_also_known_at_path_not_double_counted(tmp_path, monkeypatch):
+    """A file already known at its exact source path (re-pointing at an
+    already-imported folder) is also a hash match. It must count toward
+    known_count exactly once — double-counting would push known_count
+    past the total file count.
+    """
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    _stub_models(monkeypatch)
+    fid = db.add_folder("/cards/A")
+    db.add_photo(folder_id=fid, filename="IMG_001.NEF",
+                 extension=".nef", file_size=1, file_mtime=1.0)
+
+    plan = compute_plan(
+        db,
+        _import_params(
+            ["/cards/A/IMG_001.NEF"],
+            hash_duplicate_paths=["/cards/A/IMG_001.NEF"],  # also a hash match
+            model_ids=["m1"],
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["scope"]["new_count"] == 0
+    assert plan["scope"]["known_count"] == 1  # not 2
+
+
+def test_import_plan_hash_duplicate_does_not_link_source_folder(tmp_path, monkeypatch):
+    """In copy mode, ingest skips a hash-matched source file entirely —
+    its source folder is never walked by the post-import scan (only the
+    destination is). So Scan must NOT report the source folder as
+    "needs linking" for hash-dup-only paths.
+    """
+    from db import Database
+    from pipeline_plan import compute_plan
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.create_workspace("WorkspaceA")
+    db._active_workspace_id = ws_a
+    # Photo lives at /library/2025 in WorkspaceA. Folder /cards/SD has
+    # never been seen by the DB, so it would normally count as "unlinked".
+    fid = db.add_folder("/library/2025")
+    db.add_photo(folder_id=fid, filename="dest.NEF",
+                 extension=".nef", file_size=1, file_mtime=1.0)
+    db._active_workspace_id = db.create_workspace("WorkspaceB")
+
+    plan = compute_plan(
+        db,
+        _import_params(
+            ["/cards/SD/IMG_HASH.NEF"],  # only file is a hash dup
+            hash_duplicate_paths=["/cards/SD/IMG_HASH.NEF"],
+            skip_classify=True, skip_extract_masks=True,
+            skip_eye_keypoints=True, skip_regroup=True,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    scan = plan["stages"]["Scan"]
+    # Every file is hash-skipped → scan is genuinely a no-op (ingest
+    # walks nothing new and links no source folder).
+    assert scan["detail"]["unlinked_folders"] == 0, scan
+    assert scan["state"] == "done-prior", scan
+
+
+def test_api_pipeline_plan_rejects_oversized_hash_duplicate_paths(app_and_db):
+    """Same 50k cap as source_paths. Without this, a misbehaving client
+    could OOM the server by passing arbitrarily large hash-dup lists."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={
+            "source_paths": ["/x/0"],
+            "hash_duplicate_paths": ["/x/" + str(i) for i in range(50001)],
+            "skip_classify": True, "skip_extract_masks": True,
+            "skip_eye_keypoints": True, "skip_regroup": True,
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_api_pipeline_plan_rejects_non_list_hash_duplicate_paths(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={
+            "source_paths": ["/x/0"],
+            "hash_duplicate_paths": "/single/path.nef",
+            "skip_classify": True, "skip_extract_masks": True,
+            "skip_eye_keypoints": True, "skip_regroup": True,
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_api_pipeline_plan_rejects_non_string_hash_duplicate_paths_elements(app_and_db):
+    """Mixed-type list must be rejected at the API boundary; otherwise
+    set membership in compute_plan would behave unpredictably for
+    non-hashable / non-string entries.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={
+            "source_paths": ["/x/0"],
+            "hash_duplicate_paths": ["/ok/path.nef", 123],
+            "skip_classify": True, "skip_extract_masks": True,
+            "skip_eye_keypoints": True, "skip_regroup": True,
+        },
+    )
+    assert resp.status_code == 400

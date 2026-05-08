@@ -45,6 +45,19 @@ class PipelinePlanParams:
     # back to whole-workspace scope (that would re-introduce the very
     # misleading "Already done" pills this code exists to prevent).
     source_paths: list | None = None
+    # Paths in ``source_paths`` that the import job will skip via the
+    # ``file_hash`` global-dedup gate (copy mode + ``skip_duplicates=True``).
+    # ``ingest()`` dedupes by hash, not by source path: a file whose hash
+    # already exists at *some* path in the photos table is skipped, even
+    # though the source path itself is unknown. Without this list, those
+    # files would land in ``new_count`` (their source path doesn't match
+    # any photo row), inflating Scan/Classify/Extract estimates for a run
+    # that will actually skip them. The frontend already pre-computes
+    # hash duplicates via /api/import/check-duplicates and passes the
+    # matched source paths back — we use that result instead of re-hashing
+    # at plan time, since hashing thousands of files synchronously inside
+    # a plan request would block the UI on every settings change.
+    hash_duplicate_paths: list | None = None
 
 
 def _plural(n, s="s"):
@@ -766,17 +779,39 @@ def compute_plan(db, params, db_path):
         # "will-run" misleadingly. dict.fromkeys preserves order so the
         # downstream queries see paths in the user's preview order.
         unique_paths = list(dict.fromkeys(params.source_paths))
+        unique_path_set = set(unique_paths)
         known = db.photos_by_paths(unique_paths)
         photo_ids = set(known.values())
-        known_count = len(known)
+        known_at_path_set = set(known.keys())
+        # Hash-dedup gate (copy-mode imports with skip_duplicates=True).
+        # A file flagged here exists in the global photos table at a
+        # different path; ingest() will skip the copy, so the next run
+        # creates no new photo row for it and never touches the existing
+        # one (the post-import scan walks only the destination tree).
+        # Count it as "already known", not new. Defensive intersections:
+        #   - ``& unique_path_set`` ignores stale cache entries (the
+        #     frontend's ``_duplicateResults`` survives source-folder edits
+        #     until the next check completes; a path no longer in the
+        #     selection must not influence counts).
+        #   - subtract ``known_at_path_set`` so a file that's both an
+        #     exact-path match and a hash match isn't double-counted in
+        #     ``known_count``.
+        hash_dup_paths = (
+            set(params.hash_duplicate_paths or [])
+            & unique_path_set
+        ) - known_at_path_set
+        known_count = len(known) + len(hash_dup_paths)
         new_count = len(unique_paths) - known_count
         # photos_by_paths is global — a path is "known" even when the
         # photo's folder belongs to a different workspace. scanner.scan
         # would still attach those folders to the active workspace via
         # add_folder/_ensure_folder, so a "done-prior" Scan claim would
         # be false in that case. Count parent dirs not yet linked here.
+        # Hash-dup paths are excluded: ingest skips those files, so their
+        # parent dirs aren't walked in copy mode and we mustn't claim
+        # scan would link them.
         unlinked_folder_count = db.workspace_unlinked_folder_count(
-            {os.path.dirname(p) for p in unique_paths}
+            {os.path.dirname(p) for p in unique_paths if p not in hash_dup_paths}
         )
 
     classify = _classify_plan(db, params, photo_ids, new_count)
