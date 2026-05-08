@@ -189,10 +189,41 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
     ts_b = _parse_timestamp(photo_b.get("timestamp"))
     dt = _time_delta_seconds(ts_a, ts_b)
 
+    # Detector-state encoding from load_photo_features (mutually exclusive,
+    # so at most one is True per photo):
+    #   subject_absent  = detector ran, no qualifying detection (real signal)
+    #   subject_present = detector ran, has a qualifying detection
+    #   both False      = detector hasn't run yet — STATE IS UNKNOWN
+    #
+    # Three cases drive the subj/species treatment:
+    #   - asymmetric (one absent, one *present*): contribute active 0 with
+    #     full weight. The detector's "no subject" verdict on one side
+    #     against affirmative evidence on the other is real dissimilarity.
+    #     Without this, meta=1.0 (same lens) renormalizes the score back
+    #     up purely on time.
+    #   - both absent: NEUTRAL — drop the signal. Holds even when stale
+    #     embeddings/species are still cached on the photo rows from a
+    #     prior run. Reading them would re-activate similarity and
+    #     contradict the detector's verdict.
+    #   - any other case (absent vs unknown, present vs unknown, both
+    #     unknown, both present): fall through to standard cached-feature
+    #     similarity. Notably, "absent vs unknown" must NOT trigger the
+    #     asymmetric penalty — we have no evidence those photos differ.
+    absent_a = bool(photo_a.get("subject_absent"))
+    absent_b = bool(photo_b.get("subject_absent"))
+    present_a = bool(photo_a.get("subject_present"))
+    present_b = bool(photo_b.get("subject_present"))
+    asymmetric_subject = (absent_a and present_b) or (absent_b and present_a)
+    both_absent = absent_a and absent_b
+
     st = sim_time(dt, tau=cfg["tau_enc"])
-    ss = sim_embedding(photo_a.get("dino_subject_embedding"), photo_b.get("dino_subject_embedding"))
+    if asymmetric_subject or both_absent:
+        ss = 0.0
+        sp = 0.0
+    else:
+        ss = sim_embedding(photo_a.get("dino_subject_embedding"), photo_b.get("dino_subject_embedding"))
+        sp = sim_species(photo_a.get("species_top5"), photo_b.get("species_top5"))
     sg = sim_embedding(photo_a.get("dino_global_embedding"), photo_b.get("dino_global_embedding"))
-    sp = sim_species(photo_a.get("species_top5"), photo_b.get("species_top5"))
     sm = sim_meta(photo_a, photo_b)
 
     # Per-component missing flags: which photo (if any) lacks the signal.
@@ -207,19 +238,38 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
     has_time_a = ts_a is not None
     has_time_b = ts_b is not None
 
+    # `missing` = "we don't know yet"; `absent` = "we ran the detector and
+    # there was no animal." Trace consumers render these differently:
+    # missing prompts "embed this photo", absent is itself the reason
+    # the encounter cut.
     missing = {
         "time": (not has_time_a, not has_time_b),
-        "subj": (not has_subj_a, not has_subj_b),
+        "subj": (not has_subj_a and not absent_a, not has_subj_b and not absent_b),
         "global": (not has_global_a, not has_global_b),
-        "species": (not has_species_a, not has_species_b),
+        "species": (not has_species_a and not absent_a, not has_species_b and not absent_b),
+        "meta": (False, False),
+    }
+    absent = {
+        "time": (False, False),
+        "subj": (absent_a, absent_b),
+        "global": (False, False),
+        "species": (absent_a, absent_b),
         "meta": (False, False),
     }
 
     used = {
         "time": dt != float("inf"),
-        "subj": has_subj_a and has_subj_b,
+        # Asymmetric subject_absent ⇒ subj/species are USED (active 0).
+        # Both-sides absent drops the signal — two subjectless frames carry
+        # no evidence either way (and this overrides any stale cached
+        # embeddings/species; see the absent-handling block above).
+        "subj": asymmetric_subject or (
+            has_subj_a and has_subj_b and not both_absent
+        ),
         "global": has_global_a and has_global_b,
-        "species": has_species_a and has_species_b,
+        "species": asymmetric_subject or (
+            has_species_a and has_species_b and not both_absent
+        ),
         # Meta always contributes (even if 0)
         "meta": True,
     }
@@ -248,6 +298,8 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
             "used": bool(used[k]),
             "missing_a": bool(missing[k][0]),
             "missing_b": bool(missing[k][1]),
+            "absent_a": bool(absent[k][0]),
+            "absent_b": bool(absent[k][1]),
         }
         for k in values
     }

@@ -215,6 +215,28 @@ def load_photo_features(db, collection_id=None, config=None,
             "detection_conf": top["confidence"],
         }
 
+    # Photos the detector has actually been run on. Used to gate
+    # subject_absent below — a photo with no detector_runs row hasn't been
+    # evaluated yet (e.g. first-time regroup with skip_classify=True, or
+    # photos imported after the last classify run). Treating those as
+    # "subject_absent" would conflate "unknown" with "detector confirmed
+    # empty" and create false asymmetric cuts in compute_s_enc.
+    detected_photo_ids = db.get_detector_run_photo_ids("megadetector-v6")
+
+    # Photos with at least one MDV6 detection passing the workspace
+    # threshold — i.e. affirmative subject evidence. Computed against
+    # `megadetector-v6` only so synthetic `full-image` fallback rows
+    # (written at confidence 0 by classify_job when MDV6 is empty) can't
+    # mask MDV6's empty-scene verdict. `primary_det_by_photo` above
+    # serves det_box/det_conf for downstream scoring and intentionally
+    # accepts any detector model; the subject_absent / subject_present
+    # signals must be tighter to stay in lockstep with `detected_photo_ids`.
+    mdv6_dets = db.get_detections_for_photos(
+        photo_ids_for_dets, min_conf=min_conf,
+        detector_model="megadetector-v6",
+    )
+    mdv6_passing_photo_ids = {pid for pid, dets in mdv6_dets.items() if dets}
+
     # Load user-confirmed species keywords (alphabetically first wins
     # for photos with multiple species tags — rare but deterministic)
     species_kw_rows = db.conn.execute(
@@ -261,6 +283,28 @@ def load_photo_features(db, collection_id=None, config=None,
                        "w": det["w"], "h": det["h"]}
             det_conf = det["detection_conf"]
 
+        # Three states encoded as two booleans (mutually exclusive: at
+        # most one is True at a time):
+        #
+        #   subject_absent=True   detector ran AND found no qualifying
+        #                         detection (box_count=0, or all boxes
+        #                         below the workspace threshold)
+        #   subject_present=True  detector ran AND has a passing detection
+        #   both False            detector hasn't run yet — state is
+        #                         "unknown" (compute_s_enc treats the same
+        #                         way as cached-feature absence: drop and
+        #                         renormalize, no penalty)
+        #
+        # Both queries are filtered to `megadetector-v6` so synthetic
+        # `full-image` fallback rows can't sway the signal. Read at
+        # regroup time because regroup runs BEFORE the miss stage —
+        # photos.miss_no_subject would lag by one run.
+        subject_absent = (
+            pid in detected_photo_ids
+            and pid not in mdv6_passing_photo_ids
+        )
+        subject_present = pid in mdv6_passing_photo_ids
+
         photos.append({
             "id": pid,
             "folder_id": row["folder_id"],
@@ -286,6 +330,8 @@ def load_photo_features(db, collection_id=None, config=None,
             "dino_global_embedding": global_emb,
             "species_top5": species_by_photo.get(pid, []),
             "confirmed_species": confirmed_by_photo.get(pid),
+            "subject_absent": subject_absent,
+            "subject_present": subject_present,
             "focal_length": row["focal_length"],
             "burst_id": row["burst_id"],
             "noise_estimate": row["noise_estimate"],

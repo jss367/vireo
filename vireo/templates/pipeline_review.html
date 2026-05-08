@@ -447,6 +447,12 @@ input[type="range"]::-moz-range-thumb {
   color: rgba(220, 140, 60, 0.85);
   font-style: italic;
 }
+.algo-trace .trace-component-absent {
+  /* Detector ran and found no subject — this isn't a "go embed it" prompt
+     like trace-component-missing, it's signal that justified a low score. */
+  color: rgba(180, 180, 180, 0.85);
+  font-style: italic;
+}
 .algo-trace .trace-empty {
   font-size: 11px; color: var(--text-dim); font-style: italic; padding: 4px;
 }
@@ -1547,14 +1553,24 @@ function renderAlgorithmTrace() {
         var v = (typeof c.value === 'number') ? c.value.toFixed(2) : '-';
         var w = (typeof c.weight === 'number') ? c.weight.toFixed(2) : '-';
         if (!c.used) {
-          // Distinguish "missing data" from a zero-weighted component.
-          // Both are unused, but only the former is actionable (compute
-          // the missing signal); the latter means the user dialled it out.
+          // Three reasons a component can be unused:
+          //   (1) zero weight — user dialled it out
+          //   (2) both sides subject_absent — neutral, no evidence either
+          //       way (compute_s_enc drops the signal but it's NOT a
+          //       "missing data, go embed it" prompt)
+          //   (3) feature genuinely missing on one or both sides — actionable
           var weightZero = !(c.weight > 0);
           if (weightZero) {
             // Component is intentionally turned off — render in muted form
             // without a "missing" annotation.
             parts.push(k + '=' + v + '×' + w);
+          } else if (c.absent_a && c.absent_b) {
+            // Both detectors found no subject — signal is neutral, not
+            // actionable. Render with the same muted "absent" styling
+            // we use for the asymmetric used-but-zero case so users
+            // don't go re-embed photos that legitimately have no subject.
+            parts.push('<span class="trace-component-absent">' + escapeHtml(k)
+              + '=neutral (no subject on both, w=' + w + ')</span>');
           } else {
             var who;
             if (c.missing_a && c.missing_b) who = 'both';
@@ -1565,7 +1581,21 @@ function renderAlgorithmTrace() {
               + '=missing on ' + escapeHtml(who) + ' (w=' + w + ')</span>');
           }
         } else {
-          parts.push(k + '=' + v + '×' + w);
+          // c.used is true. If one side is subject_absent (detector ran
+          // and found nothing), name that side so the 0 is legible — the
+          // value isn't "no info", it's evidence the encounter shouldn't
+          // include this frame.
+          if (c.absent_a || c.absent_b) {
+            var absentWho;
+            if (c.absent_a && c.absent_b) absentWho = 'both';
+            else if (c.absent_a) absentWho = nameA;
+            else absentWho = nameB;
+            parts.push(escapeHtml(k) + '=' + v + '×' + w
+              + ' <span class="trace-component-absent">(no subject on '
+              + escapeHtml(absentWho) + ')</span>');
+          } else {
+            parts.push(k + '=' + v + '×' + w);
+          }
         }
       });
       html += '<div class="trace-components">' + parts.join(' · ') + '</div>';
