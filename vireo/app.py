@@ -6031,13 +6031,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/audit/remove-orphans", methods=["POST"])
     def api_audit_remove_orphans():
+        """Drop DB rows for photos whose source file is gone from disk,
+        and unlink the cached thumbnails / previews / working copies that
+        were derived from them.
+
+        Routed through ``db.delete_photos`` rather than the older
+        ``audit.remove_orphans`` so all the FK-cascading cleanup
+        (detections, predictions, collection rules, iNat submissions)
+        runs and ``_cleanup_cached_files_for_deleted_photos`` unlinks
+        the on-disk derivatives. Skipping the cache cleanup is what
+        leaves stale ``<id>.jpg`` thumbnails behind that then attach to
+        whatever new photo later inherits the freed rowid.
+        """
         db = _get_db()
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
-        from audit import remove_orphans
+        if not photo_ids:
+            return jsonify({"ok": True, "removed": 0})
 
-        remove_orphans(db, photo_ids)
-        return jsonify({"ok": True, "removed": len(photo_ids)})
+        result = db.delete_photos(photo_ids)
+        _cleanup_cached_files_for_deleted_photos(result.get("files", []))
+        return jsonify({"ok": True, "removed": result.get("deleted", 0)})
 
     @app.route("/api/audit/import-untracked", methods=["POST"])
     def api_audit_import_untracked():
@@ -9094,6 +9108,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         image when the source is recoverable — matching the project's
         "no rm -rf fixes; the app self-heals" rule.
 
+        Stale-cache guard: ``photos.id`` is INTEGER PRIMARY KEY *without*
+        AUTOINCREMENT, so SQLite reuses the highest freed rowids on the
+        next insert. Combined with delete paths that don't unlink cached
+        files (``audit.remove_orphans``, folder consolidation in
+        ``Database.consolidate_folders``, companion-pair dedup in
+        ``scanner._merge_companion_pair``), a JPEG at ``<id>.jpg`` can
+        outlive its original photo and then be served as the thumbnail
+        for an entirely different photo that later inherits that ID.
+        Compare the cached file's mtime against the photo's
+        ``file_mtime`` and treat predates-source as a miss so the regen
+        path produces a fresh JPEG. This is correctness rooted in the
+        data, independent of whether every delete site cleans up.
+
         404s remain when:
           * the filename isn't ``<int>.jpg`` (malformed request);
           * the photo no longer exists in the DB (stale cache from a
@@ -9110,10 +9137,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         thumb_dir = app.config["THUMB_CACHE_DIR"]
         thumb_path = os.path.join(thumb_dir, filename)
-        if os.path.exists(thumb_path):
-            return _send_cached(thumb_dir, filename)
 
-        # Self-heal path: regenerate on miss when the photo still exists.
         try:
             photo_id = int(filename.replace(".jpg", ""))
         except ValueError:
@@ -9121,6 +9145,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "", 404
 
         db = _get_db()
+        if os.path.exists(thumb_path):
+            cached_mtime = os.path.getmtime(thumb_path)
+            row = db.conn.execute(
+                "SELECT file_mtime FROM photos WHERE id=?", (photo_id,),
+            ).fetchone()
+            # Treat as fresh if either the photo row is gone (the existing
+            # 404-on-deleted-photo behavior takes over below) or its
+            # ``file_mtime`` is unknown (legacy rows pre-mtime tracking
+            # — we have no signal to invalidate against, so prefer the
+            # fast path over false-positive regeneration).
+            fresh = (
+                not row
+                or row["file_mtime"] is None
+                or cached_mtime >= row["file_mtime"]
+            )
+            if fresh:
+                return _send_cached(thumb_dir, filename)
+            log.info(
+                "Thumbnail for photo %s is stale (cached mtime %.0f < "
+                "source file_mtime %.0f) — regenerating",
+                photo_id, cached_mtime, row["file_mtime"],
+            )
+            # ``generate_thumbnail`` short-circuits when the destination
+            # file already exists (an "already done" optimization), so a
+            # stale copy left in place would defeat the regen path. Unlink
+            # before falling through; the regen will write a fresh JPEG
+            # at the same path.
+            try:
+                os.remove(thumb_path)
+            except OSError:
+                log.debug(
+                    "Could not unlink stale thumbnail %s before regen",
+                    thumb_path, exc_info=True,
+                )
+
+        # Self-heal path: regenerate on miss (or stale) when the photo
+        # still exists.
         # Workspace-scoped lookup: a thumbnail URL only makes sense for a
         # photo the active workspace can actually see. Without this scope,
         # ``get_canonical_image_path`` would receive an empty folders dict

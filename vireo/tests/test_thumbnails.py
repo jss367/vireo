@@ -459,6 +459,82 @@ def test_serve_thumbnail_404s_for_deleted_photo(tmp_path, monkeypatch):
     assert resp.status_code == 404
 
 
+def test_serve_thumbnail_regenerates_when_cached_predates_source(
+    tmp_path, monkeypatch,
+):
+    """Reused photo IDs leave behind cached thumbnails belonging to the
+    previous tenant of that ID. ``photos.id`` is INTEGER PRIMARY KEY
+    *without* AUTOINCREMENT, so SQLite reuses the highest freed rowids
+    on the next insert. Combined with delete paths that don't clean up
+    the on-disk cache (``audit.remove_orphans``, folder consolidation,
+    companion-pair dedup in the scanner), a thumbnail at ``<id>.jpg``
+    can persist after its original photo is gone, and a *different*
+    photo later inserted at the same ID gets the stale image served on
+    every grid scroll. The route must compare the cached thumbnail's
+    mtime against the photo's ``file_mtime`` and regenerate when the
+    cache predates the source — anchoring correctness in the data
+    rather than depending on every delete site to clean up.
+    """
+    app, db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+
+    # Pre-populate a sentinel thumbnail (the "stale" tenant). Backdate it
+    # so its mtime is older than the photo's file_mtime — this is the
+    # condition the route must detect.
+    thumb_file = os.path.join(thumb_dir, f"{pid}.jpg")
+    Image.new("RGB", (50, 50), (1, 2, 3)).save(thumb_file, "JPEG", quality=70)
+    sentinel_size = os.path.getsize(thumb_file)
+    photo_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    stale_mtime = photo_mtime - 86400  # one day older than the source
+    os.utime(thumb_file, (stale_mtime, stale_mtime))
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 200
+    assert resp.data[:2] == b"\xff\xd8", "response body is not a JPEG"
+    # The stale sentinel was 50x50 at quality 70; a regenerated thumbnail
+    # of the 800x600 source at quality 85 produces a different file size.
+    # Comparing sizes is enough to prove the file was rewritten — we
+    # don't need to round-trip through PIL.
+    assert os.path.getsize(thumb_file) != sentinel_size, (
+        "stale thumbnail was served unchanged; the route did not "
+        "detect that the cached file predates the source"
+    )
+    # And the regenerated thumb's mtime is now >= file_mtime, so a
+    # subsequent request hits the fast path.
+    assert os.path.getmtime(thumb_file) >= photo_mtime
+
+
+def test_serve_thumbnail_serves_cached_when_thumb_newer_than_source(
+    tmp_path, monkeypatch,
+):
+    """The stale-cache guard must not regress the common case: a thumbnail
+    generated *after* its source file was last modified is fresh and
+    must be served without re-decoding. Otherwise every grid scroll
+    burns CPU on a thumbnail re-render."""
+    app, db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+
+    thumb_file = os.path.join(thumb_dir, f"{pid}.jpg")
+    Image.new("RGB", (50, 50), (1, 2, 3)).save(thumb_file, "JPEG", quality=70)
+    sentinel_size = os.path.getsize(thumb_file)
+    photo_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    fresh_mtime = photo_mtime + 60  # generated after the source was written
+    os.utime(thumb_file, (fresh_mtime, fresh_mtime))
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 200
+    assert os.path.getsize(thumb_file) == sentinel_size, (
+        "fresh cached thumbnail was rewritten — the stale-cache guard "
+        "is firing on cache hits where it shouldn't"
+    )
+
+
 def test_serve_thumbnail_404s_for_non_numeric_filename(tmp_path, monkeypatch):
     """Garbage URLs (e.g. /thumbnails/foo.jpg) must 404 cleanly without
     raising — defends the route against arbitrary path probes."""

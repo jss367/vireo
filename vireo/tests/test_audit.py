@@ -97,3 +97,74 @@ def test_remove_orphans(tmp_path):
 
     photo = db.get_photo(pid)
     assert photo is None
+
+
+def test_remove_orphans_endpoint_unlinks_cached_thumbnail(
+    tmp_path, monkeypatch,
+):
+    """The /api/audit/remove-orphans endpoint must remove cached
+    thumbnails for the photos it drops. Without this cleanup, the
+    next photo to inherit the same SQLite rowid (``photos.id`` is
+    INTEGER PRIMARY KEY without AUTOINCREMENT, so deleted IDs at the
+    high end are reused on the next insert) would inherit the orphaned
+    JPEG and the user would see the wrong photo on the encounter
+    grid.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(
+        models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"),
+    )
+    monkeypatch.setattr(
+        models, "CONFIG_PATH", str(tmp_path / "models.json"),
+    )
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/gone", name="gone")
+    pid = db.add_photo(
+        folder_id=fid, filename="missing.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Stage the cached thumbnail that will become orphaned by the
+    # remove-orphans call. This mirrors a real-world state where the
+    # source file vanished from disk but the cached JPEG persists.
+    thumb_file = thumb_dir / f"{pid}.jpg"
+    Image.new("RGB", (50, 50), (1, 2, 3)).save(str(thumb_file), "JPEG")
+    assert thumb_file.exists(), "precondition: cached thumb staged"
+
+    app = create_app(
+        db_path=db_path, thumb_cache_dir=str(thumb_dir),
+        api_token="test-token-123",
+    )
+    client = app.test_client()
+    resp = client.post(
+        "/api/audit/remove-orphans",
+        json={"photo_ids": [pid]},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["removed"] == 1
+
+    # The DB row is gone …
+    assert db.get_photo(pid) is None
+    # … and so is the cached thumbnail. A future photo that inherits
+    # this ID will get a fresh thumbnail from its own source.
+    assert not thumb_file.exists(), (
+        "remove-orphans left a cached thumbnail behind; the next photo "
+        "to inherit this rowid will be served the orphaned JPEG"
+    )
