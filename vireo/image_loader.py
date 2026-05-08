@@ -39,6 +39,12 @@ def load_image(file_path, max_size=1024):
     the requested size; falls back to demosaic-based decode otherwise.
     Returns None if the file cannot be loaded.
 
+    For RAW files we retry once on transient libraw I/O errors. NAS volumes
+    occasionally fail mid-read under burst access (4 concurrent thumbnail
+    requests is enough to trip a slow share), and a single retry typically
+    succeeds — much cheaper than asking the user to refresh and recover
+    from a cached 404.
+
     Args:
         file_path: Path to the image file
         max_size: Maximum dimension (longest side). None or 0 for full resolution.
@@ -54,7 +60,7 @@ def load_image(file_path, max_size=1024):
 
     try:
         if ext in RAW_EXTENSIONS:
-            img = _load_raw(path, max_size)
+            img = _load_raw_with_retry(path, max_size)
         else:
             img = Image.open(str(path))
             img = ImageOps.exif_transpose(img)
@@ -70,6 +76,26 @@ def load_image(file_path, max_size=1024):
     except Exception as e:
         log.warning("Failed to load image: %s — %s", file_path, e)
         return None
+
+
+def _load_raw_with_retry(path, max_size):
+    """Wrap _load_raw with a single retry on transient libraw I/O errors.
+
+    Only retries on LibRawIOError — other libraw errors (UnsupportedFormat,
+    DataError) are deterministic for a given file and won't recover. The
+    retry is sequential (no backoff) since these failures are usually
+    contention-related and resolve immediately.
+    """
+    try:
+        return _load_raw(path, max_size)
+    except Exception as e:
+        # Identify libraw I/O errors by class name so we don't have to
+        # import rawpy at module scope (it's only present when a RAW
+        # actually loads). The class is rawpy._rawpy.LibRawIOError.
+        if type(e).__name__ != "LibRawIOError":
+            raise
+        log.info("Transient libraw I/O error on %s; retrying once", path)
+        return _load_raw(path, max_size)
 
 
 def _load_standard(path, max_size):
