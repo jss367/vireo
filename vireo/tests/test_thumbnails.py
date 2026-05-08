@@ -507,6 +507,53 @@ def test_serve_thumbnail_regenerates_when_cached_predates_source(
     assert os.path.getmtime(thumb_file) >= photo_mtime
 
 
+def test_serve_thumbnail_does_not_loop_on_future_dated_source(
+    tmp_path, monkeypatch,
+):
+    """``photos.file_mtime`` can legitimately be in the future — files
+    copied from a machine with clock skew, archives that preserve
+    future filesystem timestamps, NEFs whose embedded metadata reflects
+    a different timezone. A naive ``cached_mtime < file_mtime`` check
+    treats every request as stale because the regenerated thumbnail's
+    own mtime defaults to ``time.time()``, which is still less than the
+    stored future ``file_mtime``. The route must break the loop after
+    regeneration so a subsequent request hits the fast path instead of
+    re-decoding the source on every grid scroll.
+    """
+    import time as _time
+
+    app, db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+    # Set the photo's file_mtime to one day in the future, simulating
+    # the clock-skew / preserved-future-timestamp case.
+    future_mtime = _time.time() + 86400
+    db.conn.execute(
+        "UPDATE photos SET file_mtime=? WHERE id=?", (future_mtime, pid),
+    )
+    db.conn.commit()
+
+    thumb_file = os.path.join(thumb_dir, f"{pid}.jpg")
+    assert not os.path.exists(thumb_file), "precondition: cache miss"
+
+    client = app.test_client()
+    # First request triggers regeneration (cache miss → self-heal path).
+    resp1 = client.get(f"/thumbnails/{pid}.jpg")
+    assert resp1.status_code == 200
+    assert os.path.exists(thumb_file)
+    after_first = os.path.getmtime(thumb_file)
+
+    # Second request must NOT regenerate. If the freshness check still
+    # fires for future-dated sources, the route would unlink the file
+    # and re-encode the source, bumping the mtime to a new ``now``.
+    resp2 = client.get(f"/thumbnails/{pid}.jpg")
+    assert resp2.status_code == 200
+    after_second = os.path.getmtime(thumb_file)
+    assert after_second == after_first, (
+        "thumbnail regenerated a second time despite being just-written; "
+        "future-dated photos.file_mtime causes an infinite regeneration "
+        "loop on every request"
+    )
+
+
 def test_serve_thumbnail_serves_cached_when_thumb_newer_than_source(
     tmp_path, monkeypatch,
 ):

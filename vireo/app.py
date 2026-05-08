@@ -9233,6 +9233,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # unsupported format, etc.). Nothing else to do here.
             return "", 404
 
+        # Peg the regenerated thumbnail's mtime to the source file_mtime
+        # so the staleness invariant — ``cached_mtime >= file_mtime`` —
+        # holds on the next request. ``generate_thumbnail`` writes with
+        # the current wall clock; if ``file_mtime`` is in the future
+        # (clock skew on the source machine, archives that preserve
+        # future filesystem timestamps), the next request would compare
+        # ``time.time() < file_mtime`` and treat the just-written file
+        # as stale, triggering a regeneration loop on every fetch. The
+        # ``photo`` dict was loaded from the row above, so its
+        # ``file_mtime`` is the canonical source-of-truth value.
+        if photo["file_mtime"] is not None:
+            try:
+                os.utime(result, (photo["file_mtime"], photo["file_mtime"]))
+            except OSError:
+                # Best-effort: a touch failure is non-fatal; the worst
+                # case is the next request regenerates again. We don't
+                # 404 the user over a chmod / quota issue.
+                log.debug(
+                    "Could not align thumb mtime to source for photo %s",
+                    photo_id, exc_info=True,
+                )
+
         # Persist on-disk presence so the dashboard's coverage query
         # (`thumb_path IS NOT NULL`) reflects this regeneration. Stored
         # value is the bare filename, matching ``thumbnails.generate_all``.
