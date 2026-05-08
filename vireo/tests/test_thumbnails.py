@@ -751,6 +751,107 @@ def test_serve_thumbnail_resolves_when_folder_status_is_missing(tmp_path, monkey
     assert os.path.exists(os.path.join(thumb_dir, f"{pid}.jpg"))
 
 
+def test_serve_thumbnail_does_not_unlink_cross_workspace_cache(
+    tmp_path, monkeypatch,
+):
+    """The stale-cache guard fires before any workspace check, so a
+    request for a photo outside the active workspace can still drive
+    the unlink-and-regen branch — destroying another workspace's
+    cached thumbnail as a side effect, even though the request
+    ultimately 404s. The fix is to validate workspace access before
+    mutating the cache: stale-detection is fine, but the on-disk
+    unlink must not happen until we know the active workspace owns
+    the photo. Otherwise a single ill-aimed grid scroll on
+    workspace B could wipe workspace A's thumbnails.
+    """
+    app, db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+
+    # Stage a stale cached file for the photo so the staleness guard
+    # would normally fire (cached_mtime older than file_mtime).
+    thumb_file = os.path.join(thumb_dir, f"{pid}.jpg")
+    Image.new("RGB", (50, 50), (1, 2, 3)).save(thumb_file, "JPEG", quality=70)
+    photo_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    stale_mtime = photo_mtime - 86400
+    os.utime(thumb_file, (stale_mtime, stale_mtime))
+
+    # Switch to a workspace that doesn't have the photo's folder linked.
+    other_ws = db.create_workspace("Other")
+    db.update_workspace(other_ws, last_opened_at="2030-01-01T00:00:00Z")
+    db.set_active_workspace(other_ws)
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+    assert resp.status_code == 404
+    # The other workspace's cached thumbnail must survive the request.
+    assert os.path.exists(thumb_file), (
+        "cross-workspace request unlinked another workspace's cached "
+        "thumbnail; the staleness guard must not mutate cache files "
+        "for photos the active workspace cannot see"
+    )
+
+
+def test_serve_thumbnail_does_not_pin_stale_when_unlink_fails(
+    tmp_path, monkeypatch,
+):
+    """If ``os.remove`` fails on the stale file (Windows file lock,
+    permissions, antivirus quarantine), ``generate_thumbnail`` short-
+    circuits because its destination still exists, so the stale JPEG
+    is never re-encoded. Aligning the file's mtime to the source's
+    ``file_mtime`` afterward would mark the stale image as fresh
+    forever — pinning the wrong image until manual cache clear.
+
+    The route must detect this and either skip the mtime alignment
+    (so the next request retries) or refuse to call ``generate_thumbnail``
+    when the stale file is still on disk. Either way: a request that
+    cannot rewrite the file must NOT advance its mtime.
+    """
+    import app as app_module
+
+    app, db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+
+    # Stage a stale cached file. Give it sentinel bytes so we can
+    # confirm the stale content is still on disk afterward.
+    thumb_file = os.path.join(thumb_dir, f"{pid}.jpg")
+    Image.new("RGB", (50, 50), (1, 2, 3)).save(thumb_file, "JPEG", quality=70)
+    sentinel_bytes = open(thumb_file, "rb").read()
+    photo_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    stale_mtime = photo_mtime - 86400
+    os.utime(thumb_file, (stale_mtime, stale_mtime))
+
+    # Make ``os.remove`` fail when called on this thumbnail — simulating
+    # a file lock or permission denial. Other unlink calls in the test
+    # process must keep working.
+    real_remove = app_module.os.remove
+
+    def failing_remove(path, *args, **kwargs):
+        if path == thumb_file:
+            raise PermissionError(13, "Permission denied", path)
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(app_module.os, "remove", failing_remove)
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+    assert resp.status_code == 200
+
+    # The on-disk file must still be the stale sentinel — generate_thumbnail
+    # short-circuited because os.remove couldn't drop the file.
+    assert open(thumb_file, "rb").read() == sentinel_bytes
+    # And critically, its mtime must NOT have been advanced to the
+    # source's file_mtime — that would falsely mark it fresh and pin
+    # the wrong image indefinitely. Allow equality with the original
+    # stale_mtime; the route is permitted to leave it untouched.
+    assert os.path.getmtime(thumb_file) < photo_mtime, (
+        "stale thumbnail was pinned as fresh after a failed unlink; "
+        "next request will not retry the regen and the wrong image "
+        "stays cached forever"
+    )
+
+
 def test_serve_thumbnail_404s_for_photo_outside_active_workspace(tmp_path, monkeypatch):
     """The route must 404 when the photo exists in the DB but its folder
     isn't linked to the active workspace. Without workspace scoping,
