@@ -623,6 +623,136 @@ def test_detect_batch_does_not_cache_failed_detector_runs(tmp_path, monkeypatch)
     assert call_count["n"] == 2, "failed photos must be retried on next pass"
 
 
+def test_detect_batch_skips_quality_score_when_primary_below_threshold(
+    tmp_path, monkeypatch
+):
+    """Photos whose only detection is below the workspace's
+    detector_confidence threshold must NOT get a quality_score (or any
+    subject_size / subject_sharpness from the noise box) — those values
+    drive the highlights ranking, and a noise box that happens to span the
+    frame would otherwise produce a sky-high ``subject_size`` and float
+    these no-real-subject photos to the top of highlights.
+
+    Regression for the "Mountain chickadee" highlights bug: photos with
+    detector_confidence ~0.02 still received quality_score ~0.86 because
+    the noise box covered ~98% of the frame.
+    """
+    from unittest.mock import patch
+
+    from classify_job import _detect_batch
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "noise.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Pre-populate stale quality fields to confirm the fix also clears
+    # rotten state from prior runs (self-healing — see CLAUDE.md memory
+    # "App self-heals broken state").
+    db.update_photo_quality(
+        photo_id,
+        subject_sharpness=2900.0,
+        subject_size=0.98,
+        quality_score=0.86,
+        sharpness=2900.0,
+    )
+
+    img = Image.new("RGB", (100, 100), color="gray")
+    img.save(str(tmp_path / "noise.jpg"))
+
+    # Sub-threshold "noise" detection covering nearly the whole frame —
+    # exactly what MegaDetector emits when there's no real subject.
+    fake_detections = [
+        {"box": {"x": 0.01, "y": 0.01, "w": 0.98, "h": 0.98},
+         "confidence": 0.027, "category": "animal"},
+    ]
+
+    photos = [{"id": photo_id, "folder_id": folder_id, "filename": "noise.jpg"}]
+    folders = {folder_id: str(tmp_path)}
+
+    with patch("classify_job.detect_animals", return_value=fake_detections), \
+         patch("classify_job.get_primary_detection", return_value=fake_detections[0]), \
+         patch("classify_job.compute_sharpness", return_value=2900.0):
+        _detect_batch(
+            photos=photos, folders=folders, runner=None, job={"id": 0},
+            reclassify=True, db=db,
+            det_conf_threshold=0.2,
+            already_detected_ids=set(),
+        )
+
+    row = db.conn.execute(
+        "SELECT quality_score, subject_size, subject_sharpness FROM photos WHERE id = ?",
+        (photo_id,),
+    ).fetchone()
+    assert row["quality_score"] is None, (
+        "sub-threshold detection must not produce a quality_score; "
+        f"got {row['quality_score']!r}"
+    )
+    assert row["subject_size"] is None, (
+        "sub-threshold detection must not produce subject_size; "
+        f"got {row['subject_size']!r}"
+    )
+    assert row["subject_sharpness"] is None, (
+        "sub-threshold detection must not produce subject_sharpness; "
+        f"got {row['subject_sharpness']!r}"
+    )
+
+
+def test_detect_batch_scores_normally_when_primary_at_threshold(
+    tmp_path, monkeypatch
+):
+    """Counterpart to the sub-threshold test: a detection at or above the
+    threshold still produces a quality_score so we don't break the happy
+    path."""
+    from unittest.mock import patch
+
+    from classify_job import _detect_batch
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "bird.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    img = Image.new("RGB", (100, 100), color="gray")
+    img.save(str(tmp_path / "bird.jpg"))
+
+    fake_detections = [
+        {"box": {"x": 0.3, "y": 0.3, "w": 0.4, "h": 0.4},
+         "confidence": 0.85, "category": "animal"},
+    ]
+
+    photos = [{"id": photo_id, "folder_id": folder_id, "filename": "bird.jpg"}]
+    folders = {folder_id: str(tmp_path)}
+
+    with patch("classify_job.detect_animals", return_value=fake_detections), \
+         patch("classify_job.get_primary_detection", return_value=fake_detections[0]), \
+         patch("classify_job.compute_sharpness", return_value=1500.0):
+        _detect_batch(
+            photos=photos, folders=folders, runner=None, job={"id": 0},
+            reclassify=True, db=db,
+            det_conf_threshold=0.2,
+            already_detected_ids=set(),
+        )
+
+    row = db.conn.execute(
+        "SELECT quality_score, subject_size FROM photos WHERE id = ?",
+        (photo_id,),
+    ).fetchone()
+    assert row["quality_score"] is not None and row["quality_score"] > 0
+    assert row["subject_size"] is not None
+
+
 def test_classify_photos_reclassifies_when_gate_has_no_cached_rows(tmp_path):
     """If classifier_runs has a (model, fp) key but get_predictions_for_detection
     returns nothing (e.g. a prior pass stored `category == 'match'` which

@@ -287,6 +287,81 @@ def test_encounter_species_rejects_invalid_photo_ids(app_and_db):
     assert not any(c["value"] == "Robin" for c in pending)
 
 
+def test_encounter_species_skips_sub_threshold_photos(app_and_db):
+    """POST /api/encounters/species must skip photos whose only detections
+    are below the workspace's detector_confidence threshold.
+
+    Regression for the "Mountain chickadee" highlights bug: when an
+    encounter is bulk-confirmed, photos with only noise-level detections
+    (e.g. confidence ~0.02 from MegaDetector emitting a whole-frame box on
+    a frame with no real subject) were tagged with the species too. Those
+    bad tags then made the photos eligible for highlights and they floated
+    to the top by quality_score because the noise box happened to span the
+    whole frame.
+
+    Photos with NO detections at all stay eligible (this endpoint is also
+    used to label photos that were never run through the pipeline — the
+    user is asserting the species manually).
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
+    p_real, p_noise, p_undetected = photos[0]["id"], photos[1]["id"], photos[2]["id"]
+
+    db.save_detections(
+        p_real,
+        [{"box": {"x": 0.3, "y": 0.3, "w": 0.4, "h": 0.4},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    db.save_detections(
+        p_noise,
+        [{"box": {"x": 0.01, "y": 0.01, "w": 0.98, "h": 0.98},
+          "confidence": 0.02, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    # p_undetected has no detection rows at all.
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Mountain Chickadee",
+              "photo_ids": [p_real, p_noise, p_undetected]},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    real_tags = {k["name"] for k in db.get_photo_keywords(p_real)}
+    noise_tags = {k["name"] for k in db.get_photo_keywords(p_noise)}
+    undetected_tags = {k["name"] for k in db.get_photo_keywords(p_undetected)}
+
+    assert "Mountain Chickadee" in real_tags, (
+        "photo with high-confidence detection must still be tagged"
+    )
+    assert "Mountain Chickadee" not in noise_tags, (
+        "photo whose only detection is below threshold must NOT be tagged — "
+        "those are noise photos and the tag is what makes them appear in "
+        "highlights with the wrong species"
+    )
+    assert "Mountain Chickadee" in undetected_tags, (
+        "photo with no detections at all is a manual-tagging case (user "
+        "asserting species on a photo never run through the pipeline) — "
+        "this must continue to work"
+    )
+
+    # Response should reflect what actually happened so the UI can warn
+    # about skipped photos (otherwise the user thinks all 48 were tagged
+    # but really only 47 were).
+    assert data["photo_count"] == 2, (
+        f"photo_count should reflect actually-tagged photos (2), got {data['photo_count']}"
+    )
+    skipped = data.get("skipped_photo_ids") or []
+    assert p_noise in skipped, (
+        f"skipped_photo_ids should list the noise photo so the UI can warn; "
+        f"got {skipped!r}"
+    )
+
+
 def test_encounter_species_updates_pipeline_cache(app_and_db):
     """POST /api/encounters/species updates species_confirmed in pipeline cache."""
     import json as _json

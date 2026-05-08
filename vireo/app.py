@@ -10307,6 +10307,40 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if missing:
             return json_error(f"Unknown photo_ids: {missing}")
 
+        # Drop photos whose only detections are below the workspace's
+        # detector_confidence threshold — those are MegaDetector noise boxes,
+        # not real subjects, and tagging them with a species lets them slip
+        # into highlights / by-species views with the wrong label. Photos
+        # with NO detection rows at all stay eligible: this endpoint also
+        # serves manual species assertions on photos that were never run
+        # through the pipeline. See the "Mountain chickadee" highlights bug.
+        import config as cfg
+        effective_cfg = db.get_effective_config(cfg.load())
+        det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
+        det_rows = db.conn.execute(
+            f"""SELECT photo_id,
+                       MAX(detector_confidence) AS max_conf,
+                       COUNT(*) AS n
+                FROM detections WHERE photo_id IN ({placeholders})
+                GROUP BY photo_id""",
+            photo_ids,
+        ).fetchall()
+        skipped_photo_ids = [
+            r["photo_id"] for r in det_rows
+            if r["n"] > 0 and (r["max_conf"] or 0) < det_conf_threshold
+        ]
+        if skipped_photo_ids:
+            skipped_set = set(skipped_photo_ids)
+            photo_ids = [pid for pid in photo_ids if pid not in skipped_set]
+            if not photo_ids:
+                return jsonify({
+                    "ok": True,
+                    "species": species,
+                    "photo_count": 0,
+                    "skipped_photo_ids": skipped_photo_ids,
+                    "previous_species": None,
+                })
+
         # Look up the previous species (if any) from the pipeline cache before
         # mutating. We reuse the same cached dict to write the update below.
         from pipeline import load_results_raw, save_results_raw
@@ -10471,6 +10505,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "keyword_id": kid,
             "photo_count": len(photo_ids),
             "previous_species": replaced,
+            "skipped_photo_ids": skipped_photo_ids,
         }
         if cached:
             response["encounters"] = cached.get("encounters", [])

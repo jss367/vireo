@@ -445,6 +445,14 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
             if detections:
                 # Use highest-confidence detection as primary for quality scoring
                 primary = get_primary_detection(detections)
+                if primary and primary["confidence"] < det_conf_threshold:
+                    # Top detection is below the workspace's detector_confidence
+                    # threshold — it's noise, not a real subject. Skip scoring
+                    # and clear any stale quality fields from a prior run so
+                    # noise photos don't float to the top of highlights with a
+                    # giant ``subject_size`` from a whole-frame noise box.
+                    db.update_photo_quality(photo["id"])
+                    primary = None
                 if primary:
                     det_box = primary["box"]
                     subject_size = det_box["w"] * det_box["h"]
