@@ -620,6 +620,48 @@ def test_trace_includes_pair_photo_ids_and_filenames():
     assert trace[0]["photo_b_filename"] == "DSC_1385.NEF"
 
 
+def test_trace_position_aligns_with_encounter_photo_order():
+    """Within an encounter, the i-th trace entry must describe the pair
+    (photos[i], photos[i+1]) in encounter-photo order. The pipeline-review
+    UI relies on this to recover pair photos from old caches that were
+    written before photo_a_id/photo_b_id were added to trace entries —
+    falling back to enc.photo_ids[i] / enc.photo_ids[i+1].
+    """
+    from encounters import segment_encounters
+
+    # Three encounters of varying sizes, separated by big time gaps so
+    # cut_microsegments produces distinct microsegments. Within each
+    # encounter the photos remain in timestamp order.
+    photos = [
+        # Encounter A: 3 photos
+        {"id": 100, "timestamp": "2026-03-07T10:00:00", "focal_length": 600.0},
+        {"id": 101, "timestamp": "2026-03-07T10:00:02", "focal_length": 600.0},
+        {"id": 102, "timestamp": "2026-03-07T10:00:04", "focal_length": 600.0},
+        # Encounter B: 2 photos
+        {"id": 200, "timestamp": "2026-03-07T11:00:00", "focal_length": 600.0},
+        {"id": 201, "timestamp": "2026-03-07T11:00:03", "focal_length": 600.0},
+        # Encounter C: 4 photos
+        {"id": 300, "timestamp": "2026-03-07T12:00:00", "focal_length": 600.0},
+        {"id": 301, "timestamp": "2026-03-07T12:00:02", "focal_length": 600.0},
+        {"id": 302, "timestamp": "2026-03-07T12:00:04", "focal_length": 600.0},
+        {"id": 303, "timestamp": "2026-03-07T12:00:06", "focal_length": 600.0},
+    ]
+    encounters = segment_encounters(photos, emit_trace=True)
+    assert len(encounters) == 3
+
+    for enc in encounters:
+        photo_ids = [p["id"] for p in enc["photos"]]
+        trace = enc["trace"]
+        assert len(trace) == len(photo_ids) - 1
+        for i, t in enumerate(trace):
+            assert t["photo_a_id"] == photo_ids[i], (
+                f"trace[{i}].photo_a_id={t['photo_a_id']} != photo_ids[{i}]={photo_ids[i]}"
+            )
+            assert t["photo_b_id"] == photo_ids[i + 1], (
+                f"trace[{i}].photo_b_id={t['photo_b_id']} != photo_ids[{i+1}]={photo_ids[i + 1]}"
+            )
+
+
 def test_components_flag_which_photo_is_missing_each_signal():
     """Each component tags missing_a / missing_b so the UI can say
     "missing on DSC_1385" instead of just rendering a bare dot. This is
