@@ -1919,6 +1919,13 @@ function onCopyModeChange() {
     _duplicateResults = {};
   }
   updateStartButton();
+  // Toggling copy mode flips whether _buildPlanBody sends
+  // hash_duplicate_paths (only sent when _copyMode is on with skip
+  // duplicates checked and cached results exist). Without this refresh,
+  // pills keep showing the prior mode's run estimate until some other
+  // UI action triggers a plan fetch — exactly the staleness the
+  // CORE_PHILOSOPHY transparency rule prohibits.
+  schedulePlanRefresh();
 }
 
 function getSelectedFolderTemplate() {
