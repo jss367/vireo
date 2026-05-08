@@ -1,10 +1,12 @@
 """Fetch regional species labels from iNaturalist for classification."""
 
+import contextlib
 import json
 import logging
 import os
 import re
 import ssl
+import tempfile
 import urllib.parse
 import urllib.request
 
@@ -234,9 +236,8 @@ def save_labels(name, place_id, place_name, taxon_groups, species,
     meta_path = os.path.join(LABELS_DIR, f"{slug}.json")
 
     # Write labels file (one per line)
-    with open(labels_path, "w") as f:
-        for sp in sorted(set(species)):
-            f.write(sp + "\n")
+    species_text = "".join(sp + "\n" for sp in sorted(set(species)))
+    _atomic_write_text(labels_path, species_text)
 
     # Write metadata
     filter_info = OBSERVATION_FILTERS.get(
@@ -252,10 +253,31 @@ def save_labels(name, place_id, place_name, taxon_groups, species,
         "species_count": len(set(species)),
         "labels_file": labels_path,
     }
-    with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
+    _atomic_write_text(meta_path, json.dumps(meta, indent=2))
 
     return labels_path
+
+
+def _atomic_write_text(path, text):
+    """Write text to ``path`` via a sibling temp file + os.replace().
+
+    Two concurrent label-fetch jobs targeting the same slug can otherwise
+    interleave bytes inside a half-written .txt or .json. Atomic rename
+    guarantees that any reader sees either the old contents or the full new
+    contents, never a partial mix.
+    """
+    directory = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=directory
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp_path, path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
 
 
 def delete_labels(labels_file):
