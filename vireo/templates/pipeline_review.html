@@ -432,11 +432,6 @@ input[type="range"]::-moz-range-thumb {
   display: flex; gap: 6px; align-items: center;
   cursor: pointer; min-width: 0; flex: 1;
 }
-.algo-trace .trace-pair-photo img {
-  width: 36px; height: 28px; object-fit: cover;
-  border-radius: 3px; border: 1px solid var(--border-primary);
-  flex-shrink: 0;
-}
 .algo-trace .trace-pair-photo .name {
   font-size: 10px; color: var(--text-dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1503,7 +1498,6 @@ function renderAlgorithmTrace() {
       return '<div class="trace-pair-photo"><span class="name">' + escapeHtml(label) + '</span></div>';
     }
     return '<div class="trace-pair-photo" onclick="openInspect(' + pid + ')" title="' + escapeHtml(p.filename || label) + '">'
-      + '<img src="/thumbnails/' + pid + '.jpg" loading="lazy" alt="">'
       + '<span class="name">' + escapeHtml(label) + '</span>'
       + '</div>';
   }
@@ -1529,8 +1523,6 @@ function renderAlgorithmTrace() {
     var encPhotoIds = enc.photo_ids || [];
     var aId = (t.photo_a_id != null) ? t.photo_a_id : (encPhotoIds[i] != null ? encPhotoIds[i] : null);
     var bId = (t.photo_b_id != null) ? t.photo_b_id : (encPhotoIds[i + 1] != null ? encPhotoIds[i + 1] : null);
-    // Pair photos: filenames + tiny thumbs so the user can see *which*
-    // two photos this row scored, and click through to inspect either.
     html += '<div class="trace-pair-photos">';
     html += pairPhotoHtml(aId, t.photo_a_filename);
     html += '<span class="trace-pair-arrow">→</span>';
