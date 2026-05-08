@@ -158,11 +158,13 @@ def test_load_photo_features_subject_absent_from_current_detections(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
 
-    # Photo A: real detection at conf 0.9 (well above default 0.2 threshold)
+    # Photo A: real detection at conf 0.9 (well above default 0.2 threshold).
+    # write_detection_batch records both the detection rows AND a
+    # detector_runs row, marking the detector as "having run" on this photo.
     pid_a = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
-    db.save_detections(pid_a, [
+    db.write_detection_batch(pid_a, "megadetector-v6", [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
-    ], detector_model="megadetector")
+    ])
     # Stamp stale miss flags from a hypothetical prior run that would
     # WRONGLY mark this photo as no-subject. The current-detection
     # derivation must ignore them.
@@ -172,11 +174,14 @@ def test_load_photo_features_subject_absent_from_current_detections(tmp_path):
         (pid_a,),
     )
 
-    # Photo B: only sub-threshold detections (the 1761 case from apr2026)
+    # Photo B: detector ran (detector_runs row written) but only produced
+    # sub-threshold detections (the 1761 case from apr2026). Empty boxes
+    # would also work, but a sub-threshold row matches the actual apr2026
+    # state where the detector emitted low-confidence garbage.
     pid_b = db.add_photo(fid, "b.jpg", ".jpg", 100, 1.0)
-    db.save_detections(pid_b, [
+    db.write_detection_batch(pid_b, "megadetector-v6", [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.05, "h": 0.05}, "confidence": 0.03},
-    ], detector_model="megadetector")
+    ])
     # Conversely, leave miss flags NULL on B — this is what the very first
     # pipeline run on a new workspace looks like. The new derivation must
     # still mark B subject_absent based on the live detection check.
@@ -191,6 +196,57 @@ def test_load_photo_features_subject_absent_from_current_detections(tmp_path):
     assert by_id[pid_b]["subject_absent"] is True, (
         "no detection above threshold must mark subject_absent=True even "
         "when miss_computed_at IS NULL"
+    )
+
+
+def test_load_photo_features_subject_absent_false_when_detector_never_ran(tmp_path):
+    """A photo with no detector_runs row hasn't had the detector run yet
+    (e.g. first-time regroup with skip_classify=True, or newly imported
+    photos before classify/detect). Its subject state is *unknown*, not
+    "detector confirmed empty". subject_absent must be False so
+    compute_s_enc drops the signal and renormalizes — matching the
+    uncomputed-features semantics. Gating on subject_absent=True here
+    would create false hard cuts and fragment encounters.
+    """
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    # Photo C: no detections, no detector_runs row — pristine "never run".
+    pid_c = db.add_photo(fid, "c.jpg", ".jpg", 100, 1.0)
+    db.conn.commit()
+
+    photos = load_photo_features(db)
+    by_id = {p["id"]: p for p in photos}
+
+    assert by_id[pid_c]["subject_absent"] is False, (
+        "photo with no detector_runs row must not be marked subject_absent — "
+        "the detector hasn't run yet, so we have no evidence either way"
+    )
+
+
+def test_load_photo_features_subject_absent_true_for_empty_scene_run(tmp_path):
+    """Empty-scene runs (detector ran, found zero boxes) must be
+    subject_absent=True. write_detection_batch records a detector_runs
+    row with box_count=0 even when no boxes are passed — that's the
+    canonical "ran and confirmed empty" state.
+    """
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    pid = db.add_photo(fid, "empty.jpg", ".jpg", 100, 1.0)
+    db.write_detection_batch(pid, "megadetector-v6", [])  # empty scene
+    db.conn.commit()
+
+    photos = load_photo_features(db)
+    assert photos[0]["subject_absent"] is True, (
+        "empty-scene detector run (box_count=0) is the canonical "
+        "subject_absent=True signal"
     )
 
 

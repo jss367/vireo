@@ -215,6 +215,14 @@ def load_photo_features(db, collection_id=None, config=None,
             "detection_conf": top["confidence"],
         }
 
+    # Photos the detector has actually been run on. Used to gate
+    # subject_absent below — a photo with no detector_runs row hasn't been
+    # evaluated yet (e.g. first-time regroup with skip_classify=True, or
+    # photos imported after the last classify run). Treating those as
+    # "subject_absent" would conflate "unknown" with "detector confirmed
+    # empty" and create false asymmetric cuts in compute_s_enc.
+    detected_photo_ids = db.get_detector_run_photo_ids("megadetector-v6")
+
     # Load user-confirmed species keywords (alphabetically first wins
     # for photos with multiple species tags — rare but deterministic)
     species_kw_rows = db.conn.execute(
@@ -261,20 +269,24 @@ def load_photo_features(db, collection_id=None, config=None,
                        "w": det["w"], "h": det["h"]}
             det_conf = det["detection_conf"]
 
-        # subject_absent: no detection passes the workspace's effective
-        # `detector_confidence` threshold this run. This is information —
-        # encounters.compute_s_enc treats an asymmetric absent/present pair
-        # as actively dissimilar instead of dropping the missing subject
-        # embedding from the weighted average.
+        # subject_absent: the detector has been run on this photo AND no
+        # detection passes the workspace's effective `detector_confidence`
+        # threshold. Both conditions matter:
         #
-        # Derived from the same detection-vs-threshold check the miss stage
-        # uses (compute_misses_for_workspace), reading the detections table
-        # directly. We can't read photos.miss_no_subject here because
-        # regroup runs BEFORE miss in the pipeline (detect → classify →
-        # regroup → miss), so that column reflects the *previous* run's
-        # threshold + detections — stale on first runs (NULL) and after any
-        # threshold or detection change.
-        subject_absent = pid not in primary_det_by_photo
+        # - Without the detector_runs check we'd flag never-detected photos
+        #   (first-time regroup with skip_classify=True, or photos imported
+        #   after the last classify run) as subject_absent and trigger false
+        #   asymmetric cuts in compute_s_enc, fragmenting encounters.
+        # - Without the threshold check we'd miss the actual signal — a
+        #   photo whose detector ran but produced only sub-threshold boxes.
+        #
+        # detector_runs records empty-scene runs (box_count=0) explicitly,
+        # which is the canonical "detector confirmed empty" state.
+        # Reading current-run detections (not photos.miss_no_subject)
+        # because regroup runs BEFORE the miss stage in the pipeline.
+        subject_absent = (
+            pid in detected_photo_ids and pid not in primary_det_by_photo
+        )
 
         photos.append({
             "id": pid,
