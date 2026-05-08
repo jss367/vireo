@@ -1316,6 +1316,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(
                 f"source_paths too large ({len(source_paths)} > 50000)", 400,
             )
+        if not all(isinstance(p, str) for p in source_paths):
+            return json_error("source_paths entries must be strings", 400)
         params = PipelinePlanParams(
             collection_id=body.get("collection_id"),
             exclude_photo_ids=body.get("exclude_photo_ids") or [],

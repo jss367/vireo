@@ -3737,9 +3737,12 @@ function _buildPlanBody() {
     _previewData.files.forEach(function(f) {
       if (_previewSelected[f.path]) selectedPaths.push(f.path);
     });
-    // Mirror the backend cap (50k); above this the plan endpoint rejects
-    // the request rather than silently truncate, so do the same client-side.
-    if (selectedPaths.length && selectedPaths.length <= 50000) {
+    // Send the full list even if it exceeds the backend cap (50k).
+    // The server will respond 400 and the plan UI will clear — that's
+    // accurate. Dropping the field client-side would make the server
+    // fall back to whole-workspace scope, which is the misleading plan
+    // this code is here to prevent.
+    if (selectedPaths.length) {
       body.source_paths = selectedPaths;
     }
   }

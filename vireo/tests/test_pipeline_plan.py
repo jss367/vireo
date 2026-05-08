@@ -1682,3 +1682,20 @@ def test_api_pipeline_plan_rejects_non_list_source_paths(app_and_db):
         },
     )
     assert resp.status_code == 400
+
+
+def test_api_pipeline_plan_rejects_non_string_source_paths_elements(app_and_db):
+    """A payload like {"source_paths": [123]} would otherwise reach
+    photos_by_paths and crash os.path.dirname with TypeError, surfacing
+    as a 500. Catch it at the boundary as a 400 instead."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={
+            "source_paths": ["/ok/path.nef", 123],  # mixed types
+            "skip_classify": True, "skip_extract_masks": True,
+            "skip_eye_keypoints": True, "skip_regroup": True,
+        },
+    )
+    assert resp.status_code == 400
