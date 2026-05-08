@@ -189,25 +189,31 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
     ts_b = _parse_timestamp(photo_b.get("timestamp"))
     dt = _time_delta_seconds(ts_a, ts_b)
 
-    # subject_absent=True means the detector ran and confirmed there is no
-    # animal in this frame — that's *information*, not a missing feature.
+    # Detector-state encoding from load_photo_features (mutually exclusive,
+    # so at most one is True per photo):
+    #   subject_absent  = detector ran, no qualifying detection (real signal)
+    #   subject_present = detector ran, has a qualifying detection
+    #   both False      = detector hasn't run yet — STATE IS UNKNOWN
     #
-    # Three cases:
-    #   - asymmetric (one side absent, one present): subj/species contribute
-    #     an active 0 with full weight. Otherwise meta=1.0 (same lens) would
-    #     renormalize and merge an unrelated subjectless pair into the
-    #     encounter on time alone.
-    #   - both absent: subj/species are NEUTRAL — drop the signal. Crucially
-    #     this must hold even when stale embeddings/species are still cached
-    #     on the photo rows from a prior run (e.g. user raised the detector
-    #     threshold, re-ran regroup, but DINO/predictions weren't re-written).
-    #     Reading them here would re-activate similarity and pull the
-    #     encounter back together, contradicting the detector's "no animal"
-    #     verdict.
-    #   - neither absent: standard cached-feature similarity.
+    # Three cases drive the subj/species treatment:
+    #   - asymmetric (one absent, one *present*): contribute active 0 with
+    #     full weight. The detector's "no subject" verdict on one side
+    #     against affirmative evidence on the other is real dissimilarity.
+    #     Without this, meta=1.0 (same lens) renormalizes the score back
+    #     up purely on time.
+    #   - both absent: NEUTRAL — drop the signal. Holds even when stale
+    #     embeddings/species are still cached on the photo rows from a
+    #     prior run. Reading them would re-activate similarity and
+    #     contradict the detector's verdict.
+    #   - any other case (absent vs unknown, present vs unknown, both
+    #     unknown, both present): fall through to standard cached-feature
+    #     similarity. Notably, "absent vs unknown" must NOT trigger the
+    #     asymmetric penalty — we have no evidence those photos differ.
     absent_a = bool(photo_a.get("subject_absent"))
     absent_b = bool(photo_b.get("subject_absent"))
-    asymmetric_subject = absent_a != absent_b
+    present_a = bool(photo_a.get("subject_present"))
+    present_b = bool(photo_b.get("subject_present"))
+    asymmetric_subject = (absent_a and present_b) or (absent_b and present_a)
     both_absent = absent_a and absent_b
 
     st = sim_time(dt, tau=cfg["tau_enc"])

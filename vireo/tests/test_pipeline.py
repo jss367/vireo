@@ -227,6 +227,84 @@ def test_load_photo_features_subject_absent_false_when_detector_never_ran(tmp_pa
     )
 
 
+def test_load_photo_features_subject_absent_ignores_non_mdv6_detections(tmp_path):
+    """`subject_absent` must be derived against `megadetector-v6` only.
+    Synthetic `full-image` fallback rows are written at confidence 0 by
+    classify_job when MDV6 finds nothing, and the user can lower
+    `detector_confidence` to 0.0 (allowed by schema). If load_photo_features
+    matches *any* detector model when checking "has a passing detection",
+    those full-image rows would mask MDV6's true empty-scene verdict and
+    suppress the no-subject cut signal.
+    """
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    # Lower the workspace's detector_confidence to 0.0 so a confidence=0
+    # synthetic full-image row WOULD pass the threshold if not filtered.
+    ws_id = db._active_workspace_id
+    db.update_workspace(ws_id, config_overrides={"detector_confidence": 0.0})
+
+    pid = db.add_photo(fid, "x.jpg", ".jpg", 100, 1.0)
+    # MDV6: empty-scene run (canonical "detector confirmed empty")
+    db.write_detection_batch(pid, "megadetector-v6", [])
+    # Synthetic full-image fallback at conf 0 (mirrors classify_job)
+    db.write_detection_batch(pid, "full-image", [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.0},
+    ])
+    db.conn.commit()
+
+    photos = load_photo_features(db)
+    assert photos[0]["subject_absent"] is True, (
+        "MDV6's empty-scene verdict must not be masked by synthetic "
+        "full-image fallback rows from a different detector model"
+    )
+    assert photos[0]["subject_present"] is False
+
+
+def test_load_photo_features_subject_present_when_mdv6_passes_threshold(tmp_path):
+    """`subject_present=True` iff MDV6 has a detection passing the
+    workspace's effective threshold. Used by compute_s_enc to gate the
+    asymmetric-no-subject penalty so it only fires when the non-absent
+    side has affirmative subject evidence.
+    """
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    pid = db.add_photo(fid, "duck.jpg", ".jpg", 100, 1.0)
+    db.write_detection_batch(pid, "megadetector-v6", [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
+    ])
+    db.conn.commit()
+
+    photos = load_photo_features(db)
+    assert photos[0]["subject_present"] is True
+    assert photos[0]["subject_absent"] is False
+
+
+def test_load_photo_features_subject_present_false_when_detector_unrun(tmp_path):
+    """A photo the detector hasn't seen has subject_present=False — the
+    state is "unknown", neither absent nor present. compute_s_enc uses
+    this to drop subj/species rather than penalize.
+    """
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    pid = db.add_photo(fid, "fresh.jpg", ".jpg", 100, 1.0)
+    db.conn.commit()
+
+    photos = load_photo_features(db)
+    assert photos[0]["subject_present"] is False
+    assert photos[0]["subject_absent"] is False
+
+
 def test_load_photo_features_subject_absent_true_for_empty_scene_run(tmp_path):
     """Empty-scene runs (detector ran, found zero boxes) must be
     subject_absent=True. write_detection_batch records a detector_runs
