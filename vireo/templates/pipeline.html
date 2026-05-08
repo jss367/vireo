@@ -1586,6 +1586,10 @@ function renderPreview() {
         e.stopPropagation();
         _previewSelected[f.path] = check.checked;
         updatePreviewCounts();
+        // Per-file toggles change the import scope (which paths the next
+        // run will touch), so refresh the plan — folder/select-all paths
+        // already get a refresh via renderPreview(); this one does not.
+        schedulePlanRefresh();
       };
       thumb.appendChild(check);
 
@@ -3737,14 +3741,14 @@ function _buildPlanBody() {
     _previewData.files.forEach(function(f) {
       if (_previewSelected[f.path]) selectedPaths.push(f.path);
     });
-    // Send the full list even if it exceeds the backend cap (50k).
-    // The server will respond 400 and the plan UI will clear — that's
-    // accurate. Dropping the field client-side would make the server
-    // fall back to whole-workspace scope, which is the misleading plan
-    // this code is here to prevent.
-    if (selectedPaths.length) {
-      body.source_paths = selectedPaths;
-    }
+    // Always send source_paths in import / new-images mode — even when
+    // the list is empty (every preview file deselected) or exceeds the
+    // backend cap (50k). Dropping the field would make the server fall
+    // back to whole-workspace scope, which is the misleading plan this
+    // code is here to prevent. For empty: the server returns a no-op
+    // plan. For oversized: the server returns 400 and the plan UI
+    // clears — both accurate states.
+    body.source_paths = selectedPaths;
   }
 
   body.skip_classify       = !document.getElementById('enableClassify').checked;

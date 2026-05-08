@@ -1699,3 +1699,133 @@ def test_api_pipeline_plan_rejects_non_string_source_paths_elements(app_and_db):
         },
     )
     assert resp.status_code == 400
+
+
+def test_import_plan_empty_source_paths_is_no_op(tmp_path, monkeypatch):
+    """Import / new-images mode with every preview file deselected: the
+    next run is a genuine no-op. Every stage must read as "no work" —
+    NOT fall through to whole-workspace scope and report unrelated
+    "Already done" / "Will run" status from the active workspace.
+
+    Regression guard for the misleading-pill bug Codex flagged: silently
+    dropping the empty source_paths field would re-introduce exactly the
+    cross-workspace status leak this code exists to prevent.
+    """
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _stub_models(monkeypatch)
+    # Active-workspace state that would otherwise dominate the plan:
+    # one fully-classified, fully-masked photo. Without our fix this
+    # would render as "done-prior" for Classify and Extract.
+    pid, did = _add_photo_with_detection(db, folder_id, "old.jpg")
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    db.conn.execute("UPDATE photos SET mask_path='/m/old.png' WHERE id=?", (pid,))
+    db.conn.commit()
+
+    # Empty source_paths = import mode, all files deselected.
+    plan = compute_plan(
+        db,
+        _import_params([], model_ids=["m1"]),
+        str(tmp_path / "test.db"),
+    )
+    # Every stage reports "no work" — none leak active-workspace state.
+    for name in ("Scan", "Classify", "Extract"):
+        assert plan["stages"][name]["state"] == "will-skip", (
+            f"{name} leaked workspace state: {plan['stages'][name]}"
+        )
+        assert "no files selected" in plan["stages"][name]["summary"].lower()
+    assert plan["scope"]["new_count"] == 0
+    assert plan["scope"]["known_count"] == 0
+    assert plan["scope"]["photo_count"] == 0
+
+
+def test_compute_plan_distinguishes_none_from_empty_source_paths(tmp_path, monkeypatch):
+    """source_paths=None (whole-workspace) and source_paths=[] (empty
+    import) must produce different plans. Conflating them re-introduces
+    the cross-workspace status leak the import-mode plan exists to fix.
+    """
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import PipelinePlanParams, compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _stub_models(monkeypatch)
+    pid, did = _add_photo_with_detection(db, folder_id, "old.jpg")
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    db.conn.execute("UPDATE photos SET mask_path='/m/old.png' WHERE id=?", (pid,))
+    db.conn.commit()
+
+    # source_paths=None → whole-workspace fallback (Extract sees the
+    # masked photo and reports "done-prior").
+    whole_ws = compute_plan(
+        db,
+        PipelinePlanParams(
+            source_paths=None, model_ids=["m1"],
+            skip_eye_keypoints=True, skip_regroup=True,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert "Scan" not in whole_ws["stages"]  # not import mode
+    assert whole_ws["stages"]["Extract"]["state"] == "done-prior"
+
+    # source_paths=[] → import mode, no-op run. Scan emitted; Extract
+    # is "will-skip — No files selected", NOT "done-prior".
+    empty_import = compute_plan(
+        db,
+        PipelinePlanParams(
+            source_paths=[], model_ids=["m1"],
+            skip_eye_keypoints=True, skip_regroup=True,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert "Scan" in empty_import["stages"]
+    assert empty_import["stages"]["Extract"]["state"] == "will-skip"
+
+
+def test_api_pipeline_plan_empty_source_paths_does_not_fall_back(app_and_db):
+    """API-level guard: posting an explicit empty source_paths list (the
+    frontend's signal for "import mode, every preview file deselected")
+    must produce the no-op import plan, not whole-workspace fallback.
+
+    Codex flagged this exact regression — dropping the field client-side
+    when no files are selected made /api/pipeline/plan describe the
+    unrelated active workspace, which is the misleading behaviour the
+    import-mode scope is meant to prevent.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={
+            "source_paths": [],  # explicit empty == import mode, no files
+            "skip_classify": True, "skip_extract_masks": True,
+            "skip_eye_keypoints": True, "skip_regroup": True,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Scan stage emitted (= import mode active) and reports nothing to do.
+    assert "Scan" in data["stages"]
+    assert data["stages"]["Scan"]["state"] == "will-skip"
+    assert data["scope"]["new_count"] == 0
+    assert data["scope"]["known_count"] == 0
+
+
+def test_api_pipeline_plan_missing_source_paths_uses_whole_workspace(app_and_db):
+    """The mirror of the empty-list case: when the client doesn't send
+    source_paths at all (e.g. collection or workspace mode), the API
+    must fall through to whole-workspace scope. No Scan entry is
+    emitted because the run isn't an import.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={
+            # no source_paths key at all
+            "skip_classify": True, "skip_extract_masks": True,
+            "skip_eye_keypoints": True, "skip_regroup": True,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "Scan" not in data["stages"]

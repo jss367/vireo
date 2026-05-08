@@ -38,7 +38,13 @@ class PipelinePlanParams:
     # the next pipeline run *will* process them — replacing the old
     # behaviour of describing the whole active workspace's state, which
     # made an import into a non-empty workspace render as "Already done".
-    source_paths: list = field(default_factory=list)
+    #
+    # ``None`` = field not provided (whole-workspace scope, the existing
+    # behaviour for non-import modes). ``[]`` = import mode with every
+    # preview file deselected — a genuine no-op run, which must NOT fall
+    # back to whole-workspace scope (that would re-introduce the very
+    # misleading "Already done" pills this code exists to prevent).
+    source_paths: list | None = None
 
 
 def _plural(n, s="s"):
@@ -573,6 +579,43 @@ def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg):
     }
 
 
+def _empty_import_plan():
+    """Per-stage plan when import mode is active but every preview file is
+    deselected. Every stage is honestly "no work" — not "Already done".
+
+    The pill copy must read as "this run will do nothing because you've
+    selected nothing", not as a status derived from the active workspace's
+    existing data.
+    """
+    no_op = {
+        "state": "will-skip",
+        "summary": "No files selected — nothing to do",
+        "detail": {"pending": 0, "eligible": 0},
+    }
+    return {
+        "stages": {
+            "Scan": {
+                "state": "will-skip",
+                "summary": "No files selected — nothing to import",
+                "detail": {
+                    "eligible": 0, "pending": 0,
+                    "new_photos": 0, "already_known": 0,
+                },
+            },
+            "Classify": dict(no_op),
+            "Extract": dict(no_op),
+            "EyeKeypoints": dict(no_op),
+            "Group": dict(no_op),
+        },
+        "scope": {
+            "collection_id": None,
+            "photo_count": 0,
+            "new_count": 0,
+            "known_count": 0,
+        },
+    }
+
+
 def _scan_plan(params, new_count, known_count):
     """Plan entry for Scan & Import — only emitted in import / new-images modes.
 
@@ -658,7 +701,14 @@ def compute_plan(db, params, db_path):
         if params.exclude_photo_ids:
             excl = set(params.exclude_photo_ids)
             photo_ids = {pid for pid in photo_ids if pid not in excl}
-    elif params.source_paths:
+    elif params.source_paths is not None:
+        if not params.source_paths:
+            # Import / new-images mode with every preview file deselected.
+            # The next pipeline run is a genuine no-op — every stage is
+            # "Nothing selected", not "Already done" derived from unrelated
+            # active-workspace state. Short-circuit so the per-stage
+            # queries don't drift back into whole-workspace summaries.
+            return _empty_import_plan()
         # Import / new-images mode. Split the file set into already-known
         # photo_ids (used as scope for real-status queries) and a count
         # of genuinely new files (fed into each stage as fresh work).
@@ -681,7 +731,7 @@ def compute_plan(db, params, db_path):
         "EyeKeypoints": eye,
         "Group": regroup,
     }
-    if params.source_paths:
+    if params.source_paths is not None:
         stages["Scan"] = _scan_plan(params, new_count, known_count)
 
     return {

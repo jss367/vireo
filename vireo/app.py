@@ -1309,15 +1309,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Flask's defaults while covering realistic multi-card imports.
         # Beyond it the plan endpoint refuses rather than truncate, since
         # a silently-truncated list would mis-classify late files as new.
-        source_paths = body.get("source_paths") or []
-        if not isinstance(source_paths, list):
-            return json_error("source_paths must be a list", 400)
-        if len(source_paths) > 50000:
-            return json_error(
-                f"source_paths too large ({len(source_paths)} > 50000)", 400,
-            )
-        if not all(isinstance(p, str) for p in source_paths):
-            return json_error("source_paths entries must be strings", 400)
+        #
+        # An explicit empty list is *not* the same as a missing key: the
+        # frontend sends ``[]`` when the user is in import mode and has
+        # deselected every preview file (a genuine no-op import). Falling
+        # back to whole-workspace scope in that case would re-introduce
+        # the misleading "Already done" pills this endpoint exists to
+        # prevent. So preserve None vs [] all the way through.
+        if "source_paths" in body:
+            source_paths = body.get("source_paths")
+            if not isinstance(source_paths, list):
+                return json_error("source_paths must be a list", 400)
+            if len(source_paths) > 50000:
+                return json_error(
+                    f"source_paths too large ({len(source_paths)} > 50000)", 400,
+                )
+            if not all(isinstance(p, str) for p in source_paths):
+                return json_error("source_paths entries must be strings", 400)
+        else:
+            source_paths = None
         params = PipelinePlanParams(
             collection_id=body.get("collection_id"),
             exclude_photo_ids=body.get("exclude_photo_ids") or [],
