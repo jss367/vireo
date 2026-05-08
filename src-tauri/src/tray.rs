@@ -178,20 +178,27 @@ fn hide_main_window(app: &AppHandle) {
 /// "flip to browser" for the rest of the session — most browsers focus an
 /// existing tab on the same origin rather than opening a duplicate.
 pub fn open_ui_in_browser(app: &AppHandle) {
-    let (port, was_window_mode) = match app.try_state::<TrayMode>() {
-        Some(mode) => (
-            mode.port,
-            !mode.browser_mode.swap(true, Ordering::Relaxed),
-        ),
+    let port = match app.try_state::<TrayMode>() {
+        Some(mode) => mode.port,
         None => {
             log::error!("TrayMode not initialised; cannot open browser");
             return;
         }
     };
     let url = format!("http://127.0.0.1:{}", port);
+    // Try the browser launch first. If it fails (no default browser,
+    // opener plugin permission denied, etc.) we leave the window-mode
+    // UI alone — flipping the flag and hiding the window before
+    // confirming a successful launch would lock the user out of the
+    // in-app UI on the failure path.
     if let Err(e) = app.opener().open_url(&url, None::<&str>) {
         log::error!("Failed to open browser at {}: {}", url, e);
+        return;
     }
+    let was_window_mode = match app.try_state::<TrayMode>() {
+        Some(mode) => !mode.browser_mode.swap(true, Ordering::Relaxed),
+        None => false,
+    };
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
