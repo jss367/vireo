@@ -2267,3 +2267,33 @@ def test_scan_continues_after_permission_denied(tmp_path):
         assert any(locked in p for p in denied)
     finally:
         os.chmod(locked, 0o755)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks required")
+def test_scan_skips_broken_symlinks(tmp_path):
+    """A dangling symlink with a supported extension must not abort the scan.
+
+    Regression: switching from Path.rglob (which used is_file() — False for
+    broken symlinks) to os.walk (which lists broken symlinks in `filenames`)
+    caused dangling *.jpg symlinks to be queued for processing. The pre-pass
+    then called image_path.stat() and raised FileNotFoundError, killing the
+    whole scan. os.walk-mode must filter non-files like the rglob path did.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['real.jpg']})
+    # Create a dangling symlink whose target does not exist.
+    os.symlink(
+        os.path.join(root, "missing-target.jpg"),
+        os.path.join(root, "broken.jpg"),
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    # Must not raise FileNotFoundError; must still scan the real file.
+    scan(root, db)
+
+    photos = {p['filename'] for p in db.get_photos(per_page=100)}
+    assert 'real.jpg' in photos
+    assert 'broken.jpg' not in photos

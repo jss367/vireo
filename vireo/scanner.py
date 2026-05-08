@@ -864,8 +864,18 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     if (ext in SUPPORTED_EXTENSIONS
                             and not name.startswith(".")):
                         full = os.path.join(dirpath, name)
-                        if skip_paths is None or full not in skip_paths:
-                            image_files.append(Path(full))
+                        if skip_paths is not None and full in skip_paths:
+                            continue
+                        # os.walk includes broken symlinks in `filenames`,
+                        # but the pre-pass below calls image_path.stat()
+                        # which would raise FileNotFoundError and abort
+                        # the whole scan. The previous Path.rglob path
+                        # filtered these via is_file(); preserve that.
+                        # os.path.isfile follows symlinks and returns
+                        # False (not raise) for dangling targets.
+                        if not os.path.isfile(full):
+                            continue
+                        image_files.append(Path(full))
         else:
             try:
                 entries = list(root_path.iterdir())
