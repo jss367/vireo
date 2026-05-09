@@ -3208,6 +3208,70 @@ class Database:
             "pending": row["pending"] or 0,
         }
 
+    def count_photos_missing_thumb(self, photo_ids=None):
+        """Return (eligible, pending) for the thumbnails substage.
+
+        eligible = photos in scope linked to the active workspace
+        pending  = eligible photos whose ``thumb_path IS NULL``
+
+        ``thumbnail_stage``'s per-photo gate is ``os.path.exists`` on
+        the cache file, but the photos.thumb_path column is the fast
+        proxy: app.py's startup backfill aligns the column with disk
+        reality (populates it for legacy rows that already have files,
+        clears it for rows whose file has since been deleted), so a
+        NULL value is a reliable "needs generating" signal.
+        """
+        ws = self._ws_id()
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT
+                  COUNT(*) AS eligible,
+                  SUM(CASE WHEN p.thumb_path IS NULL THEN 1 ELSE 0 END)
+                    AS pending
+                FROM photos p
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                WHERE 1=1{scope_sql}""",
+            (ws, *scope_params),
+        ).fetchone()
+        return {
+            "eligible": row["eligible"] or 0,
+            "pending": row["pending"] or 0,
+        }
+
+    def count_photos_missing_preview(self, size, photo_ids=None):
+        """Return (eligible, pending) for the previews substage at ``size``.
+
+        eligible = photos in scope linked to the active workspace
+        pending  = eligible photos with no ``preview_cache`` row at ``size``
+
+        ``previews_stage`` gates on ``os.path.exists`` of the cache
+        file, but writes (or refreshes) a ``preview_cache`` row for
+        every photo it processes — whether already-cached or freshly
+        generated. Eviction (``preview_cache_max_mb``) deletes the
+        file and the row together. So the table is a reliable index
+        for "preview present on disk at this size".
+        """
+        ws = self._ws_id()
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT
+                  COUNT(*) AS eligible,
+                  SUM(CASE WHEN pc.photo_id IS NULL THEN 1 ELSE 0 END)
+                    AS pending
+                FROM photos p
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                LEFT JOIN preview_cache pc
+                  ON pc.photo_id = p.id AND pc.size = ?
+                WHERE 1=1{scope_sql}""",
+            (ws, size, *scope_params),
+        ).fetchone()
+        return {
+            "eligible": row["eligible"] or 0,
+            "pending": row["pending"] or 0,
+        }
+
     def count_extract_stale(self, sam2_variant, photo_ids=None,
                              detector_confidence=None):
         """Count photos in scope that "look done" (``photos.mask_path``

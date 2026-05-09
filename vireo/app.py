@@ -1362,6 +1362,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             reclassify=bool(body.get("reclassify")),
             source_paths=source_paths,
             hash_duplicate_paths=hash_duplicate_paths,
+            preview_max_size=body.get("preview_max_size"),
         )
         db = _get_db()
         return jsonify(compute_plan(db, params, db_path))

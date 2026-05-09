@@ -894,7 +894,8 @@ body { padding-bottom: 36px; }
       <div class="setting-row">
         <div class="setting-item">
           <div class="setting-label">Preview quality</div>
-          <select class="setting-select" id="cfgPreviewSize">
+          <select class="setting-select" id="cfgPreviewSize"
+                  onchange="schedulePlanRefresh()">
             <option value="1280">1280px</option>
             <option value="1920" selected>1920px</option>
             <option value="2560">2560px</option>
@@ -3665,6 +3666,7 @@ function _setPill(suffix, state, text, stage) {
 // the plan summary text before/between runs and switches to live counts
 // during a run via the existing txtDetections/txtMasks ids.
 var _STAGE_SUMMARY_IDS = {
+  'Previews':     'summaryPreviews',
   'Classify':     'txtDetections',
   'Extract':      'txtMasks',
   'EyeKeypoints': 'txtEyeKeypoints',
@@ -3689,8 +3691,8 @@ function _stageStateFor(stage) {
     var cb = document.getElementById(stage.enable);
     if (cb && !cb.checked) return 'will-skip';
   }
-  // Stages with no plan entry (Scan, Previews) default to "will-run" —
-  // they always run when the pipeline starts.
+  // Stages with no plan entry (Scan in non-import modes) default to
+  // "will-run" — they always run when the pipeline starts.
   if (!_pipelinePlan) return 'will-run';
   var fromPlan = _pipelinePlan.stages && _pipelinePlan.stages[stage.suffix];
   if (!fromPlan) return 'will-run';
@@ -3711,7 +3713,7 @@ function _renderPlanSummary() {
   // and can scan the whole plan at a glance before pressing Start.
   var rows = [];
   _STAGES.forEach(function(stage) {
-    if (!_STAGE_SUMMARY_IDS[stage.suffix]) return;  // Scan/Previews
+    if (!_STAGE_SUMMARY_IDS[stage.suffix]) return;  // Scan
     var state = _stageStateFor(stage);
     var summary = _runningStages[stage.suffix] || _stageOutcomes[stage.suffix]
       ? ''  // live state takes the .stage-summary span; don't double up here
@@ -3838,6 +3840,17 @@ function _buildPlanBody() {
   body.skip_extract_masks  = !document.getElementById('enableExtract').checked;
   body.skip_eye_keypoints  = !document.getElementById('enableEyeKeypoints').checked;
   body.skip_regroup        = !document.getElementById('enableGroup').checked;
+
+  // Send the user's currently-selected preview tier so the Previews plan
+  // entry counts pending work against the right preview_cache size. A
+  // value of 0 ("Full resolution") tells the backend the previews
+  // substage will skip, so the plan summary doesn't promise N previews
+  // that will never be generated.
+  var prevSelect = document.getElementById('cfgPreviewSize');
+  if (prevSelect) {
+    var pms = parseInt(prevSelect.value, 10);
+    if (!isNaN(pms)) body.preview_max_size = pms;
+  }
 
   if (!body.skip_classify) {
     var modelIds = [];
