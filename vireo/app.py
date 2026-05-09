@@ -5188,12 +5188,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if cache_type == "previews" and preview_rows_removed:
             log.info("Removed %d preview_cache rows alongside files", preview_rows_removed)
         if cache_type == "thumbnails" and thumb_ids_cleared:
-            placeholders = ",".join("?" for _ in thumb_ids_cleared)
-            db.conn.execute(
-                f"UPDATE photos SET thumb_path = NULL "
-                f"WHERE id IN ({placeholders})",
-                thumb_ids_cleared,
-            )
+            # Chunk the IN-list under SQLite's SQLITE_MAX_VARIABLE_NUMBER cap
+            # (999 on older builds). The storage UI's "delete selected" can
+            # send thousands of files at once; a single statement with one
+            # bind per id would raise OperationalError after the files have
+            # already been removed, leaving photos.thumb_path out of sync
+            # with disk.
+            for chunk in _chunked(thumb_ids_cleared):
+                placeholders = ",".join("?" for _ in chunk)
+                db.conn.execute(
+                    f"UPDATE photos SET thumb_path = NULL "
+                    f"WHERE id IN ({placeholders})",
+                    chunk,
+                )
             db.conn.commit()
             log.info(
                 "Cleared photos.thumb_path for %d photos alongside files",

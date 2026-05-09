@@ -357,11 +357,28 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
 
     thumb_dir = thumb_cache_dir or os.path.join(vireo_dir, "thumbnails")
     thumb_path = os.path.join(thumb_dir, f"{photo_id}.jpg")
+    thumb_removed = False
     if os.path.exists(thumb_path):
         try:
             os.remove(thumb_path)
+            thumb_removed = True
         except OSError:
             log.debug("Could not delete stale thumbnail %s", thumb_path, exc_info=True)
+    else:
+        # File already gone but the column may still point at it (e.g.
+        # external cache wipe). Keep the column in sync so the pipeline
+        # planner's "thumb_path IS NULL" gate matches disk reality.
+        thumb_removed = True
+    if thumb_removed:
+        # Mirror the working_copy_path / preview_cache cleanup below: any
+        # path that drops the cached thumbnail file must also clear
+        # photos.thumb_path so count_photos_missing_thumb (used by the
+        # Thumbnails & Previews plan card) doesn't see a phantom "done"
+        # state for a row whose JPEG no longer exists on disk.
+        db.conn.execute(
+            "UPDATE photos SET thumb_path = NULL WHERE id = ?",
+            (photo_id,),
+        )
 
     wc_file = os.path.join(vireo_dir, "working", f"{photo_id}.jpg")
     if os.path.exists(wc_file):
