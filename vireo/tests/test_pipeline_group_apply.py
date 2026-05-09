@@ -227,3 +227,29 @@ def test_state_endpoint_handles_unknown_species(app_and_db):
     assert data['species_kid'] is None
     for pid in pids:
         assert data['photos'][str(pid)]['has_species_keyword'] is False
+
+
+def test_state_endpoint_ignores_homonym_non_species_keyword(app_and_db):
+    """A non-species keyword (e.g. an 'individual' tag) sharing the species name
+    must NOT be reported as the species keyword. Otherwise has_species_keyword
+    and the Apply-label preview would lie about what apply will write."""
+    app, db = app_and_db
+    pids = _photo_ids(db)
+    pid = pids[0]
+
+    # Pre-existing 'individual' tag named like the species we're about to type.
+    individual_kid = db.add_keyword('Robin', kw_type='individual')
+    db.tag_photo(pid, individual_kid)
+
+    client = app.test_client()
+    resp = client.post('/api/pipeline/group/state', json={
+        'photo_ids': [pid],
+        'species': 'Robin',
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    # The individual tag is not the species keyword. Either no species kid is
+    # reported, or it's a different id from the individual.
+    assert data['species_kid'] != individual_kid
+    assert data['photos'][str(pid)]['has_species_keyword'] is False

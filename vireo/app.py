@@ -11056,8 +11056,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         species_kid = None
         if species:
+            # Read-only mirror of the species-aware lookup in db.add_keyword(
+            # species, is_species=True): match top-level taxonomy/general rows
+            # case-insensitively, prefer taxonomy. Excludes homonym rows of
+            # other deliberate types (individual, location, genre) so a person
+            # tag named like a species doesn't get reported as the species
+            # keyword for has_species_keyword / Apply-label purposes.
             row = db.conn.execute(
-                "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE LIMIT 1",
+                "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                "AND parent_id IS NULL AND type IN ('taxonomy', 'general') "
+                "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
                 (species,),
             ).fetchone()
             if row:

@@ -2762,7 +2762,8 @@ var grmState = {
   picks: new Set(),
   rejects: new Set(),
   removed: new Set(),
-  selected: null      // photo id
+  selected: null,     // photo id
+  sessionId: 0        // bumped on each openGroupReview; used to drop stale fetches
 };
 
 function findBurstForPhoto(photoId) {
@@ -2792,6 +2793,9 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
 
   var items = photoIds.map(function(pid) { return photoMap[pid]; }).filter(Boolean);
 
+  // Bump the session id so any in-flight /group/state fetch from a previous
+  // openGroupReview call lands as stale and gets ignored when it resolves.
+  var sessionId = (grmState.sessionId || 0) + 1;
   grmState = {
     encIdx: encIdx,
     burstIdx: burstIdx,
@@ -2804,7 +2808,8 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     // has_species_keyword}. This is the live DB snapshot the modal opened
     // with, used to (a) render "from DB" markers and (b) compute the
     // change-only Apply button label.
-    dbState: {}
+    dbState: {},
+    sessionId: sessionId
   };
   _grmLoupeLocked = false;
   _grmZoomMultiplier = 1;
@@ -2837,8 +2842,12 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ photo_ids: items.map(function(p) { return p.id; }), species: initialSpecies }),
   }, { toast: false }).then(function(data) {
+    // Drop the response if a newer openGroupReview has fired since: seeding
+    // burst A's DB state into burst B's modal would mis-flag photos on Apply.
+    if (grmState.sessionId !== sessionId) return;
     grmSeedFromDbState(data && data.photos ? data.photos : {}, items, selectPhotoId);
   }).catch(function() {
+    if (grmState.sessionId !== sessionId) return;
     // Network/error fallback: seed from heuristic only.
     grmSeedFromDbState({}, items, selectPhotoId);
   });
