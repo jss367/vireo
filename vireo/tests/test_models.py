@@ -96,6 +96,54 @@ def test_known_model_ids_unique():
     assert len(ids) == len(set(ids))
 
 
+def test_known_models_declare_label_list_support():
+    """Every KNOWN_MODELS entry must declare supports_label_lists (a hard
+    capability flag) and label_list_tag (a short human-readable note shown
+    next to the model name on the pipeline page).
+
+    BioCLIP variants are zero-shot and accept a custom label list at
+    inference time; timm classifiers (iNat21 EVA-02) have a fixed softmax
+    head and ignore label lists entirely. The pipeline UI uses these
+    fields to grey out the labels picker when no selected model uses it
+    and to render an honest capability tag next to each model name.
+    """
+    from models import KNOWN_MODELS
+
+    by_id = {m["id"]: m for m in KNOWN_MODELS}
+    for m in KNOWN_MODELS:
+        assert "supports_label_lists" in m, (
+            f"{m['id']} missing supports_label_lists"
+        )
+        assert isinstance(m["supports_label_lists"], bool)
+        assert "label_list_tag" in m, f"{m['id']} missing label_list_tag"
+        assert isinstance(m["label_list_tag"], str) and m["label_list_tag"]
+
+    # BioCLIP family supports label lists.
+    for mid in ("bioclip-vit-b-16", "bioclip-2", "bioclip-2.5-vith14"):
+        assert by_id[mid]["supports_label_lists"] is True, (
+            f"{mid} must support label lists (it's zero-shot CLIP)"
+        )
+
+    # iNat21 has a fixed 10K-class head; lists do not apply.
+    assert by_id["timm-inat21-eva02-l"]["supports_label_lists"] is False
+
+
+def test_get_models_propagates_label_list_capability(tmp_path, monkeypatch):
+    """get_models() must propagate supports_label_lists and label_list_tag
+    to every returned entry so the /api/models endpoint can expose them
+    to the pipeline page UI."""
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    by_id = {m["id"]: m for m in models.get_models()}
+    assert by_id["bioclip-vit-b-16"]["supports_label_lists"] is True
+    assert by_id["timm-inat21-eva02-l"]["supports_label_lists"] is False
+    assert by_id["timm-inat21-eva02-l"]["label_list_tag"]
+    assert by_id["bioclip-vit-b-16"]["label_list_tag"]
+
+
 # ---------------------------------------------------------------------------
 # get_models
 # ---------------------------------------------------------------------------
