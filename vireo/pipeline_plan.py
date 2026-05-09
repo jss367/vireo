@@ -669,12 +669,22 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
     preview_pending_total = (
         preview_pending + new_count if not previews_skipped else 0
     )
-    # Photo-level "pending" for the pill: thumbs are size-independent so a
-    # photo missing a thumb is also (almost always) missing the preview at
-    # any size — i.e. ``thumb_pending ⊆ preview_pending``. The looser of
-    # the two is the upper bound on photos the next run will touch, and
-    # it matches the pill's photo-count framing ("Resume (N left)").
-    photos_pending = max(thumb_pending_total, preview_pending_total)
+    # Photo-level "pending" for the pill: a photo missing only a thumb and
+    # a different photo missing only a preview each count once toward "next
+    # run will touch N photos." ``max(thumb_pending, preview_pending)``
+    # undercounts whenever the two missing-sets aren't strict subsets of
+    # each other (e.g. one photo just had its preview evicted but kept its
+    # thumb, another only ever had a thumb generated). Use the SQL union
+    # for the existing-scope contribution; new imports always need both
+    # substages, so they add 1 photo each regardless of substage split.
+    if previews_skipped:
+        existing_pending = thumb_pending
+    else:
+        union = db.count_photos_missing_thumb_or_preview(
+            preview_size, photo_ids,
+        )
+        existing_pending = union["pending"]
+    photos_pending = existing_pending + new_count
     return {
         "state": "will-run",
         "summary": summary,

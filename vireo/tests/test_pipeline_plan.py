@@ -917,6 +917,81 @@ def test_count_photos_missing_preview_size_specific(tmp_path):
     }
 
 
+def test_count_photos_missing_thumb_or_preview_union(tmp_path):
+    """Union helper counts a photo once whether it's missing its thumb,
+    its preview, or both. ``max(thumb_pending, preview_pending)``
+    undercounts whenever the missing-sets aren't strict subsets — this
+    pins the union behaviour the Thumbnails & Previews pill needs.
+    """
+    db, folder_id = _make_db(tmp_path)
+    pid_thumb_only_missing = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    pid_preview_only_missing = db.add_photo(
+        folder_id=folder_id, filename="b.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    pid_both_done = db.add_photo(
+        folder_id=folder_id, filename="c.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    pid_both_missing = db.add_photo(
+        folder_id=folder_id, filename="d.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    # b and c have a thumb on disk; a and d do not.
+    db.conn.execute(
+        "UPDATE photos SET thumb_path=filename WHERE id IN (?, ?)",
+        (pid_preview_only_missing, pid_both_done),
+    )
+    db.conn.commit()
+    # a and c have a 1920px preview cached; b and d do not.
+    db.preview_cache_insert(pid_thumb_only_missing, 1920, 100)
+    db.preview_cache_insert(pid_both_done, 1920, 100)
+
+    # max(thumb_pending=2, preview_pending=2) = 2 — but the real union is
+    # {a, b, d} = 3 photos the next run will touch.
+    assert db.count_photos_missing_thumb()["pending"] == 2
+    assert db.count_photos_missing_preview(1920)["pending"] == 2
+    assert db.count_photos_missing_thumb_or_preview(1920) == {
+        "eligible": 4, "pending": 3,
+    }
+
+
+def test_previews_plan_pending_uses_union_not_max(tmp_path):
+    """compute_plan must surface the union pending count, not the max of
+    substages. Two photos — one missing only the thumb, one missing only
+    the 1920px preview — should report ``pending=2``, not 1.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid_thumb_only_missing = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    pid_preview_only_missing = db.add_photo(
+        folder_id=folder_id, filename="b.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET thumb_path=filename WHERE id=?",
+        (pid_preview_only_missing,),
+    )
+    db.conn.commit()
+    db.preview_cache_insert(pid_thumb_only_missing, 1920, 100)
+
+    plan = compute_plan(
+        db, _params(preview_max_size=1920), str(tmp_path / "test.db"),
+    )
+    previews = plan["stages"]["Previews"]
+    assert previews["state"] == "will-run"
+    assert previews["detail"]["thumb_pending"] == 1
+    assert previews["detail"]["preview_pending"] == 1
+    # Both photos genuinely have work, so pending must be 2 — not 1.
+    assert previews["detail"]["pending"] == 2
+
+
 # -------- compute_plan: previews --------
 
 def test_previews_plan_done_prior_when_all_cached(tmp_path):

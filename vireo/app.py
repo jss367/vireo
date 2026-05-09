@@ -5109,6 +5109,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if os.path.isdir(thumb_dir):
                 shutil.rmtree(thumb_dir)
                 log.info("Thumbnail cache cleared")
+            # Keep photos.thumb_path in sync with disk so the dashboard
+            # coverage card and the pipeline plan don't see phantoms —
+            # the column is the fast proxy that gates "thumbnail done"
+            # in count_photos_missing_thumb, while the actual stage
+            # gates on os.path.exists. Leaving thumb_path populated
+            # after wiping the cache would make the Previews pill
+            # report "Already done" even though the next run would
+            # regenerate every thumbnail.
+            db = _get_db()
+            db.conn.execute(
+                "UPDATE photos SET thumb_path = NULL "
+                "WHERE thumb_path IS NOT NULL"
+            )
+            db.conn.commit()
             return jsonify({"ok": True})
         elif cache_type == "embeddings":
             from classifier import CACHE_DIR
@@ -5146,9 +5160,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # via this endpoint (stats page). Matches {pid}_{size}.jpg only;
         # legacy {pid}.jpg files have no tracking row to remove.
         preview_rows_removed = 0
-        if cache_type == "previews":
+        # Keep photos.thumb_path in sync when individual thumbnail files
+        # are removed — same reason as the storage/clear path: the column
+        # is the planner's fast proxy and would otherwise report phantoms.
+        thumb_ids_cleared = []
+        if cache_type in ("previews", "thumbnails"):
             import re
             sized_pat = re.compile(r"^(\d+)_(\d+)\.jpg$")
+            thumb_pat = re.compile(r"^(\d+)\.jpg$")
             db = _get_db()
         for fname in filenames:
             # Prevent path traversal
@@ -5162,8 +5181,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     if m:
                         db.preview_cache_delete(int(m.group(1)), int(m.group(2)))
                         preview_rows_removed += 1
+                elif cache_type == "thumbnails":
+                    m = thumb_pat.match(safe)
+                    if m:
+                        thumb_ids_cleared.append(int(m.group(1)))
         if cache_type == "previews" and preview_rows_removed:
             log.info("Removed %d preview_cache rows alongside files", preview_rows_removed)
+        if cache_type == "thumbnails" and thumb_ids_cleared:
+            placeholders = ",".join("?" for _ in thumb_ids_cleared)
+            db.conn.execute(
+                f"UPDATE photos SET thumb_path = NULL "
+                f"WHERE id IN ({placeholders})",
+                thumb_ids_cleared,
+            )
+            db.conn.commit()
+            log.info(
+                "Cleared photos.thumb_path for %d photos alongside files",
+                len(thumb_ids_cleared),
+            )
         log.info("Deleted %d files from %s cache", deleted, cache_type)
         return jsonify({"ok": True, "deleted": deleted})
 

@@ -1647,6 +1647,62 @@ def test_storage_delete_files_syncs_preview_cache(client_with_photo):
     assert db.preview_cache_get(photo_id, 1920) is None
 
 
+def test_storage_clear_thumbnails_resets_thumb_path(client_with_photo):
+    """/api/storage/clear type=thumbnails NULLs photos.thumb_path so the
+    pipeline plan's count_photos_missing_thumb doesn't report phantoms.
+
+    Without this, the Thumbnails & Previews pill renders "Already done"
+    after a cache wipe even though the next run regenerates everything.
+    """
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (f"{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    assert db.count_photos_missing_thumb()["pending"] == 0
+
+    resp = client.post("/api/storage/clear", json={"type": "thumbnails"})
+    assert resp.status_code == 200
+    assert db.count_photos_missing_thumb()["pending"] == 1
+    row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id = ?", (photo_id,),
+    ).fetchone()
+    assert row["thumb_path"] is None
+
+
+def test_storage_delete_files_syncs_thumb_path(client_with_photo):
+    """/api/storage/delete-files type=thumbnails NULLs photos.thumb_path
+    for the photos whose thumb files were removed."""
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    thumb_dir = app.config["THUMB_CACHE_DIR"]
+    thumb_file = os.path.join(thumb_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (10, 10)).save(thumb_file, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (thumb_file, photo_id),
+    )
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/storage/delete-files",
+        json={"type": "thumbnails", "files": [f"{photo_id}.jpg"]},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted"] == 1
+    row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id = ?", (photo_id,),
+    ).fetchone()
+    assert row["thumb_path"] is None
+
+
 def test_preview_adoption_enforces_quota(client_with_photo, monkeypatch):
     """Lazily-adopting a legacy on-disk preview file still runs eviction,
     so with preview_cache_max_mb=0 the adopted file is drained like a

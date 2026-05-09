@@ -3272,6 +3272,39 @@ class Database:
             "pending": row["pending"] or 0,
         }
 
+    def count_photos_missing_thumb_or_preview(self, size, photo_ids=None):
+        """Return (eligible, pending) where ``pending`` counts photos
+        missing a thumbnail OR a preview at ``size`` (or both) — i.e.
+        the union of the two substages' work sets.
+
+        The Thumbnails & Previews card needs the photo-level union for
+        its "Resume (N left)" framing: a photo missing only a thumb and
+        a different photo missing only a preview each represent one
+        photo the next pipeline run will touch. Falling back to
+        ``max(thumb_pending, preview_pending)`` undercounts whenever
+        the two missing-sets aren't strict subsets of each other.
+        """
+        ws = self._ws_id()
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT
+                  COUNT(*) AS eligible,
+                  SUM(CASE
+                        WHEN p.thumb_path IS NULL OR pc.photo_id IS NULL
+                        THEN 1 ELSE 0 END) AS pending
+                FROM photos p
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                LEFT JOIN preview_cache pc
+                  ON pc.photo_id = p.id AND pc.size = ?
+                WHERE 1=1{scope_sql}""",
+            (ws, size, *scope_params),
+        ).fetchone()
+        return {
+            "eligible": row["eligible"] or 0,
+            "pending": row["pending"] or 0,
+        }
+
     def count_extract_stale(self, sam2_variant, photo_ids=None,
                              detector_confidence=None):
         """Count photos in scope that "look done" (``photos.mask_path``
