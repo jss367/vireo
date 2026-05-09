@@ -3092,17 +3092,13 @@ function grmCardCoverFit(card) {
   return Math.max(GRM_CARD_W / W, GRM_CARD_H / H);
 }
 
-// Effective max for `_grmZoomMultiplier`. Multiplier=1 = cover-fit (today's
-// default visual). To reach 1:1 source-to-CSS we need multiplier ~ 1/coverFit
-// (e.g. ~30 for a 5400px-wide image). To reach 1:1 source-to-DEVICE pixels
-// (true pixel-peep on a Retina display), multiplier ~ DPR/coverFit.
+// Effective max for `_grmZoomMultiplier`. Since the <img> is laid out at
+// natural source size, the multiplier IS the source-to-CSS pixel ratio:
+// multiplier=1 → 1:1 source-to-CSS, multiplier=DPR → 1:1 source-to-DEVICE
+// (true pixel-peep on a Retina display). Allow a little headroom past that.
 function grmMaxZoomMultiplier() {
   var dpr = window.devicePixelRatio || 1;
-  var card = document.querySelector('#grmOverlay .grm-card');
-  if (!card) return 30 * dpr;
-  var coverFit = grmCardCoverFit(card);
-  if (!coverFit) return 30 * dpr;
-  return Math.max(3, dpr / coverFit);
+  return Math.max(3, dpr * 2);
 }
 
 // Compute the transform for one card. Returns the CSS transform string and
@@ -3112,11 +3108,13 @@ function _grmComputeCardTransform(card) {
   var H = parseFloat(card.dataset.natH) || GRM_CARD_H;
   var coverFit = Math.max(GRM_CARD_W / W, GRM_CARD_H / H);
   var hovering = _grmLastHoverX != null;
-  // Scale: cover-fit when not hovering; cover-fit * multiplier when hovering.
-  // Floor at coverFit so a fractional multiplier never reveals card background.
+  // The <img> is laid out at natural source-pixel size, so transform `scale`
+  // IS the source-to-CSS pixel ratio. Cover-fit when not hovering; multiplier
+  // (1 = true 1:1) when hovering, floored at coverFit so a sub-1 multiplier
+  // never reveals card background.
   var s = coverFit;
   if (hovering) {
-    s = Math.max(coverFit, coverFit * _grmZoomMultiplier);
+    s = Math.max(coverFit, _grmZoomMultiplier);
   }
   // Hover-anchor: cursor at fractional position f of the loupe maps to the
   // same fractional position in the source image. Place pixel (f*W, f*H) of
@@ -3281,12 +3279,12 @@ function grmCardMouseMove(e) {
   // pre-scale offset units that, when re-scaled, follow the cursor 1:1.
   // Must mirror _grmComputeCardTransform's hover/non-hover branch: after a
   // zoom-in followed by mouseleave (grmLoupeReset clears _grmLastHoverX) the
-  // card is displayed at cover-fit while _grmZoomMultiplier stays >1, so a
-  // naive `coverFit * multiplier` denominator would shrink drag motion by
-  // that factor and pans would jump when hover resumes.
+  // card is displayed at cover-fit while _grmZoomMultiplier stays at its
+  // hovered value, so the denominator must match what's actually on screen
+  // or pans would jump when hover resumes.
   var coverFit = grmCardCoverFit(_grmDragging.card);
   var hovering = _grmLastHoverX != null;
-  var scale = hovering ? Math.max(coverFit, coverFit * _grmZoomMultiplier) : coverFit;
+  var scale = hovering ? Math.max(coverFit, _grmZoomMultiplier) : coverFit;
   var z = scale > 0.01 ? scale : 1;
   var newTx = _grmDragging.origTx + dx / z;
   var newTy = _grmDragging.origTy + dy / z;
