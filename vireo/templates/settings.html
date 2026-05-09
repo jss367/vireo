@@ -1476,6 +1476,13 @@ function saveConfig() {
           inat_token: document.getElementById('cfgInatToken').value.trim(),
           google_maps_api_key: document.getElementById('cfgGoogleMapsApiKey').value.trim(),
           external_editors: collectExternalEditors(),
+          // Always clear the legacy single-editor field when we save the new
+          // list. Otherwise a user who once had `external_editor` set and now
+          // removes every editor from the list can't get back to OS-default
+          // behavior — `cfg.get_editors()` falls back to the legacy field
+          // whenever the new list is empty, so the old value keeps haunting
+          // them. Saving from the new UI is the migration completion step.
+          external_editor: '',
           darktable_bin: document.getElementById('cfgDarktableBin').value.trim(),
           darktable_style: document.getElementById('cfgDarktableStyle').value.trim(),
           darktable_output_format: document.getElementById('cfgDarktableFormat').value,

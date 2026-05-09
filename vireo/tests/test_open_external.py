@@ -375,6 +375,44 @@ def test_open_external_legacy_editor_synthesizes_when_list_empty(app_and_db, mon
     assert launched[0][1][0] == '/usr/bin/legacy'
 
 
+def test_clearing_editor_list_does_not_resurrect_legacy_field(app_and_db, monkeypatch):
+    """Saving an empty external_editors list must let the user reach OS default.
+
+    Without this, a user who had `external_editor` set in the old single-string
+    config, and then removes every editor from the new list in Settings, would
+    keep getting the legacy value back via cfg.get_editors() — the new list is
+    empty, so it synthesizes from the legacy field. The settings UI guards
+    against this by clearing `external_editor` whenever it saves the new list.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+
+    # Pre-existing legacy value (simulates a config that pre-dates this PR).
+    import config as cfg
+    cfg.set("external_editor", "/usr/bin/legacy")
+
+    # The settings UI's saveConfig posts both keys together — empty list and
+    # empty legacy field — to complete the migration.
+    client.post('/api/config',
+                data=json.dumps({
+                    "external_editors": [],
+                    "external_editor": "",
+                }),
+                content_type='application/json')
+
+    monkeypatch.setattr(sys, 'platform', 'darwin')
+    launched = _patch_launchers(monkeypatch)
+
+    resp = client.post('/api/photos/open-external',
+                       data=json.dumps({"photo_ids": [1]}),
+                       content_type='application/json')
+    assert resp.status_code == 200
+    # Should be the OS default opener (`open <file>`), not the legacy editor.
+    assert launched[0][1][0] == 'open'
+    assert '-a' not in launched[0][1]
+    assert '/usr/bin/legacy' not in launched[0][1]
+
+
 def test_get_editors_filters_malformed_entries(app_and_db):
     """cfg.get_editors() drops dicts missing a path or with non-string fields."""
     import config as cfg
