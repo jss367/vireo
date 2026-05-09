@@ -43,6 +43,8 @@ KNOWN_MODELS = [
         "size_mb": 400,
         "architecture": "ViT-B/16",
         "parameters": "150M",
+        "supports_label_lists": True,
+        "label_list_tag": "uses label list",
     },
     {
         "id": "bioclip-2",
@@ -65,6 +67,8 @@ KNOWN_MODELS = [
         "size_mb": 1500,
         "architecture": "ViT-L/14",
         "parameters": "428M",
+        "supports_label_lists": True,
+        "label_list_tag": "uses label list",
     },
     {
         "id": "bioclip-2.5-vith14",
@@ -85,6 +89,8 @@ KNOWN_MODELS = [
         "size_mb": 3900,
         "architecture": "ViT-H/14",
         "parameters": "986M",
+        "supports_label_lists": True,
+        "label_list_tag": "uses label list",
     },
     {
         "id": "timm-inat21-eva02-l",
@@ -106,6 +112,8 @@ KNOWN_MODELS = [
         "size_mb": 1200,
         "architecture": "EVA-02 Large",
         "parameters": "304M",
+        "supports_label_lists": False,
+        "label_list_tag": "fixed 10K species",
     },
 ]
 
@@ -246,6 +254,8 @@ def get_models():
                     "weights_path": path,
                     "downloaded": downloaded,
                     "state": "ok" if downloaded else "missing",
+                    "supports_label_lists": True,
+                    "label_list_tag": "uses label list",
                 }
             )
 
