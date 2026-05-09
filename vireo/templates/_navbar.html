@@ -4385,6 +4385,46 @@ window.buildOpenInEditorMenuItems = function(photoIds) {
   }
 })();
 
+/* ---------- Develop with darktable ----------
+ * Lifted out of browse.html so review.html (burst-review modal) and any
+ * other surface can dispatch a darktable develop job for an arbitrary list
+ * of photo IDs. Checks availability, confirms, posts the job, and streams
+ * progress via SSE.
+ */
+async function developPhotos(photoIds) {
+  if (!photoIds || !photoIds.length) return;
+  try {
+    var status = await safeFetch('/api/darktable/status', {}, { toast: false });
+    if (!status.available) {
+      showToast('darktable-cli not found. Configure it in Settings.');
+      return;
+    }
+  } catch(_) {
+    showToast('Could not check darktable availability.');
+    return;
+  }
+  if (!confirm('Develop ' + photoIds.length + ' photo(s) with darktable?')) return;
+  try {
+    var data = await safeFetch('/api/jobs/develop', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: photoIds}),
+    });
+    showToast('Developing ' + photoIds.length + ' photo(s)...');
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(prog) {
+        showToast('Developing: ' + prog.current + '/' + prog.total + ' — ' + (prog.current_file || ''));
+      },
+      onComplete: function(result) {
+        showToast('Development complete: ' + (result.developed || 0) + ' developed, ' + (result.errors || 0) + ' errors');
+      },
+      onError: function() {}
+    });
+  } catch(e) {
+    showToast(e.message || 'Error starting develop job');
+  }
+}
+
 /* ---------- Safe EventSource ---------- */
 function safeEventSource(url, callbacks) {
   callbacks = callbacks || {};
