@@ -1652,6 +1652,56 @@ def test_rescan_invalidates_stale_thumbnail_when_file_content_changes(tmp_path):
     )
 
 
+def test_rescan_clears_thumb_path_column_when_content_changes(tmp_path):
+    """``photos.thumb_path`` must be NULLed alongside the on-disk thumbnail
+    when ``_invalidate_derived_caches`` runs, mirroring the
+    ``working_copy_path`` and ``preview_cache`` cleanup. The column is the
+    Thumbnails & Previews plan card's fast proxy
+    (``count_photos_missing_thumb``); leaving it populated after the JPEG
+    is gone re-introduces the phantom "Already done" pill the f16722b /
+    storage-clear fix already eliminated for the storage-UI path.
+    """
+    from db import Database
+    from scanner import scan
+    from thumbnails import generate_thumbnail
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "photo.jpg")
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    cache_dir = vireo_dir / "thumbnails"
+    cache_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+
+    # Generate a thumbnail and stamp the column the way thumbnail_stage does.
+    generate_thumbnail(photo_id, img_path, str(cache_dir))
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (f"{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+
+    # Replace the source so the next incremental scan invalidates derived caches.
+    time.sleep(0.05)
+    Image.new("RGB", (800, 600), color=(0, 0, 255)).save(img_path, "JPEG")
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id = ?", (photo_id,),
+    ).fetchone()
+    assert row["thumb_path"] is None, (
+        "Scanner removed the thumbnail file but left photos.thumb_path "
+        "populated; the pipeline-plan substage will report 'Already done' "
+        "for work that the next pipeline run actually performs."
+    )
+
+
 def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_path):
     """preview_cache LRU rows must be removed alongside preview files when
     a photo's content changes, or total_bytes accounting reports ghost
