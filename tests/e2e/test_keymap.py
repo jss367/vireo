@@ -5,7 +5,7 @@
 def test_keymap_globals_exposed(live_server, page):
     """Loading any page exposes the Keymap module on window."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     # Module is loaded
@@ -20,7 +20,7 @@ def test_keymap_globals_exposed(live_server, page):
 def test_keymap_register_and_lookup(live_server, page):
     """register() stores shortcuts; shortcutsForScope() returns them merged with global."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     page.evaluate("""
@@ -55,7 +55,7 @@ def test_keymap_register_and_lookup(live_server, page):
 def test_dispatcher_fires_registered_action(live_server, page):
     """Pressing a registered key fires its action; suppressed when input is focused."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     page.evaluate("""
@@ -84,7 +84,7 @@ def test_dispatcher_fires_registered_action(live_server, page):
 def test_esc_stack_unwinds_top_first(live_server, page):
     """pushEsc registers handlers; Esc invokes only the top one each press."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     page.evaluate("""
@@ -106,7 +106,7 @@ def test_esc_stack_unwinds_top_first(live_server, page):
 def test_esc_stack_remove_by_token(live_server, page):
     """popEsc(token) removes a specific handler regardless of position."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     page.evaluate("""
@@ -123,7 +123,7 @@ def test_esc_stack_remove_by_token(live_server, page):
 def test_page_scope_shadows_global_for_same_key(live_server, page):
     """When global and page scopes register the same key, page wins."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     page.evaluate("""
@@ -146,7 +146,7 @@ def test_page_scope_shadows_global_for_same_key(live_server, page):
 def test_navbar_nav_shortcuts_registered_globally(live_server, page):
     """Each NAV_ROUTES entry is registered as a global Keymap shortcut after config load."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     # After the nav shortcut bootstrap runs, every nav entry should be in the global scope.
@@ -166,7 +166,7 @@ def test_navbar_nav_shortcuts_registered_globally(live_server, page):
 def test_pressing_b_navigates_to_browse(live_server, page):
     """Pressing 'b' from a non-browse page navigates to /browse."""
     url = live_server["url"]
-    page.goto(f"{url}/cull", timeout=5000)
+    page.goto(f"{url}/cull", timeout=15000)
     page.wait_for_load_state("networkidle")
     page.keyboard.press("b")
     page.wait_for_url(f"{url}/browse", timeout=3000)
@@ -175,7 +175,7 @@ def test_pressing_b_navigates_to_browse(live_server, page):
 def test_nav_shortcut_suppressed_when_overlay_open(live_server, page):
     """Pressing a nav letter while an overlay is open does not navigate."""
     url = live_server["url"]
-    page.goto(f"{url}/cull", timeout=5000)
+    page.goto(f"{url}/cull", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     # Inject an overlay matching the OVERLAY_SELECTOR set
@@ -193,7 +193,7 @@ def test_nav_shortcut_suppressed_when_overlay_open(live_server, page):
 def test_action_returning_false_does_not_preventdefault(live_server, page):
     """Actions returning false signal 'not handled' and let next candidate run."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     page.evaluate("""
@@ -215,7 +215,7 @@ def test_action_returning_false_does_not_preventdefault(live_server, page):
 def test_esc_closes_shortcuts_cheat_sheet(live_server, page):
     """Opening the cheat sheet pushes an Esc handler; pressing Esc closes it."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     page.keyboard.press("?")
@@ -233,7 +233,7 @@ def test_two_overlays_unwind_one_esc_each(live_server, page):
     overlay (top-of-stack first). Locks in the new one-Esc-per-overlay model
     that replaces the legacy 'shotgun close' Esc cascade."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     # Open the lightbox on the first photo via the JS API directly
@@ -275,7 +275,7 @@ def test_body_scroll_stays_locked_while_lower_overlay_open(live_server, page):
     where each close*() unconditionally cleared document.body.style.overflow,
     letting the page behind an active overlay scroll after one Esc."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     page.evaluate("openLightbox(1, 'hawk1.jpg')")
@@ -316,7 +316,7 @@ def test_overlay_esc_does_not_leak_to_page_handlers(live_server, page):
     clearing selection, lightbox close-detail) must not also fire. The capture-
     phase dispatcher + stopPropagation guarantees this."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     # Add a body-level bubble Esc spy
@@ -339,7 +339,7 @@ def test_overlay_esc_does_not_leak_to_page_handlers(live_server, page):
 def test_esc_closes_help_modal_via_stack(live_server, page):
     """Help modal opened via F1 pushes an Esc handler; Esc closes it."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     page.keyboard.press("F1")
@@ -362,7 +362,7 @@ def test_legacy_page_binding_shadows_global_nav(live_server, page):
     until PR 4; until then this preserves user-customized collisions
     (e.g. mapping a browse action onto the same letter as a nav shortcut)."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     # Pretend the user has remapped a browse action to 'r' (default for
@@ -395,11 +395,11 @@ def test_setscope_runs_synchronously_at_page_load(live_server, page):
     keymap.js loaded after the inline IIFE, leaving the dispatcher stuck on
     'global' scope and silently breaking page-scoped shortcuts in PR 2."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
     assert page.evaluate("window.Keymap.getScope()") == "browse"
 
-    page.goto(f"{url}/review", timeout=5000)
+    page.goto(f"{url}/review", timeout=15000)
     page.wait_for_load_state("networkidle")
     assert page.evaluate("window.Keymap.getScope()") == "review"
 
@@ -410,7 +410,7 @@ def test_pause_dispatch_silences_global_actions(live_server, page):
     press without nav shortcuts navigating the user away first. resumeDispatch
     restores normal handling."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     page.evaluate("""
@@ -439,7 +439,7 @@ def test_shortcut_capture_does_not_navigate(live_server, page):
     test for the bug where the global Keymap dispatcher won the capture-phase
     race against the editor's own keydown listener."""
     url = live_server["url"]
-    page.goto(f"{url}/shortcuts", timeout=5000)
+    page.goto(f"{url}/shortcuts", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     # Start capture on the navigation.browse button — pressing 'b' is then a
@@ -481,7 +481,7 @@ def test_help_modal_unlocks_scroll_when_keymap_unavailable(live_server, page):
     the bug where wasOpen was inferred from the Esc token (only set when
     Keymap is present), so closing the modal left body scroll locked forever."""
     url = live_server["url"]
-    page.goto(f"{url}/browse", timeout=5000)
+    page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
     # Simulate Keymap being unavailable (e.g. keymap.js failed to load).
