@@ -877,7 +877,7 @@ body {
       <button onclick="batchAddKeyword()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
       <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
-      <button onclick="openInEditorBatch()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Open in Editor</button>
+      <button onclick="openInEditorBatch(event)" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Open in Editor</button>
       <button onclick="batchSubmitInat()" style="background:var(--bg-tertiary);color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
       <button onclick="openExportModal()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Export</button>
       <button onclick="batchDelete()" style="background:var(--danger);color:white;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;" title="Delete selected photos">Delete</button>
@@ -1044,7 +1044,7 @@ body {
         <button onclick="openPipeline(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
           Inspect Pipeline
         </button>
-        <button onclick="openInEditor([window._detailPhotoId])" style="flex:1;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+        <button onclick="openInEditorWithPicker([window._detailPhotoId], event)" style="flex:1;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
           Open in Editor
         </button>
       </div>
@@ -3509,13 +3509,13 @@ async function developSelected() {
   }
 }
 
-function openInEditorBatch() {
+function openInEditorBatch(event) {
   var ids = getActiveSelection();
   if (!ids.length) return;
   if (ids.length > 20) {
     if (!confirm('Open ' + ids.length + ' photos in editor?')) return;
   }
-  openInEditor(ids);
+  openInEditorWithPicker(ids, event);
 }
 
 /* ---------- Right-click context menu on grid cards ---------- */
@@ -3657,8 +3657,7 @@ function buildPhotoContextMenu(photoIds) {
     { separator: true },
     { label: 'Find Similar', disabled: !one, disabledHint: hint,
       onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
-    { label: 'Open in Editor',
-      onClick: function() { if (typeof openInEditor === 'function') openInEditor(photoIds); } },
+  ].concat(buildOpenInEditorMenuItems(photoIds)).concat([
     { label: 'Reveal in Finder/Folder', disabled: !one, disabledHint: hint,
       onClick: function() { revealPhoto(photoIds[0]); } },
     { label: 'Copy Path',

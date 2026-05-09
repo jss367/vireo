@@ -4829,11 +4829,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not file_paths:
             return json_error("No photos found", 404)
 
-        editor = cfg.get("external_editor")
-        if editor and not isinstance(editor, str):
-            return json_error(
-                "external_editor config must be a string path", 500
-            )
+        editors = cfg.get_editors()
+        editor_index = body.get("editor_index")
+        if editor_index is None:
+            # No index = use the first configured editor (or fall through to
+            # the OS default if no editors are configured at all).
+            editor = editors[0]["path"] if editors else ""
+        else:
+            if not isinstance(editor_index, int) or isinstance(editor_index, bool):
+                return json_error("editor_index must be an integer")
+            if not editors:
+                return json_error(
+                    "No external editors configured. Add one in Settings.", 400
+                )
+            if editor_index < 0 or editor_index >= len(editors):
+                return json_error(
+                    f"editor_index {editor_index} out of range "
+                    f"(have {len(editors)} editor(s))", 400
+                )
+            editor = editors[editor_index]["path"]
         editor_path = os.path.expanduser(editor) if editor else ""
 
         # On macOS, an .app bundle is a directory — execing it raises EACCES.

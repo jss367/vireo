@@ -28,7 +28,13 @@ DEFAULTS = {
     "scan_workers": 0,
     "setup_complete": False,
     "darktable_bin": "",
+    # Legacy single-editor field. Kept for one-cycle migration: if
+    # `external_editors` is empty and this is set, get_editors() synthesizes
+    # a one-element list from it. Hidden from the schema-rendered settings.
     "external_editor": "",
+    # List of {"name": str, "path": str} dicts. Source of truth for the
+    # multi-editor "Open in Editor" picker.
+    "external_editors": [],
     "report_url": "https://script.google.com/macros/s/AKfycbwqjy8KaB0X04b9R614PWkikRmEsbarXXdarl0S0QC6thT9Uoyn8F74Gku-5z9h-TTf/exec",
     "darktable_style": "",
     "darktable_output_format": "jpg",
@@ -202,3 +208,33 @@ def set(key, value):
         config = load()
         config[key] = value
         save(config)
+
+
+def get_editors():
+    """Return the configured external editors as a list of {name, path} dicts.
+
+    Source of truth is ``external_editors``. If that's empty and the legacy
+    ``external_editor`` string is set, a one-element list is synthesized
+    (no on-disk migration — the file is left alone). Malformed entries
+    (missing path, non-string fields) are filtered out so callers can trust
+    the shape.
+    """
+    config = load()
+    raw = config.get("external_editors") or []
+    editors = []
+    if isinstance(raw, list):
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            path = entry.get("path")
+            if not isinstance(path, str) or not path.strip():
+                continue
+            name = entry.get("name")
+            if not isinstance(name, str) or not name.strip():
+                name = os.path.basename(path.rstrip("/")) or "Editor"
+            editors.append({"name": name.strip(), "path": path.strip()})
+    if not editors:
+        legacy = config.get("external_editor")
+        if isinstance(legacy, str) and legacy.strip():
+            editors.append({"name": "Editor", "path": legacy.strip()})
+    return editors

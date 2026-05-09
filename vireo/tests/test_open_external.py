@@ -252,12 +252,12 @@ def test_open_external_directory_with_multiple_app_bundles_errors(app_and_db, mo
     assert launched == []
 
 
-def test_open_external_rejects_non_string_editor(app_and_db, monkeypatch):
-    """Non-string external_editor values return a structured 500, not an uncaught TypeError.
+def test_open_external_filters_malformed_legacy_editor(app_and_db, monkeypatch):
+    """Non-string legacy `external_editor` is filtered out, not an error.
 
     /api/config doesn't type-validate writes, so the persisted value can be any
-    JSON type. The endpoint must guard expanduser() to keep returning the
-    documented JSON error envelope.
+    JSON type. cfg.get_editors() rejects non-string entries, so the endpoint
+    falls back cleanly to the OS default opener instead of erroring.
     """
     app, _ = app_and_db
     client = app.test_client()
@@ -265,15 +265,133 @@ def test_open_external_rejects_non_string_editor(app_and_db, monkeypatch):
     import config as cfg
     cfg.set("external_editor", 12345)
 
-    _patch_launchers(monkeypatch)
+    monkeypatch.setattr(sys, 'platform', 'darwin')
+    launched = _patch_launchers(monkeypatch)
 
     resp = client.post('/api/photos/open-external',
                        data=json.dumps({"photo_ids": [1]}),
                        content_type='application/json')
-    assert resp.status_code == 500
-    body = resp.get_json()
-    assert "error" in body
-    assert "string" in body["error"].lower()
+    assert resp.status_code == 200
+    # Falls through to plain `open <files>` (no -a flag, no editor binary).
+    assert launched[0][0] == 'run'
+    assert launched[0][1][0] == 'open'
+    assert '-a' not in launched[0][1]
+
+
+def test_open_external_uses_first_editor_from_list(app_and_db, monkeypatch):
+    """external_editors list takes precedence over legacy external_editor."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    client.post('/api/config',
+                data=json.dumps({
+                    "external_editor": "/usr/bin/legacy",
+                    "external_editors": [
+                        {"name": "Lightroom", "path": "/usr/bin/lr"},
+                        {"name": "Affinity", "path": "/usr/bin/affinity"},
+                    ],
+                }),
+                content_type='application/json')
+
+    launched = _patch_launchers(monkeypatch)
+
+    resp = client.post('/api/photos/open-external',
+                       data=json.dumps({"photo_ids": [1]}),
+                       content_type='application/json')
+    assert resp.status_code == 200
+    # First editor wins when no editor_index is passed; legacy field is ignored.
+    assert launched[0][1][0] == '/usr/bin/lr'
+
+
+def test_open_external_editor_index_picks_specific_editor(app_and_db, monkeypatch):
+    """editor_index in the request body picks that editor from the list."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    client.post('/api/config',
+                data=json.dumps({
+                    "external_editors": [
+                        {"name": "First", "path": "/usr/bin/first"},
+                        {"name": "Second", "path": "/usr/bin/second"},
+                        {"name": "Third", "path": "/usr/bin/third"},
+                    ],
+                }),
+                content_type='application/json')
+
+    launched = _patch_launchers(monkeypatch)
+
+    resp = client.post('/api/photos/open-external',
+                       data=json.dumps({"photo_ids": [1], "editor_index": 2}),
+                       content_type='application/json')
+    assert resp.status_code == 200
+    assert launched[0][1][0] == '/usr/bin/third'
+
+
+def test_open_external_editor_index_out_of_range(app_and_db):
+    """editor_index >= len(editors) returns 400 with a useful message."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    client.post('/api/config',
+                data=json.dumps({
+                    "external_editors": [{"name": "Only", "path": "/usr/bin/only"}],
+                }),
+                content_type='application/json')
+
+    resp = client.post('/api/photos/open-external',
+                       data=json.dumps({"photo_ids": [1], "editor_index": 5}),
+                       content_type='application/json')
+    assert resp.status_code == 400
+    assert "out of range" in resp.get_json()["error"]
+
+
+def test_open_external_editor_index_with_no_editors(app_and_db):
+    """editor_index passed with no editors configured returns 400, not OS default."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    resp = client.post('/api/photos/open-external',
+                       data=json.dumps({"photo_ids": [1], "editor_index": 0}),
+                       content_type='application/json')
+    assert resp.status_code == 400
+    assert "No external editors configured" in resp.get_json()["error"]
+
+
+def test_open_external_legacy_editor_synthesizes_when_list_empty(app_and_db, monkeypatch):
+    """Empty external_editors + legacy external_editor still works (back-compat)."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    client.post('/api/config',
+                data=json.dumps({"external_editor": "/usr/bin/legacy"}),
+                content_type='application/json')
+
+    launched = _patch_launchers(monkeypatch)
+
+    resp = client.post('/api/photos/open-external',
+                       data=json.dumps({"photo_ids": [1]}),
+                       content_type='application/json')
+    assert resp.status_code == 200
+    assert launched[0][1][0] == '/usr/bin/legacy'
+
+
+def test_get_editors_filters_malformed_entries(app_and_db):
+    """cfg.get_editors() drops dicts missing a path or with non-string fields."""
+    import config as cfg
+    cfg.set("external_editors", [
+        {"name": "Good", "path": "/usr/bin/good"},
+        {"name": "NoPath"},
+        {"path": ""},
+        "not even a dict",
+        {"name": "", "path": "/Applications/Foo.app"},
+    ])
+    editors = cfg.get_editors()
+    assert [e["path"] for e in editors] == [
+        "/usr/bin/good", "/Applications/Foo.app",
+    ]
+    # Empty name falls back to the basename of the path.
+    assert editors[0]["name"] == "Good"
+    assert editors[1]["name"] == "Foo.app"
 
 
 def test_open_external_expands_user_in_editor_path(app_and_db, monkeypatch, tmp_path):
