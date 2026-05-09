@@ -349,12 +349,32 @@ def test_job_history_filtered_by_workspace(db_with_workspace):
 
 
 @pytest.fixture
-def client(tmp_path):
-    """Flask test client with a fresh DB."""
+def client(tmp_path, monkeypatch):
+    """Flask test client with a fresh DB.
+
+    Isolates $HOME and config paths to tmp_path so create_app's
+    ``_mark_species_and_maybe_backfill`` doesn't read the developer's real
+    ``~/.vireo/taxonomy.json``. Without this, the lazy
+    ``from taxonomy import ...`` inside that helper freezes
+    ``taxonomy.TAXONOMY_JSON_PATH`` to the real path on first import; later
+    tests in ``vireo/tests/`` then load the real 554MB taxonomy via the
+    cached module, retype "Cardinal" as a species, and trigger the
+    auto-Wildlife backfill — breaking ``test_remove_keyword_from_photo`` and
+    ``test_undo_keyword_remove_clears_pending_change`` with a phantom
+    Wildlife tag.
+    """
     import os
     import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vireo"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
     from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
     app = create_app(str(tmp_path / "test.db"))
     app.config["TESTING"] = True
     with app.test_client() as c:
