@@ -11073,6 +11073,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         photos = {}
         for pid in photo_ids:
+            # Same workspace guard the apply endpoint uses, so a malicious
+            # or buggy client can't read flag/keyword state for photos that
+            # don't belong to the active workspace.
+            if not db._photo_in_workspace(pid):
+                continue
             row = db.get_photo(pid)
             if not row:
                 continue

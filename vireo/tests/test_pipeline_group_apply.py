@@ -229,6 +229,28 @@ def test_state_endpoint_handles_unknown_species(app_and_db):
         assert data['photos'][str(pid)]['has_species_keyword'] is False
 
 
+def test_state_endpoint_scopes_to_active_workspace(app_and_db):
+    """The state endpoint must not leak flag/keyword status for photos that
+    don't belong to the active workspace, matching the apply endpoint guard."""
+    app, db = app_and_db
+    photos_in_default = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()
+    pid = photos_in_default['id']
+
+    other_ws = db.create_workspace('Other')
+    db.update_workspace(other_ws, last_opened_at='2099-01-01T00:00:00')
+
+    client = app.test_client()
+    resp = client.post('/api/pipeline/group/state', json={
+        'photo_ids': [pid],
+        'species': 'Coyote',
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Photo from a different workspace must not appear in the response.
+    assert str(pid) not in data['photos']
+    assert pid not in data['photos']
+
+
 def test_state_endpoint_ignores_homonym_non_species_keyword(app_and_db):
     """A non-species keyword (e.g. an 'individual' tag) sharing the species name
     must NOT be reported as the species keyword. Otherwise has_species_keyword

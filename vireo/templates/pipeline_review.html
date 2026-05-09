@@ -2809,7 +2809,12 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     // with, used to (a) render "from DB" markers and (b) compute the
     // change-only Apply button label.
     dbState: {},
-    sessionId: sessionId
+    sessionId: sessionId,
+    // False until /group/state resolves and grmSeedFromDbState runs. Apply &
+    // Close is gated on this so a click during the seed window can't ship
+    // an empty picks/rejects payload (which would clear pre-existing flags
+    // by treating every photo as a candidate).
+    seeded: false
   };
   _grmLoupeLocked = false;
   _grmZoomMultiplier = 1;
@@ -2821,6 +2826,17 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   grmRefreshResetAllVisibility();
 
   document.getElementById('grmOverlay').classList.add('open');
+
+  // Disable Apply while we wait for /group/state — clicking it before
+  // seed completes would send empty picks/rejects, which the server treats
+  // as "all candidates" and silently clears prior flags.
+  var applyBtn = document.getElementById('grmApplyBtn');
+  if (applyBtn) {
+    applyBtn.disabled = true;
+    applyBtn.style.opacity = '0.5';
+    applyBtn.style.cursor = 'wait';
+    applyBtn.textContent = 'Loading…';
+  }
 
   // Reset the species input to this encounter's value so a stale value from a
   // previously-reviewed group doesn't leak in when the prior modal was closed
@@ -2902,6 +2918,16 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
     });
     initSelect = firstPick || (items[0] && items[0].id);
   }
+  // Mark the modal seeded *before* re-rendering so grmUpdateApplyLabel
+  // (called from renderGroupModal) re-enables the button.
+  grmState.seeded = true;
+  var applyBtn = document.getElementById('grmApplyBtn');
+  if (applyBtn) {
+    applyBtn.disabled = false;
+    applyBtn.style.opacity = '';
+    applyBtn.style.cursor = '';
+  }
+
   if (initSelect) {
     grmSelect(initSelect);
   } else {
@@ -3582,6 +3608,13 @@ document.addEventListener('contextmenu', function(e) {
 /* --- Apply & Close --- */
 
 async function grmApply() {
+  // Belt-and-suspenders: the button is disabled until seed completes, but
+  // a stuck-open modal whose /group/state never resolved (offline, server
+  // error after retry) must not let Apply clear flags.
+  if (!grmState.seeded) {
+    console.warn('grmApply called before /group/state seed completed; ignoring.');
+    return;
+  }
   var species = document.getElementById('grmSpecies').value.trim();
 
   var picksArr = Array.from(grmState.picks);
