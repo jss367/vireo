@@ -3101,6 +3101,22 @@ function grmMaxZoomMultiplier() {
   return Math.max(3, dpr * 2);
 }
 
+// Effective floor for `_grmZoomMultiplier`: the smallest coverFit across all
+// currently-visible burst cards. The hover formula floors per-card at each
+// card's own coverFit, so once the multiplier reaches the minimum coverFit
+// every card is already at cover-fit and further wheel-down would be a
+// dead no-op. A high-resolution photo can have coverFit ~0.03 (5400px wide
+// in a 180px viewport), well below the legacy 0.33 floor.
+function grmMinZoomMultiplier() {
+  var cards = document.querySelectorAll('#grmOverlay .grm-card');
+  var minCover = Infinity;
+  for (var i = 0; i < cards.length; i++) {
+    var cf = grmCardCoverFit(cards[i]);
+    if (cf > 0 && cf < minCover) minCover = cf;
+  }
+  return isFinite(minCover) ? minCover : 0.33;
+}
+
 // Compute the transform for one card. Returns the CSS transform string and
 // flags whether the user is in the zoomed (hover) state.
 function _grmComputeCardTransform(card) {
@@ -3215,14 +3231,16 @@ function grmLoupeMove(e) {
 
 function grmLoupeZoom(e) {
   e.preventDefault();
-  // Multiplier=1 = cover-fit (no zoom). Allow scaling up well past 1.0 to
-  // reach 1:1 source-to-CSS pixels and beyond to 1:1 source-to-DEVICE pixels
-  // on Retina (DPR) displays — the actual pixel-peep target.
+  // Multiplier is the source-to-CSS pixel ratio: 1 = true 1:1, DPR = 1:1
+  // source-to-DEVICE on Retina (the pixel-peep target). Floor at the
+  // smallest visible coverFit so wheel-down can always return every card
+  // to cover-fit even for high-resolution photos.
   var max = grmMaxZoomMultiplier();
+  var min = grmMinZoomMultiplier();
   if (e.deltaY < 0) {
     _grmZoomMultiplier = Math.min(max, _grmZoomMultiplier * 1.25);
   } else {
-    _grmZoomMultiplier = Math.max(0.33, _grmZoomMultiplier / 1.25);
+    _grmZoomMultiplier = Math.max(min, _grmZoomMultiplier / 1.25);
   }
   grmApplyCardTransforms();
 }
