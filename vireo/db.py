@@ -4309,14 +4309,46 @@ class Database:
                 )
         self.conn.commit()
 
-    def delete_photos(self, photo_ids, include_companions=False):
+    def delete_photos(self, photo_ids, include_companions=False, verify_workspace=False):
         """Delete photos and all associated data.
 
         Returns dict with 'deleted' count and 'files' list of
         {photo_id, folder_path, filename, companion_path} for file cleanup.
+
+        Args:
+            verify_workspace: when True, raises ValueError if any existing
+                photo id is outside the active workspace. Missing ids are
+                still skipped for API compatibility.
         """
         if not photo_ids:
             return {"deleted": 0, "files": []}
+
+        if verify_workspace:
+            placeholders = ",".join("?" for _ in photo_ids)
+            existing = {
+                row["id"]
+                for row in self.conn.execute(
+                    f"SELECT id FROM photos WHERE id IN ({placeholders})",
+                    list(photo_ids),
+                ).fetchall()
+            }
+            visible = {
+                row["id"]
+                for row in self.conn.execute(
+                    f"""SELECT p.id FROM photos p
+                        JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                        WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
+                    [self._ws_id()] + list(photo_ids),
+                ).fetchall()
+            }
+            hidden = existing - visible
+            if hidden:
+                raise ValueError(
+                    f"Photo {min(hidden)} does not belong to the active workspace"
+                )
+            photo_ids = [pid for pid in photo_ids if pid in visible]
+            if not photo_ids:
+                return {"deleted": 0, "files": []}
 
         # Resolve to actual existing photos
         placeholders = ",".join("?" for _ in photo_ids)

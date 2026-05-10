@@ -12,6 +12,7 @@ import math
 import os
 import queue
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -125,6 +126,7 @@ logging.getLogger("werkzeug").addFilter(_QuietRequestFilter())
 # SQLite versions. Sized below 999 to leave headroom for additional bound
 # parameters in joined statements.
 _SQL_PARAM_CHUNK = 900
+_DELETE_RETRY_TOKEN_TTL_SECONDS = 10 * 60
 
 
 def _chunked(seq, size=_SQL_PARAM_CHUNK):
@@ -615,6 +617,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def json_error(msg, status=400):
         """Return a JSON error response. Standard shape: {"error": "msg"}."""
         return jsonify({"error": msg}), status
+
+    app._delete_retry_tokens = {}
+
+    def _issue_delete_retry_token(path):
+        token = secrets.token_urlsafe(24)
+        app._delete_retry_tokens[token] = {
+            "path": path,
+            "expires_at": time.time() + _DELETE_RETRY_TOKEN_TTL_SECONDS,
+        }
+        return token
+
+    def _consume_delete_retry_tokens(tokens):
+        if not isinstance(tokens, list) or not tokens:
+            raise ValueError("retry_tokens required")
+        paths = []
+        now = time.time()
+        for token in tokens:
+            if not isinstance(token, str) or not token:
+                raise ValueError("retry_tokens must be a list of strings")
+            entry = app._delete_retry_tokens.pop(token, None)
+            if not entry or entry.get("expires_at", 0) < now:
+                raise ValueError("delete retry token is invalid or expired")
+            paths.append(entry["path"])
+        return paths
 
     def _get_db():
         """Get a Database instance. One connection per request via Flask g."""
@@ -2628,12 +2654,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_ids = body.get("photo_ids", [])
         mode = body.get("mode", "vireo")
         include_companions = body.get("include_companions", False)
-        # For disk_permanent retry: accept paths directly since DB rows
-        # were already deleted in the initial disk-mode call.
-        paths = body.get("paths", [])
+        retry_tokens = body.get("retry_tokens", [])
 
-        if mode == "disk_permanent" and paths:
-            # Retry path: DB already cleaned up, just delete files
+        if mode == "disk_permanent" and retry_tokens:
+            try:
+                paths = _consume_delete_retry_tokens(retry_tokens)
+            except ValueError as e:
+                return json_error(str(e), 400)
             trashed = 0
             trash_failed = []
             for p in paths:
@@ -2649,13 +2676,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "ok": True, "deleted": 0, "trashed": trashed,
                 "trash_failed": trash_failed,
             })
+        if mode == "disk_permanent" and body.get("paths"):
+            return json_error("retry_tokens required for permanent delete retry", 400)
 
         if not photo_ids:
             return json_error("photo_ids required")
+        if (
+            not isinstance(photo_ids, list)
+            or any(isinstance(pid, bool) or not isinstance(pid, int) for pid in photo_ids)
+        ):
+            return json_error("photo_ids must be a list of integers")
         if mode not in ("vireo", "disk", "disk_permanent"):
             return json_error("mode must be 'vireo', 'disk', or 'disk_permanent'")
 
-        result = db.delete_photos(photo_ids, include_companions=include_companions)
+        try:
+            result = db.delete_photos(
+                photo_ids,
+                include_companions=include_companions,
+                verify_workspace=True,
+            )
+        except ValueError as e:
+            return json_error(str(e), 403)
 
         _cleanup_cached_files_for_deleted_photos(result["files"])
 
@@ -2687,7 +2728,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 trashed += 1
                             except Exception:
                                 log.warning("Trash failed for %s", filepath, exc_info=True)
-                                trash_failed.append({"path": filepath})
+                                trash_failed.append({
+                                    "path": filepath,
+                                    "retry_token": _issue_delete_retry_token(filepath),
+                                })
                     else:  # disk_permanent
                         try:
                             os.remove(filepath)

@@ -3385,15 +3385,18 @@ async function confirmDelete() {
 
   if (data.trash_failed && data.trash_failed.length > 0) {
     var paths = data.trash_failed.map(function(f) { return f.path; });
+    var retryTokens = data.trash_failed
+      .map(function(f) { return f.retry_token; })
+      .filter(Boolean);
     if (confirm('Trash not available for ' + paths.length + ' file(s):\n' +
         paths.slice(0, 5).join('\n') +
         (paths.length > 5 ? '\n... and ' + (paths.length - 5) + ' more' : '') +
-        '\n\nPermanently delete instead?')) {
+        '\n\nPermanently delete instead?') && retryTokens.length) {
       try {
         await safeFetch('/api/batch/delete', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({paths: paths, mode: 'disk_permanent'}),
+          body: JSON.stringify({retry_tokens: retryTokens, mode: 'disk_permanent'}),
         });
       } catch(e) { /* already removed from DB */ }
     }

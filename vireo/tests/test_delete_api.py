@@ -1,6 +1,7 @@
 """Tests for photo deletion API and database cleanup."""
 import json
 import os
+import time
 
 from PIL import Image
 
@@ -318,31 +319,73 @@ def test_api_batch_delete_invalid_mode(app_and_db):
     assert resp.status_code == 400
 
 
-def test_api_batch_delete_disk_permanent_retry_with_paths(app_and_db, tmp_path):
-    """disk_permanent retry works with paths after DB rows are already gone."""
+def test_api_batch_delete_rejects_other_workspace_photo(app_and_db):
+    """Batch delete must not remove photos hidden from the active workspace."""
+    app, db = app_and_db
+    client = app.test_client()
+    default_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    other_fid = db.add_folder("/secret/photos", name="secret")
+    other_pid = db.add_photo(
+        other_fid,
+        "secret.jpg",
+        ".jpg",
+        file_size=100,
+        file_mtime=1.0,
+    )
+    db.set_active_workspace(default_ws)
+
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": [other_pid],
+        "mode": "vireo",
+    })
+
+    assert resp.status_code == 403
+    assert db.get_photo(other_pid) is not None
+
+
+def test_api_batch_delete_disk_permanent_retry_rejects_raw_paths(app_and_db, tmp_path):
+    """Permanent-delete retry must not accept client-supplied filesystem paths."""
     app, db = app_and_db
     client = app.test_client()
 
-    # Create files to delete
-    file1 = str(tmp_path / "photo1.jpg")
-    file2 = str(tmp_path / "photo2.jpg")
-    Image.new("RGB", (10, 10)).save(file1)
-    Image.new("RGB", (10, 10)).save(file2)
-    assert os.path.exists(file1)
-    assert os.path.exists(file2)
+    target = str(tmp_path / "not_from_vireo.jpg")
+    Image.new("RGB", (10, 10)).save(target)
 
-    # Retry with paths (no photo_ids needed)
     resp = client.post("/api/batch/delete", json={
         "mode": "disk_permanent",
-        "paths": [file1, file2],
+        "paths": [target],
+    })
+
+    assert resp.status_code == 400
+    assert os.path.exists(target)
+
+
+def test_api_batch_delete_disk_permanent_retry_with_token(app_and_db, tmp_path):
+    """disk_permanent retry only works with a server-issued retry token."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    target = str(tmp_path / "photo1.jpg")
+    Image.new("RGB", (10, 10)).save(target)
+    token = "test-retry-token"
+    app._delete_retry_tokens[token] = {
+        "path": target,
+        "expires_at": time.time() + 60,
+    }
+
+    resp = client.post("/api/batch/delete", json={
+        "mode": "disk_permanent",
+        "retry_tokens": [token],
     })
 
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["ok"] is True
-    assert data["trashed"] == 2
-    assert not os.path.exists(file1)
-    assert not os.path.exists(file2)
+    assert data["trashed"] == 1
+    assert not os.path.exists(target)
+    assert token not in app._delete_retry_tokens
 
 
 def test_api_batch_delete_disk_deletes_companion_file(app_and_db, tmp_path):
