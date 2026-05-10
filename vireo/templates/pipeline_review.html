@@ -1299,7 +1299,7 @@ input[type="range"]::-moz-range-thumb {
   </div>
   <div class="grm-footer">
     <label style="font-size:12px;color:var(--text-muted);">Species:</label>
-    <input type="text" id="grmSpecies" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
+    <input type="text" id="grmSpecies" oninput="grmOnSpeciesInput()" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
     <button onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary);color:var(--text-muted);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
     <div class="grm-res-control" title="Image resolution — higher = slower but better for pixel-peeping">
       <label style="font-size:12px;color:var(--text-muted);">Res:</label>
@@ -1307,7 +1307,7 @@ input[type="range"]::-moz-range-thumb {
       <span id="grmResLabel" style="font-size:11px;color:var(--text-dim);min-width:140px;">1920 · preview</span>
     </div>
     <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
-    <button onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);">Apply & Close</button>
+    <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);">Apply & Close</button>
   </div>
 </div>
 
@@ -2762,7 +2762,8 @@ var grmState = {
   picks: new Set(),
   rejects: new Set(),
   removed: new Set(),
-  selected: null      // photo id
+  selected: null,     // photo id
+  sessionId: 0        // bumped on each openGroupReview; used to drop stale fetches
 };
 
 function findBurstForPhoto(photoId) {
@@ -2792,6 +2793,9 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
 
   var items = photoIds.map(function(pid) { return photoMap[pid]; }).filter(Boolean);
 
+  // Bump the session id so any in-flight /group/state fetch from a previous
+  // openGroupReview call lands as stale and gets ignored when it resolves.
+  var sessionId = (grmState.sessionId || 0) + 1;
   grmState = {
     encIdx: encIdx,
     burstIdx: burstIdx,
@@ -2799,7 +2803,18 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     picks: new Set(),
     rejects: new Set(),
     removed: new Set(),
-    selected: null
+    selected: null,
+    // Filled in by the /group/state fetch below. Keys: photo_id → {flag,
+    // has_species_keyword}. This is the live DB snapshot the modal opened
+    // with, used to (a) render "from DB" markers and (b) compute the
+    // change-only Apply button label.
+    dbState: {},
+    sessionId: sessionId,
+    // False until /group/state resolves and grmSeedFromDbState runs. Apply &
+    // Close is gated on this so a click during the seed window can't ship
+    // an empty picks/rejects payload (which would clear pre-existing flags
+    // by treating every photo as a candidate).
+    seeded: false
   };
   _grmLoupeLocked = false;
   _grmZoomMultiplier = 1;
@@ -2810,43 +2825,142 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   _grmSuppressNextClick = false;
   grmRefreshResetAllVisibility();
 
-  // Auto-pick the AI best (highest quality_composite)
-  var best = null;
-  items.forEach(function(p) {
-    if (!best || (p.quality_composite || 0) > (best.quality_composite || 0)) best = p;
-  });
-  if (best) grmState.picks.add(best.id);
-
-  // Auto-reject the lowest quality
-  if (items.length > 2) {
-    var sorted = items.slice().sort(function(a, b) { return (a.quality_composite || 0) - (b.quality_composite || 0); });
-    var worstThird = Math.max(1, Math.floor(sorted.length / 3));
-    for (var i = 0; i < worstThird; i++) {
-      if (!grmState.picks.has(sorted[i].id)) {
-        grmState.rejects.add(sorted[i].id);
-      }
-    }
-  }
-
   document.getElementById('grmOverlay').classList.add('open');
+
+  // Disable Apply while we wait for /group/state — clicking it before
+  // seed completes would send empty picks/rejects, which the server treats
+  // as "all candidates" and silently clears prior flags.
+  var applyBtn = document.getElementById('grmApplyBtn');
+  if (applyBtn) {
+    applyBtn.disabled = true;
+    applyBtn.style.opacity = '0.5';
+    applyBtn.style.cursor = 'wait';
+    applyBtn.textContent = 'Loading…';
+  }
 
   // Reset the species input to this encounter's value so a stale value from a
   // previously-reviewed group doesn't leak in when the prior modal was closed
   // via × or Escape (only Apply & Close clears it).
-  document.getElementById('grmSpecies').value = enc.confirmed_species || (enc.species ? enc.species[0] : '') || '';
+  var initialSpecies = enc.confirmed_species || (enc.species ? enc.species[0] : '') || '';
+  document.getElementById('grmSpecies').value = initialSpecies;
 
   // Sync slider DOM with persisted resolution choice
   var slider = document.getElementById('grmResSlider');
   if (slider) slider.value = grmResolutionIdx;
   grmUpdateResLabel();
 
-  // Auto-select the requested photo (or the best)
-  var initSelect = selectPhotoId || (best ? best.id : null);
+  // Render an empty modal first so it appears responsive while we fetch DB
+  // state. The seed pass below populates picks/rejects and re-renders.
+  renderGroupModal();
+
+  safeFetch('/api/pipeline/group/state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ photo_ids: items.map(function(p) { return p.id; }), species: initialSpecies }),
+  }, { toast: false }).then(function(data) {
+    // Drop the response if a newer openGroupReview has fired since: seeding
+    // burst A's DB state into burst B's modal would mis-flag photos on Apply.
+    if (grmState.sessionId !== sessionId) return;
+    grmSeedFromDbState(data && data.photos ? data.photos : {}, items, selectPhotoId);
+  }).catch(function() {
+    if (grmState.sessionId !== sessionId) return;
+    // /group/state failed (network, 5xx, etc). Do NOT seed from an empty
+    // snapshot — that would treat every previously flagged/rejected photo
+    // as an unflagged candidate, and a click on Apply would clear those
+    // flags. Keep the modal in the "Loading…" state with Apply disabled so
+    // the user can either retry by reopening the burst or close out via ×.
+    grmShowSeedError(items, selectPhotoId);
+  });
+}
+
+// /group/state failed. Render the cards with no flag state so the user can
+// still inspect photos, but leave Apply disabled and surface what's wrong
+// in the button label. We deliberately do NOT set grmState.seeded = true
+// here — grmApply early-returns until it is, so a stray click can't clear
+// flags from a degraded snapshot.
+function grmShowSeedError(items, selectPhotoId) {
+  grmState.dbState = {};
+  var initSelect = selectPhotoId || (items[0] && items[0].id);
   if (initSelect) {
     grmSelect(initSelect);
   } else {
     renderGroupModal();
   }
+  var btn = document.getElementById('grmApplyBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    btn.style.cursor = 'not-allowed';
+    btn.textContent = 'Could not load — reopen to retry';
+    btn.title = 'Loading photo flag state failed; close and reopen this burst to try again.';
+  }
+}
+
+// Seed picks/rejects on modal open. Photos already flagged/rejected in the
+// DB land in those zones; the quality-score heuristic only fills in zones
+// for photos with no flag set, so re-opening a burst respects prior choices.
+function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
+  grmState.dbState = dbPhotos || {};
+
+  var unflagged = [];
+  items.forEach(function(p) {
+    var st = grmState.dbState[p.id];
+    var flag = st ? st.flag : null;
+    if (flag === 'flagged') {
+      grmState.picks.add(p.id);
+    } else if (flag === 'rejected') {
+      grmState.rejects.add(p.id);
+    } else {
+      unflagged.push(p);
+    }
+  });
+
+  // Heuristic fallback for photos with no DB flag: auto-pick the highest
+  // quality and auto-reject the worst third (only if no DB picks yet — we
+  // don't want to override the user's prior pick by piling on more).
+  if (grmState.picks.size === 0 && unflagged.length > 0) {
+    var best = unflagged[0];
+    unflagged.forEach(function(p) {
+      if ((p.quality_composite || 0) > (best.quality_composite || 0)) best = p;
+    });
+    grmState.picks.add(best.id);
+  }
+  if (grmState.rejects.size === 0 && items.length > 2) {
+    var sorted = unflagged.slice().sort(function(a, b) {
+      return (a.quality_composite || 0) - (b.quality_composite || 0);
+    });
+    var worstThird = Math.max(1, Math.floor(items.length / 3));
+    for (var i = 0; i < worstThird && i < sorted.length; i++) {
+      if (!grmState.picks.has(sorted[i].id)) {
+        grmState.rejects.add(sorted[i].id);
+      }
+    }
+  }
+
+  var initSelect = selectPhotoId;
+  if (!initSelect) {
+    var firstPick = null;
+    items.forEach(function(p) {
+      if (firstPick == null && grmState.picks.has(p.id)) firstPick = p.id;
+    });
+    initSelect = firstPick || (items[0] && items[0].id);
+  }
+  // Mark the modal seeded *before* re-rendering so grmUpdateApplyLabel
+  // (called from renderGroupModal) re-enables the button.
+  grmState.seeded = true;
+  var applyBtn = document.getElementById('grmApplyBtn');
+  if (applyBtn) {
+    applyBtn.disabled = false;
+    applyBtn.style.opacity = '';
+    applyBtn.style.cursor = '';
+  }
+
+  if (initSelect) {
+    grmSelect(initSelect);
+  } else {
+    renderGroupModal();
+  }
+  grmUpdateApplyLabel();
 }
 
 function closeGroupReview() {
@@ -2873,9 +2987,21 @@ function renderGroupModal() {
     var qScore = p.quality_composite != null ? Math.round(p.quality_composite * 100) : '-';
     var sharp = p.subject_tenengrad != null ? Math.round(p.subject_tenengrad) : '-';
 
+    // Read flag/keyword state from the live DB snapshot the modal opened
+    // with, not the (potentially stale) cached p.flag — so a photo flagged
+    // earlier in this session shows the "already in DB" marker even if the
+    // pipeline cache hasn't been refreshed.
+    var dbSt = (grmState.dbState && grmState.dbState[p.id]) || {};
+    var dbFlag = dbSt.flag || 'none';
+    var hasKw = !!dbSt.has_species_keyword;
+
     var flagHtml = '';
-    if (p.flag === 'flagged') flagHtml = '<span class="photo-flag-badge flag-flagged" style="bottom:auto;top:4px;left:4px;">P</span>';
-    else if (p.flag === 'rejected') flagHtml = '<span class="photo-flag-badge flag-rejected" style="bottom:auto;top:4px;left:4px;">X</span>';
+    if (dbFlag === 'flagged') flagHtml = '<span class="photo-flag-badge flag-flagged" title="Already flagged in library" style="bottom:auto;top:4px;left:4px;">P</span>';
+    else if (dbFlag === 'rejected') flagHtml = '<span class="photo-flag-badge flag-rejected" title="Already rejected in library" style="bottom:auto;top:4px;left:4px;">X</span>';
+
+    var kwHtml = hasKw
+      ? '<span class="grm-card-kw-badge" title="Species keyword already applied" style="position:absolute;top:4px;right:4px;background:var(--accent);color:var(--accent-text);font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;letter-spacing:0.04em;">TAG</span>'
+      : '';
 
     var nat = grmNaturalDims(p);
     var imgStyle = 'width:' + nat.w + 'px;height:' + nat.h + 'px;';
@@ -2888,6 +3014,7 @@ function renderGroupModal() {
         '<img src="' + grmPhotoUrl(p.id) + '" style="' + imgStyle + '"' +
           ' onload="grmCardImgLoaded(this)" loading="lazy" draggable="false">' +
         flagHtml +
+        kwHtml +
       '</div>' +
       '<div class="grm-card-info">' +
         '<div class="grm-card-species">' + escapeHtml(p.filename || '') + '</div>' +
@@ -2921,6 +3048,105 @@ function renderGroupModal() {
   });
   grmApplyCardTransforms();
   grmRefreshResetAllVisibility();
+  grmUpdateApplyLabel();
+}
+
+// Debounce species-keyword refetches so we don't hit /group/state on every
+// keystroke. The Apply label still updates synchronously; only the keyword
+// portion of dbState is async.
+var _grmSpeciesRefetchTimer = null;
+var _grmSpeciesRefetchToken = 0;
+
+// Called from the species <input>'s oninput. Refresh the Apply label
+// immediately (the diff uses the typed value), and schedule a debounced
+// refetch of has_species_keyword so the TAG markers + Tag-N preview reflect
+// the *currently typed* species, not the one the modal opened with.
+function grmOnSpeciesInput() {
+  grmUpdateApplyLabel();
+  if (_grmSpeciesRefetchTimer) clearTimeout(_grmSpeciesRefetchTimer);
+  _grmSpeciesRefetchTimer = setTimeout(grmRefreshSpeciesKeywordState, 250);
+}
+
+function grmRefreshSpeciesKeywordState() {
+  if (!grmState || !grmState.items || grmState.items.length === 0) return;
+  var speciesEl = document.getElementById('grmSpecies');
+  var species = speciesEl ? (speciesEl.value || '').trim() : '';
+  var sessionId = grmState.sessionId;
+  var token = ++_grmSpeciesRefetchToken;
+  var photoIds = grmState.items.map(function(p) { return p.id; });
+
+  safeFetch('/api/pipeline/group/state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ photo_ids: photoIds, species: species }),
+  }, { toast: false }).then(function(data) {
+    // Drop the response if the modal moved on (different burst opened, or
+    // the user kept typing and a newer fetch is in flight).
+    if (grmState.sessionId !== sessionId) return;
+    if (token !== _grmSpeciesRefetchToken) return;
+    var fresh = (data && data.photos) || {};
+    // Only update the keyword field — the flag field is owned by the user's
+    // in-modal moves at this point and would be wrong to overwrite from DB.
+    Object.keys(fresh).forEach(function(pidStr) {
+      var pid = parseInt(pidStr, 10);
+      if (!grmState.dbState[pid]) grmState.dbState[pid] = { flag: 'none' };
+      grmState.dbState[pid].has_species_keyword = !!fresh[pidStr].has_species_keyword;
+    });
+    renderGroupModal();
+  }).catch(function() {
+    // Network/server error: leave previous keyword markers in place. The
+    // Apply label is still correct as a worst-case overestimate of tags.
+  });
+}
+
+// Update the Apply button label to reflect the *new* DB writes that will
+// happen — not the totals in each zone — so the user can see at a glance
+// what they're committing to. A photo already flagged in the DB and still
+// in the picks zone is a no-op and isn't counted.
+function grmUpdateApplyLabel() {
+  var btn = document.getElementById('grmApplyBtn');
+  if (!btn) return;
+  // While the modal is unseeded (loading or seed failed), the button owns
+  // its own label/disabled state set by openGroupReview / grmShowSeedError.
+  // Don't compute a diff against an empty/unknown dbState — it would
+  // misreport pending writes and clobber the error/loading message.
+  if (!grmState || !grmState.seeded) return;
+  var diff = grmComputeDiff();
+  var parts = [];
+  if (diff.flagNew > 0) parts.push('Flag ' + diff.flagNew);
+  if (diff.rejectNew > 0) parts.push('Reject ' + diff.rejectNew);
+  if (diff.clearNew > 0) parts.push('Clear ' + diff.clearNew);
+  if (diff.tagNew > 0) parts.push('Tag ' + diff.tagNew + (diff.species ? ' as ' + diff.species : ''));
+  btn.textContent = parts.length ? parts.join(' · ') + ' & Close' : 'Apply & Close';
+}
+
+// Diff the current modal zones against the DB snapshot we opened with.
+// Returns counts of new flag/reject/clear writes plus tag adds that the
+// apply call will perform.
+function grmComputeDiff() {
+  var speciesEl = document.getElementById('grmSpecies');
+  var species = speciesEl ? (speciesEl.value || '').trim() : '';
+  var diff = { flagNew: 0, rejectNew: 0, clearNew: 0, tagNew: 0, species: species };
+  if (!grmState || !grmState.items) return diff;
+
+  grmState.items.forEach(function(p) {
+    if (grmState.removed && grmState.removed.has(p.id)) return;
+    var st = (grmState.dbState && grmState.dbState[p.id]) || {};
+    var oldFlag = st.flag || 'none';
+    var hasKw = !!st.has_species_keyword;
+    var newFlag;
+    if (grmState.picks.has(p.id)) newFlag = 'flagged';
+    else if (grmState.rejects.has(p.id)) newFlag = 'rejected';
+    else newFlag = 'none';
+
+    if (newFlag !== oldFlag) {
+      if (newFlag === 'flagged') diff.flagNew++;
+      else if (newFlag === 'rejected') diff.rejectNew++;
+      else diff.clearNew++;
+    }
+    if (species && newFlag === 'flagged' && !hasKw) diff.tagNew++;
+  });
+  return diff;
 }
 
 function grmSelect(photoId) {
@@ -3477,8 +3703,43 @@ document.addEventListener('contextmenu', function(e) {
 
 /* --- Apply & Close --- */
 
-function grmApply() {
+async function grmApply() {
+  // Belt-and-suspenders: the button is disabled until seed completes, but
+  // a stuck-open modal whose /group/state never resolved (offline, server
+  // error after retry) must not let Apply clear flags.
+  if (!grmState.seeded) {
+    console.warn('grmApply called before /group/state seed completed; ignoring.');
+    return;
+  }
   var species = document.getElementById('grmSpecies').value.trim();
+
+  var picksArr = Array.from(grmState.picks);
+  var rejectsArr = Array.from(grmState.rejects);
+  var candidatesArr = grmState.items
+    .filter(function(p) {
+      return !grmState.picks.has(p.id) && !grmState.rejects.has(p.id) && !grmState.removed.has(p.id);
+    })
+    .map(function(p) { return p.id; });
+
+  // Persist to the database first. If this fails we abort so the local
+  // pipeline cache and the DB can't drift apart — the prior fire-and-forget
+  // save-cache + no-DB-write was the bug behind this whole change.
+  var applyResp;
+  try {
+    applyResp = await safeFetch('/api/pipeline/group/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        picks: picksArr,
+        rejects: rejectsArr,
+        candidates: candidatesArr,
+        species: species,
+      }),
+    });
+  } catch (e) {
+    console.error('Pipeline group apply failed:', e);
+    return;
+  }
 
   // Update local pipelineResults with pick/reject/candidate decisions
   var photoMap = {};
@@ -3501,6 +3762,17 @@ function grmApply() {
       if (p) p.label = 'REVIEW';
     }
   });
+
+  // Sync the in-memory pipeline cache's per-photo `flag` with what the
+  // server just wrote, so the badges in the main grid (which read p.flag)
+  // refresh without a full reload.
+  if (applyResp && applyResp.photos) {
+    Object.keys(applyResp.photos).forEach(function(pidStr) {
+      var pid = parseInt(pidStr, 10);
+      var p = photoMap[pid];
+      if (p) p.flag = applyResp.photos[pidStr].flag;
+    });
+  }
 
   // Detach removed photos from the burst into new single-photo bursts
   if (grmState.removed.size > 0) {
@@ -3529,7 +3801,7 @@ function grmApply() {
     }
   }
 
-  // Save to cache
+  // Save the updated pipeline cache (label + flag changes + detached bursts).
   safeFetch('/api/pipeline/save-cache', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

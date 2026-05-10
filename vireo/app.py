@@ -11094,6 +11094,169 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         save_results_raw(body, cache_dir, db._active_workspace_id)
         return jsonify({"ok": True})
 
+    @app.route("/api/pipeline/group/state", methods=["POST"])
+    def api_pipeline_group_state():
+        """Return current DB state for a set of photos in a pipeline burst.
+
+        Used by the burst-review modal on open so it can seed picks/rejects
+        from the live `photos.flag` value (rather than the stale cached value
+        in pipelineResults) and show whether each photo already has the
+        consensus species keyword applied.
+
+        Body: {photo_ids: [int], species: str}
+        Returns: {photos: {pid: {flag, has_species_keyword}}, species_kid: int|None}
+        """
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids = list(body.get("photo_ids", []) or [])
+        species = (body.get("species") or "").strip()
+
+        species_kid = None
+        if species:
+            # Read-only mirror of the species-aware lookup in db.add_keyword(
+            # species, is_species=True): match top-level taxonomy/general rows
+            # case-insensitively, prefer taxonomy. Excludes homonym rows of
+            # other deliberate types (individual, location, genre) so a person
+            # tag named like a species doesn't get reported as the species
+            # keyword for has_species_keyword / Apply-label purposes.
+            row = db.conn.execute(
+                "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                "AND parent_id IS NULL AND type IN ('taxonomy', 'general') "
+                "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
+                (species,),
+            ).fetchone()
+            if row:
+                species_kid = row["id"]
+
+        photos = {}
+        for pid in photo_ids:
+            # Same workspace guard the apply endpoint uses, so a malicious
+            # or buggy client can't read flag/keyword state for photos that
+            # don't belong to the active workspace.
+            if not db._photo_in_workspace(pid):
+                continue
+            row = db.get_photo(pid)
+            if not row:
+                continue
+            has_kw = False
+            if species_kid is not None:
+                has_kw = any(k["id"] == species_kid for k in db.get_photo_keywords(pid))
+            photos[pid] = {
+                "flag": row["flag"] or "none",
+                "has_species_keyword": has_kw,
+            }
+        return jsonify({"photos": photos, "species_kid": species_kid})
+
+    @app.route("/api/pipeline/group/apply", methods=["POST"])
+    def api_pipeline_group_apply():
+        """Apply pick/reject decisions and species to a pipeline burst group.
+
+        Diff-based: only writes flag changes for photos whose flag actually
+        changes, only adds the species keyword when it isn't already on the
+        photo, and clears flags on photos moved to candidates that were
+        previously flagged/rejected. Returns per-photo new flag/keyword state
+        so the client can update its rendered cards without reloading.
+        """
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        picks = list(body.get("picks", []) or [])
+        rejects = list(body.get("rejects", []) or [])
+        candidates = list(body.get("candidates", []) or [])
+        species = (body.get("species") or "").strip()
+
+        # The same photo can't be in two zones. Reject conflicting input.
+        seen = set()
+        for pid in picks + rejects + candidates:
+            if pid in seen:
+                return json_error(f"Photo {pid} appears in more than one zone", 400)
+            seen.add(pid)
+
+        # All photos must be in the active workspace.
+        for pid in picks + rejects + candidates:
+            if not db._photo_in_workspace(pid):
+                return json_error(f"Photo {pid} is not in the active workspace", 403)
+
+        # Capture current state for diffing + edit history.
+        old_flags = {}
+        for pid in picks + rejects + candidates:
+            row = db.get_photo(pid)
+            if row:
+                old_flags[pid] = row["flag"] or "none"
+
+        species_kid = None
+        photos_with_species = set()
+        if species:
+            species_kid = db.add_keyword(species, is_species=True)
+            for pid in picks:
+                kws = db.get_photo_keywords(pid)
+                if any(k["id"] == species_kid for k in kws):
+                    photos_with_species.add(pid)
+
+        try:
+            # Apply target flags. We rely on update_photo_flag's own write
+            # being a no-op at the SQL level when the value matches, but we
+            # still skip when unchanged so we don't record useless history.
+            flag_items = []
+            for pid in picks:
+                old = old_flags.get(pid, "none")
+                if old != "flagged":
+                    db.update_photo_flag(pid, "flagged")
+                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "flagged"})
+            for pid in rejects:
+                old = old_flags.get(pid, "none")
+                if old != "rejected":
+                    db.update_photo_flag(pid, "rejected")
+                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "rejected"})
+            for pid in candidates:
+                old = old_flags.get(pid, "none")
+                if old in ("flagged", "rejected"):
+                    db.update_photo_flag(pid, "none")
+                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "none"})
+
+            kw_added_pids = []
+            if species and species_kid is not None:
+                for pid in picks:
+                    if pid in photos_with_species:
+                        continue
+                    db.tag_photo(pid, species_kid)
+                    # Use the shared helper so a pending `keyword_remove` for
+                    # the same species cancels out instead of co-existing with
+                    # a new `keyword_add`. sync_to_xmp applies removals after
+                    # adds, so a leftover remove would strip the keyword from
+                    # XMP even though the DB still has the tag.
+                    _queue_keyword_add(pid, species)
+                    kw_added_pids.append(pid)
+        except ValueError as e:
+            return json_error(str(e), 403)
+
+        if flag_items:
+            desc = (
+                f"Pipeline burst group: flagged {len(picks)}, rejected {len(rejects)}, "
+                f"cleared {sum(1 for it in flag_items if it['new_value'] == 'none')}"
+            )
+            db.record_edit("flag", desc, "pipeline_group_apply", flag_items,
+                           is_batch=len(flag_items) > 1)
+
+        if kw_added_pids and species_kid is not None:
+            kw_items = [{"photo_id": pid, "old_value": "", "new_value": str(species_kid)}
+                        for pid in kw_added_pids]
+            db.record_edit("keyword_add",
+                           f'Added "{species}" to {len(kw_added_pids)} photos (pipeline burst group)',
+                           str(species_kid), kw_items, is_batch=len(kw_added_pids) > 1)
+
+        # Return new per-photo state so the client can update without a reload.
+        result_photos = {}
+        for pid in picks + rejects + candidates:
+            row = db.get_photo(pid)
+            if not row:
+                continue
+            kws = db.get_photo_keywords(pid)
+            result_photos[pid] = {
+                "flag": row["flag"] or "none",
+                "has_species_keyword": species_kid is not None and any(k["id"] == species_kid for k in kws),
+            }
+        return jsonify({"ok": True, "photos": result_photos})
+
     @app.route("/api/pipeline/config", methods=["GET", "POST"])
     def api_pipeline_config():
         """Get or update pipeline model configuration.
