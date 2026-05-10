@@ -2864,9 +2864,36 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     grmSeedFromDbState(data && data.photos ? data.photos : {}, items, selectPhotoId);
   }).catch(function() {
     if (grmState.sessionId !== sessionId) return;
-    // Network/error fallback: seed from heuristic only.
-    grmSeedFromDbState({}, items, selectPhotoId);
+    // /group/state failed (network, 5xx, etc). Do NOT seed from an empty
+    // snapshot — that would treat every previously flagged/rejected photo
+    // as an unflagged candidate, and a click on Apply would clear those
+    // flags. Keep the modal in the "Loading…" state with Apply disabled so
+    // the user can either retry by reopening the burst or close out via ×.
+    grmShowSeedError(items, selectPhotoId);
   });
+}
+
+// /group/state failed. Render the cards with no flag state so the user can
+// still inspect photos, but leave Apply disabled and surface what's wrong
+// in the button label. We deliberately do NOT set grmState.seeded = true
+// here — grmApply early-returns until it is, so a stray click can't clear
+// flags from a degraded snapshot.
+function grmShowSeedError(items, selectPhotoId) {
+  grmState.dbState = {};
+  var initSelect = selectPhotoId || (items[0] && items[0].id);
+  if (initSelect) {
+    grmSelect(initSelect);
+  } else {
+    renderGroupModal();
+  }
+  var btn = document.getElementById('grmApplyBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    btn.style.cursor = 'not-allowed';
+    btn.textContent = 'Could not load — reopen to retry';
+    btn.title = 'Loading photo flag state failed; close and reopen this burst to try again.';
+  }
 }
 
 // Seed picks/rejects on modal open. Photos already flagged/rejected in the
@@ -3079,6 +3106,11 @@ function grmRefreshSpeciesKeywordState() {
 function grmUpdateApplyLabel() {
   var btn = document.getElementById('grmApplyBtn');
   if (!btn) return;
+  // While the modal is unseeded (loading or seed failed), the button owns
+  // its own label/disabled state set by openGroupReview / grmShowSeedError.
+  // Don't compute a diff against an empty/unknown dbState — it would
+  // misreport pending writes and clobber the error/loading message.
+  if (!grmState || !grmState.seeded) return;
   var diff = grmComputeDiff();
   var parts = [];
   if (diff.flagNew > 0) parts.push('Flag ' + diff.flagNew);
