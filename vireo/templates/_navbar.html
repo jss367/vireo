@@ -4287,17 +4287,28 @@ async function getExternalEditors() {
     } catch(_) {
       arr = [];
     }
-    _externalEditorsCache = arr
-      .map(function(e) {
-        var name = (e && e.name) || '';
-        var path = (e && e.path) || '';
-        if (!name && path) {
-          var parts = path.replace(/\/+$/, '').split('/');
-          name = parts[parts.length - 1] || 'Editor';
-        }
-        return { name: name, path: path };
-      })
-      .filter(function(e) { return e.path; });
+    // Mirror cfg.get_editors() shape-filtering on the server: hand-edited
+    // config.json (or any client posting to /api/config, which doesn't
+    // shape-validate this key) can yield {"path": 123} or similar. Without
+    // the typeof guard, path.replace() would throw TypeError inside this
+    // async IIFE, leaving _externalEditorsLoading as a rejected promise
+    // that every later "Open in Editor" click resolves against.
+    _externalEditorsCache = [];
+    arr.forEach(function(e) {
+      if (!e || typeof e !== 'object') return;
+      var path = e.path;
+      if (typeof path !== 'string') return;
+      path = path.trim();
+      if (!path) return;
+      var name = e.name;
+      if (typeof name !== 'string' || !name.trim()) {
+        var parts = path.replace(/\/+$/, '').split('/');
+        name = parts[parts.length - 1] || 'Editor';
+      } else {
+        name = name.trim();
+      }
+      _externalEditorsCache.push({ name: name, path: path });
+    });
     _externalEditorsLoading = null;
     return _externalEditorsCache;
   })();

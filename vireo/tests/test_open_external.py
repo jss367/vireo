@@ -414,22 +414,34 @@ def test_clearing_editor_list_does_not_resurrect_legacy_field(app_and_db, monkey
 
 
 def test_get_editors_filters_malformed_entries(app_and_db):
-    """cfg.get_editors() drops dicts missing a path or with non-string fields."""
+    """cfg.get_editors() drops dicts missing a path or with non-string fields.
+
+    The same filtering shape is mirrored in _navbar.html's getExternalEditors()
+    so a hand-edited config.json (or any /api/config writer that doesn't
+    validate the list shape) can't trip path.replace() and leave the JS
+    cache as a permanently-rejected promise.
+    """
     import config as cfg
     cfg.set("external_editors", [
         {"name": "Good", "path": "/usr/bin/good"},
         {"name": "NoPath"},
         {"path": ""},
         "not even a dict",
+        {"name": "NumPath", "path": 12345},      # non-string path → drop
+        {"name": 999, "path": "/usr/bin/numname"},  # non-string name → use basename
         {"name": "", "path": "/Applications/Foo.app"},
     ])
     editors = cfg.get_editors()
     assert [e["path"] for e in editors] == [
-        "/usr/bin/good", "/Applications/Foo.app",
+        "/usr/bin/good",
+        "/usr/bin/numname",
+        "/Applications/Foo.app",
     ]
-    # Empty name falls back to the basename of the path.
     assert editors[0]["name"] == "Good"
-    assert editors[1]["name"] == "Foo.app"
+    # Non-string name falls back to the basename of the path.
+    assert editors[1]["name"] == "numname"
+    # Empty name falls back to the basename of the path.
+    assert editors[2]["name"] == "Foo.app"
 
 
 def test_open_external_expands_user_in_editor_path(app_and_db, monkeypatch, tmp_path):

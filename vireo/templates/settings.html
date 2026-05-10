@@ -1248,8 +1248,13 @@ function collectExternalEditors() {
   // Drop entries with empty paths; default the display name to the basename
   // of the path when the user didn't fill one in. Mirrors what the backend
   // does in cfg.get_editors() so what's shown matches what's used.
+  // Defense-in-depth: loadConfig() already coerces _editorsState entries to
+  // strings, but if any later code path stored a non-string (or a future edit
+  // skips that load step), calling .trim() directly here would TypeError and
+  // block every settings autosave until the malformed entry is repaired.
+  var asStr = function(v) { return typeof v === 'string' ? v.trim() : ''; };
   return _editorsState
-    .map(function(e) { return { name: (e.name || '').trim(), path: (e.path || '').trim() }; })
+    .map(function(e) { return { name: asStr(e && e.name), path: asStr(e && e.path) }; })
     .filter(function(e) { return e.path.length > 0; })
     .map(function(e) {
       if (!e.name) {
@@ -1278,13 +1283,21 @@ async function loadConfig() {
     document.getElementById('cfgMaxEditHistory').value = cfg.max_edit_history != null ? cfg.max_edit_history : 1000;
     // Load editor list. Synthesize from the legacy single string if the user
     // hasn't migrated yet — saving from the new UI completes the migration.
-    var editors = Array.isArray(cfg.external_editors) ? cfg.external_editors.slice() : [];
-    if (editors.length === 0 && (cfg.external_editor || '').trim()) {
-      editors = [{ name: 'Editor', path: cfg.external_editor.trim() }];
-    }
-    _editorsState = editors.map(function(e) {
-      return { name: (e && e.name) || '', path: (e && e.path) || '' };
+    // Defend against malformed entries (non-string path/name from hand-edited
+    // config.json or any non-validating /api/config writer) so we don't crash
+    // the settings page on load.
+    var rawList = Array.isArray(cfg.external_editors) ? cfg.external_editors : [];
+    _editorsState = [];
+    rawList.forEach(function(e) {
+      if (!e || typeof e !== 'object') return;
+      var path = typeof e.path === 'string' ? e.path : '';
+      var name = typeof e.name === 'string' ? e.name : '';
+      _editorsState.push({ name: name, path: path });
     });
+    if (_editorsState.length === 0 && typeof cfg.external_editor === 'string'
+        && cfg.external_editor.trim()) {
+      _editorsState = [{ name: 'Editor', path: cfg.external_editor.trim() }];
+    }
     renderExternalEditors();
     document.getElementById('cfgDarktableBin').value = cfg.darktable_bin || '';
     document.getElementById('cfgDarktableStyle').value = cfg.darktable_style || '';
