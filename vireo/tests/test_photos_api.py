@@ -1647,6 +1647,153 @@ def test_storage_delete_files_syncs_preview_cache(client_with_photo):
     assert db.preview_cache_get(photo_id, 1920) is None
 
 
+def test_storage_clear_thumbnails_resets_thumb_path(client_with_photo):
+    """/api/storage/clear type=thumbnails NULLs photos.thumb_path so the
+    pipeline plan's count_photos_missing_thumb doesn't report phantoms.
+
+    Without this, the Thumbnails & Previews pill renders "Already done"
+    after a cache wipe even though the next run regenerates everything.
+    """
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (f"{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    assert db.count_photos_missing_thumb()["pending"] == 0
+
+    resp = client.post("/api/storage/clear", json={"type": "thumbnails"})
+    assert resp.status_code == 200
+    assert db.count_photos_missing_thumb()["pending"] == 1
+    row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id = ?", (photo_id,),
+    ).fetchone()
+    assert row["thumb_path"] is None
+
+
+def test_storage_delete_files_syncs_thumb_path(client_with_photo):
+    """/api/storage/delete-files type=thumbnails NULLs photos.thumb_path
+    for the photos whose thumb files were removed."""
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    thumb_dir = app.config["THUMB_CACHE_DIR"]
+    thumb_file = os.path.join(thumb_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (10, 10)).save(thumb_file, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (thumb_file, photo_id),
+    )
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/storage/delete-files",
+        json={"type": "thumbnails", "files": [f"{photo_id}.jpg"]},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted"] == 1
+    row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id = ?", (photo_id,),
+    ).fetchone()
+    assert row["thumb_path"] is None
+
+
+def test_storage_delete_files_chunks_large_thumb_id_list(
+    tmp_path, monkeypatch,
+):
+    """Deleting more thumbnails than SQLite's variable cap (999 on legacy
+    builds) must not raise OperationalError. The handler chunks the
+    UPDATE so a bulk wipe stays within ``SQLITE_MAX_VARIABLE_NUMBER``.
+
+    Without chunking, large selections from the storage UI would unlink
+    every file successfully and then fail the photos.thumb_path UPDATE,
+    leaving the column out of sync with disk and re-introducing the
+    phantom "Already done" pill this PR exists to prevent.
+    """
+    import os
+
+    from PIL import Image
+
+    import config as cfg
+    import models
+    from app import create_app
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(
+        models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"),
+    )
+    monkeypatch.setattr(
+        models, "CONFIG_PATH", str(tmp_path / "models.json"),
+    )
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+
+    # 1500 photos > 999 (legacy SQLITE_MAX_VARIABLE_NUMBER).
+    n = 1500
+    photo_ids = []
+    files = []
+    for i in range(n):
+        src = photos_dir / f"p{i}.jpg"
+        # Touch a tiny placeholder for add_photo's mtime/size; not loaded.
+        src.write_bytes(b"\xff\xd8\xff\xe0")
+        pid = db.add_photo(
+            folder_id=fid, filename=f"p{i}.jpg", extension=".jpg",
+            file_size=os.path.getsize(src),
+            file_mtime=os.path.getmtime(src),
+            width=10, height=10,
+        )
+        photo_ids.append(pid)
+        files.append(f"{pid}.jpg")
+        thumb_file = thumb_dir / f"{pid}.jpg"
+        Image.new("RGB", (8, 8)).save(str(thumb_file), "JPEG")
+        db.conn.execute(
+            "UPDATE photos SET thumb_path = ? WHERE id = ?",
+            (str(thumb_file), pid),
+        )
+    db.conn.commit()
+
+    # Force the legacy 999 cap so a regression that drops the chunking
+    # would actually trip the limit rather than relying on the modern
+    # 32766 ceiling masking the bug on most CI machines.
+    db.conn.execute("PRAGMA max_variable_number=999")
+
+    app = create_app(
+        db_path=db_path, thumb_cache_dir=str(thumb_dir),
+        api_token="test-token-123",
+    )
+    client = app.test_client()
+    resp = client.post(
+        "/api/storage/delete-files",
+        json={"type": "thumbnails", "files": files},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert data["deleted"] == n
+    row = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM photos WHERE thumb_path IS NOT NULL"
+    ).fetchone()
+    assert row["n"] == 0
+    db.close()
+
+
 def test_preview_adoption_enforces_quota(client_with_photo, monkeypatch):
     """Lazily-adopting a legacy on-disk preview file still runs eviction,
     so with preview_cache_max_mb=0 the adopted file is drained like a

@@ -58,6 +58,12 @@ class PipelinePlanParams:
     # at plan time, since hashing thousands of files synchronously inside
     # a plan request would block the UI on every settings change.
     hash_duplicate_paths: list | None = None
+    # User's currently-selected preview pyramid tier from the cfgPreviewSize
+    # picker. Determines whether the previews substage runs at all (0 =
+    # "serve originals"; the substage no-ops) and which size's
+    # preview_cache rows count as "already done". ``None`` falls back to
+    # the workspace-effective config in ``_previews_plan``.
+    preview_max_size: int | None = None
 
 
 def _plural(n, s="s"):
@@ -525,6 +531,175 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
     }
 
 
+def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
+    """Combined plan entry for the Thumbnails & Previews card.
+
+    The card aggregates two pipeline substages (thumbnails + previews) so
+    one plan entry has to answer for both. The accurate signal needs the
+    user's currently-selected preview size (a 1280px run is genuinely
+    "Already done" while the same library at 3840px isn't), so the
+    planner consults ``preview_max_size`` from the plan params (or the
+    workspace-effective config as a fallback).
+
+    States:
+      - ``will-skip``: only when both substages no-op. Today that's
+        impossible — thumbnails always runs — so we never emit this.
+        ``preview_max_size=0`` skips just the previews substage; the
+        thumbnails substage still has work to consider.
+      - ``done-prior``: all eligible photos have a cached thumbnail and
+        (if applicable) a preview at the configured size, no imports
+        coming in.
+      - ``will-run``: everything else, with a count of pending work.
+    """
+    thumb = db.count_photos_missing_thumb(photo_ids)
+    eligible = thumb["eligible"]
+    thumb_pending = thumb["pending"]
+
+    raw_size = params.preview_max_size
+    if raw_size is None:
+        raw_size = effective_cfg.get("preview_max_size", 1920)
+    try:
+        preview_size = int(raw_size or 0)
+    except (TypeError, ValueError):
+        preview_size = 1920
+
+    # preview_max_size=0 means "serve originals" — the previews substage
+    # explicitly skips in pipeline_job.py:1192-1201, so don't count it
+    # as work and don't surface a "X previews to generate" number.
+    if preview_size == 0:
+        previews_skipped = True
+        preview_pending = 0
+    else:
+        previews_skipped = False
+        prev = db.count_photos_missing_preview(preview_size, photo_ids)
+        preview_pending = prev["pending"]
+
+    if eligible == 0 and new_count == 0:
+        # Empty scope. The stages will run (the loop is just empty), but
+        # there's nothing to count. Be honest about that.
+        summary = (
+            "Will run — no photos in scope yet"
+            if not previews_skipped
+            else "Will run for thumbnails — no photos in scope (previews "
+                 "skipped: serves originals at full resolution)"
+        )
+        return {
+            "state": "will-run",
+            "summary": summary,
+            "detail": {
+                "eligible": 0,
+                "pending": 0,
+                "thumb_pending": 0,
+                "preview_pending": 0,
+                "preview_size": preview_size,
+                "previews_skipped": previews_skipped,
+                "new_photos": 0,
+            },
+        }
+
+    if (
+        thumb_pending == 0
+        and preview_pending == 0
+        and new_count == 0
+    ):
+        if previews_skipped:
+            summary = (
+                f"Thumbnails cached for all {eligible} "
+                f"photo{_plural(eligible)} (previews skipped: serves "
+                f"originals at full resolution)"
+            )
+        else:
+            summary = (
+                f"All {eligible} photo{_plural(eligible)} have cached "
+                f"thumbnails and {preview_size}px previews"
+            )
+        return {
+            "state": "done-prior",
+            "summary": summary,
+            "detail": {
+                "eligible": eligible,
+                "pending": 0,
+                "thumb_pending": 0,
+                "preview_pending": 0,
+                "preview_size": preview_size,
+                "previews_skipped": previews_skipped,
+                "new_photos": 0,
+            },
+        }
+
+    parts = []
+    if thumb_pending > 0:
+        parts.append(f"{thumb_pending} thumbnail{_plural(thumb_pending)}")
+    if preview_pending > 0:
+        parts.append(
+            f"{preview_pending} {preview_size}px "
+            f"preview{_plural(preview_pending)}"
+        )
+    if new_count > 0:
+        # Imports add work for both substages: each new photo needs a
+        # thumbnail (always) and a preview (unless skipped). Phrase as a
+        # single addendum so we don't double-count "+ N new" twice.
+        if previews_skipped:
+            parts.append(
+                f"up to {new_count} new photo{_plural(new_count)} "
+                f"to thumbnail"
+            )
+        else:
+            parts.append(
+                f"up to {new_count} new photo{_plural(new_count)} "
+                f"(thumbnail + preview each)"
+            )
+
+    if not parts:
+        # Nothing pending in scope but we got here because new_count==0
+        # was false above? Shouldn't happen — guard so a logic gap can't
+        # render an empty pill summary.
+        summary = (
+            f"Will run — {eligible} photo{_plural(eligible)} in scope"
+        )
+    else:
+        summary = "Will generate " + ", ".join(parts)
+        if previews_skipped:
+            # Make the no-op-previews case visible in the summary too. The
+            # detail flag is enough for tests, but a user reading just the
+            # pill+summary should also see why no previews are listed.
+            summary += " (previews skipped: serves originals)"
+
+    thumb_pending_total = thumb_pending + new_count
+    preview_pending_total = (
+        preview_pending + new_count if not previews_skipped else 0
+    )
+    # Photo-level "pending" for the pill: a photo missing only a thumb and
+    # a different photo missing only a preview each count once toward "next
+    # run will touch N photos." ``max(thumb_pending, preview_pending)``
+    # undercounts whenever the two missing-sets aren't strict subsets of
+    # each other (e.g. one photo just had its preview evicted but kept its
+    # thumb, another only ever had a thumb generated). Use the SQL union
+    # for the existing-scope contribution; new imports always need both
+    # substages, so they add 1 photo each regardless of substage split.
+    if previews_skipped:
+        existing_pending = thumb_pending
+    else:
+        union = db.count_photos_missing_thumb_or_preview(
+            preview_size, photo_ids,
+        )
+        existing_pending = union["pending"]
+    photos_pending = existing_pending + new_count
+    return {
+        "state": "will-run",
+        "summary": summary,
+        "detail": {
+            "eligible": eligible + new_count,
+            "pending": photos_pending,
+            "thumb_pending": thumb_pending_total,
+            "preview_pending": preview_pending_total,
+            "preview_size": preview_size,
+            "previews_skipped": previews_skipped,
+            "new_photos": new_count,
+        },
+    }
+
+
 def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg):
     if params.skip_regroup:
         return {
@@ -629,6 +804,7 @@ def _empty_import_plan():
                     "new_photos": 0, "already_known": 0,
                 },
             },
+            "Previews": dict(no_op),
             "Classify": dict(no_op),
             "Extract": dict(no_op),
             "EyeKeypoints": dict(no_op),
@@ -774,6 +950,7 @@ def compute_plan(db, params, db_path):
         {
             "stages": {
                 "Scan": {state, summary, detail?},   # only in import mode
+                "Previews": {state, summary, detail?},
                 "Classify": {state, summary, detail?},
                 "Extract": ...,
                 "EyeKeypoints": ...,
@@ -859,12 +1036,14 @@ def compute_plan(db, params, db_path):
     classify = _classify_plan(db, params, photo_ids, new_count)
     extract = _extract_plan(db, params, photo_ids, pipeline_cfg, new_count)
     eye = _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count)
+    previews = _previews_plan(db, params, photo_ids, new_count, effective_cfg)
     upstream_will_run = any(
         s["state"] == "will-run" for s in (classify, extract, eye)
     )
     regroup = _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg)
 
     stages = {
+        "Previews": previews,
         "Classify": classify,
         "Extract": extract,
         "EyeKeypoints": eye,

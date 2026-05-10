@@ -857,6 +857,308 @@ def test_classify_plan_reclassify_suppresses_outdated(
     )
 
 
+# -------- db helpers: thumbnails & previews --------
+
+def test_count_photos_missing_thumb_basic(tmp_path):
+    """One photo with thumb_path set, one without → eligible=2, pending=1."""
+    db, folder_id = _make_db(tmp_path)
+    pid_done = db.add_photo(
+        folder_id=folder_id, filename="done.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=folder_id, filename="todo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET thumb_path='done.jpg' WHERE id=?", (pid_done,),
+    )
+    db.conn.commit()
+    assert db.count_photos_missing_thumb() == {"eligible": 2, "pending": 1}
+
+
+def test_count_photos_missing_thumb_empty_workspace(tmp_path):
+    db, _ = _make_db(tmp_path)
+    assert db.count_photos_missing_thumb() == {"eligible": 0, "pending": 0}
+
+
+def test_count_photos_missing_preview_basic(tmp_path):
+    """preview_cache row at the requested size means 'already cached'."""
+    db, folder_id = _make_db(tmp_path)
+    pid_a = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=folder_id, filename="b.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    db.preview_cache_insert(pid_a, 1920, 100)
+    assert db.count_photos_missing_preview(1920) == {
+        "eligible": 2, "pending": 1,
+    }
+
+
+def test_count_photos_missing_preview_size_specific(tmp_path):
+    """A photo cached at 1280px is still pending at 1920px — the planner
+    must not count cross-size cache rows toward the configured size.
+    """
+    db, folder_id = _make_db(tmp_path)
+    pid = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    db.preview_cache_insert(pid, 1280, 100)
+    assert db.count_photos_missing_preview(1920) == {
+        "eligible": 1, "pending": 1,
+    }
+    assert db.count_photos_missing_preview(1280) == {
+        "eligible": 1, "pending": 0,
+    }
+
+
+def test_count_photos_missing_thumb_or_preview_union(tmp_path):
+    """Union helper counts a photo once whether it's missing its thumb,
+    its preview, or both. ``max(thumb_pending, preview_pending)``
+    undercounts whenever the missing-sets aren't strict subsets — this
+    pins the union behaviour the Thumbnails & Previews pill needs.
+    """
+    db, folder_id = _make_db(tmp_path)
+    pid_thumb_only_missing = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    pid_preview_only_missing = db.add_photo(
+        folder_id=folder_id, filename="b.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    pid_both_done = db.add_photo(
+        folder_id=folder_id, filename="c.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    pid_both_missing = db.add_photo(
+        folder_id=folder_id, filename="d.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    # b and c have a thumb on disk; a and d do not.
+    db.conn.execute(
+        "UPDATE photos SET thumb_path=filename WHERE id IN (?, ?)",
+        (pid_preview_only_missing, pid_both_done),
+    )
+    db.conn.commit()
+    # a and c have a 1920px preview cached; b and d do not.
+    db.preview_cache_insert(pid_thumb_only_missing, 1920, 100)
+    db.preview_cache_insert(pid_both_done, 1920, 100)
+
+    # max(thumb_pending=2, preview_pending=2) = 2 — but the real union is
+    # {a, b, d} = 3 photos the next run will touch.
+    assert db.count_photos_missing_thumb()["pending"] == 2
+    assert db.count_photos_missing_preview(1920)["pending"] == 2
+    assert db.count_photos_missing_thumb_or_preview(1920) == {
+        "eligible": 4, "pending": 3,
+    }
+
+
+def test_previews_plan_pending_uses_union_not_max(tmp_path):
+    """compute_plan must surface the union pending count, not the max of
+    substages. Two photos — one missing only the thumb, one missing only
+    the 1920px preview — should report ``pending=2``, not 1.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid_thumb_only_missing = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    pid_preview_only_missing = db.add_photo(
+        folder_id=folder_id, filename="b.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET thumb_path=filename WHERE id=?",
+        (pid_preview_only_missing,),
+    )
+    db.conn.commit()
+    db.preview_cache_insert(pid_thumb_only_missing, 1920, 100)
+
+    plan = compute_plan(
+        db, _params(preview_max_size=1920), str(tmp_path / "test.db"),
+    )
+    previews = plan["stages"]["Previews"]
+    assert previews["state"] == "will-run"
+    assert previews["detail"]["thumb_pending"] == 1
+    assert previews["detail"]["preview_pending"] == 1
+    # Both photos genuinely have work, so pending must be 2 — not 1.
+    assert previews["detail"]["pending"] == 2
+
+
+# -------- compute_plan: previews --------
+
+def test_previews_plan_done_prior_when_all_cached(tmp_path):
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid_a = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    pid_b = db.add_photo(
+        folder_id=folder_id, filename="b.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET thumb_path=filename WHERE id IN (?, ?)",
+        (pid_a, pid_b),
+    )
+    db.conn.commit()
+    db.preview_cache_insert(pid_a, 1920, 100)
+    db.preview_cache_insert(pid_b, 1920, 100)
+    plan = compute_plan(
+        db, _params(preview_max_size=1920), str(tmp_path / "test.db"),
+    )
+    previews = plan["stages"]["Previews"]
+    assert previews["state"] == "done-prior"
+    assert "2 photos" in previews["summary"]
+    assert "1920px" in previews["summary"]
+    assert previews["detail"]["thumb_pending"] == 0
+    assert previews["detail"]["preview_pending"] == 0
+
+
+def test_previews_plan_will_run_with_pending_counts(tmp_path):
+    """Mixed scope: some cached, some not. Pill summary names both
+    substages so the user sees the breakdown, not a single conflated number.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid_done = db.add_photo(
+        folder_id=folder_id, filename="done.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=folder_id, filename="todo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET thumb_path='done.jpg' WHERE id=?", (pid_done,),
+    )
+    db.conn.commit()
+    db.preview_cache_insert(pid_done, 1920, 100)
+    plan = compute_plan(
+        db, _params(preview_max_size=1920), str(tmp_path / "test.db"),
+    )
+    previews = plan["stages"]["Previews"]
+    assert previews["state"] == "will-run"
+    assert previews["detail"]["thumb_pending"] == 1
+    assert previews["detail"]["preview_pending"] == 1
+    assert "1 thumbnail" in previews["summary"]
+    assert "1 1920px preview" in previews["summary"]
+
+
+def test_previews_plan_done_prior_when_full_resolution_and_thumbs_cached(tmp_path):
+    """preview_max_size=0 → previews substage skipped. With all thumbs
+    cached, the card is honestly Already done — only the thumbnail
+    substage had work, and it has none left.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET thumb_path='a.jpg' WHERE id=?", (pid,),
+    )
+    db.conn.commit()
+    plan = compute_plan(
+        db, _params(preview_max_size=0), str(tmp_path / "test.db"),
+    )
+    previews = plan["stages"]["Previews"]
+    assert previews["state"] == "done-prior"
+    assert previews["detail"]["previews_skipped"] is True
+    assert "previews skipped" in previews["summary"]
+
+
+def test_previews_plan_full_resolution_will_run_when_thumbs_pending(tmp_path):
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    plan = compute_plan(
+        db, _params(preview_max_size=0), str(tmp_path / "test.db"),
+    )
+    previews = plan["stages"]["Previews"]
+    assert previews["state"] == "will-run"
+    assert previews["detail"]["thumb_pending"] == 1
+    assert previews["detail"]["preview_pending"] == 0
+    assert "1 thumbnail" in previews["summary"]
+    # No "Npx preview" mention when previews are skipped.
+    assert "preview" not in previews["summary"].replace("previews", "")
+
+
+def test_previews_plan_size_change_invalidates_done_prior(tmp_path):
+    """Library cached at 1280px should NOT report Already done when the
+    user has the picker on 1920px — the next run will generate fresh
+    1920px files. This is the core of the user's question on
+    transparency: the pill must answer for the *current* selection.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET thumb_path='a.jpg' WHERE id=?", (pid,),
+    )
+    db.conn.commit()
+    db.preview_cache_insert(pid, 1280, 100)
+    # 1280 selected → done-prior.
+    plan_1280 = compute_plan(
+        db, _params(preview_max_size=1280), str(tmp_path / "test.db"),
+    )
+    assert plan_1280["stages"]["Previews"]["state"] == "done-prior"
+    # 1920 selected → will-run, even though "some prior preview output exists".
+    plan_1920 = compute_plan(
+        db, _params(preview_max_size=1920), str(tmp_path / "test.db"),
+    )
+    previews_1920 = plan_1920["stages"]["Previews"]
+    assert previews_1920["state"] == "will-run"
+    assert previews_1920["detail"]["preview_pending"] == 1
+
+
+def test_previews_plan_empty_workspace_will_run_no_count(tmp_path):
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db, _params(preview_max_size=1920), str(tmp_path / "test.db"),
+    )
+    previews = plan["stages"]["Previews"]
+    assert previews["state"] == "will-run"
+    assert previews["detail"]["eligible"] == 0
+    assert "no photos in scope" in previews["summary"]
+
+
+def test_previews_plan_import_mode_counts_new_files(tmp_path):
+    """Import mode: N new paths must be reflected as up-to-N new photos
+    needing thumbnails+previews, even when the active workspace is empty.
+    """
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db,
+        _params(
+            source_paths=["/cards/a/IMG_001.JPG", "/cards/a/IMG_002.JPG"],
+            preview_max_size=1920,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    previews = plan["stages"]["Previews"]
+    assert previews["state"] == "will-run"
+    assert previews["detail"]["new_photos"] == 2
+    assert "up to 2 new" in previews["summary"]
+
+
 # -------- compute_plan: extract --------
 
 def test_extract_plan_will_skip_when_disabled(tmp_path):

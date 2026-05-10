@@ -1362,6 +1362,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             reclassify=bool(body.get("reclassify")),
             source_paths=source_paths,
             hash_duplicate_paths=hash_duplicate_paths,
+            preview_max_size=body.get("preview_max_size"),
         )
         db = _get_db()
         return jsonify(compute_plan(db, params, db_path))
@@ -5108,6 +5109,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if os.path.isdir(thumb_dir):
                 shutil.rmtree(thumb_dir)
                 log.info("Thumbnail cache cleared")
+            # Keep photos.thumb_path in sync with disk so the dashboard
+            # coverage card and the pipeline plan don't see phantoms —
+            # the column is the fast proxy that gates "thumbnail done"
+            # in count_photos_missing_thumb, while the actual stage
+            # gates on os.path.exists. Leaving thumb_path populated
+            # after wiping the cache would make the Previews pill
+            # report "Already done" even though the next run would
+            # regenerate every thumbnail.
+            db = _get_db()
+            db.conn.execute(
+                "UPDATE photos SET thumb_path = NULL "
+                "WHERE thumb_path IS NOT NULL"
+            )
+            db.conn.commit()
             return jsonify({"ok": True})
         elif cache_type == "embeddings":
             from classifier import CACHE_DIR
@@ -5145,9 +5160,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # via this endpoint (stats page). Matches {pid}_{size}.jpg only;
         # legacy {pid}.jpg files have no tracking row to remove.
         preview_rows_removed = 0
-        if cache_type == "previews":
+        # Keep photos.thumb_path in sync when individual thumbnail files
+        # are removed — same reason as the storage/clear path: the column
+        # is the planner's fast proxy and would otherwise report phantoms.
+        thumb_ids_cleared = []
+        if cache_type in ("previews", "thumbnails"):
             import re
             sized_pat = re.compile(r"^(\d+)_(\d+)\.jpg$")
+            thumb_pat = re.compile(r"^(\d+)\.jpg$")
             db = _get_db()
         for fname in filenames:
             # Prevent path traversal
@@ -5161,8 +5181,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     if m:
                         db.preview_cache_delete(int(m.group(1)), int(m.group(2)))
                         preview_rows_removed += 1
+                elif cache_type == "thumbnails":
+                    m = thumb_pat.match(safe)
+                    if m:
+                        thumb_ids_cleared.append(int(m.group(1)))
         if cache_type == "previews" and preview_rows_removed:
             log.info("Removed %d preview_cache rows alongside files", preview_rows_removed)
+        if cache_type == "thumbnails" and thumb_ids_cleared:
+            # Chunk the IN-list under SQLite's SQLITE_MAX_VARIABLE_NUMBER cap
+            # (999 on older builds). The storage UI's "delete selected" can
+            # send thousands of files at once; a single statement with one
+            # bind per id would raise OperationalError after the files have
+            # already been removed, leaving photos.thumb_path out of sync
+            # with disk.
+            for chunk in _chunked(thumb_ids_cleared):
+                placeholders = ",".join("?" for _ in chunk)
+                db.conn.execute(
+                    f"UPDATE photos SET thumb_path = NULL "
+                    f"WHERE id IN ({placeholders})",
+                    chunk,
+                )
+            db.conn.commit()
+            log.info(
+                "Cleared photos.thumb_path for %d photos alongside files",
+                len(thumb_ids_cleared),
+            )
         log.info("Deleted %d files from %s cache", deleted, cache_type)
         return jsonify({"ok": True, "deleted": deleted})
 

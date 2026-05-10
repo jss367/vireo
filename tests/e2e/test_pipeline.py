@@ -305,6 +305,60 @@ def test_pipeline_disabling_extract_cascades_to_eye_keypoints(live_server, page)
     expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
 
 
+def test_pipeline_previews_pill_shows_pending_count(live_server, page):
+    """Previews card must surface honest counts ("Will generate N previews")
+    instead of an opaque "Will run", per CORE_PHILOSOPHY's no-black-boxes
+    rule. The seeded fixture has 5 photos and no preview_cache rows, so
+    the pill should reflect 5 photos pending and the summary should name
+    the substages that have work.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    expect(page.locator("#pillPreviews")).to_contain_text("Will run")
+    # Wait for the plan to actually populate — the pill above has a
+    # default-when-no-plan fallback, so its presence isn't proof the
+    # plan response has been merged into _pipelinePlan yet.
+    page.wait_for_function(
+        "() => window._pipelinePlan && window._pipelinePlan.stages "
+        "&& window._pipelinePlan.stages.Previews"
+    )
+    plan = page.evaluate(
+        "() => window._pipelinePlan ? window._pipelinePlan.stages.Previews : null"
+    )
+    assert plan is not None, "Previews plan entry missing from response"
+    assert plan["detail"]["eligible"] > 0, f"Expected eligible>0, got: {plan!r}"
+    # Detail count appears in parentheses — the pill formatter shape is
+    # "Will run (N)" / "Resume (N left)".
+    pill_text = page.locator("#pillPreviews").inner_text()
+    assert any(c.isdigit() for c in pill_text), (
+        f"Previews pill should include a count, got: {pill_text!r}, "
+        f"plan: {plan!r}"
+    )
+    # Summary span carries the substage breakdown ("N previews" or
+    # "N thumbnails, N previews").
+    expect(page.locator("#summaryPreviews")).to_contain_text("preview")
+
+
+def test_pipeline_previews_pill_full_resolution_skips_previews(live_server, page):
+    """Selecting "Full resolution" disables the previews substage. The pill
+    summary must reflect that — promising N previews that will never run
+    would be a black box.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.click("#card-previews .stage-header")
+    page.select_option("#cfgPreviewSize", "0")
+    # The summary updates after the debounced plan refresh fires. In will-run
+    # mode the summary surfaces "previews skipped" so the user sees why no
+    # preview count appears alongside the thumbnail count.
+    expect(page.locator("#summaryPreviews")).to_contain_text("previews skipped")
+    plan = page.evaluate(
+        "() => window._pipelinePlan ? window._pipelinePlan.stages.Previews : null"
+    )
+    assert plan["detail"]["previews_skipped"] is True
+    assert plan["detail"]["preview_pending"] == 0
+
+
 def test_pipeline_shared_card_not_done_until_all_substages_complete(live_server, page):
     """model_loader and classify both map to the Classify card. The pill must
     not flip to 'Done' when only model_loader has completed — classify still
