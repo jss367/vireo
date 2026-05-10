@@ -12,7 +12,18 @@ import math
 #   - setup_complete: internal state flag (not a user-facing setting)
 #   - ingest.recent_destinations: auto-populated MRU list, not a knob
 #   - keyboard_shortcuts.*: managed by a dedicated curated UI section
-EXCLUDED = ("setup_complete", "ingest.recent_destinations", "keyboard_shortcuts")
+EXCLUDED = (
+    "setup_complete",
+    "ingest.recent_destinations",
+    "keyboard_shortcuts",
+    # Legacy single-editor field; superseded by `external_editors`. Hidden
+    # from the schema-rendered settings UI but still read by config.get_editors
+    # for one-cycle migration of users who set the old string.
+    "external_editor",
+    # List of {name, path} dicts — has custom settings UI rather than a
+    # generic widget, so it lives outside SCHEMA.
+    "external_editors",
+)
 
 
 CATEGORIES = (
@@ -238,12 +249,6 @@ SCHEMA = {
         "category": "Paths", "scope": "global",
         "label": "darktable-cli path",
         "desc": "Absolute path to the darktable-cli binary.",
-    },
-    "external_editor": {
-        "type": "path",
-        "category": "Paths", "scope": "global",
-        "label": "External editor",
-        "desc": "Absolute path to an external image editor (used by 'Open in editor').",
     },
     "darktable_style": {
         "type": "string",

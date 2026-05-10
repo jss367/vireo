@@ -3059,9 +3059,9 @@ function openLightbox(photoId, filename, photoList) {
   inatBtn.onclick = function() { submitToInat(photoId); };
   var editorBtn = document.getElementById('lightboxOpenEditor');
   if (editorBtn) {
-    if (typeof openInEditor === 'function') {
+    if (typeof openInEditorWithPicker === 'function') {
       editorBtn.style.display = '';
-      editorBtn.onclick = function() { openInEditor([photoId]); };
+      editorBtn.onclick = function(e) { openInEditorWithPicker([photoId], e); };
     } else {
       editorBtn.style.display = 'none';
     }
@@ -3301,8 +3301,7 @@ function buildLightboxContextMenu(pid) {
       onClick: function() { window.findSimilar(pid); } });
   }
   if (has('openInEditor')) {
-    items.push({ label: 'Open in Editor',
-      onClick: function() { window.openInEditor([pid]); } });
+    items = items.concat(window.buildOpenInEditorMenuItems([pid]));
   }
   if (has('revealPhoto')) {
     items.push({ label: 'Reveal in Finder/Folder',
@@ -4257,18 +4256,183 @@ async function safeFetch(url, opts, options) {
   return JSON.parse(text);
 }
 
-/* ---------- Open in External Editor ---------- */
-async function openInEditor(photoIds) {
+/* ---------- Open in External Editor ----------
+ * Three entry points for opening photos in an external editor:
+ *   - openInEditor(ids, editorIndex)         — direct call, posts to backend
+ *   - openInEditorWithPicker(ids, event)     — for buttons: shows a picker
+ *                                              menu when 2+ editors exist,
+ *                                              otherwise opens directly.
+ *   - getExternalEditorsSync()               — for context-menu builders that
+ *                                              need to inline editor entries
+ *                                              synchronously; reads the cache.
+ *
+ * Editors are cached on first read of /api/config; settings.html invalidates
+ * via window.invalidateEditorsCache() after saving so the next click picks
+ * up changes.
+ */
+var _externalEditorsCache = null;
+var _externalEditorsLoading = null;
+
+async function getExternalEditors() {
+  if (_externalEditorsCache !== null) return _externalEditorsCache;
+  if (_externalEditorsLoading) return _externalEditorsLoading;
+  _externalEditorsLoading = (async function() {
+    var arr = [];
+    try {
+      var cfg = await safeFetch('/api/config', {}, { toast: false });
+      arr = Array.isArray(cfg.external_editors) ? cfg.external_editors : [];
+      if (arr.length === 0 && (cfg.external_editor || '').trim()) {
+        arr = [{ name: 'Editor', path: cfg.external_editor.trim() }];
+      }
+    } catch(_) {
+      arr = [];
+    }
+    // Mirror cfg.get_editors() shape-filtering on the server: hand-edited
+    // config.json (or any client posting to /api/config, which doesn't
+    // shape-validate this key) can yield {"path": 123} or similar. Without
+    // the typeof guard, path.replace() would throw TypeError inside this
+    // async IIFE, leaving _externalEditorsLoading as a rejected promise
+    // that every later "Open in Editor" click resolves against.
+    _externalEditorsCache = [];
+    arr.forEach(function(e) {
+      if (!e || typeof e !== 'object') return;
+      var path = e.path;
+      if (typeof path !== 'string') return;
+      path = path.trim();
+      if (!path) return;
+      var name = e.name;
+      if (typeof name !== 'string' || !name.trim()) {
+        var parts = path.replace(/\/+$/, '').split('/');
+        name = parts[parts.length - 1] || 'Editor';
+      } else {
+        name = name.trim();
+      }
+      _externalEditorsCache.push({ name: name, path: path });
+    });
+    _externalEditorsLoading = null;
+    return _externalEditorsCache;
+  })();
+  return _externalEditorsLoading;
+}
+
+// Synchronous accessor for context-menu builders. Returns the cached list,
+// or an empty array if the cache hasn't been warmed yet. Pages that build
+// menus call getExternalEditors() at init so this is normally populated by
+// the time the user opens a menu.
+window.getExternalEditorsSync = function() {
+  return _externalEditorsCache || [];
+};
+
+window.invalidateEditorsCache = function() {
+  _externalEditorsCache = null;
+  _externalEditorsLoading = null;
+};
+
+async function openInEditor(photoIds, editorIndex) {
   if (!photoIds || !photoIds.length) return;
+  var body = { photo_ids: photoIds };
+  if (typeof editorIndex === 'number') body.editor_index = editorIndex;
   try {
     var data = await safeFetch('/api/photos/open-external', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({photo_ids: photoIds}),
+      body: JSON.stringify(body),
     });
     showToast('Opened ' + data.opened + ' photo(s) in editor', 'success');
   } catch(e) {
     showToast(e.message || 'Failed to open in editor');
+  }
+}
+
+async function openInEditorWithPicker(photoIds, event) {
+  if (!photoIds || !photoIds.length) return;
+  var editors = await getExternalEditors();
+  if (editors.length <= 1) {
+    // 0 editors → backend uses OS default. 1 editor → that one is the default.
+    return openInEditor(photoIds);
+  }
+  var items = editors.map(function(ed, idx) {
+    return {
+      label: 'Open in ' + ed.name,
+      onClick: function() { openInEditor(photoIds, idx); },
+    };
+  });
+  if (event && typeof window.openContextMenu === 'function') {
+    window.openContextMenu(event, items);
+  } else {
+    // No anchor event — fall back to the first editor rather than swallowing.
+    openInEditor(photoIds, 0);
+  }
+}
+
+// Build the "Open in Editor" entries for a context menu. With 0 or 1 editors
+// configured, this is a single "Open in Editor" item (backend picks default).
+// With 2+, it returns one "Open in <name>" item per editor so the user picks
+// inline without a nested submenu.
+window.buildOpenInEditorMenuItems = function(photoIds) {
+  var editors = window.getExternalEditorsSync();
+  if (editors.length > 1) {
+    return editors.map(function(ed, idx) {
+      return {
+        label: 'Open in ' + ed.name,
+        onClick: function() { window.openInEditor(photoIds, idx); },
+      };
+    });
+  }
+  return [{
+    label: 'Open in Editor',
+    onClick: function() { window.openInEditor(photoIds); },
+  }];
+};
+
+// Warm the cache so context-menu builders can render editor entries
+// synchronously the first time the user opens a menu.
+(function() {
+  var run = function() { getExternalEditors().catch(function() {}); };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', run, { once: true });
+  } else {
+    run();
+  }
+})();
+
+/* ---------- Develop with darktable ----------
+ * Lifted out of browse.html so review.html (burst-review modal) and any
+ * other surface can dispatch a darktable develop job for an arbitrary list
+ * of photo IDs. Checks availability, confirms, posts the job, and streams
+ * progress via SSE.
+ */
+async function developPhotos(photoIds) {
+  if (!photoIds || !photoIds.length) return;
+  try {
+    var status = await safeFetch('/api/darktable/status', {}, { toast: false });
+    if (!status.available) {
+      showToast('darktable-cli not found. Configure it in Settings.');
+      return;
+    }
+  } catch(_) {
+    showToast('Could not check darktable availability.');
+    return;
+  }
+  if (!confirm('Develop ' + photoIds.length + ' photo(s) with darktable?')) return;
+  try {
+    var data = await safeFetch('/api/jobs/develop', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: photoIds}),
+    });
+    showToast('Developing ' + photoIds.length + ' photo(s)...');
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(prog) {
+        showToast('Developing: ' + prog.current + '/' + prog.total + ' — ' + (prog.current_file || ''));
+      },
+      onComplete: function(result) {
+        showToast('Development complete: ' + (result.developed || 0) + ' developed, ' + (result.errors || 0) + ' errors');
+      },
+      onError: function() {}
+    });
+  } catch(e) {
+    showToast(e.message || 'Error starting develop job');
   }
 }
 

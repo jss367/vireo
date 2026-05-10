@@ -833,21 +833,14 @@
     </div>
   </div>
 
-  <!-- External Editor -->
+  <!-- External Editors -->
   <div class="section">
-    <div class="section-title">External Editor</div>
+    <div class="section-title">External Editors</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      Application used when clicking "Open in Editor" in the browse tab. Leave empty to use your OS default.
+      Applications used when clicking "Open in Editor" in the browse tab, lightbox, or burst review. Add as many as you like (e.g. Lightroom, Affinity, Photoshop) — when more than one is configured you'll get a picker. With none configured, photos open in the OS default app.
     </p>
-    <div class="setting-row">
-      <div class="setting-label">
-        Editor path
-        <small>Full path to the editor executable or .app bundle (e.g. /usr/bin/darktable, /Applications/RawTherapee.app, /Applications/Adobe Lightroom Classic/Adobe Lightroom Classic.app). Leave empty to open with your OS default application.</small>
-      </div>
-      <input type="text" id="cfgExternalEditor" placeholder="OS default"
-             style="width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
-             onchange="saveConfig()">
-    </div>
+    <div id="cfgExternalEditorsList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;"></div>
+    <button type="button" onclick="addExternalEditor()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">+ Add editor</button>
   </div>
 
   <!-- darktable Development -->
@@ -1183,6 +1176,95 @@ function saveWsConfig() {
 }
 
 var _saveTimer = null;
+
+// ---------- External Editors list ----------
+// Source-of-truth for the editor list in settings UI. Populated by
+// loadConfig() and read back on save via collectExternalEditors().
+var _editorsState = [];
+
+function renderExternalEditors() {
+  var container = document.getElementById('cfgExternalEditorsList');
+  if (!container) return;
+  container.innerHTML = '';
+  if (_editorsState.length === 0) {
+    var empty = document.createElement('div');
+    empty.style.cssText = 'color:var(--text-dim);font-size:12px;font-style:italic;';
+    empty.textContent = 'No editors configured. Photos will open in your OS default app.';
+    container.appendChild(empty);
+    return;
+  }
+  _editorsState.forEach(function(ed, i) {
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;';
+    var inputCss = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;';
+
+    var nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.placeholder = 'Display name (e.g. Lightroom)';
+    nameInput.value = ed.name || '';
+    nameInput.style.cssText = inputCss + 'width:160px;';
+    nameInput.addEventListener('input', function() {
+      _editorsState[i].name = nameInput.value;
+      saveConfig();
+    });
+
+    var pathInput = document.createElement('input');
+    pathInput.type = 'text';
+    pathInput.placeholder = '/Applications/Adobe Lightroom Classic/Adobe Lightroom Classic.app';
+    pathInput.value = ed.path || '';
+    pathInput.style.cssText = inputCss + 'flex:1;min-width:240px;font-family:monospace;';
+    pathInput.addEventListener('input', function() {
+      _editorsState[i].path = pathInput.value;
+      saveConfig();
+    });
+
+    var removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.textContent = '×';
+    removeBtn.title = 'Remove';
+    removeBtn.style.cssText = 'background:var(--bg-tertiary);color:var(--text-dim);border:1px solid var(--border-secondary);border-radius:4px;width:28px;height:28px;font-size:16px;cursor:pointer;line-height:1;';
+    removeBtn.addEventListener('click', function() {
+      _editorsState.splice(i, 1);
+      renderExternalEditors();
+      saveConfig();
+    });
+
+    row.appendChild(nameInput);
+    row.appendChild(pathInput);
+    row.appendChild(removeBtn);
+    container.appendChild(row);
+  });
+}
+
+function addExternalEditor() {
+  _editorsState.push({ name: '', path: '' });
+  renderExternalEditors();
+  // Defer save until the user has typed something. Empty entries get filtered
+  // out by collectExternalEditors() anyway, but a save here would just be
+  // a no-op write that triggers extra disk churn.
+}
+
+function collectExternalEditors() {
+  // Drop entries with empty paths; default the display name to the basename
+  // of the path when the user didn't fill one in. Mirrors what the backend
+  // does in cfg.get_editors() so what's shown matches what's used.
+  // Defense-in-depth: loadConfig() already coerces _editorsState entries to
+  // strings, but if any later code path stored a non-string (or a future edit
+  // skips that load step), calling .trim() directly here would TypeError and
+  // block every settings autosave until the malformed entry is repaired.
+  var asStr = function(v) { return typeof v === 'string' ? v.trim() : ''; };
+  return _editorsState
+    .map(function(e) { return { name: asStr(e && e.name), path: asStr(e && e.path) }; })
+    .filter(function(e) { return e.path.length > 0; })
+    .map(function(e) {
+      if (!e.name) {
+        var parts = e.path.replace(/\/+$/, '').split('/');
+        e.name = parts[parts.length - 1] || 'Editor';
+      }
+      return e;
+    });
+}
+
 async function loadConfig() {
   try {
     var cfg = await safeFetch('/api/config', {}, { toast: false });
@@ -1199,8 +1281,24 @@ async function loadConfig() {
     document.getElementById('cfgGoogleMapsApiKey').value = cfg.google_maps_api_key || '';
     document.getElementById('cfgKeywordCase').value = cfg.keyword_case || 'auto';
     document.getElementById('cfgMaxEditHistory').value = cfg.max_edit_history != null ? cfg.max_edit_history : 1000;
-    // Load darktable settings
-    document.getElementById('cfgExternalEditor').value = cfg.external_editor || '';
+    // Load editor list. Synthesize from the legacy single string if the user
+    // hasn't migrated yet — saving from the new UI completes the migration.
+    // Defend against malformed entries (non-string path/name from hand-edited
+    // config.json or any non-validating /api/config writer) so we don't crash
+    // the settings page on load.
+    var rawList = Array.isArray(cfg.external_editors) ? cfg.external_editors : [];
+    _editorsState = [];
+    rawList.forEach(function(e) {
+      if (!e || typeof e !== 'object') return;
+      var path = typeof e.path === 'string' ? e.path : '';
+      var name = typeof e.name === 'string' ? e.name : '';
+      _editorsState.push({ name: name, path: path });
+    });
+    if (_editorsState.length === 0 && typeof cfg.external_editor === 'string'
+        && cfg.external_editor.trim()) {
+      _editorsState = [{ name: 'Editor', path: cfg.external_editor.trim() }];
+    }
+    renderExternalEditors();
     document.getElementById('cfgDarktableBin').value = cfg.darktable_bin || '';
     document.getElementById('cfgDarktableStyle').value = cfg.darktable_style || '';
     document.getElementById('cfgDarktableFormat').value = cfg.darktable_output_format || 'jpg';
@@ -1390,7 +1488,14 @@ function saveConfig() {
           hf_token: hfToken,
           inat_token: document.getElementById('cfgInatToken').value.trim(),
           google_maps_api_key: document.getElementById('cfgGoogleMapsApiKey').value.trim(),
-          external_editor: document.getElementById('cfgExternalEditor').value.trim(),
+          external_editors: collectExternalEditors(),
+          // Always clear the legacy single-editor field when we save the new
+          // list. Otherwise a user who once had `external_editor` set and now
+          // removes every editor from the list can't get back to OS-default
+          // behavior — `cfg.get_editors()` falls back to the legacy field
+          // whenever the new list is empty, so the old value keeps haunting
+          // them. Saving from the new UI is the migration completion step.
+          external_editor: '',
           darktable_bin: document.getElementById('cfgDarktableBin').value.trim(),
           darktable_style: document.getElementById('cfgDarktableStyle').value.trim(),
           darktable_output_format: document.getElementById('cfgDarktableFormat').value,
@@ -1472,6 +1577,11 @@ function saveConfig() {
         }),
       });
       if (typeof loadPreviewCacheStatus === 'function') loadPreviewCacheStatus();
+      // Drop the cached editor list so the next "Open in Editor" click
+      // sees changes to the editors list without a page reload.
+      if (typeof window.invalidateEditorsCache === 'function') {
+        window.invalidateEditorsCache();
+      }
     } catch(e) {}
   }, 500);
 }

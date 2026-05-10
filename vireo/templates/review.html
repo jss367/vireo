@@ -1392,8 +1392,27 @@ function buildBurstGroupContextMenu(photoId, filename) {
     { label: 'Reveal in Finder/Folder', onClick: function() { revealReviewPhoto(photoId); } },
     { label: 'Copy Path',               onClick: function() { copyReviewPhotoPath(photoId); } },
     { separator: true },
+    // Send-elsewhere actions: get the photo into another tool without losing
+    // burst-review state. "Show in Browse" opens in a new tab so the modal
+    // and current pick/reject decisions stay intact.
+    { label: 'Send to iNaturalist',
+      onClick: function() {
+        if (typeof window.submitToInat === 'function') window.submitToInat(photoId);
+      } },
+  ].concat(
+    typeof window.buildOpenInEditorMenuItems === 'function'
+      ? window.buildOpenInEditorMenuItems([photoId])
+      : []
+  ).concat([
+    { label: 'Develop in darktable',
+      onClick: function() {
+        if (typeof window.developPhotos === 'function') window.developPhotos([photoId]);
+      } },
+    { label: 'Show in Browse tab',
+      onClick: function() { window.open('/browse?photo_id=' + photoId, '_blank'); } },
+    { separator: true },
     { label: 'Remove from Group',       onClick: function() { grmRemoveFromGroup(); } },
-  ];
+  ]);
 }
 
 document.addEventListener('contextmenu', function(e) {
