@@ -11162,7 +11162,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     if pid in photos_with_species:
                         continue
                     db.tag_photo(pid, species_kid)
-                    db.queue_change(pid, "keyword_add", species)
+                    # Use the shared helper so a pending `keyword_remove` for
+                    # the same species cancels out instead of co-existing with
+                    # a new `keyword_add`. sync_to_xmp applies removals after
+                    # adds, so a leftover remove would strip the keyword from
+                    # XMP even though the DB still has the tag.
+                    _queue_keyword_add(pid, species)
                     kw_added_pids.append(pid)
         except ValueError as e:
             return json_error(str(e), 403)

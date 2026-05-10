@@ -1299,7 +1299,7 @@ input[type="range"]::-moz-range-thumb {
   </div>
   <div class="grm-footer">
     <label style="font-size:12px;color:var(--text-muted);">Species:</label>
-    <input type="text" id="grmSpecies" oninput="grmUpdateApplyLabel()" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
+    <input type="text" id="grmSpecies" oninput="grmOnSpeciesInput()" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
     <button onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary);color:var(--text-muted);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
     <div class="grm-res-control" title="Image resolution — higher = slower but better for pixel-peeping">
       <label style="font-size:12px;color:var(--text-muted);">Res:</label>
@@ -3022,6 +3022,54 @@ function renderGroupModal() {
   grmApplyCardTransforms();
   grmRefreshResetAllVisibility();
   grmUpdateApplyLabel();
+}
+
+// Debounce species-keyword refetches so we don't hit /group/state on every
+// keystroke. The Apply label still updates synchronously; only the keyword
+// portion of dbState is async.
+var _grmSpeciesRefetchTimer = null;
+var _grmSpeciesRefetchToken = 0;
+
+// Called from the species <input>'s oninput. Refresh the Apply label
+// immediately (the diff uses the typed value), and schedule a debounced
+// refetch of has_species_keyword so the TAG markers + Tag-N preview reflect
+// the *currently typed* species, not the one the modal opened with.
+function grmOnSpeciesInput() {
+  grmUpdateApplyLabel();
+  if (_grmSpeciesRefetchTimer) clearTimeout(_grmSpeciesRefetchTimer);
+  _grmSpeciesRefetchTimer = setTimeout(grmRefreshSpeciesKeywordState, 250);
+}
+
+function grmRefreshSpeciesKeywordState() {
+  if (!grmState || !grmState.items || grmState.items.length === 0) return;
+  var speciesEl = document.getElementById('grmSpecies');
+  var species = speciesEl ? (speciesEl.value || '').trim() : '';
+  var sessionId = grmState.sessionId;
+  var token = ++_grmSpeciesRefetchToken;
+  var photoIds = grmState.items.map(function(p) { return p.id; });
+
+  safeFetch('/api/pipeline/group/state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ photo_ids: photoIds, species: species }),
+  }, { toast: false }).then(function(data) {
+    // Drop the response if the modal moved on (different burst opened, or
+    // the user kept typing and a newer fetch is in flight).
+    if (grmState.sessionId !== sessionId) return;
+    if (token !== _grmSpeciesRefetchToken) return;
+    var fresh = (data && data.photos) || {};
+    // Only update the keyword field — the flag field is owned by the user's
+    // in-modal moves at this point and would be wrong to overwrite from DB.
+    Object.keys(fresh).forEach(function(pidStr) {
+      var pid = parseInt(pidStr, 10);
+      if (!grmState.dbState[pid]) grmState.dbState[pid] = { flag: 'none' };
+      grmState.dbState[pid].has_species_keyword = !!fresh[pidStr].has_species_keyword;
+    });
+    renderGroupModal();
+  }).catch(function() {
+    // Network/server error: leave previous keyword markers in place. The
+    // Apply label is still correct as a worst-case overestimate of tags.
+  });
 }
 
 // Update the Apply button label to reflect the *new* DB writes that will

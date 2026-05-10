@@ -126,6 +126,38 @@ def test_apply_skips_keyword_when_already_applied(app_and_db):
     assert pending == 0
 
 
+def test_apply_cancels_pending_keyword_remove(app_and_db):
+    """If a `keyword_remove` for the same species is already pending sync,
+    a pick that adds that species must cancel the remove rather than queue a
+    contradictory `keyword_add` alongside it. sync_to_xmp applies removes
+    after adds, so a leftover remove would strip the tag from XMP even
+    though the DB has it."""
+    app, db = app_and_db
+    pids = _photo_ids(db)
+    pid = pids[0]
+    # Pre-existing pending remove for "Coyote".
+    db.queue_change(pid, 'keyword_remove', 'Coyote')
+    client = app.test_client()
+
+    resp = client.post('/api/pipeline/group/apply', json={
+        'picks': [pid],
+        'rejects': [],
+        'candidates': [],
+        'species': 'Coyote',
+    })
+    assert resp.status_code == 200
+
+    pending = db.conn.execute(
+        "SELECT change_type FROM pending_changes "
+        "WHERE photo_id = ? AND value = 'Coyote' AND workspace_id = ?",
+        (pid, db._active_workspace_id),
+    ).fetchall()
+    types = {row['change_type'] for row in pending}
+    # The remove must be cancelled and no add queued in its place.
+    assert 'keyword_remove' not in types
+    assert 'keyword_add' not in types
+
+
 def test_apply_records_edit_history_for_undo(app_and_db):
     """Flag and keyword changes must be recorded in edit_history so undo
     works the same way it does on the regular review page."""
