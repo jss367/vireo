@@ -3469,44 +3469,10 @@ function scrollToCard(idx) {
   if (cards[idx]) cards[idx].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
-async function developSelected() {
+function developSelected() {
   var ids = getActiveSelection();
   if (!ids.length) return;
-
-  // Check darktable availability first
-  try {
-    var status = await safeFetch('/api/darktable/status', {}, { toast: false });
-    if (!status.available) {
-      showToast('darktable-cli not found. Configure it in Settings.');
-      return;
-    }
-  } catch(e) {
-    showToast('Could not check darktable availability.');
-    return;
-  }
-
-  if (!confirm('Develop ' + ids.length + ' photo(s) with darktable?')) return;
-
-  try {
-    var data = await safeFetch('/api/jobs/develop', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({photo_ids: ids}),
-    });
-    showToast('Developing ' + ids.length + ' photo(s)...');
-    // Monitor job progress via SSE
-    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
-      onProgress: function(prog) {
-        showToast('Developing: ' + prog.current + '/' + prog.total + ' — ' + (prog.current_file || ''));
-      },
-      onComplete: function(result) {
-        showToast('Development complete: ' + (result.developed || 0) + ' developed, ' + (result.errors || 0) + ' errors');
-      },
-      onError: function() {}
-    });
-  } catch(e) {
-    showToast(e.message || 'Error starting develop job');
-  }
+  developPhotos(ids);
 }
 
 function openInEditorBatch(event) {
