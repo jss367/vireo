@@ -1717,12 +1717,11 @@ def test_storage_delete_files_chunks_large_thumb_id_list(
     """
     import os
 
-    from PIL import Image
-
     import config as cfg
     import models
     from app import create_app
     from db import Database
+    from PIL import Image
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
