@@ -443,6 +443,57 @@ def test_api_batch_delete_disk_permanent_retry_with_token(app_and_db, tmp_path):
     assert token not in app._delete_retry_tokens
 
 
+def test_api_batch_delete_disk_permanent_retry_reissues_token_on_failure(
+    app_and_db, tmp_path, monkeypatch
+):
+    """If os.remove fails during a permanent-delete retry, the response must
+    include a fresh retry_token so the client can try again. The DB row was
+    already removed in the earlier ``disk`` flow, so without a new token the
+    file is stranded with no API path back to it."""
+    import vireo.app as app_module
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    target = str(tmp_path / "locked.jpg")
+    Image.new("RGB", (10, 10)).save(target)
+    token = "old-retry-token"
+    app._delete_retry_tokens[token] = {
+        "path": target,
+        "expires_at": time.time() + 60,
+    }
+
+    original_remove = os.remove
+
+    def flaky_remove(path):
+        if path == target:
+            raise OSError("simulated transient failure")
+        return original_remove(path)
+
+    monkeypatch.setattr(app_module.os, "remove", flaky_remove)
+
+    resp = client.post("/api/batch/delete", json={
+        "mode": "disk_permanent",
+        "retry_tokens": [token],
+    })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert data["trashed"] == 0
+    assert len(data["trash_failed"]) == 1
+    failed = data["trash_failed"][0]
+    assert failed["path"] == target
+    new_token = failed.get("retry_token")
+    assert new_token, "expected a fresh retry_token to be reissued on failure"
+    # The old token was consumed; the new one is distinct and recorded.
+    assert token not in app._delete_retry_tokens
+    assert new_token != token
+    assert new_token in app._delete_retry_tokens
+    assert app._delete_retry_tokens[new_token]["path"] == target
+    assert os.path.exists(target)
+
+
 def test_api_batch_delete_disk_deletes_companion_file(app_and_db, tmp_path):
     """Disk mode deletes companion files when include_companions is true."""
     app, db = app_and_db

@@ -2683,7 +2683,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     trashed += 1
                 except OSError:
                     log.warning("Permanent delete failed for %s", p, exc_info=True)
-                    trash_failed.append({"path": p})
+                    # Reissue a token so a transient failure (e.g. the file is
+                    # momentarily locked) doesn't strand the file: the DB row
+                    # was already removed in the earlier ``disk`` flow, so the
+                    # only way back to it is through another retry token.
+                    trash_failed.append({
+                        "path": p,
+                        "retry_token": _issue_delete_retry_token(p),
+                    })
             return jsonify({
                 "ok": True, "deleted": 0, "trashed": trashed,
                 "trash_failed": trash_failed,
