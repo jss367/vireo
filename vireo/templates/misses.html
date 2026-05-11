@@ -375,7 +375,9 @@ function render() {
     '<div class="misses-hint">' +
       'Shortcuts: ' +
       '<kbd>J</kbd>/<kbd>K</kbd> next/prev in section &middot; ' +
-      '<kbd>U</kbd> unflag focused thumbnail &middot; ' +
+      '<kbd>U</kbd> unflag &middot; ' +
+      '<kbd>P</kbd> flag &middot; ' +
+      '<kbd>X</kbd> reject focused thumbnail &middot; ' +
       'click to open lightbox; click photo to toggle 1:1 zoom' +
     '</div>';
   root.innerHTML = html;
@@ -529,6 +531,29 @@ async function bulkReject(cat, e) {
   loadMisses();
 }
 
+/* ---------- Per-card flag/reject (keyboard) ----------
+ * Mirrors the bulk-reject behavior: sets the photo's flag without removing
+ * the card from the list, so j/k navigation stays continuous. The card will
+ * disappear on the next loadMisses() (list_misses excludes flag='rejected').
+ */
+async function flagFocusedMiss(photoId, flag) {
+  try {
+    var r = await fetch('/api/photos/' + photoId + '/flag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ flag: flag }),
+    });
+    if (!r.ok) throw new Error('http ' + r.status);
+  } catch (err) {
+    if (typeof showToast === 'function') showToast('Flag update failed', 'error');
+    return;
+  }
+  if (typeof showToast === 'function') {
+    var label = flag === 'flagged' ? 'Flagged' : flag === 'rejected' ? 'Rejected' : 'Cleared';
+    showToast(label + ' photo', 'success');
+  }
+}
+
 /* ---------- Per-card unflag ---------- */
 async function unflagMiss(cat, photoId, e) {
   if (e) e.stopPropagation();
@@ -599,6 +624,22 @@ document.addEventListener('keydown', function(e) {
       if (p) {
         e.preventDefault();
         unflagMiss(focusedCategory, p.id);
+      }
+    }
+  } else if (k === 'p' || k === 'P') {
+    if (focusedCategory != null && focusedIndex >= 0) {
+      var p = (missesData[focusedCategory] || [])[focusedIndex];
+      if (p) {
+        e.preventDefault();
+        flagFocusedMiss(p.id, 'flagged');
+      }
+    }
+  } else if (k === 'x' || k === 'X') {
+    if (focusedCategory != null && focusedIndex >= 0) {
+      var p = (missesData[focusedCategory] || [])[focusedIndex];
+      if (p) {
+        e.preventDefault();
+        flagFocusedMiss(p.id, 'rejected');
       }
     }
   } else if (k === 'Enter') {

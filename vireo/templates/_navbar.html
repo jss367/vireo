@@ -3665,6 +3665,33 @@ document.addEventListener('keydown', function(e) {
   var editable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' ||
     (e.target && e.target.isContentEditable);
   if (!editable && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // Flag / Reject / Unflag — operate on the photo currently displayed in the
+    // lightbox. The lightbox is shared across pages; setFlagFor (browse) and
+    // setReviewFlag (review) update their page's local model, so prefer them
+    // when available so badges/grids stay in sync without a refetch. The bare
+    // POST fallback covers pages that open the lightbox without a flag helper
+    // (misses, pipeline-review).
+    var flagKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.flag) || 'p';
+    var rejectKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.reject) || 'x';
+    var unflagKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.unflag) || 'u';
+    var lbFlag = null;
+    if (matchesShortcut(e, flagKey)) lbFlag = 'flagged';
+    else if (matchesShortcut(e, rejectKey)) lbFlag = 'rejected';
+    else if (matchesShortcut(e, unflagKey)) lbFlag = 'none';
+    if (lbFlag !== null && _lightboxCurrentId != null) {
+      var pid = _lightboxCurrentId;
+      if (typeof window.setFlagFor === 'function') window.setFlagFor(pid, lbFlag);
+      else if (typeof window.setReviewFlag === 'function') window.setReviewFlag(pid, lbFlag);
+      else {
+        safeFetch('/api/photos/' + pid + '/flag', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({flag: lbFlag}),
+        }, { toast: false }).catch(function(){});
+      }
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
     if (e.key === '+' || e.key === '=') {
       _lbSetZoom(_lbZoom * 1.25, null, null);
       e.preventDefault();
