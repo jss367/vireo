@@ -158,12 +158,23 @@ def compute_misses_for_workspace(
     min_conf = db.get_effective_config(cfg.load()).get(
         "detector_confidence", 0.2
     )
+    # max_prediction_conf is the highest classifier confidence across all
+    # detections of the photo, ignoring the workspace detector_confidence
+    # cutoff. A classifier prediction at or above
+    # `miss_classifier_override_conf` overrides the no_subject flag — the
+    # canonical case is a hummingbird where megadetector returned a
+    # below-threshold box but BioCLIP identified the species with high
+    # confidence on that same box.
     rows = db.conn.execute(
         "SELECT p.id, p.burst_id, "
         "       (SELECT MAX(d.detector_confidence) FROM detections d "
         "        WHERE d.photo_id = p.id "
         "          AND d.detector_confidence >= ?) "
         "         AS detection_conf, "
+        "       (SELECT MAX(pr.confidence) FROM predictions pr "
+        "        JOIN detections d2 ON d2.id = pr.detection_id "
+        "        WHERE d2.photo_id = p.id) "
+        "         AS max_prediction_conf, "
         "       p.subject_size, p.crop_complete, "
         "       p.subject_tenengrad, p.bg_tenengrad "
         "FROM photos p "
@@ -171,6 +182,9 @@ def compute_misses_for_workspace(
         "WHERE wf.workspace_id = ?",
         (min_conf, ws_id),
     ).fetchall()
+    override_conf = _miss_threshold(
+        pipeline_config, "miss_classifier_override_conf"
+    )
 
     target_ids = None
     if collection_id is not None:
@@ -197,6 +211,14 @@ def compute_misses_for_workspace(
         now = datetime.now(UTC).isoformat(timespec="microseconds")
     updates = []
 
+    def _apply_classifier_override(row, flags):
+        if not flags["no_subject"]:
+            return flags
+        max_pred = row.get("max_prediction_conf")
+        if max_pred is not None and max_pred >= override_conf:
+            return {**flags, "no_subject": False}
+        return flags
+
     for burst_rows in by_burst.values():
         for row in burst_rows:
             if target_ids is not None and row["id"] not in target_ids:
@@ -205,6 +227,7 @@ def compute_misses_for_workspace(
                 continue
             siblings = [s for s in burst_rows if s["id"] != row["id"]]
             flags = classify_miss(row, siblings, pipeline_config)
+            flags = _apply_classifier_override(row, flags)
             updates.append((
                 int(flags["no_subject"]),
                 int(flags["clipped"]),
@@ -219,6 +242,7 @@ def compute_misses_for_workspace(
         if row["id"] in excluded:
             continue
         flags = classify_miss(row, siblings=[], config=pipeline_config)
+        flags = _apply_classifier_override(row, flags)
         updates.append((
             int(flags["no_subject"]),
             int(flags["clipped"]),

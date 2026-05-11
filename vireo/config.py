@@ -85,6 +85,12 @@ DEFAULTS = {
         "miss_bbox_area_min": 0.005,
         "miss_bbox_area_min_singleton": 0.002,
         "miss_oof_ratio": 0.5,
+        # If any stored classifier prediction on a photo's detections has
+        # confidence >= this, the photo cannot be flagged no_subject — the
+        # classifier saw something even when the detector's confidence was
+        # below the workspace `detector_confidence` cutoff. Set to 1.01 to
+        # disable the override.
+        "miss_classifier_override_conf": 0.8,
         # Eye-focus detection
         "eye_detect_enabled": True,
         "eye_classifier_conf_gate": 0.50,
