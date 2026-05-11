@@ -520,6 +520,21 @@ function openMiss(cat, idx, e) {
   openLightbox(p.id, p.filename || '', photoList);
 }
 
+/* Drop any selected ids that are no longer rendered in any category. Call
+ * this after any synchronous mutation to `missesData` (per-card unflag,
+ * bulk-reject section clear) so a follow-up bulk P/X/U via selection can't
+ * silently act on photos the user no longer sees as selected. The async
+ * loadMisses() prune doesn't cover this window. */
+function pruneSelectionToVisible() {
+  if (selection.size === 0) return;
+  selection.forEach(function(id) {
+    var stillVisible = CATEGORY_ORDER.some(function(c) {
+      return (missesData[c] || []).some(function(p) { return p.id === id; });
+    });
+    if (!stillVisible) selection.delete(id);
+  });
+}
+
 /* ---------- Bulk reject ---------- */
 async function bulkReject(cat, e) {
   if (e) e.stopPropagation();
@@ -549,6 +564,7 @@ async function bulkReject(cat, e) {
   }
   // Optimistically clear the section, then refetch.
   missesData[cat] = [];
+  pruneSelectionToVisible();
   render();
   loadMisses();
 }
@@ -648,19 +664,12 @@ async function unflagMiss(cat, photoId, e) {
     if (typeof showToast === 'function') showToast('Unflag failed', 'error');
     return;
   }
-  // Remove from in-memory list and re-render.
+  // Remove from in-memory list and re-render. pruneSelectionToVisible()
+  // covers the case where this card was in the multi-selection — a photo
+  // can sit in multiple miss categories at once, so the id only drops out
+  // after the LAST visible card disappears.
   missesData[cat] = (missesData[cat] || []).filter(function(p) { return p.id !== photoId; });
-  // Prune the id from `selection` once no remaining category renders a card
-  // for it — otherwise a follow-up P/X/U on the multi-selection would act on
-  // a photo the user can no longer see as selected. A photo can sit in
-  // multiple miss categories at once, so only drop it after the LAST visible
-  // card disappears.
-  if (selection.has(photoId)) {
-    var stillVisible = CATEGORY_ORDER.some(function(c) {
-      return (missesData[c] || []).some(function(p) { return p.id === photoId; });
-    });
-    if (!stillVisible) selection.delete(photoId);
-  }
+  pruneSelectionToVisible();
   render();
 }
 

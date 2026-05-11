@@ -480,3 +480,123 @@ def test_compute_misses_uses_injected_now_timestamp(tmp_path):
         "SELECT miss_computed_at FROM photos WHERE id=?", (pid,),
     ).fetchone())
     assert row["miss_computed_at"] == fixed_ts
+
+
+def _photo_with_weak_detection(db, name, file_mtime, det_conf=0.143):
+    """Helper: photo with one below-cutoff detection and no quality features.
+
+    Mirrors the canonical hummingbird case — megadetector returned a
+    sub-threshold box, no later pipeline stage measured quality features.
+    Without a classifier prediction this photo is flagged ``no_subject``.
+    Returns ``(photo_id, detection_id)``.
+    """
+    folder_id = db.add_folder(f"/tmp/{name}", name=name)
+    pid = db.add_photo(
+        folder_id, f"{name}.jpg", extension=".jpg", file_size=100,
+        file_mtime=file_mtime, timestamp=f"2026-04-22T10:00:0{file_mtime}",
+    )
+    det_ids = db.save_detections(
+        pid,
+        [{"box": {"x": 0.19, "y": 0.22, "w": 0.33, "h": 0.23},
+          "confidence": det_conf, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    db.conn.commit()
+    return pid, det_ids[0]
+
+
+def test_high_classifier_confidence_overrides_no_subject(tmp_path):
+    """Canonical hummingbird case: detector below workspace cutoff, but a
+    classifier prediction at 0.996 on the same box. The photo must not be
+    flagged ``no_subject``."""
+    import config as cfg
+    from db import Database
+    from misses import compute_misses_for_workspace
+
+    db = Database(str(tmp_path / "m.db"))
+    pid, det_id = _photo_with_weak_detection(db, "hummer", 1)
+    db.add_prediction(
+        det_id, species="Allen's Hummingbird", confidence=0.996,
+        model="BioCLIP-2.5",
+    )
+    db.conn.commit()
+
+    n = compute_misses_for_workspace(db, cfg.DEFAULTS["pipeline"])
+    assert n == 1
+
+    row = dict(db.conn.execute(
+        "SELECT miss_no_subject, miss_clipped, miss_oof FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone())
+    assert row["miss_no_subject"] == 0
+    assert row["miss_clipped"] == 0
+    assert row["miss_oof"] == 0
+
+
+def test_low_classifier_confidence_does_not_override_no_subject(tmp_path):
+    """Classifier prediction below ``miss_classifier_override_conf`` (0.8 by
+    default) must not rescue the photo — the detector signal still wins."""
+    import config as cfg
+    from db import Database
+    from misses import compute_misses_for_workspace
+
+    db = Database(str(tmp_path / "m.db"))
+    pid, det_id = _photo_with_weak_detection(db, "weak", 1)
+    db.add_prediction(
+        det_id, species="Maybe-A-Bird", confidence=0.40,
+        model="BioCLIP-2.5",
+    )
+    db.conn.commit()
+
+    compute_misses_for_workspace(db, cfg.DEFAULTS["pipeline"])
+
+    row = dict(db.conn.execute(
+        "SELECT miss_no_subject FROM photos WHERE id=?", (pid,),
+    ).fetchone())
+    assert row["miss_no_subject"] == 1
+
+
+def test_no_classifier_prediction_does_not_override_no_subject(tmp_path):
+    """Without any stored prediction the override can't fire — the existing
+    detector-only behaviour must hold."""
+    import config as cfg
+    from db import Database
+    from misses import compute_misses_for_workspace
+
+    db = Database(str(tmp_path / "m.db"))
+    pid, _det_id = _photo_with_weak_detection(db, "noclass", 1)
+
+    compute_misses_for_workspace(db, cfg.DEFAULTS["pipeline"])
+
+    row = dict(db.conn.execute(
+        "SELECT miss_no_subject FROM photos WHERE id=?", (pid,),
+    ).fetchone())
+    assert row["miss_no_subject"] == 1
+
+
+def test_classifier_override_threshold_is_configurable(tmp_path):
+    """Lowering ``miss_classifier_override_conf`` rescues photos that the
+    default 0.8 would not. Confirms the threshold is honoured rather than
+    hard-coded."""
+    import config as cfg
+    from db import Database
+    from misses import compute_misses_for_workspace
+
+    db = Database(str(tmp_path / "m.db"))
+    pid, det_id = _photo_with_weak_detection(db, "tunable", 1)
+    db.add_prediction(
+        det_id, species="Probably-A-Bird", confidence=0.50,
+        model="BioCLIP-2.5",
+    )
+    db.conn.commit()
+
+    pipeline_config = {
+        **cfg.DEFAULTS["pipeline"],
+        "miss_classifier_override_conf": 0.40,
+    }
+    compute_misses_for_workspace(db, pipeline_config)
+
+    row = dict(db.conn.execute(
+        "SELECT miss_no_subject FROM photos WHERE id=?", (pid,),
+    ).fetchone())
+    assert row["miss_no_subject"] == 0

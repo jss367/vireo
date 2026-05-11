@@ -272,6 +272,43 @@ def test_per_card_unflag_prunes_selection_when_last_card_gone(live_server, page)
     assert page.evaluate(f"selection.has({other})")
 
 
+def test_bulk_reject_category_prunes_selected_ids_synchronously(live_server, page):
+    """Codex P2: when "Reject all in <category>" empties a section, ids that
+    were in that category must drop out of `selection` synchronously — not
+    only when the deferred loadMisses() refetch completes. Otherwise a
+    follow-up P/X/U via the bulk-selection branch silently re-edits hidden
+    photos."""
+    url = live_server["url"]
+    db = live_server["db"]
+    a, b, c = live_server["data"]["photos"][:3]
+    _seed_misses(db, [a, b], "no_subject")
+    _seed_misses(db, [c], "clipped")
+
+    page.goto(f"{url}/misses")
+    page.locator(f"[data-testid='miss-card-no_subject-{a}']").wait_for(
+        state="visible", timeout=3000,
+    )
+    page.locator(f"[data-testid='miss-card-clipped-{c}']").wait_for(
+        state="visible", timeout=3000,
+    )
+
+    _ctrl_click(page, page.locator(f"[data-testid='miss-card-no_subject-{a}']"))
+    _ctrl_click(page, page.locator(f"[data-testid='miss-card-no_subject-{b}']"))
+    _ctrl_click(page, page.locator(f"[data-testid='miss-card-clipped-{c}']"))
+    assert page.evaluate("selection.size") == 3
+
+    # Auto-confirm the window.confirm dialog the bulk-reject button raises.
+    page.once("dialog", lambda d: d.accept())
+    page.locator("[data-testid='miss-reject-no_subject']").click()
+
+    # The two no_subject ids must drop out synchronously — the third (clipped)
+    # remains.
+    page.wait_for_function(
+        f"!selection.has({a}) && !selection.has({b}) && selection.has({c})",
+        timeout=3000,
+    )
+
+
 def test_per_card_unflag_keeps_selection_when_other_category_still_renders(live_server, page):
     """A photo flagged in multiple categories renders one card per category.
     Unflagging from one category must NOT drop the id from selection while a

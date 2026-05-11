@@ -2510,7 +2510,7 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
   // Dropdown — bottom-bar widget opens upward to stay inside the card
   var dropdownCls = 'species-dropdown' + (pos === 'bot' ? ' up' : '');
   html += '<div class="' + dropdownCls + '" id="spDrop_' + encIdx + '_' + idKey + '">';
-  html += '<div class="species-dropdown-search"><input type="text" placeholder="Search species..." oninput="searchSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')"></div>';
+  html += '<div class="species-dropdown-search"><input type="text" placeholder="Search or type a new name..." oninput="searchSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')" onkeydown="speciesInputKey(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ')"></div>';
 
   // "Use encounter label" option for burst level
   if (level === 'burst' && enc.species) {
@@ -2576,21 +2576,55 @@ function searchSpecies(event, encIdx, burstIdx, pos) {
   var targetId = 'spSearch_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc') + '_' + pos;
   var container = document.getElementById(targetId);
   if (!container) return;
-  if (q.length < 2) { container.innerHTML = ''; return; }
+  if (!q) { container.innerHTML = ''; return; }
 
-  clearTimeout(_searchTimer);
-  _searchTimer = setTimeout(async function() {
-    var results = await safeFetch('/api/species/search?q=' + encodeURIComponent(q), {}, { toast: false });
-    if (!results || !Array.isArray(results)) return;
+  function renderInto(target, typed, results) {
+    var qLower = typed.toLowerCase();
+    var hasExact = results.some(function(name) { return name.toLowerCase() === qLower; });
     var html = '';
+    if (!hasExact) {
+      html += '<div class="species-dropdown-item" data-freeform="1">'
+        + '<span class="sp-name">Use &ldquo;' + escapeHtml(typed) + '&rdquo;</span>'
+        + '<span class="sp-models" style="color:var(--text-dim);">new name</span>'
+        + '</div>';
+    }
     results.forEach(function(name) {
       html += '<div class="species-dropdown-item" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + escapeHtml(name).replace(/'/g, "\\'") + '\')">';
       html += '<span class="sp-name">' + escapeHtml(name) + '</span>';
       html += '<span class="sp-models" style="color:var(--text-dim);">search</span>';
       html += '</div>';
     });
-    container.innerHTML = html;
+    target.innerHTML = html;
+    var freeRow = target.querySelector('[data-freeform="1"]');
+    if (freeRow) {
+      freeRow.addEventListener('click', function(e) {
+        confirmSpecies(e, encIdx, burstIdx, typed);
+      });
+    }
+  }
+
+  if (q.length < 2) {
+    renderInto(container, q, []);
+    return;
+  }
+
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(async function() {
+    var results = await safeFetch('/api/species/search?q=' + encodeURIComponent(q), {}, { toast: false });
+    if (!results || !Array.isArray(results)) results = [];
+    renderInto(container, q, results);
   }, 250);
+}
+
+function speciesInputKey(event, encIdx, burstIdx) {
+  if (event.key !== 'Enter') return;
+  // Skip while an IME composition is active — Enter is used to finalize
+  // character conversion in East Asian input methods.
+  if (event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  var typed = (event.target.value || '').trim();
+  if (!typed) return;
+  confirmSpecies(event, encIdx, burstIdx, typed);
 }
 
 async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
