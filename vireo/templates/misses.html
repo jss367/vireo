@@ -115,6 +115,13 @@
   }
   .miss-card:hover { transform: translateY(-1px); border-color: var(--accent); }
   .miss-card.focused { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+  .miss-card.selected {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent), inset 0 0 0 9999px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  .miss-card.selected.focused {
+    box-shadow: 0 0 0 3px var(--accent), inset 0 0 0 9999px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
 
   .miss-card-img-wrap {
     position: relative;
@@ -282,6 +289,10 @@ var CATEGORY_LABELS = {
 var missesData = { no_subject: [], clipped: [], oof: [] };
 var focusedCategory = null;
 var focusedIndex = -1;
+// Multi-select state. Spans categories — ctrl-click on cards in different
+// sections accumulates them all. The focused card doubles as the anchor for
+// shift-click range selection (range stays within the clicked category).
+var selection = new Set();
 
 function escapeHtml(s) {
   if (s == null) return '';
@@ -350,6 +361,16 @@ async function loadMisses() {
     clipped:    sortPhotos(data.clipped || []),
     oof:        sortPhotos(data.oof || []),
   };
+  // Drop any selected ids that no longer appear (rejected photos disappear
+  // from /api/misses on the next refetch). Without this, a stale id could
+  // sit in the set and be acted on by Esc-only-clear logic.
+  var present = new Set();
+  CATEGORY_ORDER.forEach(function(cat) {
+    (missesData[cat] || []).forEach(function(p) { present.add(p.id); });
+  });
+  selection.forEach(function(id) {
+    if (!present.has(id)) selection.delete(id);
+  });
   render();
 }
 
@@ -374,11 +395,11 @@ function render() {
   html +=
     '<div class="misses-hint">' +
       'Shortcuts: ' +
-      '<kbd>J</kbd>/<kbd>K</kbd> next/prev in section &middot; ' +
-      '<kbd>U</kbd> unflag &middot; ' +
-      '<kbd>P</kbd> flag &middot; ' +
-      '<kbd>X</kbd> reject focused thumbnail &middot; ' +
-      'click to open lightbox; click photo to toggle 1:1 zoom' +
+      '<kbd>J</kbd>/<kbd>K</kbd> next/prev &middot; ' +
+      '<kbd>Shift+J/K</kbd> extend selection &middot; ' +
+      '<kbd>U</kbd>/<kbd>P</kbd>/<kbd>X</kbd> unflag/flag/reject (focused or selection) &middot; ' +
+      '<kbd>Esc</kbd> clear selection &middot; ' +
+      'Ctrl/Shift-click to multi-select; click to open lightbox' +
     '</div>';
   root.innerHTML = html;
 }
@@ -445,15 +466,16 @@ function renderCard(cat, p, idx) {
     (CATEGORY_LABELS[cat] || cat) + ' miss: ' + (p.filename || ('photo ' + p.id))
   );
 
+  var selectedCls = selection.has(p.id) ? ' selected' : '';
   return (
-    '<div class="miss-card" ' +
+    '<div class="miss-card' + selectedCls + '" ' +
       'data-cat="' + cat + '" ' +
       'data-idx="' + idx + '" ' +
       'data-photo-id="' + p.id + '" ' +
       'data-filename="' + escapeAttr(p.filename || '') + '" ' +
       'data-testid="miss-card-' + cat + '-' + p.id + '" ' +
       'aria-label="' + ariaLabel + '" ' +
-      'onclick="openMiss(\'' + cat + '\', ' + idx + ', event)">' +
+      'onclick="onCardClick(\'' + cat + '\', ' + idx + ', ' + p.id + ', event)">' +
       '<div class="miss-card-img-wrap">' +
         '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename || '') + '">' +
         bboxHtml +
@@ -498,6 +520,21 @@ function openMiss(cat, idx, e) {
   openLightbox(p.id, p.filename || '', photoList);
 }
 
+/* Drop any selected ids that are no longer rendered in any category. Call
+ * this after any synchronous mutation to `missesData` (per-card unflag,
+ * bulk-reject section clear) so a follow-up bulk P/X/U via selection can't
+ * silently act on photos the user no longer sees as selected. The async
+ * loadMisses() prune doesn't cover this window. */
+function pruneSelectionToVisible() {
+  if (selection.size === 0) return;
+  selection.forEach(function(id) {
+    var stillVisible = CATEGORY_ORDER.some(function(c) {
+      return (missesData[c] || []).some(function(p) { return p.id === id; });
+    });
+    if (!stillVisible) selection.delete(id);
+  });
+}
+
 /* ---------- Bulk reject ---------- */
 async function bulkReject(cat, e) {
   if (e) e.stopPropagation();
@@ -527,6 +564,7 @@ async function bulkReject(cat, e) {
   }
   // Optimistically clear the section, then refetch.
   missesData[cat] = [];
+  pruneSelectionToVisible();
   render();
   loadMisses();
 }
@@ -554,6 +592,66 @@ async function flagFocusedMiss(photoId, flag) {
   }
 }
 
+/* ---------- Bulk flag/reject for the multi-selection ----------
+ * Hits /api/batch/flag (same endpoint browse uses), then clears the selection
+ * so a stray follow-up x/p doesn't act on stale ids. Cards stay rendered in
+ * place for the same reason as flagFocusedMiss — list_misses excludes
+ * flag='rejected' on the next refetch.
+ */
+async function bulkFlagSelection(flag) {
+  if (selection.size === 0) return;
+  var ids = Array.from(selection);
+  try {
+    var r = await fetch('/api/batch/flag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photo_ids: ids, flag: flag }),
+    });
+    if (!r.ok) throw new Error('http ' + r.status);
+  } catch (err) {
+    if (typeof showToast === 'function') showToast('Bulk flag failed', 'error');
+    return;
+  }
+  if (typeof showToast === 'function') {
+    var verb = flag === 'flagged' ? 'Flagged' : flag === 'rejected' ? 'Rejected' : 'Cleared';
+    showToast(verb + ' ' + ids.length + ' photo' + (ids.length === 1 ? '' : 's'), 'success');
+  }
+  clearSelection();
+}
+
+/* Bulk unflag-as-miss across the selection. Each photo can be flagged in
+ * multiple miss categories at once, so we hit /api/misses/<id>/unflag per
+ * photo for every category it belongs to — same primitive the per-card X
+ * button uses. The selection is cleared before refetch so stale ids don't
+ * linger if loadMisses takes a moment. */
+async function bulkUnflagSelection() {
+  if (selection.size === 0) return;
+  var ids = Array.from(selection);
+  // Build the (id, category) work list from the current in-memory data so
+  // we don't need an extra round-trip to discover which categories each
+  // photo lives in.
+  var pairs = [];
+  CATEGORY_ORDER.forEach(function(cat) {
+    (missesData[cat] || []).forEach(function(p) {
+      if (selection.has(p.id)) pairs.push({ id: p.id, cat: cat });
+    });
+  });
+  var failures = 0;
+  await Promise.all(pairs.map(function(pair) {
+    return fetch('/api/misses/' + pair.id + '/unflag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category: pair.cat }),
+    }).then(function(r) { if (!r.ok) failures++; }).catch(function() { failures++; });
+  }));
+  if (typeof showToast === 'function') {
+    if (failures === 0) showToast('Unflagged ' + ids.length + ' photo' + (ids.length === 1 ? '' : 's'), 'success');
+    else showToast('Bulk unflag: ' + failures + ' of ' + pairs.length + ' calls failed', 'error');
+  }
+  clearSelection();
+  loadMisses();
+}
+
 /* ---------- Per-card unflag ---------- */
 async function unflagMiss(cat, photoId, e) {
   if (e) e.stopPropagation();
@@ -566,9 +664,79 @@ async function unflagMiss(cat, photoId, e) {
     if (typeof showToast === 'function') showToast('Unflag failed', 'error');
     return;
   }
-  // Remove from in-memory list and re-render.
+  // Remove from in-memory list and re-render. pruneSelectionToVisible()
+  // covers the case where this card was in the multi-selection — a photo
+  // can sit in multiple miss categories at once, so the id only drops out
+  // after the LAST visible card disappears.
   missesData[cat] = (missesData[cat] || []).filter(function(p) { return p.id !== photoId; });
+  pruneSelectionToVisible();
   render();
+}
+
+/* ---------- Selection ----------
+ * Plain click preserves the legacy "click to open lightbox" behavior — adding
+ * a focus side-effect is safe because openMiss already calls setFocused. The
+ * selection model is purely additive: only ctrl/shift-click engage it, so a
+ * user who never reaches for a modifier sees no behavior change.
+ *
+ * Range selection (shift-click, shift+J/K) stays within a single category
+ * because the misses page renders a separate grid per category and the user's
+ * mental model of "this row" maps to "this category". Cross-category bulk
+ * selection still works via repeated ctrl-click.
+ */
+function clearSelection() {
+  if (selection.size === 0) return;
+  selection.clear();
+  document.querySelectorAll('.miss-card.selected').forEach(function(el) {
+    el.classList.remove('selected');
+  });
+}
+
+function setSelected(photoId, on) {
+  if (on) selection.add(photoId);
+  else selection.delete(photoId);
+  // querySelectorAll: a photo can appear in multiple miss categories at once
+  // (e.g. both `clipped` and `oof`), and each section renders its own card.
+  // querySelector would only update the first match, leaving the duplicate
+  // visually out of sync with the selection set.
+  var els = document.querySelectorAll('.miss-card[data-photo-id="' + photoId + '"]');
+  els.forEach(function(el) { el.classList.toggle('selected', on); });
+}
+
+function selectRangeWithinCategory(cat, fromIdx, toIdx) {
+  var photos = missesData[cat] || [];
+  if (!photos.length) return;
+  var lo = Math.min(fromIdx, toIdx);
+  var hi = Math.max(fromIdx, toIdx);
+  for (var i = lo; i <= hi && i < photos.length; i++) {
+    if (i < 0) continue;
+    setSelected(photos[i].id, true);
+  }
+}
+
+function onCardClick(cat, idx, photoId, e) {
+  // Let the inner unflag button keep its own click behavior.
+  if (e && e.target && e.target.closest('button')) return;
+  if (e && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    e.stopPropagation();
+    setSelected(photoId, !selection.has(photoId));
+    setFocused(cat, idx);
+    return;
+  }
+  if (e && e.shiftKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    var anchorIdx = (focusedCategory === cat && focusedIndex >= 0) ? focusedIndex : idx;
+    selectRangeWithinCategory(cat, anchorIdx, idx);
+    setFocused(cat, idx);
+    return;
+  }
+  // Plain click: clear any prior selection, then fall through to the legacy
+  // open-lightbox path. openMiss() calls setFocused() so the anchor moves with
+  // the click.
+  clearSelection();
+  openMiss(cat, idx, e);
 }
 
 /* ---------- Focus tracking + keyboard shortcuts ---------- */
@@ -611,8 +779,9 @@ document.addEventListener('keydown', function(e) {
 
   // Flag / Reject / Unflag — share the configured browse.flag/reject/unflag
   // shortcuts so a single rebind (incl. modifier combos like ctrl+p) covers
-  // Browse, Lightbox, and the /misses focused card consistently. Checked
-  // before the modifier guard below so modifier-based rebindings still match.
+  // Browse, Lightbox, and /misses consistently. Checked before the modifier
+  // guard below so modifier-based rebindings still match. Acts on the
+  // multi-selection if non-empty, otherwise falls back to the focused card.
   var sc = (window._vireoShortcuts && window._vireoShortcuts.browse) || {};
   var flagKey = sc.flag || 'p';
   var rejectKey = sc.reject || 'x';
@@ -622,7 +791,11 @@ document.addEventListener('keydown', function(e) {
   else if (matchesShortcut(e, rejectKey)) missFlag = 'rejected';
   else if (matchesShortcut(e, unflagKey)) missFlag = 'none';
   if (missFlag !== null) {
-    if (focusedCategory != null && focusedIndex >= 0) {
+    if (selection.size > 0) {
+      e.preventDefault();
+      if (missFlag === 'none') bulkUnflagSelection();
+      else bulkFlagSelection(missFlag);
+    } else if (focusedCategory != null && focusedIndex >= 0) {
       var fp = (missesData[focusedCategory] || [])[focusedIndex];
       if (fp) {
         e.preventDefault();
@@ -633,16 +806,24 @@ document.addEventListener('keydown', function(e) {
     return;
   }
 
-  // Don't hijack modifier combos for the remaining bare-key shortcuts (j/k/Enter).
+  // Bare-key shortcuts (j/k/Esc/Enter) — modifier-free only. Shift is allowed
+  // here so Shift+J/K can extend the selection.
   if (e.metaKey || e.ctrlKey || e.altKey) return;
 
   var k = e.key;
   if (k === 'j' || k === 'J') {
     e.preventDefault();
-    moveFocus(1);
+    if (e.shiftKey) extendSelectionByFocus(1);
+    else moveFocus(1);
   } else if (k === 'k' || k === 'K') {
     e.preventDefault();
-    moveFocus(-1);
+    if (e.shiftKey) extendSelectionByFocus(-1);
+    else moveFocus(-1);
+  } else if (k === 'Escape') {
+    if (selection.size > 0) {
+      e.preventDefault();
+      clearSelection();
+    }
   } else if (k === 'Enter') {
     if (focusedCategory != null && focusedIndex >= 0) {
       e.preventDefault();
@@ -650,6 +831,23 @@ document.addEventListener('keydown', function(e) {
     }
   }
 });
+
+/* extendSelectionByFocus — Shift+J/K. Move focus by `delta`, then add the new
+ * focused card to the selection. The previously-focused card is also added so
+ * that the first Shift+J after a plain j-walk seeds the range with two cards
+ * instead of one (matches what users expect from text-editor selection). */
+function extendSelectionByFocus(delta) {
+  if (focusedCategory == null) {
+    moveFocus(delta);
+    return;
+  }
+  var photos = missesData[focusedCategory] || [];
+  var oldP = photos[focusedIndex];
+  if (oldP) setSelected(oldP.id, true);
+  moveFocus(delta);
+  var newP = photos[focusedIndex];
+  if (newP) setSelected(newP.id, true);
+}
 
 /* ---------- Boot ---------- */
 loadMisses();
