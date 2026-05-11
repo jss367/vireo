@@ -104,3 +104,44 @@ def test_misses_x_no_focus_does_nothing(live_server, page):
     flag = photo["flag"] if photo else None
     # Flag should remain unset (None or 'none').
     assert flag in (None, "none"), f"expected unflagged, got {flag!r}"
+
+
+def test_misses_honors_modifier_rebind(live_server, page):
+    """A modifier-based rebind of `browse.reject` (e.g. alt+x) must trigger
+    on /misses. Previously the misses keydown handler returned early on any
+    modifier press, so a rebind to alt+x would never fire there even though
+    Browse honored it."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    _seed_miss(db, pid, "no_subject")
+
+    page.goto(f"{url}/misses")
+    card = page.locator(f"[data-testid='miss-card-no_subject-{pid}']")
+    card.wait_for(state="visible", timeout=3000)
+
+    page.wait_for_function(
+        "window._vireoShortcuts && window._vireoShortcuts.browse",
+        timeout=3000,
+    )
+    page.evaluate(
+        "window._vireoShortcuts.browse = window._vireoShortcuts.browse || {};"
+        "window._vireoShortcuts.browse.reject = 'alt+x';"
+    )
+
+    page.keyboard.press("j")
+    page.wait_for_function(
+        f"document.querySelector('[data-testid=\"miss-card-no_subject-{pid}\"]')"
+        ".classList.contains('focused')",
+        timeout=2000,
+    )
+
+    # Bare 'x' should now be a no-op (modifier mismatch).
+    page.keyboard.press("x")
+    time.sleep(0.3)
+    assert db.get_photo(pid)["flag"] in (None, "none")
+
+    # Alt+X should reject the focused card.
+    page.keyboard.press("Alt+x")
+    flag = _wait_for_flag(db, pid, "rejected")
+    assert flag == "rejected", f"expected 'rejected' after Alt+X, got {flag!r}"

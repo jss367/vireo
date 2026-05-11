@@ -607,9 +607,34 @@ function moveFocus(delta) {
 
 document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-  // Don't hijack modifier combos or when a modal/lightbox is open.
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .help-overlay.active')) return;
+
+  // Flag / Reject / Unflag — share the configured browse.flag/reject/unflag
+  // shortcuts so a single rebind (incl. modifier combos like ctrl+p) covers
+  // Browse, Lightbox, and the /misses focused card consistently. Checked
+  // before the modifier guard below so modifier-based rebindings still match.
+  var sc = (window._vireoShortcuts && window._vireoShortcuts.browse) || {};
+  var flagKey = sc.flag || 'p';
+  var rejectKey = sc.reject || 'x';
+  var unflagKey = sc.unflag || 'u';
+  var missFlag = null;
+  if (matchesShortcut(e, flagKey)) missFlag = 'flagged';
+  else if (matchesShortcut(e, rejectKey)) missFlag = 'rejected';
+  else if (matchesShortcut(e, unflagKey)) missFlag = 'none';
+  if (missFlag !== null) {
+    if (focusedCategory != null && focusedIndex >= 0) {
+      var fp = (missesData[focusedCategory] || [])[focusedIndex];
+      if (fp) {
+        e.preventDefault();
+        if (missFlag === 'none') unflagMiss(focusedCategory, fp.id);
+        else flagFocusedMiss(fp.id, missFlag);
+      }
+    }
+    return;
+  }
+
+  // Don't hijack modifier combos for the remaining bare-key shortcuts (j/k/Enter).
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
 
   var k = e.key;
   if (k === 'j' || k === 'J') {
@@ -618,30 +643,6 @@ document.addEventListener('keydown', function(e) {
   } else if (k === 'k' || k === 'K') {
     e.preventDefault();
     moveFocus(-1);
-  } else if (k === 'u' || k === 'U') {
-    if (focusedCategory != null && focusedIndex >= 0) {
-      var p = (missesData[focusedCategory] || [])[focusedIndex];
-      if (p) {
-        e.preventDefault();
-        unflagMiss(focusedCategory, p.id);
-      }
-    }
-  } else if (k === 'p' || k === 'P') {
-    if (focusedCategory != null && focusedIndex >= 0) {
-      var p = (missesData[focusedCategory] || [])[focusedIndex];
-      if (p) {
-        e.preventDefault();
-        flagFocusedMiss(p.id, 'flagged');
-      }
-    }
-  } else if (k === 'x' || k === 'X') {
-    if (focusedCategory != null && focusedIndex >= 0) {
-      var p = (missesData[focusedCategory] || [])[focusedIndex];
-      if (p) {
-        e.preventDefault();
-        flagFocusedMiss(p.id, 'rejected');
-      }
-    }
   } else if (k === 'Enter') {
     if (focusedCategory != null && focusedIndex >= 0) {
       e.preventDefault();
