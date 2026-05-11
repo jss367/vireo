@@ -238,6 +238,10 @@ body { padding-bottom: 36px; }
   font-size: 11px; color: var(--text-faint, #5A8890);
   text-transform: uppercase; margin-bottom: 6px;
 }
+.setting-hint {
+  font-size: 12px; color: var(--text-secondary, #8BB8C0);
+  margin-top: 6px;
+}
 .setting-select {
   background: var(--bg-input, #14374E);
   color: var(--text-primary, #E0F0F0);
@@ -893,7 +897,7 @@ body { padding-bottom: 36px; }
       </p>
       <div class="setting-row">
         <div class="setting-item">
-          <div class="setting-label">Preview quality</div>
+          <div class="setting-label">Preview size</div>
           <select class="setting-select" id="cfgPreviewSize"
                   onchange="schedulePlanRefresh()">
             <option value="1280">1280px</option>
@@ -902,6 +906,7 @@ body { padding-bottom: 36px; }
             <option value="3840">3840px</option>
             <option value="0">Full resolution</option>
           </select>
+          <div class="setting-hint">Largest edge for cached previews.</div>
         </div>
       </div>
       <div class="progress-wrap" id="progressPreviews" style="display:none;">
@@ -2404,7 +2409,7 @@ async function startPipeline() {
     }
   }
 
-  // Preview quality
+  // Preview size
   body.preview_max_size = parseInt(document.getElementById('cfgPreviewSize').value);
 
   // Optional stages
