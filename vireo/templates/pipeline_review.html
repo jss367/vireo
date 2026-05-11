@@ -2618,6 +2618,9 @@ function searchSpecies(event, encIdx, burstIdx, pos) {
 
 function speciesInputKey(event, encIdx, burstIdx) {
   if (event.key !== 'Enter') return;
+  // Skip while an IME composition is active — Enter is used to finalize
+  // character conversion in East Asian input methods.
+  if (event.isComposing || event.keyCode === 229) return;
   event.preventDefault();
   var typed = (event.target.value || '').trim();
   if (!typed) return;
