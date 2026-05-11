@@ -95,12 +95,19 @@ def test_lightbox_honors_modifier_rebind(live_server, page):
     _open_lightbox_on_browse(page, url)
     pid = _current_lightbox_id(page)
 
-    # Rebind browse.flag to ctrl+p after the page loads its config.
+    # Rebind browse.flag to ctrl+p after the page loads its config. Browse
+    # caches the value in a local `_shortcuts` (filled at page load from
+    # window._vireoShortcuts.browse), so the test must update both — same
+    # thing a real settings rebind achieves via the reload that follows.
     page.wait_for_function(
-        "window._vireoShortcuts && window._vireoShortcuts.browse",
+        "window._vireoShortcuts && window._vireoShortcuts.browse"
+        " && typeof _shortcuts !== 'undefined' && _shortcuts !== null",
         timeout=3000,
     )
-    page.evaluate("window._vireoShortcuts.browse.flag = 'ctrl+p'")
+    page.evaluate(
+        "window._vireoShortcuts.browse.flag = 'ctrl+p';"
+        "_shortcuts.flag = 'ctrl+p';"
+    )
 
     # Bare 'p' should now be a no-op (modifier mismatch).
     page.keyboard.press("p")
