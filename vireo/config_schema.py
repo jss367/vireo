@@ -417,6 +417,16 @@ SCHEMA = {
         "label": "Miss: out-of-focus ratio",
         "desc": "Out-of-focus area ratio threshold.",
     },
+    "pipeline.miss_classifier_override_conf": {
+        "type": "float", "min": 0.0, "max": 1.01, "step": 0.01,
+        "category": "Pipeline", "scope": "both",
+        "label": "Miss: classifier-override confidence",
+        "desc": (
+            "If any stored classifier prediction on a photo's detections "
+            "is at least this confident, the photo cannot be flagged "
+            "no_subject. Set to 1.01 to disable."
+        ),
+    },
     "pipeline.eye_detect_enabled": {
         "type": "bool",
         "category": "Pipeline", "scope": "both",
