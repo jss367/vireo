@@ -3656,21 +3656,20 @@ document.addEventListener('keydown', function(e) {
     e.preventDefault();
     return;  // Stop here so a user-remapped zoomKey (e.g. '+') doesn't also trigger step-zoom below.
   }
-  // Continuous zoom keyboard shortcuts. stopImmediatePropagation prevents these keys
-  // from reaching the browse-page rating handler — otherwise pressing '0' to zoom-to-fit
-  // would also fire rate_0 and silently clear the photo's rating.
   // Skip when focus is in a form field — modals opened from the lightbox (e.g. iNaturalist)
   // need '-' / '0' as literal input in lat/lon fields.
   var tag = e.target && e.target.tagName;
   var editable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' ||
     (e.target && e.target.isContentEditable);
-  if (!editable && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    // Flag / Reject / Unflag — operate on the photo currently displayed in the
-    // lightbox. The lightbox is shared across pages; setFlagFor (browse) and
-    // setReviewFlag (review) update their page's local model, so prefer them
-    // when available so badges/grids stay in sync without a refetch. The bare
-    // POST fallback covers pages that open the lightbox without a flag helper
-    // (misses, pipeline-review).
+  // Flag / Reject / Unflag — operate on the photo currently displayed in the
+  // lightbox. The lightbox is shared across pages; setFlagFor (browse) and
+  // setReviewFlag (review) update their page's local model, so prefer them
+  // when available so badges/grids stay in sync without a refetch. The bare
+  // POST fallback covers pages that open the lightbox without a flag helper
+  // (misses, pipeline-review). Lives outside the no-modifier guard below so
+  // user rebindings to combos like Ctrl+P still match — matchesShortcut
+  // already enforces the exact modifier set the binding declares.
+  if (!editable) {
     var flagKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.flag) || 'p';
     var rejectKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.reject) || 'x';
     var unflagKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.unflag) || 'u';
@@ -3692,6 +3691,11 @@ document.addEventListener('keydown', function(e) {
       e.stopImmediatePropagation();
       return;
     }
+  }
+  // Continuous zoom keyboard shortcuts. stopImmediatePropagation prevents these keys
+  // from reaching the browse-page rating handler — otherwise pressing '0' to zoom-to-fit
+  // would also fire rate_0 and silently clear the photo's rating.
+  if (!editable && !e.ctrlKey && !e.metaKey && !e.altKey) {
     if (e.key === '+' || e.key === '=') {
       _lbSetZoom(_lbZoom * 1.25, null, null);
       e.preventDefault();

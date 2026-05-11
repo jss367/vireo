@@ -675,8 +675,12 @@ function clearSelection() {
 function setSelected(photoId, on) {
   if (on) selection.add(photoId);
   else selection.delete(photoId);
-  var el = document.querySelector('.miss-card[data-photo-id="' + photoId + '"]');
-  if (el) el.classList.toggle('selected', on);
+  // querySelectorAll: a photo can appear in multiple miss categories at once
+  // (e.g. both `clipped` and `oof`), and each section renders its own card.
+  // querySelector would only update the first match, leaving the duplicate
+  // visually out of sync with the selection set.
+  var els = document.querySelectorAll('.miss-card[data-photo-id="' + photoId + '"]');
+  els.forEach(function(el) { el.classList.toggle('selected', on); });
 }
 
 function selectRangeWithinCategory(cat, fromIdx, toIdx) {
@@ -751,10 +755,40 @@ function moveFocus(delta) {
 
 document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-  // Don't hijack modifier combos (except Shift, which we use for range select)
-  // or when a modal/lightbox is open.
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .help-overlay.active')) return;
+
+  // Flag / Reject / Unflag — share the configured browse.flag/reject/unflag
+  // shortcuts so a single rebind (incl. modifier combos like ctrl+p) covers
+  // Browse, Lightbox, and /misses consistently. Checked before the modifier
+  // guard below so modifier-based rebindings still match. Acts on the
+  // multi-selection if non-empty, otherwise falls back to the focused card.
+  var sc = (window._vireoShortcuts && window._vireoShortcuts.browse) || {};
+  var flagKey = sc.flag || 'p';
+  var rejectKey = sc.reject || 'x';
+  var unflagKey = sc.unflag || 'u';
+  var missFlag = null;
+  if (matchesShortcut(e, flagKey)) missFlag = 'flagged';
+  else if (matchesShortcut(e, rejectKey)) missFlag = 'rejected';
+  else if (matchesShortcut(e, unflagKey)) missFlag = 'none';
+  if (missFlag !== null) {
+    if (selection.size > 0) {
+      e.preventDefault();
+      if (missFlag === 'none') bulkUnflagSelection();
+      else bulkFlagSelection(missFlag);
+    } else if (focusedCategory != null && focusedIndex >= 0) {
+      var fp = (missesData[focusedCategory] || [])[focusedIndex];
+      if (fp) {
+        e.preventDefault();
+        if (missFlag === 'none') unflagMiss(focusedCategory, fp.id);
+        else flagFocusedMiss(fp.id, missFlag);
+      }
+    }
+    return;
+  }
+
+  // Bare-key shortcuts (j/k/Esc/Enter) — modifier-free only. Shift is allowed
+  // here so Shift+J/K can extend the selection.
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
 
   var k = e.key;
   if (k === 'j' || k === 'J') {
@@ -769,39 +803,6 @@ document.addEventListener('keydown', function(e) {
     if (selection.size > 0) {
       e.preventDefault();
       clearSelection();
-    }
-  } else if (k === 'u' || k === 'U') {
-    if (selection.size > 0) {
-      e.preventDefault();
-      bulkUnflagSelection();
-    } else if (focusedCategory != null && focusedIndex >= 0) {
-      var p = (missesData[focusedCategory] || [])[focusedIndex];
-      if (p) {
-        e.preventDefault();
-        unflagMiss(focusedCategory, p.id);
-      }
-    }
-  } else if (k === 'p' || k === 'P') {
-    if (selection.size > 0) {
-      e.preventDefault();
-      bulkFlagSelection('flagged');
-    } else if (focusedCategory != null && focusedIndex >= 0) {
-      var p = (missesData[focusedCategory] || [])[focusedIndex];
-      if (p) {
-        e.preventDefault();
-        flagFocusedMiss(p.id, 'flagged');
-      }
-    }
-  } else if (k === 'x' || k === 'X') {
-    if (selection.size > 0) {
-      e.preventDefault();
-      bulkFlagSelection('rejected');
-    } else if (focusedCategory != null && focusedIndex >= 0) {
-      var p = (missesData[focusedCategory] || [])[focusedIndex];
-      if (p) {
-        e.preventDefault();
-        flagFocusedMiss(p.id, 'rejected');
-      }
     }
   } else if (k === 'Enter') {
     if (focusedCategory != null && focusedIndex >= 0) {

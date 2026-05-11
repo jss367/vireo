@@ -203,6 +203,40 @@ def test_x_without_selection_falls_back_to_focused(live_server, page):
     assert _wait_for_flag(db, focused_pid, "rejected") == "rejected"
 
 
+def test_setSelected_updates_all_duplicate_cards(live_server, page):
+    """A photo flagged in multiple miss categories renders one card per
+    category. Toggling its selection must update every card's `.selected`
+    class — not just the first match — or the visual state drifts from the
+    actual `selection` set."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    # Flag the same photo as BOTH clipped and oof so the page renders two
+    # cards for it.
+    _seed_misses(db, [pid], "clipped")
+    _seed_misses(db, [pid], "oof")
+
+    page.goto(f"{url}/misses")
+    clipped_card = page.locator(f"[data-testid='miss-card-clipped-{pid}']")
+    oof_card = page.locator(f"[data-testid='miss-card-oof-{pid}']")
+    clipped_card.wait_for(state="visible", timeout=3000)
+    oof_card.wait_for(state="visible", timeout=3000)
+
+    _ctrl_click(page, clipped_card)
+
+    # Both cards must now carry the `selected` class — querySelector would
+    # have stopped after the first match.
+    assert "selected" in (clipped_card.get_attribute("class") or "")
+    assert "selected" in (oof_card.get_attribute("class") or ""), (
+        "duplicate card in another category was not updated by setSelected"
+    )
+
+    # And toggling off must clear both too.
+    _ctrl_click(page, clipped_card)
+    assert "selected" not in (clipped_card.get_attribute("class") or "")
+    assert "selected" not in (oof_card.get_attribute("class") or "")
+
+
 def test_plain_click_still_opens_lightbox(live_server, page):
     """Regression: plain (no-modifier) click on a miss card must still open
     the shared lightbox — the multi-select model only kicks in with Ctrl/Shift."""

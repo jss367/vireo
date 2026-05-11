@@ -83,3 +83,38 @@ def test_lightbox_u_unflags_photo(live_server, page):
 
     flag = _wait_for_flag(db, pid, "none")
     assert flag == "none", f"expected 'none', got {flag!r}"
+
+
+def test_lightbox_honors_modifier_rebind(live_server, page):
+    """A modifier-based rebind of `browse.flag` (e.g. ctrl+p) must trigger
+    in the lightbox. Previously the lightbox keydown block lived inside a
+    `!ctrlKey && !metaKey && !altKey` guard, so any modifier-combo rebind
+    would silently fail even though Browse honored it."""
+    url = live_server["url"]
+    db = live_server["db"]
+    _open_lightbox_on_browse(page, url)
+    pid = _current_lightbox_id(page)
+
+    # Rebind browse.flag to ctrl+p after the page loads its config. Browse
+    # caches the value in a local `_shortcuts` (filled at page load from
+    # window._vireoShortcuts.browse), so the test must update both — same
+    # thing a real settings rebind achieves via the reload that follows.
+    page.wait_for_function(
+        "window._vireoShortcuts && window._vireoShortcuts.browse"
+        " && typeof _shortcuts !== 'undefined' && _shortcuts !== null",
+        timeout=3000,
+    )
+    page.evaluate(
+        "window._vireoShortcuts.browse.flag = 'ctrl+p';"
+        "_shortcuts.flag = 'ctrl+p';"
+    )
+
+    # Bare 'p' should now be a no-op (modifier mismatch).
+    page.keyboard.press("p")
+    time.sleep(0.3)
+    assert db.get_photo(pid)["flag"] in (None, "none")
+
+    # Ctrl+P should flag.
+    page.keyboard.press("Control+p")
+    flag = _wait_for_flag(db, pid, "flagged")
+    assert flag == "flagged", f"expected 'flagged' after Ctrl+P, got {flag!r}"
