@@ -631,15 +631,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _consume_delete_retry_tokens(tokens):
         if not isinstance(tokens, list) or not tokens:
             raise ValueError("retry_tokens required")
-        paths = []
         now = time.time()
+        # Validate every token before consuming any. Otherwise a request like
+        # [valid, invalid] would pop the valid entry, return 400, and leave
+        # the caller with no way to retry — and in the disk flow the DB row
+        # is already gone, so the file would be stranded.
+        seen = set()
+        validated = []
         for token in tokens:
             if not isinstance(token, str) or not token:
                 raise ValueError("retry_tokens must be a list of strings")
-            entry = app._delete_retry_tokens.pop(token, None)
+            if token in seen:
+                raise ValueError("delete retry token is invalid or expired")
+            seen.add(token)
+            entry = app._delete_retry_tokens.get(token)
             if not entry or entry.get("expires_at", 0) < now:
                 raise ValueError("delete retry token is invalid or expired")
-            paths.append(entry["path"])
+            validated.append((token, entry["path"]))
+        paths = []
+        for token, path in validated:
+            app._delete_retry_tokens.pop(token, None)
+            paths.append(path)
         return paths
 
     def _get_db():

@@ -362,6 +362,61 @@ def test_api_batch_delete_disk_permanent_retry_rejects_raw_paths(app_and_db, tmp
     assert os.path.exists(target)
 
 
+def test_api_batch_delete_retry_tokens_atomic_on_invalid(app_and_db, tmp_path):
+    """If any retry token in a batch is invalid, no valid token is consumed."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    target = str(tmp_path / "photo1.jpg")
+    Image.new("RGB", (10, 10)).save(target)
+    valid_token = "valid-retry-token"
+    app._delete_retry_tokens[valid_token] = {
+        "path": target,
+        "expires_at": time.time() + 60,
+    }
+
+    resp = client.post("/api/batch/delete", json={
+        "mode": "disk_permanent",
+        "retry_tokens": [valid_token, "bogus-token"],
+    })
+
+    assert resp.status_code == 400
+    # The valid token must still be usable, and the file must still exist.
+    assert valid_token in app._delete_retry_tokens
+    assert os.path.exists(target)
+
+    resp = client.post("/api/batch/delete", json={
+        "mode": "disk_permanent",
+        "retry_tokens": [valid_token],
+    })
+    assert resp.status_code == 200
+    assert not os.path.exists(target)
+    assert valid_token not in app._delete_retry_tokens
+
+
+def test_api_batch_delete_retry_tokens_reject_duplicates(app_and_db, tmp_path):
+    """A duplicated retry token in one request must be rejected without consuming it."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    target = str(tmp_path / "photo1.jpg")
+    Image.new("RGB", (10, 10)).save(target)
+    token = "dup-retry-token"
+    app._delete_retry_tokens[token] = {
+        "path": target,
+        "expires_at": time.time() + 60,
+    }
+
+    resp = client.post("/api/batch/delete", json={
+        "mode": "disk_permanent",
+        "retry_tokens": [token, token],
+    })
+
+    assert resp.status_code == 400
+    assert token in app._delete_retry_tokens
+    assert os.path.exists(target)
+
+
 def test_api_batch_delete_disk_permanent_retry_with_token(app_and_db, tmp_path):
     """disk_permanent retry only works with a server-issued retry token."""
     app, db = app_and_db
