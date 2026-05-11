@@ -237,6 +237,79 @@ def test_setSelected_updates_all_duplicate_cards(live_server, page):
     assert "selected" not in (oof_card.get_attribute("class") or "")
 
 
+def test_per_card_unflag_prunes_selection_when_last_card_gone(live_server, page):
+    """If a selected photo is unflagged-as-miss via the per-card X button and
+    no other category still shows it, its id must drop out of `selection` —
+    otherwise a follow-up bulk P/X/U would silently act on the now-hidden
+    photo."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    other = live_server["data"]["photos"][1]
+    _seed_misses(db, [pid, other], "no_subject")
+
+    page.goto(f"{url}/misses")
+    card = page.locator(f"[data-testid='miss-card-no_subject-{pid}']")
+    other_card = page.locator(f"[data-testid='miss-card-no_subject-{other}']")
+    card.wait_for(state="visible", timeout=3000)
+
+    _ctrl_click(page, card)
+    _ctrl_click(page, other_card)
+    assert page.evaluate("selection.size") == 2
+
+    # Click the per-card unflag-as-miss button on the first card.
+    page.locator(
+        f"[data-testid='miss-unflag-no_subject-{pid}']"
+    ).click()
+
+    # That card is now gone from the only category that contained it, so its
+    # id must be pruned. The other selection survives.
+    page.wait_for_function(
+        f"!selection.has({pid})",
+        timeout=3000,
+    )
+    assert page.evaluate("selection.size") == 1
+    assert page.evaluate(f"selection.has({other})")
+
+
+def test_per_card_unflag_keeps_selection_when_other_category_still_renders(live_server, page):
+    """A photo flagged in multiple categories renders one card per category.
+    Unflagging from one category must NOT drop the id from selection while a
+    sibling card is still visible — that card stays selected and bulk
+    operations should still cover it."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    _seed_misses(db, [pid], "clipped")
+    _seed_misses(db, [pid], "oof")
+
+    page.goto(f"{url}/misses")
+    clipped_card = page.locator(f"[data-testid='miss-card-clipped-{pid}']")
+    oof_card = page.locator(f"[data-testid='miss-card-oof-{pid}']")
+    clipped_card.wait_for(state="visible", timeout=3000)
+    oof_card.wait_for(state="visible", timeout=3000)
+
+    _ctrl_click(page, clipped_card)
+    assert page.evaluate(f"selection.has({pid})")
+
+    # Unflag just the clipped card.
+    page.locator(
+        f"[data-testid='miss-unflag-clipped-{pid}']"
+    ).click()
+
+    # The clipped card disappears; the oof card stays. The id must remain in
+    # selection, and the surviving oof card must still render as selected.
+    page.wait_for_function(
+        f"document.querySelector('[data-testid=\"miss-card-clipped-{pid}\"]') === null",
+        timeout=3000,
+    )
+    assert page.evaluate(f"selection.has({pid})"), (
+        "id was wrongly pruned even though another category still renders it"
+    )
+    oof_class = oof_card.get_attribute("class") or ""
+    assert "selected" in oof_class
+
+
 def test_plain_click_still_opens_lightbox(live_server, page):
     """Regression: plain (no-modifier) click on a miss card must still open
     the shared lightbox — the multi-select model only kicks in with Ctrl/Shift."""

@@ -650,6 +650,17 @@ async function unflagMiss(cat, photoId, e) {
   }
   // Remove from in-memory list and re-render.
   missesData[cat] = (missesData[cat] || []).filter(function(p) { return p.id !== photoId; });
+  // Prune the id from `selection` once no remaining category renders a card
+  // for it — otherwise a follow-up P/X/U on the multi-selection would act on
+  // a photo the user can no longer see as selected. A photo can sit in
+  // multiple miss categories at once, so only drop it after the LAST visible
+  // card disappears.
+  if (selection.has(photoId)) {
+    var stillVisible = CATEGORY_ORDER.some(function(c) {
+      return (missesData[c] || []).some(function(p) { return p.id === photoId; });
+    });
+    if (!stillVisible) selection.delete(photoId);
+  }
   render();
 }
 
