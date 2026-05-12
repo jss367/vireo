@@ -12,6 +12,7 @@ PAGES = [
     "/cull",
     "/pipeline",
     "/pipeline/review",
+    "/pipeline/rapid-review",
     "/variants",
     "/workspace",
     "/compare",

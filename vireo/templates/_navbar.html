@@ -1427,6 +1427,7 @@ document.addEventListener('keydown', function(e) {
   if (mod && e.key.toLowerCase() === 'w') {
     const cur = (function() {
       const p = window.location.pathname;
+      if (p.startsWith('/pipeline/rapid-review')) return 'pipeline_rapid_review';
       if (p.startsWith('/pipeline/review')) return 'pipeline_review';
       if (p === '/' || p.startsWith('/browse')) return 'browse';
       return (p.split('/')[1] || '').replace(/-/g, '_');
@@ -1781,6 +1782,7 @@ window.NAV_ALL_PAGES = [
   {id: 'pipeline',        label: 'Pipeline',        href: '/pipeline'},
   {id: 'jobs',            label: 'Jobs',            href: '/jobs'},
   {id: 'pipeline_review', label: 'Pipeline Review', href: '/pipeline/review'},
+  {id: 'pipeline_rapid_review', label: 'Rapid Review', href: '/pipeline/rapid-review'},
   {id: 'review',          label: 'Review',          href: '/review'},
   {id: 'cull',            label: 'Cull',            href: '/cull'},
   {id: 'misses',          label: 'Misses',          href: '/misses'},
@@ -1824,6 +1826,7 @@ window.NAV_ALL_PAGES = [
 
   function currentNavId() {
     const p = window.location.pathname;
+    if (p.startsWith('/pipeline/rapid-review')) return 'pipeline_rapid_review';
     if (p.startsWith('/pipeline/review')) return 'pipeline_review';
     if (p === '/' || p.startsWith('/browse')) return 'browse';
     const seg = (p.split('/')[1] || '').replace(/-/g, '_');
@@ -5767,6 +5770,7 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
 
   function currentNavId() {
     const p = window.location.pathname;
+    if (p.startsWith('/pipeline/rapid-review')) return 'pipeline_rapid_review';
     if (p.startsWith('/pipeline/review')) return 'pipeline_review';
     if (p === '/' || p.startsWith('/browse')) return 'browse';
     return (p.split('/')[1] || '').replace(/-/g, '_');
