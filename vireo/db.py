@@ -31,6 +31,15 @@ def _nfc(name: str) -> str:
     """
     return unicodedata.normalize("NFC", name)
 
+
+def _escape_like(value: str) -> str:
+    """Escape a literal string for a SQLite LIKE pattern using backslash."""
+    return (
+        value.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
 # Canonical set of keyword type values stored in keywords.type.
 # - taxonomy: a species/genus/etc. (linked to taxa via taxon_id)
 # - individual: a named person, pet, or otherwise tracked individual
@@ -1185,11 +1194,35 @@ class Database:
         # data until TTL expiry.
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
+    def _folder_subtree_ids_by_path(self, folder_id):
+        """Return folder_id plus known descendants, using paths as fallback.
+
+        Older databases can contain child folders whose ``parent_id`` is NULL
+        even though their paths clearly live below a parent. Path-prefix
+        matching keeps recursive workspace roots working for those rows too.
+        """
+        row = self.conn.execute(
+            "SELECT path FROM folders WHERE id = ?", (folder_id,)
+        ).fetchone()
+        if row is None or not row["path"]:
+            return [folder_id]
+        root_path = row["path"].rstrip(os.sep)
+        like = _escape_like(root_path) + os.sep + "%"
+        rows = self.conn.execute(
+            """SELECT id FROM folders
+               WHERE path = ? OR path LIKE ? ESCAPE '\\'""",
+            (root_path, like),
+        ).fetchall()
+        ids = {folder_id}
+        ids.update(r["id"] for r in rows)
+        return list(ids)
+
     def add_workspace_folder(self, workspace_id, folder_id):
-        """Link a folder to a workspace."""
-        self.conn.execute(
+        """Link a folder and its known descendants to a workspace."""
+        folder_ids = self._folder_subtree_ids_by_path(folder_id)
+        self.conn.executemany(
             "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
-            (workspace_id, folder_id),
+            [(workspace_id, fid) for fid in folder_ids],
         )
         self.conn.commit()
         # The folder's untracked files now count toward this workspace's
@@ -1198,24 +1231,82 @@ class Database:
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def remove_workspace_folder(self, workspace_id, folder_id):
-        """Unlink a folder from a workspace."""
+        """Unlink a folder and its descendants from a workspace."""
+        folder_ids = self._folder_subtree_ids_by_path(folder_id)
+        placeholders = ",".join("?" for _ in folder_ids)
         self.conn.execute(
-            "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
-            (workspace_id, folder_id),
+            f"""DELETE FROM workspace_folders
+                WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+            [workspace_id] + folder_ids,
         )
         self.conn.commit()
         # The folder no longer contributes to this workspace's new-images
         # backlog. Drop the cached payload so the banner reflects the change.
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
+    def _materialize_workspace_descendants(self, workspace_id):
+        """Ensure linked folders include all known path descendants."""
+        rows = self.conn.execute(
+            """SELECT DISTINCT child.id
+               FROM workspace_folders wf
+               JOIN folders root ON root.id = wf.folder_id
+               JOIN folders child
+                 ON child.path = root.path
+                 OR child.path LIKE (
+                    REPLACE(REPLACE(REPLACE(root.path, '\\', '\\\\'), '%', '\\%'), '_', '\\_')
+                    || ? || '%'
+                 ) ESCAPE '\\'
+               LEFT JOIN workspace_folders existing
+                 ON existing.workspace_id = wf.workspace_id
+                AND existing.folder_id = child.id
+               WHERE wf.workspace_id = ?
+                 AND existing.folder_id IS NULL""",
+            (os.sep, workspace_id),
+        ).fetchall()
+        if not rows:
+            return
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+            [(workspace_id, r["id"]) for r in rows],
+        )
+        self.conn.commit()
+
     def get_workspace_folders(self, workspace_id):
-        """Return all folders linked to a workspace."""
+        """Return all explicit folder links for a workspace.
+
+        Parent folders are recursive roots: if a linked folder has known
+        descendants in ``folders``, keep those descendants linked internally so
+        existing workspace-scoped photo queries continue to work.
+        """
+        self._materialize_workspace_descendants(workspace_id)
         return self.conn.execute(
             """SELECT f.* FROM folders f
                JOIN workspace_folders wf ON wf.folder_id = f.id
                WHERE wf.workspace_id = ?
                ORDER BY f.path""",
             (workspace_id,),
+        ).fetchall()
+
+    def get_workspace_folder_roots(self, workspace_id):
+        """Return user-facing workspace roots, hiding covered descendants."""
+        self._materialize_workspace_descendants(workspace_id)
+        return self.conn.execute(
+            """SELECT f.* FROM folders f
+               JOIN workspace_folders wf ON wf.folder_id = f.id
+               WHERE wf.workspace_id = ?
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM workspace_folders awf
+                   JOIN folders ancestor ON ancestor.id = awf.folder_id
+                   WHERE awf.workspace_id = wf.workspace_id
+                     AND ancestor.id != f.id
+                     AND f.path LIKE (
+                       REPLACE(REPLACE(REPLACE(ancestor.path, '\\', '\\\\'), '%', '\\%'), '_', '\\_')
+                       || ? || '%'
+                     ) ESCAPE '\\'
+                 )
+               ORDER BY f.path""",
+            (workspace_id, os.sep),
         ).fetchall()
 
     def get_workspace_extensions(self):

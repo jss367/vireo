@@ -76,12 +76,66 @@ def test_workspace_folders(db):
     assert folders[0]["id"] == folder_id
 
 
+def test_workspace_folder_roots_hide_recursive_descendants(db):
+    ws_id = db._active_workspace_id
+    root_id = db.add_folder("/photos/usa/2026", name="2026")
+    child_id = db.add_folder(
+        "/photos/usa/2026/2026-05-01",
+        name="2026-05-01",
+        parent_id=root_id,
+    )
+
+    folders = {f["id"] for f in db.get_workspace_folders(ws_id)}
+    roots = db.get_workspace_folder_roots(ws_id)
+
+    assert root_id in folders
+    assert child_id in folders
+    assert [f["id"] for f in roots] == [root_id]
+
+
+def test_workspace_root_materializes_existing_path_descendants(db):
+    ws_id = db._active_workspace_id
+    db.set_active_workspace(None)
+    root_id = db.add_folder("/photos/usa/2026", name="2026")
+    # Historical DBs can have path-descendant folders without parent_id.
+    child_id = db.add_folder("/photos/usa/2026/2026-05-01", name="2026-05-01")
+    db.add_photo(child_id, "bird.jpg", ".jpg", 1000, 1.0)
+    db.set_active_workspace(ws_id)
+
+    db.add_workspace_folder(ws_id, root_id)
+
+    folders = {f["id"] for f in db.get_workspace_folders(ws_id)}
+    roots = db.get_workspace_folder_roots(ws_id)
+    photos = db.get_photos()
+
+    assert root_id in folders
+    assert child_id in folders
+    assert [f["id"] for f in roots] == [root_id]
+    assert [p["filename"] for p in photos] == ["bird.jpg"]
+
+
 def test_remove_workspace_folder(db):
     ws_id = db.create_workspace("Test")
     folder_id = db.add_folder("/photos/kenya", name="kenya")
     db.add_workspace_folder(ws_id, folder_id)
     db.remove_workspace_folder(ws_id, folder_id)
     assert len(db.get_workspace_folders(ws_id)) == 0
+
+
+def test_remove_workspace_root_unlinks_descendants(db):
+    ws_id = db._active_workspace_id
+    root_id = db.add_folder("/photos/usa/2026", name="2026")
+    child_id = db.add_folder(
+        "/photos/usa/2026/2026-05-01",
+        name="2026-05-01",
+        parent_id=root_id,
+    )
+    db.add_photo(child_id, "bird.jpg", ".jpg", 1000, 1.0)
+
+    db.remove_workspace_folder(ws_id, root_id)
+
+    assert len(db.get_workspace_folders(ws_id)) == 0
+    assert db.get_photos() == []
 
 
 def test_set_active_workspace(db):

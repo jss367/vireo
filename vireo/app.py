@@ -3378,7 +3378,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not ws:
             return json_error("No active workspace", 404)
         result = dict(ws)
-        result["folders"] = [dict(f) for f in db.get_workspace_folders(ws["id"])]
+        result["folders"] = [dict(f) for f in db.get_workspace_folder_roots(ws["id"])]
         return jsonify(result)
 
     @app.route("/api/workspaces", methods=["POST"])
@@ -3482,7 +3482,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/workspaces/<int:ws_id>/folders", methods=["GET"])
     def api_workspace_folders(ws_id):
         db = _get_db()
-        folders = db.get_workspace_folders(ws_id)
+        folders = db.get_workspace_folder_roots(ws_id)
         return jsonify([dict(f) for f in folders])
 
     @app.route("/api/workspaces/<int:ws_id>/folders", methods=["POST"])
