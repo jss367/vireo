@@ -502,6 +502,9 @@ var rapid = {
   currentIndex: -1,
   seeded: false,
   applying: false,
+  // Bumped on each openSession; used to drop stale /group/state responses
+  // when the user switches bursts before the previous fetch resolves.
+  openToken: 0,
 };
 
 function escapeHtml(s) {
@@ -523,7 +526,9 @@ function burstIds(burst) {
 }
 
 function burstSpecies(enc, burst) {
-  if (burst && burst.species_override) return burst.species_override;
+  if (burst && burst.species_override && burst.species_override.species) {
+    return burst.species_override.species;
+  }
   if (enc && enc.confirmed_species) return enc.confirmed_species;
   if (enc && enc.species && enc.species.length) return enc.species[0];
   return '';
@@ -600,6 +605,10 @@ async function openSession(index) {
   rapid.history = [];
   rapid.currentIndex = rapid.items.length ? 0 : -1;
   rapid.seeded = false;
+  // Bump the token so any in-flight /group/state fetch from a previous
+  // openSession lands as stale and gets ignored when it resolves.
+  var token = (rapid.openToken || 0) + 1;
+  rapid.openToken = token;
   document.getElementById('speciesInput').value = session.species || '';
   renderAll();
 
@@ -609,6 +618,10 @@ async function openSession(index) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ photo_ids: session.ids, species: session.species || '' }),
     });
+    // Drop the response if the user has switched bursts since this fetch
+    // started — seeding burst A's DB state into burst B's queue would
+    // mis-flag photos on Apply.
+    if (rapid.openToken !== token) return;
     var photos = (data && data.photos) || {};
     rapid.items.forEach(function(p) {
       var st = photos[p.id] || {};
@@ -620,6 +633,7 @@ async function openSession(index) {
     rapid.seeded = true;
     renderAll();
   } catch (e) {
+    if (rapid.openToken !== token) return;
     rapid.seeded = true;
     renderAll();
   }
