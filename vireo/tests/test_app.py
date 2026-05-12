@@ -1144,6 +1144,21 @@ def test_pipeline_has_model_checkboxes(app_and_db):
     assert b'id="cfgModel"' not in resp.data  # old single select removed
 
 
+def test_cull_page_uses_pipeline_controls(app_and_db):
+    """Cull exposes the same threshold sliders as pipeline review."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/cull')
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert 'id="slRejectCrop"' in html
+    assert 'id="slWTime"' in html
+    assert 'id="slEncCut"' in html
+    assert 'id="slBurstEmb"' in html
+    assert "/api/pipeline/regroup-live" in html
+    assert "/api/jobs/cull" not in html
+
+
 def test_static_vireo_utils_served(app_and_db):
     """vireo-utils.js is served from /static/."""
     app, _ = app_and_db
