@@ -2983,6 +2983,13 @@ function _lbApplyMaskVisibility() {
   if (!img) return;
   if (!_lbMasksVisible || !_lbMaskCurrentUrl) {
     img.classList.remove('show');
+    // A previous call may have assigned onload to re-add `show` once
+    // the mask image finished loading. If the user toggles masks off
+    // while that request is still in flight, the pending callback
+    // would override the hide as soon as it fires. Clear both handlers
+    // so an in-flight load can't resurrect the overlay.
+    img.onload = null;
+    img.onerror = null;
     return;
   }
   // onerror guards against the file being deleted out from under us
@@ -2990,7 +2997,13 @@ function _lbApplyMaskVisibility() {
   // exists but the file is gone → silently hide instead of leaving a
   // broken-image icon over the photo.
   img.onerror = function() { img.classList.remove('show'); };
-  img.onload = function() { img.classList.add('show'); };
+  img.onload = function() {
+    // Re-check the toggle: the user may have hidden masks between
+    // src assignment and the load resolving.
+    if (_lbMasksVisible && _lbMaskCurrentUrl) {
+      img.classList.add('show');
+    }
+  };
   if (img.getAttribute('src') !== _lbMaskCurrentUrl) {
     img.src = _lbMaskCurrentUrl;
   } else {

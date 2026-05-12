@@ -162,6 +162,67 @@ def test_lightbox_right_click_does_not_toggle_zoom(live_server, page):
     assert before == after
 
 
+def test_mask_toggle_off_clears_pending_onload(live_server, page):
+    """Hiding masks while a mask image request is in flight must not let the
+    pending onload handler re-add `show` after the user toggled off.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.evaluate("localStorage.removeItem('vireo.lb.masksVisible');")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.dblclick()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+
+    # Simulate the "request in flight" state: toggle on with a URL set,
+    # then call _lbApplyMaskVisibility() so it assigns img.onload.
+    page.evaluate(
+        """
+        _lbMasksVisible = true;
+        _lbMaskCurrentUrl = '/dummy-mask-url-for-test.png';
+        _lbApplyMaskVisibility();
+        """
+    )
+    assert page.evaluate(
+        "typeof document.getElementById('lightboxMaskOverlay').onload === 'function'"
+    ), "onload should be assigned while a mask request is in flight"
+
+    # User toggles masks off while the load is still pending.
+    page.evaluate(
+        """
+        _lbMasksVisible = false;
+        _lbApplyMaskVisibility();
+        """
+    )
+    assert page.evaluate(
+        "document.getElementById('lightboxMaskOverlay').onload === null"
+    ), "onload must be cleared when masks are toggled off mid-load"
+
+    # Even if a late load fires (simulated by invoking the stored handler
+    # captured before the toggle, or any direct .add('show') from a leftover
+    # callback), the overlay must remain hidden. Manually re-arm the handler
+    # the way the old code did and fire it — defense-in-depth: the handler
+    # itself also re-checks visibility before adding `show`.
+    page.evaluate(
+        """
+        const img = document.getElementById('lightboxMaskOverlay');
+        // Re-arm as the old buggy assignment used to.
+        img.onload = function() {
+          if (_lbMasksVisible && _lbMaskCurrentUrl) {
+            img.classList.add('show');
+          }
+        };
+        img.onload();
+        """
+    )
+    assert not page.locator("#lightboxMaskOverlay").evaluate(
+        "el => el.classList.contains('show')"
+    ), "mask overlay must stay hidden after a late load fires while toggled off"
+
+
 def test_lightbox_close_menu_item_closes_overlay(live_server, page):
     """The 'Close Lightbox' menu item dismisses the overlay."""
     url = live_server["url"]
