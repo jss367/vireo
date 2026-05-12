@@ -179,6 +179,32 @@ def test_workspace_root_materialization_is_case_sensitive(db):
     assert {p["filename"] for p in db.get_photos()} == {"bird.jpg"}
 
 
+def test_workspace_large_recursive_root_operations_chunk_sql_params(db):
+    ws_id = db._active_workspace_id
+    db.set_active_workspace(None)
+    root_id = db.add_folder("/photos/big", name="big")
+    for idx in range(1005):
+        db.add_folder(f"/photos/big/day-{idx:04d}", name=f"day-{idx:04d}")
+    db.set_active_workspace(ws_id)
+
+    db.add_workspace_folder(ws_id, root_id)
+
+    assert len(db.get_workspace_folders(ws_id)) == 1006
+    assert [f["id"] for f in db.get_workspace_folder_roots(ws_id)] == [root_id]
+
+    target_ws_id = db.create_workspace("Target")
+    result = db.move_folders_to_workspace(ws_id, target_ws_id, [root_id])
+
+    assert result["folders_moved"] == 1
+    assert len(db.get_workspace_folders(ws_id)) == 0
+    assert len(db.get_workspace_folders(target_ws_id)) == 1006
+    assert [f["id"] for f in db.get_workspace_folder_roots(target_ws_id)] == [root_id]
+
+    db.remove_workspace_folder_tree(target_ws_id, root_id)
+
+    assert len(db.get_workspace_folders(target_ws_id)) == 0
+
+
 def test_remove_workspace_folder(db):
     ws_id = db.create_workspace("Test")
     folder_id = db.add_folder("/photos/kenya", name="kenya")

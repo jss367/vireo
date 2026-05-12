@@ -15,6 +15,8 @@ log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
 
+_SQLITE_PARAM_CHUNK_SIZE = 800
+
 
 def _nfc(name: str) -> str:
     """NFC-normalize a filename for byte-exact comparison against scandir output.
@@ -35,6 +37,13 @@ def _nfc(name: str) -> str:
 def _path_for_subtree_match(value: str) -> str:
     """Normalize a stored path for platform-neutral subtree prefix matching."""
     return value.replace("\\", "/").rstrip("/")
+
+
+def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
+    values = list(values)
+    for idx in range(0, len(values), size):
+        yield values[idx:idx + size]
+
 
 # Canonical set of keyword type values stored in keywords.type.
 # - taxonomy: a species/genus/etc. (linked to taxa via taxon_id)
@@ -1250,13 +1259,14 @@ class Database:
             [(workspace_id, fid) for fid in folder_ids],
         )
         if is_root:
-            placeholders = ",".join("?" for _ in folder_ids)
-            self.conn.execute(
-                f"""UPDATE workspace_folders
-                    SET is_root = CASE WHEN folder_id = ? THEN 1 ELSE 0 END
-                    WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
-                [folder_id, workspace_id] + folder_ids,
-            )
+            for chunk in _chunks(folder_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"""UPDATE workspace_folders
+                        SET is_root = CASE WHEN folder_id = ? THEN 1 ELSE 0 END
+                        WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+                    [folder_id, workspace_id] + chunk,
+                )
         self.conn.commit()
         # The folder's untracked files now count toward this workspace's
         # new-images backlog. Drop any stale cached payload so the next read
@@ -1277,12 +1287,13 @@ class Database:
     def remove_workspace_folder_tree(self, workspace_id, folder_id):
         """Unlink a folder and its path descendants from a workspace."""
         folder_ids = self._folder_subtree_ids_by_path(folder_id)
-        placeholders = ",".join("?" for _ in folder_ids)
-        self.conn.execute(
-            f"""DELETE FROM workspace_folders
-                WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
-            [workspace_id] + folder_ids,
-        )
+        for chunk in _chunks(folder_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"""DELETE FROM workspace_folders
+                    WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+                [workspace_id] + chunk,
+            )
         self.conn.commit()
         # The folder no longer contributes to this workspace's new-images
         # backlog. Drop the cached payload so the banner reflects the change.
@@ -1321,13 +1332,14 @@ class Database:
         """Mark specific linked folders as user-facing roots."""
         if not folder_ids:
             return
-        placeholders = ",".join("?" for _ in folder_ids)
-        self.conn.execute(
-            f"""UPDATE workspace_folders
-                SET is_root = 1
-                WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
-            [workspace_id] + list(folder_ids),
-        )
+        for chunk in _chunks(folder_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"""UPDATE workspace_folders
+                    SET is_root = 1
+                    WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+                [workspace_id] + chunk,
+            )
         self.conn.commit()
 
     def get_workspace_folders(self, workspace_id):
@@ -1427,17 +1439,18 @@ class Database:
                     seen_folder_ids.add(subtree_id)
                     moved_folder_ids.append(subtree_id)
 
-        placeholders = ",".join("?" for _ in moved_folder_ids)
-
         try:
             # Move pending_changes
-            cur = self.conn.execute(
-                f"""UPDATE pending_changes SET workspace_id = ?
-                    WHERE workspace_id = ?
-                    AND photo_id IN (SELECT id FROM photos WHERE folder_id IN ({placeholders}))""",
-                [target_ws_id, source_ws_id] + moved_folder_ids,
-            )
-            pending_changes_moved = cur.rowcount
+            pending_changes_moved = 0
+            for chunk in _chunks(moved_folder_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                cur = self.conn.execute(
+                    f"""UPDATE pending_changes SET workspace_id = ?
+                        WHERE workspace_id = ?
+                        AND photo_id IN (SELECT id FROM photos WHERE folder_id IN ({placeholders}))""",
+                    [target_ws_id, source_ws_id] + chunk,
+                )
+                pending_changes_moved += cur.rowcount
 
             # Move prediction_review rows for predictions whose photo is in
             # the moved folders. Without this the accepted/rejected/group
@@ -1449,57 +1462,63 @@ class Database:
             # source. That way if the target already has a review row for
             # the same (prediction_id), we keep the target's value rather
             # than overwriting it.
-            self.conn.execute(
-                f"""INSERT OR IGNORE INTO prediction_review
-                      (prediction_id, workspace_id, status, reviewed_at,
-                       individual, group_id, vote_count, total_votes)
-                    SELECT pr_rev.prediction_id, ?, pr_rev.status,
-                           pr_rev.reviewed_at, pr_rev.individual,
-                           pr_rev.group_id, pr_rev.vote_count,
-                           pr_rev.total_votes
-                    FROM prediction_review pr_rev
-                    JOIN predictions p ON p.id = pr_rev.prediction_id
-                    JOIN detections d ON d.id = p.detection_id
-                    WHERE pr_rev.workspace_id = ?
-                      AND d.photo_id IN (
-                          SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                      )""",
-                [target_ws_id, source_ws_id] + moved_folder_ids,
-            )
-            self.conn.execute(
-                f"""DELETE FROM prediction_review
-                    WHERE workspace_id = ?
-                      AND prediction_id IN (
-                          SELECT pr_rev.prediction_id
-                          FROM prediction_review pr_rev
-                          JOIN predictions p ON p.id = pr_rev.prediction_id
-                          JOIN detections d ON d.id = p.detection_id
-                          WHERE pr_rev.workspace_id = ?
-                            AND d.photo_id IN (
-                                SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                            )
-                      )""",
-                [source_ws_id, source_ws_id] + moved_folder_ids,
-            )
+            for chunk in _chunks(moved_folder_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"""INSERT OR IGNORE INTO prediction_review
+                          (prediction_id, workspace_id, status, reviewed_at,
+                           individual, group_id, vote_count, total_votes)
+                        SELECT pr_rev.prediction_id, ?, pr_rev.status,
+                               pr_rev.reviewed_at, pr_rev.individual,
+                               pr_rev.group_id, pr_rev.vote_count,
+                               pr_rev.total_votes
+                        FROM prediction_review pr_rev
+                        JOIN predictions p ON p.id = pr_rev.prediction_id
+                        JOIN detections d ON d.id = p.detection_id
+                        WHERE pr_rev.workspace_id = ?
+                          AND d.photo_id IN (
+                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                          )""",
+                    [target_ws_id, source_ws_id] + chunk,
+                )
+                self.conn.execute(
+                    f"""DELETE FROM prediction_review
+                        WHERE workspace_id = ?
+                          AND prediction_id IN (
+                              SELECT pr_rev.prediction_id
+                              FROM prediction_review pr_rev
+                              JOIN predictions p ON p.id = pr_rev.prediction_id
+                              JOIN detections d ON d.id = p.detection_id
+                              WHERE pr_rev.workspace_id = ?
+                                AND d.photo_id IN (
+                                    SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                                )
+                          )""",
+                    [source_ws_id, source_ws_id] + chunk,
+                )
 
             # Move workspace_folders: remove from source, add to target
-            self.conn.execute(
-                f"DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id IN ({placeholders})",
-                [source_ws_id] + moved_folder_ids,
-            )
+            for chunk in _chunks(moved_folder_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"""DELETE FROM workspace_folders
+                        WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+                    [source_ws_id] + chunk,
+                )
             self.conn.executemany(
                 """INSERT OR IGNORE INTO workspace_folders
                    (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
                 [(target_ws_id, fid) for fid in moved_folder_ids],
             )
-            selected_placeholders = ",".join("?" for _ in folder_ids)
-            self.conn.execute(
-                f"""UPDATE workspace_folders
-                    SET is_root = 1
-                    WHERE workspace_id = ?
-                      AND folder_id IN ({selected_placeholders})""",
-                [target_ws_id] + list(folder_ids),
-            )
+            for chunk in _chunks(folder_ids):
+                selected_placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"""UPDATE workspace_folders
+                        SET is_root = 1
+                        WHERE workspace_id = ?
+                          AND folder_id IN ({selected_placeholders})""",
+                    [target_ws_id] + chunk,
+                )
 
             self.conn.commit()
         except Exception:
