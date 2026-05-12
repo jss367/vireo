@@ -2253,6 +2253,31 @@ def test_scan_links_restrict_dirs_when_all_files_skipped(tmp_path):
     )
 
 
+def test_scan_does_not_promote_discovered_descendants_to_workspace_roots(tmp_path):
+    """Scanner-created child links should stay hidden behind the chosen root."""
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "USA2026")
+    _create_test_images(root, {
+        "day1": ["bird.jpg"],
+    })
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    db.set_active_workspace(None)
+    root_id = db.add_folder(root, name="USA2026")
+    db.add_workspace_folder(ws_id, root_id)
+    db.set_active_workspace(ws_id)
+
+    scan(root, db)
+
+    linked_paths = {f["path"] for f in db.get_workspace_folders(ws_id)}
+    root_paths = [f["path"] for f in db.get_workspace_folder_roots(ws_id)]
+    assert os.path.join(root, "day1") in linked_paths
+    assert root_paths == [root]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions required")
 def test_scan_surfaces_permission_denied_subdirs(tmp_path):
     """A subdir the kernel won't let us enter must surface as a denied path,

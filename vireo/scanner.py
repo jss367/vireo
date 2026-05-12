@@ -977,6 +977,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             path=folder_str,
             name=folder_path.name,
             parent_id=parent_id,
+            workspace_root=False,
         )
         folder_cache[folder_str] = folder_id
         return folder_id

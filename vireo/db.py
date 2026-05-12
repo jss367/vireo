@@ -1241,7 +1241,7 @@ class Database:
         ids.update(r["id"] for r in rows)
         return list(ids)
 
-    def add_workspace_folder(self, workspace_id, folder_id):
+    def add_workspace_folder(self, workspace_id, folder_id, *, is_root=True):
         """Link a folder and its known descendants to a workspace."""
         folder_ids = self._folder_subtree_ids_by_path(folder_id)
         self.conn.executemany(
@@ -1249,13 +1249,14 @@ class Database:
                (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
             [(workspace_id, fid) for fid in folder_ids],
         )
-        placeholders = ",".join("?" for _ in folder_ids)
-        self.conn.execute(
-            f"""UPDATE workspace_folders
-                SET is_root = CASE WHEN folder_id = ? THEN 1 ELSE 0 END
-                WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
-            [folder_id, workspace_id] + folder_ids,
-        )
+        if is_root:
+            placeholders = ",".join("?" for _ in folder_ids)
+            self.conn.execute(
+                f"""UPDATE workspace_folders
+                    SET is_root = CASE WHEN folder_id = ? THEN 1 ELSE 0 END
+                    WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+                [folder_id, workspace_id] + folder_ids,
+            )
         self.conn.commit()
         # The folder's untracked files now count toward this workspace's
         # new-images backlog. Drop any stale cached payload so the next read
@@ -1612,8 +1613,12 @@ class Database:
 
     # -- Folders --
 
-    def add_folder(self, path, name=None, parent_id=None):
+    def add_folder(self, path, name=None, parent_id=None, *, workspace_root=True):
         """Insert a folder. Automatically links it to the active workspace.
+
+        ``workspace_root`` controls whether that automatic link is a
+        user-facing workspace root. Scanner-discovered descendants pass
+        ``False`` so recursive roots do not expand over time.
 
         Returns the folder id.
         """
@@ -1631,7 +1636,11 @@ class Database:
             folder_id = row["id"]
         # Auto-link to active workspace
         if self._active_workspace_id is not None:
-            self.add_workspace_folder(self._active_workspace_id, folder_id)
+            self.add_workspace_folder(
+                self._active_workspace_id,
+                folder_id,
+                is_root=workspace_root,
+            )
         return folder_id
 
     def get_folder_tree(self):
