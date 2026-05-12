@@ -971,6 +971,99 @@ def test_compute_review_readiness_variant_aware_embeddings(tmp_path):
     assert out_explicit_mismatch["with_embeddings"] == 0
 
 
+def test_compute_review_readiness_ignores_no_subject_photos_for_enhancers(tmp_path):
+    """No-subject photos should not make the review page claim masks,
+    embeddings, or species predictions are incomplete.
+
+    The detector can legitimately evaluate a workspace photo and find no
+    above-threshold subject. Those photos are reviewable as subject-absent
+    rejects, but rerunning SAM/DINO/species stages will not produce subject
+    features for them.
+    """
+    from db import Database
+    from dino_embed import embedding_to_blob
+    from pipeline import compute_review_readiness
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    pids = [
+        db.add_photo(
+            fid, f"photo{i}.jpg", ".jpg", 1000, 1.0,
+            timestamp=datetime(2026, 3, 20, 10, 0, i).isoformat(),
+            width=4000, height=3000,
+        )
+        for i in range(4)
+    ]
+    emb = np.ones(768, dtype=np.float32)
+    emb = emb / np.linalg.norm(emb)
+
+    for pid in pids[:2]:
+        det_ids = db.write_detection_batch(pid, "megadetector-v6", [
+            {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
+        ])
+        db.add_prediction(det_ids[0], "robin", 0.9, "bioclip", category="match")
+        db.update_photo_pipeline_features(pid, mask_path=f"/masks/{pid}.png")
+        db.update_photo_embeddings(
+            pid,
+            dino_subject_embedding=embedding_to_blob(emb),
+            dino_global_embedding=embedding_to_blob(emb),
+        )
+
+    for pid in pids[2:]:
+        db.write_detection_batch(pid, "megadetector-v6", [])
+
+    out = compute_review_readiness(db)
+    assert out["state"] == "computable"
+    assert out["total_photos"] == 4
+    assert out["mask_target_photos"] == 2
+    assert out["embedding_target_photos"] == 2
+    assert out["prediction_target_photos"] == 2
+    assert "masks_partial" not in out["enhancing_missing"]
+    assert "embeddings" not in out["enhancing_missing"]
+    assert "species_predictions" not in out["enhancing_missing"]
+
+
+def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
+    """A current eye-keypoint attempt should satisfy readiness even when
+    no trustworthy eye point was written."""
+    from db import Database
+    from dino_embed import embedding_to_blob
+    from pipeline import EYE_KP_FINGERPRINT_VERSION, compute_review_readiness
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    pid = db.add_photo(
+        fid, "photo.jpg", ".jpg", 1000, 1.0,
+        timestamp=datetime(2026, 3, 20, 10, 0, 0).isoformat(),
+        width=4000, height=3000,
+    )
+    det_ids = db.write_detection_batch(pid, "megadetector-v6", [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
+    ])
+    db.add_prediction(det_ids[0], "robin", 0.9, "bioclip", category="match")
+    emb = np.ones(768, dtype=np.float32)
+    emb = emb / np.linalg.norm(emb)
+    db.update_photo_pipeline_features(
+        pid,
+        mask_path=f"/masks/{pid}.png",
+        eye_x=None,
+        eye_y=None,
+        eye_conf=None,
+        eye_tenengrad=None,
+        eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+    )
+    db.update_photo_embeddings(
+        pid,
+        dino_subject_embedding=embedding_to_blob(emb),
+        dino_global_embedding=embedding_to_blob(emb),
+    )
+
+    out = compute_review_readiness(db)
+    assert out["with_eye_keypoint_attempts"] == 1
+    assert out["eye_keypoint_target_photos"] == 1
+    assert "eye_keypoints" not in out["enhancing_missing"]
+
+
 def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
     """save_results must preserve an existing miss_computed_at marker
     when the caller's results dict doesn't carry one. reflow and

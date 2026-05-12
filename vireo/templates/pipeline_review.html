@@ -2305,10 +2305,15 @@ function renderEmptyState(readiness) {
   // Per-stage rows
   var rows = [
     ['Photos', readiness.total_photos, readiness.total_photos],
-    ['Masks', readiness.with_masks, readiness.total_photos],
-    ['Embeddings', readiness.with_embeddings, readiness.total_photos],
-    ['Eye keypoints', readiness.with_eye_keypoints, readiness.total_photos],
-    ['Species predictions', readiness.with_predictions, readiness.total_photos],
+    ['Masks', readiness.with_masks, readiness.mask_target_photos || readiness.total_photos],
+    ['Embeddings', readiness.with_embeddings, readiness.embedding_target_photos || readiness.total_photos],
+    ['Eye keypoints', readiness.with_eye_keypoint_attempts != null
+      ? readiness.with_eye_keypoint_attempts
+      : readiness.with_eye_keypoints,
+      readiness.eye_keypoint_target_photos != null
+        ? readiness.eye_keypoint_target_photos
+        : readiness.total_photos],
+    ['Species predictions', readiness.with_predictions, readiness.prediction_target_photos || readiness.total_photos],
   ];
   stages.innerHTML = rows.map(function(r) {
     var name = r[0], n = r[1], total = r[2];
