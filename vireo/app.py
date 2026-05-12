@@ -2657,12 +2657,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Chunked because delete_photos issues several IN-clause queries; a
         # 1000+ id request would hit SQLite's bound-parameter cap on legacy
-        # builds.
+        # builds. We pass ``commit=False`` so all chunks share one outer
+        # transaction — without that, an error on a later chunk would 500
+        # the request after earlier chunks already committed, leaving DB
+        # rows gone and cached files / disk trashing not yet cleaned up
+        # for them.
         result = {"deleted": 0, "files": []}
-        for chunk in _chunked(photo_ids):
-            chunk_result = db.delete_photos(chunk, include_companions=include_companions)
-            result["deleted"] += chunk_result["deleted"]
-            result["files"].extend(chunk_result["files"])
+        try:
+            for chunk in _chunked(photo_ids):
+                chunk_result = db.delete_photos(
+                    chunk,
+                    include_companions=include_companions,
+                    commit=False,
+                )
+                result["deleted"] += chunk_result["deleted"]
+                result["files"].extend(chunk_result["files"])
+            db.conn.commit()
+        except Exception:
+            db.conn.rollback()
+            raise
 
         _cleanup_cached_files_for_deleted_photos(result["files"])
 

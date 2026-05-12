@@ -366,6 +366,59 @@ def test_api_batch_delete_chunks_large_photo_id_lists(app_and_db, monkeypatch):
         assert db.get_photo(pid) is None
 
 
+def test_api_batch_delete_chunked_loop_is_atomic_on_failure(app_and_db, monkeypatch):
+    """A failure in a later chunk must roll back earlier chunks so DB rows
+    and cached files don't drift apart. Without a shared transaction the
+    earlier chunks' commits would survive, leaving the route 500ing after
+    deleting only part of the selection."""
+    import app as appmod
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    fid = db.add_folder('/photos/atomic', name='atomic')
+    bulk_ids = [
+        db.add_photo(
+            folder_id=fid,
+            filename=f"atomic{i}.jpg",
+            extension='.jpg',
+            file_size=10,
+            file_mtime=float(i),
+        )
+        for i in range(5)
+    ]
+
+    def small_chunked(seq, size=2):
+        for i in range(0, len(seq), size):
+            yield seq[i:i + size]
+    monkeypatch.setattr(appmod, "_chunked", small_chunked)
+
+    real_delete = Database.delete_photos
+    calls = {"n": 0}
+
+    def flaky(self, photo_ids, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("simulated SQLite error mid-loop")
+        return real_delete(self, photo_ids, **kwargs)
+
+    monkeypatch.setattr(Database, "delete_photos", flaky)
+
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": bulk_ids,
+        "mode": "vireo",
+    })
+
+    # Route should fail visibly rather than silently dropping rows.
+    assert resp.status_code >= 500
+    # No DB rows should be missing — the first chunk's DML must roll back
+    # along with the failed chunk's, restoring the all-or-nothing semantics
+    # the single-call path had.
+    for pid in bulk_ids:
+        assert db.get_photo(pid) is not None, f"photo {pid} was deleted despite rollback"
+
+
 def test_api_batch_delete_disk_permanent_retry_with_paths(app_and_db, tmp_path):
     """disk_permanent retry works with paths after DB rows are already gone."""
     app, db = app_and_db

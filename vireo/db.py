@@ -4309,11 +4309,17 @@ class Database:
                 )
         self.conn.commit()
 
-    def delete_photos(self, photo_ids, include_companions=False):
+    def delete_photos(self, photo_ids, include_companions=False, commit=True):
         """Delete photos and all associated data.
 
         Returns dict with 'deleted' count and 'files' list of
         {photo_id, folder_path, filename, companion_path} for file cleanup.
+
+        When ``commit`` is ``False``, this call participates in an outer
+        transaction managed by the caller: no ``commit()``/``rollback()`` is
+        issued here, so the caller can chain several ``delete_photos`` calls
+        atomically (used by the batch-delete route to chunk under SQLite's
+        bound-parameter cap without losing all-or-nothing semantics).
         """
         if not photo_ids:
             return {"deleted": 0, "files": []}
@@ -4417,9 +4423,11 @@ class Database:
                     (count, fid),
                 )
 
-            self.conn.commit()
+            if commit:
+                self.conn.commit()
         except Exception:
-            self.conn.rollback()
+            if commit:
+                self.conn.rollback()
             raise
         finally:
             # Always invalidate — even on rollback we may have partially dirtied
