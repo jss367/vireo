@@ -39,6 +39,14 @@
   font-size: 12px;
   text-decoration: none;
 }
+.rapid-inline-btn {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
 .burst-list {
   display: flex;
   flex-direction: column;
@@ -502,6 +510,7 @@ var rapid = {
   currentIndex: -1,
   seeded: false,
   applying: false,
+  loadError: false,
   // Bumped on each openSession; used to drop stale /group/state responses
   // when the user switches bursts before the previous fetch resolves.
   openToken: 0,
@@ -605,6 +614,7 @@ async function openSession(index) {
   rapid.history = [];
   rapid.currentIndex = rapid.items.length ? 0 : -1;
   rapid.seeded = false;
+  rapid.loadError = false;
   // Bump the token so any in-flight /group/state fetch from a previous
   // openSession lands as stale and gets ignored when it resolves.
   var token = (rapid.openToken || 0) + 1;
@@ -634,7 +644,8 @@ async function openSession(index) {
     renderAll();
   } catch (e) {
     if (rapid.openToken !== token) return;
-    rapid.seeded = true;
+    rapid.seeded = false;
+    rapid.loadError = true;
     renderAll();
   }
 }
@@ -759,7 +770,12 @@ function renderAll() {
 function renderCurrent() {
   var session = rapid.sessions[rapid.sessionIndex];
   document.getElementById('burstTitle').textContent = session ? session.title : 'Rapid Review';
-  document.getElementById('burstSubtitle').textContent = session ? session.subtitle : '';
+  var subtitle = document.getElementById('burstSubtitle');
+  if (rapid.loadError) {
+    subtitle.innerHTML = 'Failed to load burst state. <button type="button" class="rapid-inline-btn" onclick="openSession(rapid.sessionIndex)">Retry</button>';
+  } else {
+    subtitle.textContent = session ? session.subtitle : '';
+  }
   var p = currentPhoto();
   var img = document.getElementById('currentPhoto');
   var empty = document.getElementById('stageEmpty');
@@ -871,7 +887,6 @@ async function applyCurrent(openNext) {
   var picks = Array.from(rapid.picks);
   var rejects = Array.from(rapid.rejects);
   var candidates = candidateIdsForApply();
-  var touched = new Set(picks.concat(rejects).concat(candidates));
   // Snapshot session context up front. The sidebar still allows openSession()
   // during the request, so reading rapid.sessionIndex / rapid.items /
   // rapid.picks / rapid.rejects after the await could splice burst A's
@@ -894,10 +909,15 @@ async function applyCurrent(openNext) {
       }),
     });
     items.forEach(function(p) {
-      if (!touched.has(p.id)) return;
       if (pickSet.has(p.id)) p.label = 'KEEP';
-      else if (rejectSet.has(p.id)) p.label = 'REJECT';
-      else p.label = 'REVIEW';
+      else if (rejectSet.has(p.id)) {
+        p.label = 'REJECT';
+      } else {
+        p.label = 'REVIEW';
+      }
+      if (pickSet.has(p.id)) p.flag = 'flagged';
+      else if (rejectSet.has(p.id)) p.flag = 'rejected';
+      else p.flag = 'none';
     });
     if (resp && resp.photos) {
       Object.keys(resp.photos).forEach(function(pidStr) {
