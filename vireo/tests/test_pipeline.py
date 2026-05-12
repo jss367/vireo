@@ -490,7 +490,7 @@ def _sample_cache():
                 "time_range": ["2026-03-20T10:00:00", "2026-03-20T10:00:04"],
                 "photo_ids": [1, 2, 3],
                 "bursts": [
-                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": {"species": "American Robin", "confirmed": True}},
                     {"photo_ids": [3], "species_predictions": [], "species_override": None},
                 ],
             },
@@ -523,6 +523,8 @@ def _sample_cache():
             "review_count": 1,
             "reject_count": 2,
             "rarity_protected": 1,
+            "confirmed_count": 1,
+            "unconfirmed_count": 2,
         },
     }
 
@@ -580,6 +582,8 @@ def test_prune_results_recomputes_counts(tmp_path):
     assert summary["review_count"] == 1
     assert summary["reject_count"] == 0
     assert summary["rarity_protected"] == 1
+    assert summary["confirmed_count"] == 1
+    assert summary["unconfirmed_count"] == 2
 
 
 def test_prune_results_no_overlap_returns_false(tmp_path):

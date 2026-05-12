@@ -158,12 +158,15 @@ def test_make_summary(tmp_path):
     from pipeline import _make_summary
 
     photos = [
-        {"label": "KEEP", "rarity_protected": False},
-        {"label": "KEEP", "rarity_protected": False},
-        {"label": "REVIEW", "rarity_protected": True},
+        {"label": "KEEP", "rarity_protected": False, "confirmed_species": "Blue Jay"},
+        {"label": "KEEP", "rarity_protected": False, "confirmed_species": "Blue Jay"},
+        {"label": "REVIEW", "rarity_protected": True, "confirmed_species": None},
         {"label": "REJECT"},
     ]
-    encounters = [{"burst_count": 2}, {"burst_count": 1}]
+    encounters = [
+        {"burst_count": 2, "photos": photos[:3], "bursts": [photos[:2], photos[2:3]]},
+        {"burst_count": 1, "photos": photos[3:], "bursts": [photos[3:]]},
+    ]
 
     s = _make_summary(encounters, photos)
     assert s["total_photos"] == 4
@@ -173,3 +176,5 @@ def test_make_summary(tmp_path):
     assert s["rarity_protected"] == 1
     assert s["burst_count"] == 3
     assert s["encounter_count"] == 2
+    assert s["confirmed_count"] == 1
+    assert s["unconfirmed_count"] == 2
