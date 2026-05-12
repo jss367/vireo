@@ -2655,7 +2655,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if mode not in ("vireo", "disk", "disk_permanent"):
             return json_error("mode must be 'vireo', 'disk', or 'disk_permanent'")
 
-        result = db.delete_photos(photo_ids, include_companions=include_companions)
+        # Chunked because delete_photos issues several IN-clause queries; a
+        # 1000+ id request would hit SQLite's bound-parameter cap on legacy
+        # builds.
+        result = {"deleted": 0, "files": []}
+        for chunk in _chunked(photo_ids):
+            chunk_result = db.delete_photos(chunk, include_companions=include_companions)
+            result["deleted"] += chunk_result["deleted"]
+            result["files"].extend(chunk_result["files"])
 
         _cleanup_cached_files_for_deleted_photos(result["files"])
 

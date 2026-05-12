@@ -318,6 +318,54 @@ def test_api_batch_delete_invalid_mode(app_and_db):
     assert resp.status_code == 400
 
 
+def test_api_batch_delete_chunks_large_photo_id_lists(app_and_db, monkeypatch):
+    """Route must chunk photo_ids before calling delete_photos so SQLite's
+    bound-parameter cap (~999 on legacy builds) can't trip on bulk deletes."""
+    import app as appmod
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    fid = db.add_folder('/photos/bulk', name='bulk')
+    bulk_ids = [
+        db.add_photo(
+            folder_id=fid,
+            filename=f"bulk{i}.jpg",
+            extension='.jpg',
+            file_size=10,
+            file_mtime=float(i),
+        )
+        for i in range(5)
+    ]
+
+    def small_chunked(seq, size=2):
+        for i in range(0, len(seq), size):
+            yield seq[i:i + size]
+    monkeypatch.setattr(appmod, "_chunked", small_chunked)
+
+    chunks_seen = []
+    real_delete = Database.delete_photos
+
+    def spy(self, photo_ids, **kwargs):
+        chunks_seen.append(list(photo_ids))
+        return real_delete(self, photo_ids, **kwargs)
+
+    monkeypatch.setattr(Database, "delete_photos", spy)
+
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": bulk_ids,
+        "mode": "vireo",
+    })
+
+    assert resp.status_code == 200
+    assert resp.get_json()["deleted"] == len(bulk_ids)
+    assert len(chunks_seen) >= 3, f"expected chunked calls, got {chunks_seen}"
+    assert all(len(c) <= 2 for c in chunks_seen)
+    for pid in bulk_ids:
+        assert db.get_photo(pid) is None
+
+
 def test_api_batch_delete_disk_permanent_retry_with_paths(app_and_db, tmp_path):
     """disk_permanent retry works with paths after DB rows are already gone."""
     app, db = app_and_db
