@@ -671,7 +671,11 @@ function setZone(id, zone) {
 
 function decideCurrent(zone) {
   var p = currentPhoto();
-  if (!p || rapid.applying) return;
+  // Block until DB seed lands. Otherwise the seed loop in openSession() can
+  // ADD a flag for a photo the user already rejected via hotkey, leaving it
+  // in both picks and rejects — apply then 500s with "appears in more than
+  // one zone".
+  if (!p || rapid.applying || !rapid.seeded) return;
   var id = p.id;
   var entry = {
     id: id,
@@ -690,7 +694,7 @@ function decideCurrent(zone) {
 
 function clearCurrent() {
   var p = currentPhoto();
-  if (!p || rapid.applying) return;
+  if (!p || rapid.applying || !rapid.seeded) return;
   var id = p.id;
   rapid.history.push({
     id: id,
@@ -898,8 +902,15 @@ async function applyCurrent(openNext) {
     if (species && enc) {
       enc.confirmed_species = species;
       enc.species_confirmed = true;
-      session.species = species;
-      session.subtitle = session.ids.length + ' photos - ' + species;
+      // sessions[].species is cached at page load, so update every burst in
+      // this encounter — otherwise Apply Next stops tagging picks with the
+      // confirmed species until the user retypes it for each burst.
+      rapid.sessions.forEach(function(s) {
+        if (s.encIdx === session.encIdx) {
+          s.species = species;
+          s.subtitle = s.ids.length + ' photos - ' + species;
+        }
+      });
     }
     updateSummaryFromPhotos();
     await safeFetch('/api/pipeline/save-cache', {
