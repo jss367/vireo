@@ -1990,6 +1990,129 @@ def test_eye_stage_gate1_low_classifier_conf_no_write(tmp_path, monkeypatch):
     assert _read_eye_fields(db, pid) == (None, None, None, None)
 
 
+def test_eye_stage_gate1_failure_does_not_stamp_fingerprint(tmp_path, monkeypatch):
+    """Gate 1 (classifier conf) short-circuits cheaply but must NOT stamp
+    eye_kp_fingerprint: the gate is driven by the user-configurable
+    `eye_classifier_conf_gate`, so stamping would permanently filter the
+    photo out of `list_photos_for_eye_keypoint_stage` even after the user
+    lowers the gate. The photo must remain eligible on a subsequent run
+    with a more permissive threshold.
+    """
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(
+        tmp_path, classifier_conf=0.3,
+    )
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    # First pass: high gate skips the photo at Gate 1.
+    monkeypatch.setattr(
+        kp, "detect_keypoints",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("Gate 1 should short-circuit before model runs")
+        ),
+    )
+    detect_eye_keypoints_stage(
+        db, config={"eye_detect_enabled": True, "eye_classifier_conf_gate": 0.5},
+    )
+
+    # Fingerprint must still be NULL — the photo wasn't actually evaluated.
+    fp_row = db.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert fp_row[0] is None, (
+        "Gate 1 (low classifier confidence) must not stamp eye_kp_fingerprint; "
+        "stamping locks the photo out of future runs even after the user "
+        "lowers eye_classifier_conf_gate."
+    )
+
+    # Photo must still surface as a candidate for the next stage run.
+    rows = db.list_photos_for_eye_keypoint_stage()
+    assert any(r["id"] == pid for r in rows)
+
+    # Second pass: lower the gate. Now the model runs and writes eye fields.
+    good = [
+        {"name": "left_eye", "x": 300.0, "y": 300.0, "conf": 0.88},
+        {"name": "right_eye", "x": 350.0, "y": 300.0, "conf": 0.85},
+    ]
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: good)
+    detect_eye_keypoints_stage(
+        db, config={"eye_detect_enabled": True, "eye_classifier_conf_gate": 0.1},
+    )
+    eye_x, eye_y, eye_conf, _ = _read_eye_fields(db, pid)
+    assert eye_x is not None and eye_y is not None and eye_conf is not None
+
+
+def test_eye_stage_unrouted_taxonomy_does_not_stamp_fingerprint(tmp_path, monkeypatch):
+    """When `_resolve_keypoint_model` returns None for a photo (e.g. the
+    species' taxonomy class isn't in the routing map yet), the stage must
+    not stamp eye_kp_fingerprint. The routing depends on
+    `_EYE_KEYPOINT_MODEL_FOR_CLASS` and taxonomy data which can be extended
+    later; stamping would prevent the photo from re-running after such
+    an extension.
+    """
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(
+        tmp_path, taxonomy_class="Actinopterygii",  # ray-finned fish
+    )
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    def _boom(*a, **kw):
+        raise AssertionError(
+            "detect_keypoints should not run for unrouted taxonomy"
+        )
+
+    monkeypatch.setattr(kp, "detect_keypoints", _boom)
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
+
+    fp_row = db.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert fp_row[0] is None, (
+        "Unrouted-taxonomy short-circuit must not stamp eye_kp_fingerprint; "
+        "the routing map / taxonomy data can be extended later and the "
+        "photo must remain eligible to re-run then."
+    )
+    rows = db.list_photos_for_eye_keypoint_stage()
+    assert any(r["id"] == pid for r in rows)
+
+
+def test_eye_stage_gate3_failure_stamps_fingerprint(tmp_path, monkeypatch):
+    """Inverse case: when the model actually runs and finds no
+    trustworthy eye (Gate 3/4 fail), eye_kp_fingerprint must be stamped so
+    `list_photos_for_eye_keypoint_stage` does not keep returning the photo
+    on every subsequent run. This is the original motivation for the
+    no-eye attempt marker — it should not be weakened by the fix to the
+    pre-model gates.
+    """
+    import keypoints as kp
+    from pipeline import EYE_KP_FINGERPRINT_VERSION, detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    # All eye points below the detection-conf gate → Gate 3 fails.
+    low = [
+        {"name": "left_eye", "x": 300.0, "y": 300.0, "conf": 0.2},
+        {"name": "right_eye", "x": 350.0, "y": 300.0, "conf": 0.15},
+    ]
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: low)
+    detect_eye_keypoints_stage(
+        db, config={"eye_detect_enabled": True, "eye_detection_conf_gate": 0.5},
+    )
+
+    fp_row = db.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert fp_row[0] == EYE_KP_FINGERPRINT_VERSION
+    # And the photo is no longer eligible on the next selection pass.
+    rows = db.list_photos_for_eye_keypoint_stage()
+    assert not any(r["id"] == pid for r in rows)
+
+
 def test_eye_stage_gate1_out_of_scope_species_no_write(tmp_path, monkeypatch):
     """Gate 1: species class not in {Aves, Mammalia} → no write."""
     import keypoints as kp

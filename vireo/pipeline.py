@@ -1232,6 +1232,14 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
     from quality import compute_eye_tenengrad
 
     def mark_attempted_without_eye():
+        # Stamp the current eye-keypoint fingerprint only after the model
+        # has actually run and produced no trustworthy eye. Pre-model gates
+        # (Gate 1: classifier confidence, taxonomy routing, missing weights,
+        # missing image, etc.) depend on runtime settings or external state
+        # the user can change, so stamping there would permanently filter
+        # the photo out of future runs even after the user lowers the gate
+        # or adds the missing model — a functional regression. Those photos
+        # remain on the to-do list and are cheaply re-skipped on each run.
         db.update_photo_pipeline_features(
             row["id"],
             eye_x=None,
@@ -1243,11 +1251,9 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
 
     # Gate 1: classifier confidence + species in scope.
     if (row.get("species_conf") or 0.0) < C:
-        mark_attempted_without_eye()
         return
     model_name = _resolve_keypoint_model(db, row)
     if model_name is None:
-        mark_attempted_without_eye()
         return
 
     # Gate 2: weights present on disk. The pipeline job auto-downloads both
