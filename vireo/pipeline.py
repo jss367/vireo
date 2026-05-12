@@ -450,6 +450,7 @@ def _clear_derived_scores(photos):
 
 def _make_summary(encounters, all_photos):
     """Build summary stats dict from triage results."""
+    confirmation_counts = _count_raw_confirmation_units(encounters)
     return {
         "total_photos": len(all_photos),
         "encounter_count": len(encounters),
@@ -460,7 +461,86 @@ def _make_summary(encounters, all_photos):
         "rarity_protected": sum(
             1 for p in all_photos if p.get("rarity_protected")
         ),
+        **confirmation_counts,
     }
+
+
+def _photos_uniformly_confirmed(photos):
+    species = [p.get("confirmed_species") for p in photos]
+    confirmed = {s for s in species if s}
+    return bool(photos) and len(confirmed) == 1 and all(species)
+
+
+def _count_raw_confirmation_units(encounters):
+    """Count confirmed/unconfirmed review units in raw encounter structures.
+
+    The review page hides confirmed items at the burst level when bursts are
+    present, otherwise at the encounter level. Mirror that unit here so the
+    summary bar matches the user's review workload.
+    """
+    confirmed = 0
+    unconfirmed = 0
+    for enc in encounters:
+        bursts = enc.get("bursts") or []
+        if bursts:
+            for burst in bursts:
+                if _photos_uniformly_confirmed(burst):
+                    confirmed += 1
+                else:
+                    unconfirmed += 1
+        elif _photos_uniformly_confirmed(enc.get("photos", [])):
+            confirmed += 1
+        else:
+            unconfirmed += 1
+    return {
+        "confirmed_count": confirmed,
+        "unconfirmed_count": unconfirmed,
+    }
+
+
+def _serialized_burst_confirmed(enc, burst):
+    ovr = burst.get("species_override") if isinstance(burst, dict) else None
+    if ovr:
+        return bool(ovr.get("confirmed"))
+    return bool(enc.get("species_confirmed"))
+
+
+def _count_serialized_confirmation_units(encounters):
+    """Count confirmed/unconfirmed review units in cached JSON results."""
+    confirmed = 0
+    unconfirmed = 0
+    for enc in encounters:
+        bursts = enc.get("bursts") or []
+        if bursts:
+            for burst in bursts:
+                if _serialized_burst_confirmed(enc, burst):
+                    confirmed += 1
+                else:
+                    unconfirmed += 1
+        elif enc.get("species_confirmed"):
+            confirmed += 1
+        else:
+            unconfirmed += 1
+    return {
+        "confirmed_count": confirmed,
+        "unconfirmed_count": unconfirmed,
+    }
+
+
+def refresh_serialized_summary(results):
+    """Recompute cached summary counts in place and return the summary."""
+    photos = results.get("photos", []) or []
+    encounters = results.get("encounters", []) or []
+    summary = results.setdefault("summary", {})
+    summary["total_photos"] = len(photos)
+    summary["encounter_count"] = len(encounters)
+    summary["burst_count"] = sum(e.get("burst_count", 0) for e in encounters)
+    summary["keep_count"] = sum(1 for p in photos if p.get("label") == "KEEP")
+    summary["review_count"] = sum(1 for p in photos if p.get("label") == "REVIEW")
+    summary["reject_count"] = sum(1 for p in photos if p.get("label") == "REJECT")
+    summary["rarity_protected"] = sum(1 for p in photos if p.get("rarity_protected"))
+    summary.update(_count_serialized_confirmation_units(encounters))
+    return summary
 
 
 def reflow(encounters, config=None):
@@ -707,7 +787,9 @@ def load_results(cache_dir, workspace_id):
     if not os.path.exists(path):
         return None
     with open(path) as f:
-        return json.load(f)
+        data = json.load(f)
+    refresh_serialized_summary(data)
+    return data
 
 
 def prune_missing_photos(cache_dir, workspace_id, db):
@@ -812,16 +894,7 @@ def prune_results(cache_dir, workspace_id, deleted_ids):
         pruned_encounters.append(enc)
     data["encounters"] = pruned_encounters
 
-    photos = data["photos"]
-    summary = data.get("summary") or {}
-    summary["total_photos"] = len(photos)
-    summary["encounter_count"] = len(pruned_encounters)
-    summary["burst_count"] = sum(e.get("burst_count", 0) for e in pruned_encounters)
-    summary["keep_count"] = sum(1 for p in photos if p.get("label") == "KEEP")
-    summary["review_count"] = sum(1 for p in photos if p.get("label") == "REVIEW")
-    summary["reject_count"] = sum(1 for p in photos if p.get("label") == "REJECT")
-    summary["rarity_protected"] = sum(1 for p in photos if p.get("rarity_protected"))
-    data["summary"] = summary
+    refresh_serialized_summary(data)
 
     with open(path, "w") as f:
         json.dump(data, f)
@@ -1098,6 +1171,7 @@ def rebuild_species_predictions(results, photo_ids):
 
 def save_results_raw(results, cache_dir, workspace_id):
     """Save an already-serialized results dict back to the JSON cache."""
+    refresh_serialized_summary(results)
     path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
     with open(path, "w") as f:
         json.dump(results, f)

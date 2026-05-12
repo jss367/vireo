@@ -44,8 +44,9 @@
 /* Summary bar */
 .summary-bar {
   display: flex;
-  gap: 24px;
+  gap: 20px;
   align-items: center;
+  flex-wrap: wrap;
   margin-bottom: 20px;
   padding: 16px 20px;
   background: var(--bg-secondary);
@@ -1209,6 +1210,14 @@ input[type="range"]::-moz-range-thumb {
         <div class="num" style="color:var(--warning);" id="statProtected">0</div>
         <div class="label">Protected</div>
       </div>
+      <div class="summary-stat">
+        <div class="num" style="color:var(--success, #4caf50);" id="statConfirmedCount">0</div>
+        <div class="label">Confirmed</div>
+      </div>
+      <div class="summary-stat">
+        <div class="num" id="statUnconfirmedCount">0</div>
+        <div class="label">Unconfirmed</div>
+      </div>
       <a id="missesReviewBtn" href="/misses" data-testid="pipeline-review-misses"
          style="display:none;margin-left:auto;padding:8px 14px;
                 background:var(--danger);color:#fff;border-radius:6px;
@@ -2026,7 +2035,55 @@ function doRegroupLive() {
   });
 }
 
+function countConfirmationUnits(results) {
+  var counts = {confirmed: 0, unconfirmed: 0};
+  if (!results || !Array.isArray(results.encounters)) return counts;
+  results.encounters.forEach(function(enc) {
+    var bursts = enc.bursts || [];
+    if (bursts.length > 0) {
+      bursts.forEach(function(burst) {
+        if (isBurstConfirmed(enc, burst)) counts.confirmed++;
+        else counts.unconfirmed++;
+      });
+    } else if (enc.species_confirmed) {
+      counts.confirmed++;
+    } else {
+      counts.unconfirmed++;
+    }
+  });
+  return counts;
+}
+
+function refreshLocalSummaryCounts() {
+  if (!pipelineResults) return null;
+  var summary = pipelineResults.summary || {};
+  var photos = pipelineResults.photos || [];
+  summary.total_photos = photos.length;
+  summary.encounter_count = (pipelineResults.encounters || []).length;
+  summary.burst_count = (pipelineResults.encounters || []).reduce(function(total, enc) {
+    return total + (enc.burst_count || ((enc.bursts || []).length));
+  }, 0);
+  summary.keep_count = 0;
+  summary.review_count = 0;
+  summary.reject_count = 0;
+  summary.rarity_protected = 0;
+  photos.forEach(function(p) {
+    if (p.label === 'KEEP') summary.keep_count++;
+    else if (p.label === 'REVIEW') summary.review_count++;
+    else if (p.label === 'REJECT') summary.reject_count++;
+    if (p.rarity_protected) summary.rarity_protected++;
+  });
+  var confirmCounts = countConfirmationUnits(pipelineResults);
+  summary.confirmed_count = confirmCounts.confirmed;
+  summary.unconfirmed_count = confirmCounts.unconfirmed;
+  pipelineResults.summary = summary;
+  return summary;
+}
+
 function updateSummaryBar(summary) {
+  if (pipelineResults && (summary.confirmed_count == null || summary.unconfirmed_count == null)) {
+    summary = refreshLocalSummaryCounts() || summary;
+  }
   var el;
   el = document.getElementById('statTotalPhotos'); if (el) el.textContent = summary.total_photos;
   el = document.getElementById('statEncounterCount'); if (el) el.textContent = summary.encounter_count;
@@ -2034,6 +2091,8 @@ function updateSummaryBar(summary) {
   el = document.getElementById('statKeepCount'); if (el) el.textContent = summary.keep_count;
   el = document.getElementById('statReviewCount'); if (el) el.textContent = summary.review_count;
   el = document.getElementById('statRejectCount'); if (el) el.textContent = summary.reject_count;
+  el = document.getElementById('statConfirmedCount'); if (el) el.textContent = summary.confirmed_count || 0;
+  el = document.getElementById('statUnconfirmedCount'); if (el) el.textContent = summary.unconfirmed_count || 0;
   var protWrap = document.getElementById('statProtectedWrap');
   if (protWrap) {
     if (summary.rarity_protected) {
@@ -2680,9 +2739,11 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
     }
   } else if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
     enc.bursts[burstIdx].species_override = { species: speciesName, confirmed: true };
+    updateSummaryBar(refreshLocalSummaryCounts());
   } else {
     enc.species_confirmed = true;
     enc.confirmed_species = speciesName;
+    updateSummaryBar(refreshLocalSummaryCounts());
   }
   renderResults();
   checkPendingSync();
@@ -2701,6 +2762,7 @@ async function clearBurstOverride(event, encIdx, burstIdx) {
     body: JSON.stringify(pipelineResults),
   });
   renderResults();
+  updateSummaryBar(refreshLocalSummaryCounts());
 }
 
 // -- Detach & Undo --
@@ -3851,17 +3913,7 @@ async function grmApply() {
   // Clear the species input for next use
   document.getElementById('grmSpecies').value = '';
   renderResults();
-  // Recalculate summary counts from photo labels
-  var summary = pipelineResults.summary;
-  summary.keep_count = 0;
-  summary.review_count = 0;
-  summary.reject_count = 0;
-  pipelineResults.photos.forEach(function(p) {
-    if (p.label === 'KEEP') summary.keep_count++;
-    else if (p.label === 'REVIEW') summary.review_count++;
-    else if (p.label === 'REJECT') summary.reject_count++;
-  });
-  updateSummaryBar(summary);
+  updateSummaryBar(refreshLocalSummaryCounts());
 }
 
 initPipelineReviewPage();
