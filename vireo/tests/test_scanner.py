@@ -2278,6 +2278,27 @@ def test_scan_does_not_promote_discovered_descendants_to_workspace_roots(tmp_pat
     assert root_paths == [root]
 
 
+def test_scan_promotes_top_level_target_to_workspace_root(tmp_path):
+    """A normal scan should make its selected root visible in workspace APIs."""
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        "day1": ["bird.jpg"],
+    })
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+
+    scan(root, db)
+
+    linked_paths = {f["path"] for f in db.get_workspace_folders(ws_id)}
+    root_paths = [f["path"] for f in db.get_workspace_folder_roots(ws_id)]
+    assert os.path.join(root, "day1") in linked_paths
+    assert root_paths == [root]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions required")
 def test_scan_surfaces_permission_denied_subdirs(tmp_path):
     """A subdir the kernel won't let us enter must surface as a denied path,
