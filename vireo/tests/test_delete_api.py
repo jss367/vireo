@@ -318,6 +318,277 @@ def test_api_batch_delete_invalid_mode(app_and_db):
     assert resp.status_code == 400
 
 
+def test_api_batch_delete_chunks_large_photo_id_lists(app_and_db, monkeypatch):
+    """Route must chunk photo_ids before calling delete_photos so SQLite's
+    bound-parameter cap (~999 on legacy builds) can't trip on bulk deletes."""
+    import app as appmod
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    fid = db.add_folder('/photos/bulk', name='bulk')
+    bulk_ids = [
+        db.add_photo(
+            folder_id=fid,
+            filename=f"bulk{i}.jpg",
+            extension='.jpg',
+            file_size=10,
+            file_mtime=float(i),
+        )
+        for i in range(5)
+    ]
+
+    def small_chunked(seq, size=2):
+        for i in range(0, len(seq), size):
+            yield seq[i:i + size]
+    monkeypatch.setattr(appmod, "_chunked", small_chunked)
+
+    chunks_seen = []
+    real_delete = Database.delete_photos
+
+    def spy(self, photo_ids, **kwargs):
+        chunks_seen.append(list(photo_ids))
+        return real_delete(self, photo_ids, **kwargs)
+
+    monkeypatch.setattr(Database, "delete_photos", spy)
+
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": bulk_ids,
+        "mode": "vireo",
+    })
+
+    assert resp.status_code == 200
+    assert resp.get_json()["deleted"] == len(bulk_ids)
+    assert len(chunks_seen) >= 3, f"expected chunked calls, got {chunks_seen}"
+    assert all(len(c) <= 2 for c in chunks_seen)
+    for pid in bulk_ids:
+        assert db.get_photo(pid) is None
+
+
+def test_api_batch_delete_chunked_loop_is_atomic_on_failure(app_and_db, monkeypatch):
+    """A failure in a later chunk must roll back earlier chunks so DB rows
+    and cached files don't drift apart. Without a shared transaction the
+    earlier chunks' commits would survive, leaving the route 500ing after
+    deleting only part of the selection."""
+    import app as appmod
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    fid = db.add_folder('/photos/atomic', name='atomic')
+    bulk_ids = [
+        db.add_photo(
+            folder_id=fid,
+            filename=f"atomic{i}.jpg",
+            extension='.jpg',
+            file_size=10,
+            file_mtime=float(i),
+        )
+        for i in range(5)
+    ]
+
+    def small_chunked(seq, size=2):
+        for i in range(0, len(seq), size):
+            yield seq[i:i + size]
+    monkeypatch.setattr(appmod, "_chunked", small_chunked)
+
+    real_delete = Database.delete_photos
+    calls = {"n": 0}
+
+    def flaky(self, photo_ids, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("simulated SQLite error mid-loop")
+        return real_delete(self, photo_ids, **kwargs)
+
+    monkeypatch.setattr(Database, "delete_photos", flaky)
+
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": bulk_ids,
+        "mode": "vireo",
+    })
+
+    # Route should fail visibly rather than silently dropping rows.
+    assert resp.status_code >= 500
+    # No DB rows should be missing — the first chunk's DML must roll back
+    # along with the failed chunk's, restoring the all-or-nothing semantics
+    # the single-call path had.
+    for pid in bulk_ids:
+        assert db.get_photo(pid) is not None, f"photo {pid} was deleted despite rollback"
+
+
+def test_api_batch_delete_chunked_failure_preserves_pipeline_cache(
+    app_and_db, monkeypatch
+):
+    """When a later chunk fails and the route rolls the DB back, the
+    pipeline review cache must NOT have already been pruned for the
+    earlier chunks' photos — those rows still exist, so pruning them
+    would orphan their pipeline entries with no way to restore them
+    (the cache file is non-transactional)."""
+    import app as appmod
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    fid = db.add_folder('/photos/pcache', name='pcache')
+    bulk_ids = [
+        db.add_photo(
+            folder_id=fid,
+            filename=f"pcache{i}.jpg",
+            extension='.jpg',
+            file_size=10,
+            file_mtime=float(i),
+        )
+        for i in range(5)
+    ]
+
+    # Seed a pipeline review cache that references every photo.
+    cache_dir = os.path.dirname(db._db_path)
+    cache_path = os.path.join(
+        cache_dir, f"pipeline_results_ws{db._active_workspace_id}.json"
+    )
+    cache = {
+        "encounters": [{
+            "species": None,
+            "photo_count": len(bulk_ids),
+            "burst_count": 1,
+            "photo_ids": list(bulk_ids),
+            "bursts": [{
+                "photo_ids": list(bulk_ids),
+                "species_predictions": [],
+                "species_override": None,
+            }],
+        }],
+        "photos": [{"id": pid, "label": "KEEP"} for pid in bulk_ids],
+        "summary": {
+            "total_photos": len(bulk_ids),
+            "encounter_count": 1,
+            "burst_count": 1,
+            "keep_count": len(bulk_ids),
+            "review_count": 0,
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    with open(cache_path, "w") as f:
+        json.dump(cache, f)
+
+    def small_chunked(seq, size=2):
+        for i in range(0, len(seq), size):
+            yield seq[i:i + size]
+    monkeypatch.setattr(appmod, "_chunked", small_chunked)
+
+    real_delete = Database.delete_photos
+    calls = {"n": 0}
+
+    def flaky(self, photo_ids, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("simulated SQLite error mid-loop")
+        return real_delete(self, photo_ids, **kwargs)
+
+    monkeypatch.setattr(Database, "delete_photos", flaky)
+
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": bulk_ids,
+        "mode": "vireo",
+    })
+
+    assert resp.status_code >= 500
+
+    # The on-disk pipeline cache must still reference every original
+    # photo — none were actually deleted (the DB rolled back), so the
+    # cache must not have been pre-pruned for the first chunk.
+    with open(cache_path) as f:
+        cache_after = json.load(f)
+    assert [p["id"] for p in cache_after["photos"]] == list(bulk_ids)
+    assert cache_after["encounters"][0]["photo_ids"] == list(bulk_ids)
+    assert cache_after["encounters"][0]["bursts"][0]["photo_ids"] == list(bulk_ids)
+    assert cache_after["summary"]["total_photos"] == len(bulk_ids)
+
+
+def test_api_batch_delete_chunked_success_prunes_pipeline_cache(
+    app_and_db, monkeypatch
+):
+    """On the happy path (all chunks commit), the pipeline cache must
+    still be pruned of the deleted photos exactly once after the outer
+    commit — i.e., deferring the prune doesn't drop it on the floor."""
+    import app as appmod
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    fid = db.add_folder('/photos/pchunk', name='pchunk')
+    bulk_ids = [
+        db.add_photo(
+            folder_id=fid,
+            filename=f"pchunk{i}.jpg",
+            extension='.jpg',
+            file_size=10,
+            file_mtime=float(i),
+        )
+        for i in range(5)
+    ]
+    survivor = db.add_photo(
+        folder_id=fid,
+        filename="survivor.jpg",
+        extension='.jpg',
+        file_size=10,
+        file_mtime=99.0,
+    )
+
+    cache_dir = os.path.dirname(db._db_path)
+    cache_path = os.path.join(
+        cache_dir, f"pipeline_results_ws{db._active_workspace_id}.json"
+    )
+    all_in_cache = list(bulk_ids) + [survivor]
+    cache = {
+        "encounters": [{
+            "species": None,
+            "photo_count": len(all_in_cache),
+            "burst_count": 1,
+            "photo_ids": list(all_in_cache),
+            "bursts": [{
+                "photo_ids": list(all_in_cache),
+                "species_predictions": [],
+                "species_override": None,
+            }],
+        }],
+        "photos": [{"id": pid, "label": "KEEP"} for pid in all_in_cache],
+        "summary": {
+            "total_photos": len(all_in_cache),
+            "encounter_count": 1,
+            "burst_count": 1,
+            "keep_count": len(all_in_cache),
+            "review_count": 0,
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    with open(cache_path, "w") as f:
+        json.dump(cache, f)
+
+    def small_chunked(seq, size=2):
+        for i in range(0, len(seq), size):
+            yield seq[i:i + size]
+    monkeypatch.setattr(appmod, "_chunked", small_chunked)
+
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": bulk_ids,
+        "mode": "vireo",
+    })
+    assert resp.status_code == 200
+
+    with open(cache_path) as f:
+        cache_after = json.load(f)
+    assert [p["id"] for p in cache_after["photos"]] == [survivor]
+    assert cache_after["encounters"][0]["photo_ids"] == [survivor]
+    assert cache_after["summary"]["total_photos"] == 1
+
+
 def test_api_batch_delete_disk_permanent_retry_with_paths(app_and_db, tmp_path):
     """disk_permanent retry works with paths after DB rows are already gone."""
     app, db = app_and_db

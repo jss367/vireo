@@ -2655,8 +2655,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if mode not in ("vireo", "disk", "disk_permanent"):
             return json_error("mode must be 'vireo', 'disk', or 'disk_permanent'")
 
-        result = db.delete_photos(photo_ids, include_companions=include_companions)
+        # Chunked because delete_photos issues several IN-clause queries; a
+        # 1000+ id request would hit SQLite's bound-parameter cap on legacy
+        # builds. We pass ``commit=False`` so all chunks share one outer
+        # transaction — without that, an error on a later chunk would 500
+        # the request after earlier chunks already committed, leaving DB
+        # rows gone and cached files / disk trashing not yet cleaned up
+        # for them. ``commit=False`` also defers the pipeline-cache prune
+        # (a non-transactional file write) to the caller so a rolled-back
+        # later chunk doesn't leave the cache permanently stripped of rows
+        # the DB just restored.
+        result = {"deleted": 0, "ids": [], "files": []}
+        try:
+            for chunk in _chunked(photo_ids):
+                chunk_result = db.delete_photos(
+                    chunk,
+                    include_companions=include_companions,
+                    commit=False,
+                )
+                result["deleted"] += chunk_result["deleted"]
+                result["ids"].extend(chunk_result["ids"])
+                result["files"].extend(chunk_result["files"])
+            db.conn.commit()
+        except Exception:
+            db.conn.rollback()
+            raise
 
+        # Run the deferred non-DB side effects only after the outer
+        # transaction committed successfully.
+        db.prune_pipeline_cache_for_ids(result["ids"])
         _cleanup_cached_files_for_deleted_photos(result["files"])
 
         trashed = 0
