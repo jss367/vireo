@@ -5029,11 +5029,9 @@ class Database:
           * has at least one non-synthetic detection (excludes full-image
             rows that exist only to anchor predictions)
           * has at least one prediction on that detection
-          * EITHER has not been processed (eye_tenengrad IS NULL) OR was
-            processed with a stale fingerprint (eye_kp_fingerprint differs
-            from EYE_KP_FINGERPRINT_VERSION). The stale path lets a
-            keypoint-model bump re-run on already-processed photos, since
-            (eye_x, eye_y, eye_conf, eye_tenengrad) are model-specific.
+          * has not been attempted with the current keypoint model fingerprint
+            yet. The stage stamps eye_kp_fingerprint even when no trustworthy
+            eye is found, so no-eye photos do not rerun forever.
           * (optional) photo.id is in ``photo_ids`` when provided — lets the
             caller scope the stage to a collection so a pipeline run doesn't
             touch unrelated photos elsewhere in the workspace
@@ -5084,8 +5082,7 @@ class Database:
                 AND d.detector_confidence >= ?
                JOIN predictions pr ON pr.detection_id = d.id
                WHERE p.mask_path IS NOT NULL
-                 AND (p.eye_tenengrad IS NULL
-                      OR p.eye_kp_fingerprint IS NULL
+                 AND (p.eye_kp_fingerprint IS NULL
                       OR p.eye_kp_fingerprint != ?){extra_where}
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
