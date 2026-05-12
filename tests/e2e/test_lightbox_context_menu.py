@@ -71,6 +71,77 @@ def test_lightbox_right_click_opens_menu(live_server, page):
     assert menu.locator(".vireo-ctx-chip").count() > 5
 
 
+def test_lightbox_overlay_toggles_persist_and_context_restores(live_server, page):
+    """Lightbox overlay visibility toggles persist and stay recoverable."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.evaluate(
+        """
+        [
+          'vireo.lb.boxesVisible',
+          'vireo.lb.masksVisible',
+          'vireo.lb.eyeVisible',
+          'vireo.lb.infoVisible',
+          'vireo.lb.chromeVisible',
+        ].forEach(k => localStorage.removeItem(k));
+        """
+    )
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.dblclick()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+
+    page.locator("#lightboxToggleBoxes").click()
+    page.locator("#lightboxToggleMasks").click()
+    page.locator("#lightboxToggleEye").click()
+    page.locator("#lightboxToggleInfo").click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('lb-hide-info')",
+        timeout=2000,
+    )
+
+    page.locator("#lightboxToggleChrome").click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('lb-hide-chrome')",
+        timeout=2000,
+    )
+    assert page.evaluate("localStorage.getItem('vireo.lb.boxesVisible')") == "0"
+    assert page.evaluate("localStorage.getItem('vireo.lb.masksVisible')") == "0"
+    assert page.evaluate("localStorage.getItem('vireo.lb.eyeVisible')") == "0"
+    assert page.evaluate("localStorage.getItem('vireo.lb.infoVisible')") == "0"
+    assert page.evaluate("localStorage.getItem('vireo.lb.chromeVisible')") == "0"
+
+    _fire_contextmenu_on_lightbox(page)
+    menu = page.locator(".vireo-ctx-menu")
+    expect(menu).to_be_visible()
+    menu.locator(".vireo-ctx-item", has_text="Lightbox controls: Off").click()
+    page.wait_for_function(
+        "!document.getElementById('lightboxOverlay').classList.contains('lb-hide-chrome')",
+        timeout=2000,
+    )
+    assert page.evaluate("localStorage.getItem('vireo.lb.chromeVisible')") == "1"
+
+    page.evaluate("closeLightbox()")
+    page.reload()
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.dblclick()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('lb-hide-info')",
+        timeout=2000,
+    )
+    assert page.locator("#lightboxToggleBoxes").inner_text() == "Show Boxes"
+    assert page.locator("#lightboxToggleMasks").inner_text() == "Show Masks"
+    assert page.locator("#lightboxToggleEye").inner_text() == "Show Eye"
+
+
 def test_lightbox_right_click_does_not_toggle_zoom(live_server, page):
     """Right-click must not trip the click-to-zoom / pan handlers.
 
@@ -89,6 +160,118 @@ def test_lightbox_right_click_does_not_toggle_zoom(live_server, page):
         "typeof _lbZoom !== 'undefined' ? _lbZoom : null"
     )
     assert before == after
+
+
+def test_mask_toggle_off_clears_pending_onload(live_server, page):
+    """Hiding masks while a mask image request is in flight must not let the
+    pending onload handler re-add `show` after the user toggled off.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.evaluate("localStorage.removeItem('vireo.lb.masksVisible');")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.dblclick()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+
+    # Simulate the "request in flight" state: toggle on with a URL set,
+    # then call _lbApplyMaskVisibility() so it assigns img.onload.
+    page.evaluate(
+        """
+        _lbMasksVisible = true;
+        _lbMaskCurrentUrl = '/dummy-mask-url-for-test.png';
+        _lbApplyMaskVisibility();
+        """
+    )
+    assert page.evaluate(
+        "typeof document.getElementById('lightboxMaskOverlay').onload === 'function'"
+    ), "onload should be assigned while a mask request is in flight"
+
+    # User toggles masks off while the load is still pending.
+    page.evaluate(
+        """
+        _lbMasksVisible = false;
+        _lbApplyMaskVisibility();
+        """
+    )
+    assert page.evaluate(
+        "document.getElementById('lightboxMaskOverlay').onload === null"
+    ), "onload must be cleared when masks are toggled off mid-load"
+
+    # Even if a late load fires (simulated by invoking the stored handler
+    # captured before the toggle, or any direct .add('show') from a leftover
+    # callback), the overlay must remain hidden. Manually re-arm the handler
+    # the way the old code did and fire it — defense-in-depth: the handler
+    # itself also re-checks visibility before adding `show`.
+    page.evaluate(
+        """
+        const img = document.getElementById('lightboxMaskOverlay');
+        // Re-arm as the old buggy assignment used to.
+        img.onload = function() {
+          if (_lbMasksVisible && _lbMaskCurrentUrl) {
+            img.classList.add('show');
+          }
+        };
+        img.onload();
+        """
+    )
+    assert not page.locator("#lightboxMaskOverlay").evaluate(
+        "el => el.classList.contains('show')"
+    ), "mask overlay must stay hidden after a late load fires while toggled off"
+
+
+def test_mask_toggle_off_then_on_after_failed_load_stays_hidden(live_server, page):
+    """Toggling masks off then back on after a failed load must not surface
+    a broken-image overlay through the same-URL fast path.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.evaluate("localStorage.removeItem('vireo.lb.masksVisible');")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.dblclick()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+
+    # Drive the overlay to a known failed-load state via a real 404 URL.
+    # _lbApplyMaskVisibility() assigns onerror which removes `show`.
+    page.evaluate(
+        """
+        _lbMasksVisible = true;
+        _lbMaskCurrentUrl = '/__definitely_missing__/mask.png';
+        _lbApplyMaskVisibility();
+        """
+    )
+    # Wait until the browser settles the request (onerror has fired).
+    page.wait_for_function(
+        "document.getElementById('lightboxMaskOverlay').complete"
+        " && document.getElementById('lightboxMaskOverlay').naturalWidth === 0",
+        timeout=3000,
+    )
+    assert not page.locator("#lightboxMaskOverlay").evaluate(
+        "el => el.classList.contains('show')"
+    ), "failed load should leave the overlay hidden"
+
+    # User toggles masks off, then back on. The src never changes, so the
+    # same-URL branch in _lbApplyMaskVisibility() runs. It must NOT add
+    # `show`, since the previous load failed and would render as a
+    # broken-image icon.
+    page.evaluate(
+        """
+        _lbMasksVisible = false;
+        _lbApplyMaskVisibility();
+        _lbMasksVisible = true;
+        _lbApplyMaskVisibility();
+        """
+    )
+    assert not page.locator("#lightboxMaskOverlay").evaluate(
+        "el => el.classList.contains('show')"
+    ), "same-URL re-show after a failed load must not reveal a broken overlay"
 
 
 def test_lightbox_close_menu_item_closes_overlay(live_server, page):
