@@ -114,6 +114,29 @@ def test_workspace_root_materializes_existing_path_descendants(db):
     assert [p["filename"] for p in photos] == ["bird.jpg"]
 
 
+def test_workspace_root_materializes_windows_style_descendants(db):
+    ws_id = db._active_workspace_id
+    db.set_active_workspace(None)
+    root_id = db.add_folder(r"C:\photos\usa\2026", name="2026")
+    child_id = db.add_folder(
+        r"C:\photos\usa\2026\2026-05-01",
+        name="2026-05-01",
+    )
+    db.add_photo(child_id, "bird.jpg", ".jpg", 1000, 1.0)
+    db.set_active_workspace(ws_id)
+
+    db.add_workspace_folder(ws_id, root_id)
+
+    folders = {f["id"] for f in db.get_workspace_folders(ws_id)}
+    roots = db.get_workspace_folder_roots(ws_id)
+    photos = db.get_photos()
+
+    assert root_id in folders
+    assert child_id in folders
+    assert [f["id"] for f in roots] == [root_id]
+    assert [p["filename"] for p in photos] == ["bird.jpg"]
+
+
 def test_remove_workspace_folder(db):
     ws_id = db.create_workspace("Test")
     folder_id = db.add_folder("/photos/kenya", name="kenya")
@@ -132,7 +155,7 @@ def test_remove_workspace_root_unlinks_descendants(db):
     )
     db.add_photo(child_id, "bird.jpg", ".jpg", 1000, 1.0)
 
-    db.remove_workspace_folder(ws_id, root_id)
+    db.remove_workspace_folder_tree(ws_id, root_id)
 
     assert len(db.get_workspace_folders(ws_id)) == 0
     assert db.get_photos() == []

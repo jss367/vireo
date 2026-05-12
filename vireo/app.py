@@ -3498,7 +3498,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/workspaces/<int:ws_id>/folders/<int:folder_id>", methods=["DELETE"])
     def api_remove_workspace_folder(ws_id, folder_id):
         db = _get_db()
-        db.remove_workspace_folder(ws_id, folder_id)
+        db.remove_workspace_folder_tree(ws_id, folder_id)
         return jsonify({"ok": True})
 
     @app.route("/api/workspaces/<int:ws_id>/move-folders", methods=["POST"])

@@ -40,6 +40,11 @@ def _escape_like(value: str) -> str:
         .replace("_", "\\_")
     )
 
+
+def _path_for_subtree_match(value: str) -> str:
+    """Normalize a stored path for platform-neutral subtree LIKE matching."""
+    return value.replace("\\", "/").rstrip("/")
+
 # Canonical set of keyword type values stored in keywords.type.
 # - taxonomy: a species/genus/etc. (linked to taxa via taxon_id)
 # - individual: a named person, pet, or otherwise tracked individual
@@ -1206,12 +1211,13 @@ class Database:
         ).fetchone()
         if row is None or not row["path"]:
             return [folder_id]
-        root_path = row["path"].rstrip(os.sep)
-        like = _escape_like(root_path) + os.sep + "%"
+        root_path = _path_for_subtree_match(row["path"])
+        like = _escape_like(root_path) + "/%"
         rows = self.conn.execute(
             """SELECT id FROM folders
-               WHERE path = ? OR path LIKE ? ESCAPE '\\'""",
-            (root_path, like),
+               WHERE id = ?
+                  OR REPLACE(path, '\\', '/') LIKE ? ESCAPE '\\'""",
+            (folder_id, like),
         ).fetchall()
         ids = {folder_id}
         ids.update(r["id"] for r in rows)
@@ -1231,7 +1237,18 @@ class Database:
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def remove_workspace_folder(self, workspace_id, folder_id):
-        """Unlink a folder and its descendants from a workspace."""
+        """Unlink a single folder from a workspace."""
+        self.conn.execute(
+            "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (workspace_id, folder_id),
+        )
+        self.conn.commit()
+        # The folder no longer contributes to this workspace's new-images
+        # backlog. Drop the cached payload so the banner reflects the change.
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
+
+    def remove_workspace_folder_tree(self, workspace_id, folder_id):
+        """Unlink a folder and its path descendants from a workspace."""
         folder_ids = self._folder_subtree_ids_by_path(folder_id)
         placeholders = ",".join("?" for _ in folder_ids)
         self.conn.execute(
@@ -1252,16 +1269,24 @@ class Database:
                JOIN folders root ON root.id = wf.folder_id
                JOIN folders child
                  ON child.path = root.path
-                 OR child.path LIKE (
-                    REPLACE(REPLACE(REPLACE(root.path, '\\', '\\\\'), '%', '\\%'), '_', '\\_')
-                    || ? || '%'
+                 OR REPLACE(child.path, '\\', '/') LIKE (
+                    REPLACE(
+                      REPLACE(
+                        REPLACE(
+                          RTRIM(REPLACE(root.path, '\\', '/'), '/'),
+                          '\\', '\\\\'
+                        ),
+                        '%', '\\%'
+                      ),
+                      '_', '\\_'
+                    ) || '/%'
                  ) ESCAPE '\\'
                LEFT JOIN workspace_folders existing
                  ON existing.workspace_id = wf.workspace_id
                 AND existing.folder_id = child.id
                WHERE wf.workspace_id = ?
                  AND existing.folder_id IS NULL""",
-            (os.sep, workspace_id),
+            (workspace_id,),
         ).fetchall()
         if not rows:
             return
@@ -1300,13 +1325,22 @@ class Database:
                    JOIN folders ancestor ON ancestor.id = awf.folder_id
                    WHERE awf.workspace_id = wf.workspace_id
                      AND ancestor.id != f.id
-                     AND f.path LIKE (
-                       REPLACE(REPLACE(REPLACE(ancestor.path, '\\', '\\\\'), '%', '\\%'), '_', '\\_')
-                       || ? || '%'
+                     AND ancestor.photo_count = 0
+                     AND REPLACE(f.path, '\\', '/') LIKE (
+                       REPLACE(
+                         REPLACE(
+                           REPLACE(
+                             RTRIM(REPLACE(ancestor.path, '\\', '/'), '/'),
+                             '\\', '\\\\'
+                           ),
+                           '%', '\\%'
+                         ),
+                         '_', '\\_'
+                       ) || '/%'
                      ) ESCAPE '\\'
                  )
                ORDER BY f.path""",
-            (workspace_id, os.sep),
+            (workspace_id,),
         ).fetchall()
 
     def get_workspace_extensions(self):
@@ -1371,7 +1405,15 @@ class Database:
         if not folder_ids:
             return {"folders_moved": 0, "pending_changes_moved": 0}
 
-        placeholders = ",".join("?" for _ in folder_ids)
+        moved_folder_ids = []
+        seen_folder_ids = set()
+        for fid in folder_ids:
+            for subtree_id in self._folder_subtree_ids_by_path(fid):
+                if subtree_id in source_folder_ids and subtree_id not in seen_folder_ids:
+                    seen_folder_ids.add(subtree_id)
+                    moved_folder_ids.append(subtree_id)
+
+        placeholders = ",".join("?" for _ in moved_folder_ids)
 
         try:
             # Move pending_changes
@@ -1379,7 +1421,7 @@ class Database:
                 f"""UPDATE pending_changes SET workspace_id = ?
                     WHERE workspace_id = ?
                     AND photo_id IN (SELECT id FROM photos WHERE folder_id IN ({placeholders}))""",
-                [target_ws_id, source_ws_id] + list(folder_ids),
+                [target_ws_id, source_ws_id] + moved_folder_ids,
             )
             pending_changes_moved = cur.rowcount
 
@@ -1408,7 +1450,7 @@ class Database:
                       AND d.photo_id IN (
                           SELECT id FROM photos WHERE folder_id IN ({placeholders})
                       )""",
-                [target_ws_id, source_ws_id] + list(folder_ids),
+                [target_ws_id, source_ws_id] + moved_folder_ids,
             )
             self.conn.execute(
                 f"""DELETE FROM prediction_review
@@ -1423,15 +1465,15 @@ class Database:
                                 SELECT id FROM photos WHERE folder_id IN ({placeholders})
                             )
                       )""",
-                [source_ws_id, source_ws_id] + list(folder_ids),
+                [source_ws_id, source_ws_id] + moved_folder_ids,
             )
 
             # Move workspace_folders: remove from source, add to target
             self.conn.execute(
                 f"DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id IN ({placeholders})",
-                [source_ws_id] + list(folder_ids),
+                [source_ws_id] + moved_folder_ids,
             )
-            for fid in folder_ids:
+            for fid in moved_folder_ids:
                 self.conn.execute(
                     "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
                     (target_ws_id, fid),
