@@ -1238,6 +1238,7 @@ input[type="range"]::-moz-range-thumb {
 
     <!-- Filter bar (hidden until data loads) -->
     <div class="filter-bar" id="filterBar" style="display:none">
+      <a class="filter-btn" href="/pipeline/rapid-review" style="text-decoration:none;">Rapid Review</a>
       <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">All<span class="count" id="countAll"></span></button>
       <button class="filter-btn" data-filter="KEEP" onclick="setFilter('KEEP')">Keep<span class="count" id="countKeep"></span></button>
       <button class="filter-btn" data-filter="REVIEW" onclick="setFilter('REVIEW')">Review<span class="count" id="countReview"></span></button>
@@ -2462,6 +2463,7 @@ function computeReviewNow() {
     document.getElementById('sidebarScoring').style.display = '';
     document.getElementById('sidebarGrouping').style.display = '';
     renderResults();
+    openRequestedGroupReviewFromUrl();
     checkPendingSync();
     refreshMissesReviewBtn();
     renderDegradedBanner(reviewReadiness && reviewReadiness.enhancing_missing);
@@ -2514,6 +2516,7 @@ function initPipelineReviewPage() {
     if (fb) fb.style.display = '';
 
     renderResults();
+    openRequestedGroupReviewFromUrl();
     checkPendingSync();
     refreshMissesReviewBtn();
     renderDegradedBanner(data.review_readiness && data.review_readiness.enhancing_missing);
@@ -2901,6 +2904,19 @@ function findBurstForPhoto(photoId) {
     }
   }
   return null;
+}
+
+function openRequestedGroupReviewFromUrl() {
+  if (!pipelineResults) return;
+  var params = new URLSearchParams(window.location.search || '');
+  if (!params.has('enc') || !params.has('burst')) return;
+  var encIdx = parseInt(params.get('enc'), 10);
+  var burstIdx = parseInt(params.get('burst'), 10);
+  if (!Number.isInteger(encIdx) || !Number.isInteger(burstIdx)) return;
+  var enc = pipelineResults.encounters && pipelineResults.encounters[encIdx];
+  if (!enc || !enc.bursts || !enc.bursts[burstIdx]) return;
+  var photoId = params.has('photo') ? parseInt(params.get('photo'), 10) : null;
+  openGroupReview(encIdx, burstIdx, Number.isInteger(photoId) ? photoId : null);
 }
 
 function openGroupReview(encIdx, burstIdx, selectPhotoId) {

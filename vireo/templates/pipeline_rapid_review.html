@@ -1,0 +1,1008 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Rapid Review</title>
+<style>
+.rapid-layout {
+  height: calc(100vh - 48px - var(--bottom-offset, 28px));
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  overflow: hidden;
+}
+.rapid-sidebar {
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-primary);
+  overflow-y: auto;
+  padding: 16px 12px;
+}
+.rapid-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.rapid-title h1 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 17px;
+  line-height: 1.2;
+}
+.rapid-title a,
+.rapid-link {
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: none;
+}
+.rapid-inline-btn {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
+.burst-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.burst-row {
+  width: 100%;
+  border: 1px solid var(--border-primary);
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 6px;
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  padding: 9px 10px;
+  text-align: left;
+}
+.burst-row:hover { border-color: var(--text-muted); }
+.burst-row.active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--text-primary);
+}
+.burst-row-main {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.burst-row-sub {
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.burst-row-count {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.rapid-main {
+  min-width: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: var(--bg-primary);
+}
+.rapid-topbar {
+  min-height: 58px;
+  border-bottom: 1px solid var(--border-primary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 12px 18px;
+}
+.burst-heading {
+  min-width: 0;
+}
+.burst-heading h2 {
+  margin: 0 0 4px;
+  color: var(--text-primary);
+  font-size: 16px;
+}
+.burst-heading div {
+  color: var(--text-dim);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.rapid-btn {
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 8px 12px;
+}
+.rapid-btn:hover { border-color: var(--text-muted); color: var(--text-primary); }
+.rapid-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 650;
+}
+.rapid-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.review-surface {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 16px;
+  padding: 16px 18px;
+  overflow: hidden;
+}
+.photo-stage {
+  min-width: 0;
+  min-height: 0;
+  background: #050607;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+}
+.photo-stage img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.stage-empty {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+.status-pill {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.03em;
+  background: rgba(10, 12, 14, 0.78);
+  color: var(--text-secondary);
+  border: 1px solid rgba(255,255,255,0.16);
+}
+.status-pill.pick { color: var(--accent); }
+.status-pill.reject { color: var(--danger); }
+.status-pill.review { color: var(--warning); }
+.side-panel {
+  min-width: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--border-primary);
+  padding-left: 16px;
+}
+.filename {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 650;
+  word-break: break-word;
+  margin-bottom: 10px;
+}
+.metric-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.metric {
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  padding: 8px;
+  background: var(--bg-secondary);
+}
+.metric-label {
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+.metric-value {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+.species-field {
+  margin: 12px 0 16px;
+}
+.species-field label {
+  color: var(--text-dim);
+  display: block;
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+.species-field input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.decision-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.decision-btn {
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 11px 12px;
+  font-size: 14px;
+  font-weight: 700;
+}
+.decision-btn.pick { background: var(--accent); color: var(--accent-text); }
+.decision-btn.review { background: var(--warning); color: #111; }
+.decision-btn.reject { background: var(--danger); color: #fff; }
+.decision-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.progress-block {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.progress-stat {
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  padding: 8px;
+  text-align: center;
+}
+.progress-stat strong {
+  color: var(--text-primary);
+  display: block;
+  font-size: 18px;
+  line-height: 1;
+}
+.progress-stat span {
+  color: var(--text-dim);
+  display: block;
+  font-size: 10px;
+  margin-top: 5px;
+  text-transform: uppercase;
+}
+.bottom-area {
+  min-height: 172px;
+  border-top: 1px solid var(--border-primary);
+  display: grid;
+  grid-template-rows: 86px 1fr;
+  overflow: hidden;
+}
+.filmstrip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.thumb {
+  width: 72px;
+  height: 54px;
+  flex: 0 0 auto;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  padding: 0;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.thumb.current { border-color: var(--accent); }
+.thumb.reviewed::after {
+  content: "";
+  position: absolute;
+  inset: 4px auto auto 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+}
+.thumb.pick::before,
+.thumb.reject::before,
+.thumb.review::before {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 4px;
+}
+.thumb.pick::before { background: var(--accent); }
+.thumb.reject::before { background: var(--danger); }
+.thumb.review::before { background: var(--warning); }
+.lanes {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  padding: 10px 18px 12px;
+  overflow: hidden;
+}
+.lane {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 8px;
+}
+.lane-title {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.lane-strip {
+  min-width: 0;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+}
+.mini-thumb {
+  width: 46px;
+  height: 34px;
+  flex: 0 0 auto;
+  border-radius: 4px;
+  border: 1px solid var(--border-primary);
+  overflow: hidden;
+  background: var(--bg-secondary);
+  padding: 0;
+  cursor: pointer;
+}
+.mini-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.empty-state {
+  padding: 40px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+@media (max-width: 920px) {
+  .rapid-layout { grid-template-columns: 1fr; }
+  .rapid-sidebar { display: none; }
+  .review-surface { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; }
+  .side-panel { border-left: none; border-top: 1px solid var(--border-primary); padding: 12px 0 0; }
+}
+</style>
+</head>
+<body>
+{% include '_navbar.html' %}
+
+<div class="rapid-layout">
+  <aside class="rapid-sidebar">
+    <div class="rapid-title">
+      <h1>Rapid Review</h1>
+      <a href="/pipeline/review">Classic</a>
+    </div>
+    <div class="burst-list" id="burstList"></div>
+  </aside>
+
+  <main class="rapid-main">
+    <div class="rapid-topbar">
+      <div class="burst-heading">
+        <h2 id="burstTitle">Loading...</h2>
+        <div id="burstSubtitle"></div>
+      </div>
+      <div class="top-actions">
+        <button class="rapid-btn" id="undoBtn" onclick="undoLast()" title="Undo last decision">Undo</button>
+        <button class="rapid-btn" onclick="openClassic()" title="Open this burst in classic pipeline review">Classic</button>
+        <button class="rapid-btn primary" id="applyBtn" onclick="applyCurrent(false)" title="Apply staged changes">Apply</button>
+        <button class="rapid-btn primary" id="applyNextBtn" onclick="applyCurrent(true)" title="Apply staged changes and open the next burst">Apply Next</button>
+      </div>
+    </div>
+
+    <section class="review-surface" id="reviewSurface">
+      <div class="photo-stage" id="photoStage">
+        <img id="currentPhoto" alt="">
+        <div class="status-pill review" id="statusPill">Review</div>
+        <div class="stage-empty" id="stageEmpty" style="display:none;">No active photo</div>
+      </div>
+      <aside class="side-panel">
+        <div class="filename" id="filename">-</div>
+        <div class="metric-grid">
+          <div class="metric">
+            <div class="metric-label">Quality</div>
+            <div class="metric-value" id="metricQuality">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Sharpness</div>
+            <div class="metric-value" id="metricSharpness">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">AI Label</div>
+            <div class="metric-value" id="metricLabel">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Reviewed</div>
+            <div class="metric-value" id="metricReviewed">0/0</div>
+          </div>
+        </div>
+        <div class="species-field">
+          <label for="speciesInput">Species keyword for picks</label>
+          <input id="speciesInput" type="text" oninput="renderApplyState()">
+        </div>
+        <div class="decision-grid">
+          <button class="decision-btn pick" onclick="decideCurrent('pick')" title="Pick and advance">Pick</button>
+          <button class="decision-btn review" onclick="decideCurrent('review')" title="Leave for review and advance">Review</button>
+          <button class="decision-btn reject" onclick="decideCurrent('reject')" title="Reject and advance">Reject</button>
+        </div>
+        <div class="progress-block">
+          <div class="progress-stat"><strong id="pickCount">0</strong><span>Picks</span></div>
+          <div class="progress-stat"><strong id="reviewCount">0</strong><span>Review</span></div>
+          <div class="progress-stat"><strong id="rejectCount">0</strong><span>Rejects</span></div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="bottom-area">
+      <div class="filmstrip" id="filmstrip"></div>
+      <div class="lanes">
+        <div class="lane">
+          <div class="lane-title">Picks</div>
+          <div class="lane-strip" id="pickLane"></div>
+        </div>
+        <div class="lane">
+          <div class="lane-title">Review</div>
+          <div class="lane-strip" id="reviewLane"></div>
+        </div>
+        <div class="lane">
+          <div class="lane-title">Rejects</div>
+          <div class="lane-strip" id="rejectLane"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+var rapid = {
+  results: null,
+  photoMap: {},
+  sessions: [],
+  sessionIndex: -1,
+  items: [],
+  picks: new Set(),
+  rejects: new Set(),
+  reviewed: new Set(),
+  touched: new Set(),
+  initialFlags: {},
+  history: [],
+  currentIndex: -1,
+  seeded: false,
+  applying: false,
+  loadError: false,
+  // Bumped on each openSession; used to drop stale /group/state responses
+  // when the user switches bursts before the previous fetch resolves.
+  openToken: 0,
+};
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+
+function photoPreviewUrl(id) {
+  return '/photos/' + id + '/preview?size=2560';
+}
+
+function thumbUrl(id) {
+  return '/thumbnails/' + id + '.jpg';
+}
+
+function burstIds(burst) {
+  return (burst && burst.photo_ids) ? burst.photo_ids : (burst || []);
+}
+
+function burstSpecies(enc, burst) {
+  if (burst && burst.species_override && burst.species_override.species) {
+    return burst.species_override.species;
+  }
+  if (enc && enc.confirmed_species) return enc.confirmed_species;
+  if (enc && enc.species && enc.species.length) return enc.species[0];
+  return '';
+}
+
+function hasBurstSpeciesOverride(burst) {
+  return !!(burst && burst.species_override && burst.species_override.species);
+}
+
+function buildSessions(results) {
+  var sessions = [];
+  (results.encounters || []).forEach(function(enc, encIdx) {
+    var bursts = enc.bursts && enc.bursts.length ? enc.bursts : [{ photo_ids: enc.photo_ids || [] }];
+    bursts.forEach(function(burst, burstIdx) {
+      var ids = burstIds(burst).filter(function(id) { return rapid.photoMap[id]; });
+      if (!ids.length) return;
+      sessions.push({
+        encIdx: encIdx,
+        burstIdx: burstIdx,
+        ids: ids,
+        species: burstSpecies(enc, burst),
+        hasBurstOverride: hasBurstSpeciesOverride(burst),
+        title: 'Encounter ' + (encIdx + 1) + ', Burst ' + (burstIdx + 1),
+        subtitle: ids.length + ' photos' + (burstSpecies(enc, burst) ? ' - ' + burstSpecies(enc, burst) : ''),
+      });
+    });
+  });
+  return sessions;
+}
+
+function findInitialSession() {
+  var params = new URLSearchParams(window.location.search);
+  var enc = params.get('enc');
+  var burst = params.get('burst');
+  if (enc != null && burst != null) {
+    var encIdx = parseInt(enc, 10);
+    var burstIdx = parseInt(burst, 10);
+    for (var i = 0; i < rapid.sessions.length; i++) {
+      if (rapid.sessions[i].encIdx === encIdx && rapid.sessions[i].burstIdx === burstIdx) return i;
+    }
+  }
+  for (var j = 0; j < rapid.sessions.length; j++) {
+    if (rapid.sessions[j].ids.length > 1) return j;
+  }
+  return rapid.sessions.length ? 0 : -1;
+}
+
+async function initRapidReview() {
+  try {
+    rapid.results = await safeFetch('/api/pipeline/results', {}, { toast: false });
+  } catch (e) {
+    document.getElementById('burstTitle').textContent = 'No pipeline results';
+    document.getElementById('burstSubtitle').innerHTML = '<a class="rapid-link" href="/pipeline">Open Pipeline</a>';
+    document.getElementById('reviewSurface').innerHTML = '<div class="empty-state">Run pipeline review results first.</div>';
+    return;
+  }
+  rapid.photoMap = {};
+  (rapid.results.photos || []).forEach(function(p) { rapid.photoMap[p.id] = p; });
+  rapid.sessions = buildSessions(rapid.results);
+  renderBurstList();
+  var idx = findInitialSession();
+  if (idx >= 0) openSession(idx);
+  else {
+    document.getElementById('burstTitle').textContent = 'No bursts found';
+    document.getElementById('reviewSurface').innerHTML = '<div class="empty-state">No photos are available for rapid review.</div>';
+  }
+}
+
+async function openSession(index) {
+  if (index < 0 || index >= rapid.sessions.length) return;
+  rapid.sessionIndex = index;
+  var session = rapid.sessions[index];
+  rapid.items = session.ids.map(function(id) { return rapid.photoMap[id]; }).filter(Boolean);
+  rapid.picks = new Set();
+  rapid.rejects = new Set();
+  rapid.reviewed = new Set();
+  rapid.touched = new Set();
+  rapid.initialFlags = {};
+  rapid.history = [];
+  rapid.currentIndex = rapid.items.length ? 0 : -1;
+  rapid.seeded = false;
+  rapid.loadError = false;
+  // Bump the token so any in-flight /group/state fetch from a previous
+  // openSession lands as stale and gets ignored when it resolves.
+  var token = (rapid.openToken || 0) + 1;
+  rapid.openToken = token;
+  document.getElementById('speciesInput').value = session.species || '';
+  renderAll();
+
+  try {
+    var data = await safeFetch('/api/pipeline/group/state', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ photo_ids: session.ids, species: session.species || '' }),
+    });
+    // Drop the response if the user has switched bursts since this fetch
+    // started — seeding burst A's DB state into burst B's queue would
+    // mis-flag photos on Apply.
+    if (rapid.openToken !== token) return;
+    var photos = (data && data.photos) || {};
+    rapid.items.forEach(function(p) {
+      var st = photos[p.id] || {};
+      var flag = st.flag || p.flag || 'none';
+      rapid.initialFlags[p.id] = flag;
+      if (flag === 'flagged') rapid.picks.add(p.id);
+      else if (flag === 'rejected') rapid.rejects.add(p.id);
+    });
+    rapid.seeded = true;
+    renderAll();
+  } catch (e) {
+    if (rapid.openToken !== token) return;
+    rapid.seeded = false;
+    rapid.loadError = true;
+    renderAll();
+  }
+}
+
+function renderBurstList() {
+  var html = rapid.sessions.map(function(s, idx) {
+    var active = idx === rapid.sessionIndex ? ' active' : '';
+    return '<button class="burst-row' + active + '" onclick="openSession(' + idx + ')">' +
+      '<span class="burst-row-main">' + escapeHtml(s.title) + '</span>' +
+      '<span class="burst-row-count">' + s.ids.length + '</span>' +
+      '<span class="burst-row-sub">' + escapeHtml(s.subtitle) + '</span>' +
+      '</button>';
+  }).join('');
+  document.getElementById('burstList').innerHTML = html;
+}
+
+function currentPhoto() {
+  if (rapid.currentIndex < 0 || rapid.currentIndex >= rapid.items.length) return null;
+  return rapid.items[rapid.currentIndex];
+}
+
+function zoneFor(id) {
+  if (rapid.picks.has(id)) return 'pick';
+  if (rapid.rejects.has(id)) return 'reject';
+  return 'review';
+}
+
+function setZone(id, zone) {
+  rapid.picks.delete(id);
+  rapid.rejects.delete(id);
+  if (zone === 'pick') rapid.picks.add(id);
+  else if (zone === 'reject') rapid.rejects.add(id);
+}
+
+function decideCurrent(zone) {
+  var p = currentPhoto();
+  // Block until DB seed lands. Otherwise the seed loop in openSession() can
+  // ADD a flag for a photo the user already rejected via hotkey, leaving it
+  // in both picks and rejects — apply then 500s with "appears in more than
+  // one zone".
+  if (!p || rapid.applying || !rapid.seeded) return;
+  var id = p.id;
+  var entry = {
+    id: id,
+    prevZone: zoneFor(id),
+    prevReviewed: rapid.reviewed.has(id),
+    prevTouched: rapid.touched.has(id),
+    prevIndex: rapid.currentIndex,
+  };
+  rapid.history.push(entry);
+  setZone(id, zone);
+  rapid.reviewed.add(id);
+  rapid.touched.add(id);
+  advanceToNext();
+  renderAll();
+}
+
+function clearCurrent() {
+  var p = currentPhoto();
+  if (!p || rapid.applying || !rapid.seeded) return;
+  var id = p.id;
+  rapid.history.push({
+    id: id,
+    prevZone: zoneFor(id),
+    prevReviewed: rapid.reviewed.has(id),
+    prevTouched: rapid.touched.has(id),
+    prevIndex: rapid.currentIndex,
+  });
+  setZone(id, 'review');
+  rapid.touched.add(id);
+  renderAll();
+}
+
+function advanceToNext() {
+  if (!rapid.items.length) {
+    rapid.currentIndex = -1;
+    return;
+  }
+  for (var i = rapid.currentIndex + 1; i < rapid.items.length; i++) {
+    if (!rapid.reviewed.has(rapid.items[i].id)) {
+      rapid.currentIndex = i;
+      return;
+    }
+  }
+  for (var j = 0; j < rapid.currentIndex; j++) {
+    if (!rapid.reviewed.has(rapid.items[j].id)) {
+      rapid.currentIndex = j;
+      return;
+    }
+  }
+  rapid.currentIndex = -1;
+}
+
+function undoLast() {
+  if (!rapid.history.length || rapid.applying) return;
+  var entry = rapid.history.pop();
+  setZone(entry.id, entry.prevZone);
+  if (entry.prevReviewed) rapid.reviewed.add(entry.id);
+  else rapid.reviewed.delete(entry.id);
+  if (entry.prevTouched) rapid.touched.add(entry.id);
+  else rapid.touched.delete(entry.id);
+  rapid.currentIndex = entry.prevIndex;
+  renderAll();
+}
+
+function selectPhoto(id) {
+  var idx = rapid.items.findIndex(function(p) { return p.id === id; });
+  if (idx >= 0) {
+    rapid.currentIndex = idx;
+    renderAll();
+  }
+}
+
+function renderAll() {
+  renderBurstList();
+  renderCurrent();
+  renderFilmstrip();
+  renderLanes();
+  renderApplyState();
+}
+
+function renderCurrent() {
+  var session = rapid.sessions[rapid.sessionIndex];
+  document.getElementById('burstTitle').textContent = session ? session.title : 'Rapid Review';
+  var subtitle = document.getElementById('burstSubtitle');
+  if (rapid.loadError) {
+    subtitle.innerHTML = 'Failed to load burst state. <button type="button" class="rapid-inline-btn" onclick="openSession(rapid.sessionIndex)">Retry</button>';
+  } else {
+    subtitle.textContent = session ? session.subtitle : '';
+  }
+  var p = currentPhoto();
+  var img = document.getElementById('currentPhoto');
+  var empty = document.getElementById('stageEmpty');
+  var pill = document.getElementById('statusPill');
+  if (!p) {
+    img.removeAttribute('src');
+    img.style.display = 'none';
+    empty.style.display = '';
+    empty.textContent = rapid.items.length ? 'Burst complete' : 'No active photo';
+    pill.style.display = 'none';
+    document.getElementById('filename').textContent = rapid.items.length ? 'Ready to apply' : '-';
+    document.getElementById('metricQuality').textContent = '-';
+    document.getElementById('metricSharpness').textContent = '-';
+    document.getElementById('metricLabel').textContent = '-';
+    document.getElementById('metricReviewed').textContent = rapid.reviewed.size + '/' + rapid.items.length;
+    return;
+  }
+  img.style.display = '';
+  img.src = photoPreviewUrl(p.id);
+  empty.style.display = 'none';
+  var zone = zoneFor(p.id);
+  pill.style.display = '';
+  pill.className = 'status-pill ' + zone;
+  pill.textContent = zone === 'pick' ? 'Pick' : zone === 'reject' ? 'Reject' : 'Review';
+  document.getElementById('filename').textContent = p.filename || ('Photo ' + p.id);
+  document.getElementById('metricQuality').textContent = p.quality_composite != null ? Number(p.quality_composite).toFixed(3) : '-';
+  document.getElementById('metricSharpness').textContent = p.subject_tenengrad != null ? Math.round(p.subject_tenengrad) : '-';
+  document.getElementById('metricLabel').textContent = p.label || '-';
+  document.getElementById('metricReviewed').textContent = rapid.reviewed.size + '/' + rapid.items.length;
+}
+
+function thumbClass(p) {
+  var classes = ['thumb', zoneFor(p.id)];
+  if (rapid.reviewed.has(p.id)) classes.push('reviewed');
+  if (currentPhoto() && currentPhoto().id === p.id) classes.push('current');
+  return classes.join(' ');
+}
+
+function renderFilmstrip() {
+  var html = rapid.items.map(function(p) {
+    return '<button class="' + thumbClass(p) + '" onclick="selectPhoto(' + p.id + ')" title="' + escapeHtml(p.filename || '') + '">' +
+      '<img src="' + thumbUrl(p.id) + '" alt=""></button>';
+  }).join('');
+  document.getElementById('filmstrip').innerHTML = html;
+}
+
+function renderLane(id, photos) {
+  var html = photos.map(function(p) {
+    return '<button class="mini-thumb" onclick="selectPhoto(' + p.id + ')" title="' + escapeHtml(p.filename || '') + '">' +
+      '<img src="' + thumbUrl(p.id) + '" alt=""></button>';
+  }).join('');
+  document.getElementById(id).innerHTML = html;
+}
+
+function renderLanes() {
+  var picks = [];
+  var reviews = [];
+  var rejects = [];
+  rapid.items.forEach(function(p) {
+    var zone = zoneFor(p.id);
+    if (zone === 'pick') picks.push(p);
+    else if (zone === 'reject') rejects.push(p);
+    else reviews.push(p);
+  });
+  renderLane('pickLane', picks);
+  renderLane('reviewLane', reviews);
+  renderLane('rejectLane', rejects);
+  document.getElementById('pickCount').textContent = picks.length;
+  document.getElementById('reviewCount').textContent = reviews.length;
+  document.getElementById('rejectCount').textContent = rejects.length;
+}
+
+function candidateIdsForApply() {
+  return rapid.items.filter(function(p) {
+    var initial = rapid.initialFlags[p.id] || 'none';
+    return zoneFor(p.id) === 'review' &&
+      (rapid.touched.has(p.id) || initial === 'flagged' || initial === 'rejected');
+  }).map(function(p) { return p.id; });
+}
+
+function renderApplyState() {
+  var disabled = !rapid.seeded || rapid.applying || rapid.sessionIndex < 0;
+  document.getElementById('undoBtn').disabled = disabled || rapid.history.length === 0;
+  document.querySelectorAll('.decision-btn').forEach(function(btn) {
+    btn.disabled = disabled || !currentPhoto();
+  });
+  document.getElementById('applyBtn').disabled = disabled;
+  document.getElementById('applyNextBtn').disabled = disabled || rapid.sessionIndex >= rapid.sessions.length - 1;
+}
+
+function updateSummaryFromPhotos() {
+  var summary = rapid.results.summary || {};
+  summary.keep_count = 0;
+  summary.review_count = 0;
+  summary.reject_count = 0;
+  (rapid.results.photos || []).forEach(function(p) {
+    if (p.label === 'KEEP') summary.keep_count++;
+    else if (p.label === 'REJECT') summary.reject_count++;
+    else summary.review_count++;
+  });
+  rapid.results.summary = summary;
+}
+
+async function applyCurrent(openNext) {
+  if (!rapid.seeded || rapid.applying || rapid.sessionIndex < 0) return;
+  rapid.applying = true;
+  renderApplyState();
+  var species = (document.getElementById('speciesInput').value || '').trim();
+  var picks = Array.from(rapid.picks);
+  var rejects = Array.from(rapid.rejects);
+  var candidates = candidateIdsForApply();
+  // Snapshot session context up front. The sidebar still allows openSession()
+  // during the request, so reading rapid.sessionIndex / rapid.items /
+  // rapid.picks / rapid.rejects after the await could splice burst A's
+  // response into burst B's labels, confirmed species/subtitle, and cache.
+  var sessionIndex = rapid.sessionIndex;
+  var session = rapid.sessions[sessionIndex];
+  var items = rapid.items.slice();
+  var pickSet = new Set(picks);
+  var rejectSet = new Set(rejects);
+
+  try {
+    var resp = await safeFetch('/api/pipeline/group/apply', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        picks: picks,
+        rejects: rejects,
+        candidates: candidates,
+        species: species,
+      }),
+    });
+    items.forEach(function(p) {
+      if (pickSet.has(p.id)) p.label = 'KEEP';
+      else if (rejectSet.has(p.id)) {
+        p.label = 'REJECT';
+      } else {
+        p.label = 'REVIEW';
+      }
+      if (pickSet.has(p.id)) p.flag = 'flagged';
+      else if (rejectSet.has(p.id)) p.flag = 'rejected';
+      else p.flag = 'none';
+    });
+    if (resp && resp.photos) {
+      Object.keys(resp.photos).forEach(function(pidStr) {
+        var pid = parseInt(pidStr, 10);
+        var p = rapid.photoMap[pid];
+        if (p) p.flag = resp.photos[pidStr].flag;
+      });
+    }
+    var enc = rapid.results.encounters[session.encIdx];
+    if (species && enc) {
+      enc.confirmed_species = species;
+      enc.species_confirmed = true;
+      // sessions[].species is cached at page load, so update every burst in
+      // this encounter — otherwise Apply Next stops tagging picks with the
+      // confirmed species until the user retypes it for each burst.
+      rapid.sessions.forEach(function(s) {
+        if (s.encIdx === session.encIdx && !s.hasBurstOverride) {
+          s.species = species;
+          s.subtitle = s.ids.length + ' photos - ' + species;
+        }
+      });
+    }
+    updateSummaryFromPhotos();
+    await safeFetch('/api/pipeline/save-cache', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(rapid.results),
+    }, { toast: false });
+    rapid.applying = false;
+    if (openNext && sessionIndex < rapid.sessions.length - 1) {
+      openSession(sessionIndex + 1);
+    } else if (rapid.sessionIndex === sessionIndex) {
+      openSession(sessionIndex);
+    } else {
+      // User navigated to a different burst during apply; don't disrupt their
+      // view, but rerender so propagated species/subtitle show in the sidebar.
+      renderAll();
+    }
+  } catch (e) {
+    rapid.applying = false;
+    renderApplyState();
+  }
+}
+
+function openClassic() {
+  var session = rapid.sessions[rapid.sessionIndex];
+  if (!session) {
+    window.location.href = '/pipeline/review';
+    return;
+  }
+  window.location.href = '/pipeline/review?enc=' + session.encIdx + '&burst=' + session.burstIdx;
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.target && e.target.tagName === 'INPUT') return;
+  if (e.key === 'ArrowDown' || e.key === 'x' || e.key === 'X') {
+    e.preventDefault();
+    decideCurrent('reject');
+  } else if (e.key === 'ArrowUp' || e.key === 'p' || e.key === 'P') {
+    e.preventDefault();
+    decideCurrent('pick');
+  } else if (e.key === 'ArrowRight' || e.key === ' ') {
+    e.preventDefault();
+    decideCurrent('review');
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    undoLast();
+  } else if (e.key === 'u' || e.key === 'U') {
+    e.preventDefault();
+    clearCurrent();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    applyCurrent(false);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    window.location.href = '/pipeline/review';
+  }
+});
+
+initRapidReview();
+</script>
+</body>
+</html>
