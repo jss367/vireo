@@ -11,6 +11,10 @@ inputs:
   payload:
     description: Plain-text payload sent as the `text` field
     required: true
+  allow-missing:
+    description: Exit successfully when routine credentials are missing.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -21,16 +25,22 @@ runs:
         ROUTINE_URL: ${{ inputs.url }}
         ROUTINE_TOKEN: ${{ inputs.token }}
         ROUTINE_PAYLOAD: ${{ inputs.payload }}
+        ALLOW_MISSING: ${{ inputs.allow-missing }}
       run: |
         set -euo pipefail
 
         if [[ -z "${ROUTINE_URL}" || -z "${ROUTINE_TOKEN}" ]]; then
+          if [[ "${ALLOW_MISSING}" == "true" ]]; then
+            echo "::notice::CLAUDE_ROUTINE_URL or CLAUDE_ROUTINE_TOKEN is missing; skipping routine fire."
+            exit 0
+          fi
+
           echo "::error::CLAUDE_ROUTINE_URL or CLAUDE_ROUTINE_TOKEN secret is missing."
           exit 1
         fi
 
-        # Build JSON safely — jq quotes the payload so embedded newlines,
-        # quotes, backticks etc. survive without shell interpolation hazards.
+        # Build JSON safely so embedded newlines, quotes, and backticks in
+        # review text survive without shell interpolation hazards.
         body=$(jq -n --arg text "${ROUTINE_PAYLOAD}" '{text: $text}')
 
         response=$(mktemp)

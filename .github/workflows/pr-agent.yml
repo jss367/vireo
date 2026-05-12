@@ -1,12 +1,11 @@
 name: PR Agent
 
-# Forwards PR events to the "Vireo PR Fix Agent" Claude Code routine
-# (claude.ai/code/routines). The LLM work runs there, not here — this
-# workflow only classifies events and fires the routine with a text
-# payload. See docs/pr-agent-routine.md for setup.
+# Forwards PR events to the Vireo PR Fix Agent Claude Code routine
+# (claude.ai/code/routines). The LLM work runs there, not here; this
+# workflow classifies events and fires the routine with a text payload.
+# See docs/pr-agent-routine.md for setup.
 #
-# Pure-bash merge jobs (merge-on-approval, merge-on-thumbsup,
-# merge-on-reaction) still run here because they don't need an LLM.
+# Pure-bash merge jobs run here because they do not need an LLM.
 
 on:
   issue_comment:
@@ -32,10 +31,12 @@ permissions:
   pull-requests: write
   issues: write
 
+env:
+  TRUSTED_ACTORS: "jss367 chatgpt-codex-connector[bot]"
+  AGENT_LABEL: claude-agent
+
 jobs:
-  # ═══════════════════════════════════════════════════════════
-  #  ACTIVATE — /claude-fix comment on a PR
-  # ═══════════════════════════════════════════════════════════
+  # Activate on /claude-fix comment on a PR.
   activate:
     if: >-
       github.event_name == 'issue_comment'
@@ -46,20 +47,27 @@ jobs:
           || github.actor == 'chatgpt-codex-connector[bot]')
     runs-on: ubuntu-latest
     steps:
-      - name: Add claude-agent label
+      - name: Add agent label
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number }}
         run: |
-          gh pr edit ${{ github.event.issue.number }} \
-            --repo ${{ github.repository }} \
-            --add-label claude-agent
+          gh label create "$AGENT_LABEL" \
+            --repo "$REPO" \
+            --color 5319e7 \
+            --description "PRs handled by the Claude PR agent" \
+            || true
+          gh pr edit "$PR" --repo "$REPO" --add-label "$AGENT_LABEL"
 
       - uses: actions/checkout@v4
+
       - name: Fire routine
         uses: ./.github/actions/fire-routine
         with:
           url: ${{ secrets.CLAUDE_ROUTINE_URL }}
           token: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
+          allow-missing: "true"
           payload: |
             Task: address-review
             PR: ${{ github.event.issue.number }}
@@ -68,9 +76,7 @@ jobs:
             Reviewer invoked /claude-fix. Read every outstanding review
             and comment on the PR and address all of them.
 
-  # ═══════════════════════════════════════════════════════════
-  #  FIX COMMENT FEEDBACK — regular comment on a claude-agent PR
-  # ═══════════════════════════════════════════════════════════
+  # Route regular trusted comments on agent PRs back to the routine.
   fix-comment-feedback:
     if: >-
       github.event_name == 'issue_comment'
@@ -78,18 +84,21 @@ jobs:
       && github.event.issue.state == 'open'
       && contains(github.event.issue.labels.*.name, 'claude-agent')
       && !contains(github.event.comment.body, '/claude-fix')
-      && !contains(github.event.comment.body, '👍')
+      && github.event.comment.body != '+1'
+      && github.event.comment.body != '👍'
       && (github.event.comment.author_association == 'OWNER'
           || github.event.comment.author_association == 'COLLABORATOR'
           || github.actor == 'chatgpt-codex-connector[bot]')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Fire routine
         uses: ./.github/actions/fire-routine
         with:
           url: ${{ secrets.CLAUDE_ROUTINE_URL }}
           token: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
+          allow-missing: "true"
           payload: |
             Task: address-comment
             PR: ${{ github.event.issue.number }}
@@ -97,22 +106,25 @@ jobs:
             Comment body:
             ${{ github.event.comment.body }}
 
-  # ═══════════════════════════════════════════════════════════
-  #  FIX COMMENTS — review submitted on a claude-agent PR
-  # ═══════════════════════════════════════════════════════════
+  # Route non-approval reviews on agent PRs back to the routine.
   fix-comments:
     if: >-
       github.event_name == 'pull_request_review'
       && github.event.review.state != 'approved'
       && contains(github.event.pull_request.labels.*.name, 'claude-agent')
+      && (github.event.review.author_association == 'OWNER'
+          || github.event.review.author_association == 'COLLABORATOR'
+          || github.actor == 'chatgpt-codex-connector[bot]')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Fire routine
         uses: ./.github/actions/fire-routine
         with:
           url: ${{ secrets.CLAUDE_ROUTINE_URL }}
           token: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
+          allow-missing: "true"
           payload: |
             Task: address-review
             PR: ${{ github.event.pull_request.number }}
@@ -121,9 +133,8 @@ jobs:
             Review body:
             ${{ github.event.review.body }}
 
-  # ═══════════════════════════════════════════════════════════
-  #  CODEX REVIEW — codex connect reviews on non-agent PRs
-  # ═══════════════════════════════════════════════════════════
+  # Route Codex connector reviews on non-agent PRs to the routine, then
+  # the routine labels the PR so follow-up comments keep routing back.
   codex-review:
     if: >-
       github.event_name == 'pull_request_review'
@@ -136,14 +147,16 @@ jobs:
         id: fork-check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
-          pr_repo=$(gh pr view ${{ github.event.pull_request.number }} \
-            --repo "${{ github.repository }}" \
+          pr_repo=$(gh pr view "$PR" \
+            --repo "$REPO" \
             --json headRepositoryOwner,headRepository \
             --jq '.headRepositoryOwner.login + "/" + .headRepository.name')
 
-          if [[ "$pr_repo" != "${{ github.repository }}" ]]; then
-            echo "PR is from fork ${pr_repo} — skipping."
+          if [[ "$pr_repo" != "$REPO" ]]; then
+            echo "PR is from fork ${pr_repo}; skipping."
             echo "is_fork=true" >> "$GITHUB_OUTPUT"
           else
             echo "is_fork=false" >> "$GITHUB_OUTPUT"
@@ -158,6 +171,7 @@ jobs:
         with:
           url: ${{ secrets.CLAUDE_ROUTINE_URL }}
           token: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
+          allow-missing: "true"
           payload: |
             Task: address-codex-review
             PR: ${{ github.event.pull_request.number }}
@@ -165,9 +179,7 @@ jobs:
             Review body:
             ${{ github.event.review.body }}
 
-  # ═══════════════════════════════════════════════════════════
-  #  FIX CI — auto-fix when Tests workflow fails on a PR
-  # ═══════════════════════════════════════════════════════════
+  # Auto-fix when the Tests workflow fails on a PR.
   fix-ci:
     if: >-
       github.event_name == 'workflow_run'
@@ -179,12 +191,12 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_RUN_PULL_REQUESTS: ${{ toJson(github.event.workflow_run.pull_requests) }}
         run: |
-          pr_number=$(gh api "repos/${{ github.repository }}/commits/${{ github.event.workflow_run.head_sha }}/pulls" \
-            --jq '.[0].number // empty')
+          pr_number=$(jq -r '.[0].number // empty' <<< "$WORKFLOW_RUN_PULL_REQUESTS")
 
           if [[ -z "$pr_number" ]]; then
-            echo "No PR found for this workflow run."
+            echo "No triggering PR found in workflow_run payload."
             echo "should_fix=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -194,16 +206,19 @@ jobs:
             --jq '.headRepositoryOwner.login + "/" + .headRepository.name')
 
           if [[ "$pr_repo" != "${{ github.repository }}" ]]; then
-            echo "PR #${pr_number} is from fork ${pr_repo} — skipping."
+            echo "PR #${pr_number} is from fork ${pr_repo}; skipping."
             echo "should_fix=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          last_msg=$(gh api "repos/${{ github.repository }}/commits/${{ github.event.workflow_run.head_sha }}" \
-            --jq '.commit.message' | head -1)
+          head_sha=$(gh pr view "$pr_number" --repo "${{ github.repository }}" \
+            --json headRefOid \
+            --jq '.headRefOid')
+          commit=$(gh api "repos/${{ github.repository }}/commits/${head_sha}")
+          commit_msg=$(jq -r '.commit.message' <<< "$commit")
 
-          if [[ "$last_msg" == "fix: resolve CI failures"* ]]; then
-            echo "Last commit was already a CI fix attempt — not retrying."
+          if grep -Fq "[pr-agent-fix-ci:${pr_number}]" <<< "$commit_msg"; then
+            echo "PR head commit was already a CI fix attempt; not retrying."
             echo "should_fix=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -221,37 +236,62 @@ jobs:
         with:
           url: ${{ secrets.CLAUDE_ROUTINE_URL }}
           token: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
+          allow-missing: "true"
           payload: |
             Task: fix-ci
             PR: ${{ steps.pr.outputs.pr_number }}
             Workflow run: ${{ github.event.workflow_run.id }}
 
-  # ═══════════════════════════════════════════════════════════
-  #  CONFLICT DETECTION — push to main
-  # ═══════════════════════════════════════════════════════════
+  # Ask the routine to resolve conflicts after main moves.
   resolve-conflicts:
     if: >-
       github.event_name == 'push'
       && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Find conflicting claude-agent PRs
+      - name: Find conflicting agent PRs
         id: conflicts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           prs=$(gh pr list \
-            --repo ${{ github.repository }} \
-            --label claude-agent \
+            --repo "${{ github.repository }}" \
+            --label "$AGENT_LABEL" \
             --state open \
-            --json number,headRefName,mergeable \
-            --jq '.[] | select(.mergeable == "CONFLICTING") | .number')
+            --limit 1000 \
+            --json number \
+            --jq '.[].number')
+
+          conflicting_prs=""
+          for pr in $prs; do
+            mergeable="UNKNOWN"
+            for attempt in 1 2 3 4 5 6; do
+              mergeable=$(gh pr view "$pr" \
+                --repo "${{ github.repository }}" \
+                --json mergeable \
+                --jq '.mergeable')
+
+              if [[ "$mergeable" != "UNKNOWN" ]]; then
+                break
+              fi
+
+              echo "PR #${pr}: mergeability UNKNOWN on attempt ${attempt}; waiting."
+              sleep 10
+            done
+
+            if [[ "$mergeable" == "CONFLICTING" || "$mergeable" == "UNKNOWN" ]]; then
+              echo "PR #${pr}: mergeability ${mergeable}; sending to routine."
+              conflicting_prs="${conflicting_prs} ${pr}"
+            fi
+          done
+
+          prs=$(echo "$conflicting_prs" | xargs)
 
           if [[ -z "$prs" ]]; then
             echo "No conflicting PRs found."
             echo "has_conflicts=false" >> "$GITHUB_OUTPUT"
           else
-            pr_csv=$(echo "$prs" | paste -sd, -)
+            pr_csv=$(echo "$prs" | tr ' ' ',')
             echo "Conflicting PRs: $pr_csv"
             echo "has_conflicts=true" >> "$GITHUB_OUTPUT"
             echo "pr_csv=$pr_csv" >> "$GITHUB_OUTPUT"
@@ -266,18 +306,20 @@ jobs:
         with:
           url: ${{ secrets.CLAUDE_ROUTINE_URL }}
           token: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
+          allow-missing: "true"
           payload: |
             Task: resolve-conflicts
             PRs: ${{ steps.conflicts.outputs.pr_csv }}
 
-  # ═══════════════════════════════════════════════════════════
-  #  MERGE — approval or 👍 on a claude-agent PR
-  # ═══════════════════════════════════════════════════════════
+  # Enable squash auto-merge after an approving review on an agent PR.
   merge-on-approval:
     if: >-
       github.event_name == 'pull_request_review'
       && github.event.review.state == 'approved'
       && contains(github.event.pull_request.labels.*.name, 'claude-agent')
+      && (github.event.review.author_association == 'OWNER'
+          || github.event.review.author_association == 'COLLABORATOR'
+          || github.actor == 'chatgpt-codex-connector[bot]')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -289,31 +331,43 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           base=$(gh pr view "$PR" --repo "$REPO" --json baseRefName -q .baseRefName)
           head=$(gh pr view "$PR" --repo "$REPO" --json headRefName -q .headRefName)
+          pr_repo=$(gh pr view "$PR" --repo "$REPO" \
+            --json headRepositoryOwner,headRepository \
+            --jq '.headRepositoryOwner.login + "/" + .headRepository.name')
 
-          if [[ "$base" != "main" ]]; then
-            gh pr comment "$PR" --repo "$REPO" --body "🤖 Auto-merge skipped: PR targets \`$base\` instead of \`main\`. Legacy stacked PRs must be merged manually from leaf to root."
+          if [[ "$pr_repo" != "$REPO" ]]; then
+            echo "PR #${PR}: from fork ${pr_repo}; skipping auto-merge."
             exit 0
           fi
 
-          children=$(gh pr list --repo "$REPO" --base "$head" --label claude-agent --state open --json number -q 'length')
+          if [[ "$base" != "main" ]]; then
+            gh pr comment "$PR" --repo "$REPO" --body "Auto-merge skipped: PR targets \`$base\` instead of \`main\`. Stacked PRs must be merged manually from leaf to root."
+            exit 0
+          fi
+
+          children=$(gh pr list --repo "$REPO" --base "$head" --label "$AGENT_LABEL" --state open --json number -q 'length')
           if [[ "$children" -gt 0 ]]; then
-            gh pr comment "$PR" --repo "$REPO" --body "🤖 Auto-merge skipped: open child PRs still target \`$head\`. Resolve or close children first, then re-approve."
+            gh pr comment "$PR" --repo "$REPO" --body "Auto-merge skipped: open child PRs still target \`$head\`. Resolve or close children first, then re-approve."
             exit 0
           fi
 
           title=$(gh pr view "$PR" --repo "$REPO" --json title -q .title)
           gh pr merge "$PR" --repo "$REPO" --squash --auto --delete-branch \
+            --match-head-commit "$HEAD_SHA" \
             --subject "${title} (#${PR})"
           echo "Auto-merge enabled on PR #${PR}. GitHub will merge when CI passes."
 
+  # Enable squash auto-merge after a trusted thumbs-up comment on an agent PR.
   merge-on-thumbsup:
     if: >-
       github.event_name == 'issue_comment'
       && github.event.issue.pull_request
-      && contains(github.event.comment.body, '👍')
+      && (github.event.comment.body == '+1'
+          || github.event.comment.body == '👍')
       && contains(github.event.issue.labels.*.name, 'claude-agent')
       && (github.event.comment.author_association == 'OWNER'
           || github.event.comment.author_association == 'COLLABORATOR'
@@ -332,26 +386,35 @@ jobs:
         run: |
           base=$(gh pr view "$PR" --repo "$REPO" --json baseRefName -q .baseRefName)
           head=$(gh pr view "$PR" --repo "$REPO" --json headRefName -q .headRefName)
+          head_sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
+          pr_repo=$(gh pr view "$PR" --repo "$REPO" \
+            --json headRepositoryOwner,headRepository \
+            --jq '.headRepositoryOwner.login + "/" + .headRepository.name')
 
-          if [[ "$base" != "main" ]]; then
-            gh pr comment "$PR" --repo "$REPO" --body "🤖 Auto-merge skipped: PR targets \`$base\` instead of \`main\`. Legacy stacked PRs must be merged manually from leaf to root."
+          if [[ "$pr_repo" != "$REPO" ]]; then
+            echo "PR #${PR}: from fork ${pr_repo}; skipping auto-merge."
             exit 0
           fi
 
-          children=$(gh pr list --repo "$REPO" --base "$head" --label claude-agent --state open --json number -q 'length')
+          if [[ "$base" != "main" ]]; then
+            gh pr comment "$PR" --repo "$REPO" --body "Auto-merge skipped: PR targets \`$base\` instead of \`main\`. Stacked PRs must be merged manually from leaf to root."
+            exit 0
+          fi
+
+          children=$(gh pr list --repo "$REPO" --base "$head" --label "$AGENT_LABEL" --state open --json number -q 'length')
           if [[ "$children" -gt 0 ]]; then
-            gh pr comment "$PR" --repo "$REPO" --body "🤖 Auto-merge skipped: open child PRs still target \`$head\`. Resolve or close children first, then re-approve."
+            gh pr comment "$PR" --repo "$REPO" --body "Auto-merge skipped: open child PRs still target \`$head\`. Resolve or close children first, then re-approve."
             exit 0
           fi
 
           title=$(gh pr view "$PR" --repo "$REPO" --json title -q .title)
           gh pr merge "$PR" --repo "$REPO" --squash --auto --delete-branch \
+            --match-head-commit "$head_sha" \
             --subject "${title} (#${PR})"
           echo "Auto-merge enabled on PR #${PR}. GitHub will merge when CI passes."
 
-  # ═══════════════════════════════════════════════════════════
-  #  MERGE ON REACTION — poll for +1 reactions from trusted actors
-  # ═══════════════════════════════════════════════════════════
+  # Poll for +1 reactions from trusted actors. This catches reaction events
+  # because GitHub Actions does not expose an issue reaction trigger.
   merge-on-reaction:
     if: >-
       github.event_name == 'schedule'
@@ -369,10 +432,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TRUSTED_ACTORS="jss367 chatgpt-codex-connector[bot]"
-
           prs=$(gh pr list --repo "${{ github.repository }}" \
             --state open \
+            --label "$AGENT_LABEL" \
+            --limit 1000 \
             --json number -q '.[].number')
 
           if [[ -z "$prs" ]]; then
@@ -383,16 +446,16 @@ jobs:
 
           approved_prs=""
           for pr in $prs; do
-            last_push=$(gh pr view "$pr" --repo "${{ github.repository }}" \
-              --json commits --jq '.commits[-1].committedDate')
+            latest_pr_update=$(gh pr view "$pr" --repo "${{ github.repository }}" \
+              --json updatedAt --jq '.updatedAt')
 
-            reaction_match=$(gh api "repos/${{ github.repository }}/issues/${pr}/reactions" \
-              | jq --arg cutoff "$last_push" \
-                '[.[] | select(.content == "+1" and .created_at > $cutoff) | .user.login]')
+            reaction_match=$(gh api --paginate "repos/${{ github.repository }}/issues/${pr}/reactions" \
+              | jq -s --arg cutoff "$latest_pr_update" \
+                '[.[][] | select(.content == "+1" and .created_at > $cutoff) | .user.login]')
 
             for actor in $TRUSTED_ACTORS; do
               if echo "$reaction_match" | jq -e "index(\"$actor\")" > /dev/null 2>&1; then
-                echo "PR #${pr} has +1 from ${actor} after latest push (${last_push})"
+                echo "PR #${pr} has +1 from ${actor} after latest PR update (${latest_pr_update})"
                 approved_prs="${approved_prs} ${pr}"
                 break
               fi
@@ -419,20 +482,30 @@ jobs:
             echo "=== Processing PR #${pr} ==="
             base=$(gh pr view "$pr" --repo "$REPO" --json baseRefName -q .baseRefName)
             head=$(gh pr view "$pr" --repo "$REPO" --json headRefName -q .headRefName)
+            head_sha=$(gh pr view "$pr" --repo "$REPO" --json headRefOid -q .headRefOid)
+            pr_repo=$(gh pr view "$pr" --repo "$REPO" \
+              --json headRepositoryOwner,headRepository \
+              --jq '.headRepositoryOwner.login + "/" + .headRepository.name')
 
-            if [[ "$base" != "main" ]]; then
-              echo "PR #${pr}: targets '${base}' not 'main' — skipping (no comment posted by scheduled poll)."
+            if [[ "$pr_repo" != "$REPO" ]]; then
+              echo "PR #${pr}: from fork ${pr_repo}; skipping auto-merge."
               continue
             fi
 
-            children=$(gh pr list --repo "$REPO" --base "$head" --state open --json number -q 'length')
+            if [[ "$base" != "main" ]]; then
+              echo "PR #${pr}: targets '${base}' not 'main'; skipping."
+              continue
+            fi
+
+            children=$(gh pr list --repo "$REPO" --base "$head" --label "$AGENT_LABEL" --state open --json number -q 'length')
             if [[ "$children" -gt 0 ]]; then
-              echo "PR #${pr}: ${children} open child PR(s) target '${head}' — skipping (no comment posted by scheduled poll)."
+              echo "PR #${pr}: ${children} open child PR(s) target '${head}'; skipping."
               continue
             fi
 
             title=$(gh pr view "$pr" --repo "$REPO" --json title -q .title)
             gh pr merge "$pr" --repo "$REPO" --squash --auto --delete-branch \
+              --match-head-commit "$head_sha" \
               --subject "${title} (#${pr})" \
               || echo "WARNING: Auto-merge failed for PR #${pr}"
           done
