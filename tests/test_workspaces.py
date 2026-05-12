@@ -160,6 +160,25 @@ def test_workspace_root_materializes_windows_style_descendants(db):
     assert [p["filename"] for p in photos] == ["bird.jpg"]
 
 
+def test_workspace_root_materialization_is_case_sensitive(db):
+    ws_id = db._active_workspace_id
+    db.set_active_workspace(None)
+    root_id = db.add_folder("/photos/USA/2026", name="2026")
+    child_id = db.add_folder("/photos/USA/2026/2026-05-01", name="2026-05-01")
+    other_id = db.add_folder("/photos/usa/2026/2026-05-02", name="2026-05-02")
+    db.add_photo(child_id, "bird.jpg", ".jpg", 1000, 1.0)
+    db.add_photo(other_id, "wrong-case.jpg", ".jpg", 1000, 1.0)
+    db.set_active_workspace(ws_id)
+
+    db.add_workspace_folder(ws_id, root_id)
+
+    folders = {f["id"] for f in db.get_workspace_folders(ws_id)}
+    assert root_id in folders
+    assert child_id in folders
+    assert other_id not in folders
+    assert {p["filename"] for p in db.get_photos()} == {"bird.jpg"}
+
+
 def test_remove_workspace_folder(db):
     ws_id = db.create_workspace("Test")
     folder_id = db.add_folder("/photos/kenya", name="kenya")

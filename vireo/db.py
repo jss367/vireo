@@ -32,17 +32,8 @@ def _nfc(name: str) -> str:
     return unicodedata.normalize("NFC", name)
 
 
-def _escape_like(value: str) -> str:
-    """Escape a literal string for a SQLite LIKE pattern using backslash."""
-    return (
-        value.replace("\\", "\\\\")
-        .replace("%", "\\%")
-        .replace("_", "\\_")
-    )
-
-
 def _path_for_subtree_match(value: str) -> str:
-    """Normalize a stored path for platform-neutral subtree LIKE matching."""
+    """Normalize a stored path for platform-neutral subtree prefix matching."""
     return value.replace("\\", "/").rstrip("/")
 
 # Canonical set of keyword type values stored in keywords.type.
@@ -717,18 +708,11 @@ class Database:
                      JOIN folders child ON child.id = child_wf.folder_id
                      WHERE root_wf.workspace_id = child_wf.workspace_id
                        AND root_wf.folder_id != child_wf.folder_id
-                       AND REPLACE(child.path, '\\', '/') LIKE (
-                         REPLACE(
-                           REPLACE(
-                             REPLACE(
-                               RTRIM(REPLACE(root.path, '\\', '/'), '/'),
-                               '\\', '\\\\'
-                             ),
-                             '%', '\\%'
-                           ),
-                           '_', '\\_'
-                         ) || '/%'
-                       ) ESCAPE '\\'
+                       AND substr(
+                         REPLACE(child.path, '\\', '/'),
+                         1,
+                         length(RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/')
+                       ) = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
                    )"""
             )
         # Migration: working-copy failure markers. Backfill (and the inline
@@ -1246,12 +1230,12 @@ class Database:
         if row is None or not row["path"]:
             return [folder_id]
         root_path = _path_for_subtree_match(row["path"])
-        like = _escape_like(root_path) + "/%"
+        prefix = root_path + "/"
         rows = self.conn.execute(
             """SELECT id FROM folders
                WHERE id = ?
-                  OR REPLACE(path, '\\', '/') LIKE ? ESCAPE '\\'""",
-            (folder_id, like),
+                  OR substr(REPLACE(path, '\\', '/'), 1, ?) = ?""",
+            (folder_id, len(prefix), prefix),
         ).fetchall()
         ids = {folder_id}
         ids.update(r["id"] for r in rows)
@@ -1311,18 +1295,11 @@ class Database:
                JOIN folders root ON root.id = wf.folder_id
                JOIN folders child
                  ON child.path = root.path
-                 OR REPLACE(child.path, '\\', '/') LIKE (
-                    REPLACE(
-                      REPLACE(
-                        REPLACE(
-                          RTRIM(REPLACE(root.path, '\\', '/'), '/'),
-                          '\\', '\\\\'
-                        ),
-                        '%', '\\%'
-                      ),
-                      '_', '\\_'
-                    ) || '/%'
-                 ) ESCAPE '\\'
+                 OR substr(
+                      REPLACE(child.path, '\\', '/'),
+                      1,
+                      length(RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/')
+                    ) = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
                LEFT JOIN workspace_folders existing
                  ON existing.workspace_id = wf.workspace_id
                 AND existing.folder_id = child.id
