@@ -153,3 +153,43 @@ def test_rapid_review_rewrites_all_burst_labels_before_saving_cache(live_server,
     assert saved_photos[3]["label"] == "REVIEW"
     assert saved_photos[2]["flag"] == "none"
     assert saved_photos[3]["flag"] == "none"
+
+
+def test_rapid_review_preserves_burst_override_species_on_apply_next(live_server, page):
+    results = {
+        "photos": [
+            {"id": 1, "filename": "a.jpg", "label": "REVIEW", "quality_composite": 0.3, "subject_tenengrad": 10},
+            {"id": 4, "filename": "d.jpg", "label": "REVIEW", "quality_composite": 0.8, "subject_tenengrad": 40},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 4],
+                "photo_count": 2,
+                "burst_count": 2,
+                "species": ["Encounter bird"],
+                "bursts": [
+                    {"photo_ids": [1]},
+                    {"photo_ids": [4], "species_override": {"species": "Override bird", "confirmed": True}},
+                ],
+            }
+        ],
+        "summary": {"keep_count": 0, "review_count": 2, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(
+        page,
+        results=results,
+        apply_photos={
+            "1": {"flag": "none", "has_species_keyword": False},
+            "4": {"flag": "none", "has_species_keyword": False},
+        },
+    )
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    expect(page.locator("#speciesInput")).to_have_value("Encounter bird")
+    page.locator("#speciesInput").fill("New encounter bird")
+
+    with page.expect_response("**/api/pipeline/save-cache"):
+        page.locator("#applyNextBtn").click()
+
+    expect(page.locator("#filename")).to_have_text("d.jpg")
+    expect(page.locator("#speciesInput")).to_have_value("Override bird")

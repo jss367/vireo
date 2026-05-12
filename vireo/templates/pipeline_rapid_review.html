@@ -543,6 +543,10 @@ function burstSpecies(enc, burst) {
   return '';
 }
 
+function hasBurstSpeciesOverride(burst) {
+  return !!(burst && burst.species_override && burst.species_override.species);
+}
+
 function buildSessions(results) {
   var sessions = [];
   (results.encounters || []).forEach(function(enc, encIdx) {
@@ -555,6 +559,7 @@ function buildSessions(results) {
         burstIdx: burstIdx,
         ids: ids,
         species: burstSpecies(enc, burst),
+        hasBurstOverride: hasBurstSpeciesOverride(burst),
         title: 'Encounter ' + (encIdx + 1) + ', Burst ' + (burstIdx + 1),
         subtitle: ids.length + ' photos' + (burstSpecies(enc, burst) ? ' - ' + burstSpecies(enc, burst) : ''),
       });
@@ -934,7 +939,7 @@ async function applyCurrent(openNext) {
       // this encounter — otherwise Apply Next stops tagging picks with the
       // confirmed species until the user retypes it for each burst.
       rapid.sessions.forEach(function(s) {
-        if (s.encIdx === session.encIdx) {
+        if (s.encIdx === session.encIdx && !s.hasBurstOverride) {
           s.species = species;
           s.subtitle = s.ids.length + ' photos - ' + species;
         }
