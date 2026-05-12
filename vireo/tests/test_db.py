@@ -5386,6 +5386,42 @@ def test_relocate_folder_merge_preserves_workspace_links(tmp_path):
     assert ws2 in ws_ids, "target folder should retain its original workspace"
 
 
+def test_relocate_folder_merge_preserves_non_root_workspace_link(tmp_path):
+    """_merge_into_existing must not promote materialized descendants to roots."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws1 = db.ensure_default_workspace()
+    db.set_active_workspace(ws1)
+
+    existing_path = str(tmp_path / "existing")
+    os.makedirs(existing_path)
+
+    fid_missing = db.add_folder("/old/path", name="missing")
+    fid_existing = db.conn.execute(
+        "INSERT INTO folders (path, name) VALUES (?, ?)", (existing_path, "existing")
+    ).lastrowid
+    db.conn.execute(
+        """UPDATE workspace_folders
+           SET is_root = 0
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws1, fid_missing),
+    )
+    db.conn.commit()
+
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
+    db.conn.commit()
+
+    db.relocate_folder(fid_missing, existing_path)
+
+    row = db.conn.execute(
+        """SELECT is_root FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws1, fid_existing),
+    ).fetchone()
+    assert row is not None
+    assert row["is_root"] == 0
+
+
 def test_relocate_folder_cascade_skips_duplicate(tmp_path):
     """relocate_folder skips cascading a child if its target path is already tracked."""
     from db import Database

@@ -1327,6 +1327,7 @@ class Database:
             [(workspace_id, r["id"]) for r in rows],
         )
         self.conn.commit()
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def mark_workspace_folder_roots(self, workspace_id, folder_ids):
         """Mark specific linked folders as user-facing roots."""
@@ -1430,6 +1431,27 @@ class Database:
 
         if not folder_ids:
             return {"folders_moved": 0, "pending_changes_moved": 0}
+
+        selected_folder_ids = set(folder_ids)
+        source_folder_paths = {
+            folder["id"]: _path_for_subtree_match(folder["path"])
+            for folder in source_folders
+            if folder["path"]
+        }
+        remaining_source_paths = [
+            path
+            for fid, path in source_folder_paths.items()
+            if fid not in selected_folder_ids
+        ]
+        for fid in selected_folder_ids:
+            selected_path = source_folder_paths.get(fid)
+            if selected_path and any(
+                selected_path.startswith(path + "/") for path in remaining_source_paths
+            ):
+                raise ValueError(
+                    "Cannot move a folder that is covered by another source "
+                    "workspace folder; move the covering folder or remove it first"
+                )
 
         moved_folder_ids = []
         seen_folder_ids = set()
@@ -2011,12 +2033,26 @@ class Database:
             (target_folder_id, source_folder_id),
         )
 
-        # Transfer workspace visibility from source to target
-        self.conn.execute(
-            "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) "
-            "SELECT workspace_id, ? FROM workspace_folders WHERE folder_id = ?",
-            (target_folder_id, source_folder_id),
-        )
+        # Transfer workspace visibility from source to target while preserving
+        # whether the source link was a user-facing root or a materialized
+        # descendant.
+        workspace_links = self.conn.execute(
+            "SELECT workspace_id, is_root FROM workspace_folders WHERE folder_id = ?",
+            (source_folder_id,),
+        ).fetchall()
+        for link in workspace_links:
+            self.conn.execute(
+                """INSERT OR IGNORE INTO workspace_folders
+                   (workspace_id, folder_id, is_root) VALUES (?, ?, ?)""",
+                (link["workspace_id"], target_folder_id, link["is_root"]),
+            )
+            if link["is_root"]:
+                self.conn.execute(
+                    """UPDATE workspace_folders
+                       SET is_root = 1
+                       WHERE workspace_id = ? AND folder_id = ?""",
+                    (link["workspace_id"], target_folder_id),
+                )
 
         # Remove source folder
         self.conn.execute(

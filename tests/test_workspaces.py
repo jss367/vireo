@@ -205,6 +205,27 @@ def test_workspace_large_recursive_root_operations_chunk_sql_params(db):
     assert len(db.get_workspace_folders(target_ws_id)) == 0
 
 
+def test_materializing_workspace_descendants_invalidates_new_images_cache(db):
+    ws_id = db.create_workspace("USA 2026")
+    root_id = db.add_folder("/photos/usa/2026", name="2026")
+    child_id = db.add_folder("/photos/usa/2026/day-1", name="day-1")
+
+    db.conn.execute(
+        """INSERT INTO workspace_folders (workspace_id, folder_id, is_root)
+           VALUES (?, ?, 1)""",
+        (ws_id, root_id),
+    )
+    db.conn.commit()
+    db._new_images_cache.set(
+        db._db_path, ws_id, {"new_count": 0, "per_root": [], "sample": []}
+    )
+
+    folders = {f["id"] for f in db.get_workspace_folders(ws_id)}
+
+    assert child_id in folders
+    assert db._new_images_cache.get(db._db_path, ws_id) is None
+
+
 def test_remove_workspace_folder(db):
     ws_id = db.create_workspace("Test")
     folder_id = db.add_folder("/photos/kenya", name="kenya")
@@ -933,6 +954,24 @@ def test_move_folders_collections_stay_behind(db_with_workspace):
     assert len(db.get_collections()) == 1
     db.set_active_workspace(ws2)
     assert len(db.get_collections()) == 0
+
+
+def test_move_folders_blocks_descendant_when_source_root_remains(db):
+    ws1 = db.create_workspace("Source")
+    ws2 = db.create_workspace("Target")
+    root_id = db.add_folder("/photos/usa/2026", name="2026")
+    child_id = db.add_folder(
+        "/photos/usa/2026/day-1",
+        name="day-1",
+        parent_id=root_id,
+    )
+    db.add_workspace_folder(ws1, root_id)
+
+    with pytest.raises(ValueError, match="covered by another source workspace folder"):
+        db.move_folders_to_workspace(ws1, ws2, [child_id])
+
+    assert {f["id"] for f in db.get_workspace_folders(ws1)} == {root_id, child_id}
+    assert db.get_workspace_folders(ws2) == []
 
 
 def test_move_folders_validates_source_workspace(db):
