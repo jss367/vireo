@@ -71,6 +71,77 @@ def test_lightbox_right_click_opens_menu(live_server, page):
     assert menu.locator(".vireo-ctx-chip").count() > 5
 
 
+def test_lightbox_overlay_toggles_persist_and_context_restores(live_server, page):
+    """Lightbox overlay visibility toggles persist and stay recoverable."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.evaluate(
+        """
+        [
+          'vireo.lb.boxesVisible',
+          'vireo.lb.masksVisible',
+          'vireo.lb.eyeVisible',
+          'vireo.lb.infoVisible',
+          'vireo.lb.chromeVisible',
+        ].forEach(k => localStorage.removeItem(k));
+        """
+    )
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.dblclick()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+
+    page.locator("#lightboxToggleBoxes").click()
+    page.locator("#lightboxToggleMasks").click()
+    page.locator("#lightboxToggleEye").click()
+    page.locator("#lightboxToggleInfo").click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('lb-hide-info')",
+        timeout=2000,
+    )
+
+    page.locator("#lightboxToggleChrome").click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('lb-hide-chrome')",
+        timeout=2000,
+    )
+    assert page.evaluate("localStorage.getItem('vireo.lb.boxesVisible')") == "0"
+    assert page.evaluate("localStorage.getItem('vireo.lb.masksVisible')") == "0"
+    assert page.evaluate("localStorage.getItem('vireo.lb.eyeVisible')") == "0"
+    assert page.evaluate("localStorage.getItem('vireo.lb.infoVisible')") == "0"
+    assert page.evaluate("localStorage.getItem('vireo.lb.chromeVisible')") == "0"
+
+    _fire_contextmenu_on_lightbox(page)
+    menu = page.locator(".vireo-ctx-menu")
+    expect(menu).to_be_visible()
+    menu.locator(".vireo-ctx-item", has_text="Lightbox controls: Off").click()
+    page.wait_for_function(
+        "!document.getElementById('lightboxOverlay').classList.contains('lb-hide-chrome')",
+        timeout=2000,
+    )
+    assert page.evaluate("localStorage.getItem('vireo.lb.chromeVisible')") == "1"
+
+    page.evaluate("closeLightbox()")
+    page.reload()
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.dblclick()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('lb-hide-info')",
+        timeout=2000,
+    )
+    assert page.locator("#lightboxToggleBoxes").inner_text() == "Show Boxes"
+    assert page.locator("#lightboxToggleMasks").inner_text() == "Show Masks"
+    assert page.locator("#lightboxToggleEye").inner_text() == "Show Eye"
+
+
 def test_lightbox_right_click_does_not_toggle_zoom(live_server, page):
     """Right-click must not trip the click-to-zoom / pan handlers.
 

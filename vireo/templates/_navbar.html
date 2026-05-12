@@ -475,6 +475,16 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   z-index: 10000;
 }
 .lightbox-close:hover { opacity: 1; }
+.lightbox-overlay.lb-hide-chrome .lightbox-close,
+.lightbox-overlay.lb-hide-chrome .lightbox-nav,
+.lightbox-overlay.lb-hide-chrome .lightbox-actions {
+  display: none !important;
+}
+.lightbox-overlay.lb-hide-info .lightbox-filename,
+.lightbox-overlay.lb-hide-info #lightboxCounter,
+.lightbox-overlay.lb-hide-info .lightbox-zoom-badge {
+  display: none !important;
+}
 .lb-detection-box {
   position: absolute;
   border: 2px solid;
@@ -2684,8 +2694,8 @@ async function createWorkspace() {
 <!-- Lightbox -->
 <div class="lightbox-overlay" id="lightboxOverlay" onclick="closeLightbox(event)">
   <span class="lightbox-close" onclick="closeLightbox(event)">&times;</span>
-  <div onclick="event.stopPropagation(); lightboxNav(-1);" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Previous (←)">&#9664;</div>
-  <div onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Next (→)">&#9654;</div>
+  <div id="lightboxPrev" class="lightbox-nav" onclick="event.stopPropagation(); lightboxNav(-1);" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Previous (←)">&#9664;</div>
+  <div id="lightboxNext" class="lightbox-nav" onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Next (→)">&#9654;</div>
   <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (Math.abs(_lbZoom - 1.0) < 0.001 && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
     <span class="lightbox-zoom-badge" id="lightboxZoomBadge" style="display:none;">1:1</span>
     <div class="lightbox-transform" id="lightboxTransform">
@@ -2697,9 +2707,21 @@ async function createWorkspace() {
   </div>
   <div class="lightbox-filename" id="lightboxFilename"></div>
   <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
-  <div style="position:absolute;bottom:16px;right:24px;display:flex;gap:8px;">
+  <div id="lightboxActions" class="lightbox-actions" style="position:absolute;bottom:16px;right:24px;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;max-width:calc(100vw - 48px);">
     <button id="lightboxToggleBoxes" onclick="event.stopPropagation(); toggleLightboxBoxes();" style="background:rgba(0,0,0,0.6);color:var(--text-secondary);border:1px solid var(--text-faint);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Toggle detection boxes (b)">
       Hide Boxes
+    </button>
+    <button id="lightboxToggleMasks" onclick="event.stopPropagation(); toggleLightboxMasks();" style="background:rgba(0,0,0,0.6);color:var(--text-secondary);border:1px solid var(--text-faint);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Toggle mask overlay">
+      Hide Masks
+    </button>
+    <button id="lightboxToggleEye" onclick="event.stopPropagation(); toggleLightboxEye();" style="background:rgba(0,0,0,0.6);color:var(--text-secondary);border:1px solid var(--text-faint);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Toggle eye marker">
+      Hide Eye
+    </button>
+    <button id="lightboxToggleInfo" onclick="event.stopPropagation(); toggleLightboxInfo();" style="background:rgba(0,0,0,0.6);color:var(--text-secondary);border:1px solid var(--text-faint);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Toggle filename, counter, and zoom badge">
+      Hide Info
+    </button>
+    <button id="lightboxToggleChrome" onclick="event.stopPropagation(); toggleLightboxChrome();" style="background:rgba(0,0,0,0.6);color:var(--text-secondary);border:1px solid var(--text-faint);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Toggle lightbox controls">
+      Hide UI
     </button>
     <span class="lb-mask-controls" id="lightboxMaskControls" onclick="event.stopPropagation();" title="SAM mask overlay">
       <span>Mask:</span>
@@ -2781,9 +2803,25 @@ var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
 var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
 var _lbSessionFullLongEdge = null;  // last learned /full size across photos; better fallback than hardcoded 1920 for custom preview_max_size
 var _lbPending1To1 = false;  // true when z/click was pressed with unknown nativeZoom; upgrade to true 1:1 once learned
-var _lbBoxesVisible = (function() {
-  try { return localStorage.getItem('vireo.lb.boxesVisible') !== '0'; } catch (e) { return true; }
-})();
+
+function _lbStoredBool(key, fallback) {
+  try {
+    var value = localStorage.getItem(key);
+    if (value === '0') return false;
+    if (value === '1') return true;
+  } catch (e) {}
+  return fallback;
+}
+
+function _lbPersistBool(key, value) {
+  try { localStorage.setItem(key, value ? '1' : '0'); } catch (e) {}
+}
+
+var _lbBoxesVisible = _lbStoredBool('vireo.lb.boxesVisible', true);
+var _lbMasksVisible = _lbStoredBool('vireo.lb.masksVisible', true);
+var _lbEyeVisible = _lbStoredBool('vireo.lb.eyeVisible', true);
+var _lbInfoVisible = _lbStoredBool('vireo.lb.infoVisible', true);
+var _lbChromeVisible = _lbStoredBool('vireo.lb.chromeVisible', true);
 
 function _lbApplyBoxesVisibility() {
   var container = document.getElementById('lightboxDetections');
@@ -2794,8 +2832,50 @@ function _lbApplyBoxesVisibility() {
 
 function toggleLightboxBoxes() {
   _lbBoxesVisible = !_lbBoxesVisible;
-  try { localStorage.setItem('vireo.lb.boxesVisible', _lbBoxesVisible ? '1' : '0'); } catch (e) {}
+  _lbPersistBool('vireo.lb.boxesVisible', _lbBoxesVisible);
   _lbApplyBoxesVisibility();
+}
+
+function _lbApplyInfoVisibility() {
+  var overlay = document.getElementById('lightboxOverlay');
+  if (overlay) overlay.classList.toggle('lb-hide-info', !_lbInfoVisible);
+  var btn = document.getElementById('lightboxToggleInfo');
+  if (btn) btn.textContent = _lbInfoVisible ? 'Hide Info' : 'Show Info';
+}
+
+function toggleLightboxInfo() {
+  _lbInfoVisible = !_lbInfoVisible;
+  _lbPersistBool('vireo.lb.infoVisible', _lbInfoVisible);
+  _lbApplyInfoVisibility();
+}
+
+function _lbApplyChromeVisibility() {
+  var overlay = document.getElementById('lightboxOverlay');
+  if (overlay) overlay.classList.toggle('lb-hide-chrome', !_lbChromeVisible);
+  var btn = document.getElementById('lightboxToggleChrome');
+  if (btn) btn.textContent = _lbChromeVisible ? 'Hide UI' : 'Show UI';
+}
+
+function toggleLightboxChrome() {
+  _lbChromeVisible = !_lbChromeVisible;
+  _lbPersistBool('vireo.lb.chromeVisible', _lbChromeVisible);
+  _lbApplyChromeVisibility();
+}
+
+function _lbApplyEyeVisibility() {
+  var container = document.getElementById('lightboxEye');
+  if (container) {
+    container.style.display =
+      (_lbEyeVisible && container.childElementCount > 0) ? 'block' : 'none';
+  }
+  var btn = document.getElementById('lightboxToggleEye');
+  if (btn) btn.textContent = _lbEyeVisible ? 'Hide Eye' : 'Show Eye';
+}
+
+function toggleLightboxEye() {
+  _lbEyeVisible = !_lbEyeVisible;
+  _lbPersistBool('vireo.lb.eyeVisible', _lbEyeVisible);
+  _lbApplyEyeVisibility();
 }
 
 /* Species color palette for lightbox bounding boxes */
@@ -2840,7 +2920,7 @@ function _lbRenderEyeCrosshair(photo) {
     marker.appendChild(label);
   }
   container.appendChild(marker);
-  container.style.display = 'block';
+  _lbApplyEyeVisibility();
 }
 
 function _lbLoadDetections(photoId) {
@@ -2884,6 +2964,7 @@ function _lbLoadDetections(photoId) {
  */
 var _lbMaskActiveVariant = null;     // name of the photo's currently-active variant
 var _lbMaskAvailable = [];           // [{variant, url, created_at}, ...]
+var _lbMaskCurrentUrl = null;
 
 function _lbResetMaskOverlay() {
   var img = document.getElementById('lightboxMaskOverlay');
@@ -2894,16 +2975,14 @@ function _lbResetMaskOverlay() {
   if (sel) sel.innerHTML = '';
   _lbMaskActiveVariant = null;
   _lbMaskAvailable = [];
+  _lbMaskCurrentUrl = null;
 }
 
-function _lbApplyMaskUrl(url) {
-  // Set the overlay's src and reveal it. If url is empty/null, hide
-  // the overlay (e.g. the photo has no mask for the chosen variant).
+function _lbApplyMaskVisibility() {
   var img = document.getElementById('lightboxMaskOverlay');
   if (!img) return;
-  if (!url) {
+  if (!_lbMasksVisible || !_lbMaskCurrentUrl) {
     img.classList.remove('show');
-    img.removeAttribute('src');
     return;
   }
   // onerror guards against the file being deleted out from under us
@@ -2912,7 +2991,32 @@ function _lbApplyMaskUrl(url) {
   // broken-image icon over the photo.
   img.onerror = function() { img.classList.remove('show'); };
   img.onload = function() { img.classList.add('show'); };
-  img.src = url;
+  if (img.getAttribute('src') !== _lbMaskCurrentUrl) {
+    img.src = _lbMaskCurrentUrl;
+  } else {
+    img.classList.add('show');
+  }
+}
+
+function _lbApplyMaskUrl(url) {
+  // Set the selected overlay URL. Visibility is controlled separately so
+  // users can keep their mask preference across photos and sessions.
+  var img = document.getElementById('lightboxMaskOverlay');
+  _lbMaskCurrentUrl = url || null;
+  if (!url && img) img.removeAttribute('src');
+  _lbApplyMaskVisibility();
+}
+
+function _lbApplyMaskToggleButton() {
+  var btn = document.getElementById('lightboxToggleMasks');
+  if (btn) btn.textContent = _lbMasksVisible ? 'Hide Masks' : 'Show Masks';
+}
+
+function toggleLightboxMasks() {
+  _lbMasksVisible = !_lbMasksVisible;
+  _lbPersistBool('vireo.lb.masksVisible', _lbMasksVisible);
+  _lbApplyMaskToggleButton();
+  _lbApplyMaskVisibility();
 }
 
 function _lbOnMaskVariantChange() {
@@ -3067,6 +3171,10 @@ function openLightbox(photoId, filename, photoList) {
     }
   }
   overlay.classList.add('active');
+  _lbApplyInfoVisibility();
+  _lbApplyChromeVisibility();
+  _lbApplyEyeVisibility();
+  _lbApplyMaskToggleButton();
 
   // Fetch and render detection bounding boxes
   _lbLoadDetections(photoId);
@@ -3276,6 +3384,12 @@ function buildLightboxContextMenu(pid) {
       },
     };
   };
+  var toggleItem = function(label, visible, onClick) {
+    return {
+      label: label + ': ' + (visible ? 'On' : 'Off'),
+      onClick: onClick,
+    };
+  };
 
   var items = [
     { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
@@ -3294,6 +3408,12 @@ function buildLightboxContextMenu(pid) {
     flagChip('rejected', '\u2715', 'Reject'),
     flagChip('none', '\u25CB', 'Unflag'),
   ] });
+  items.push({ separator: true });
+  items.push(toggleItem('Detection boxes', _lbBoxesVisible, toggleLightboxBoxes));
+  items.push(toggleItem('Mask overlay', _lbMasksVisible, toggleLightboxMasks));
+  items.push(toggleItem('Eye marker', _lbEyeVisible, toggleLightboxEye));
+  items.push(toggleItem('Filename and counter', _lbInfoVisible, toggleLightboxInfo));
+  items.push(toggleItem('Lightbox controls', _lbChromeVisible, toggleLightboxChrome));
   items.push({ separator: true });
 
   if (has('findSimilar')) {
