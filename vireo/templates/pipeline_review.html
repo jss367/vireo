@@ -650,6 +650,12 @@ input[type="range"]::-moz-range-thumb {
 .species-name.confirmed {
   color: var(--accent);
 }
+.species-name.missing {
+  color: var(--accent);
+}
+.species-name.missing:hover {
+  color: var(--accent-hover);
+}
 .species-badge {
   font-size: 10px;
   padding: 1px 6px;
@@ -662,6 +668,10 @@ input[type="range"]::-moz-range-thumb {
 }
 .species-badge.confirmed {
   background: rgba(36, 229, 202, 0.2);
+  color: var(--accent);
+}
+.species-badge.missing {
+  background: rgba(36, 229, 202, 0.14);
   color: var(--accent);
 }
 .species-confirm-btn {
@@ -1337,6 +1347,17 @@ function encounterKey(enc) {
   return enc.photo_ids.slice().sort(function(a, b) { return a - b; }).join(',');
 }
 
+function escapeHtml(s) {
+  if (s == null) return '';
+  var d = document.createElement('div');
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+
+function speciesNameArg(name) {
+  return "'" + escapeHtml(String(name).replace(/\\/g, '\\\\').replace(/'/g, "\\'")) + "'";
+}
+
 // GRM resolution slider — index into GRM_RES_STOPS. Persists across photos within a session.
 var GRM_RES_STOPS = [
   {size: 1920, label: '1920', kind: 'preview'},
@@ -1484,12 +1505,6 @@ function renderAlgorithmTrace() {
   }
   var photoMap = {};
   (pipelineResults.photos || []).forEach(function(p) { photoMap[p.id] = p; });
-  function escapeHtml(s) {
-    if (s == null) return '';
-    var d = document.createElement('div');
-    d.textContent = String(s);
-    return d.innerHTML;
-  }
   function shortName(fname) {
     if (!fname) return '';
     var dot = fname.lastIndexOf('.');
@@ -2480,35 +2495,38 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
   // level: 'encounter' or 'burst'
   // pos:   'top' (default) or 'bot' — disambiguates the duplicated bottom widget
   pos = pos || 'top';
-  var isConfirmed, displayName, predictions;
+  var isConfirmed, displayName, predictions, candidateSpecies;
   if (level === 'burst') {
     var burst = enc.bursts[burstIdx];
     var ovr = burst.species_override;
     if (ovr) {
       isConfirmed = !!ovr.confirmed;
-      displayName = ovr.species || (enc.species ? enc.species[0] : 'Unknown');
+      candidateSpecies = ovr.species || enc.confirmed_species || (enc.species ? enc.species[0] : null);
     } else {
       // No per-burst override: inherit from the encounter so confirming the
       // encounter visibly cascades to every burst.
       isConfirmed = !!enc.species_confirmed;
-      displayName = enc.confirmed_species || (enc.species ? enc.species[0] : 'Unknown');
+      candidateSpecies = enc.confirmed_species || (enc.species ? enc.species[0] : null);
     }
+    displayName = candidateSpecies || 'Add species';
     predictions = burst.species_predictions || [];
   } else {
     isConfirmed = enc.species_confirmed;
-    displayName = enc.confirmed_species || (enc.species ? enc.species[0] : 'Unknown');
+    candidateSpecies = enc.confirmed_species || (enc.species ? enc.species[0] : null);
+    displayName = candidateSpecies || 'Add species';
     predictions = enc.species_predictions || [];
   }
 
-  var cls = isConfirmed ? 'confirmed' : 'unconfirmed';
-  var badge = isConfirmed ? '&#10003;' : '?';
+  var hasCandidate = !!candidateSpecies;
+  var cls = isConfirmed ? 'confirmed' : (hasCandidate ? 'unconfirmed' : 'missing');
+  var badge = isConfirmed ? '&#10003;' : (hasCandidate ? '?' : '+');
   var widgetCls = level === 'burst' ? 'burst-species-widget' : 'species-widget';
 
   var idKey = (burstIdx != null ? burstIdx : 'enc') + '_' + pos;
   var html = '<span class="' + widgetCls + '" data-enc="' + encIdx + '" data-burst="' + (burstIdx != null ? burstIdx : '') + '">';
-  html += '<span class="species-name ' + cls + '" onclick="toggleSpeciesDropdown(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')">' + escapeHtml(displayName) + '</span>';
+  html += '<span class="species-name ' + cls + '" title="' + (hasCandidate ? 'Change species' : 'Add species') + '" onclick="toggleSpeciesDropdown(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')">' + escapeHtml(displayName) + '</span>';
   html += '<span class="species-badge ' + cls + '">' + badge + '</span>';
-  if (!isConfirmed) {
+  if (!isConfirmed && hasCandidate) {
     html += '<button class="species-confirm-btn" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',null)" title="Confirm as ' + escapeHtml(displayName) + '">&#10003;</button>';
   }
 
@@ -2518,9 +2536,10 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
   html += '<div class="species-dropdown-search"><input type="text" placeholder="Search or type a new name..." oninput="searchSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')" onkeydown="speciesInputKey(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ')"></div>';
 
   // "Use encounter label" option for burst level
-  if (level === 'burst' && enc.species) {
+  var encounterLabel = enc.confirmed_species || (enc.species ? enc.species[0] : null);
+  if (level === 'burst' && encounterLabel) {
     html += '<div class="species-dropdown-item" onclick="clearBurstOverride(event, ' + encIdx + ',' + burstIdx + ')">';
-    html += '<span class="sp-name" style="color:var(--text-dim);">Use encounter label (' + escapeHtml(enc.species[0] || '') + ')</span>';
+    html += '<span class="sp-name" style="color:var(--text-dim);">Use encounter label (' + escapeHtml(encounterLabel) + ')</span>';
     html += '</div>';
   }
 
@@ -2529,7 +2548,7 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
     var modelParts = (sp.models || []).map(function(m) {
       return escapeHtml(m.model) + ' ' + (m.confidence * 100).toFixed(0) + '%';
     });
-    html += '<div class="species-dropdown-item" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + escapeHtml(sp.species).replace(/'/g, "\\'") + '\')">';
+    html += '<div class="species-dropdown-item" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',' + speciesNameArg(sp.species) + ')">';
     html += '<span class="sp-name">' + escapeHtml(sp.species) + '</span>';
     html += '<span class="sp-models">' + modelParts.join(', ') + '</span>';
     html += '</div>';
@@ -2594,7 +2613,7 @@ function searchSpecies(event, encIdx, burstIdx, pos) {
         + '</div>';
     }
     results.forEach(function(name) {
-      html += '<div class="species-dropdown-item" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + escapeHtml(name).replace(/'/g, "\\'") + '\')">';
+      html += '<div class="species-dropdown-item" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',' + speciesNameArg(name) + ')">';
       html += '<span class="sp-name">' + escapeHtml(name) + '</span>';
       html += '<span class="sp-models" style="color:var(--text-dim);">search</span>';
       html += '</div>';
