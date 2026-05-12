@@ -490,7 +490,7 @@ def _sample_cache():
                 "time_range": ["2026-03-20T10:00:00", "2026-03-20T10:00:04"],
                 "photo_ids": [1, 2, 3],
                 "bursts": [
-                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": {"species": "American Robin", "confirmed": True}},
                     {"photo_ids": [3], "species_predictions": [], "species_override": None},
                 ],
             },
@@ -523,6 +523,8 @@ def _sample_cache():
             "review_count": 1,
             "reject_count": 2,
             "rarity_protected": 1,
+            "confirmed_count": 1,
+            "unconfirmed_count": 2,
         },
     }
 
@@ -580,6 +582,8 @@ def test_prune_results_recomputes_counts(tmp_path):
     assert summary["review_count"] == 1
     assert summary["reject_count"] == 0
     assert summary["rarity_protected"] == 1
+    assert summary["confirmed_count"] == 1
+    assert summary["unconfirmed_count"] == 2
 
 
 def test_prune_results_no_overlap_returns_false(tmp_path):
@@ -969,6 +973,99 @@ def test_compute_review_readiness_variant_aware_embeddings(tmp_path):
     db.conn.commit()
     out_explicit_mismatch = compute_review_readiness(db, dinov2_variant="vit-l14")
     assert out_explicit_mismatch["with_embeddings"] == 0
+
+
+def test_compute_review_readiness_ignores_no_subject_photos_for_enhancers(tmp_path):
+    """No-subject photos should not make the review page claim masks,
+    embeddings, or species predictions are incomplete.
+
+    The detector can legitimately evaluate a workspace photo and find no
+    above-threshold subject. Those photos are reviewable as subject-absent
+    rejects, but rerunning SAM/DINO/species stages will not produce subject
+    features for them.
+    """
+    from db import Database
+    from dino_embed import embedding_to_blob
+    from pipeline import compute_review_readiness
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    pids = [
+        db.add_photo(
+            fid, f"photo{i}.jpg", ".jpg", 1000, 1.0,
+            timestamp=datetime(2026, 3, 20, 10, 0, i).isoformat(),
+            width=4000, height=3000,
+        )
+        for i in range(4)
+    ]
+    emb = np.ones(768, dtype=np.float32)
+    emb = emb / np.linalg.norm(emb)
+
+    for pid in pids[:2]:
+        det_ids = db.write_detection_batch(pid, "megadetector-v6", [
+            {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
+        ])
+        db.add_prediction(det_ids[0], "robin", 0.9, "bioclip", category="match")
+        db.update_photo_pipeline_features(pid, mask_path=f"/masks/{pid}.png")
+        db.update_photo_embeddings(
+            pid,
+            dino_subject_embedding=embedding_to_blob(emb),
+            dino_global_embedding=embedding_to_blob(emb),
+        )
+
+    for pid in pids[2:]:
+        db.write_detection_batch(pid, "megadetector-v6", [])
+
+    out = compute_review_readiness(db)
+    assert out["state"] == "computable"
+    assert out["total_photos"] == 4
+    assert out["mask_target_photos"] == 2
+    assert out["embedding_target_photos"] == 2
+    assert out["prediction_target_photos"] == 2
+    assert "masks_partial" not in out["enhancing_missing"]
+    assert "embeddings" not in out["enhancing_missing"]
+    assert "species_predictions" not in out["enhancing_missing"]
+
+
+def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
+    """A current eye-keypoint attempt should satisfy readiness even when
+    no trustworthy eye point was written."""
+    from db import Database
+    from dino_embed import embedding_to_blob
+    from pipeline import EYE_KP_FINGERPRINT_VERSION, compute_review_readiness
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    pid = db.add_photo(
+        fid, "photo.jpg", ".jpg", 1000, 1.0,
+        timestamp=datetime(2026, 3, 20, 10, 0, 0).isoformat(),
+        width=4000, height=3000,
+    )
+    det_ids = db.write_detection_batch(pid, "megadetector-v6", [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
+    ])
+    db.add_prediction(det_ids[0], "robin", 0.9, "bioclip", category="match")
+    emb = np.ones(768, dtype=np.float32)
+    emb = emb / np.linalg.norm(emb)
+    db.update_photo_pipeline_features(
+        pid,
+        mask_path=f"/masks/{pid}.png",
+        eye_x=None,
+        eye_y=None,
+        eye_conf=None,
+        eye_tenengrad=None,
+        eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+    )
+    db.update_photo_embeddings(
+        pid,
+        dino_subject_embedding=embedding_to_blob(emb),
+        dino_global_embedding=embedding_to_blob(emb),
+    )
+
+    out = compute_review_readiness(db)
+    assert out["with_eye_keypoint_attempts"] == 1
+    assert out["eye_keypoint_target_photos"] == 1
+    assert "eye_keypoints" not in out["enhancing_missing"]
 
 
 def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
@@ -1895,6 +1992,129 @@ def test_eye_stage_gate1_low_classifier_conf_no_write(tmp_path, monkeypatch):
         db, config={"eye_detect_enabled": True, "eye_classifier_conf_gate": 0.5},
     )
     assert _read_eye_fields(db, pid) == (None, None, None, None)
+
+
+def test_eye_stage_gate1_failure_does_not_stamp_fingerprint(tmp_path, monkeypatch):
+    """Gate 1 (classifier conf) short-circuits cheaply but must NOT stamp
+    eye_kp_fingerprint: the gate is driven by the user-configurable
+    `eye_classifier_conf_gate`, so stamping would permanently filter the
+    photo out of `list_photos_for_eye_keypoint_stage` even after the user
+    lowers the gate. The photo must remain eligible on a subsequent run
+    with a more permissive threshold.
+    """
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(
+        tmp_path, classifier_conf=0.3,
+    )
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    # First pass: high gate skips the photo at Gate 1.
+    monkeypatch.setattr(
+        kp, "detect_keypoints",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("Gate 1 should short-circuit before model runs")
+        ),
+    )
+    detect_eye_keypoints_stage(
+        db, config={"eye_detect_enabled": True, "eye_classifier_conf_gate": 0.5},
+    )
+
+    # Fingerprint must still be NULL — the photo wasn't actually evaluated.
+    fp_row = db.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert fp_row[0] is None, (
+        "Gate 1 (low classifier confidence) must not stamp eye_kp_fingerprint; "
+        "stamping locks the photo out of future runs even after the user "
+        "lowers eye_classifier_conf_gate."
+    )
+
+    # Photo must still surface as a candidate for the next stage run.
+    rows = db.list_photos_for_eye_keypoint_stage()
+    assert any(r["id"] == pid for r in rows)
+
+    # Second pass: lower the gate. Now the model runs and writes eye fields.
+    good = [
+        {"name": "left_eye", "x": 300.0, "y": 300.0, "conf": 0.88},
+        {"name": "right_eye", "x": 350.0, "y": 300.0, "conf": 0.85},
+    ]
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: good)
+    detect_eye_keypoints_stage(
+        db, config={"eye_detect_enabled": True, "eye_classifier_conf_gate": 0.1},
+    )
+    eye_x, eye_y, eye_conf, _ = _read_eye_fields(db, pid)
+    assert eye_x is not None and eye_y is not None and eye_conf is not None
+
+
+def test_eye_stage_unrouted_taxonomy_does_not_stamp_fingerprint(tmp_path, monkeypatch):
+    """When `_resolve_keypoint_model` returns None for a photo (e.g. the
+    species' taxonomy class isn't in the routing map yet), the stage must
+    not stamp eye_kp_fingerprint. The routing depends on
+    `_EYE_KEYPOINT_MODEL_FOR_CLASS` and taxonomy data which can be extended
+    later; stamping would prevent the photo from re-running after such
+    an extension.
+    """
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(
+        tmp_path, taxonomy_class="Actinopterygii",  # ray-finned fish
+    )
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    def _boom(*a, **kw):
+        raise AssertionError(
+            "detect_keypoints should not run for unrouted taxonomy"
+        )
+
+    monkeypatch.setattr(kp, "detect_keypoints", _boom)
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
+
+    fp_row = db.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert fp_row[0] is None, (
+        "Unrouted-taxonomy short-circuit must not stamp eye_kp_fingerprint; "
+        "the routing map / taxonomy data can be extended later and the "
+        "photo must remain eligible to re-run then."
+    )
+    rows = db.list_photos_for_eye_keypoint_stage()
+    assert any(r["id"] == pid for r in rows)
+
+
+def test_eye_stage_gate3_failure_stamps_fingerprint(tmp_path, monkeypatch):
+    """Inverse case: when the model actually runs and finds no
+    trustworthy eye (Gate 3/4 fail), eye_kp_fingerprint must be stamped so
+    `list_photos_for_eye_keypoint_stage` does not keep returning the photo
+    on every subsequent run. This is the original motivation for the
+    no-eye attempt marker — it should not be weakened by the fix to the
+    pre-model gates.
+    """
+    import keypoints as kp
+    from pipeline import EYE_KP_FINGERPRINT_VERSION, detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    # All eye points below the detection-conf gate → Gate 3 fails.
+    low = [
+        {"name": "left_eye", "x": 300.0, "y": 300.0, "conf": 0.2},
+        {"name": "right_eye", "x": 350.0, "y": 300.0, "conf": 0.15},
+    ]
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: low)
+    detect_eye_keypoints_stage(
+        db, config={"eye_detect_enabled": True, "eye_detection_conf_gate": 0.5},
+    )
+
+    fp_row = db.conn.execute(
+        "SELECT eye_kp_fingerprint FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert fp_row[0] == EYE_KP_FINGERPRINT_VERSION
+    # And the photo is no longer eligible on the next selection pass.
+    rows = db.list_photos_for_eye_keypoint_stage()
+    assert not any(r["id"] == pid for r in rows)
 
 
 def test_eye_stage_gate1_out_of_scope_species_no_write(tmp_path, monkeypatch):

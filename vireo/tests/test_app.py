@@ -463,6 +463,9 @@ def test_encounter_species_updates_pipeline_cache(app_and_db):
     resp = client.post("/api/encounters/species",
                        json={"species": "Blue Jay", "photo_ids": photo_ids})
     assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["summary"]["confirmed_count"] == 1
+    assert body["summary"]["unconfirmed_count"] == 0
 
     # Read cache back and check
     with open(path) as f:
@@ -470,6 +473,8 @@ def test_encounter_species_updates_pipeline_cache(app_and_db):
     enc = updated["encounters"][0]
     assert enc["species_confirmed"] is True
     assert enc["confirmed_species"] == "Blue Jay"
+    assert updated["summary"]["confirmed_count"] == 1
+    assert updated["summary"]["unconfirmed_count"] == 0
 
 
 def _seed_encounter_cache(app, db, photo_ids, *, confirmed_species=None, bursts=None):

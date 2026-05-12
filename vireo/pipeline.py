@@ -450,6 +450,7 @@ def _clear_derived_scores(photos):
 
 def _make_summary(encounters, all_photos):
     """Build summary stats dict from triage results."""
+    confirmation_counts = _count_raw_confirmation_units(encounters)
     return {
         "total_photos": len(all_photos),
         "encounter_count": len(encounters),
@@ -460,7 +461,86 @@ def _make_summary(encounters, all_photos):
         "rarity_protected": sum(
             1 for p in all_photos if p.get("rarity_protected")
         ),
+        **confirmation_counts,
     }
+
+
+def _photos_uniformly_confirmed(photos):
+    species = [p.get("confirmed_species") for p in photos]
+    confirmed = {s for s in species if s}
+    return bool(photos) and len(confirmed) == 1 and all(species)
+
+
+def _count_raw_confirmation_units(encounters):
+    """Count confirmed/unconfirmed review units in raw encounter structures.
+
+    The review page hides confirmed items at the burst level when bursts are
+    present, otherwise at the encounter level. Mirror that unit here so the
+    summary bar matches the user's review workload.
+    """
+    confirmed = 0
+    unconfirmed = 0
+    for enc in encounters:
+        bursts = enc.get("bursts") or []
+        if bursts:
+            for burst in bursts:
+                if _photos_uniformly_confirmed(burst):
+                    confirmed += 1
+                else:
+                    unconfirmed += 1
+        elif _photos_uniformly_confirmed(enc.get("photos", [])):
+            confirmed += 1
+        else:
+            unconfirmed += 1
+    return {
+        "confirmed_count": confirmed,
+        "unconfirmed_count": unconfirmed,
+    }
+
+
+def _serialized_burst_confirmed(enc, burst):
+    ovr = burst.get("species_override") if isinstance(burst, dict) else None
+    if ovr:
+        return bool(ovr.get("confirmed"))
+    return bool(enc.get("species_confirmed"))
+
+
+def _count_serialized_confirmation_units(encounters):
+    """Count confirmed/unconfirmed review units in cached JSON results."""
+    confirmed = 0
+    unconfirmed = 0
+    for enc in encounters:
+        bursts = enc.get("bursts") or []
+        if bursts:
+            for burst in bursts:
+                if _serialized_burst_confirmed(enc, burst):
+                    confirmed += 1
+                else:
+                    unconfirmed += 1
+        elif enc.get("species_confirmed"):
+            confirmed += 1
+        else:
+            unconfirmed += 1
+    return {
+        "confirmed_count": confirmed,
+        "unconfirmed_count": unconfirmed,
+    }
+
+
+def refresh_serialized_summary(results):
+    """Recompute cached summary counts in place and return the summary."""
+    photos = results.get("photos", []) or []
+    encounters = results.get("encounters", []) or []
+    summary = results.setdefault("summary", {})
+    summary["total_photos"] = len(photos)
+    summary["encounter_count"] = len(encounters)
+    summary["burst_count"] = sum(e.get("burst_count", 0) for e in encounters)
+    summary["keep_count"] = sum(1 for p in photos if p.get("label") == "KEEP")
+    summary["review_count"] = sum(1 for p in photos if p.get("label") == "REVIEW")
+    summary["reject_count"] = sum(1 for p in photos if p.get("label") == "REJECT")
+    summary["rarity_protected"] = sum(1 for p in photos if p.get("rarity_protected"))
+    summary.update(_count_serialized_confirmation_units(encounters))
+    return summary
 
 
 def reflow(encounters, config=None):
@@ -707,7 +787,9 @@ def load_results(cache_dir, workspace_id):
     if not os.path.exists(path):
         return None
     with open(path) as f:
-        return json.load(f)
+        data = json.load(f)
+    refresh_serialized_summary(data)
+    return data
 
 
 def prune_missing_photos(cache_dir, workspace_id, db):
@@ -812,16 +894,7 @@ def prune_results(cache_dir, workspace_id, deleted_ids):
         pruned_encounters.append(enc)
     data["encounters"] = pruned_encounters
 
-    photos = data["photos"]
-    summary = data.get("summary") or {}
-    summary["total_photos"] = len(photos)
-    summary["encounter_count"] = len(pruned_encounters)
-    summary["burst_count"] = sum(e.get("burst_count", 0) for e in pruned_encounters)
-    summary["keep_count"] = sum(1 for p in photos if p.get("label") == "KEEP")
-    summary["review_count"] = sum(1 for p in photos if p.get("label") == "REVIEW")
-    summary["reject_count"] = sum(1 for p in photos if p.get("label") == "REJECT")
-    summary["rarity_protected"] = sum(1 for p in photos if p.get("rarity_protected"))
-    data["summary"] = summary
+    refresh_serialized_summary(data)
 
     with open(path, "w") as f:
         json.dump(data, f)
@@ -846,23 +919,70 @@ def load_results_raw(cache_dir, workspace_id):
         return json.load(f)
 
 
-def _count_usable_embeddings(db, expected_variant):
+def _count_stage_targets(db):
+    """Return detection-aware target counts for review readiness.
+
+    Masks, DINO embeddings, and species predictions are only expected for
+    photos with a real detector box above the workspace threshold. Photos where
+    the detector found no qualifying subject can still appear in review as
+    subject-absent rejects, but rerunning mask/embedding/species stages will not
+    fill those rows.
+    """
+    import config as cfg
+
+    ws = db._ws_id()
+    min_conf = db.get_effective_config(cfg.load()).get(
+        "detector_confidence", 0.2
+    )
+    row = db.conn.execute(
+        """SELECT COUNT(DISTINCT p.id) AS n
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+           JOIN folders f ON f.id = p.folder_id
+                         AND f.status IN ('ok', 'partial')
+           JOIN detections d ON d.photo_id = p.id
+                            AND d.detector_model != 'full-image'
+                            AND d.detector_confidence >= ?
+           WHERE wf.workspace_id = ?""",
+        (min_conf, ws),
+    ).fetchone()
+    detected = row["n"] or 0
+
+    return {"detected": detected}
+
+
+def _count_usable_embeddings(db, expected_variant, detected_only=False):
     """Count workspace photos whose stored DINO embedding is usable under
     ``expected_variant`` — i.e. the same rule ``load_photo_features`` applies
     via :func:`_embedding_usable`. Without ``expected_variant`` we accept any
     non-null embedding (back-compat for callers that don't know the variant).
     """
     ws = db._ws_id()
+    join_detection = ""
+    params_prefix = []
+    if detected_only:
+        import config as cfg
+        min_conf = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
+        join_detection = (
+            "JOIN detections d ON d.photo_id = p.id "
+            "AND d.detector_model != 'full-image' "
+            "AND d.detector_confidence >= ?"
+        )
+        params_prefix.append(min_conf)
+
     if expected_variant is None:
         row = db.conn.execute(
-            """SELECT COUNT(*) AS n
+            f"""SELECT COUNT(DISTINCT p.id) AS n
                FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id
                              AND f.status IN ('ok', 'partial')
+               {join_detection}
                WHERE wf.workspace_id = ?
                  AND p.dino_subject_embedding IS NOT NULL""",
-            (ws,),
+            (*params_prefix, ws),
         ).fetchone()
         return row["n"] or 0
 
@@ -872,30 +992,64 @@ def _count_usable_embeddings(db, expected_variant):
     except Exception:
         # Unknown variant — only the exact-match branch can pass.
         row = db.conn.execute(
-            """SELECT COUNT(*) AS n
+            f"""SELECT COUNT(DISTINCT p.id) AS n
                FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id
                              AND f.status IN ('ok', 'partial')
+               {join_detection}
                WHERE wf.workspace_id = ?
                  AND p.dino_subject_embedding IS NOT NULL
                  AND p.dino_embedding_variant = ?""",
-            (ws, expected_variant),
+            (*params_prefix, ws, expected_variant),
         ).fetchone()
         return row["n"] or 0
 
     row = db.conn.execute(
-        """SELECT COUNT(*) AS n
+        f"""SELECT COUNT(DISTINCT p.id) AS n
            FROM photos p
            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
            JOIN folders f ON f.id = p.folder_id
                          AND f.status IN ('ok', 'partial')
+           {join_detection}
            WHERE wf.workspace_id = ?
              AND p.dino_subject_embedding IS NOT NULL
              AND (p.dino_embedding_variant = ?
                   OR (p.dino_embedding_variant IS NULL
                       AND length(p.dino_subject_embedding) = ?))""",
-        (ws, expected_variant, expected_bytes),
+        (*params_prefix, ws, expected_variant, expected_bytes),
+    ).fetchone()
+    return row["n"] or 0
+
+
+def _count_eye_keypoint_attempts(db):
+    """Count photos already evaluated by the current eye-keypoint model.
+
+    Legacy successful rows may have ``eye_x`` but no fingerprint, so count
+    those as attempted for review-readiness back-compat. New runs stamp the
+    fingerprint even when no trusted eye is found.
+    """
+    import config as cfg
+
+    ws = db._ws_id()
+    min_conf = db.get_effective_config(cfg.load()).get(
+        "detector_confidence", 0.2
+    )
+    row = db.conn.execute(
+        """SELECT COUNT(DISTINCT p.id) AS n
+           FROM photos p
+           JOIN workspace_folders wf
+             ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+           JOIN folders f ON f.id = p.folder_id
+                         AND f.status IN ('ok', 'partial')
+           JOIN detections d
+             ON d.photo_id = p.id
+            AND d.detector_model != 'full-image'
+            AND d.detector_confidence >= ?
+           JOIN predictions pr ON pr.detection_id = d.id
+           WHERE p.mask_path IS NOT NULL
+             AND (p.eye_kp_fingerprint = ? OR p.eye_x IS NOT NULL)""",
+        (ws, min_conf, EYE_KP_FINGERPRINT_VERSION),
     ).fetchone()
     return row["n"] or 0
 
@@ -937,15 +1091,34 @@ def compute_review_readiness(db, mask_threshold=0.25, dinov2_variant=None):
     """
     cov = db.get_coverage_stats()
     total = cov["total"]
-    usable_embeddings = _count_usable_embeddings(db, dinov2_variant)
+    targets = _count_stage_targets(db) if total else {
+        "detected": 0,
+    }
+    detected_target = targets["detected"]
+    # Once real detector output exists, masks/embeddings/species are expected
+    # only for detector-backed subject photos. Before detection has produced
+    # any eligible subject rows, fall back to total so first-run or legacy
+    # partially-masked workspaces still surface incomplete feature coverage.
+    feature_target = detected_target or total
+    embedding_detected_only = detected_target > 0
+    usable_embeddings = _count_usable_embeddings(
+        db, dinov2_variant, detected_only=embedding_detected_only,
+    )
+    eye_target = db.count_eye_keypoint_eligible() if total else 0
+    eye_attempts = _count_eye_keypoint_attempts(db) if eye_target else 0
     out = {
         "state": "empty",
         "total_photos": total,
         "with_masks": cov["mask"],
+        "mask_target_photos": feature_target,
         "with_sharpness": cov["subject_sharpness"],
         "with_embeddings": usable_embeddings,
+        "embedding_target_photos": feature_target,
         "with_eye_keypoints": cov["eye"],
+        "with_eye_keypoint_attempts": eye_attempts,
+        "eye_keypoint_target_photos": eye_target,
         "with_predictions": cov["classified"],
+        "prediction_target_photos": feature_target,
         "missing_required": [],
         "enhancing_missing": [],
     }
@@ -956,7 +1129,8 @@ def compute_review_readiness(db, mask_threshold=0.25, dinov2_variant=None):
     # Use ceiling so the gate honors the documented minimum fraction — e.g.
     # 1 mask out of 5 (20%) must classify as insufficient against a 25%
     # threshold, not slip through because int() floored 1.25 down to 1.
-    if cov["mask"] < max(1, math.ceil(total * mask_threshold)):
+    required_masks = max(1, math.ceil(feature_target * mask_threshold))
+    if cov["mask"] < required_masks:
         out["state"] = "insufficient"
         out["missing_required"].append("masks")
         # Still surface enhancing_missing so the diagnostic is complete
@@ -964,13 +1138,13 @@ def compute_review_readiness(db, mask_threshold=0.25, dinov2_variant=None):
         out["state"] = "computable"
 
     # Enhancing: per-stage gaps that would improve quality if filled
-    if cov["mask"] < total and "masks" not in out["missing_required"]:
+    if cov["mask"] < feature_target and "masks" not in out["missing_required"]:
         out["enhancing_missing"].append("masks_partial")
-    if usable_embeddings < total:
+    if usable_embeddings < feature_target:
         out["enhancing_missing"].append("embeddings")
-    if cov["eye"] < total:
+    if eye_attempts < eye_target:
         out["enhancing_missing"].append("eye_keypoints")
-    if cov["classified"] < total:
+    if cov["classified"] < feature_target:
         out["enhancing_missing"].append("species_predictions")
 
     return out
@@ -997,6 +1171,7 @@ def rebuild_species_predictions(results, photo_ids):
 
 def save_results_raw(results, cache_dir, workspace_id):
     """Save an already-serialized results dict back to the JSON cache."""
+    refresh_serialized_summary(results)
     path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
     with open(path, "w") as f:
         json.dump(results, f)
@@ -1130,6 +1305,24 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
     from image_loader import load_image
     from quality import compute_eye_tenengrad
 
+    def mark_attempted_without_eye():
+        # Stamp the current eye-keypoint fingerprint only after the model
+        # has actually run and produced no trustworthy eye. Pre-model gates
+        # (Gate 1: classifier confidence, taxonomy routing, missing weights,
+        # missing image, etc.) depend on runtime settings or external state
+        # the user can change, so stamping there would permanently filter
+        # the photo out of future runs even after the user lowers the gate
+        # or adds the missing model — a functional regression. Those photos
+        # remain on the to-do list and are cheaply re-skipped on each run.
+        db.update_photo_pipeline_features(
+            row["id"],
+            eye_x=None,
+            eye_y=None,
+            eye_conf=None,
+            eye_tenengrad=None,
+            eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+        )
+
     # Gate 1: classifier confidence + species in scope.
     if (row.get("species_conf") or 0.0) < C:
         return
@@ -1198,6 +1391,7 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
         eye_candidates.append(k_point)
 
     if not eye_candidates:
+        mark_attempted_without_eye()
         return
 
     # Pick the eye with the highest windowed tenengrad — "best" eye wins.
