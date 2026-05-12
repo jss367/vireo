@@ -51,6 +51,10 @@ body { padding-bottom: 36px; }
 .folder-cov-grid .bar-label { width: 110px; }
 .folder-cov-grid .bar-track { height: 10px; }
 .folder-cov-grid .cov-pct { width: 38px; font-size: 11px; }
+.folder-cov-title {
+  padding: 6px 0 2px 14px; font-size: 11px; font-weight: 600;
+  color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px;
+}
 
 .grid-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 @media (max-width: 768px) { .grid-2col { grid-template-columns: 1fr; } }
@@ -204,13 +208,22 @@ body { padding-bottom: 36px; }
     <div id="pendingDetail" style="display:none;margin-top:16px;border-top:1px solid var(--border-primary);padding-top:16px;"></div>
   </div>
 
-  <!-- Processing Coverage -->
+  <!-- Pipeline Outputs -->
   <div class="section">
-    <div class="section-title">Processing Coverage</div>
+    <div class="section-title">Pipeline Outputs</div>
     <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">
-      How much of this workspace has gone through each pipeline stage.
+      Vireo-generated results that should be complete after a thorough pipeline run.
     </div>
-    <div id="coverageChart"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
+    <div id="pipelineCoverageChart"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
+  </div>
+
+  <!-- Image Attributes -->
+  <div class="section">
+    <div class="section-title">Image Attributes</div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">
+      Source metadata and library decisions that may legitimately stay below 100%.
+    </div>
+    <div id="attributeCoverageChart"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
   <!-- Top Species -->
@@ -345,11 +358,10 @@ loadDashboard();
 loadCoverage();
 loadClassificationInventory();
 
-// Order matches the pipeline roughly: ingest → metadata → pixel ops → AI → review.
-var COVERAGE_FIELDS = [
-  {key: 'timestamp',         label: 'EXIF timestamp'},
-  {key: 'exif',              label: 'EXIF data'},
-  {key: 'gps',               label: 'GPS coordinates'},
+// Counts are split between Vireo outputs and facts that come from the image
+// or the user's library decisions. The second group should not be read as
+// pipeline completeness.
+var PIPELINE_COVERAGE_FIELDS = [
   {key: 'file_hash',         label: 'File hash (SHA-256)'},
   {key: 'phash',             label: 'Perceptual hash'},
   {key: 'thumbnail',         label: 'Thumbnail'},
@@ -363,14 +375,25 @@ var COVERAGE_FIELDS = [
   {key: 'dino_embedding',    label: 'DINO embedding'},
   {key: 'label_embedding',   label: 'Label embedding'},
   {key: 'classified',        label: 'Classification'},
-  {key: 'burst',             label: 'Burst grouping'},
+];
+
+var ATTRIBUTE_COVERAGE_FIELDS = [
+  {key: 'timestamp',         label: 'EXIF timestamp'},
+  {key: 'exif',              label: 'EXIF data'},
+  {key: 'gps',               label: 'GPS coordinates'},
+  {key: 'burst',             label: 'Camera burst marker'},
   {key: 'rating',            label: 'Rated (\u2605+)'},
 ];
 
+var COVERAGE_GROUPS = [
+  {title: 'Pipeline Outputs', fields: PIPELINE_COVERAGE_FIELDS},
+  {title: 'Image Attributes', fields: ATTRIBUTE_COVERAGE_FIELDS},
+];
 var _coverageFolders = null;
 
 async function loadCoverage() {
-  var container = document.getElementById('coverageChart');
+  var pipelineContainer = document.getElementById('pipelineCoverageChart');
+  var attributeContainer = document.getElementById('attributeCoverageChart');
   try {
     var data = await safeFetch('/api/coverage', {}, { toast: false });
     _coverageFolders = data.folders || [];
@@ -391,29 +414,26 @@ async function loadCoverage() {
         }
       } catch (_) { /* fall through to default empty-state */ }
     }
-    renderCoverage(container, overall, offlineCtx);
+    renderCoverageGroup(pipelineContainer, overall, PIPELINE_COVERAGE_FIELDS, offlineCtx);
+    renderCoverageGroup(attributeContainer, overall, ATTRIBUTE_COVERAGE_FIELDS, offlineCtx);
   } catch(e) {
-    container.innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load coverage.</span>';
+    pipelineContainer.innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load coverage.</span>';
+    attributeContainer.innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load coverage.</span>';
   }
 }
 
-function renderCoverage(container, stats, offlineCtx) {
+function renderCoverageGroup(container, stats, fields, offlineCtx) {
   var total = stats.total || 0;
   if (total === 0) {
-    // ``stats.total`` counts photos in 'ok'/'partial' folders only, so it
-    // hits 0 both for an empty workspace and for one whose folders are
-    // entirely offline. ``offlineCtx`` (set by ``loadCoverage`` when
-    // ``/api/scan/status`` shows missing folders) disambiguates so the
-    // empty-state copy doesn't contradict the headline.
     container.innerHTML = offlineCtx
       ? '<span style="color:var(--text-ghost);font-size:13px;">'
         + offlineCtx.offline_photos.toLocaleString()
-        + ' photos are in offline folders — mount the storage to see processing coverage.</span>'
+        + ' photos are in offline folders — mount the storage to see coverage.</span>'
       : '<span style="color:var(--text-ghost);font-size:13px;">No photos in this workspace.</span>';
     return;
   }
   var html = '';
-  COVERAGE_FIELDS.forEach(function(f) {
+  fields.forEach(function(f) {
     var count = stats[f.key] || 0;
     var pct = Math.round((count / total) * 100);
     html += '<div class="bar-row cov-bar">' +
@@ -431,17 +451,21 @@ function renderFolderCoverage(folder) {
   if (total === 0) {
     return '<div style="padding:4px 0 6px 14px;font-size:11px;color:var(--text-ghost);">No photos in this folder.</div>';
   }
-  var html = '<div class="folder-cov-grid">';
-  COVERAGE_FIELDS.forEach(function(f) {
-    var count = folder[f.key] || 0;
-    var pct = Math.round((count / total) * 100);
-    html += '<div class="bar-row cov-bar">' +
-      '<span class="bar-label" title="' + f.label + ' \u2014 ' + count.toLocaleString() + ' / ' + total.toLocaleString() + '">' + f.label + '</span>' +
-      '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
-      '<span class="cov-pct">' + pct + '%</span>' +
-    '</div>';
+  var html = '';
+  COVERAGE_GROUPS.forEach(function(group) {
+    html += '<div class="folder-cov-title">' + group.title + '</div>';
+    html += '<div class="folder-cov-grid">';
+    group.fields.forEach(function(f) {
+      var count = folder[f.key] || 0;
+      var pct = Math.round((count / total) * 100);
+      html += '<div class="bar-row cov-bar">' +
+        '<span class="bar-label" title="' + f.label + ' \u2014 ' + count.toLocaleString() + ' / ' + total.toLocaleString() + '">' + f.label + '</span>' +
+        '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
+        '<span class="cov-pct">' + pct + '%</span>' +
+      '</div>';
+    });
+    html += '</div>';
   });
-  html += '</div>';
   return html;
 }
 
