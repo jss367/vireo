@@ -223,6 +223,57 @@ def test_mask_toggle_off_clears_pending_onload(live_server, page):
     ), "mask overlay must stay hidden after a late load fires while toggled off"
 
 
+def test_mask_toggle_off_then_on_after_failed_load_stays_hidden(live_server, page):
+    """Toggling masks off then back on after a failed load must not surface
+    a broken-image overlay through the same-URL fast path.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.evaluate("localStorage.removeItem('vireo.lb.masksVisible');")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.dblclick()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+
+    # Drive the overlay to a known failed-load state via a real 404 URL.
+    # _lbApplyMaskVisibility() assigns onerror which removes `show`.
+    page.evaluate(
+        """
+        _lbMasksVisible = true;
+        _lbMaskCurrentUrl = '/__definitely_missing__/mask.png';
+        _lbApplyMaskVisibility();
+        """
+    )
+    # Wait until the browser settles the request (onerror has fired).
+    page.wait_for_function(
+        "document.getElementById('lightboxMaskOverlay').complete"
+        " && document.getElementById('lightboxMaskOverlay').naturalWidth === 0",
+        timeout=3000,
+    )
+    assert not page.locator("#lightboxMaskOverlay").evaluate(
+        "el => el.classList.contains('show')"
+    ), "failed load should leave the overlay hidden"
+
+    # User toggles masks off, then back on. The src never changes, so the
+    # same-URL branch in _lbApplyMaskVisibility() runs. It must NOT add
+    # `show`, since the previous load failed and would render as a
+    # broken-image icon.
+    page.evaluate(
+        """
+        _lbMasksVisible = false;
+        _lbApplyMaskVisibility();
+        _lbMasksVisible = true;
+        _lbApplyMaskVisibility();
+        """
+    )
+    assert not page.locator("#lightboxMaskOverlay").evaluate(
+        "el => el.classList.contains('show')"
+    ), "same-URL re-show after a failed load must not reveal a broken overlay"
+
+
 def test_lightbox_close_menu_item_closes_overlay(live_server, page):
     """The 'Close Lightbox' menu item dismisses the overlay."""
     url = live_server["url"]
