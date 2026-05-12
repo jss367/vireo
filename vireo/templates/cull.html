@@ -395,7 +395,7 @@ body { padding-bottom: 36px; }
 <script>
 var cullData = null;
 var pipelineResults = null;
-var selectedCollectionIds = null;
+var selectedCollectionId = null;
 var expandedSpecies = {};
 var _reflowTimer = null;
 var _regroupTimer = null;
@@ -433,16 +433,15 @@ async function loadCollections() {
 
 async function onCullCollectionChange() {
   var val = document.getElementById('cullCollection').value;
-  selectedCollectionIds = null;
-  if (val) {
-    try {
-      var data = await safeFetch('/api/collections/' + val + '/photos?per_page=999999', {}, { toast: false });
-      selectedCollectionIds = new Set((data.photos || []).map(function(p) { return p.id; }));
-    } catch(e) {
-      selectedCollectionIds = null;
-    }
+  var parsed = val ? parseInt(val, 10) : NaN;
+  selectedCollectionId = isFinite(parsed) ? parsed : null;
+  // Re-run analysis whenever the scope changes so KEEP/REVIEW/REJECT
+  // labels are computed against the selected collection's photos only.
+  // Filtering the existing workspace-wide results client-side would
+  // leave the labels influenced by photos outside the collection.
+  if (pipelineResults) {
+    runCulling();
   }
-  rebuildCullDataFromPipeline();
 }
 
 async function loadPipelineSliderDefaults() {
@@ -607,12 +606,18 @@ function setPipelineResults(data, statusText) {
   }
 }
 
+function pipelineBody(config) {
+  var body = {config: config};
+  if (selectedCollectionId != null) body.collection_id = selectedCollectionId;
+  return body;
+}
+
 function doReflow() {
   if (!pipelineResults) return runCulling();
   safeFetch('/api/pipeline/reflow', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({config: getScoringConfig()}),
+    body: JSON.stringify(pipelineBody(getScoringConfig())),
   }, { toast: false })
   .then(function(data) {
     if (data && !data.error) setPipelineResults(data);
@@ -628,7 +633,7 @@ function doRegroupLive() {
   safeFetch('/api/pipeline/regroup-live', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({config: config}),
+    body: JSON.stringify(pipelineBody(config)),
   }, { toast: false })
   .then(function(data) {
     if (data && !data.error) setPipelineResults(data);
@@ -649,10 +654,11 @@ async function runCulling() {
   status.textContent = 'Analyzing pipeline...';
   status.style.color = 'var(--text-dim)';
   try {
+    var config = Object.assign({}, getGroupingConfig(), getScoringConfig());
     var data = await safeFetch('/api/pipeline/regroup-live', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({config: Object.assign({}, getGroupingConfig(), getScoringConfig())}),
+      body: JSON.stringify(pipelineBody(config)),
     }, { toast: false });
     setPipelineResults(data, 'Analysis complete!');
   } catch(e) {
@@ -726,7 +732,7 @@ function pipelineToCullData(results) {
 
   results.encounters.forEach(function(enc, ei) {
     var encIds = (enc.photo_ids || []).filter(function(pid) {
-      return photoMap[pid] && (!selectedCollectionIds || selectedCollectionIds.has(pid));
+      return !!photoMap[pid];
     });
     if (!encIds.length) return;
 

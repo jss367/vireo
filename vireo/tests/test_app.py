@@ -1157,6 +1157,15 @@ def test_cull_page_uses_pipeline_controls(app_and_db):
     assert 'id="slBurstEmb"' in html
     assert "/api/pipeline/regroup-live" in html
     assert "/api/jobs/cull" not in html
+    # Cull must send collection_id to the pipeline endpoints so scoring
+    # is computed against the selected collection only. Without this,
+    # KEEP/REVIEW/REJECT labels are influenced by photos outside the
+    # collection and the client-only filter just hides them post-hoc.
+    assert "collection_id" in html
+    # Filtering via the API + per_page=999999 is a footgun — the
+    # collection-photos endpoint clamps per_page to 500, so large
+    # collections silently truncate. Server-side scoping replaces it.
+    assert "per_page=999999" not in html
 
 
 def test_static_vireo_utils_served(app_and_db):
@@ -4251,6 +4260,156 @@ def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
         assert "score" in sample
         assert "decision" in sample
         assert "components" in sample
+
+
+def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
+    """/api/pipeline/regroup-live with collection_id must:
+
+    1. Only score photos in the collection — the response's photos and
+       encounters reference only that subset.
+    2. Reject invalid collection_id values.
+    3. Not clobber the workspace-wide cached pipeline state, so the
+       pipeline-review page keeps seeing its own results after Cull
+       runs a scoped analysis.
+    """
+    from datetime import datetime, timedelta
+
+    import numpy as np
+    from db import Database
+    from dino_embed import embedding_to_blob
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+    from pipeline import load_results_raw
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    base_time = datetime(2026, 3, 20, 10, 0, 0)
+    collection_pids = []
+    other_pids = []
+    for enc_idx in range(2):
+        emb_base = np.zeros(768, dtype=np.float32)
+        emb_base[enc_idx * 100: enc_idx * 100 + 100] = 1.0
+        emb_base = emb_base / np.linalg.norm(emb_base)
+        enc_offset = enc_idx * 300
+        for i in range(3):
+            ts = base_time + timedelta(seconds=enc_offset + i * 2)
+            pid = db.add_photo(
+                fid, f"enc{enc_idx}_p{i}.jpg", ".jpg", 1000, 1.0,
+                timestamp=ts.isoformat(), width=4000, height=3000,
+            )
+            emb = emb_base + np.random.RandomState(pid).randn(768).astype(np.float32) * 0.01
+            emb = emb / np.linalg.norm(emb)
+            db.update_photo_pipeline_features(
+                pid,
+                mask_path=f"/masks/{pid}.png",
+                subject_tenengrad=200 + i * 50,
+                bg_tenengrad=30 + i * 5,
+                crop_complete=0.85 + i * 0.03,
+                bg_separation=50.0 - i * 10,
+                subject_clip_high=0.01,
+                subject_clip_low=0.01,
+                subject_y_median=120.0,
+                phash_crop=f"{pid:016x}",
+            )
+            db.update_photo_embeddings(
+                pid,
+                dino_subject_embedding=embedding_to_blob(emb),
+                dino_global_embedding=embedding_to_blob(emb),
+            )
+            db.update_photo_quality(pid, subject_size=0.08 + i * 0.02)
+            det_ids = db.save_detections(pid, [
+                {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
+            ], detector_model="megadetector")
+            species = "robin" if enc_idx == 0 else "eagle"
+            db.add_prediction(det_ids[0], species, 0.9 - i * 0.05, "bioclip", category="match")
+            (collection_pids if enc_idx == 0 else other_pids).append(pid)
+
+    import json as _json
+    cid = db.add_collection(
+        "robins-only",
+        _json.dumps([{"field": "photo_ids", "value": collection_pids}]),
+    )
+    db.close()
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
+    client = app.test_client()
+
+    # First, a workspace-wide run primes the workspace cache.
+    resp = client.post("/api/pipeline/regroup-live", json={"config": {}})
+    assert resp.status_code == 200, resp.get_json()
+    full = resp.get_json()
+    full_photo_ids = {p["id"] for p in full["photos"]}
+    assert collection_pids[0] in full_photo_ids
+    assert other_pids[0] in full_photo_ids
+
+    cache_dir = os.path.dirname(db_path)
+    cached_before = load_results_raw(cache_dir, ws_id)
+    assert cached_before is not None
+    cached_before_pids = {p["id"] for p in cached_before["photos"]}
+
+    # Scoped run — only the collection's photos should appear.
+    resp = client.post(
+        "/api/pipeline/regroup-live",
+        json={"config": {}, "collection_id": cid},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    scoped = resp.get_json()
+    scoped_pids = {p["id"] for p in scoped["photos"]}
+    assert scoped_pids == set(collection_pids), (
+        f"scoped response leaked non-collection photos: "
+        f"{scoped_pids ^ set(collection_pids)}"
+    )
+    for enc in scoped["encounters"]:
+        for pid in enc["photo_ids"]:
+            assert pid in collection_pids, (
+                f"encounter contains out-of-scope photo {pid}"
+            )
+
+    # Workspace cache must be untouched — pipeline-review should still
+    # see the workspace-wide results, not the Cull-scoped subset.
+    cached_after = load_results_raw(cache_dir, ws_id)
+    cached_after_pids = {p["id"] for p in cached_after["photos"]}
+    assert cached_after_pids == cached_before_pids, (
+        "scoped regroup-live clobbered the workspace pipeline cache"
+    )
+
+    # Reflow with collection_id behaves the same.
+    resp = client.post(
+        "/api/pipeline/reflow",
+        json={"config": {}, "collection_id": cid},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    reflow_pids = {p["id"] for p in resp.get_json()["photos"]}
+    assert reflow_pids == set(collection_pids)
+    cached_after_reflow = load_results_raw(cache_dir, ws_id)
+    assert {p["id"] for p in cached_after_reflow["photos"]} == cached_before_pids
+
+    # Validation: non-numeric collection_id is rejected.
+    resp = client.post(
+        "/api/pipeline/regroup-live",
+        json={"config": {}, "collection_id": "not-a-number"},
+    )
+    assert resp.status_code == 400
+    resp = client.post(
+        "/api/pipeline/reflow",
+        json={"config": {}, "collection_id": True},
+    )
+    assert resp.status_code == 400
 
 
 def test_save_grouping_defaults_persists_to_config(tmp_path, monkeypatch):

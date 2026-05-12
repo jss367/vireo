@@ -616,6 +616,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Return a JSON error response. Standard shape: {"error": "msg"}."""
         return jsonify({"error": msg}), status
 
+    def _coerce_collection_id(raw):
+        """Parse an optional collection_id from a request body.
+
+        Returns ``None`` if absent/blank, an ``int`` if valid, or the
+        sentinel ``False`` if present but unparseable (so callers can
+        distinguish "not provided" from "invalid"). ``bool`` is rejected
+        because it's an ``int`` subclass.
+        """
+        if raw is None or raw == "":
+            return None
+        if isinstance(raw, bool):
+            return False
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, str):
+            try:
+                return int(raw)
+            except ValueError:
+                return False
+        return False
+
     def _get_db():
         """Get a Database instance. One connection per request via Flask g."""
         if "db" not in g:
@@ -10784,6 +10805,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         Instant (milliseconds) — no model inference, no regrouping.
         Takes threshold overrides in the request body, re-scores and
         re-triages the existing encounter/burst grouping.
+
+        When ``collection_id`` is provided, photos are scoped to that
+        collection and results are NOT saved to the workspace cache (so
+        Cull's ephemeral scoped run doesn't clobber pipeline-review's
+        workspace-wide cached state).
         """
         from pipeline import (
             load_photo_features,
@@ -10796,6 +10822,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         body = request.get_json(silent=True) or {}
         overrides = body.get("config", {})
+        collection_id = _coerce_collection_id(body.get("collection_id"))
+        if collection_id is False:
+            return json_error("collection_id must be an integer")
 
         import config as cfg
 
@@ -10806,7 +10835,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Load features and re-group (grouping is fast, seconds)
         # We re-group to have the full photo dicts with numpy arrays
         # (the cached JSON doesn't have embeddings)
-        photos = load_photo_features(db, config=effective_cfg)
+        photos = load_photo_features(
+            db, collection_id=collection_id, config=effective_cfg
+        )
         if not photos:
             return json_error("No photos with pipeline features", 404)
 
@@ -10825,8 +10856,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if existing and existing.get("miss_computed_at"):
             results["miss_computed_at"] = existing["miss_computed_at"]
 
-        # Save updated results
-        save_results(results, cache_dir, db._active_workspace_id)
+        if collection_id is None:
+            save_results(results, cache_dir, db._active_workspace_id)
 
         return jsonify(serialize_results(results))
 
@@ -10836,6 +10867,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         Slightly slower than reflow (seconds) because it re-runs encounter
         segmentation and burst clustering in addition to scoring/triage.
+
+        When ``collection_id`` is provided, photos are scoped to that
+        collection and results are NOT saved to the workspace cache (so
+        Cull's ephemeral scoped run doesn't clobber pipeline-review's
+        workspace-wide cached state).
         """
         from pipeline import (
             load_photo_features,
@@ -10847,6 +10883,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         body = request.get_json(silent=True) or {}
         overrides = body.get("config", {})
+        collection_id = _coerce_collection_id(body.get("collection_id"))
+        if collection_id is False:
+            return json_error("collection_id must be an integer")
 
         import config as cfg
 
@@ -10854,7 +10893,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = {**effective_cfg.get("pipeline", {}), **overrides}
 
-        photos = load_photo_features(db, config=effective_cfg)
+        photos = load_photo_features(
+            db, collection_id=collection_id, config=effective_cfg
+        )
         if not photos:
             return json_error("No photos with pipeline features", 404)
 
@@ -10871,7 +10912,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if existing and existing.get("miss_computed_at"):
             results["miss_computed_at"] = existing["miss_computed_at"]
 
-        save_results(results, cache_dir, db._active_workspace_id)
+        if collection_id is None:
+            save_results(results, cache_dir, db._active_workspace_id)
 
         return jsonify(serialize_results(results))
 
