@@ -1355,6 +1355,7 @@ function escapeHtml(s) {
 }
 
 function speciesNameArg(name) {
+  if (name == null) return "''";
   return "'" + escapeHtml(String(name).replace(/\\/g, '\\\\').replace(/'/g, "\\'")) + "'";
 }
 

@@ -90,3 +90,10 @@ def test_predictionless_pipeline_encounter_can_add_species(live_server, page):
         (*photo_ids, "Yellow-breasted Chat"),
     ).fetchall()
     assert {r["id"] for r in rows} == set(photo_ids)
+
+
+def test_species_name_arg_keeps_nullish_values_empty(live_server, page):
+    page.goto(f"{live_server['url']}/pipeline/review")
+
+    assert page.evaluate("speciesNameArg(null)") == "''"
+    assert page.evaluate("speciesNameArg(undefined)") == "''"
