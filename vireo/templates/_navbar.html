@@ -3006,9 +3006,16 @@ function _lbApplyMaskVisibility() {
   };
   if (img.getAttribute('src') !== _lbMaskCurrentUrl) {
     img.src = _lbMaskCurrentUrl;
-  } else {
+  } else if (img.naturalWidth > 0) {
+    // Same URL and we know it loaded successfully — safe to re-show
+    // without re-fetching.
     img.classList.add('show');
   }
+  // If src matches but naturalWidth is 0, the previous load either failed
+  // (onerror already hid the overlay; re-adding `show` would surface a
+  // broken-image icon) or is still in flight (the onload assigned above
+  // will add `show` when the request resolves). Either way, don't add
+  // `show` here.
 }
 
 function _lbApplyMaskUrl(url) {
