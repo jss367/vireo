@@ -47,6 +47,11 @@ runs:
         echo
 
         if [[ "${status}" -lt 200 || "${status}" -ge 300 ]]; then
+          error_type=$(jq -r '.error.type // empty' < "${response}")
+          if [[ "${status}" == "429" && "${error_type}" == "rate_limit_error" ]]; then
+            echo "::warning::Routine fire skipped because the routine provider returned a rate-limit/quota error."
+            exit 0
+          fi
           echo "::error::Routine fire failed with status ${status}"
           exit 1
         fi

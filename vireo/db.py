@@ -15,6 +15,8 @@ log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
 
+_SQLITE_PARAM_CHUNK_SIZE = 800
+
 
 def _nfc(name: str) -> str:
     """NFC-normalize a filename for byte-exact comparison against scandir output.
@@ -30,6 +32,18 @@ def _nfc(name: str) -> str:
     falls back to ``os.path.exists`` on miss, deferring case rules to the kernel.
     """
     return unicodedata.normalize("NFC", name)
+
+
+def _path_for_subtree_match(value: str) -> str:
+    """Normalize a stored path for platform-neutral subtree prefix matching."""
+    return value.replace("\\", "/").rstrip("/")
+
+
+def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
+    values = list(values)
+    for idx in range(0, len(values), size):
+        yield values[idx:idx + size]
+
 
 # Canonical set of keyword type values stored in keywords.type.
 # - taxonomy: a species/genus/etc. (linked to taxa via taxon_id)
@@ -330,6 +344,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS workspace_folders (
                 workspace_id    INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
                 folder_id       INTEGER REFERENCES folders(id),
+                is_root         INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (workspace_id, folder_id)
             );
 
@@ -683,6 +698,32 @@ class Database:
             self.conn.execute("SELECT pinned_at FROM workspaces LIMIT 0")
         except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE workspaces ADD COLUMN pinned_at TEXT")
+        # Migration: distinguish user-facing workspace roots from internal
+        # descendant links materialized for recursive roots.
+        try:
+            self.conn.execute("SELECT is_root FROM workspace_folders LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE workspace_folders "
+                "ADD COLUMN is_root INTEGER NOT NULL DEFAULT 1"
+            )
+            self.conn.execute(
+                """UPDATE workspace_folders AS child_wf
+                   SET is_root = 0
+                   WHERE EXISTS (
+                     SELECT 1
+                     FROM workspace_folders AS root_wf
+                     JOIN folders root ON root.id = root_wf.folder_id
+                     JOIN folders child ON child.id = child_wf.folder_id
+                     WHERE root_wf.workspace_id = child_wf.workspace_id
+                       AND root_wf.folder_id != child_wf.folder_id
+                       AND substr(
+                         REPLACE(child.path, '\\', '/'),
+                         1,
+                         length(RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/')
+                       ) = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
+                   )"""
+            )
         # Migration: working-copy failure markers. Backfill (and the inline
         # scan extraction) record a failure here when extract_working_copy
         # returns False, gated by file_mtime so a user-replaced file retries
@@ -1185,12 +1226,47 @@ class Database:
         # data until TTL expiry.
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
-    def add_workspace_folder(self, workspace_id, folder_id):
-        """Link a folder to a workspace."""
-        self.conn.execute(
-            "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
-            (workspace_id, folder_id),
+    def _folder_subtree_ids_by_path(self, folder_id):
+        """Return folder_id plus known descendants, using paths as fallback.
+
+        Older databases can contain child folders whose ``parent_id`` is NULL
+        even though their paths clearly live below a parent. Path-prefix
+        matching keeps recursive workspace roots working for those rows too.
+        """
+        row = self.conn.execute(
+            "SELECT path FROM folders WHERE id = ?", (folder_id,)
+        ).fetchone()
+        if row is None or not row["path"]:
+            return [folder_id]
+        root_path = _path_for_subtree_match(row["path"])
+        prefix = root_path + "/"
+        rows = self.conn.execute(
+            """SELECT id FROM folders
+               WHERE id = ?
+                  OR substr(REPLACE(path, '\\', '/'), 1, ?) = ?""",
+            (folder_id, len(prefix), prefix),
+        ).fetchall()
+        ids = {folder_id}
+        ids.update(r["id"] for r in rows)
+        return list(ids)
+
+    def add_workspace_folder(self, workspace_id, folder_id, *, is_root=True):
+        """Link a folder and its known descendants to a workspace."""
+        folder_ids = self._folder_subtree_ids_by_path(folder_id)
+        self.conn.executemany(
+            """INSERT OR IGNORE INTO workspace_folders
+               (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
+            [(workspace_id, fid) for fid in folder_ids],
         )
+        if is_root:
+            for chunk in _chunks(folder_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"""UPDATE workspace_folders
+                        SET is_root = CASE WHEN folder_id = ? THEN 1 ELSE 0 END
+                        WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+                    [folder_id, workspace_id] + chunk,
+                )
         self.conn.commit()
         # The folder's untracked files now count toward this workspace's
         # new-images backlog. Drop any stale cached payload so the next read
@@ -1198,7 +1274,7 @@ class Database:
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def remove_workspace_folder(self, workspace_id, folder_id):
-        """Unlink a folder from a workspace."""
+        """Unlink a single folder from a workspace."""
         self.conn.execute(
             "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
             (workspace_id, folder_id),
@@ -1208,12 +1284,88 @@ class Database:
         # backlog. Drop the cached payload so the banner reflects the change.
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
+    def remove_workspace_folder_tree(self, workspace_id, folder_id):
+        """Unlink a folder and its path descendants from a workspace."""
+        folder_ids = self._folder_subtree_ids_by_path(folder_id)
+        for chunk in _chunks(folder_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"""DELETE FROM workspace_folders
+                    WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+                [workspace_id] + chunk,
+            )
+        self.conn.commit()
+        # The folder no longer contributes to this workspace's new-images
+        # backlog. Drop the cached payload so the banner reflects the change.
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
+
+    def _materialize_workspace_descendants(self, workspace_id):
+        """Ensure linked folders include all known path descendants."""
+        rows = self.conn.execute(
+            """SELECT DISTINCT child.id
+               FROM workspace_folders wf
+               JOIN folders root ON root.id = wf.folder_id
+               JOIN folders child
+                 ON child.path = root.path
+                 OR substr(
+                      REPLACE(child.path, '\\', '/'),
+                      1,
+                      length(RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/')
+                    ) = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
+               LEFT JOIN workspace_folders existing
+                 ON existing.workspace_id = wf.workspace_id
+                AND existing.folder_id = child.id
+               WHERE wf.workspace_id = ?
+                 AND existing.folder_id IS NULL""",
+            (workspace_id,),
+        ).fetchall()
+        if not rows:
+            return
+        self.conn.executemany(
+            """INSERT OR IGNORE INTO workspace_folders
+               (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
+            [(workspace_id, r["id"]) for r in rows],
+        )
+        self.conn.commit()
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
+
+    def mark_workspace_folder_roots(self, workspace_id, folder_ids):
+        """Mark specific linked folders as user-facing roots."""
+        if not folder_ids:
+            return
+        for chunk in _chunks(folder_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"""UPDATE workspace_folders
+                    SET is_root = 1
+                    WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+                [workspace_id] + chunk,
+            )
+        self.conn.commit()
+
     def get_workspace_folders(self, workspace_id):
-        """Return all folders linked to a workspace."""
+        """Return all explicit folder links for a workspace.
+
+        Parent folders are recursive roots: if a linked folder has known
+        descendants in ``folders``, keep those descendants linked internally so
+        existing workspace-scoped photo queries continue to work.
+        """
+        self._materialize_workspace_descendants(workspace_id)
         return self.conn.execute(
             """SELECT f.* FROM folders f
                JOIN workspace_folders wf ON wf.folder_id = f.id
                WHERE wf.workspace_id = ?
+               ORDER BY f.path""",
+            (workspace_id,),
+        ).fetchall()
+
+    def get_workspace_folder_roots(self, workspace_id):
+        """Return user-facing workspace roots, hiding covered descendants."""
+        self._materialize_workspace_descendants(workspace_id)
+        return self.conn.execute(
+            """SELECT f.* FROM folders f
+               JOIN workspace_folders wf ON wf.folder_id = f.id
+               WHERE wf.workspace_id = ? AND wf.is_root = 1
                ORDER BY f.path""",
             (workspace_id,),
         ).fetchall()
@@ -1280,17 +1432,47 @@ class Database:
         if not folder_ids:
             return {"folders_moved": 0, "pending_changes_moved": 0}
 
-        placeholders = ",".join("?" for _ in folder_ids)
+        selected_folder_ids = set(folder_ids)
+        source_folder_paths = {
+            folder["id"]: _path_for_subtree_match(folder["path"])
+            for folder in source_folders
+            if folder["path"]
+        }
+        remaining_source_paths = [
+            path
+            for fid, path in source_folder_paths.items()
+            if fid not in selected_folder_ids
+        ]
+        for fid in selected_folder_ids:
+            selected_path = source_folder_paths.get(fid)
+            if selected_path and any(
+                selected_path.startswith(path + "/") for path in remaining_source_paths
+            ):
+                raise ValueError(
+                    "Cannot move a folder that is covered by another source "
+                    "workspace folder; move the covering folder or remove it first"
+                )
+
+        moved_folder_ids = []
+        seen_folder_ids = set()
+        for fid in folder_ids:
+            for subtree_id in self._folder_subtree_ids_by_path(fid):
+                if subtree_id in source_folder_ids and subtree_id not in seen_folder_ids:
+                    seen_folder_ids.add(subtree_id)
+                    moved_folder_ids.append(subtree_id)
 
         try:
             # Move pending_changes
-            cur = self.conn.execute(
-                f"""UPDATE pending_changes SET workspace_id = ?
-                    WHERE workspace_id = ?
-                    AND photo_id IN (SELECT id FROM photos WHERE folder_id IN ({placeholders}))""",
-                [target_ws_id, source_ws_id] + list(folder_ids),
-            )
-            pending_changes_moved = cur.rowcount
+            pending_changes_moved = 0
+            for chunk in _chunks(moved_folder_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                cur = self.conn.execute(
+                    f"""UPDATE pending_changes SET workspace_id = ?
+                        WHERE workspace_id = ?
+                        AND photo_id IN (SELECT id FROM photos WHERE folder_id IN ({placeholders}))""",
+                    [target_ws_id, source_ws_id] + chunk,
+                )
+                pending_changes_moved += cur.rowcount
 
             # Move prediction_review rows for predictions whose photo is in
             # the moved folders. Without this the accepted/rejected/group
@@ -1302,48 +1484,62 @@ class Database:
             # source. That way if the target already has a review row for
             # the same (prediction_id), we keep the target's value rather
             # than overwriting it.
-            self.conn.execute(
-                f"""INSERT OR IGNORE INTO prediction_review
-                      (prediction_id, workspace_id, status, reviewed_at,
-                       individual, group_id, vote_count, total_votes)
-                    SELECT pr_rev.prediction_id, ?, pr_rev.status,
-                           pr_rev.reviewed_at, pr_rev.individual,
-                           pr_rev.group_id, pr_rev.vote_count,
-                           pr_rev.total_votes
-                    FROM prediction_review pr_rev
-                    JOIN predictions p ON p.id = pr_rev.prediction_id
-                    JOIN detections d ON d.id = p.detection_id
-                    WHERE pr_rev.workspace_id = ?
-                      AND d.photo_id IN (
-                          SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                      )""",
-                [target_ws_id, source_ws_id] + list(folder_ids),
-            )
-            self.conn.execute(
-                f"""DELETE FROM prediction_review
-                    WHERE workspace_id = ?
-                      AND prediction_id IN (
-                          SELECT pr_rev.prediction_id
-                          FROM prediction_review pr_rev
-                          JOIN predictions p ON p.id = pr_rev.prediction_id
-                          JOIN detections d ON d.id = p.detection_id
-                          WHERE pr_rev.workspace_id = ?
-                            AND d.photo_id IN (
-                                SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                            )
-                      )""",
-                [source_ws_id, source_ws_id] + list(folder_ids),
-            )
+            for chunk in _chunks(moved_folder_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"""INSERT OR IGNORE INTO prediction_review
+                          (prediction_id, workspace_id, status, reviewed_at,
+                           individual, group_id, vote_count, total_votes)
+                        SELECT pr_rev.prediction_id, ?, pr_rev.status,
+                               pr_rev.reviewed_at, pr_rev.individual,
+                               pr_rev.group_id, pr_rev.vote_count,
+                               pr_rev.total_votes
+                        FROM prediction_review pr_rev
+                        JOIN predictions p ON p.id = pr_rev.prediction_id
+                        JOIN detections d ON d.id = p.detection_id
+                        WHERE pr_rev.workspace_id = ?
+                          AND d.photo_id IN (
+                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                          )""",
+                    [target_ws_id, source_ws_id] + chunk,
+                )
+                self.conn.execute(
+                    f"""DELETE FROM prediction_review
+                        WHERE workspace_id = ?
+                          AND prediction_id IN (
+                              SELECT pr_rev.prediction_id
+                              FROM prediction_review pr_rev
+                              JOIN predictions p ON p.id = pr_rev.prediction_id
+                              JOIN detections d ON d.id = p.detection_id
+                              WHERE pr_rev.workspace_id = ?
+                                AND d.photo_id IN (
+                                    SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                                )
+                          )""",
+                    [source_ws_id, source_ws_id] + chunk,
+                )
 
             # Move workspace_folders: remove from source, add to target
-            self.conn.execute(
-                f"DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id IN ({placeholders})",
-                [source_ws_id] + list(folder_ids),
-            )
-            for fid in folder_ids:
+            for chunk in _chunks(moved_folder_ids):
+                placeholders = ",".join("?" for _ in chunk)
                 self.conn.execute(
-                    "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
-                    (target_ws_id, fid),
+                    f"""DELETE FROM workspace_folders
+                        WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+                    [source_ws_id] + chunk,
+                )
+            self.conn.executemany(
+                """INSERT OR IGNORE INTO workspace_folders
+                   (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
+                [(target_ws_id, fid) for fid in moved_folder_ids],
+            )
+            for chunk in _chunks(folder_ids):
+                selected_placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"""UPDATE workspace_folders
+                        SET is_root = 1
+                        WHERE workspace_id = ?
+                          AND folder_id IN ({selected_placeholders})""",
+                    [target_ws_id] + chunk,
                 )
 
             self.conn.commit()
@@ -1458,8 +1654,12 @@ class Database:
 
     # -- Folders --
 
-    def add_folder(self, path, name=None, parent_id=None):
+    def add_folder(self, path, name=None, parent_id=None, *, workspace_root=True):
         """Insert a folder. Automatically links it to the active workspace.
+
+        ``workspace_root`` controls whether that automatic link is a
+        user-facing workspace root. Scanner-discovered descendants pass
+        ``False`` so recursive roots do not expand over time.
 
         Returns the folder id.
         """
@@ -1477,7 +1677,11 @@ class Database:
             folder_id = row["id"]
         # Auto-link to active workspace
         if self._active_workspace_id is not None:
-            self.add_workspace_folder(self._active_workspace_id, folder_id)
+            self.add_workspace_folder(
+                self._active_workspace_id,
+                folder_id,
+                is_root=workspace_root,
+            )
         return folder_id
 
     def get_folder_tree(self):
@@ -1829,12 +2033,26 @@ class Database:
             (target_folder_id, source_folder_id),
         )
 
-        # Transfer workspace visibility from source to target
-        self.conn.execute(
-            "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) "
-            "SELECT workspace_id, ? FROM workspace_folders WHERE folder_id = ?",
-            (target_folder_id, source_folder_id),
-        )
+        # Transfer workspace visibility from source to target while preserving
+        # whether the source link was a user-facing root or a materialized
+        # descendant.
+        workspace_links = self.conn.execute(
+            "SELECT workspace_id, is_root FROM workspace_folders WHERE folder_id = ?",
+            (source_folder_id,),
+        ).fetchall()
+        for link in workspace_links:
+            self.conn.execute(
+                """INSERT OR IGNORE INTO workspace_folders
+                   (workspace_id, folder_id, is_root) VALUES (?, ?, ?)""",
+                (link["workspace_id"], target_folder_id, link["is_root"]),
+            )
+            if link["is_root"]:
+                self.conn.execute(
+                    """UPDATE workspace_folders
+                       SET is_root = 1
+                       WHERE workspace_id = ? AND folder_id = ?""",
+                    (link["workspace_id"], target_folder_id),
+                )
 
         # Remove source folder
         self.conn.execute(

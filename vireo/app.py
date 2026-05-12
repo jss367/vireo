@@ -3404,7 +3404,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not ws:
             return json_error("No active workspace", 404)
         result = dict(ws)
-        result["folders"] = [dict(f) for f in db.get_workspace_folders(ws["id"])]
+        result["folders"] = [dict(f) for f in db.get_workspace_folder_roots(ws["id"])]
         return jsonify(result)
 
     @app.route("/api/workspaces", methods=["POST"])
@@ -3417,8 +3417,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             ws_id = db.create_workspace(name, config_overrides=body.get("config_overrides"))
             # Link selected folders if provided
-            for folder_id in body.get("folder_ids", []):
+            folder_ids = body.get("folder_ids", [])
+            for folder_id in folder_ids:
                 db.add_workspace_folder(ws_id, folder_id)
+            db.mark_workspace_folder_roots(ws_id, folder_ids)
             ws = db.get_workspace(ws_id)
             return jsonify(dict(ws))
         except Exception as e:
@@ -3508,7 +3510,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/workspaces/<int:ws_id>/folders", methods=["GET"])
     def api_workspace_folders(ws_id):
         db = _get_db()
-        folders = db.get_workspace_folders(ws_id)
+        folders = db.get_workspace_folder_roots(ws_id)
         return jsonify([dict(f) for f in folders])
 
     @app.route("/api/workspaces/<int:ws_id>/folders", methods=["POST"])
@@ -3524,7 +3526,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/workspaces/<int:ws_id>/folders/<int:folder_id>", methods=["DELETE"])
     def api_remove_workspace_folder(ws_id, folder_id):
         db = _get_db()
-        db.remove_workspace_folder(ws_id, folder_id)
+        db.remove_workspace_folder_tree(ws_id, folder_id)
         return jsonify({"ok": True})
 
     @app.route("/api/workspaces/<int:ws_id>/move-folders", methods=["POST"])
