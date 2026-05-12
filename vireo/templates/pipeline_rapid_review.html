@@ -502,6 +502,7 @@ var rapid = {
   currentIndex: -1,
   seeded: false,
   applying: false,
+  loadError: false,
   // Bumped on each openSession; used to drop stale /group/state responses
   // when the user switches bursts before the previous fetch resolves.
   openToken: 0,
@@ -605,6 +606,7 @@ async function openSession(index) {
   rapid.history = [];
   rapid.currentIndex = rapid.items.length ? 0 : -1;
   rapid.seeded = false;
+  rapid.loadError = false;
   // Bump the token so any in-flight /group/state fetch from a previous
   // openSession lands as stale and gets ignored when it resolves.
   var token = (rapid.openToken || 0) + 1;
@@ -634,7 +636,12 @@ async function openSession(index) {
     renderAll();
   } catch (e) {
     if (rapid.openToken !== token) return;
-    rapid.seeded = true;
+    // Leave seeded=false so Apply stays disabled. Without a valid
+    // initialFlags snapshot, candidateIdsForApply() would treat any
+    // previously flagged/rejected-but-untouched photos as Review, and
+    // applying would silently clear DB flags that the user can still
+    // see as Pick/Reject — divergence between UI and DB.
+    rapid.loadError = true;
     renderAll();
   }
 }
@@ -759,7 +766,13 @@ function renderAll() {
 function renderCurrent() {
   var session = rapid.sessions[rapid.sessionIndex];
   document.getElementById('burstTitle').textContent = session ? session.title : 'Rapid Review';
-  document.getElementById('burstSubtitle').textContent = session ? session.subtitle : '';
+  var subtitleEl = document.getElementById('burstSubtitle');
+  if (rapid.loadError && session) {
+    subtitleEl.innerHTML = '<span style="color: var(--danger);">Failed to load burst state.</span> ' +
+      '<a class="rapid-link" href="#" onclick="retryOpenSession(event)">Retry</a>';
+  } else {
+    subtitleEl.textContent = session ? session.subtitle : '';
+  }
   var p = currentPhoto();
   var img = document.getElementById('currentPhoto');
   var empty = document.getElementById('stageEmpty');
@@ -940,6 +953,11 @@ async function applyCurrent(openNext) {
     rapid.applying = false;
     renderApplyState();
   }
+}
+
+function retryOpenSession(e) {
+  if (e && e.preventDefault) e.preventDefault();
+  if (rapid.sessionIndex >= 0) openSession(rapid.sessionIndex);
 }
 
 function openClassic() {
