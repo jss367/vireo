@@ -4309,20 +4309,43 @@ class Database:
                 )
         self.conn.commit()
 
+    def prune_pipeline_cache_for_ids(self, ids):
+        """Remove ``ids`` from the workspace's pipeline review cache file.
+
+        Split out from ``delete_photos`` so chunked callers can defer it to
+        after their outer transaction commits — pruning the on-disk cache
+        is not transactional, so running it per-chunk would leave the cache
+        permanently stripped of rows that a later rollback restores.
+        """
+        if not ids or self._db_path == ":memory:" or not self._active_workspace_id:
+            return
+        try:
+            from pipeline import prune_results
+            prune_results(
+                os.path.dirname(self._db_path),
+                self._active_workspace_id,
+                ids,
+            )
+        except Exception:
+            log.exception("Failed to prune pipeline cache after delete")
+
     def delete_photos(self, photo_ids, include_companions=False, commit=True):
         """Delete photos and all associated data.
 
-        Returns dict with 'deleted' count and 'files' list of
+        Returns dict with 'deleted' count, 'ids' list of deleted photo IDs
+        (post-companion-resolution), and 'files' list of
         {photo_id, folder_path, filename, companion_path} for file cleanup.
 
         When ``commit`` is ``False``, this call participates in an outer
         transaction managed by the caller: no ``commit()``/``rollback()`` is
-        issued here, so the caller can chain several ``delete_photos`` calls
-        atomically (used by the batch-delete route to chunk under SQLite's
-        bound-parameter cap without losing all-or-nothing semantics).
+        issued here, **and** the non-DB pipeline-cache prune is skipped so
+        a later failed chunk can roll the DB back without leaving a
+        permanently-mutated cache file on disk. The caller is responsible
+        for invoking ``prune_pipeline_cache_for_ids`` with the union of
+        returned ``ids`` after the outer commit succeeds.
         """
         if not photo_ids:
-            return {"deleted": 0, "files": []}
+            return {"deleted": 0, "ids": [], "files": []}
 
         # Resolve to actual existing photos
         placeholders = ",".join("?" for _ in photo_ids)
@@ -4334,7 +4357,7 @@ class Database:
         ).fetchall()
 
         if not rows:
-            return {"deleted": 0, "files": []}
+            return {"deleted": 0, "ids": [], "files": []}
 
         # Resolve companions
         if include_companions:
@@ -4437,18 +4460,14 @@ class Database:
                 self.invalidate_new_images_cache_for_folders(affected_folder_ids)
 
         # Prune the pipeline review cache so deleted photos don't render as
-        # blank cards on the pipeline review page.
-        if all_ids and self._db_path != ":memory:" and self._active_workspace_id:
-            try:
-                from pipeline import prune_results
-                prune_results(
-                    os.path.dirname(self._db_path),
-                    self._active_workspace_id,
-                    all_ids,
-                )
-            except Exception:
-                log.exception("Failed to prune pipeline cache after delete")
-        return {"deleted": len(all_ids), "files": files}
+        # blank cards on the pipeline review page. Skipped when ``commit`` is
+        # False so chunked callers can defer this non-transactional side
+        # effect until after their outer commit — otherwise a rolled-back
+        # later chunk would leave the on-disk cache permanently stripped of
+        # rows the DB just restored.
+        if commit:
+            self.prune_pipeline_cache_for_ids(all_ids)
+        return {"deleted": len(all_ids), "ids": all_ids, "files": files}
 
     # ------------------------------------------------------------------
     # preview_cache LRU
