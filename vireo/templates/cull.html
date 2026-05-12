@@ -695,11 +695,16 @@ function topSpeciesForPhoto(photo) {
   return 'Unclassified';
 }
 
+function speciesName(value) {
+  if (Array.isArray(value)) return value[0] || 'Unclassified';
+  return value || 'Unclassified';
+}
+
 function speciesForEncounter(enc, photoMap) {
-  if (enc.confirmed_species) return enc.confirmed_species;
-  if (enc.species) return enc.species;
+  if (enc.confirmed_species) return speciesName(enc.confirmed_species);
+  if (enc.species) return speciesName(enc.species);
   var votes = enc.species_predictions || [];
-  if (votes.length && votes[0].species) return votes[0].species;
+  if (votes.length && votes[0].species) return speciesName(votes[0].species);
   var ids = enc.photo_ids || [];
   for (var i = 0; i < ids.length; i++) {
     if (photoMap[ids[i]]) return topSpeciesForPhoto(photoMap[ids[i]]);

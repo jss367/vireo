@@ -1166,6 +1166,10 @@ def test_cull_page_uses_pipeline_controls(app_and_db):
     # collection-photos endpoint clamps per_page to 500, so large
     # collections silently truncate. Server-side scoping replaces it.
     assert "per_page=999999" not in html
+    # Pipeline encounters can serialize species as [name, confidence]; Cull
+    # should group by the stable species name instead of the full tuple.
+    assert "function speciesName" in html
+    assert "Array.isArray(value)" in html
 
 
 def test_static_vireo_utils_served(app_and_db):
