@@ -3391,8 +3391,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             ws_id = db.create_workspace(name, config_overrides=body.get("config_overrides"))
             # Link selected folders if provided
-            for folder_id in body.get("folder_ids", []):
+            folder_ids = body.get("folder_ids", [])
+            for folder_id in folder_ids:
                 db.add_workspace_folder(ws_id, folder_id)
+            db.mark_workspace_folder_roots(ws_id, folder_ids)
             ws = db.get_workspace(ws_id)
             return jsonify(dict(ws))
         except Exception as e:

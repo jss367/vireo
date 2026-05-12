@@ -73,13 +73,13 @@ def test_create_workspace_with_folders(app_and_db):
     assert resp.status_code == 200
     ws_id = resp.get_json()["id"]
 
-    # Verify folders are linked internally while the API exposes roots.
+    # Verify explicitly selected folders are linked and remain visible roots.
     folder_resp = client.get(f"/api/workspaces/{ws_id}/folders")
     assert folder_resp.status_code == 200
     linked = folder_resp.get_json()
-    assert len(db.get_workspace_folders(ws_id)) == len(folder_ids)
-    assert len(linked) == 1
-    assert linked[0]["id"] == folder_ids[0]
+    assert len(linked) == len(folder_ids)
+    linked_ids = {f["id"] for f in linked}
+    assert linked_ids == set(folder_ids)
 
 
 def test_update_workspace(app_and_db):

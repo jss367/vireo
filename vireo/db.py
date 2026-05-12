@@ -344,6 +344,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS workspace_folders (
                 workspace_id    INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
                 folder_id       INTEGER REFERENCES folders(id),
+                is_root         INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (workspace_id, folder_id)
             );
 
@@ -697,6 +698,39 @@ class Database:
             self.conn.execute("SELECT pinned_at FROM workspaces LIMIT 0")
         except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE workspaces ADD COLUMN pinned_at TEXT")
+        # Migration: distinguish user-facing workspace roots from internal
+        # descendant links materialized for recursive roots.
+        try:
+            self.conn.execute("SELECT is_root FROM workspace_folders LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE workspace_folders "
+                "ADD COLUMN is_root INTEGER NOT NULL DEFAULT 1"
+            )
+            self.conn.execute(
+                """UPDATE workspace_folders AS child_wf
+                   SET is_root = 0
+                   WHERE EXISTS (
+                     SELECT 1
+                     FROM workspace_folders AS root_wf
+                     JOIN folders root ON root.id = root_wf.folder_id
+                     JOIN folders child ON child.id = child_wf.folder_id
+                     WHERE root_wf.workspace_id = child_wf.workspace_id
+                       AND root_wf.folder_id != child_wf.folder_id
+                       AND REPLACE(child.path, '\\', '/') LIKE (
+                         REPLACE(
+                           REPLACE(
+                             REPLACE(
+                               RTRIM(REPLACE(root.path, '\\', '/'), '/'),
+                               '\\', '\\\\'
+                             ),
+                             '%', '\\%'
+                           ),
+                           '_', '\\_'
+                         ) || '/%'
+                       ) ESCAPE '\\'
+                   )"""
+            )
         # Migration: working-copy failure markers. Backfill (and the inline
         # scan extraction) record a failure here when extract_working_copy
         # returns False, gated by file_mtime so a user-replaced file retries
@@ -1227,8 +1261,16 @@ class Database:
         """Link a folder and its known descendants to a workspace."""
         folder_ids = self._folder_subtree_ids_by_path(folder_id)
         self.conn.executemany(
-            "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+            """INSERT OR IGNORE INTO workspace_folders
+               (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
             [(workspace_id, fid) for fid in folder_ids],
+        )
+        placeholders = ",".join("?" for _ in folder_ids)
+        self.conn.execute(
+            f"""UPDATE workspace_folders
+                SET is_root = CASE WHEN folder_id = ? THEN 1 ELSE 0 END
+                WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+            [folder_id, workspace_id] + folder_ids,
         )
         self.conn.commit()
         # The folder's untracked files now count toward this workspace's
@@ -1291,8 +1333,22 @@ class Database:
         if not rows:
             return
         self.conn.executemany(
-            "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+            """INSERT OR IGNORE INTO workspace_folders
+               (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
             [(workspace_id, r["id"]) for r in rows],
+        )
+        self.conn.commit()
+
+    def mark_workspace_folder_roots(self, workspace_id, folder_ids):
+        """Mark specific linked folders as user-facing roots."""
+        if not folder_ids:
+            return
+        placeholders = ",".join("?" for _ in folder_ids)
+        self.conn.execute(
+            f"""UPDATE workspace_folders
+                SET is_root = 1
+                WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+            [workspace_id] + list(folder_ids),
         )
         self.conn.commit()
 
@@ -1318,27 +1374,7 @@ class Database:
         return self.conn.execute(
             """SELECT f.* FROM folders f
                JOIN workspace_folders wf ON wf.folder_id = f.id
-               WHERE wf.workspace_id = ?
-                 AND NOT EXISTS (
-                   SELECT 1
-                   FROM workspace_folders awf
-                   JOIN folders ancestor ON ancestor.id = awf.folder_id
-                   WHERE awf.workspace_id = wf.workspace_id
-                     AND ancestor.id != f.id
-                     AND ancestor.photo_count = 0
-                     AND REPLACE(f.path, '\\', '/') LIKE (
-                       REPLACE(
-                         REPLACE(
-                           REPLACE(
-                             RTRIM(REPLACE(ancestor.path, '\\', '/'), '/'),
-                             '\\', '\\\\'
-                           ),
-                           '%', '\\%'
-                         ),
-                         '_', '\\_'
-                       ) || '/%'
-                     ) ESCAPE '\\'
-                 )
+               WHERE wf.workspace_id = ? AND wf.is_root = 1
                ORDER BY f.path""",
             (workspace_id,),
         ).fetchall()
@@ -1473,11 +1509,19 @@ class Database:
                 f"DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id IN ({placeholders})",
                 [source_ws_id] + moved_folder_ids,
             )
-            for fid in moved_folder_ids:
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
-                    (target_ws_id, fid),
-                )
+            self.conn.executemany(
+                """INSERT OR IGNORE INTO workspace_folders
+                   (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
+                [(target_ws_id, fid) for fid in moved_folder_ids],
+            )
+            selected_placeholders = ",".join("?" for _ in folder_ids)
+            self.conn.execute(
+                f"""UPDATE workspace_folders
+                    SET is_root = 1
+                    WHERE workspace_id = ?
+                      AND folder_id IN ({selected_placeholders})""",
+                [target_ws_id] + list(folder_ids),
+            )
 
             self.conn.commit()
         except Exception:
