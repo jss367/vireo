@@ -76,6 +76,7 @@ body { padding-bottom: 36px; }
 }
 .cull-card:hover { border-color: var(--text-ghost); }
 .cull-card.keep { border-color: var(--accent); }
+.cull-card.review { border-color: var(--warning); }
 .cull-card.reject { border-color: var(--danger); opacity: 0.6; }
 .cull-card.best { box-shadow: 0 0 0 2px var(--accent), 0 0 8px rgba(36,229,202,0.3); }
 .cull-card img {
@@ -109,6 +110,10 @@ body { padding-bottom: 36px; }
 .cull-card-action.reject-badge {
   background: var(--danger);
   color: var(--text-primary);
+}
+.cull-card-action.review-badge {
+  background: var(--warning);
+  color: var(--accent-text);
 }
 .cull-quality { color: var(--text-muted); }
 .cull-filename {
@@ -155,6 +160,55 @@ body { padding-bottom: 36px; }
 .btn-primary { background: var(--accent); color: var(--accent-text); }
 .btn-secondary { background: var(--bg-tertiary); color: var(--text-secondary); }
 .btn-danger { background: none; color: var(--danger); border: 1px solid var(--danger); }
+.slider-section-header {
+  margin: 16px 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+}
+.slider-section-header:first-child { margin-top: 0; }
+.slider-section-hint {
+  margin-bottom: 10px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-dim);
+}
+.slider-group { margin-bottom: 8px; }
+.slider-row {
+  display: grid;
+  grid-template-columns: minmax(112px, 150px) minmax(160px, 1fr) 44px;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.slider-label { color: var(--text-secondary); }
+.slider-val {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.slider-row input[type="range"] { accent-color: var(--accent); min-width: 0; }
+.button-row { display: flex; gap: 8px; margin-top: 14px; }
+.reset-btn, .save-btn {
+  padding: 6px 10px;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+}
+.save-btn { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.reflow-indicator {
+  display: none;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--accent);
+}
 </style>
 </head>
 <body>
@@ -181,42 +235,153 @@ body { padding-bottom: 36px; }
   </div>
 
   <div id="cullSettings" style="display:none;background:var(--bg-secondary);border:1px solid var(--border-primary);border-radius:8px;padding:16px;margin-bottom:16px;">
-    <div style="font-size:13px;color:var(--text-primary);font-weight:500;margin-bottom:12px;">Culling Settings</div>
-    <label style="display:flex;align-items:start;gap:8px;font-size:13px;color:var(--text-secondary);cursor:pointer;">
-      <input type="checkbox" id="cullSeparateTypes" checked style="accent-color:var(--accent);margin-top:2px;">
-      <div>
-        Don't compare across file types
-        <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">RAW and JPEG of the same scene are culled separately. A JPEG usually means someone has processed it, so it shouldn't compete with the RAW original.</div>
-      </div>
-    </label>
+    <div style="font-size:13px;color:var(--text-primary);font-weight:500;margin-bottom:12px;">Pipeline Culling Settings</div>
+    <div class="reflow-indicator" id="reflowIndicator">Recomputing...</div>
 
-    <div style="margin-top:14px;font-size:13px;color:var(--text-secondary);">
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">
-        <label for="cullTimeWindow">Time window</label>
-        <input type="range" id="cullTimeWindow" min="5" max="600" value="60" step="5"
-          style="flex:1;max-width:200px;accent-color:var(--accent);">
-        <span id="cullTimeValue" style="font-size:12px;min-width:60px;">60s</span>
+    <div class="slider-section-header">Hard Reject Floors</div>
+    <div class="slider-section-hint">Auto-reject photos that fail any of these quality floors</div>
+    <div class="slider-group">
+      <div class="slider-row">
+        <span class="slider-label" title="Min visible subject in frame - rejects birds clipped by edges">Crop complete</span>
+        <input type="range" min="0" max="100" value="60" step="1" id="slRejectCrop" oninput="onScoringChange(this)">
+        <span class="slider-val" id="valRejectCrop">0.60</span>
       </div>
-      <div style="font-size:11px;color:var(--text-dim);">Photos taken within this window are grouped as the same scene.</div>
+      <div class="slider-row">
+        <span class="slider-label" title="Min subject sharpness rank within the encounter">Focus</span>
+        <input type="range" min="0" max="100" value="35" step="1" id="slRejectFocus" oninput="onScoringChange(this)">
+        <span class="slider-val" id="valRejectFocus">0.35</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-label" title="Max blown-out highlight fraction on the subject">Clip highlights</span>
+        <input type="range" min="0" max="100" value="30" step="1" id="slRejectClip" oninput="onScoringChange(this)">
+        <span class="slider-val" id="valRejectClip">0.30</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-label" title="Min overall quality score">Composite</span>
+        <input type="range" min="0" max="100" value="40" step="1" id="slRejectComposite" oninput="onScoringChange(this)">
+        <span class="slider-val" id="valRejectComposite">0.40</span>
+      </div>
     </div>
 
-    <div style="margin-top:14px;font-size:13px;color:var(--text-secondary);">
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">
-        <label for="cullPhashThreshold">Scene similarity</label>
-        <input type="range" id="cullPhashThreshold" min="0" max="32" value="19" step="1"
-          style="flex:1;max-width:200px;accent-color:var(--accent);">
-        <span id="cullPhashValue" style="font-size:12px;min-width:80px;">Loose (19)</span>
+    <div class="slider-section-header">MMR Selection</div>
+    <div class="slider-section-hint">Pick the best photos from each group while keeping variety</div>
+    <div class="slider-group">
+      <div class="slider-row">
+        <span class="slider-label" title="Quality vs diversity within a burst - higher favors quality">Burst lambda</span>
+        <input type="range" min="0" max="100" value="85" step="1" id="slBurstLambda" oninput="onScoringChange(this)">
+        <span class="slider-val" id="valBurstLambda">0.85</span>
       </div>
-      <div style="font-size:11px;color:var(--text-dim);">How visually similar photos must be to belong to the same scene. Lower = stricter matching, higher = more lenient.</div>
+      <div class="slider-row">
+        <span class="slider-label" title="Max photos to keep from each burst">Burst keep</span>
+        <input type="range" min="1" max="10" value="3" step="1" id="slBurstKeep" oninput="onScoringChange(this)">
+        <span class="slider-val" id="valBurstKeep">3</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-label" title="Quality vs diversity across the encounter - higher favors quality">Enc. lambda</span>
+        <input type="range" min="0" max="100" value="70" step="1" id="slEncLambda" oninput="onScoringChange(this)">
+        <span class="slider-val" id="valEncLambda">0.70</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-label" title="Max photos to keep from each encounter">Enc. keep</span>
+        <input type="range" min="1" max="20" value="5" step="1" id="slEncKeep" oninput="onScoringChange(this)">
+        <span class="slider-val" id="valEncKeep">5</span>
+      </div>
     </div>
 
-    <label style="display:flex;align-items:start;gap:8px;font-size:13px;color:var(--text-secondary);cursor:pointer;margin-top:14px;">
-      <input type="checkbox" id="cullCrossBucket" style="accent-color:var(--accent);margin-top:2px;">
-      <div>
-        Merge scenes that look similar even if taken far apart
-        <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">When enabled, scenes with visually similar photos are merged even if they were taken outside the time window (e.g. bird returned to same perch).</div>
+    <div class="slider-section-header">Encounter cut - signal weights</div>
+    <div class="slider-section-hint">How much each signal contributes to the similarity score between adjacent photos. Re-normalized over signals that have data.</div>
+    <div class="slider-group">
+      <div class="slider-row">
+        <span class="slider-label" title="Weight of time-proximity in S_enc">Time</span>
+        <input type="range" min="0" max="100" value="35" step="1" id="slWTime" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valWTime">0.35</span>
       </div>
-    </label>
+      <div class="slider-row">
+        <span class="slider-label" title="Weight of DINO subject embedding">Subject embed</span>
+        <input type="range" min="0" max="100" value="35" step="1" id="slWSubj" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valWSubj">0.35</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-label" title="Weight of DINO global embedding">Global embed</span>
+        <input type="range" min="0" max="100" value="15" step="1" id="slWGlobal" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valWGlobal">0.15</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-label" title="Weight of per-photo species agreement">Species</span>
+        <input type="range" min="0" max="100" value="10" step="1" id="slWSpecies" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valWSpecies">0.10</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-label" title="Weight of GPS + focal length similarity">Meta (GPS+FL)</span>
+        <input type="range" min="0" max="100" value="5" step="1" id="slWMeta" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valWMeta">0.05</span>
+      </div>
+    </div>
+
+    <div class="slider-section-header">Encounter cut - thresholds</div>
+    <div class="slider-group">
+      <div class="slider-row">
+        <span class="slider-label" title="Time constant for time-similarity decay (seconds)">tau time (s)</span>
+        <input type="range" min="5" max="120" value="40" step="1" id="slTauEnc" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valTauEnc">40</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-label" title="Force a cut if the gap between two photos exceeds this">Hard cut: time</span>
+        <input type="range" min="30" max="600" value="180" step="10" id="slHardCutTime" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valHardCutTime">180</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-label" title="Force a cut if S_enc drops below this">Hard cut: score</span>
+        <input type="range" min="0" max="100" value="42" step="1" id="slEncCut" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valEncCut">0.42</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-label" title="Soft-cut threshold: 2 of last 3 scores below this triggers a cut">Soft cut: score</span>
+        <input type="range" min="0" max="100" value="52" step="1" id="slSoftCut" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valSoftCut">0.52</span>
+      </div>
+    </div>
+
+    <div class="slider-section-header">Encounter merge</div>
+    <div class="slider-section-hint">Stitch adjacent microsegments back together if they look like the same encounter</div>
+    <div class="slider-group">
+      <div class="slider-row">
+        <span class="slider-label" title="Merge if S_seg between segments exceeds this">Merge score</span>
+        <input type="range" min="0" max="100" value="62" step="1" id="slEncMerge" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valEncMerge">0.62</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-label" title="Only consider merge if time gap is within this many seconds">Max gap (s)</span>
+        <input type="range" min="5" max="300" value="60" step="5" id="slMergeMaxGap" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valMergeMaxGap">60</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-label" title="Time decay constant for merge gap scoring">tau merge (s)</span>
+        <input type="range" min="5" max="120" value="20" step="1" id="slMergeTau" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valMergeTau">20</span>
+      </div>
+    </div>
+
+    <div class="slider-section-header">Bursts</div>
+    <div class="slider-section-hint">Group rapid-fire shots within an encounter</div>
+    <div class="slider-group">
+      <div class="slider-row">
+        <span class="slider-label" title="Max seconds between consecutive shots to stay in the same burst">Time gap (s)</span>
+        <input type="range" min="1" max="30" value="3" step="1" id="slBurstTime" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valBurstTime">3</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-label" title="Max embedding distance - higher tolerates more visually different shots">Emb. distance</span>
+        <input type="range" min="0" max="100" value="20" step="1" id="slBurstEmb" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valBurstEmb">0.20</span>
+      </div>
+    </div>
+
+    <div class="button-row">
+      <button class="reset-btn" onclick="resetScoringDefaults()">Reset scoring</button>
+      <button class="reset-btn" onclick="resetGroupingDefaults()">Reset grouping</button>
+      <button class="save-btn" onclick="saveGroupingDefaults()">Save grouping defaults</button>
+    </div>
   </div>
 
   <div id="cullSummary" style="display:none;"></div>
@@ -228,8 +393,31 @@ body { padding-bottom: 36px; }
 </div>
 
 <script>
-// Load collections
+var cullData = null;
+var pipelineResults = null;
+var selectedCollectionId = null;
+var expandedSpecies = {};
+var _reflowTimer = null;
+var _regroupTimer = null;
+
+var SCORING_DEFAULTS = {
+  reject_crop_complete: 60, reject_focus: 35, reject_clip_high: 30, reject_composite: 40,
+  burst_lambda: 85, burst_max_keep: 3, encounter_lambda: 70, encounter_max_keep: 5,
+};
+var GROUPING_DEFAULTS = {
+  w_time: 35, w_subj: 35, w_global: 15, w_species: 10, w_meta: 5,
+  tau_enc: 40, hard_cut_time: 180, hard_cut_score: 42, soft_cut_score: 52,
+  merge_score: 62, merge_max_gap: 60, merge_tau: 20,
+  burst_time_gap: 3, burst_embedding_threshold: 20,
+};
+
 (async function() {
+  await loadPipelineSliderDefaults();
+  await loadCollections();
+  await loadCullingResults();
+})();
+
+async function loadCollections() {
   try {
     var collections = await safeFetch('/api/collections', {}, { toast: false });
     var sel = document.getElementById('cullCollection');
@@ -239,300 +427,227 @@ body { padding-bottom: 36px; }
       opt.textContent = c.name;
       sel.appendChild(opt);
     });
+    sel.addEventListener('change', onCullCollectionChange);
   } catch(e) {}
-
-  // Load existing results if available
-  loadCullingResults();
-})();
-
-var cullData = null;
-// Track which species sections are expanded
-var expandedSpecies = {};
-
-// Update time window slider label
-document.getElementById('cullTimeWindow').addEventListener('input', function() {
-  var v = parseInt(this.value);
-  if (v >= 60) {
-    var m = Math.floor(v / 60), s = v % 60;
-    document.getElementById('cullTimeValue').textContent = s ? m + 'm ' + s + 's' : m + 'm';
-  } else {
-    document.getElementById('cullTimeValue').textContent = v + 's';
-  }
-});
-
-// Update phash slider label
-document.getElementById('cullPhashThreshold').addEventListener('input', function() {
-  var v = parseInt(this.value);
-  var label;
-  if (v === 0) label = 'Exact (0)';
-  else if (v <= 5) label = 'Strict (' + v + ')';
-  else if (v <= 12) label = 'Normal (' + v + ')';
-  else if (v <= 20) label = 'Loose (' + v + ')';
-  else label = 'Very loose (' + v + ')';
-  document.getElementById('cullPhashValue').textContent = label;
-});
-
-// --- pHash Hamming distance in JS ---
-function hexToBits(hex) {
-  // Convert hex string to array of 0/1 bits
-  var bits = [];
-  for (var i = 0; i < hex.length; i++) {
-    var nibble = parseInt(hex[i], 16);
-    bits.push((nibble >> 3) & 1, (nibble >> 2) & 1, (nibble >> 1) & 1, nibble & 1);
-  }
-  return bits;
 }
 
-function phashDistance(hexA, hexB) {
-  if (!hexA || !hexB || hexA.length !== hexB.length) return 999;
-  var dist = 0;
-  for (var i = 0; i < hexA.length; i++) {
-    var xor = parseInt(hexA[i], 16) ^ parseInt(hexB[i], 16);
-    // Count bits in the xor nibble
-    while (xor) { dist += xor & 1; xor >>= 1; }
+async function onCullCollectionChange() {
+  var val = document.getElementById('cullCollection').value;
+  var parsed = val ? parseInt(val, 10) : NaN;
+  selectedCollectionId = isFinite(parsed) ? parsed : null;
+  // Re-run analysis whenever the scope changes so KEEP/REVIEW/REJECT
+  // labels are computed against the selected collection's photos only.
+  // Filtering the existing workspace-wide results client-side would
+  // leave the labels influenced by photos outside the collection.
+  if (pipelineResults) {
+    runCulling();
   }
-  return dist;
 }
 
-// --- Client-side scene grouping ---
-function regroupScenes() {
-  if (!cullData || !cullData.species_groups) return;
-
-  var timeWindow = parseInt(document.getElementById('cullTimeWindow').value) || 60;
-  var phashThreshold = parseInt(document.getElementById('cullPhashThreshold').value);
-  var crossBucket = document.getElementById('cullCrossBucket').checked;
-
-  var totalKeepers = 0, totalRejects = 0;
-
-  cullData.species_groups.forEach(function(sg) {
-    if (!sg.photos_data || !sg.redundancy_clusters) return;
-
-    var photos = sg.photos_data;
-    var pids = photos.map(function(p) { return p.photo_id; });
-
-    // Build lookups
-    var photoById = {};
-    photos.forEach(function(p) { photoById[p.photo_id] = p; });
-
-    // Carry over server-enriched fields (quality_score, sharpness) from existing scene_groups
-    var groups = sg.scene_groups || sg.pose_groups || [];
-    groups.forEach(function(g) {
-      g.photos.forEach(function(p) {
-        if (photoById[p.photo_id]) {
-          if (p.quality_score != null) photoById[p.photo_id].quality_score = p.quality_score;
-          if (p.sharpness != null) photoById[p.photo_id].sharpness = p.sharpness;
-        }
-      });
-    });
-
-    // Step 1: Time bucketing (single-linkage)
-    var withTs = photos
-      .filter(function(p) { return p.timestamp; })
-      .map(function(p) { return { pid: p.photo_id, ts: new Date(p.timestamp).getTime() / 1000 }; })
-      .sort(function(a, b) { return a.ts - b.ts; });
-
-    var withoutTs = photos.filter(function(p) { return !p.timestamp; }).map(function(p) { return p.photo_id; });
-
-    var timeBuckets = [];
-    if (withTs.length > 0) {
-      var curBucket = [withTs[0].pid];
-      var curTimes = [withTs[0].ts];
-      for (var i = 1; i < withTs.length; i++) {
-        var ts = withTs[i].ts;
-        var minGap = Infinity;
-        for (var j = 0; j < curTimes.length; j++) {
-          var gap = Math.abs(ts - curTimes[j]);
-          if (gap < minGap) minGap = gap;
-        }
-        if (minGap <= timeWindow) {
-          curBucket.push(withTs[i].pid);
-          curTimes.push(ts);
-        } else {
-          timeBuckets.push(curBucket);
-          curBucket = [withTs[i].pid];
-          curTimes = [ts];
-        }
-      }
-      timeBuckets.push(curBucket);
-    }
-    withoutTs.forEach(function(pid) { timeBuckets.push([pid]); });
-
-    // Step 2: pHash merge within each time bucket (single-linkage)
-    var mergedBuckets = [];
-    timeBuckets.forEach(function(bucket) {
-      var clusters = phashMerge(bucket, photoById, phashThreshold);
-      clusters.forEach(function(c) { mergedBuckets.push(c); });
-    });
-
-    // Step 3: Cross-bucket merge by pHash
-    if (crossBucket && mergedBuckets.length > 1) {
-      mergedBuckets = mergeBucketsByPhash(mergedBuckets, photoById, phashThreshold);
-    }
-
-    // Build scene groups with keep/reject from redundancy clusters
-    var rcMap = {};  // pid -> cluster index
-    sg.redundancy_clusters.forEach(function(cluster, ci) {
-      cluster.forEach(function(pid) { rcMap[pid] = ci; });
-    });
-
-    var sceneGroups = [];
-    var sgKeepers = 0, sgRejects = 0;
-
-    mergedBuckets.forEach(function(scenePids, sceneId) {
-      // Group by redundancy cluster within this scene
-      var rcGroups = {};
-      scenePids.forEach(function(pid) {
-        var rc = rcMap[pid] !== undefined ? rcMap[pid] : 'solo_' + pid;
-        if (!rcGroups[rc]) rcGroups[rc] = [];
-        rcGroups[rc].push(pid);
-      });
-
-      var photosInScene = [];
-      Object.keys(rcGroups).forEach(function(rc) {
-        var ranked = rcGroups[rc].sort(function(a, b) {
-          return (photoById[b] ? photoById[b].quality : 0) - (photoById[a] ? photoById[a].quality : 0);
-        });
-        ranked.forEach(function(pid, idx) {
-          var p = photoById[pid] || {};
-          photosInScene.push({
-            photo_id: pid,
-            quality: p.quality || 0,
-            quality_score: p.quality_score != null ? p.quality_score : null,
-            sharpness: p.sharpness != null ? p.sharpness : null,
-            filename: p.filename || '',
-            action: idx === 0 ? 'keep' : 'reject',
-            redundant_with: idx > 0 ? ranked[0] : null,
-          });
-        });
-      });
-
-      // Sort by filename for burst order
-      photosInScene.sort(function(a, b) { return (a.filename || '').localeCompare(b.filename || ''); });
-
-      // Build label
-      var label = buildSceneLabel(sceneId, scenePids, photoById);
-
-      sceneGroups.push({ scene_id: sceneId, label: label, photos: photosInScene });
-      sgKeepers += photosInScene.filter(function(p) { return p.action === 'keep'; }).length;
-      sgRejects += photosInScene.filter(function(p) { return p.action === 'reject'; }).length;
-    });
-
-    sg.scene_groups = sceneGroups;
-    sg.keepers = sgKeepers;
-    sg.rejects = sgRejects;
-    totalKeepers += sgKeepers;
-    totalRejects += sgRejects;
-  });
-
-  cullData.suggested_keepers = totalKeepers;
-  cullData.suggested_rejects = totalRejects;
-  renderCulling();
-}
-
-function phashMerge(pids, photoById, threshold) {
-  if (pids.length <= 1) return [pids];
-  var clusters = [[pids[0]]];
-  for (var i = 1; i < pids.length; i++) {
-    var pid = pids[i];
-    var ph = photoById[pid] ? photoById[pid].phash : null;
-    if (!ph) { clusters.push([pid]); continue; }
-    var placed = false;
-    for (var ci = 0; ci < clusters.length; ci++) {
-      for (var mi = 0; mi < clusters[ci].length; mi++) {
-        var mph = photoById[clusters[ci][mi]] ? photoById[clusters[ci][mi]].phash : null;
-        if (!mph) continue;
-        if (phashDistance(ph, mph) <= threshold) {
-          clusters[ci].push(pid);
-          placed = true;
-          break;
-        }
-      }
-      if (placed) break;
-    }
-    if (!placed) clusters.push([pid]);
-  }
-  return clusters;
-}
-
-function mergeBucketsByPhash(buckets, photoById, threshold) {
-  var parent = [];
-  for (var i = 0; i < buckets.length; i++) parent.push(i);
-  function find(x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
-  function union(a, b) { var ra = find(a), rb = find(b); if (ra !== rb) parent[rb] = ra; }
-
-  for (var i = 0; i < buckets.length; i++) {
-    for (var j = i + 1; j < buckets.length; j++) {
-      if (find(i) === find(j)) continue;
-      var matched = false;
-      for (var ai = 0; ai < buckets[i].length && !matched; ai++) {
-        var phi = photoById[buckets[i][ai]] ? photoById[buckets[i][ai]].phash : null;
-        if (!phi) continue;
-        for (var bj = 0; bj < buckets[j].length; bj++) {
-          var phj = photoById[buckets[j][bj]] ? photoById[buckets[j][bj]].phash : null;
-          if (!phj) continue;
-          if (phashDistance(phi, phj) <= threshold) {
-            union(i, j);
-            matched = true;
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  var groups = {};
-  for (var i = 0; i < buckets.length; i++) {
-    var root = find(i);
-    if (!groups[root]) groups[root] = [];
-    buckets[i].forEach(function(pid) { groups[root].push(pid); });
-  }
-  return Object.keys(groups).map(function(k) { return groups[k]; });
-}
-
-function buildSceneLabel(sceneId, pids, photoById) {
-  var times = [];
-  pids.forEach(function(pid) {
-    var p = photoById[pid];
-    if (p && p.timestamp) times.push(new Date(p.timestamp));
-  });
-  times.sort(function(a, b) { return a - b; });
-  var num = sceneId + 1;
-  var count = pids.length;
-  if (times.length > 0) {
-    var fmt = function(d) { return d.toTimeString().split(' ')[0]; };
-    var start = fmt(times[0]);
-    var end = fmt(times[times.length - 1]);
-    if (start === end) return 'Scene ' + num + ' \u2014 ' + start + ' (' + count + ' photos)';
-    return 'Scene ' + num + ' \u2014 ' + start + ' to ' + end + ' (' + count + ' photos)';
-  }
-  return 'Scene ' + num + ' (' + count + ' photos)';
-}
-
-// --- Wire up settings to live-regroup ---
-var _regroupTimer = null;
-function debouncedRegroup() {
-  clearTimeout(_regroupTimer);
-  _regroupTimer = setTimeout(regroupScenes, 150);
-}
-document.getElementById('cullTimeWindow').addEventListener('input', debouncedRegroup);
-document.getElementById('cullPhashThreshold').addEventListener('input', debouncedRegroup);
-document.getElementById('cullCrossBucket').addEventListener('change', regroupScenes);
-window.addEventListener('devmodechange', function() { if (cullData) renderCulling(); });
-
-// Load config defaults for cull sliders
-(async function() {
+async function loadPipelineSliderDefaults() {
   try {
     var cfg = await safeFetch('/api/config', {}, { toast: false });
-    if (cfg.cull_time_window != null) {
-      document.getElementById('cullTimeWindow').value = cfg.cull_time_window;
-      document.getElementById('cullTimeWindow').dispatchEvent(new Event('input'));
-    }
-    if (cfg.cull_phash_threshold != null) {
-      document.getElementById('cullPhashThreshold').value = cfg.cull_phash_threshold;
-      document.getElementById('cullPhashThreshold').dispatchEvent(new Event('input'));
-    }
+    var p = cfg.pipeline || {};
+    SCORING_DEFAULTS.reject_crop_complete = Math.round((p.reject_crop_complete != null ? p.reject_crop_complete : 0.60) * 100);
+    SCORING_DEFAULTS.reject_focus = Math.round((p.reject_focus != null ? p.reject_focus : 0.35) * 100);
+    SCORING_DEFAULTS.reject_clip_high = Math.round((p.reject_clip_high != null ? p.reject_clip_high : 0.30) * 100);
+    SCORING_DEFAULTS.reject_composite = Math.round((p.reject_composite != null ? p.reject_composite : 0.40) * 100);
+    SCORING_DEFAULTS.burst_lambda = Math.round((p.burst_lambda != null ? p.burst_lambda : 0.85) * 100);
+    SCORING_DEFAULTS.burst_max_keep = p.burst_max_keep != null ? p.burst_max_keep : 3;
+    SCORING_DEFAULTS.encounter_lambda = Math.round((p.encounter_lambda != null ? p.encounter_lambda : 0.70) * 100);
+    SCORING_DEFAULTS.encounter_max_keep = p.encounter_max_keep != null ? p.encounter_max_keep : 5;
+    GROUPING_DEFAULTS.w_time = Math.round((p.w_time != null ? p.w_time : 0.35) * 100);
+    GROUPING_DEFAULTS.w_subj = Math.round((p.w_subj != null ? p.w_subj : 0.35) * 100);
+    GROUPING_DEFAULTS.w_global = Math.round((p.w_global != null ? p.w_global : 0.15) * 100);
+    GROUPING_DEFAULTS.w_species = Math.round((p.w_species != null ? p.w_species : 0.10) * 100);
+    GROUPING_DEFAULTS.w_meta = Math.round((p.w_meta != null ? p.w_meta : 0.05) * 100);
+    GROUPING_DEFAULTS.tau_enc = p.tau_enc != null ? p.tau_enc : 40;
+    GROUPING_DEFAULTS.hard_cut_time = p.hard_cut_time != null ? p.hard_cut_time : 180;
+    GROUPING_DEFAULTS.hard_cut_score = Math.round((p.hard_cut_score != null ? p.hard_cut_score : 0.42) * 100);
+    GROUPING_DEFAULTS.soft_cut_score = Math.round((p.soft_cut_score != null ? p.soft_cut_score : 0.52) * 100);
+    GROUPING_DEFAULTS.merge_score = Math.round((p.merge_score != null ? p.merge_score : 0.62) * 100);
+    GROUPING_DEFAULTS.merge_max_gap = p.merge_max_gap != null ? p.merge_max_gap : 60;
+    GROUPING_DEFAULTS.merge_tau = p.merge_tau != null ? p.merge_tau : 20;
+    GROUPING_DEFAULTS.burst_time_gap = p.burst_time_gap != null ? p.burst_time_gap : 3;
+    GROUPING_DEFAULTS.burst_embedding_threshold = Math.round((1 - (p.burst_embedding_threshold != null ? p.burst_embedding_threshold : 0.80)) * 100);
   } catch(e) {}
-})();
+  applyScoringDefaults();
+  applyGroupingDefaults();
+}
+
+function sliderVal(id) {
+  var el = document.getElementById(id);
+  return el ? parseFloat(el.value) : 0;
+}
+
+function updateSliderDisplay(slider) {
+  var id = slider.id;
+  var valEl = document.getElementById('val' + id.substring(2));
+  if (!valEl) return;
+  var INT_SLIDERS = [
+    'slBurstKeep','slEncKeep',
+    'slBurstTime',
+    'slTauEnc','slHardCutTime',
+    'slMergeMaxGap','slMergeTau',
+  ];
+  valEl.textContent = INT_SLIDERS.indexOf(id) >= 0
+    ? slider.value
+    : (slider.value / 100).toFixed(2);
+}
+
+function getScoringConfig() {
+  return {
+    reject_crop_complete: sliderVal('slRejectCrop') / 100,
+    reject_focus: sliderVal('slRejectFocus') / 100,
+    reject_clip_high: sliderVal('slRejectClip') / 100,
+    reject_composite: sliderVal('slRejectComposite') / 100,
+    burst_lambda: sliderVal('slBurstLambda') / 100,
+    burst_max_keep: Math.round(sliderVal('slBurstKeep')),
+    encounter_lambda: sliderVal('slEncLambda') / 100,
+    encounter_max_keep: Math.round(sliderVal('slEncKeep')),
+  };
+}
+
+function getGroupingConfig() {
+  function pct(id) { return parseFloat(document.getElementById(id).value) / 100.0; }
+  function num(id) { return parseFloat(document.getElementById(id).value); }
+  return {
+    w_time: pct('slWTime'),
+    w_subj: pct('slWSubj'),
+    w_global: pct('slWGlobal'),
+    w_species: pct('slWSpecies'),
+    w_meta: pct('slWMeta'),
+    tau_enc: num('slTauEnc'),
+    hard_cut_time: num('slHardCutTime'),
+    hard_cut_score: pct('slEncCut'),
+    soft_cut_score: pct('slSoftCut'),
+    merge_score: pct('slEncMerge'),
+    merge_max_gap: num('slMergeMaxGap'),
+    merge_tau: num('slMergeTau'),
+    burst_time_gap: num('slBurstTime'),
+    burst_embedding_threshold: 1 - pct('slBurstEmb'),
+  };
+}
+
+function applyScoringDefaults() {
+  document.getElementById('slRejectCrop').value = SCORING_DEFAULTS.reject_crop_complete;
+  document.getElementById('slRejectFocus').value = SCORING_DEFAULTS.reject_focus;
+  document.getElementById('slRejectClip').value = SCORING_DEFAULTS.reject_clip_high;
+  document.getElementById('slRejectComposite').value = SCORING_DEFAULTS.reject_composite;
+  document.getElementById('slBurstLambda').value = SCORING_DEFAULTS.burst_lambda;
+  document.getElementById('slBurstKeep').value = SCORING_DEFAULTS.burst_max_keep;
+  document.getElementById('slEncLambda').value = SCORING_DEFAULTS.encounter_lambda;
+  document.getElementById('slEncKeep').value = SCORING_DEFAULTS.encounter_max_keep;
+  document.querySelectorAll('#cullSettings input[type="range"]').forEach(updateSliderDisplay);
+}
+
+function applyGroupingDefaults() {
+  function setVal(id, v) { var el = document.getElementById(id); if (el) el.value = v; }
+  setVal('slWTime', GROUPING_DEFAULTS.w_time);
+  setVal('slWSubj', GROUPING_DEFAULTS.w_subj);
+  setVal('slWGlobal', GROUPING_DEFAULTS.w_global);
+  setVal('slWSpecies', GROUPING_DEFAULTS.w_species);
+  setVal('slWMeta', GROUPING_DEFAULTS.w_meta);
+  setVal('slTauEnc', GROUPING_DEFAULTS.tau_enc);
+  setVal('slHardCutTime', GROUPING_DEFAULTS.hard_cut_time);
+  setVal('slEncCut', GROUPING_DEFAULTS.hard_cut_score);
+  setVal('slSoftCut', GROUPING_DEFAULTS.soft_cut_score);
+  setVal('slEncMerge', GROUPING_DEFAULTS.merge_score);
+  setVal('slMergeMaxGap', GROUPING_DEFAULTS.merge_max_gap);
+  setVal('slMergeTau', GROUPING_DEFAULTS.merge_tau);
+  setVal('slBurstTime', GROUPING_DEFAULTS.burst_time_gap);
+  setVal('slBurstEmb', GROUPING_DEFAULTS.burst_embedding_threshold);
+  document.querySelectorAll('#cullSettings input[type="range"]').forEach(updateSliderDisplay);
+}
+
+function resetScoringDefaults() {
+  applyScoringDefaults();
+  doReflow();
+}
+
+function resetGroupingDefaults() {
+  applyGroupingDefaults();
+  doRegroupLive();
+}
+
+function saveGroupingDefaults() {
+  safeFetch('/api/pipeline/save-grouping-defaults', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({pipeline: getGroupingConfig()}),
+  })
+  .then(function() { if (typeof showToast === 'function') showToast('Saved as defaults', 'success'); })
+  .catch(function() {});
+}
+
+function onScoringChange(slider) {
+  updateSliderDisplay(slider);
+  clearTimeout(_reflowTimer);
+  var indicator = document.getElementById('reflowIndicator');
+  if (indicator) { indicator.style.display = 'block'; indicator.textContent = 'Recomputing...'; }
+  _reflowTimer = setTimeout(doReflow, 250);
+}
+
+function onGroupingChange(slider) {
+  updateSliderDisplay(slider);
+  clearTimeout(_regroupTimer);
+  var indicator = document.getElementById('reflowIndicator');
+  if (indicator) { indicator.style.display = 'block'; indicator.textContent = 'Regrouping...'; }
+  _regroupTimer = setTimeout(doRegroupLive, 500);
+}
+
+function setPipelineResults(data, statusText) {
+  pipelineResults = data;
+  rebuildCullDataFromPipeline();
+  var status = document.getElementById('cullStatus');
+  if (statusText && status) {
+    status.textContent = statusText;
+    status.style.color = 'var(--accent)';
+  }
+}
+
+function pipelineBody(config) {
+  var body = {config: config};
+  if (selectedCollectionId != null) body.collection_id = selectedCollectionId;
+  return body;
+}
+
+function doReflow() {
+  if (!pipelineResults) return runCulling();
+  // Send grouping config too: the server's /api/pipeline/reflow re-runs
+  // run_grouping internally, so without the current UI grouping values
+  // it falls back to persisted defaults and the visible grouping
+  // sliders would lie about the active analysis state.
+  var config = Object.assign({}, getGroupingConfig(), getScoringConfig());
+  safeFetch('/api/pipeline/reflow', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(pipelineBody(config)),
+  }, { toast: false })
+  .then(function(data) {
+    if (data && !data.error) setPipelineResults(data);
+  })
+  .finally(function() {
+    var indicator = document.getElementById('reflowIndicator');
+    if (indicator) indicator.style.display = 'none';
+  });
+}
+
+function doRegroupLive() {
+  var config = Object.assign({}, getGroupingConfig(), getScoringConfig());
+  safeFetch('/api/pipeline/regroup-live', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(pipelineBody(config)),
+  }, { toast: false })
+  .then(function(data) {
+    if (data && !data.error) setPipelineResults(data);
+  })
+  .finally(function() {
+    var indicator = document.getElementById('reflowIndicator');
+    if (indicator) indicator.style.display = 'none';
+  });
+}
 
 function toggleCullSettings() {
   var panel = document.getElementById('cullSettings');
@@ -540,75 +655,182 @@ function toggleCullSettings() {
 }
 
 async function runCulling() {
-  var collId = document.getElementById('cullCollection').value;
-  var separateTypes = document.getElementById('cullSeparateTypes').checked;
   var status = document.getElementById('cullStatus');
-  status.textContent = 'Analyzing...';
-
+  status.textContent = 'Analyzing pipeline...';
+  status.style.color = 'var(--text-dim)';
   try {
-    var data = await safeFetch('/api/jobs/cull', {
+    var config = Object.assign({}, getGroupingConfig(), getScoringConfig());
+    var data = await safeFetch('/api/pipeline/regroup-live', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        collection_id: collId ? parseInt(collId) : null,
-        separate_file_types: separateTypes,
-        time_window: parseInt(document.getElementById('cullTimeWindow').value) || 60,
-        phash_threshold: parseInt(document.getElementById('cullPhashThreshold').value),
-        cross_bucket_merge: document.getElementById('cullCrossBucket').checked,
-      }),
+      body: JSON.stringify(pipelineBody(config)),
     }, { toast: false });
-
-    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
-      onProgress: function(p) {
-        if (p.current_file) status.textContent = p.current_file;
-      },
-      onComplete: function(result) {
-        if (result.status === 'completed') {
-          status.textContent = 'Analysis complete!';
-          status.style.color = 'var(--accent)';
-          loadCullingResults();
-        } else {
-          status.textContent = 'Failed: ' + (result.errors || []).join(', ');
-          status.style.color = 'var(--danger)';
-        }
-      },
-    });
+    setPipelineResults(data, 'Analysis complete!');
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--danger)';
   }
 }
 
 async function loadCullingResults() {
   try {
-    cullData = await safeFetch('/api/culling/results', {}, { toast: false });
-    renderCulling();
+    var data = await safeFetch('/api/pipeline/page-init', {}, { toast: false });
+    if (data && data.results) {
+      setPipelineResults(data.results);
+    } else {
+      document.getElementById('cullContent').innerHTML =
+        '<div style="text-align:center;padding:40px;color:var(--text-dim);">No pipeline results. Run Analyze for Culling after extracting pipeline features.</div>';
+    }
   } catch(e) {}
+}
+
+function rebuildCullDataFromPipeline() {
+  cullData = pipelineToCullData(pipelineResults);
+  renderCulling();
+}
+
+function topSpeciesForPhoto(photo) {
+  var top5 = photo && photo.species_top5;
+  if (top5 && top5.length && top5[0] && top5[0][0]) return top5[0][0];
+  return 'Unclassified';
+}
+
+function speciesName(value) {
+  if (Array.isArray(value)) return value[0] || 'Unclassified';
+  return value || 'Unclassified';
+}
+
+function speciesForEncounter(enc, photoMap) {
+  if (enc.confirmed_species) return speciesName(enc.confirmed_species);
+  if (enc.species) return speciesName(enc.species);
+  var votes = enc.species_predictions || [];
+  if (votes.length && votes[0].species) return speciesName(votes[0].species);
+  var ids = enc.photo_ids || [];
+  for (var i = 0; i < ids.length; i++) {
+    if (photoMap[ids[i]]) return topSpeciesForPhoto(photoMap[ids[i]]);
+  }
+  return 'Unclassified';
+}
+
+function actionForLabel(label) {
+  if (label === 'KEEP') return 'keep';
+  if (label === 'REJECT') return 'reject';
+  return 'review';
+}
+
+function encounterLabel(enc, idx, count) {
+  var label = 'Encounter ' + (idx + 1) + ' (' + count + ' photos)';
+  if (enc.time_range && enc.time_range[0]) {
+    var start = (enc.time_range[0].split('T')[1] || enc.time_range[0]).substring(0, 8);
+    var end = enc.time_range[1] ? (enc.time_range[1].split('T')[1] || enc.time_range[1]).substring(0, 8) : '';
+    label = 'Encounter ' + (idx + 1) + ' - ' + start + (end ? ' to ' + end : '') + ' (' + count + ' photos)';
+  }
+  if (enc.burst_count) label += ' / ' + enc.burst_count + ' bursts';
+  return label;
+}
+
+function pipelineToCullData(results) {
+  if (!results || !results.photos || !results.encounters) return null;
+  var photoMap = {};
+  results.photos.forEach(function(p) { photoMap[p.id] = p; });
+
+  var speciesMap = {};
+  var total = 0;
+  var keep = 0;
+  var review = 0;
+  var reject = 0;
+
+  results.encounters.forEach(function(enc, ei) {
+    var encIds = (enc.photo_ids || []).filter(function(pid) {
+      return !!photoMap[pid];
+    });
+    if (!encIds.length) return;
+
+    var species = speciesForEncounter(enc, photoMap);
+    if (!speciesMap[species]) {
+      speciesMap[species] = {
+        species: species,
+        photo_count: 0,
+        keepers: 0,
+        reviews: 0,
+        rejects: 0,
+        scene_groups: [],
+      };
+    }
+
+    var groupPhotos = [];
+    var burstOrder = [];
+    (enc.bursts || []).forEach(function(burst) {
+      (burst.photo_ids || burst || []).forEach(function(pid) {
+        if (encIds.indexOf(pid) >= 0 && burstOrder.indexOf(pid) < 0) burstOrder.push(pid);
+      });
+    });
+    encIds.forEach(function(pid) {
+      if (burstOrder.indexOf(pid) < 0) burstOrder.push(pid);
+    });
+
+    burstOrder.forEach(function(pid) {
+      var p = photoMap[pid];
+      var action = actionForLabel(p.label);
+      groupPhotos.push({
+        photo_id: pid,
+        quality: p.quality_composite || 0,
+        quality_score: p.quality_composite != null ? p.quality_composite : null,
+        sharpness: p.subject_sharpness != null ? p.subject_sharpness : null,
+        filename: p.filename || '',
+        action: action,
+        pipeline_label: p.label || 'REVIEW',
+      });
+      total++;
+      if (action === 'keep') keep++;
+      else if (action === 'reject') reject++;
+      else review++;
+    });
+
+    var sg = speciesMap[species];
+    sg.photo_count += groupPhotos.length;
+    sg.keepers += groupPhotos.filter(function(p) { return p.action === 'keep'; }).length;
+    sg.reviews += groupPhotos.filter(function(p) { return p.action === 'review'; }).length;
+    sg.rejects += groupPhotos.filter(function(p) { return p.action === 'reject'; }).length;
+    sg.scene_groups.push({
+      scene_id: ei,
+      label: encounterLabel(enc, ei, groupPhotos.length),
+      photos: groupPhotos,
+    });
+  });
+
+  var speciesGroups = Object.keys(speciesMap).map(function(k) { return speciesMap[k]; });
+  speciesGroups.sort(function(a, b) { return b.photo_count - a.photo_count || a.species.localeCompare(b.species); });
+  return {
+    species_groups: speciesGroups,
+    total_photos: total,
+    suggested_keepers: keep,
+    suggested_reviews: review,
+    suggested_rejects: reject,
+    pipeline_summary: results.summary || {},
+  };
 }
 
 function renderCulling() {
   if (!cullData || !cullData.species_groups || cullData.species_groups.length === 0) {
+    document.getElementById('cullSummary').style.display = 'none';
+    document.getElementById('applyBtn').style.display = 'none';
     document.getElementById('cullContent').innerHTML =
-      '<div style="text-align:center;padding:40px;color:var(--text-dim);">No results. Run culling analysis first.</div>';
+      '<div style="text-align:center;padding:40px;color:var(--text-dim);">No pipeline results for this view. Run Analyze for Culling after extracting pipeline features.</div>';
     return;
+  }
+  if (Object.keys(expandedSpecies).length === 0 && cullData.species_groups.length > 0) {
+    expandedSpecies[0] = true;
   }
 
   // Summary bar
   var summaryHtml = '<div class="summary-bar">' +
     '<div class="summary-stat"><div class="num">' + cullData.total_photos + '</div><div class="label">Photos</div></div>' +
     '<div class="summary-stat"><div class="num" style="color:var(--accent);">' + cullData.suggested_keepers + '</div><div class="label">Keepers</div></div>' +
-    '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + cullData.suggested_rejects + '</div><div class="label">Reject Candidates</div></div>' +
+    '<div class="summary-stat"><div class="num" style="color:var(--warning);">' + (cullData.suggested_reviews || 0) + '</div><div class="label">Review</div></div>' +
+    '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + cullData.suggested_rejects + '</div><div class="label">Reject</div></div>' +
     '<div class="summary-stat"><div class="num">' + cullData.species_groups.length + '</div><div class="label">Species</div></div>' +
   '</div>';
-  var missing = cullData.photos_missing_phash || 0;
-  if (missing > 0) {
-    summaryHtml += '<div style="margin-top:12px;padding:10px 14px;border:1px solid var(--danger);' +
-      'border-radius:6px;background:rgba(255,100,100,0.08);color:var(--text);font-size:14px;">' +
-      '\u26A0 ' + missing + ' photo' + (missing === 1 ? '' : 's') + ' couldn\'t be hashed. ' +
-      'Scene grouping will treat each as unique, so time-window and pHash thresholds ' +
-      'won\'t merge them. Usually means the working-copy JPEG is missing — ' +
-      're-run thumbnail/working-copy extraction, then re-analyze.' +
-      '</div>';
-  }
   document.getElementById('cullSummary').innerHTML = summaryHtml;
   document.getElementById('cullSummary').style.display = '';
   document.getElementById('applyBtn').style.display = '';
@@ -617,6 +839,7 @@ function renderCulling() {
   var html = '';
   cullData.species_groups.forEach(function(sg, si) {
     var keepCount = sg.keepers;
+    var reviewCount = sg.reviews || 0;
     var rejectCount = sg.rejects;
 
     html += '<div class="species-section">';
@@ -624,6 +847,7 @@ function renderCulling() {
     html += '<span class="species-name">' + escapeHtml(sg.species) + '</span>';
     html += '<span class="species-stats">' + sg.photo_count + ' photos &middot; ';
     html += '<span class="species-keep">' + keepCount + ' keep</span> &middot; ';
+    html += '<span style="color:var(--warning);">' + reviewCount + ' review</span> &middot; ';
     html += '<span class="species-reject">' + rejectCount + ' reject</span>';
     html += '</span></div>';
 
@@ -643,45 +867,23 @@ function renderCulling() {
       window[poseKey] = pg.photos.map(function(p) { return {id: p.photo_id, filename: p.filename || ''}; });
 
       html += '<div class="pose-strip">';
-      var devMode = typeof isDevMode === 'function' && isDevMode();
-      var photoById = {};
-      if (devMode && sg.photos_data) {
-        sg.photos_data.forEach(function(p) { photoById[p.photo_id] = p; });
-      }
-      var embSims = sg.embedding_sims || {};
 
-      pg.photos.forEach(function(photo, photoIdx) {
-        // Dev mode: show similarity connector between adjacent cards
-        if (devMode && photoIdx > 0) {
-          var prevId = pg.photos[photoIdx - 1].photo_id;
-          var curId = photo.photo_id;
-          var pA = photoById[prevId], pB = photoById[curId];
-          // pHash distance
-          var phDist = '-';
-          if (pA && pB && pA.phash && pB.phash) {
-            phDist = phashDistance(pA.phash, pB.phash);
-          }
-          // Embedding similarity
-          var embKey = Math.min(prevId, curId) + '-' + Math.max(prevId, curId);
-          var embSim = embSims[embKey] != null ? embSims[embKey] : '-';
-          // Color classes
-          var phClass = phDist === '-' ? '' : (phDist <= 10 ? 'similar' : phDist >= 20 ? 'different' : 'mid');
-          var emClass = embSim === '-' ? '' : (embSim >= 0.88 ? 'similar' : embSim <= 0.7 ? 'different' : 'mid');
-          html += '<div class="dev-connector">' +
-            '<div class="dev-label">pH</div><div class="dev-val ' + phClass + '">' + phDist + '</div>' +
-            '<div class="dev-label">emb</div><div class="dev-val ' + emClass + '">' + (typeof embSim === 'number' ? embSim.toFixed(2) : embSim) + '</div>' +
-          '</div>';
-        }
-
+      pg.photos.forEach(function(photo) {
         var cardClass = 'cull-card ' + photo.action;
-        if (photo.action === 'keep' && photo.quality === pg.photos[0].quality) {
+        var bestQuality = Math.max.apply(null, pg.photos.map(function(p) { return p.quality || 0; }));
+        if (photo.action === 'keep' && photo.quality === bestQuality) {
           cardClass += ' best';
         }
-        var badge = photo.action === 'keep'
-          ? '<div class="cull-card-action keep-badge">&#10003;</div>'
-          : '<div class="cull-card-action reject-badge" onclick="event.stopPropagation(); toggleCullAction(' + si + ',' + pi + ',' + photo.photo_id + ')">&#10005;</div>';
+        var badge;
+        if (photo.action === 'keep') {
+          badge = '<div class="cull-card-action keep-badge" onclick="event.stopPropagation(); toggleCullAction(' + si + ',' + pi + ',' + photo.photo_id + ')">&#10003;</div>';
+        } else if (photo.action === 'reject') {
+          badge = '<div class="cull-card-action reject-badge" onclick="event.stopPropagation(); toggleCullAction(' + si + ',' + pi + ',' + photo.photo_id + ')">&#10005;</div>';
+        } else {
+          badge = '<div class="cull-card-action review-badge" onclick="event.stopPropagation(); toggleCullAction(' + si + ',' + pi + ',' + photo.photo_id + ')">?</div>';
+        }
 
-        var qScore = photo.quality_score != null ? Math.round(photo.quality_score * 100) : (photo.sharpness != null ? Math.round(photo.sharpness) : '-');
+        var qScore = photo.quality_score != null ? photo.quality_score.toFixed(2) : (photo.sharpness != null ? Math.round(photo.sharpness) : '-');
 
         html += '<div class="' + cardClass + '" data-photo-id="' + photo.photo_id + '" ' +
           'onclick="openLightbox(' + photo.photo_id + ',\'' + escapeHtml(photo.filename || '').replace(/'/g, "\\'") + '\', window.' + poseKey + ')" ' +
@@ -689,7 +891,7 @@ function renderCulling() {
           badge +
           '<img src="/thumbnails/' + photo.photo_id + '.jpg" loading="lazy">' +
           '<div class="cull-card-info">' +
-            '<div class="cull-quality">Q: ' + qScore + '</div>' +
+            '<div class="cull-quality">' + (photo.pipeline_label || photo.action.toUpperCase()) + ' &middot; Q: ' + qScore + '</div>' +
             '<div class="cull-filename" onclick="event.stopPropagation()" onmousedown="event.stopPropagation()">' + escapeHtml(photo.filename || '') + '</div>' +
           '</div>' +
         '</div>';
@@ -702,10 +904,6 @@ function renderCulling() {
 
   document.getElementById('cullContent').innerHTML = html;
 
-  // Auto-expand first species if nothing expanded yet
-  if (Object.keys(expandedSpecies).length === 0 && cullData.species_groups.length > 0) {
-    expandedSpecies[0] = true;
-  }
 }
 
 function toggleSpecies(idx) {
@@ -721,20 +919,21 @@ function toggleCullAction(speciesIdx, poseIdx, photoId) {
   var photo = pg.photos.find(function(p) { return p.photo_id === photoId; });
   if (!photo) return;
 
-  // Toggle between keep and reject
-  if (photo.action === 'keep') {
-    photo.action = 'reject';
-    sg.keepers--;
-    sg.rejects++;
-    cullData.suggested_keepers--;
-    cullData.suggested_rejects++;
-  } else {
-    photo.action = 'keep';
-    sg.keepers++;
-    sg.rejects--;
-    cullData.suggested_keepers++;
-    cullData.suggested_rejects--;
+  function dec(action) {
+    if (action === 'keep') { sg.keepers--; cullData.suggested_keepers--; }
+    else if (action === 'reject') { sg.rejects--; cullData.suggested_rejects--; }
+    else { sg.reviews--; cullData.suggested_reviews--; }
   }
+  function inc(action) {
+    if (action === 'keep') { sg.keepers++; cullData.suggested_keepers++; }
+    else if (action === 'reject') { sg.rejects++; cullData.suggested_rejects++; }
+    else { sg.reviews++; cullData.suggested_reviews++; }
+  }
+  var next = photo.action === 'keep' ? 'review' : (photo.action === 'review' ? 'reject' : 'keep');
+  dec(photo.action);
+  photo.action = next;
+  photo.pipeline_label = next.toUpperCase();
+  inc(next);
   renderCulling();
 }
 
