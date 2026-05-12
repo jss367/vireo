@@ -1,4 +1,5 @@
 import base64
+import re
 
 from playwright.sync_api import expect
 
@@ -193,3 +194,59 @@ def test_rapid_review_preserves_burst_override_species_on_apply_next(live_server
 
     expect(page.locator("#filename")).to_have_text("d.jpg")
     expect(page.locator("#speciesInput")).to_have_value("Override bird")
+
+
+def test_classic_pipeline_review_opens_requested_burst_from_url(live_server, page):
+    image_body = base64.b64decode(_PNG_1X1)
+    results = {
+        "photos": [
+            {"id": 1, "filename": "a.jpg", "label": "REVIEW", "quality_composite": 0.3, "subject_tenengrad": 10},
+            {"id": 2, "filename": "b.jpg", "label": "REVIEW", "quality_composite": 0.6, "subject_tenengrad": 20},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2],
+                "photo_count": 2,
+                "burst_count": 1,
+                "species": ["Test bird"],
+                "bursts": [{"photo_ids": [1, 2]}],
+            }
+        ],
+        "summary": {
+            "total_photos": 2,
+            "encounter_count": 1,
+            "burst_count": 1,
+            "keep_count": 0,
+            "review_count": 2,
+            "reject_count": 0,
+        },
+    }
+    page.route(
+        "**/api/pipeline/page-init",
+        lambda route: route.fulfill(
+            json={
+                "results": results,
+                "workspace_overrides": {},
+                "review_readiness": {"state": "ready", "total_photos": 2},
+            }
+        ),
+    )
+    page.route(
+        "**/api/pipeline/group/state",
+        lambda route: route.fulfill(
+            json={
+                "photos": {
+                    "1": {"flag": "none", "has_species_keyword": False},
+                    "2": {"flag": "none", "has_species_keyword": False},
+                },
+                "species_kid": None,
+            }
+        ),
+    )
+    page.route("**/photos/*/preview?*", lambda route: route.fulfill(body=image_body, content_type="image/png"))
+    page.route("**/photos/*/original", lambda route: route.fulfill(body=image_body, content_type="image/png"))
+
+    page.goto(f"{live_server['url']}/pipeline/review?enc=0&burst=0")
+
+    expect(page.locator("#grmOverlay")).to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#grmOverlay .grm-card[data-photo-id]")).to_have_count(2)
