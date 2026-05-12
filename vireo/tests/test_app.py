@@ -1166,6 +1166,12 @@ def test_cull_page_uses_pipeline_controls(app_and_db):
     # collection-photos endpoint clamps per_page to 500, so large
     # collections silently truncate. Server-side scoping replaces it.
     assert "per_page=999999" not in html
+    # doReflow must include grouping config alongside scoring config —
+    # the server re-runs run_grouping inside /api/pipeline/reflow, so
+    # sending only scoring makes the server fall back to persisted
+    # grouping defaults and the visible grouping sliders end up lying
+    # about the active analysis state.
+    assert "pipelineBody(getScoringConfig())" not in html
 
 
 def test_static_vireo_utils_served(app_and_db):
