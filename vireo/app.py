@@ -4844,14 +4844,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/darktable/status")
     def api_darktable_status():
         import config as cfg
-        from develop import find_darktable
+        from develop import find_darktable, find_dng_converter
 
         configured = cfg.get("darktable_bin")
         binary = find_darktable(configured)
+        dng_configured = cfg.get("dng_converter_bin")
+        dng_binary = find_dng_converter(dng_configured)
         return jsonify({
             "available": binary is not None,
             "bin": binary or "",
             "configured_bin": configured,
+            "dng_available": dng_binary is not None,
+            "dng_bin": dng_binary or "",
+            "configured_dng_bin": dng_configured,
+            "auto_convert_dng": cfg.get("darktable_auto_convert_dng"),
             "style": cfg.get("darktable_style"),
             "output_format": cfg.get("darktable_output_format"),
             "output_dir": cfg.get("darktable_output_dir"),
@@ -9706,6 +9712,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         style = body.get("style") or cfg.get("darktable_style") or ""
         output_format = body.get("output_format") or cfg.get("darktable_output_format") or "jpg"
         output_dir = body.get("output_dir") or cfg.get("darktable_output_dir") or ""
+        auto_convert_dng = body.get("auto_convert_dng")
+        if auto_convert_dng is None:
+            auto_convert_dng = cfg.get("darktable_auto_convert_dng")
+        dng_converter_bin = body.get("dng_converter_bin") or cfg.get("dng_converter_bin") or ""
         width = body.get("width")
 
         runner = app._job_runner
@@ -9750,12 +9760,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     out_dir = os.path.join(folder_path, "developed")
                 out_path = output_path_for_photo(photo["filename"], out_dir, output_format)
 
+                try:
+                    photo_metadata = json.loads(photo["exif_data"]) if photo["exif_data"] else None
+                except (TypeError, json.JSONDecodeError):
+                    photo_metadata = None
+
                 result = develop_photo(
                     darktable_bin=binary,
                     input_path=input_path,
                     output_path=out_path,
                     style=style if style else None,
                     width=width,
+                    auto_convert_dng=bool(auto_convert_dng),
+                    dng_converter_bin=dng_converter_bin,
+                    metadata=photo_metadata,
                 )
 
                 if result["success"]:

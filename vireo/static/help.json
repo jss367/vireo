@@ -110,8 +110,8 @@
   {
     "question": "How do I use Vireo with Darktable?",
     "category": "Settings",
-    "keywords": ["darktable", "editor", "external", "develop", "raw", "processing"],
-    "answer": "Configure the Darktable binary path in Settings. You can then send photos to Darktable for editing, apply styles, and export processed versions."
+    "keywords": ["darktable", "editor", "external", "develop", "raw", "processing", "dng", "nikon"],
+    "answer": "Configure the Darktable binary path in Settings. You can then send photos to Darktable for editing, apply styles, and export processed versions. If you shoot Nikon High Efficiency NEFs, enable auto-convert to DNG and configure Adobe DNG Converter if Vireo cannot auto-detect it."
   },
   {
     "question": "Is Vireo free?",

@@ -270,6 +270,18 @@ SCHEMA = {
         "label": "Darktable output directory",
         "desc": 'Where developed photos are saved. Empty = create a "developed" subfolder next to originals.',
     },
+    "darktable_auto_convert_dng": {
+        "type": "bool",
+        "category": "Paths", "scope": "global",
+        "label": "Auto-convert unsupported Nikon NEFs to DNG",
+        "desc": "Before darktable development, convert Nikon High Efficiency NEF files to DNG when needed.",
+    },
+    "dng_converter_bin": {
+        "type": "path",
+        "category": "Paths", "scope": "global",
+        "label": "Adobe DNG Converter path",
+        "desc": "Optional path to Adobe DNG Converter. Leave empty to auto-detect the app.",
+    },
 
     # --- Integrations -----------------------------------------------------
     "inat_token": {

@@ -897,6 +897,27 @@
         <button onclick="browseForOutputDir()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
       </div>
     </div>
+    <div class="setting-row">
+      <div class="setting-label">
+        Auto convert to DNG if necessary
+        <small>For Nikon High Efficiency NEFs that darktable cannot decode, convert through Adobe DNG Converter first.</small>
+      </div>
+      <input type="checkbox" id="cfgDarktableAutoConvertDng"
+             onchange="saveConfig(); loadDarktableStatus();"
+             style="accent-color:var(--accent);">
+    </div>
+    <div class="setting-row">
+      <div class="setting-label">
+        Adobe DNG Converter path
+        <small>Leave empty to auto-detect the macOS app bundle or PATH. Required only when DNG conversion is enabled.</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <input type="text" id="cfgDngConverterBin" placeholder="auto-detect"
+               style="width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
+               onchange="saveConfig(); loadDarktableStatus();">
+        <button onclick="browseForDngConverter()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
+      </div>
+    </div>
   </div>
 
   <!-- System Info -->
@@ -1303,6 +1324,8 @@ async function loadConfig() {
     document.getElementById('cfgDarktableStyle').value = cfg.darktable_style || '';
     document.getElementById('cfgDarktableFormat').value = cfg.darktable_output_format || 'jpg';
     document.getElementById('cfgDarktableOutputDir').value = cfg.darktable_output_dir || '';
+    document.getElementById('cfgDarktableAutoConvertDng').checked = cfg.darktable_auto_convert_dng === true;
+    document.getElementById('cfgDngConverterBin').value = cfg.dng_converter_bin || '';
     loadDarktableStatus();
     // Load display settings
     document.getElementById('cfgPhotosPerPage').value = cfg.photos_per_page != null ? cfg.photos_per_page : 50;
@@ -1500,6 +1523,8 @@ function saveConfig() {
           darktable_style: document.getElementById('cfgDarktableStyle').value.trim(),
           darktable_output_format: document.getElementById('cfgDarktableFormat').value,
           darktable_output_dir: document.getElementById('cfgDarktableOutputDir').value.trim(),
+          darktable_auto_convert_dng: document.getElementById('cfgDarktableAutoConvertDng').checked,
+          dng_converter_bin: document.getElementById('cfgDngConverterBin').value.trim(),
           photos_per_page: parseInt(document.getElementById('cfgPhotosPerPage').value, 10) || 50,
           thumbnail_size: parseInt(document.getElementById('cfgThumbSize').value, 10) || 400,
           thumbnail_quality: parseInt(document.getElementById('cfgThumbQuality').value, 10) || 85,
@@ -1671,6 +1696,15 @@ async function loadDarktableStatus() {
     } else {
       el.innerHTML = '<span style="color:var(--danger);font-size:13px;">&#10007; darktable-cli not found</span>' +
         '<span style="color:var(--text-dim);font-size:12px;margin-left:8px;">Install darktable or set the path below</span>';
+    }
+    if (data.auto_convert_dng) {
+      if (data.dng_available) {
+        el.innerHTML += '<div style="color:var(--accent);font-size:13px;margin-top:4px;">&#10003; Adobe DNG Converter found' +
+          '<span style="color:var(--text-dim);font-size:12px;margin-left:8px;">' + escapeHtml(data.dng_bin) + '</span></div>';
+      } else {
+        el.innerHTML += '<div style="color:var(--danger);font-size:13px;margin-top:4px;">&#10007; Adobe DNG Converter not found' +
+          '<span style="color:var(--text-dim);font-size:12px;margin-left:8px;">Install it or set the path below</span></div>';
+      }
     }
   } catch(e) {}
 }
@@ -2620,6 +2654,15 @@ async function browseForDarktable() {
   if (path) {
     document.getElementById('cfgDarktableBin').value = path;
     saveConfig();
+  }
+}
+
+async function browseForDngConverter() {
+  var path = await pickFile({ title: 'Select Adobe DNG Converter binary' });
+  if (path) {
+    document.getElementById('cfgDngConverterBin').value = path;
+    saveConfig();
+    loadDarktableStatus();
   }
 }
 

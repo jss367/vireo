@@ -35,6 +35,8 @@ def test_api_config_saves_darktable_settings(app_and_db):
                            "darktable_style": "Wildlife",
                            "darktable_output_format": "tiff",
                            "darktable_output_dir": "/output",
+                           "darktable_auto_convert_dng": True,
+                           "dng_converter_bin": "/Applications/Adobe DNG Converter.app/Contents/MacOS/Adobe DNG Converter",
                        }),
                        content_type='application/json')
     assert resp.status_code == 200
@@ -45,6 +47,8 @@ def test_api_config_saves_darktable_settings(app_and_db):
     assert cfg["darktable_style"] == "Wildlife"
     assert cfg["darktable_output_format"] == "tiff"
     assert cfg["darktable_output_dir"] == "/output"
+    assert cfg["darktable_auto_convert_dng"] is True
+    assert cfg["dng_converter_bin"] == "/Applications/Adobe DNG Converter.app/Contents/MacOS/Adobe DNG Converter"
 
 
 def _poll_job(client, job_id, timeout_iters=50):

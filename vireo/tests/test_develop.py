@@ -22,6 +22,16 @@ def test_find_darktable_returns_configured_path(tmp_path):
     assert find_darktable(str(fake_bin)) == str(fake_bin)
 
 
+def test_find_dng_converter_returns_configured_path(tmp_path):
+    """find_dng_converter returns the configured converter binary if it exists."""
+    from develop import find_dng_converter
+
+    fake_bin = tmp_path / "Adobe DNG Converter"
+    fake_bin.touch()
+    fake_bin.chmod(0o755)
+    assert find_dng_converter(str(fake_bin)) == str(fake_bin)
+
+
 def test_find_darktable_returns_none_for_bad_configured_path(monkeypatch):
     """find_darktable returns None when configured path doesn't exist and PATH has nothing."""
     from develop import find_darktable
@@ -149,6 +159,27 @@ def test_find_darktable_resolves_symlink(tmp_path):
         assert develop.find_darktable("") == str(real)
 
 
+def test_is_nikon_high_efficiency_nef_from_metadata(tmp_path):
+    """ExifTool NEFCompression values 13/14 are Nikon HE/HE*."""
+    import develop
+
+    raw = tmp_path / "bird.NEF"
+    raw.touch()
+
+    assert develop.is_nikon_high_efficiency_nef(
+        str(raw), metadata={"Nikon": {"NEFCompression": 13}}
+    )
+    assert develop.is_nikon_high_efficiency_nef(
+        str(raw), metadata={"Nikon": {"NEFCompression": "High Efficiency*"}}
+    )
+    assert not develop.is_nikon_high_efficiency_nef(
+        str(raw), metadata={"Nikon": {"NEFCompression": 3}}
+    )
+    assert not develop.is_nikon_high_efficiency_nef(
+        str(tmp_path / "bird.CR3"), metadata={"Nikon": {"NEFCompression": 13}}
+    )
+
+
 def _fake_completed(returncode, stdout="", stderr=""):
     import subprocess
     return subprocess.CompletedProcess(args=[], returncode=returncode,
@@ -244,3 +275,79 @@ def test_develop_photo_truncates_verbose_failure(tmp_path, monkeypatch):
     # error message darktable prints near the end) must survive.
     assert "TAIL_MARKER" in result["error"]
     assert len(result["error"]) < 800
+
+
+def test_develop_photo_converts_nikon_he_nef_before_darktable(tmp_path, monkeypatch):
+    """When enabled, Nikon HE NEFs are converted to DNG before darktable-cli."""
+    import subprocess
+
+    import develop
+
+    raw = tmp_path / "bird.NEF"
+    raw.touch()
+    darktable_bin = tmp_path / "darktable-cli"
+    darktable_bin.touch()
+    darktable_bin.chmod(0o755)
+    dng_bin = tmp_path / "Adobe DNG Converter"
+    dng_bin.touch()
+    dng_bin.chmod(0o755)
+    out = tmp_path / "out" / "bird.jpg"
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == str(dng_bin):
+            dng_dir = cmd[cmd.index("-d") + 1]
+            dng_path = os.path.join(dng_dir, "bird.dng")
+            with open(dng_path, "w") as f:
+                f.write("dng")
+            return _fake_completed(0)
+        assert cmd[0] == str(darktable_bin)
+        assert cmd[1].endswith("bird.dng")
+        os.makedirs(os.path.dirname(cmd[2]), exist_ok=True)
+        with open(cmd[2], "w") as f:
+            f.write("jpg")
+        return _fake_completed(0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = develop.develop_photo(
+        str(darktable_bin),
+        str(raw),
+        str(out),
+        auto_convert_dng=True,
+        dng_converter_bin=str(dng_bin),
+        metadata={"Nikon": {"NEFCompression": 14}},
+    )
+
+    assert result["success"] is True
+    assert len(calls) == 2
+    assert calls[0][0] == str(dng_bin)
+    assert calls[1][0] == str(darktable_bin)
+
+
+def test_develop_photo_reports_missing_dng_converter_for_nikon_he(tmp_path, monkeypatch):
+    """HE files fail early with a useful DNG converter message when enabled."""
+    import develop
+
+    raw = tmp_path / "bird.NEF"
+    raw.touch()
+    darktable_bin = tmp_path / "darktable-cli"
+    darktable_bin.touch()
+    darktable_bin.chmod(0o755)
+    out = tmp_path / "out" / "bird.jpg"
+
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+
+    result = develop.develop_photo(
+        str(darktable_bin),
+        str(raw),
+        str(out),
+        auto_convert_dng=True,
+        dng_converter_bin=str(tmp_path / "missing-dng-converter"),
+        metadata={"Nikon": {"NEFCompression": 13}},
+    )
+
+    assert result["success"] is False
+    assert "Nikon High Efficiency NEF" in result["error"]
+    assert "DNG conversion failed" in result["error"]
