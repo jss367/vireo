@@ -317,9 +317,6 @@ jobs:
       github.event_name == 'pull_request_review'
       && github.event.review.state == 'approved'
       && contains(github.event.pull_request.labels.*.name, 'claude-agent')
-      && (github.event.review.author_association == 'OWNER'
-          || github.event.review.author_association == 'COLLABORATOR'
-          || github.actor == 'chatgpt-codex-connector[bot]')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -332,7 +329,13 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_AUTHOR: ${{ github.event.review.user.login }}
         run: |
+          if [[ " $TRUSTED_ACTORS " != *" $REVIEW_AUTHOR "* ]]; then
+            echo "PR #${PR}: approval from ${REVIEW_AUTHOR} is not in TRUSTED_ACTORS; skipping auto-merge."
+            exit 0
+          fi
+
           base=$(gh pr view "$PR" --repo "$REPO" --json baseRefName -q .baseRefName)
           head=$(gh pr view "$PR" --repo "$REPO" --json headRefName -q .headRefName)
           pr_repo=$(gh pr view "$PR" --repo "$REPO" \
