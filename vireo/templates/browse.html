@@ -792,7 +792,7 @@ body {
 
     <!-- Filter Bar -->
     <div class="filter-bar">
-      <input type="text" id="searchInput" placeholder="Search keywords or filenames..." onkeydown="if(event.key==='Enter')applyFilters()">
+      <input type="text" id="searchInput" placeholder="Search keywords or filenames..." onkeydown="if(event.key==='Enter')applyFilters()" oninput="if(!this.value.trim())applyFilters()">
       <input type="text" id="clipSearchInput" placeholder="CLIP search: describe what you see..."
              style="flex:1;min-width:200px;"
              onkeydown="if(event.key==='Enter')runClipSearch()">
@@ -1125,6 +1125,24 @@ var calendarYear = new Date().getFullYear();
 var selectedDay = null;
 var calendarData = null;
 var clipSearchActive = false;
+
+function hasActiveBrowseFilter() {
+  var searchInput = document.getElementById('searchInput');
+  var colorFilter = document.getElementById('colorFilter');
+  var dateFrom = document.getElementById('dateFrom');
+  var dateTo = document.getElementById('dateTo');
+  return !!(
+    activeFolderId ||
+    activeKeyword ||
+    activeCollectionId ||
+    clipSearchActive ||
+    filterRating > 0 ||
+    (searchInput && searchInput.value.trim()) ||
+    (colorFilter && colorFilter.value) ||
+    (dateFrom && dateFrom.value) ||
+    (dateTo && dateTo.value)
+  );
+}
 
 var _shortcuts = null;
 var _BROWSE_SC_DEFAULTS = {rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
@@ -2222,7 +2240,7 @@ function renderGrid() {
   if (photos.length === 0) {
     grid.innerHTML = '';
     // Show welcome if DB is completely empty, otherwise show filter-empty message
-    if (totalPhotos === 0 && !activeFolderId && !activeKeyword && filterRating === 0) {
+    if (totalPhotos === 0 && !hasActiveBrowseFilter()) {
       welcome.style.display = 'block';
       empty.style.display = 'none';
     } else {
@@ -2480,10 +2498,13 @@ function batchDelete() {
     // Remove deleted photos from local array
     var deletedSet = new Set(ids);
     photos = photos.filter(function(p) { return !deletedSet.has(p.id); });
+    totalPhotos = Math.max(0, totalPhotos - (data.deleted || 0));
     selectedPhotos.clear();
     selectedPhotoId = null;
     document.getElementById('batchBar').style.display = 'none';
     renderGrid();
+    updateFilterSummary();
+    loadSummary();
     // Update total count display
     var countEl = document.getElementById('photoCount');
     if (countEl) {
