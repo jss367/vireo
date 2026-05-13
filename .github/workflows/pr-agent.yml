@@ -349,7 +349,7 @@ jobs:
             exit 0
           fi
 
-          children=$(gh pr list --repo "$REPO" --base "$head" --label "$AGENT_LABEL" --state open --json number -q 'length')
+          children=$(gh pr list --repo "$REPO" --base "$head" --state open --json number -q 'length')
           if [[ "$children" -gt 0 ]]; then
             gh pr comment "$PR" --repo "$REPO" --body "Auto-merge skipped: open child PRs still target \`$head\`. Resolve or close children first, then re-approve."
             exit 0
@@ -401,7 +401,7 @@ jobs:
             exit 0
           fi
 
-          children=$(gh pr list --repo "$REPO" --base "$head" --label "$AGENT_LABEL" --state open --json number -q 'length')
+          children=$(gh pr list --repo "$REPO" --base "$head" --state open --json number -q 'length')
           if [[ "$children" -gt 0 ]]; then
             gh pr comment "$PR" --repo "$REPO" --body "Auto-merge skipped: open child PRs still target \`$head\`. Resolve or close children first, then re-approve."
             exit 0
@@ -497,7 +497,7 @@ jobs:
               continue
             fi
 
-            children=$(gh pr list --repo "$REPO" --base "$head" --label "$AGENT_LABEL" --state open --json number -q 'length')
+            children=$(gh pr list --repo "$REPO" --base "$head" --state open --json number -q 'length')
             if [[ "$children" -gt 0 ]]; then
               echo "PR #${pr}: ${children} open child PR(s) target '${head}'; skipping."
               continue
