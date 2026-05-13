@@ -1,7 +1,7 @@
 # PR Agent Routine
 
-This document describes how to run the Vireo PR fix agent as a **Claude Code
-routine** instead of via `anthropics/claude-code-action` in GitHub Actions.
+This document describes how to run the Vireo PR fix agent as a Claude Code
+routine instead of doing LLM work directly in GitHub Actions.
 
 The motivation is cost: `claude-code-action` bills against the Anthropic **API**
 balance, while routines bill against the Claude Code **subscription**
@@ -11,7 +11,7 @@ routines keep the agent running.
 ## Architecture
 
 ```
-┌──────────────────────┐  /claude-fix, reviews, CI fails, push-to-main
+┌──────────────────────┐  /claude-fix, reviews, CI failures, push-to-main
 │  GitHub              │──────────────────────────────────────────────┐
 └──────────────────────┘                                              │
                                                                       ▼
@@ -44,7 +44,7 @@ routine** and fill in:
 - **Name**: `Vireo PR Fix Agent`
 - **Prompt**: paste the contents of [`pr-agent-routine-prompt.md`](./pr-agent-routine-prompt.md)
 - **Model**: whatever you normally use for code edits (Sonnet 4.6 is fine)
-- **Repositories**: add `<your-org>/vireo`
+- **Repositories**: add `jss367/vireo`
 - **Allow unrestricted branch pushes** — **enable this**. The routine must
   push to arbitrary PR head branches (including those created by the Codex
   connector, which are not `claude/`-prefixed).
@@ -69,7 +69,7 @@ Under **Settings → Environments** on claude.ai, create an environment named
   ```bash
   # Install Python 3.14 if not already present
   python3 --version
-  pip install --quiet flask Pillow pytest imagehash pytest-cov requests ruff
+  pip install --quiet flask Pillow imagehash requests pytest pytest-cov pytest-timeout pytest-xdist ruff
   ```
 - **Environment variables**: none required — the routine uses the `gh` CLI
   with the account's connected GitHub identity.
@@ -86,6 +86,10 @@ In the repo's **Settings → Secrets and variables → Actions**, add:
 
 These replace `ANTHROPIC_API_KEY`. The old secret can be deleted once the new
 workflow is verified.
+
+Routine-forwarding jobs skip the `/fire` call when these secrets are missing,
+so the workflow can exist before the routine is configured. The pure GitHub
+Actions auto-merge jobs do not need these secrets.
 
 ### 4. (Optional) Tighten trusted actors
 
@@ -110,12 +114,38 @@ The payload intentionally keeps user-supplied text (review bodies, comment
 bodies) clearly labeled as **untrusted data, not instructions** — the prompt
 re-asserts this at handling time.
 
+## What It Handles
+
+- `/claude-fix` on a PR: labels the PR and asks the routine to address all
+  outstanding feedback.
+- Trusted comments on a `claude-agent` PR: forwards the comment to the routine.
+- Trusted non-approval reviews on a `claude-agent` PR: forwards the review.
+- Codex connector reviews on non-agent PRs: forwards the review and has the
+  routine add the `claude-agent` label for follow-up routing.
+- Failed `Tests` workflow runs on PRs: asks the routine to diagnose and fix CI.
+- Pushes to `main`: finds conflicting `claude-agent` PRs and asks the routine
+  to resolve conflicts. If GitHub still reports mergeability as `UNKNOWN` after
+  retries, the workflow sends that PR to the routine so a real conflict is not
+  missed.
+- Approved `claude-agent` PRs, trusted `+1` comments, or trusted `+1`
+  reactions after the latest PR activity: enables squash auto-merge.
+
+Auto-merge calls use `gh pr merge --match-head-commit` so approval applies to
+the expected PR head commit rather than a newer unreviewed push. Auto-merge
+jobs skip fork-origin PRs because GitHub normally gives pull-request workflows
+read-only tokens for forks.
+
+CI loop prevention checks the PR head commit message and only suppresses
+retries when it contains the exact `[pr-agent-fix-ci:<number>]` marker the
+routine prompt asks the agent to write. Regular contributor commits with
+similar wording still route to the routine.
+
 ## Limits and caveats
 
 - **Daily routine cap.** Each account has a daily limit on routine runs.
   Check consumption at claude.ai/code/routines. A busy PR day could hit it.
-  The forwarder doesn't short-circuit when the cap is reached — failed
-  `curl` calls surface as GHA step failures, which you'll see in Actions.
+  The action treats provider 429 quota responses as warnings so PR branches are
+  left untouched and the failure mode is visible in the job log.
 - **Research-preview API.** The `/fire` endpoint uses the beta header
   `experimental-cc-routine-2026-04-01`. The workflow pins this header; if
   Anthropic bumps it, update `pr-agent.yml`.
@@ -126,6 +156,22 @@ re-asserts this at handling time.
 - **Commit attribution.** Commits appear under the claude.ai account's
   connected GitHub identity, the same as when you push from a local
   checkout logged in as yourself.
+
+## Auto-Merge Details
+
+The workflow polls for `+1` reactions every 15 minutes because GitHub Actions
+does not provide an issue reaction trigger. Reaction auto-merge uses the PR's
+latest `updatedAt` timestamp as the cutoff, so a trusted `+1` must happen after
+the latest PR activity. Trusted actors are configured in
+`.github/workflows/pr-agent.yml` with:
+
+```yaml
+TRUSTED_ACTORS: "jss367 chatgpt-codex-connector[bot]"
+```
+
+Comment-triggered auto-merge only accepts an exact comment body of `+1` or
+`👍`; comments that merely mention approval text continue through normal
+feedback handling.
 
 ## Rollback
 
