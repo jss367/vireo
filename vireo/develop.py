@@ -69,8 +69,17 @@ def find_dng_converter(configured_path):
         "/Applications/Adobe DNG Converter.app/Contents/MacOS/Adobe DNG Converter",
     ]
 
-    program_files = os.environ.get("PROGRAMFILES")
-    if program_files:
+    # Adobe DNG Converter on Windows has shipped under a few layouts: the
+    # current installer drops the binary directly in
+    # "Program Files\Adobe DNG Converter", while older 32-bit builds nest it
+    # one level deeper under "Program Files (x86)\Adobe\Adobe DNG Converter".
+    for env_var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432"):
+        program_files = os.environ.get(env_var)
+        if not program_files:
+            continue
+        candidates.append(
+            os.path.join(program_files, "Adobe DNG Converter", "Adobe DNG Converter.exe")
+        )
         candidates.append(
             os.path.join(
                 program_files,

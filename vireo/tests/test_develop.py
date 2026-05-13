@@ -32,6 +32,42 @@ def test_find_dng_converter_returns_configured_path(tmp_path):
     assert find_dng_converter(str(fake_bin)) == str(fake_bin)
 
 
+def test_find_dng_converter_finds_windows_default_install(tmp_path, monkeypatch):
+    """Default Windows install (Program Files\\Adobe DNG Converter\\...) is detected."""
+    from develop import find_dng_converter
+
+    program_files = tmp_path / "Program Files"
+    converter_dir = program_files / "Adobe DNG Converter"
+    converter_dir.mkdir(parents=True)
+    fake_bin = converter_dir / "Adobe DNG Converter.exe"
+    fake_bin.touch()
+
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    monkeypatch.delenv("PROGRAMFILES(X86)", raising=False)
+    monkeypatch.delenv("PROGRAMW6432", raising=False)
+    monkeypatch.setenv("PROGRAMFILES", str(program_files))
+
+    assert find_dng_converter("") == str(fake_bin)
+
+
+def test_find_dng_converter_finds_windows_x86_nested_install(tmp_path, monkeypatch):
+    """Older 32-bit installs (Program Files (x86)\\Adobe\\Adobe DNG Converter) are detected."""
+    from develop import find_dng_converter
+
+    program_files_x86 = tmp_path / "Program Files (x86)"
+    converter_dir = program_files_x86 / "Adobe" / "Adobe DNG Converter"
+    converter_dir.mkdir(parents=True)
+    fake_bin = converter_dir / "Adobe DNG Converter.exe"
+    fake_bin.touch()
+
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    monkeypatch.delenv("PROGRAMFILES", raising=False)
+    monkeypatch.delenv("PROGRAMW6432", raising=False)
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(program_files_x86))
+
+    assert find_dng_converter("") == str(fake_bin)
+
+
 def test_find_darktable_returns_none_for_bad_configured_path(monkeypatch):
     """find_darktable returns None when configured path doesn't exist and PATH has nothing."""
     from develop import find_darktable
