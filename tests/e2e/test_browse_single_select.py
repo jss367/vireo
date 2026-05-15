@@ -329,3 +329,23 @@ def test_filterByCollection_clears_multiselect_set(live_server, page):
     assert page.evaluate("selectedPhotos.size") == 0
     assert page.evaluate("selectedPhotoId") is None
     expect(bar).to_be_hidden()
+
+
+def test_filterByCollection_cancels_pending_search_debounce(live_server, page):
+    """A delayed search apply must not kick the user out of collection mode."""
+    db = live_server["db"]
+    rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
+    collection_id = db.add_collection("Debounce Collection", rules)
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    page.locator("#searchInput").fill("hum")
+    page.evaluate(f"filterByCollection({collection_id})")
+    page.wait_for_function(
+        f"activeCollectionId === {collection_id}", timeout=2000
+    )
+
+    page.wait_for_timeout(350)
+    assert page.evaluate("activeCollectionId") == collection_id

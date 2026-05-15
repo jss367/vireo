@@ -11,7 +11,6 @@ def test_keyword_search_empty_state_and_clear(live_server, page):
 
     search = page.locator("#searchInput")
     search.fill("definitely-no-such-photo")
-    search.press("Enter")
 
     expect(page.locator("#emptyState")).to_be_visible()
     expect(page.locator("#welcomeState")).to_be_hidden()
