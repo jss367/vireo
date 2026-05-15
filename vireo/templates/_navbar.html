@@ -1163,6 +1163,26 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 /* When the missing-folders banner is visible above, new-images stacks
    naturally in document flow — both are non-fixed block-level elements. */
 
+.runtime-warning-banner {
+  background: color-mix(in srgb, var(--warning, #ffb020) 18%, var(--bg-secondary));
+  color: var(--text-primary, #E6F1F5);
+  padding: 8px 16px;
+  font-size: 13px;
+  display: none;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--warning, #ffb020);
+}
+.runtime-warning-banner strong { color: var(--warning, #ffb020); }
+.runtime-warning-banner .runtime-warning-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.4;
+}
+.runtime-warning-banner .banner-dismiss {
+  color: var(--text-secondary, #9fb3bd);
+}
+
 .dup-cleanup-banner {
   background: var(--bg-tertiary, #153D55);
   color: var(--text-primary, #E6F1F5);
@@ -1385,6 +1405,11 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     <span class="activity-dot" id="navActivityDot"></span>
   </span>
 </nav>
+
+<div class="runtime-warning-banner" id="runtimeWarningBanner" data-testid="runtime-warning-banner">
+  <div class="runtime-warning-text" id="runtimeWarningText"></div>
+  <button class="banner-dismiss" type="button" onclick="dismissRuntimeWarning()" title="Dismiss">&times;</button>
+</div>
 
 <!-- Command palette (cmd+K) -->
 <div class="cmd-palette-overlay" id="commandPalette" hidden onclick="if(event.target===this)closeCommandPalette()">
@@ -4689,6 +4714,52 @@ function formatDuration(seconds) {
   var _jobPollTimer = null;
   var _navJobPollTimer = null;
 
+  function runtimeWarningDismissKey(id) {
+    return 'vireo_runtime_warning_dismissed_' + String(id || '');
+  }
+
+  function findRuntimeWarning() {
+    for (var i = 0; i < activeJobs.length; i++) {
+      var j = activeJobs[i];
+      if (j.status === 'running' && j.runtime_warning) return j.runtime_warning;
+    }
+    return null;
+  }
+
+  function updateRuntimeWarningBanner() {
+    var banner = document.getElementById('runtimeWarningBanner');
+    var text = document.getElementById('runtimeWarningText');
+    if (!banner || !text) return;
+
+    var warning = findRuntimeWarning();
+    if (!warning || localStorage.getItem(runtimeWarningDismissKey(warning.id)) === '1') {
+      banner.style.display = 'none';
+      banner.dataset.warningId = '';
+      return;
+    }
+
+    banner.dataset.warningId = warning.id || '';
+    text.innerHTML =
+      '<strong>' + bpEscape(warning.title || 'Using CPU only') + '.</strong> ' +
+      bpEscape(warning.message || 'This job may be much slower than expected.') +
+      ' ' + bpEscape(warning.detail || '') +
+      ' ' + bpEscape(warning.next_action || '');
+    banner.style.display = 'flex';
+  }
+
+  window.dismissRuntimeWarning = function() {
+    var banner = document.getElementById('runtimeWarningBanner');
+    if (!banner) return;
+    var id = banner.dataset.warningId || 'cpu-only-ml';
+    localStorage.setItem(runtimeWarningDismissKey(id), '1');
+    banner.style.display = 'none';
+    fetch('/api/jobs/runtime-warning/dismiss', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: id})
+    }).catch(function() {});
+  };
+
   // Theme system
   var THEMES = [
     {id: 'vireo-dark', name: 'Vireo Dark', icon: '\u2600'},
@@ -5073,6 +5144,7 @@ function formatDuration(seconds) {
       updateSummary();
       updateActivityDot();
       updateDockProgress();
+      updateRuntimeWarningBanner();
     }
   });
 
@@ -5086,6 +5158,7 @@ function formatDuration(seconds) {
         updateSummary();
         updateActivityDot();
         updateDockProgress();
+        updateRuntimeWarningBanner();
       })
       .catch(function() {});
   }

@@ -644,6 +644,109 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             g.db = Database(db_path)
         return g.db
 
+    _GPU_RUNTIME_PROVIDERS = ("CoreMLExecutionProvider", "CUDAExecutionProvider")
+    _CPU_WARNING_MIN_WORK_ITEMS = 25
+
+    def _runtime_execution_info():
+        """Return ONNX Runtime provider/device information for UI diagnostics."""
+        import platform
+
+        info = {
+            "platform": platform.platform(),
+            "device": "CPU",
+            "device_detail": "No GPU acceleration",
+            "onnxruntime_version": None,
+            "onnxruntime_providers": [],
+            "gpu_provider_available": False,
+            "cpu_only": True,
+        }
+        try:
+            import onnxruntime as ort
+
+            info["onnxruntime_version"] = ort.__version__
+            available = list(ort.get_available_providers())
+            info["onnxruntime_providers"] = available
+            info["gpu_provider_available"] = any(
+                p in available for p in _GPU_RUNTIME_PROVIDERS
+            )
+            info["cpu_only"] = not info["gpu_provider_available"]
+
+            if "CoreMLExecutionProvider" in available:
+                info["device"] = "CoreML"
+                info["device_detail"] = "Apple CoreML acceleration"
+            elif "CUDAExecutionProvider" in available:
+                info["device"] = "CUDA"
+                info["device_detail"] = "NVIDIA CUDA acceleration"
+            else:
+                info["device"] = "CPU"
+                info["device_detail"] = "GPU not available - using CPU"
+        except ImportError:
+            info["device_detail"] = "onnxruntime not installed"
+
+        return info
+
+    def _build_cpu_runtime_warning(job_type, *, work_units=None, reason=None):
+        """Build a dismissible CPU-only warning for expensive ML jobs."""
+        if work_units is None or work_units < _CPU_WARNING_MIN_WORK_ITEMS:
+            return None
+
+        info = _runtime_execution_info()
+        if info["gpu_provider_available"]:
+            return None
+
+        providers = info["onnxruntime_providers"]
+        provider_text = ", ".join(providers) if providers else "none detected"
+        label = job_type.replace("-", " ").replace("_", " ").title()
+        warning = {
+            "id": "cpu-only-ml",
+            "kind": "cpu-only-ml",
+            "title": "Using CPU only",
+            "message": f"This {label} job may be much slower than expected.",
+            "detail": f"Available ONNX Runtime providers: {provider_text}",
+            "next_action": (
+                "Install the CUDA/CoreML runtime, check accelerator "
+                "availability, or continue on CPU."
+            ),
+            "device": info["device"],
+            "device_detail": info["device_detail"],
+            "onnxruntime_version": info["onnxruntime_version"],
+            "onnxruntime_providers": providers,
+            "work_units": work_units,
+            "reason": reason or "large_ml_job_cpu_only",
+        }
+        log.warning(
+            "CPU-only runtime warning for %s job (%s work item%s): "
+            "providers=%s device=%s reason=%s",
+            job_type,
+            work_units,
+            "" if work_units == 1 else "s",
+            provider_text,
+            info["device"],
+            warning["reason"],
+        )
+        return warning
+
+    def _runtime_warning_is_dismissed(warning):
+        if not warning:
+            return False
+        return warning.get("id") in getattr(app, "_runtime_warning_dismissals", set())
+
+    def _filter_dismissed_runtime_warning(job):
+        warning = job.get("runtime_warning")
+        if _runtime_warning_is_dismissed(warning):
+            job = dict(job)
+            job["runtime_warning"] = None
+        return job
+
+    def _count_lines(path):
+        if not path:
+            return None
+        try:
+            with open(path) as f:
+                return sum(1 for line in f if line.strip())
+        except OSError:
+            return None
+
     @app.teardown_appcontext
     def _close_db(exc):
         db = g.pop("db", None)
@@ -883,6 +986,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     app._job_runner = JobRunner(db=init_db)
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
+    app._runtime_warning_dismissals = set()
     app._log_broadcaster.install()
 
     # Self-healing background backfill of missing working copies. RAW (and
@@ -5557,6 +5661,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "labels_file": labels_file,
             },
             workspace_id=active_ws,
+            runtime_warning=_build_cpu_runtime_warning(
+                "precompute-embeddings",
+                work_units=_count_lines(labels_file),
+                reason="large_embedding_precompute_cpu_only",
+            ),
         )
         return jsonify({"job_id": job_id})
 
@@ -6850,33 +6959,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/system/info")
     def api_system_info():
         """Return system information: ONNX Runtime, hardware."""
-        import platform
-
-        info = {
-            "platform": platform.platform(),
-            "device": "CPU",
-            "device_detail": "No GPU acceleration",
-            "onnxruntime_version": None,
-            "onnxruntime_providers": [],
-        }
-        try:
-            import onnxruntime as ort
-
-            info["onnxruntime_version"] = ort.__version__
-            available = ort.get_available_providers()
-            info["onnxruntime_providers"] = available
-
-            if "CoreMLExecutionProvider" in available:
-                info["device"] = "CoreML"
-                info["device_detail"] = "Apple CoreML acceleration"
-            elif "CUDAExecutionProvider" in available:
-                info["device"] = "CUDA"
-                info["device_detail"] = "NVIDIA CUDA acceleration"
-            else:
-                info["device"] = "CPU"
-                info["device_detail"] = "GPU not available — using CPU"
-        except ImportError:
-            info["device_detail"] = "onnxruntime not installed"
+        info = _runtime_execution_info()
 
         # "installed" requires both module AND weights — module-only
         # lets classify silently fall back to full-image classification.
@@ -8892,7 +8975,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
         from classify_job import ClassifyParams, run_classify_job
 
-        user_cfg = _get_db().get_effective_config(cfg.load())
+        db = _get_db()
+        user_cfg = db.get_effective_config(cfg.load())
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
 
@@ -8915,8 +8999,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
 
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
+        active_ws = db._active_workspace_id
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        work_units = db.count_collection_photos(collection_id)
+        runtime_warning = _build_cpu_runtime_warning(
+            "classify",
+            work_units=work_units,
+            reason="large_classification_job_cpu_only",
+        )
 
         def work(job):
             return run_classify_job(job, runner, db_path, active_ws, params, vireo_dir=vireo_dir)
@@ -8929,6 +9019,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "model_name": params.model_name,
             },
             workspace_id=active_ws,
+            runtime_warning=runtime_warning,
         )
         return jsonify({"job_id": job_id})
 
@@ -8955,8 +9046,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_jobs_list():
         runner = app._job_runner
         db = _get_db()
-        active = [_strip_heavy_for_list(j) for j in runner.list_jobs()]
-        history = [_strip_heavy_for_list(j) for j in runner.get_history(db, limit=10)]
+        active = [
+            _filter_dismissed_runtime_warning(_strip_heavy_for_list(j))
+            for j in runner.list_jobs()
+        ]
+        history = [
+            _filter_dismissed_runtime_warning(_strip_heavy_for_list(j))
+            for j in runner.get_history(db, limit=10)
+        ]
         ws_rows = db.get_workspaces()
         ws_names = {w["id"]: w["name"] for w in ws_rows}
         return jsonify({
@@ -8966,12 +9063,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "workspace_names": ws_names,
         })
 
+    @app.route("/api/jobs/runtime-warning/dismiss", methods=["POST"])
+    def api_job_runtime_warning_dismiss():
+        body = request.get_json(silent=True) or {}
+        warning_id = body.get("id")
+        if not warning_id:
+            return json_error("id required")
+        app._runtime_warning_dismissals.add(str(warning_id))
+        log.info("Dismissed runtime warning: %s", warning_id)
+        return jsonify({"ok": True, "id": str(warning_id)})
+
     @app.route("/api/jobs/<job_id>")
     def api_job_status(job_id):
         job = app._job_runner.get(job_id)
         if not job:
             return json_error("job not found", 404)
-        return jsonify(job)
+        return jsonify(_filter_dismissed_runtime_warning(job))
 
     @app.route("/api/jobs/<job_id>/cancel", methods=["POST"])
     def api_job_cancel(job_id):
@@ -9847,7 +9954,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         import config as cfg
 
-        effective_cfg = _get_db().get_effective_config(cfg.load())
+        db = _get_db()
+        effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
         sam2_variant = pipeline_cfg.get("sam2_variant", "sam2-small")
         dinov2_variant = pipeline_cfg.get("dinov2_variant", "vit-b14")
@@ -9859,7 +9967,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         min_detector_conf = effective_cfg.get("detector_confidence", 0.2)
 
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
+        active_ws = db._active_workspace_id
+        work_units = (
+            db.count_collection_photos(collection_id)
+            if collection_id
+            else db.count_photos()
+        )
+        runtime_warning = _build_cpu_runtime_warning(
+            "extract-masks",
+            work_units=work_units,
+            reason="large_segmentation_job_cpu_only",
+        )
 
         def work(job):
             import numpy as np
@@ -10151,6 +10269,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "proxy_longest_edge": proxy_longest_edge,
             },
             workspace_id=active_ws,
+            runtime_warning=runtime_warning,
         )
         return jsonify({"job_id": job_id})
 
@@ -10245,6 +10364,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from pipeline_job import PipelineParams, run_pipeline_job
 
         body = request.get_json(silent=True) or {}
+        db = _get_db()
         source = body.get("source")
         sources = body.get("sources")
         collection_id = body.get("collection_id")
@@ -10267,7 +10387,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # time instead of a 200 followed by an asynchronous job failure.
         if (
             source_snapshot_id is not None
-            and _get_db().get_new_images_snapshot(source_snapshot_id) is None
+            and db.get_new_images_snapshot(source_snapshot_id) is None
         ):
             return json_error(
                 f"source_snapshot_id {source_snapshot_id} not found",
@@ -10378,7 +10498,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 log.warning("Failed to save recent destination to config")
 
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
+        active_ws = db._active_workspace_id
+        work_units = None
+        if collection_id:
+            work_units = db.count_collection_photos(collection_id)
+        elif source_snapshot_id is not None:
+            snap = db.get_new_images_snapshot(source_snapshot_id)
+            work_units = snap["file_count"] if snap else None
+
+        runtime_warning = None
+        if not (params.skip_classify and params.skip_extract_masks):
+            runtime_warning = _build_cpu_runtime_warning(
+                "pipeline",
+                work_units=work_units,
+                reason="large_pipeline_ml_job_cpu_only",
+            )
 
         def work(job):
             return run_pipeline_job(
@@ -10397,6 +10531,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "skip_regroup": params.skip_regroup,
             },
             workspace_id=active_ws,
+            runtime_warning=runtime_warning,
         )
         result = {"job_id": job_id}
         if model_warning:
