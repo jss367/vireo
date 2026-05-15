@@ -188,17 +188,6 @@ def _deep_merge(base, override):
     return result
 
 
-def _migrate_shortcuts(config):
-    shortcuts = config.get("keyboard_shortcuts")
-    if not isinstance(shortcuts, dict):
-        return
-    navigation = shortcuts.get("navigation")
-    if not isinstance(navigation, dict):
-        return
-    if navigation.get("pipeline") == "p":
-        navigation["pipeline"] = DEFAULTS["keyboard_shortcuts"]["navigation"]["pipeline"]
-
-
 def load():
     """Load config, returning defaults for any missing keys."""
     config = copy.deepcopy(DEFAULTS)
@@ -208,7 +197,6 @@ def load():
                 config = _deep_merge(config, json.load(f))
         except Exception:
             log.warning("Failed to read config, using defaults")
-    _migrate_shortcuts(config)
     return config
 
 

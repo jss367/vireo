@@ -178,8 +178,8 @@ def test_deep_merge_preserves_pipeline(tmp_path):
     assert loaded["photos_per_page"] == 50
 
 
-def test_load_migrates_legacy_pipeline_p_shortcut(tmp_path):
-    """Existing configs with the former Pipeline=P default stop claiming P."""
+def test_load_preserves_user_pipeline_p_shortcut(tmp_path):
+    """A saved Pipeline=P binding is treated as user config, not rewritten."""
     import json
 
     import config as cfg
@@ -190,7 +190,7 @@ def test_load_migrates_legacy_pipeline_p_shortcut(tmp_path):
 
     loaded = cfg.load()
 
-    assert loaded["keyboard_shortcuts"]["navigation"]["pipeline"] == ""
+    assert loaded["keyboard_shortcuts"]["navigation"]["pipeline"] == "p"
     assert loaded["keyboard_shortcuts"]["pipeline_rapid_review"]["pick"] == "p"
 
 
