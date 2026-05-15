@@ -1376,6 +1376,7 @@ async function applyCurrent(openNext) {
     }, { toast: false });
     rapid.applying = false;
     var currentKey = sessionKey(session);
+    var activeKey = sessionKey(rapid.sessions[rapid.sessionIndex]);
     rebuildFilteredSessions();
     if (openNext) {
       var nextIdx = findNextFilteredIndexAfterRaw(session.rawIndex);
@@ -1389,8 +1390,17 @@ async function applyCurrent(openNext) {
       else showEmptyQueue();
     } else {
       // User navigated to a different burst during apply; don't disrupt their
-      // view, but rerender so propagated species/subtitle show in the sidebar.
-      renderAll();
+      // view. Rebase the old filtered index onto the rebuilt queue first:
+      // the applied burst may have dropped out and shifted every later index.
+      var activeIdx = findSessionIndexByKey(activeKey);
+      if (activeIdx >= 0) {
+        rapid.sessionIndex = activeIdx;
+        renderAll();
+      } else {
+        activeIdx = findNearestFilteredIndex(session.rawIndex);
+        if (activeIdx >= 0) openSession(activeIdx);
+        else showEmptyQueue();
+      }
     }
     return true;
   } catch (e) {
