@@ -149,6 +149,33 @@ def test_api_photos_filter_keyword(app_and_db):
     assert data['photos'][0]['filename'] == 'bird1.jpg'
 
 
+def test_api_photos_filter_flag(app_and_db):
+    """GET /api/photos?flag= filters to picks or rejects."""
+    app, db = app_and_db
+    db.conn.execute("UPDATE photos SET flag='flagged' WHERE filename='bird1.jpg'")
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE filename='bird2.jpg'")
+    db.conn.commit()
+
+    client = app.test_client()
+    picks = client.get('/api/photos?flag=flagged').get_json()
+    rejects = client.get('/api/photos?flag=rejected').get_json()
+
+    assert picks['total'] == 1
+    assert [p['filename'] for p in picks['photos']] == ['bird1.jpg']
+    assert rejects['total'] == 1
+    assert [p['filename'] for p in rejects['photos']] == ['bird2.jpg']
+
+
+def test_api_photos_rejects_unknown_flag_filter(app_and_db):
+    """GET /api/photos?flag= validates the flag filter value."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    resp = client.get('/api/photos?flag=bogus')
+
+    assert resp.status_code == 400
+
+
 def test_api_photo_detail(app_and_db):
     """GET /api/photos/<id> returns photo with keywords."""
     app, db = app_and_db
