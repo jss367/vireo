@@ -1151,6 +1151,14 @@ def _store_match_prediction(db, item, model_name, labels_fingerprint, tax=None):
             taxonomy=alt_tax,
             labels_fingerprint=labels_fingerprint,
         )
+    # add_prediction is INSERT-OR-IGNORE: a row cached as non-match on an
+    # earlier pass keeps its stale category here. Re-stamp it 'match' so the
+    # downgrade in reconcile_match_review_state still fires if this detection
+    # later stops being a match.
+    db.reconcile_match_review_state(
+        item["detection_id"], model_name, labels_fingerprint,
+        item["prediction"], "match",
+    )
 
 
 def _store_grouped_predictions(
@@ -1218,6 +1226,14 @@ def _store_grouped_predictions(
                 taxonomy=tax_hierarchy,
                 labels_fingerprint=labels_fingerprint,
             )
+            # If this detection was a cached 'match', its auto-accepted
+            # review row would otherwise survive the now non-match reuse
+            # (add_prediction's default pending never overwrites it) and
+            # keep it out of the queue. Downgrade it back to pending.
+            db.reconcile_match_review_state(
+                item["detection_id"], model_name, labels_fingerprint,
+                item["prediction"], category,
+            )
             # Store alternative predictions
             for alt in item.get("alternatives", []):
                 alt_tax = alt.get("taxonomy") or (
@@ -1271,6 +1287,16 @@ def _store_grouped_predictions(
             cons_hierarchy = rep_tax or (
                 tax.get_hierarchy(cons["prediction"]) if tax else {}
             )
+
+            # Drop any stale auto-accept from a prior 'match' pass first, so
+            # the update_prediction_group_info upsert below re-inserts a
+            # fresh pending row (its ON CONFLICT keeps the existing status)
+            # and the burst re-enters review.
+            for item in group:
+                db.reconcile_match_review_state(
+                    item["detection_id"], model_name, labels_fingerprint,
+                    item["prediction"], category,
+                )
 
             for item in group:
                 if item.get("_existing"):

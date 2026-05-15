@@ -6631,6 +6631,56 @@ class Database:
             )
         self.conn.commit()
 
+    def reconcile_match_review_state(
+        self,
+        detection_id,
+        classifier_model,
+        labels_fingerprint,
+        species,
+        category,
+    ):
+        """Re-sync a cached prediction's category and auto-review on reuse.
+
+        Taxonomy ``match`` predictions are auto-accepted and intentionally
+        hidden from the pending review queue (``_store_match_prediction``
+        writes ``status='accepted'``).  That review row is durable, so when a
+        detection stops being a match — e.g. the photo's XMP keywords were
+        edited — a later non-reclassify run reuses the cached prediction but
+        the stale ``accepted`` row would keep it out of the queue until a
+        full reclassify/clear is forced.  Matches are never user-reviewable
+        (they never appear in the queue), so the only ``accepted`` row on a
+        ``category='match'`` prediction is auto-written and safe to drop here
+        so the prediction re-enters pending review.
+
+        The persisted ``category`` is always refreshed to the current value:
+        ``add_prediction`` is INSERT-OR-IGNORE so it never updates it on
+        reuse, and a stale ``match`` marker would defeat the downgrade above
+        on the next flip (and mislead the ``/api/predictions``
+        disagreement/refinement enrichment).
+        """
+        ws = self._ws_id()
+        row = self.conn.execute(
+            """SELECT id, category FROM predictions
+               WHERE detection_id = ? AND classifier_model = ?
+                 AND labels_fingerprint = ? AND species IS ?""",
+            (detection_id, classifier_model, labels_fingerprint, species),
+        ).fetchone()
+        if row is None:
+            return
+        pred_id = row["id"]
+        if row["category"] == "match" and category != "match":
+            self.conn.execute(
+                "DELETE FROM prediction_review "
+                "WHERE prediction_id = ? AND workspace_id = ?",
+                (pred_id, ws),
+            )
+        if row["category"] != category:
+            self.conn.execute(
+                "UPDATE predictions SET category = ? WHERE id = ?",
+                (category, pred_id),
+            )
+        commit_with_retry(self.conn)
+
     def clear_predictions(self, model=None, collection_photo_ids=None,
                           labels_fingerprint=None, clear_run_keys=True):
         """Clear predictions, optionally filtered by model, photo set, and fingerprint.

@@ -1210,6 +1210,158 @@ def test_store_grouped_predictions_persists_group_match_for_cache(tmp_path, monk
     ]
 
 
+def test_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatch):
+    """A detection cached as a 'match' is auto-accepted and hidden from the
+    review queue.  If the photo's XMP later stops matching, a non-reclassify
+    run reuses the cached prediction; the stale 'accepted' review row must be
+    downgraded so the prediction re-enters the pending queue.
+    """
+    import classify_job
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+
+    class Tax:
+        def get_hierarchy(self, _species):
+            return {}
+
+    def run(category, alternatives, extra):
+        monkeypatch.setattr("compare.categorize", lambda *_a, **_k: category)
+        return classify_job._store_grouped_predictions(
+            raw_results=[{
+                "photo": {
+                    "id": photo_id, "filename": "a.jpg",
+                    "folder_id": folder_id, "timestamp": None, "burst_id": None,
+                },
+                "folder_path": str(tmp_path),
+                "detection_id": det_id,
+                "prediction": "Robin",
+                "confidence": 0.88,
+                "alternatives": alternatives,
+                "taxonomy": {},
+                "timestamp": None,
+                **extra,
+            }],
+            job_id="job-abc",
+            model_name="bioclip-2",
+            grouping_window=0,
+            similarity_threshold=0.99,
+            tax=Tax(),
+            db=db,
+            labels_fingerprint="fp-active",
+        )
+
+    # Run 1: photo already labeled -> match -> auto-accepted, out of queue.
+    run("match", [{"species": "Sparrow", "confidence": 0.12}], {})
+    statuses = {
+        r["species"]: r["status"]
+        for r in db.get_predictions(photo_ids=[photo_id])
+    }
+    assert statuses == {"Robin": "accepted", "Sparrow": "alternative"}
+
+    # Run 2: XMP keyword removed -> no longer a match. The classify gate
+    # surfaces the cached prediction (_existing) and skips inference.
+    run("disagreement", [], {"_existing": True})
+
+    rows = {r["species"]: r for r in db.get_predictions(photo_ids=[photo_id])}
+    assert rows["Robin"]["status"] == "pending"        # back in the queue
+    assert rows["Robin"]["category"] == "disagreement"  # stale marker cleared
+    assert rows["Sparrow"]["status"] == "alternative"   # still nested
+
+
+def test_group_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatch):
+    """Burst groups cached as 'match' must also re-enter review when the
+    photos stop matching and the cached predictions are reused.
+    """
+    from datetime import datetime
+
+    import classify_job
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_ids = [
+        db.add_photo(
+            folder_id, f"{i}.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        for i in range(2)
+    ]
+    det_ids = [
+        db.save_detections(
+            pid,
+            [{
+                "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                "confidence": 0.9,
+                "category": "animal",
+            }],
+            detector_model="MDV6",
+        )[0]
+        for pid in photo_ids
+    ]
+
+    class Tax:
+        def get_hierarchy(self, _species):
+            return {}
+
+    def run(category, extra):
+        monkeypatch.setattr("compare.categorize", lambda *_a, **_k: category)
+        raw = [
+            {
+                "photo": {
+                    "id": pid, "filename": f"{i}.jpg",
+                    "folder_id": folder_id, "timestamp": None,
+                    "burst_id": None,
+                },
+                "folder_path": str(tmp_path),
+                "detection_id": did,
+                "prediction": "Robin",
+                "confidence": 0.9 - (i * 0.01),
+                "alternatives": [],
+                "taxonomy": {},
+                "timestamp": datetime(2024, 1, 1, 12, 0, i),
+                **extra,
+            }
+            for i, (pid, did) in enumerate(
+                zip(photo_ids, det_ids, strict=True)
+            )
+        ]
+        return classify_job._store_grouped_predictions(
+            raw_results=raw, job_id="job-abc", model_name="bioclip-2",
+            grouping_window=10, similarity_threshold=0.99, tax=Tax(),
+            db=db, labels_fingerprint="fp-active",
+        )
+
+    run("match", {})
+    accepted = db.get_predictions(photo_ids=photo_ids, status="accepted")
+    assert {r["detection_id"] for r in accepted} == set(det_ids)
+
+    run("disagreement", {"_existing": True})
+
+    pending = db.get_predictions(photo_ids=photo_ids, status="pending")
+    by_det = {r["detection_id"]: r for r in pending}
+    assert set(by_det) == set(det_ids)
+    for r in by_det.values():
+        assert r["status"] == "pending"
+        assert r["group_id"]  # burst grouping metadata reapplied
+        assert r["category"] == "disagreement"
+
+
 def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
     """If (detection, classifier_model, fingerprint) already ran, don't invoke again."""
     from db import Database
