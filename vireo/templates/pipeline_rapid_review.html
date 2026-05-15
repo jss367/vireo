@@ -229,11 +229,30 @@
   position: relative;
   overflow: hidden;
 }
+.photo-stage.zoomed {
+  align-items: flex-start;
+  justify-content: flex-start;
+  overflow: auto;
+  cursor: grab;
+}
+.photo-stage.zoomed.dragging {
+  cursor: grabbing;
+}
 .photo-stage img {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
   display: block;
+  cursor: zoom-in;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.photo-stage.zoomed img {
+  flex: 0 0 auto;
+  max-width: none;
+  max-height: none;
+  object-fit: none;
+  cursor: grab;
 }
 .stage-empty {
   color: var(--text-muted);
@@ -558,8 +577,8 @@
     </div>
 
     <section class="review-surface" id="reviewSurface">
-      <div class="photo-stage" id="photoStage">
-        <img id="currentPhoto" alt="">
+      <div class="photo-stage" id="photoStage" onclick="toggleRapidZoom(event)">
+        <img id="currentPhoto" alt="" draggable="false" onload="rapidImageLoaded()">
         <div class="status-pill review" id="statusPill">Review</div>
         <div class="stage-empty" id="stageEmpty" style="display:none;">No active photo</div>
       </div>
@@ -650,6 +669,11 @@ var rapid = {
   seeded: false,
   applying: false,
   loadError: false,
+  zoomed: false,
+  zoomPhotoId: null,
+  zoomAnchor: null,
+  zoomDrag: null,
+  suppressZoomClick: false,
   // Bumped on each openSession; used to drop stale /group/state responses
   // when the user switches bursts before the previous fetch resolves.
   openToken: 0,
@@ -677,6 +701,10 @@ function escapeHtml(s) {
 
 function photoPreviewUrl(id) {
   return '/photos/' + id + '/preview?size=2560';
+}
+
+function photoOriginalUrl(id) {
+  return '/photos/' + id + '/original';
 }
 
 function thumbUrl(id) {
@@ -831,11 +859,26 @@ function rebuildFilteredSessions() {
   rapid.sessions = rapid.allSessions.filter(sessionMatchesQueue);
 }
 
-function findSessionIndexByKey(key) {
-  for (var i = 0; i < rapid.sessions.length; i++) {
-    if (sessionKey(rapid.sessions[i]) === key) return i;
+function findSessionIndexByKeyIn(sessions, key) {
+  for (var i = 0; i < sessions.length; i++) {
+    if (sessionKey(sessions[i]) === key) return i;
   }
   return -1;
+}
+
+function findSessionIndexByKey(key) {
+  return findSessionIndexByKeyIn(rapid.sessions, key);
+}
+
+function requestedSessionKey() {
+  var params = new URLSearchParams(window.location.search);
+  var enc = params.get('enc');
+  var burst = params.get('burst');
+  if (enc == null || burst == null) return '';
+  var encIdx = parseInt(enc, 10);
+  var burstIdx = parseInt(burst, 10);
+  if (!Number.isFinite(encIdx) || !Number.isFinite(burstIdx)) return '';
+  return encIdx + ':' + burstIdx;
 }
 
 function findNextFilteredIndexAfterRaw(rawIndex) {
@@ -862,15 +905,10 @@ function hasStagedChanges() {
 }
 
 function findInitialSession() {
-  var params = new URLSearchParams(window.location.search);
-  var enc = params.get('enc');
-  var burst = params.get('burst');
-  if (enc != null && burst != null) {
-    var encIdx = parseInt(enc, 10);
-    var burstIdx = parseInt(burst, 10);
-    for (var i = 0; i < rapid.sessions.length; i++) {
-      if (rapid.sessions[i].encIdx === encIdx && rapid.sessions[i].burstIdx === burstIdx) return i;
-    }
+  var key = requestedSessionKey();
+  if (key) {
+    var requestedIdx = findSessionIndexByKey(key);
+    if (requestedIdx >= 0) return requestedIdx;
   }
   for (var j = 0; j < rapid.sessions.length; j++) {
     if (rapid.sessions[j].ids.length > 1) return j;
@@ -901,6 +939,11 @@ function promptStagedQueueChange() {
   return new Promise(function(resolve) {
     rapid.queuePromptResolve = resolve;
   });
+}
+
+function isQueuePromptOpen() {
+  var prompt = document.getElementById('queuePrompt');
+  return !!(prompt && !prompt.hidden);
 }
 
 document.getElementById('queuePrompt').addEventListener('click', function(e) {
@@ -957,7 +1000,14 @@ async function initRapidReview() {
   rapid.photoMap = {};
   (rapid.results.photos || []).forEach(function(p) { rapid.photoMap[p.id] = p; });
   rapid.allSessions = buildSessions(rapid.results);
+  var requestedKey = requestedSessionKey();
   rebuildFilteredSessions();
+  if (requestedKey &&
+      findSessionIndexByKey(requestedKey) < 0 &&
+      findSessionIndexByKeyIn(rapid.allSessions, requestedKey) >= 0) {
+    rapid.queue.filter = 'all';
+    rebuildFilteredSessions();
+  }
   renderQueueControls();
   renderBurstList();
   var idx = findInitialSession();
@@ -1023,6 +1073,7 @@ async function openSession(index) {
   rapid.initialFlags = {};
   rapid.history = [];
   rapid.currentIndex = rapid.items.length ? 0 : -1;
+  resetRapidZoom();
   rapid.seeded = false;
   rapid.loadError = false;
   // Bump the token so any in-flight /group/state fetch from a previous
@@ -1087,6 +1138,121 @@ function currentPhoto() {
   return rapid.items[rapid.currentIndex];
 }
 
+function resetRapidZoom() {
+  rapid.zoomed = false;
+  rapid.zoomPhotoId = null;
+  rapid.zoomAnchor = null;
+  rapid.zoomDrag = null;
+  rapid.suppressZoomClick = false;
+  var stage = document.getElementById('photoStage');
+  var img = document.getElementById('currentPhoto');
+  if (stage) {
+    stage.classList.remove('zoomed', 'dragging');
+    stage.scrollLeft = 0;
+    stage.scrollTop = 0;
+  }
+  if (img) {
+    img.style.width = '';
+    img.style.height = '';
+  }
+}
+
+function applyRapidZoomLayout() {
+  var p = currentPhoto();
+  var stage = document.getElementById('photoStage');
+  var img = document.getElementById('currentPhoto');
+  var shouldZoom = !!(p && rapid.zoomed && rapid.zoomPhotoId === p.id);
+  stage.classList.toggle('zoomed', shouldZoom);
+  if (!shouldZoom) {
+    img.style.width = '';
+    img.style.height = '';
+    stage.scrollLeft = 0;
+    stage.scrollTop = 0;
+    return;
+  }
+  if (img.complete && img.naturalWidth && img.naturalHeight) {
+    img.style.width = img.naturalWidth + 'px';
+    img.style.height = img.naturalHeight + 'px';
+    if (rapid.zoomAnchor) {
+      var anchor = rapid.zoomAnchor;
+      rapid.zoomAnchor = null;
+      requestAnimationFrame(function() {
+        stage.scrollLeft = Math.max(0, anchor.x * img.offsetWidth - stage.clientWidth / 2);
+        stage.scrollTop = Math.max(0, anchor.y * img.offsetHeight - stage.clientHeight / 2);
+      });
+    }
+  }
+}
+
+function rapidImageLoaded() {
+  applyRapidZoomLayout();
+}
+
+function toggleRapidZoom(e) {
+  if (e) e.stopPropagation();
+  if (rapid.suppressZoomClick) {
+    rapid.suppressZoomClick = false;
+    return;
+  }
+  var p = currentPhoto();
+  if (!p) return;
+  if (rapid.zoomed && rapid.zoomPhotoId === p.id) {
+    resetRapidZoom();
+    renderCurrent();
+    return;
+  }
+  var img = document.getElementById('currentPhoto');
+  var rect = img.getBoundingClientRect();
+  rapid.zoomed = true;
+  rapid.zoomPhotoId = p.id;
+  rapid.zoomAnchor = {
+    x: rect.width ? Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) : 0.5,
+    y: rect.height ? Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height)) : 0.5,
+  };
+  renderCurrent();
+}
+
+function rapidZoomPointerDown(e) {
+  var p = currentPhoto();
+  if (!p || !rapid.zoomed || rapid.zoomPhotoId !== p.id || e.button !== 0) return;
+  var stage = document.getElementById('photoStage');
+  rapid.zoomDrag = {
+    pointerId: e.pointerId,
+    startX: e.clientX,
+    startY: e.clientY,
+    scrollLeft: stage.scrollLeft,
+    scrollTop: stage.scrollTop,
+    moved: false,
+  };
+  stage.classList.add('dragging');
+  e.currentTarget.setPointerCapture(e.pointerId);
+}
+
+function rapidZoomPointerMove(e) {
+  if (!rapid.zoomDrag) return;
+  var stage = document.getElementById('photoStage');
+  var dx = e.clientX - rapid.zoomDrag.startX;
+  var dy = e.clientY - rapid.zoomDrag.startY;
+  if (!rapid.zoomDrag.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+    rapid.zoomDrag.moved = true;
+  }
+  if (rapid.zoomDrag.moved) {
+    stage.scrollLeft = rapid.zoomDrag.scrollLeft - dx;
+    stage.scrollTop = rapid.zoomDrag.scrollTop - dy;
+  }
+}
+
+function rapidZoomPointerUp(e) {
+  if (!rapid.zoomDrag) return;
+  var moved = rapid.zoomDrag.moved;
+  rapid.zoomDrag = null;
+  document.getElementById('photoStage').classList.remove('dragging');
+  if (moved) rapid.suppressZoomClick = true;
+  try {
+    e.currentTarget.releasePointerCapture(e.pointerId);
+  } catch (_) {}
+}
+
 function zoneFor(id) {
   if (rapid.picks.has(id)) return 'pick';
   if (rapid.rejects.has(id)) return 'reject';
@@ -1120,6 +1286,7 @@ function decideCurrent(zone) {
   rapid.reviewed.add(id);
   rapid.touched.add(id);
   advanceToNext();
+  resetRapidZoom();
   renderAll();
 }
 
@@ -1168,6 +1335,7 @@ function undoLast() {
   if (entry.prevTouched) rapid.touched.add(entry.id);
   else rapid.touched.delete(entry.id);
   rapid.currentIndex = entry.prevIndex;
+  resetRapidZoom();
   renderAll();
 }
 
@@ -1175,6 +1343,7 @@ function selectPhoto(id) {
   var idx = rapid.items.findIndex(function(p) { return p.id === id; });
   if (idx >= 0) {
     rapid.currentIndex = idx;
+    resetRapidZoom();
     renderAll();
   }
 }
@@ -1203,6 +1372,7 @@ function renderCurrent() {
   var empty = document.getElementById('stageEmpty');
   var pill = document.getElementById('statusPill');
   if (!p) {
+    resetRapidZoom();
     img.removeAttribute('src');
     img.style.display = 'none';
     empty.style.display = '';
@@ -1216,7 +1386,11 @@ function renderCurrent() {
     return;
   }
   img.style.display = '';
-  img.src = photoPreviewUrl(p.id);
+  var shouldZoom = rapid.zoomed && rapid.zoomPhotoId === p.id;
+  var src = shouldZoom ? photoOriginalUrl(p.id) : photoPreviewUrl(p.id);
+  img.title = shouldZoom ? 'Click to fit image' : 'Click for 1:1 zoom';
+  if (img.getAttribute('src') !== src) img.src = src;
+  applyRapidZoomLayout();
   empty.style.display = 'none';
   var zone = zoneFor(p.id);
   pill.style.display = '';
@@ -1423,6 +1597,10 @@ function openClassic() {
 }
 
 document.addEventListener('keydown', function(e) {
+  if (isQueuePromptOpen()) {
+    e.preventDefault();
+    return;
+  }
   if (e.target && e.target.tagName === 'INPUT') return;
   if (e.key === 'ArrowDown' || e.key === 'x' || e.key === 'X') {
     e.preventDefault();
@@ -1449,6 +1627,10 @@ document.addEventListener('keydown', function(e) {
 });
 
 initRapidReview();
+document.getElementById('photoStage').addEventListener('pointerdown', rapidZoomPointerDown);
+document.getElementById('photoStage').addEventListener('pointermove', rapidZoomPointerMove);
+document.getElementById('photoStage').addEventListener('pointerup', rapidZoomPointerUp);
+document.getElementById('photoStage').addEventListener('pointercancel', rapidZoomPointerUp);
 </script>
 </body>
 </html>

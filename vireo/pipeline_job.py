@@ -1814,8 +1814,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         try:
             import config as cfg
             from classify_job import (
+                _BATCH_SIZE,
                 _flush_batch,
                 _prepare_image,
+                _record_batch_classifier_runs,
                 _store_grouped_predictions,
             )
 
@@ -1995,6 +1997,56 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 processed_in_spec = 0
                 start_time = time.time()
                 batch_size = 32  # classification batch granularity
+                inference_batch_size = _BATCH_SIZE
+                inference_batch: list = []
+                has_flushed_in_spec = False
+
+                def _close_pending_inference(inference_batch=inference_batch):
+                    for entry in inference_batch:
+                        with contextlib.suppress(Exception):
+                            entry["img"].close()
+                    inference_batch.clear()
+
+                def _flush_pending_inference(
+                    inference_batch=inference_batch,
+                    raw_results=raw_results,
+                    clf=clf,
+                    model_type=model_type,
+                    model_name=model_name,
+                    spec_fp=spec_fp,
+                ):
+                    nonlocal failed, has_flushed_in_spec
+                    if not inference_batch:
+                        return
+
+                    pending = list(inference_batch)
+                    inference_batch.clear()
+                    has_flushed_in_spec = True
+                    pre_len = len(raw_results)
+                    n_batch_failed = _flush_batch(
+                        pending, clf, model_type, model_name,
+                        thread_db, raw_results,
+                    )
+                    failed += n_batch_failed
+
+                    successful_det_ids = {
+                        r.get("detection_id") for r in raw_results[pre_len:]
+                    }
+                    if n_batch_failed:
+                        for entry in pending:
+                            if entry.get("detection_id") not in successful_det_ids:
+                                failed_photo_ids.add(entry["photo"]["id"])
+
+                    _record_batch_classifier_runs(
+                        thread_db, pending, model_name, spec_fp, raw_results,
+                        pre_len,
+                    )
+
+                    new_count = len(raw_results) - pre_len
+                    if new_count > 0:
+                        stages["classify"]["count"] = (
+                            stages["classify"].get("count", 0) + new_count
+                        )
 
                 for batch_start in range(0, total, batch_size):
                     if _should_abort(abort):
@@ -2126,46 +2178,31 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             failed += 1
                             failed_photo_ids.add(photo["id"])
                             continue
-                        img_batch = [{
+                        inference_batch.append({
                             "photo": photo,
                             "detection_id": primary_det["id"],
                             "folder_path": folder_path,
                             "image_path": image_path,
                             "img": img,
-                        }]
-                        pre_len = len(raw_results)
-                        n_batch_failed = _flush_batch(
-                            img_batch, clf, model_type, model_name,
-                            thread_db, raw_results,
-                        )
-                        if n_batch_failed:
-                            failed_photo_ids.add(photo["id"])
-                        failed += n_batch_failed
-
-                        # Record the classifier_runs row so the next pass over
-                        # the same (detection, model, fingerprint) short-
-                        # circuits. prediction_count reflects how many rows
-                        # _flush_batch added to raw_results for this detection.
-                        #
-                        # Only persist when the batch produced at least one
-                        # prediction. A count of 0 means the classifier
-                        # failed (transient load error, decode error, etc.);
-                        # caching that would strand the detection without
-                        # predictions until the user forces --reclassify.
-                        new_count = len(raw_results) - pre_len
-                        if new_count > 0:
-                            thread_db.record_classifier_run(
-                                primary_det["id"], model_name, spec_fp,
-                                prediction_count=new_count,
-                            )
-                            stages["classify"]["count"] = (
-                                stages["classify"].get("count", 0) + 1
-                            )
+                        })
+                        # Flush the first real inference immediately. That
+                        # preserves the existing cancel checkpoint after model
+                        # warm-up, then later images batch normally for GPU
+                        # throughput.
+                        if (
+                            not has_flushed_in_spec
+                            or len(inference_batch) >= inference_batch_size
+                        ):
+                            _flush_pending_inference()
 
                     # Batch boundary: surface the per-photo accumulated
                     # count + cached to the UI. Replaces the old per-batch
                     # pre-advance which lied about progress when batches
                     # contained cache hits.
+                    if _should_abort(abort):
+                        _close_pending_inference()
+                    else:
+                        _flush_pending_inference()
                     stages["classify"]["total"] = total * len(resolved_specs_local)
                     elapsed = max(time.time() - start_time, 0.01)
                     _emit_progress(
@@ -2185,6 +2222,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             "total": total,
                         },
                     )
+
+                if _should_abort(abort):
+                    _close_pending_inference()
+                else:
+                    _flush_pending_inference()
 
                 # Skip the grouping/storage finalization on cancel — it can
                 # take a minute on large collections and the user has already

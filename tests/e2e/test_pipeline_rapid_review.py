@@ -9,7 +9,18 @@ _PNG_1X1 = (
 )
 
 
-def _mock_pipeline_rapid_review(page, *, results=None, state_ok=True, apply_photos=None, save_payloads=None):
+def _mock_pipeline_rapid_review(
+    page,
+    *,
+    results=None,
+    state_ok=True,
+    apply_photos=None,
+    save_payloads=None,
+    preview_body=None,
+    preview_content_type="image/png",
+    original_body=None,
+    original_content_type="image/png",
+):
     image_body = base64.b64decode(_PNG_1X1)
     if results is None:
         results = {
@@ -73,7 +84,11 @@ def _mock_pipeline_rapid_review(page, *, results=None, state_ok=True, apply_phot
     )
     page.route(
         "**/photos/*/preview?*",
-        lambda route: route.fulfill(body=image_body, content_type="image/png"),
+        lambda route: route.fulfill(body=preview_body or image_body, content_type=preview_content_type),
+    )
+    page.route(
+        "**/photos/*/original",
+        lambda route: route.fulfill(body=original_body or image_body, content_type=original_content_type),
     )
 
 
@@ -227,6 +242,32 @@ def test_rapid_review_default_queue_excludes_fully_confirmed_bursts(live_server,
     expect(page.locator(".burst-row")).to_have_count(2)
 
 
+def test_rapid_review_deep_link_opens_filtered_out_burst_via_all(live_server, page):
+    results = {
+        "photos": [
+            {"id": 1, "filename": "confirmed.jpg", "label": "KEEP", "flag": "flagged", "confirmed_species": "Test bird"},
+            {"id": 2, "filename": "needs.jpg", "label": "REVIEW", "flag": "none"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2],
+                "photo_count": 2,
+                "burst_count": 2,
+                "species": ["Test bird"],
+                "bursts": [{"photo_ids": [1]}, {"photo_ids": [2]}],
+            }
+        ],
+        "summary": {"keep_count": 1, "review_count": 1, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(page, results=results)
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review?enc=0&burst=0")
+
+    expect(page.locator("#queueFilter")).to_have_value("all")
+    expect(page.locator("#burstTitle")).to_have_text("Encounter 1, Burst 1")
+    expect(page.locator("#filename")).to_have_text("confirmed.jpg")
+
+
 def test_rapid_review_needs_species_includes_mixed_burst(live_server, page):
     results = {
         "photos": [
@@ -358,6 +399,7 @@ def test_rapid_review_rebases_active_session_after_apply_rebuild(live_server, pa
 
 
 def test_rapid_review_filter_change_prompts_with_staged_decisions(live_server, page):
+    save_payloads = []
     results = {
         "photos": [
             {"id": 1, "filename": "needs.jpg", "label": "REVIEW", "flag": "none"},
@@ -374,7 +416,7 @@ def test_rapid_review_filter_change_prompts_with_staged_decisions(live_server, p
         ],
         "summary": {"keep_count": 1, "review_count": 1, "reject_count": 0},
     }
-    _mock_pipeline_rapid_review(page, results=results)
+    _mock_pipeline_rapid_review(page, results=results, save_payloads=save_payloads)
 
     page.goto(f"{live_server['url']}/pipeline/rapid-review")
     expect(page.locator("#applyBtn")).to_be_enabled()
@@ -382,6 +424,12 @@ def test_rapid_review_filter_change_prompts_with_staged_decisions(live_server, p
     page.locator("#queueFilter").select_option("all")
 
     expect(page.locator("#queuePrompt")).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(page.locator("#queuePrompt")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"/pipeline/rapid-review$"))
+    page.keyboard.press("Enter")
+    expect(page.locator("#queuePrompt")).to_be_visible()
+    assert save_payloads == []
     page.locator('[data-queue-choice="stay"]').click()
     expect(page.locator("#queueFilter")).to_have_value("needs-species")
 
@@ -390,6 +438,43 @@ def test_rapid_review_filter_change_prompts_with_staged_decisions(live_server, p
     page.locator('[data-queue-choice="discard"]').click()
     expect(page.locator("#queueFilter")).to_have_value("all")
     expect(page.locator("#queueCount")).to_contain_text("All: 2 of 2 bursts")
+
+
+def test_rapid_review_click_main_image_opens_original_at_one_to_one(live_server, page):
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="3000" height="2000">'
+        '<rect width="3000" height="2000" fill="#101820"/>'
+        '<circle cx="2600" cy="1700" r="180" fill="#f2aa4c"/>'
+        "</svg>"
+    )
+    _mock_pipeline_rapid_review(
+        page,
+        preview_body=original_svg,
+        preview_content_type="image/svg+xml",
+        original_body=original_svg,
+        original_content_type="image/svg+xml",
+    )
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    img = page.locator("#currentPhoto")
+    stage = page.locator("#photoStage")
+
+    stage.click(position={"x": 12, "y": 12})
+
+    expect(stage).to_have_class(re.compile(r"\bzoomed\b"))
+    expect(img).to_have_attribute("src", re.compile(r"/photos/1/original$"))
+    page.wait_for_function(
+        """() => {
+          const img = document.getElementById('currentPhoto');
+          return img && img.naturalWidth === 3000 && img.style.width === '3000px';
+        }"""
+    )
+    assert stage.evaluate("el => el.scrollWidth") >= 3000
+
+    stage.click(position={"x": 12, "y": 12})
+
+    expect(stage).not_to_have_class(re.compile(r"\bzoomed\b"))
+    expect(img).to_have_attribute("src", re.compile(r"/photos/1/preview\?size=2560$"))
 
 
 def test_classic_pipeline_review_opens_requested_burst_from_url(live_server, page):

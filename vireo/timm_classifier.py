@@ -8,6 +8,7 @@ import json
 import logging
 import os
 
+import numpy as np
 import onnx_runtime
 
 log = logging.getLogger(__name__)
@@ -208,11 +209,18 @@ class TimmClassifier:
         Returns:
             list of prediction lists (one per image)
         """
+        if not images:
+            return []
+
+        input_arr = np.concatenate(
+            [self._preprocess(img) for img in images],
+            axis=0,
+        )
+        output = self._session.run(None, {self._input_name: input_arr})
+        logits = output[0]
+        probs_batch = onnx_runtime.softmax(logits, axis=-1)
+
         results = []
-        for img in images:
-            input_arr = self._preprocess(img)
-            output = self._session.run(None, {self._input_name: input_arr})
-            logits = output[0]
-            probs = onnx_runtime.softmax(logits, axis=-1).flatten()
+        for probs in probs_batch:
             results.append(self._build_results(probs, threshold))
         return results
