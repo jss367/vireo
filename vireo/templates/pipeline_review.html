@@ -14,6 +14,18 @@
   height: calc(100vh - 48px - var(--bottom-offset, 28px));
   overflow: hidden;
 }
+.pipeline-layout.sidebar-collapsed .pipeline-sidebar {
+  width: 44px;
+  padding: 10px 6px;
+  overflow: hidden;
+}
+.pipeline-layout.sidebar-collapsed .sidebar-content {
+  display: none;
+}
+.pipeline-layout.sidebar-collapsed .pipeline-sidebar-toggle {
+  margin-left: 0;
+  margin-right: 0;
+}
 
 /* -- Sidebar -- */
 .pipeline-sidebar {
@@ -23,6 +35,29 @@
   border-right: 1px solid var(--border-primary);
   padding: 20px 16px;
   overflow-y: auto;
+  transition: width 0.18s ease, padding 0.18s ease;
+}
+.pipeline-sidebar-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  margin: 0 0 14px auto;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.pipeline-sidebar-toggle:hover {
+  border-color: var(--text-muted);
+  color: var(--text-primary);
 }
 .sidebar-section { margin-bottom: 24px; position: relative; }
 .sidebar-title {
@@ -37,6 +72,7 @@
 /* -- Main area -- */
 .pipeline-main {
   flex: 1;
+  min-width: 0;
   padding: 20px 24px;
   overflow-y: auto;
 }
@@ -1036,9 +1072,19 @@ input[type="range"]::-moz-range-thumb {
 <body>
 {% include '_navbar.html' %}
 
-<div class="pipeline-layout">
+<div class="pipeline-layout" id="pipelineLayout">
   <!-- Sidebar -->
-  <div class="pipeline-sidebar">
+  <div class="pipeline-sidebar" id="pipelineSidebar">
+    <button type="button"
+            class="pipeline-sidebar-toggle"
+            id="pipelineSidebarToggle"
+            data-testid="pipeline-sidebar-toggle"
+            onclick="togglePipelineSidebar()"
+            aria-controls="pipelineSidebarContent"
+            aria-label="Collapse sidebar"
+            aria-expanded="true"
+            title="Collapse sidebar">&#8249;</button>
+    <div class="sidebar-content" id="pipelineSidebarContent">
     <div class="sidebar-section" id="sidebarScoring" style="display:none">
       <div class="sidebar-title">Scoring Thresholds</div>
       <div class="reflow-indicator" id="reflowIndicator">Recomputing...</div>
@@ -1200,6 +1246,7 @@ input[type="range"]::-moz-range-thumb {
 
     <div class="sidebar-section">
       <a href="/pipeline" class="back-link">&larr; Back to Pipeline</a>
+    </div>
     </div>
   </div>
 
@@ -1390,6 +1437,36 @@ var reviewReadiness = null;
 // instead of letting it migrate to a sibling encounter that happens to
 // share the original first photo_id.
 var collapsedEncounters = new Set();
+var PIPELINE_SIDEBAR_STORAGE_KEY = 'vireo.pipelineReview.sidebarCollapsed';
+
+function setPipelineSidebarCollapsed(collapsed, persist) {
+  var layout = document.getElementById('pipelineLayout');
+  var toggle = document.getElementById('pipelineSidebarToggle');
+  if (!layout || !toggle) return;
+  layout.classList.toggle('sidebar-collapsed', !!collapsed);
+  toggle.textContent = collapsed ? '\u203a' : '\u2039';
+  toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  toggle.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+  toggle.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+  if (persist !== false) {
+    try {
+      window.localStorage.setItem(PIPELINE_SIDEBAR_STORAGE_KEY, collapsed ? '1' : '0');
+    } catch (e) {}
+  }
+}
+
+function togglePipelineSidebar() {
+  var layout = document.getElementById('pipelineLayout');
+  setPipelineSidebarCollapsed(!(layout && layout.classList.contains('sidebar-collapsed')));
+}
+
+function initPipelineSidebarState() {
+  var collapsed = false;
+  try {
+    collapsed = window.localStorage.getItem(PIPELINE_SIDEBAR_STORAGE_KEY) === '1';
+  } catch (e) {}
+  setPipelineSidebarCollapsed(collapsed, false);
+}
 
 function encounterKey(enc) {
   if (!enc || !enc.photo_ids || !enc.photo_ids.length) return null;
@@ -2548,6 +2625,7 @@ function computeReviewNow() {
 }
 
 function initPipelineReviewPage() {
+  initPipelineSidebarState();
   safeFetch('/api/pipeline/page-init', {}, { toast: false })
   .then(function(data) {
     // Capture overrides regardless of state so computeReviewNow() can apply
