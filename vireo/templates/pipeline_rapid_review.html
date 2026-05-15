@@ -607,7 +607,7 @@
         </div>
         <div class="species-field">
           <label for="speciesInput">Species keyword for picks</label>
-          <input id="speciesInput" type="text" oninput="renderApplyState()">
+          <input id="speciesInput" type="text" oninput="rapidOnSpeciesInput()">
         </div>
         <div class="decision-grid">
           <button class="decision-btn pick" onclick="decideCurrent('pick')" title="Pick and advance">Pick</button>
@@ -712,6 +712,8 @@ var RAPID_SC_DEFAULTS = {
 };
 var rapidShortcuts = Object.assign({}, RAPID_SC_DEFAULTS);
 var rapidShortcutsRegistered = false;
+var _rapidSpeciesRefetchTimer = null;
+var _rapidSpeciesRefetchToken = 0;
 
 if (window.Keymap && window.Keymap.setScope) {
   window.Keymap.setScope(RAPID_SCOPE);
@@ -1552,6 +1554,41 @@ function candidateIdsForApply() {
     return zoneFor(p.id) === 'review' &&
       (rapid.touched.has(p.id) || initial === 'flagged' || initial === 'rejected');
   }).map(function(p) { return p.id; });
+}
+
+function rapidOnSpeciesInput() {
+  renderApplyState();
+  if (_rapidSpeciesRefetchTimer) clearTimeout(_rapidSpeciesRefetchTimer);
+  _rapidSpeciesRefetchTimer = setTimeout(rapidRefreshSpeciesKeywordState, 250);
+}
+
+function rapidRefreshSpeciesKeywordState() {
+  if (!rapid.items || !rapid.items.length || rapid.sessionIndex < 0) return;
+  var speciesEl = document.getElementById('speciesInput');
+  var species = speciesEl ? (speciesEl.value || '').trim() : '';
+  var token = ++_rapidSpeciesRefetchToken;
+  var openToken = rapid.openToken;
+  var sessionIndex = rapid.sessionIndex;
+  var photoIds = rapid.items.map(function(p) { return p.id; });
+
+  safeFetch('/api/pipeline/group/state', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ photo_ids: photoIds, species: species }),
+  }, { toast: false }).then(function(data) {
+    if (token !== _rapidSpeciesRefetchToken) return;
+    if (rapid.openToken !== openToken || rapid.sessionIndex !== sessionIndex) return;
+    var fresh = (data && data.photos) || {};
+    photoIds.forEach(function(pid) {
+      var row = fresh[pid] || fresh[String(pid)] || {};
+      rapid.initialSpeciesKeywords[pid] = !!row.has_species_keyword;
+    });
+    rapid.keywordStateSpecies = species;
+    renderApplyState();
+  }).catch(function() {
+    // Keep the previous keyword snapshot. If the typed species differs from
+    // that snapshot, the Apply label remains a conservative tag overestimate.
+  });
 }
 
 function rapidPlural(n, one, many) {

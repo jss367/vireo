@@ -229,7 +229,7 @@ def test_rapid_review_apply_button_summarizes_pending_writes(live_server, page):
     )
 
 
-def test_rapid_review_species_edit_recounts_existing_keyword_state(live_server, page):
+def test_rapid_review_species_edit_refreshes_existing_keyword_state(live_server, page):
     results = {
         "photos": [
             {"id": 1, "filename": "a.jpg", "label": "KEEP", "flag": "flagged"},
@@ -256,10 +256,10 @@ def test_rapid_review_species_edit_recounts_existing_keyword_state(live_server, 
 
     page.locator("#speciesInput").fill("New bird")
 
-    expect(page.locator("#applyBtn")).to_have_text("Apply: Set species · Tag 1")
+    expect(page.locator("#applyBtn")).to_have_text("Apply: Set species")
     expect(page.locator("#applyBtn")).to_have_attribute(
         "title",
-        'Apply will set confirmed species to "New bird", add species keyword "New bird" to 1 pick.',
+        'Apply will set confirmed species to "New bird".',
     )
 
 
