@@ -1462,6 +1462,7 @@ async function loadCollectionCounts() {
 }
 
 async function filterByCollection(id) {
+  cancelScheduledSearchFilter();
   activeFolderId = null;
   activeKeyword = null;
   activeCollectionId = id;
@@ -1838,6 +1839,7 @@ async function saveCollection() {
 
 /* ---------- Photo Loading ---------- */
 function resetAndLoad() {
+  cancelScheduledSearchFilter();
   photos = [];
   currentPage = 1;
   allLoaded = false;
@@ -2093,18 +2095,22 @@ function applyFilters() {
 }
 
 function scheduleSearchFilter() {
-  if (searchFilterTimer) clearTimeout(searchFilterTimer);
+  cancelScheduledSearchFilter();
   searchFilterTimer = setTimeout(function() {
     searchFilterTimer = null;
     applyFilters();
   }, 250);
 }
 
-function applySearchFilterNow() {
+function cancelScheduledSearchFilter() {
   if (searchFilterTimer) {
     clearTimeout(searchFilterTimer);
     searchFilterTimer = null;
   }
+}
+
+function applySearchFilterNow() {
+  cancelScheduledSearchFilter();
   applyFilters();
 }
 
