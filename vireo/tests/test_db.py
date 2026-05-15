@@ -9913,7 +9913,7 @@ def test_count_classifier_runs_excludes_full_image_and_below_threshold(tmp_path)
 def test_all_nav_ids_covers_every_page():
     from db import ALL_NAV_IDS
     expected = {
-        "pipeline", "jobs", "pipeline_review", "review", "cull",
+        "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
         "misses", "highlights", "browse", "map", "variants",
         "dashboard", "audit", "compare",
         "settings", "workspace", "lightroom", "shortcuts",
