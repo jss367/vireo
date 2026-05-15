@@ -5838,8 +5838,12 @@ function _updateMissingPhotosBulkBtn() {
 }
 
 async function removeOneMissingPhoto(id) {
-  if (!confirm('Remove this photo from Vireo?\n\nCached thumbnail/preview/working copy (if any) will also be deleted. The XMP sidecar on disk will not be touched.')) return;
-  await _deleteMissingPhotoIds([id], false);
+  const deleteSidecars = document.getElementById('missingPhotosDeleteSidecars').checked;
+  const sidecarMsg = deleteSidecars
+    ? '\n\nLeftover XMP sidecars will also be deleted from disk.'
+    : '\n\nThe XMP sidecar on disk will not be touched.';
+  if (!confirm(`Remove this photo from Vireo?\n\nCached thumbnail/preview/working copy (if any) will also be deleted.${sidecarMsg}`)) return;
+  await _deleteMissingPhotoIds([id], deleteSidecars);
   loadMissingPhotos();
 }
 
@@ -5874,6 +5878,16 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({photo_ids: ids, mode: 'vireo'}),
   });
+  // Best-effort: refreshing the Misses page is an auxiliary UI sync. A
+  // failure here must not reject the delete flow or block the caller's
+  // own loadMissingPhotos() refresh.
+  if (typeof loadMisses === 'function') {
+    try {
+      await loadMisses();
+    } catch (err) {
+      console.error('Failed to refresh Misses after delete:', err);
+    }
+  }
 }
 </script>
 <script src="/static/vireo-utils.js"></script>
