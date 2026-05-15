@@ -3574,11 +3574,12 @@ async function setFlagFor(photoId, flag) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: [photoId], flag: flag}),
     });
-  } catch(e) { return; }
+  } catch(e) { return false; }
   var p = photos.find(function(x) { return x.id === photoId; });
   if (p) p.flag = flag;
   refreshGridCards([photoId]);
   if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
+  return true;
 }
 
 async function setColorLabelFor(photoId, color) {
