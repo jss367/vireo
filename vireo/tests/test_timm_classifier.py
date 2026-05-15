@@ -79,7 +79,7 @@ def _make_fake_session(num_classes=3):
         logits = np.array([[5.0, 2.0, 0.5]] * batch_size, dtype=np.float32)
         return [logits]
 
-    session.run = fake_run
+    session.run = MagicMock(side_effect=fake_run)
     return session
 
 
@@ -257,6 +257,21 @@ def test_classify_batch(tmp_path):
     # Each image should produce results for all 3 classes
     assert len(results[0]) == 3
     assert len(results[1]) == 3
+
+
+def test_classify_batch_runs_single_onnx_batch(tmp_path):
+    """classify_batch() sends the whole image batch through ONNX at once."""
+    clf = _make_fake_classifier(tmp_path)
+
+    img1 = Image.new("RGB", (336, 336), color="red")
+    img2 = Image.new("RGB", (336, 336), color="blue")
+
+    clf.classify_batch([img1, img2], threshold=0.0)
+
+    assert clf._session.run.call_count == 1
+    _output_names, input_dict = clf._session.run.call_args.args
+    input_arr = input_dict[clf._input_name]
+    assert input_arr.shape[0] == 2
 
 
 def test_classify_with_pil_image(tmp_path):
