@@ -2039,6 +2039,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                     _record_batch_classifier_runs(
                         thread_db, pending, model_name, spec_fp, raw_results,
+                        pre_len,
                     )
 
                     new_count = len(raw_results) - pre_len
