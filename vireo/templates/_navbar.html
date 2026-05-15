@@ -5866,8 +5866,15 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({photo_ids: ids, mode: 'vireo'}),
   });
+  // Best-effort: refreshing the Misses page is an auxiliary UI sync. A
+  // failure here must not reject the delete flow or block the caller's
+  // own loadMissingPhotos() refresh.
   if (typeof loadMisses === 'function') {
-    await loadMisses();
+    try {
+      await loadMisses();
+    } catch (err) {
+      console.error('Failed to refresh Misses after delete:', err);
+    }
   }
 }
 </script>
