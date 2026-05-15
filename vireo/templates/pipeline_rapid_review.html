@@ -1360,8 +1360,11 @@ async function applyCurrent(openNext) {
       enc.species_confirmed = true;
       // sessions[].species is cached at page load, so update every burst in
       // this encounter — otherwise Apply Next stops tagging picks with the
-      // confirmed species until the user retypes it for each burst.
-      rapid.sessions.forEach(function(s) {
+      // confirmed species until the user retypes it for each burst. Iterate
+      // allSessions, not the filtered rapid.sessions: a queue filter/toggle
+      // can hide sibling bursts, and they must still get the confirmed
+      // species so they aren't stale when they re-enter the queue.
+      rapid.allSessions.forEach(function(s) {
         if (s.encIdx === session.encIdx && !s.hasBurstOverride) {
           s.species = species;
           s.subtitle = s.ids.length + ' photos - ' + species;
