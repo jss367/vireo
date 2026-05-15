@@ -264,7 +264,7 @@ body {
 .summary-folder-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 12px; }
 .summary-folder-name { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; margin-right: 8px; }
 .summary-folder-count { color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
-.selection-panel { display: block; }
+.selection-panel { display: block; margin-bottom: 16px; }
 .selection-panel.hidden { display: none; }
 .selection-heading {
   font-size: 18px;
@@ -2564,8 +2564,8 @@ function updateSelectionPanel(ids) {
 
   var detail = document.getElementById('detailContent');
   var summary = document.getElementById('summaryPanel');
-  if (detail) detail.classList.remove('visible');
   if (summary) summary.classList.add('hidden');
+  if (detail) detail.classList.toggle('visible', selectedPhotoId != null);
   panel.classList.remove('hidden');
   document.getElementById('selectionCount').textContent = ids.length + ' photos selected';
   loadSelectionKeywordSuggestions(ids);
