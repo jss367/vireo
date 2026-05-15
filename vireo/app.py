@@ -5200,7 +5200,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "darktable" in " ".join(parts).lower()
 
         file_paths = [path for _photo, path in photo_paths]
-        if _is_darktable_editor() and cfg.get("darktable_auto_convert_dng"):
+        if _is_darktable_editor():
             from develop import convert_to_dng, is_nikon_high_efficiency_nef
 
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
@@ -5232,12 +5232,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         os.path.isfile(candidate)
                         and os.path.getmtime(candidate) >= source_mtime
                     ):
+                        log.info(
+                            "Using cached DNG for darktable external editor: %s",
+                            candidate,
+                        )
                         fresh_cached = candidate
                         break
                 if fresh_cached:
                     converted_paths.append(fresh_cached)
                     continue
 
+                log.info(
+                    "Converting Nikon HE NEF for darktable external editor: %s",
+                    input_path,
+                )
                 conversion = convert_to_dng(
                     cfg.get("dng_converter_bin") or "",
                     input_path,
