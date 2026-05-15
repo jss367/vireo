@@ -265,6 +265,44 @@ def test_singleton_set_keyboard_shortcut_applies(live_server, page):
     )
 
 
+def test_multiselect_offers_partial_keyword_fill(live_server, page):
+    """Selecting mixed tagged/untagged photos offers one-click keyword fill."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    assert cards.count() >= 5
+
+    page.evaluate("""
+      photos.forEach(function(p) { selectedPhotos.add(p.id); });
+      renderGrid();
+      updateBatchBar();
+    """)
+
+    expect(page.locator("#selectionPanel")).to_be_visible()
+    row = page.locator(".selection-keyword-row", has_text="Red-tailed Hawk")
+    expect(row).to_be_visible()
+    expect(row).to_contain_text("missing from 4")
+
+    row.locator("button", has_text="Add to 4").click()
+
+    page.wait_for_function("""
+      async () => {
+        const ids = photos.map(p => p.id);
+        const details = await Promise.all(
+          ids.map(id => fetch('/api/photos/' + id).then(r => r.json()))
+        );
+        return details.every(p =>
+          (p.keywords || []).some(k => k.name === 'Red-tailed Hawk')
+        );
+      }
+    """, timeout=3000)
+    expect(
+        page.locator(".selection-keyword-row", has_text="Red-tailed Hawk")
+    ).to_have_count(0)
+
+
 def test_filterByCollection_clears_multiselect_set(live_server, page):
     """Switching to a collection must drop a surviving multi-select set.
 

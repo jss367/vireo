@@ -2107,6 +2107,75 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                        [{'photo_id': photo_id, 'old_value': str(keyword_id), 'new_value': ''}])
         return jsonify({"ok": True})
 
+    @app.route("/api/selection/keyword-suggestions", methods=["POST"])
+    def api_selection_keyword_suggestions():
+        """Return selected keywords that are present on some, but not all photos."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        raw_ids = body.get("photo_ids", [])
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return json_error("photo_ids required")
+
+        photo_ids = []
+        seen = set()
+        for raw in raw_ids:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return json_error("photo_ids must be integers")
+            if raw not in seen:
+                photo_ids.append(raw)
+                seen.add(raw)
+        if not photo_ids:
+            return json_error("photo_ids required")
+        if len(photo_ids) > 1000:
+            return json_error("too many photo_ids", 400)
+
+        for pid in photo_ids:
+            if not db._photo_in_workspace(pid):
+                return json_error(
+                    f"Photo {pid} does not belong to the active workspace", 403
+                )
+
+        placeholders = ",".join("?" for _ in photo_ids)
+        rows = db.conn.execute(
+            f"""SELECT pk.photo_id, k.id, k.name, k.type
+                FROM photo_keywords pk
+                JOIN keywords k ON k.id = pk.keyword_id
+                WHERE pk.photo_id IN ({placeholders})
+                ORDER BY LOWER(k.name), k.id""",
+            photo_ids,
+        ).fetchall()
+
+        selected_count = len(photo_ids)
+        by_keyword = {}
+        for row in rows:
+            entry = by_keyword.setdefault(
+                row["id"],
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "type": row["type"],
+                    "photo_ids": set(),
+                },
+            )
+            entry["photo_ids"].add(row["photo_id"])
+
+        suggestions = []
+        for entry in by_keyword.values():
+            count = len(entry["photo_ids"])
+            missing_count = selected_count - count
+            if 0 < count < selected_count:
+                suggestions.append({
+                    "id": entry["id"],
+                    "name": entry["name"],
+                    "type": entry["type"],
+                    "count": count,
+                    "missing_count": missing_count,
+                })
+        suggestions.sort(
+            key=lambda item: (-item["count"], item["name"].lower(), item["id"])
+        )
+        return jsonify({"selected_count": selected_count, "suggestions": suggestions})
+
     @app.route("/api/keywords/<int:keyword_id>", methods=["PUT"])
     def api_update_keyword(keyword_id):
         db = _get_db()
@@ -2625,19 +2694,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
-        name = body.get("name", "").strip()
-        if not photo_ids or not name:
-            return json_error("photo_ids and name required")
-        # Route kw_type through add_keyword so its type-reconciliation logic
-        # runs (preserves existing user-typed rows; only upgrades 'general').
-        # See api_add_keyword for the rationale.
-        kw_type_raw = body.get("type")
-        kw_type = (
-            kw_type_raw
-            if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
-            else None
-        )
-        kid = db.add_keyword(name, kw_type=kw_type)
+        keyword_id = body.get("keyword_id")
+        name = body.get("name", "")
+        name = name.strip() if isinstance(name, str) else ""
+        if not photo_ids:
+            return json_error("photo_ids required")
+        if keyword_id is not None:
+            if isinstance(keyword_id, bool) or not isinstance(keyword_id, int):
+                return json_error("keyword_id must be an integer")
+            keyword_row = db.conn.execute(
+                "SELECT id, name FROM keywords WHERE id = ?", (keyword_id,)
+            ).fetchone()
+            if keyword_row is None:
+                return json_error("keyword not found", 404)
+            kid = keyword_row["id"]
+            name = keyword_row["name"]
+        else:
+            if not name:
+                return json_error("photo_ids and name required")
+            # Route kw_type through add_keyword so its type-reconciliation logic
+            # runs (preserves existing user-typed rows; only upgrades 'general').
+            # See api_add_keyword for the rationale.
+            kw_type_raw = body.get("type")
+            kw_type = (
+                kw_type_raw
+                if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
+                else None
+            )
+            kid = db.add_keyword(name, kw_type=kw_type)
         for pid in photo_ids:
             db.tag_photo(pid, kid)
             _queue_keyword_add(pid, name)

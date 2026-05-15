@@ -264,6 +264,58 @@ body {
 .summary-folder-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 12px; }
 .summary-folder-name { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; margin-right: 8px; }
 .summary-folder-count { color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
+.selection-panel { display: block; }
+.selection-panel.hidden { display: none; }
+.selection-heading {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+.selection-keyword-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.selection-keyword-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+}
+.selection-keyword-name {
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.selection-keyword-meta {
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.selection-keyword-add {
+  flex-shrink: 0;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.selection-keyword-add:hover { filter: brightness(1.05); }
+.selection-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
 .detail-close {
   float: right;
   background: none;
@@ -970,6 +1022,15 @@ body {
       </div>
     </div>
 
+    <!-- Multi-select Detail -->
+    <div class="selection-panel hidden" id="selectionPanel">
+      <div class="selection-heading" id="selectionCount">0 photos selected</div>
+      <div class="detail-section">
+        <div class="detail-section-title">Fill Missing Keywords</div>
+        <div class="selection-keyword-list" id="selectionKeywordSuggestions"></div>
+      </div>
+    </div>
+
     <!-- Photo Detail (shown when a photo is selected) -->
     <div class="detail-content" id="detailContent">
       <button class="detail-close" onclick="closeDetail()">&times;</button>
@@ -1110,6 +1171,8 @@ var allLoaded = false;
 var selectedPhotoId = null;
 var selectedIndex = -1;
 var selectedPhotos = new Set(); // multi-select
+var selectionKeywordRequestSeq = 0;
+var selectionKeywordKey = '';
 var showDetectionBoxes = false;
 var cardFields = ["filename", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
@@ -2409,6 +2472,97 @@ function updateBatchBar() {
   } else {
     bar.style.display = 'none';
   }
+  updateSelectionPanel(ids);
+}
+
+function updateSelectionPanel(ids) {
+  var panel = document.getElementById('selectionPanel');
+  if (!panel) return;
+  if (ids.length <= 1) {
+    var wasVisible = !panel.classList.contains('hidden');
+    panel.classList.add('hidden');
+    selectionKeywordKey = '';
+    selectionKeywordRequestSeq++;
+    var list = document.getElementById('selectionKeywordSuggestions');
+    if (list) list.innerHTML = '';
+    if (wasVisible && !selectedPhotoId) {
+      var detail = document.getElementById('detailContent');
+      var summary = document.getElementById('summaryPanel');
+      if (detail) detail.classList.remove('visible');
+      if (summary) summary.classList.remove('hidden');
+      loadSummary();
+    }
+    return;
+  }
+
+  var detail = document.getElementById('detailContent');
+  var summary = document.getElementById('summaryPanel');
+  if (detail) detail.classList.remove('visible');
+  if (summary) summary.classList.add('hidden');
+  panel.classList.remove('hidden');
+  document.getElementById('selectionCount').textContent = ids.length + ' photos selected';
+  loadSelectionKeywordSuggestions(ids);
+}
+
+async function loadSelectionKeywordSuggestions(ids) {
+  var key = ids.slice().sort(function(a, b) { return a - b; }).join(',');
+  if (key === selectionKeywordKey) return;
+  selectionKeywordKey = key;
+  var seq = ++selectionKeywordRequestSeq;
+  var list = document.getElementById('selectionKeywordSuggestions');
+  if (list) list.innerHTML = '<div class="selection-empty">Checking selected keywords...</div>';
+
+  try {
+    var data = await safeFetch('/api/selection/keyword-suggestions', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids}),
+    }, { toast: false });
+    if (seq !== selectionKeywordRequestSeq) return;
+    renderSelectionKeywordSuggestions(data.suggestions || []);
+  } catch(e) {
+    if (seq === selectionKeywordRequestSeq && list) {
+      list.innerHTML = '<div class="selection-empty">Could not load keyword suggestions.</div>';
+    }
+  }
+}
+
+function renderSelectionKeywordSuggestions(suggestions) {
+  var list = document.getElementById('selectionKeywordSuggestions');
+  if (!list) return;
+  if (!suggestions.length) {
+    list.innerHTML = '<div class="selection-empty">No partial keywords in this selection.</div>';
+    return;
+  }
+
+  var html = '';
+  suggestions.slice(0, 8).forEach(function(k) {
+    var missing = k.missing_count || 0;
+    html += '<div class="selection-keyword-row">' +
+      '<div style="min-width:0;">' +
+        '<div class="selection-keyword-name">' + escapeHtml(k.name) + '</div>' +
+        '<div class="selection-keyword-meta">On ' + k.count + ', missing from ' + missing + '</div>' +
+      '</div>' +
+      '<button class="selection-keyword-add" onclick="applySelectionKeyword(' + k.id + ')" title="Add this keyword to the selected photos missing it">Add to ' + missing + '</button>' +
+    '</div>';
+  });
+  list.innerHTML = html;
+}
+
+async function applySelectionKeyword(keywordId) {
+  var ids = getActiveSelection();
+  if (ids.length <= 1) return;
+  try {
+    await safeFetch('/api/batch/keyword', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, keyword_id: keywordId}),
+    });
+  } catch(e) { return; }
+  selectionKeywordKey = '';
+  loadSelectionKeywordSuggestions(ids);
+  loadKeywords();
+  showUndoToast();
 }
 
 async function batchSetRating(rating) {
@@ -2483,6 +2637,9 @@ async function confirmBatchKeyword() {
       body: JSON.stringify({photo_ids: ids, name: name}),
     });
   } catch(e) { return; }
+  selectionKeywordKey = '';
+  loadSelectionKeywordSuggestions(ids);
+  loadKeywords();
   showUndoToast();
 }
 
@@ -2652,7 +2809,9 @@ async function loadDetail(id) {
 
   try {
     var photo = await safeFetch('/api/photos/' + id, {}, { toast: false });
-    renderDetail(photo);
+    if (selectedPhotoId === id && getActiveSelection().length === 1) {
+      renderDetail(photo);
+    }
   } catch(e) {}
 }
 

@@ -2781,6 +2781,60 @@ def test_batch_keyword_route_handles_non_string_type(app_and_db):
     )
 
 
+def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
+    """Multi-select suggestions should offer keywords present on only some photos."""
+    app, db = app_and_db
+    ids = [
+        row["id"]
+        for row in db.conn.execute(
+            "SELECT id FROM photos ORDER BY filename"
+        ).fetchall()
+    ]
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/selection/keyword-suggestions",
+        json={"photo_ids": ids},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    by_name = {item["name"]: item for item in data["suggestions"]}
+    assert by_name["Cardinal"]["count"] == 1
+    assert by_name["Cardinal"]["missing_count"] == 2
+    assert by_name["Sparrow"]["count"] == 1
+    assert by_name["Sparrow"]["missing_count"] == 2
+
+
+def test_batch_keyword_route_accepts_existing_keyword_id(app_and_db):
+    """The fill-missing-keywords button applies the exact selected keyword row."""
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+    cardinal_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": ids, "keyword_id": cardinal_id},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    tagged = db.conn.execute(
+        """SELECT photo_id FROM photo_keywords
+           WHERE keyword_id = ?
+           ORDER BY photo_id""",
+        (cardinal_id,),
+    ).fetchall()
+    assert [row["photo_id"] for row in tagged] == sorted(ids)
+
+
 def test_create_app_runs_wildlife_backfill_synchronously_on_first_boot(tmp_path, monkeypatch):
     """Regression: on first boot after upgrade (wildlife_backfill_done
     marker unset), create_app must complete the species-marking +
