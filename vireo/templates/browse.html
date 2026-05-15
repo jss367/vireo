@@ -1248,6 +1248,8 @@ var selectedDay = null;
 var calendarData = null;
 var clipSearchActive = false;
 var searchFilterTimer = null;
+var collectionCountRefreshTimer = null;
+var collectionCountLoadGen = 0;
 
 function refreshPendingSyncBanner() {
   if (typeof checkPendingSync === 'function') {
@@ -1588,8 +1590,10 @@ async function loadCollections() {
 }
 
 async function loadCollectionCounts() {
+  var gen = ++collectionCountLoadGen;
   try {
     var data = await safeFetch('/api/collections', {}, { toast: false });
+    if (gen !== collectionCountLoadGen) return;
     if (!data) return;
     var items = document.querySelectorAll('#collectionList .tree-item');
     var countsById = {};
@@ -1608,6 +1612,14 @@ async function loadCollectionCounts() {
       }
     });
   } catch(e) {}
+}
+
+function scheduleCollectionCountsRefresh() {
+  if (collectionCountRefreshTimer) clearTimeout(collectionCountRefreshTimer);
+  collectionCountRefreshTimer = setTimeout(function() {
+    collectionCountRefreshTimer = null;
+    loadCollectionCounts();
+  }, 150);
 }
 
 function refreshBrowseSidebarCounts() {
@@ -2716,6 +2728,7 @@ async function batchSetRating(rating) {
     if (p) p.rating = rating;
   });
   refreshGridCards(ids);
+  scheduleCollectionCountsRefresh();
   refreshPendingSyncBanner();
   showUndoToast();
 }
@@ -2736,6 +2749,7 @@ async function batchSetFlag(flag) {
   if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1) {
     updateDetailFlagButtons(flag);
   }
+  scheduleCollectionCountsRefresh();
   showUndoToast();
 }
 
@@ -2754,6 +2768,7 @@ async function batchSetColorLabel(color) {
     else delete colorLabels[id];
   });
   refreshGridCards(ids);
+  scheduleCollectionCountsRefresh();
   showUndoToast();
 }
 
@@ -2782,6 +2797,7 @@ async function confirmBatchKeyword() {
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(ids);
   loadKeywords();
+  scheduleCollectionCountsRefresh();
   refreshPendingSyncBanner();
   showUndoToast();
 }
@@ -2927,6 +2943,7 @@ async function undoLast() {
     var data = await safeFetch('/api/undo', { method: 'POST' });
     showToast('Undone: ' + data.undone + ' — Ctrl+Shift+Z to redo');
     resetAndLoad();
+    scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -2936,6 +2953,7 @@ async function redoLast() {
     var data = await safeFetch('/api/redo', { method: 'POST' });
     showToast('Redone: ' + data.redone);
     resetAndLoad();
+    scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -3298,6 +3316,7 @@ async function setRating(photoId, rating) {
     var p = photos.find(function(x) { return x.id === photoId; });
     if (p) p.rating = rating;
     refreshGridCards([photoId]);
+    scheduleCollectionCountsRefresh();
     loadDetail(photoId);
     refreshPendingSyncBanner();
   } catch(e) {}
@@ -3316,6 +3335,7 @@ async function setFlag(flag) {
     if (p) p.flag = flag;
     refreshGridCards([photoId]);
     if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
+    scheduleCollectionCountsRefresh();
   } catch(e) {}
 }
 
@@ -3384,6 +3404,7 @@ async function setColorLabel(color) {
   }
   if (selectedPhotoId === photoId) updateDetailColors();
   refreshGridCards([photoId]);
+  scheduleCollectionCountsRefresh();
 }
 
 function updateDetailColors() {
@@ -3407,6 +3428,7 @@ async function addKeyword() {
     input.value = '';
     loadDetail(selectedPhotoId);
     loadKeywords();
+    scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -3417,6 +3439,8 @@ async function removeKeyword(photoId, keywordId) {
       method: 'DELETE',
     });
     loadDetail(photoId);
+    loadKeywords();
+    scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -3874,6 +3898,7 @@ async function setRatingFor(photoId, rating) {
   var p = photos.find(function(x) { return x.id === photoId; });
   if (p) p.rating = rating;
   refreshGridCards([photoId]);
+  scheduleCollectionCountsRefresh();
   if (selectedPhotoId === photoId) loadDetail(photoId);
   refreshPendingSyncBanner();
 }
@@ -3889,6 +3914,7 @@ async function setFlagFor(photoId, flag) {
   if (p) p.flag = flag;
   refreshGridCards([photoId]);
   if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
+  scheduleCollectionCountsRefresh();
   return true;
 }
 
@@ -3904,6 +3930,7 @@ async function setColorLabelFor(photoId, color) {
   else delete colorLabels[photoId];
   refreshGridCards([photoId]);
   if (selectedPhotoId === photoId) updateDetailColors();
+  scheduleCollectionCountsRefresh();
 }
 
 function revealPhoto(photoId) {
