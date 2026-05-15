@@ -290,6 +290,7 @@ class Database:
                 miss_clipped             INTEGER,
                 miss_oof                 INTEGER,
                 miss_computed_at         TEXT,
+                wildlife_excluded        INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(folder_id, filename)
             );
 
@@ -784,6 +785,13 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE photos ADD COLUMN active_mask_variant TEXT"
             )
+        try:
+            self.conn.execute("SELECT wildlife_excluded FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos "
+                "ADD COLUMN wildlife_excluded INTEGER NOT NULL DEFAULT 0"
+            )
 
         # Backfill pre-existing photos with mask_path set on the photos
         # row but no row in photo_masks. They get migrated to
@@ -1107,6 +1115,24 @@ class Database:
             ).fetchall()
             for r in rows:
                 excluded.add(r["photo_id"])
+        return [pid for pid in photo_ids_list if pid not in excluded]
+
+    def filter_out_wildlife_excluded(self, photo_ids):
+        """Return photo ids not explicitly excluded from wildlife classification."""
+        if not photo_ids:
+            return []
+        photo_ids_list = list(photo_ids)
+        excluded = set()
+        chunk_size = self._FILTER_SUBJECT_CHUNK
+        for chunk in _chunks(photo_ids_list, chunk_size):
+            placeholders = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"""SELECT id FROM photos
+                    WHERE wildlife_excluded = 1
+                      AND id IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            excluded.update(r["id"] for r in rows)
         return [pid for pid in photo_ids_list if pid not in excluded]
 
     def get_workspace_active_labels(self):
@@ -2713,7 +2739,8 @@ class Database:
     PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
                     timestamp, width, height, rating, flag, thumb_path, sharpness,
                     subject_sharpness, subject_size, quality_score,
-                    latitude, longitude, companion_path, working_copy_path"""
+                    latitude, longitude, companion_path, working_copy_path,
+                    wildlife_excluded"""
 
     # Columns for single-photo detail queries (includes exif_data JSON +
     # eye-focus fields consumed by the review lightbox's crosshair overlay)
@@ -4448,6 +4475,16 @@ class Database:
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
         self.conn.execute("UPDATE photos SET flag = ? WHERE id = ?", (flag, photo_id))
+        self.conn.commit()
+
+    def update_photo_wildlife_excluded(self, photo_id, excluded, verify_workspace=True):
+        """Set whether a photo is excluded from wildlife detection/classification."""
+        if verify_workspace:
+            self._verify_photo_in_workspace(photo_id)
+        self.conn.execute(
+            "UPDATE photos SET wildlife_excluded = ? WHERE id = ?",
+            (1 if excluded else 0, photo_id),
+        )
         self.conn.commit()
 
     def batch_update_photo_flag(self, photo_ids, flag, verify_workspace=True):
@@ -8222,6 +8259,10 @@ class Database:
                     self.queue_change(pid, 'rating', old_val)
             elif entry['action_type'] == 'flag':
                 self.update_photo_flag(pid, old_val, verify_workspace=False)
+            elif entry['action_type'] == 'wildlife_excluded':
+                self.update_photo_wildlife_excluded(
+                    pid, old_val == "1", verify_workspace=False
+                )
             elif entry['action_type'] == 'color_label':
                 if old_val:
                     self.set_color_label(pid, old_val)
@@ -8341,6 +8382,10 @@ class Database:
                     self.queue_change(pid, 'rating', new_val)
             elif entry['action_type'] == 'flag':
                 self.update_photo_flag(pid, entry['new_value'], verify_workspace=False)
+            elif entry['action_type'] == 'wildlife_excluded':
+                self.update_photo_wildlife_excluded(
+                    pid, new_val == "1", verify_workspace=False
+                )
             elif entry['action_type'] == 'color_label':
                 if new_val:
                     self.set_color_label(pid, new_val)

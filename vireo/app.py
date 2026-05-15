@@ -1948,6 +1948,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                        [{'photo_id': photo_id, 'old_value': old_flag, 'new_value': flag}])
         return jsonify({"ok": True})
 
+    @app.route("/api/photos/<int:photo_id>/wildlife_excluded", methods=["POST"])
+    def api_set_wildlife_excluded(photo_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        excluded = body.get("excluded")
+        if not isinstance(excluded, bool):
+            return json_error("excluded must be a boolean")
+        old = db.get_photo(photo_id)
+        if not old:
+            return json_error("not found", 404)
+        old_value = "1" if old["wildlife_excluded"] else "0"
+        new_value = "1" if excluded else "0"
+        try:
+            db.update_photo_wildlife_excluded(photo_id, excluded)
+        except ValueError as e:
+            return json_error(str(e), 403)
+        db.record_edit(
+            "wildlife_excluded",
+            "Excluded from wildlife classification" if excluded else "Included in wildlife classification",
+            new_value,
+            [{"photo_id": photo_id, "old_value": old_value, "new_value": new_value}],
+        )
+        return jsonify({"ok": True, "wildlife_excluded": excluded})
+
     @app.route("/api/photos/<int:photo_id>/color_label", methods=["POST"])
     def api_set_color_label(photo_id):
         db = _get_db()

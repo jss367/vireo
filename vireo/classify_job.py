@@ -1441,6 +1441,31 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         )
         photos = thread_db.get_collection_photos(params.collection_id, per_page=999999)
 
+        pre_count = len(photos)
+        kept_ids = set(thread_db.filter_out_wildlife_excluded(
+            [p["id"] for p in photos],
+        ))
+        photos = [p for p in photos if p["id"] in kept_ids]
+        skipped_wildlife = pre_count - len(photos)
+        if skipped_wildlife:
+            log.info(
+                "Skipping %d photo(s) marked not wildlife",
+                skipped_wildlife,
+            )
+            runner.push_event(
+                job["id"], "progress",
+                {
+                    "current": 0,
+                    "total": len(photos),
+                    "current_file": (
+                        f"Skipped {skipped_wildlife} photo(s) marked not wildlife"
+                    ),
+                    "rate": 0,
+                    "phase": "Step 1/5: Loading photos",
+                    "skipped_wildlife_excluded": skipped_wildlife,
+                },
+            )
+
         # Skip photos already tagged with a 'subject' keyword (per workspace
         # config). reclassify=True bypasses so users can verify existing tags.
         if not params.reclassify:
