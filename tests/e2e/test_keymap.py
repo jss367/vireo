@@ -143,38 +143,59 @@ def test_page_scope_shadows_global_for_same_key(live_server, page):
     assert page.evaluate("window._kmFired") == "page"
 
 
-def test_navbar_nav_shortcuts_registered_globally(live_server, page):
-    """Navigation entries with default keys are registered globally after config load."""
+def test_default_navigation_shortcuts_are_not_registered_as_bare_keys(live_server, page):
+    """Default navigation does not reserve bare keys in the global dispatcher."""
     url = live_server["url"]
     page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
 
-    # After the nav shortcut bootstrap runs, every nav entry should be in the global scope.
     names = page.evaluate("""
         window.Keymap.shortcutsForScope('global')
             .filter(s => s.category === 'Navigation')
             .map(s => s.name)
     """)
-    expected = {
-        'lightroom', 'pipeline_review', 'review', 'cull',
-        'browse', 'map', 'variants', 'dashboard', 'audit', 'compare',
-        'workspace', 'shortcuts', 'settings', 'keywords'
-    }
-    assert expected.issubset(set(names))
-    assert 'pipeline' not in names
+    assert names == []
 
 
-def test_pressing_b_navigates_to_browse(live_server, page):
-    """Pressing 'b' from a non-browse page navigates to /browse."""
+def test_legacy_bare_navigation_shortcut_is_ignored(live_server, page):
+    """Existing configs with bare nav letters must not steal page-local keys."""
+    page.route(
+        "**/api/config",
+        lambda route: route.fulfill(
+            json={"keyboard_shortcuts": {"navigation": {"browse": "b"}}}
+        ),
+    )
     url = live_server["url"]
     page.goto(f"{url}/cull", timeout=15000)
     page.wait_for_load_state("networkidle")
     page.keyboard.press("b")
+    page.wait_for_timeout(300)
+    assert page.url.endswith("/cull"), f"Expected to stay on /cull, got {page.url}"
+
+
+def test_modified_navigation_shortcut_still_navigates(live_server, page):
+    """Modifier chords remain valid for explicit navigation shortcuts."""
+    page.route(
+        "**/api/config",
+        lambda route: route.fulfill(
+            json={"keyboard_shortcuts": {"navigation": {"browse": "ctrl+b"}}}
+        ),
+    )
+    url = live_server["url"]
+    page.goto(f"{url}/cull", timeout=15000)
+    page.wait_for_load_state("networkidle")
+    page.keyboard.press("Control+B")
     page.wait_for_url(f"{url}/browse", timeout=3000)
 
 
 def test_nav_shortcut_suppressed_when_overlay_open(live_server, page):
-    """Pressing a nav letter while an overlay is open does not navigate."""
+    """A modified nav shortcut is suppressed while an overlay is open."""
+    page.route(
+        "**/api/config",
+        lambda route: route.fulfill(
+            json={"keyboard_shortcuts": {"navigation": {"browse": "ctrl+b"}}}
+        ),
+    )
     url = live_server["url"]
     page.goto(f"{url}/cull", timeout=15000)
     page.wait_for_load_state("networkidle")
@@ -186,7 +207,7 @@ def test_nav_shortcut_suppressed_when_overlay_open(live_server, page):
         document.body.appendChild(ov);
     """)
 
-    page.keyboard.press("b")
+    page.keyboard.press("Control+B")
     page.wait_for_timeout(400)
     assert page.url.endswith("/cull"), f"Expected to stay on /cull, got {page.url}"
 

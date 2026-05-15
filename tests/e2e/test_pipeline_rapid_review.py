@@ -27,8 +27,8 @@ def _mock_pipeline_rapid_review(
         shortcut_config = {
             "keyboard_shortcuts": {
                 # Keep the old collision in this fixture so Rapid Review proves
-                # page shortcuts win even when an existing config still has P for
-                # Pipeline.
+                # legacy bare navigation shortcuts are ignored and leave P for
+                # the page-local Pick action.
                 "navigation": {"pipeline": "p"},
                 "pipeline_rapid_review": {
                     "pick": "p",
@@ -133,14 +133,14 @@ def test_rapid_review_decision_keys_advance_through_queue(live_server, page):
     expect(page.locator("#metricReviewed")).to_have_text("1/3")
 
 
-def test_rapid_review_pick_key_wins_over_pipeline_nav_shortcut(live_server, page):
+def test_rapid_review_pick_key_ignores_legacy_pipeline_nav_shortcut(live_server, page):
     _mock_pipeline_rapid_review(page)
 
     page.goto(f"{live_server['url']}/pipeline/rapid-review")
     page.wait_for_function(
         """() => window.Keymap
           && window.Keymap.getScope() === 'pipeline_rapid_review'
-          && window.Keymap.shortcutsForScope('global').some(s => s.name === 'pipeline' && s.key === 'p')"""
+          && !window.Keymap.shortcutsForScope('global').some(s => s.name === 'pipeline' && s.key === 'p')"""
     )
 
     page.keyboard.press("p")

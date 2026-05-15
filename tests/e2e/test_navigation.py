@@ -103,13 +103,13 @@ def test_unpinning_active_tab_navigates_to_adjacent(live_server, page):
     assert "/cull" not in page.url
 
 
-def test_hotkey_underline_appears_on_pinned_tabs(live_server, page):
-    """Pinned tabs in the dynamic strip get hotkey underlines (.hk span)."""
+def test_bare_navigation_hotkey_underlines_are_not_rendered(live_server, page):
+    """Pinned tabs do not advertise bare-key navigation hints by default."""
     url = live_server["url"]
     page.goto(f"{url}/browse")
     page.wait_for_selector(".nav-tab[data-nav-id='browse']")
-    # Wait for hotkey hints to apply (they're computed after tab render)
-    page.wait_for_selector(".nav-tab[data-nav-id='browse'] .hk", timeout=2000)
+    page.wait_for_load_state("networkidle")
+    assert page.query_selector(".nav-tab[data-nav-id='browse'] .hk") is None
 
 
 def test_tab_close_button_does_not_change_tab_width_on_hover(live_server, page):
