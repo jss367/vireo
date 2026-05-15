@@ -72,6 +72,76 @@ def test_collection_filter_fires_filter(live_server, page):
     )
 
 
+def test_collection_click_preserves_selected_member_position(live_server, page):
+    """Switching into a collection should keep a selected member anchored.
+
+    Regression: filterByCollection() cleared selectedPhotoId before loading the
+    collection, so a focused photo disappeared from selection even when it was
+    present in the destination collection.
+    """
+    import json as _json
+
+    db = live_server["db"]
+    target_id = live_server["data"]["photos"][3]
+    cid = db.add_collection(
+        "All Test Photos",
+        _json.dumps([{"field": "all"}]),
+    )
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    card = page.locator(f'.grid-card[data-id="{target_id}"]')
+    card.wait_for(state="visible")
+    card.click()
+
+    before_top = page.evaluate(
+        """(photoId) => {
+          const card = document.querySelector(`.grid-card[data-id="${photoId}"]`);
+          const container = document.getElementById('gridContainer');
+          return Math.round(card.getBoundingClientRect().top - container.getBoundingClientRect().top);
+        }""",
+        target_id,
+    )
+
+    page.locator(
+        ".tree-item[data-collection-id]", has_text="All Test Photos"
+    ).click()
+
+    page.wait_for_function(
+        f"window.activeCollectionId === {cid} && window.selectedPhotoId === {target_id}",
+        timeout=3000,
+    )
+    page.locator(f'.grid-card[data-id="{target_id}"]').wait_for(state="visible")
+    assert page.evaluate(
+        """(photoId) => document
+          .querySelector(`.grid-card[data-id="${photoId}"]`)
+          .classList.contains('selected')""",
+        target_id,
+    )
+
+    page.wait_for_function(
+        """([photoId, beforeTop]) => {
+          const card = document.querySelector(`.grid-card[data-id="${photoId}"]`);
+          const container = document.getElementById('gridContainer');
+          if (!card || !container) return false;
+          const top = Math.round(card.getBoundingClientRect().top - container.getBoundingClientRect().top);
+          return Math.abs(top - beforeTop) <= 1;
+        }""",
+        arg=[target_id, before_top],
+        timeout=3000,
+    )
+    after_top = page.evaluate(
+        """(photoId) => {
+          const card = document.querySelector(`.grid-card[data-id="${photoId}"]`);
+          const container = document.getElementById('gridContainer');
+          return Math.round(card.getBoundingClientRect().top - container.getBoundingClientRect().top);
+        }""",
+        target_id,
+    )
+    assert abs(after_top - before_top) <= 1
+
+
 def test_collection_duplicate_fires_endpoint_and_rerenders(live_server, page):
     """Clicking 'Duplicate' POSTs to /duplicate and re-renders the list."""
     _seed_collection(live_server, "Picks B")

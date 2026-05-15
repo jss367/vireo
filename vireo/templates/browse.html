@@ -1393,6 +1393,54 @@ function refreshGridCards(photoIds) {
   });
 }
 
+function getGridCard(photoId) {
+  return document.querySelector('.grid-card[data-id="' + photoId + '"]');
+}
+
+function captureSelectedPhotoAnchor() {
+  if (selectedPhotoId == null || selectedPhotos.size > 0) return null;
+  var card = getGridCard(selectedPhotoId);
+  if (!card) return null;
+  var container = document.getElementById('gridContainer');
+  var containerRect = container.getBoundingClientRect();
+  var cardRect = card.getBoundingClientRect();
+  return {
+    photoId: selectedPhotoId,
+    topOffset: cardRect.top - containerRect.top,
+    detailVisible: document.getElementById('detailContent').classList.contains('visible'),
+  };
+}
+
+function restorePhotoAnchor(anchor) {
+  if (!anchor) return false;
+  var card = getGridCard(anchor.photoId);
+  if (!card) return false;
+  var container = document.getElementById('gridContainer');
+  var containerRect = container.getBoundingClientRect();
+  var cardRect = card.getBoundingClientRect();
+  container.scrollTop += (cardRect.top - containerRect.top) - anchor.topOffset;
+  return true;
+}
+
+async function loadUntilPhotoRendered(photoId) {
+  var card = getGridCard(photoId);
+  while (!card && !allLoaded) {
+    var beforePage = currentPage;
+    var beforeLen = photos.length;
+    await loadPhotos();
+    if (currentPage === beforePage && photos.length === beforeLen) break;
+    card = getGridCard(photoId);
+  }
+  return card;
+}
+
+function clearActiveSelectionAndDetail() {
+  selectedPhotos.clear();
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  closeDetail();
+}
+
 /* ---------- Bootstrap ---------- */
 bootstrapBrowse();
 
@@ -1630,6 +1678,7 @@ function refreshBrowseSidebarCounts() {
 
 async function filterByCollection(id) {
   cancelScheduledSearchFilter();
+  var anchor = captureSelectedPhotoAnchor();
   activeFolderId = null;
   activeKeyword = null;
   activeCollectionId = id;
@@ -1638,16 +1687,35 @@ async function filterByCollection(id) {
   allLoaded = false;
   loadEpoch++;         // invalidate any in-flight loadPhotos response
   loading = false;     // safe to clear: the stale response will be dropped
-  // Dataset is about to change; a surviving multi-select Set points at
-  // photos from the previous collection. Without this clear, closeDetail()
-  // keeps selectedPhotos intact and updateBatchBar() shows "N selected" with
-  // stale ids, arming Delete/Export/Develop against hidden photos.
+  // Multi-selects cannot be safely carried across a dataset switch: a
+  // surviving Set can arm batch actions against hidden photos. A single
+  // focused photo is kept only long enough to prove it exists in the
+  // destination collection below.
   selectedPhotos.clear();
-  selectedPhotoId = null;
-  selectedIndex = -1;
+  if (!anchor) {
+    selectedPhotoId = null;
+    selectedIndex = -1;
+  }
   document.getElementById('grid').innerHTML = '';
-  closeDetail();
+  document.getElementById('gridContainer').scrollTop = 0;
+  if (!anchor) closeDetail();
   await loadPhotos();
+  if (!anchor) return;
+
+  var card = await loadUntilPhotoRendered(anchor.photoId);
+  if (!card) {
+    clearActiveSelectionAndDetail();
+    return;
+  }
+  selectedPhotoId = anchor.photoId;
+  selectedIndex = photos.findIndex(function(p) { return p.id === anchor.photoId; });
+  refreshCardSelectionVisuals();
+  updateBatchBar();
+  if (anchor.detailVisible) loadDetail(anchor.photoId);
+  requestAnimationFrame(function() {
+    restorePhotoAnchor(anchor);
+    updateScrollPosition();
+  });
 }
 
 /* ---------- Collection Modal ---------- */
