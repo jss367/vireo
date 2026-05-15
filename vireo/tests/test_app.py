@@ -864,11 +864,18 @@ def test_species_search(app_and_db):
 
 
 def test_pipeline_review_page(app_and_db):
-    """GET /pipeline/review returns 200."""
+    """GET /pipeline/review returns 200 with explicit summary units."""
     app, _ = app_and_db
     client = app.test_client()
     resp = client.get('/pipeline/review')
     assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "Inventory" in html
+    assert "Triage" in html
+    assert "Species Review" in html
+    assert "Keep Photos" in html
+    assert "Review Units Confirmed" in html
+    assert "Species confirmation is counted by review unit" in html
 
 
 def test_classify_route_removed(app_and_db):
