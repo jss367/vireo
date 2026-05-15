@@ -104,6 +104,23 @@ def test_large_classify_job_skips_warning_when_gpu_provider_present(
     assert job["runtime_warning"] is None
 
 
+def test_large_classify_job_skips_warning_when_directml_provider_present(
+    app_and_db, monkeypatch,
+):
+    """Non-CUDA/CoreML accelerated ONNX providers also suppress warnings."""
+    _stub_classify_job(monkeypatch)
+    _set_onnx_providers(monkeypatch, ["DmlExecutionProvider", "CPUExecutionProvider"])
+    app, db = app_and_db
+    cid = _collection_with_photo_count(db, 30)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/classify", json={"collection_id": cid})
+    assert resp.status_code == 200
+
+    job = _job_from_response(client, resp.get_json()["job_id"])
+    assert job["runtime_warning"] is None
+
+
 def test_small_classify_job_does_not_show_cpu_only_warning(
     app_and_db, monkeypatch,
 ):
@@ -122,7 +139,7 @@ def test_small_classify_job_does_not_show_cpu_only_warning(
 
 
 def test_cpu_only_runtime_warning_can_be_dismissed(app_and_db, monkeypatch):
-    """Dismissing a runtime warning hides it from subsequent job polling."""
+    """Dismissing a warning is client-local and does not suppress API data."""
     _stub_classify_job(monkeypatch, sleep=0.4)
     _set_onnx_providers(monkeypatch, ["CPUExecutionProvider"])
     app, db = app_and_db
@@ -143,7 +160,25 @@ def test_cpu_only_runtime_warning_can_be_dismissed(app_and_db, monkeypatch):
     assert dismiss.status_code == 200
 
     job = _job_from_response(client, job_id)
-    assert job["runtime_warning"] is None
+    assert job["runtime_warning"]["id"] == "cpu-only-ml"
+
+
+def test_precompute_embedding_warning_sizing_ignores_decode_errors(
+    app_and_db, monkeypatch, tmp_path,
+):
+    """A non-UTF-8 labels file must not make job submission fail."""
+    _set_onnx_providers(monkeypatch, ["CPUExecutionProvider"])
+    labels_file = tmp_path / "labels.txt"
+    labels_file.write_bytes(b"\xff\xfe\x00")
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/jobs/precompute-embeddings",
+        json={"model_id": "missing-model", "labels_file": str(labels_file)},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["job_id"].startswith("precompute-embeddings-")
 
 
 def test_job_cull_returns_job_id(app_and_db):

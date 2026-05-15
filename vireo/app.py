@@ -644,7 +644,38 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             g.db = Database(db_path)
         return g.db
 
-    _GPU_RUNTIME_PROVIDERS = ("CoreMLExecutionProvider", "CUDAExecutionProvider")
+    _ACCELERATED_RUNTIME_PROVIDERS = {
+        "ACLExecutionProvider",
+        "ArmNNExecutionProvider",
+        "CANNExecutionProvider",
+        "CoreMLExecutionProvider",
+        "CUDAExecutionProvider",
+        "DmlExecutionProvider",
+        "MIGraphXExecutionProvider",
+        "NNAPIExecutionProvider",
+        "OpenVINOExecutionProvider",
+        "QNNExecutionProvider",
+        "ROCMExecutionProvider",
+        "TensorrtExecutionProvider",
+        "VitisAIExecutionProvider",
+        "WebGPUExecutionProvider",
+    }
+    _PROVIDER_DEVICE_INFO = {
+        "ACLExecutionProvider": ("ACL", "Arm Compute Library acceleration"),
+        "ArmNNExecutionProvider": ("ArmNN", "Arm NN acceleration"),
+        "CANNExecutionProvider": ("CANN", "Huawei CANN acceleration"),
+        "CoreMLExecutionProvider": ("CoreML", "Apple CoreML acceleration"),
+        "CUDAExecutionProvider": ("CUDA", "NVIDIA CUDA acceleration"),
+        "DmlExecutionProvider": ("DirectML", "Microsoft DirectML acceleration"),
+        "MIGraphXExecutionProvider": ("MIGraphX", "AMD MIGraphX acceleration"),
+        "NNAPIExecutionProvider": ("NNAPI", "Android NNAPI acceleration"),
+        "OpenVINOExecutionProvider": ("OpenVINO", "Intel OpenVINO acceleration"),
+        "QNNExecutionProvider": ("QNN", "Qualcomm QNN acceleration"),
+        "ROCMExecutionProvider": ("ROCm", "AMD ROCm acceleration"),
+        "TensorrtExecutionProvider": ("TensorRT", "NVIDIA TensorRT acceleration"),
+        "VitisAIExecutionProvider": ("Vitis AI", "AMD/Xilinx Vitis AI acceleration"),
+        "WebGPUExecutionProvider": ("WebGPU", "WebGPU acceleration"),
+    }
     _CPU_WARNING_MIN_WORK_ITEMS = 25
 
     def _runtime_execution_info():
@@ -657,6 +688,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "device_detail": "No GPU acceleration",
             "onnxruntime_version": None,
             "onnxruntime_providers": [],
+            "accelerated_provider_available": False,
             "gpu_provider_available": False,
             "cpu_only": True,
         }
@@ -666,17 +698,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             info["onnxruntime_version"] = ort.__version__
             available = list(ort.get_available_providers())
             info["onnxruntime_providers"] = available
-            info["gpu_provider_available"] = any(
-                p in available for p in _GPU_RUNTIME_PROVIDERS
-            )
-            info["cpu_only"] = not info["gpu_provider_available"]
+            accelerated = [
+                p for p in available if p in _ACCELERATED_RUNTIME_PROVIDERS
+            ]
+            info["accelerated_provider_available"] = bool(accelerated)
+            # Back-compat for callers that already key off this field.
+            info["gpu_provider_available"] = bool(accelerated)
+            info["cpu_only"] = not bool(accelerated)
 
-            if "CoreMLExecutionProvider" in available:
-                info["device"] = "CoreML"
-                info["device_detail"] = "Apple CoreML acceleration"
-            elif "CUDAExecutionProvider" in available:
-                info["device"] = "CUDA"
-                info["device_detail"] = "NVIDIA CUDA acceleration"
+            if accelerated:
+                device, detail = _PROVIDER_DEVICE_INFO.get(
+                    accelerated[0],
+                    (accelerated[0].replace("ExecutionProvider", ""), "Hardware acceleration"),
+                )
+                info["device"] = device
+                info["device_detail"] = detail
             else:
                 info["device"] = "CPU"
                 info["device_detail"] = "GPU not available - using CPU"
@@ -691,7 +727,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None
 
         info = _runtime_execution_info()
-        if info["gpu_provider_available"]:
+        if info["accelerated_provider_available"]:
             return None
 
         providers = info["onnxruntime_providers"]
@@ -726,25 +762,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return warning
 
-    def _runtime_warning_is_dismissed(warning):
-        if not warning:
-            return False
-        return warning.get("id") in getattr(app, "_runtime_warning_dismissals", set())
-
-    def _filter_dismissed_runtime_warning(job):
-        warning = job.get("runtime_warning")
-        if _runtime_warning_is_dismissed(warning):
-            job = dict(job)
-            job["runtime_warning"] = None
-        return job
-
     def _count_lines(path):
         if not path:
             return None
         try:
             with open(path) as f:
                 return sum(1 for line in f if line.strip())
-        except OSError:
+        except (OSError, UnicodeError):
             return None
 
     def _runtime_warning_work_units(description, count_fn):
@@ -994,7 +1018,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     app._job_runner = JobRunner(db=init_db)
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
-    app._runtime_warning_dismissals = set()
     app._log_broadcaster.install()
 
     # Self-healing background backfill of missing working copies. RAW (and
@@ -5671,7 +5694,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             workspace_id=active_ws,
             runtime_warning=_build_cpu_runtime_warning(
                 "precompute-embeddings",
-                work_units=_count_lines(labels_file),
+                work_units=_runtime_warning_work_units(
+                    "precompute labels file",
+                    lambda: _count_lines(labels_file),
+                ),
                 reason="large_embedding_precompute_cpu_only",
             ),
         )
@@ -9057,14 +9083,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_jobs_list():
         runner = app._job_runner
         db = _get_db()
-        active = [
-            _filter_dismissed_runtime_warning(_strip_heavy_for_list(j))
-            for j in runner.list_jobs()
-        ]
-        history = [
-            _filter_dismissed_runtime_warning(_strip_heavy_for_list(j))
-            for j in runner.get_history(db, limit=10)
-        ]
+        active = [_strip_heavy_for_list(j) for j in runner.list_jobs()]
+        history = [_strip_heavy_for_list(j) for j in runner.get_history(db, limit=10)]
         ws_rows = db.get_workspaces()
         ws_names = {w["id"]: w["name"] for w in ws_rows}
         return jsonify({
@@ -9080,8 +9100,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         warning_id = body.get("id")
         if not warning_id:
             return json_error("id required")
-        app._runtime_warning_dismissals.add(str(warning_id))
-        log.info("Dismissed runtime warning: %s", warning_id)
+        log.info("Client dismissed runtime warning: %s", warning_id)
         return jsonify({"ok": True, "id": str(warning_id)})
 
     @app.route("/api/jobs/<job_id>")
@@ -9089,7 +9108,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         job = app._job_runner.get(job_id)
         if not job:
             return json_error("job not found", 404)
-        return jsonify(_filter_dismissed_runtime_warning(job))
+        return jsonify(job)
 
     @app.route("/api/jobs/<job_id>/cancel", methods=["POST"])
     def api_job_cancel(job_id):
