@@ -494,6 +494,52 @@ body {
   outline: none;
 }
 .add-kw-input:focus { border-color: var(--accent); }
+.keyword-autocomplete {
+  position: relative;
+  width: 100%;
+}
+.keyword-suggestion-list {
+  display: none;
+  position: absolute;
+  z-index: 1001;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--bg-primary) 55%, transparent);
+  padding: 4px 0;
+}
+.keyword-suggestion-list.open { display: block; }
+.keyword-suggestion-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 9px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.keyword-suggestion-option:hover,
+.keyword-suggestion-option.active {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+.keyword-suggestion-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.keyword-suggestion-meta {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+}
 .location-section .filled-place {
   font-weight: 600;
   color: var(--text-primary);
@@ -1132,7 +1178,10 @@ body {
       <div class="detail-section">
         <div class="detail-section-title">Keywords</div>
         <div id="detailKeywords"></div>
-        <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." onkeydown="if(event.key==='Enter')addKeyword()">
+        <div class="keyword-autocomplete">
+          <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." autocomplete="off">
+          <div class="keyword-suggestion-list" id="addKeywordSuggestions" role="listbox"></div>
+        </div>
       </div>
 
       <div class="detail-section">
@@ -1190,7 +1239,10 @@ body {
 <div class="modal-overlay" id="batchKeywordModal">
   <div class="modal">
     <h3 id="batchKeywordTitle">Add Keyword</h3>
-    <input class="modal-input" id="batchKeywordInput" placeholder="Keyword name" onkeydown="if(event.key==='Enter')confirmBatchKeyword()">
+    <div class="keyword-autocomplete">
+      <input class="modal-input" id="batchKeywordInput" placeholder="Keyword name" autocomplete="off">
+      <div class="keyword-suggestion-list" id="batchKeywordSuggestions" role="listbox"></div>
+    </div>
     <div class="modal-actions">
       <button class="modal-btn modal-btn-primary" onclick="confirmBatchKeyword()">Add</button>
       <button class="modal-btn modal-btn-cancel" onclick="hideBatchKeywordModal()">Cancel</button>
@@ -1248,11 +1300,188 @@ var selectedDay = null;
 var calendarData = null;
 var clipSearchActive = false;
 var searchFilterTimer = null;
+var keywordAutocompleteCache = null;
+var keywordAutocompletePromise = null;
+var keywordAutocompleteStates = {};
 
 function refreshPendingSyncBanner() {
   if (typeof checkPendingSync === 'function') {
     checkPendingSync();
   }
+}
+
+function invalidateKeywordAutocompleteCache() {
+  keywordAutocompleteCache = null;
+  keywordAutocompletePromise = null;
+}
+
+async function loadKeywordAutocompleteOptions(force) {
+  if (!force && keywordAutocompleteCache) return keywordAutocompleteCache;
+  if (!force && keywordAutocompletePromise) return keywordAutocompletePromise;
+  keywordAutocompletePromise = safeFetch('/api/keywords/all', {}, { toast: false })
+    .then(function(rows) {
+      keywordAutocompleteCache = (rows || [])
+        .filter(function(k) { return k && k.name; })
+        .map(function(k) {
+          return {
+            id: k.id,
+            name: k.name,
+            type: k.type || 'general',
+            photo_count: k.photo_count || 0,
+            search: String(k.name || '').toLowerCase(),
+          };
+        })
+        .sort(function(a, b) {
+          return a.search.localeCompare(b.search) || a.id - b.id;
+        });
+      return keywordAutocompleteCache;
+    })
+    .catch(function() {
+      keywordAutocompleteCache = [];
+      return keywordAutocompleteCache;
+    })
+    .finally(function() {
+      keywordAutocompletePromise = null;
+    });
+  return keywordAutocompletePromise;
+}
+
+function getKeywordAutocompleteState(inputId) {
+  if (!keywordAutocompleteStates[inputId]) {
+    keywordAutocompleteStates[inputId] = {
+      matches: [],
+      activeIndex: -1,
+      selectedKeyword: null,
+      dropdownId: '',
+      submitFn: null,
+    };
+  }
+  return keywordAutocompleteStates[inputId];
+}
+
+function keywordMatchScore(search, query) {
+  if (search === query) return 0;
+  if (search.indexOf(query) === 0) return 1;
+  if (search.split(/[\s\-_/]+/).some(function(part) { return part.indexOf(query) === 0; })) return 2;
+  var idx = search.indexOf(query);
+  return idx === -1 ? 99 : 3 + idx / 1000;
+}
+
+function hideKeywordSuggestions(inputId) {
+  var state = getKeywordAutocompleteState(inputId);
+  var dropdown = document.getElementById(state.dropdownId);
+  if (dropdown) {
+    dropdown.classList.remove('open');
+    dropdown.innerHTML = '';
+  }
+  state.matches = [];
+  state.activeIndex = -1;
+}
+
+function renderKeywordSuggestions(inputId) {
+  var input = document.getElementById(inputId);
+  var state = getKeywordAutocompleteState(inputId);
+  var dropdown = document.getElementById(state.dropdownId);
+  if (!input || !dropdown) return;
+  var query = input.value.trim().toLowerCase();
+  state.selectedKeyword = null;
+  if (!query || !keywordAutocompleteCache || !keywordAutocompleteCache.length) {
+    hideKeywordSuggestions(inputId);
+    return;
+  }
+
+  state.matches = keywordAutocompleteCache
+    .map(function(k) {
+      return { keyword: k, score: keywordMatchScore(k.search, query) };
+    })
+    .filter(function(item) { return item.score < 99; })
+    .sort(function(a, b) {
+      return a.score - b.score || a.keyword.search.localeCompare(b.keyword.search) || a.keyword.id - b.keyword.id;
+    })
+    .slice(0, 8)
+    .map(function(item) { return item.keyword; });
+
+  if (!state.matches.length) {
+    hideKeywordSuggestions(inputId);
+    return;
+  }
+  if (state.activeIndex < 0 || state.activeIndex >= state.matches.length) state.activeIndex = 0;
+
+  dropdown.innerHTML = state.matches.map(function(k, idx) {
+    var active = idx === state.activeIndex ? ' active' : '';
+    var count = k.photo_count === 1 ? '1 photo' : k.photo_count + ' photos';
+    return '<div class="keyword-suggestion-option' + active + '" role="option" data-index="' + idx + '">' +
+      '<span class="keyword-suggestion-name">' + escapeHtml(k.name) + '</span>' +
+      '<span class="keyword-suggestion-meta">' + escapeHtml(count) + '</span>' +
+      '</div>';
+  }).join('');
+  dropdown.classList.add('open');
+}
+
+function chooseKeywordSuggestion(inputId, index) {
+  var input = document.getElementById(inputId);
+  var state = getKeywordAutocompleteState(inputId);
+  var keyword = state.matches[index];
+  if (!input || !keyword) return;
+  input.value = keyword.name;
+  state.selectedKeyword = keyword;
+  hideKeywordSuggestions(inputId);
+  if (typeof state.submitFn === 'function') {
+    state.submitFn(keyword);
+  }
+}
+
+function bindKeywordAutocomplete(inputId, dropdownId, submitFn) {
+  var input = document.getElementById(inputId);
+  var dropdown = document.getElementById(dropdownId);
+  if (!input || !dropdown) return;
+  var state = getKeywordAutocompleteState(inputId);
+  state.dropdownId = dropdownId;
+  state.submitFn = submitFn;
+
+  input.addEventListener('focus', function() {
+    loadKeywordAutocompleteOptions().then(function() { renderKeywordSuggestions(inputId); });
+  });
+  input.addEventListener('input', function() {
+    var s = getKeywordAutocompleteState(inputId);
+    s.activeIndex = 0;
+    s.selectedKeyword = null;
+    loadKeywordAutocompleteOptions().then(function() { renderKeywordSuggestions(inputId); });
+  });
+  input.addEventListener('keydown', function(e) {
+    var s = getKeywordAutocompleteState(inputId);
+    var isOpen = dropdown.classList.contains('open') && s.matches.length > 0;
+    if (isOpen && e.key === 'ArrowDown') {
+      e.preventDefault();
+      s.activeIndex = (s.activeIndex + 1) % s.matches.length;
+      renderKeywordSuggestions(inputId);
+      return;
+    }
+    if (isOpen && e.key === 'ArrowUp') {
+      e.preventDefault();
+      s.activeIndex = (s.activeIndex - 1 + s.matches.length) % s.matches.length;
+      renderKeywordSuggestions(inputId);
+      return;
+    }
+    if (e.key === 'Escape') {
+      hideKeywordSuggestions(inputId);
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (isOpen && s.activeIndex >= 0) chooseKeywordSuggestion(inputId, s.activeIndex);
+      else if (typeof submitFn === 'function') submitFn(null);
+    }
+  });
+  input.addEventListener('blur', function() {
+    setTimeout(function() { hideKeywordSuggestions(inputId); }, 120);
+  });
+  dropdown.addEventListener('mousedown', function(e) {
+    var option = e.target.closest('.keyword-suggestion-option');
+    if (!option) return;
+    e.preventDefault();
+    chooseKeywordSuggestion(inputId, parseInt(option.dataset.index, 10));
+  });
 }
 
 function hasActiveBrowseFilter() {
@@ -2750,25 +2979,37 @@ async function batchSetColorLabel(color) {
 function batchAddKeyword() {
   document.getElementById('batchKeywordTitle').textContent = 'Add keyword to ' + getActiveSelection().length + ' photos';
   document.getElementById('batchKeywordInput').value = '';
+  getKeywordAutocompleteState('batchKeywordInput').selectedKeyword = null;
+  hideKeywordSuggestions('batchKeywordInput');
   document.getElementById('batchKeywordModal').classList.add('open');
   setTimeout(function() { document.getElementById('batchKeywordInput').focus(); }, 50);
 }
 
 function hideBatchKeywordModal() {
   document.getElementById('batchKeywordModal').classList.remove('open');
+  hideKeywordSuggestions('batchKeywordInput');
 }
 
 async function confirmBatchKeyword() {
-  var name = document.getElementById('batchKeywordInput').value.trim();
+  var input = document.getElementById('batchKeywordInput');
+  var name = input.value.trim();
   if (!name) return;
   hideBatchKeywordModal();
   var ids = getActiveSelection();
+  var state = getKeywordAutocompleteState('batchKeywordInput');
+  var selectedKeyword = state.selectedKeyword && state.selectedKeyword.name === name
+    ? state.selectedKeyword
+    : null;
+  var payload = selectedKeyword && selectedKeyword.id
+    ? {photo_ids: ids, keyword_id: selectedKeyword.id}
+    : {photo_ids: ids, name: name};
   try {
     await safeFetch('/api/batch/keyword', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({photo_ids: ids, name: name}),
+      body: JSON.stringify(payload),
     });
   } catch(e) { return; }
+  if (!selectedKeyword) invalidateKeywordAutocompleteCache();
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(ids);
   loadKeywords();
@@ -3380,18 +3621,30 @@ function updateDetailColors() {
   });
 }
 
-async function addKeyword() {
+async function addKeyword(keyword) {
   if (!selectedPhotoId) return;
   var input = document.getElementById('addKeywordInput');
   var name = input.value.trim();
   if (!name) return;
+  var state = getKeywordAutocompleteState('addKeywordInput');
+  var selectedKeyword = keyword || (
+    state.selectedKeyword && state.selectedKeyword.name === name
+      ? state.selectedKeyword
+      : null
+  );
+  var payload = selectedKeyword && selectedKeyword.id
+    ? { keyword_id: selectedKeyword.id }
+    : { name: name };
   try {
     await safeFetch('/api/photos/' + selectedPhotoId + '/keywords', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name }),
+      body: JSON.stringify(payload),
     });
     input.value = '';
+    state.selectedKeyword = null;
+    hideKeywordSuggestions('addKeywordInput');
+    if (!selectedKeyword) invalidateKeywordAutocompleteCache();
     loadDetail(selectedPhotoId);
     loadKeywords();
     refreshPendingSyncBanner();
@@ -3696,9 +3949,14 @@ function _onLocationInputKeydown(e) {
 // to re-bind on every photo load.
 document.addEventListener('DOMContentLoaded', function() {
   var input = document.getElementById('locationInput');
-  if (!input) return;
-  input.addEventListener('focus', _onLocationInputFocus);
-  input.addEventListener('keydown', _onLocationInputKeydown);
+  if (input) {
+    input.addEventListener('focus', _onLocationInputFocus);
+    input.addEventListener('keydown', _onLocationInputKeydown);
+  }
+  bindKeywordAutocomplete('addKeywordInput', 'addKeywordSuggestions', addKeyword);
+  bindKeywordAutocomplete('batchKeywordInput', 'batchKeywordSuggestions', function() {
+    confirmBatchKeyword();
+  });
 });
 
 /* ---------- Keyword Type Dropdown ---------- */

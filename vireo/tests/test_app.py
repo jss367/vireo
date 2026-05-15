@@ -25,6 +25,27 @@ def test_browse_page(app_and_db):
     assert 'function refreshPendingSyncBanner()' in html
 
 
+def test_api_add_keyword_accepts_existing_keyword_id(app_and_db):
+    """POST /api/photos/<id>/keywords can attach an existing keyword by id."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo = db.conn.execute(
+        "SELECT id FROM photos WHERE filename = 'bird3.jpg'"
+    ).fetchone()
+    keyword = db.conn.execute(
+        "SELECT id, name FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()
+
+    resp = client.post(
+        f"/api/photos/{photo['id']}/keywords",
+        json={"keyword_id": keyword["id"]},
+    )
+
+    assert resp.status_code == 200
+    names = {k["name"] for k in db.get_photo_keywords(photo["id"])}
+    assert "Cardinal" in names
+
+
 def test_help_static_assets_served(app_and_db):
     """The help modal's JS, JSON, and vendored Fuse library must be served.
 

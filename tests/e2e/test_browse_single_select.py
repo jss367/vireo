@@ -119,6 +119,36 @@ def test_clear_button_closes_detail_panel(live_server, page):
     )
 
 
+def test_add_keyword_input_suggests_existing_keyword(live_server, page):
+    """Typing in the add-keyword field should offer matching existing keywords."""
+    db = live_server["db"]
+    source_id = live_server["data"]["photos"][0]
+    target_id = live_server["data"]["photos"][1]
+    keyword_id = db.add_keyword("Alan's Hummingbird")
+    db.tag_photo(source_id, keyword_id)
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(f'.grid-card[data-id="{target_id}"]').click()
+
+    keyword_input = page.locator("#addKeywordInput")
+    keyword_input.fill("AL")
+
+    suggestion = page.locator(
+        "#addKeywordSuggestions .keyword-suggestion-option",
+        has_text="Alan's Hummingbird",
+    )
+    expect(suggestion).to_be_visible()
+
+    with page.expect_response(
+        lambda r: f"/api/photos/{target_id}/keywords" in r.url
+        and r.request.method == "POST"
+        and r.status == 200
+    ):
+        suggestion.click()
+
+    expect(page.locator("#detailKeywords")).to_contain_text("Alan's Hummingbird")
+
+
 def test_cmd_click_toggles_focus_out_of_set_reconciles(live_server, page):
     """click A, cmd-click B, cmd-click A: the focus must not linger on A.
 
