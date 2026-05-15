@@ -2526,6 +2526,10 @@ function getActiveSelection() {
   return [];
 }
 
+function detailMatchesSelectedPhoto() {
+  return selectedPhotoId != null && window._detailPhotoId === selectedPhotoId;
+}
+
 function updateBatchBar() {
   var bar = document.getElementById('batchBar');
   if (!bar) return;
@@ -2565,7 +2569,7 @@ function updateSelectionPanel(ids) {
   var detail = document.getElementById('detailContent');
   var summary = document.getElementById('summaryPanel');
   if (summary) summary.classList.add('hidden');
-  if (detail) detail.classList.toggle('visible', selectedPhotoId != null);
+  if (detail) detail.classList.toggle('visible', detailMatchesSelectedPhoto());
   panel.classList.remove('hidden');
   document.getElementById('selectionCount').textContent = ids.length + ' photos selected';
   loadSelectionKeywordSuggestions(ids);
@@ -2878,12 +2882,14 @@ async function showUndoToast() {
 
 async function loadDetail(id) {
   document.getElementById('summaryPanel').classList.add('hidden');
-  document.getElementById('detailContent').classList.add('visible');
+  var detail = document.getElementById('detailContent');
+  if (detail) detail.classList.toggle('visible', window._detailPhotoId === id);
 
   try {
     var photo = await safeFetch('/api/photos/' + id, {}, { toast: false });
-    if (selectedPhotoId === id && getActiveSelection().length === 1) {
+    if (selectedPhotoId === id) {
       renderDetail(photo);
+      if (detail) detail.classList.add('visible');
     }
   } catch(e) {}
 }
