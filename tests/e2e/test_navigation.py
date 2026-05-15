@@ -240,6 +240,26 @@ def test_ephemeral_tab_pin_button_persists_tab(live_server, page):
     )
 
 
+def test_rapid_review_ephemeral_tab_pin_button_persists_tab(live_server, page):
+    """Rapid Review can be pinned from its ephemeral tab."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline/rapid-review")
+    page.wait_for_selector(
+        ".nav-tab[data-nav-id='pipeline_rapid_review'].is-ephemeral",
+        timeout=3000,
+    )
+    page.click("[data-testid='nav-tab-pin-pipeline_rapid_review']")
+    page.wait_for_selector(
+        ".nav-tab[data-nav-id='pipeline_rapid_review']:not(.is-ephemeral)",
+        timeout=3000,
+    )
+    page.reload()
+    page.wait_for_selector(
+        ".nav-tab[data-nav-id='pipeline_rapid_review']:not(.is-ephemeral)",
+        timeout=3000,
+    )
+
+
 def test_close_ephemeral_navigates_to_rightmost_visible_pinned_tab(live_server, page):
     """When pinned tabs overflow, closing the ephemeral tab must navigate to
     the rightmost *visible* pinned tab — not the last pinned id, which may be
