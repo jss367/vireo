@@ -208,7 +208,6 @@ def test_open_external_converts_nikon_he_nef_for_darktable(
                     "external_editors": [
                         {"name": "darktable", "path": str(bundle)},
                     ],
-                    "darktable_auto_convert_dng": True,
                     "dng_converter_bin": "/fake/dng-converter",
                 }),
                 content_type='application/json')
