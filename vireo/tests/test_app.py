@@ -2847,6 +2847,32 @@ def test_batch_keyword_route_accepts_existing_keyword_id(app_and_db):
     assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
 
 
+def test_batch_keyword_route_chunks_large_existing_keyword_lookup(app_and_db):
+    """Large batch keyword adds must not exceed SQLite's variable limit."""
+    app, db = app_and_db
+    folder_id = db.get_folder_tree()[0]["id"]
+    ids = [
+        db.add_photo(
+            folder_id,
+            f"large-batch-{idx}.jpg",
+            extension=".jpg",
+            file_size=1,
+            file_mtime=1.0,
+        )
+        for idx in range(1005)
+    ]
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": ids, "name": "Large Batch"},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["updated"] == len(ids)
+
+
 def test_create_app_runs_wildlife_backfill_synchronously_on_first_boot(tmp_path, monkeypatch):
     """Regression: on first boot after upgrade (wildlife_backfill_done
     marker unset), create_app must complete the species-marking +

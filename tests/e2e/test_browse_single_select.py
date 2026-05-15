@@ -331,6 +331,37 @@ def test_multiselect_offers_partial_keyword_fill(live_server, page):
     assert restored_with_keyword == original_with_keyword
 
 
+def test_multiselect_shrink_to_focused_photo_restores_detail(live_server, page):
+    """Leaving multi-select with a focused photo must restore the detail pane."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    page.locator(".grid-card").first.wait_for(state="visible")
+    first_filename = page.evaluate("photos[0].filename")
+
+    page.evaluate("""
+      selectedPhotoId = photos[0].id;
+      selectedIndex = 0;
+      selectedPhotos.clear();
+      selectedPhotos.add(photos[0].id);
+      selectedPhotos.add(photos[1].id);
+      updateBatchBar();
+    """)
+    expect(page.locator("#selectionPanel")).to_be_visible()
+
+    page.evaluate("""
+      selectedPhotos.delete(photos[1].id);
+      updateBatchBar();
+    """)
+
+    expect(page.locator("#selectionPanel")).to_be_hidden()
+    page.wait_for_function(
+        "document.getElementById('detailContent').classList.contains('visible')",
+        timeout=3000,
+    )
+    expect(page.locator("#detailFilename")).to_have_text(first_filename)
+
+
 def test_reject_shortcut_keeps_existing_thumbnail_nodes(live_server, page):
     """Rejecting one photo should not rebuild the whole grid.
 

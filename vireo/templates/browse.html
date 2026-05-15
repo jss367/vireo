@@ -2500,7 +2500,9 @@ function updateSelectionPanel(ids) {
     selectionKeywordRequestSeq++;
     var list = document.getElementById('selectionKeywordSuggestions');
     if (list) list.innerHTML = '';
-    if (wasVisible && !selectedPhotoId) {
+    if (wasVisible && selectedPhotoId) {
+      loadDetail(selectedPhotoId);
+    } else if (wasVisible) {
       var detail = document.getElementById('detailContent');
       var summary = document.getElementById('summaryPanel');
       if (detail) detail.classList.remove('visible');

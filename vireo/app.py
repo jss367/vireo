@@ -2727,13 +2727,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             kid = db.add_keyword(name, kw_type=kw_type)
 
-        placeholders = ",".join("?" for _ in photo_ids)
-        existing_rows = db.conn.execute(
-            f"""SELECT photo_id FROM photo_keywords
-                WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
-            [kid] + list(photo_ids),
-        ).fetchall()
-        already_tagged = {row["photo_id"] for row in existing_rows}
+        already_tagged = set()
+        batch_size = 800
+        for i in range(0, len(photo_ids), batch_size):
+            chunk = list(photo_ids[i:i + batch_size])
+            placeholders = ",".join("?" for _ in chunk)
+            existing_rows = db.conn.execute(
+                f"""SELECT photo_id FROM photo_keywords
+                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
+                [kid] + chunk,
+            ).fetchall()
+            already_tagged.update(row["photo_id"] for row in existing_rows)
         added_ids = [pid for pid in photo_ids if pid not in already_tagged]
 
         for pid in added_ids:
