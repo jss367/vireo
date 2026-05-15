@@ -1131,7 +1131,7 @@ def test_store_grouped_predictions_persists_match_for_cache(tmp_path, monkeypatc
 
 
 def test_store_grouped_predictions_persists_group_match_for_cache(tmp_path, monkeypatch):
-    """Burst groups that are already labeled also need per-detection cache rows."""
+    """Already-labeled burst groups cache consensus species per detection."""
     from datetime import datetime
 
     import classify_job
@@ -1179,8 +1179,8 @@ def test_store_grouped_predictions_persists_group_match_for_cache(tmp_path, monk
             },
             "folder_path": str(tmp_path),
             "detection_id": det_id,
-            "prediction": "Robin",
-            "confidence": 0.9 - (idx * 0.01),
+            "prediction": "Robin" if idx == 0 else "Sparrow",
+            "confidence": 0.9 if idx == 0 else 0.5,
             "alternatives": [],
             "taxonomy": {},
             "timestamp": datetime(2024, 1, 1, 12, 0, idx),
@@ -1202,11 +1202,11 @@ def test_store_grouped_predictions_persists_group_match_for_cache(tmp_path, monk
     assert result["predictions_stored"] == 0
     assert result["already_labeled"] == 2
     rows = db.conn.execute(
-        "SELECT detection_id, category FROM predictions ORDER BY detection_id"
+        "SELECT detection_id, species, category FROM predictions ORDER BY detection_id"
     ).fetchall()
-    assert [(r["detection_id"], r["category"]) for r in rows] == [
-        (det_ids[0], "match"),
-        (det_ids[1], "match"),
+    assert [(r["detection_id"], r["species"], r["category"]) for r in rows] == [
+        (det_ids[0], "Robin", "match"),
+        (det_ids[1], "Robin", "match"),
     ]
 
 

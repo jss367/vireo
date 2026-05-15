@@ -1115,7 +1115,10 @@ def _record_batch_classifier_runs(db, batch, model_name, labels_fingerprint, raw
         )
 
 
-def _store_match_prediction(db, item, model_name, labels_fingerprint, tax=None):
+def _store_match_prediction(
+    db, item, model_name, labels_fingerprint, tax=None,
+    species=None, confidence=None, taxonomy=None,
+):
     """Persist an already-labeled classifier result as a reusable cache row.
 
     A taxonomy ``match`` means the photo's XMP already carries this species, so
@@ -1124,13 +1127,15 @@ def _store_match_prediction(db, item, model_name, labels_fingerprint, tax=None):
     sees a classifier_runs key with no cached prediction to surface and pays for
     inference again.
     """
-    tax_hierarchy = item.get("taxonomy") or (
-        tax.get_hierarchy(item["prediction"]) if tax else {}
+    species = species or item["prediction"]
+    confidence = item["confidence"] if confidence is None else confidence
+    tax_hierarchy = taxonomy or item.get("taxonomy") or (
+        tax.get_hierarchy(species) if tax else {}
     )
     db.add_prediction(
         detection_id=item["detection_id"],
-        species=item["prediction"],
-        confidence=round(item["confidence"], 4),
+        species=species,
+        confidence=round(confidence, 4),
         model=model_name,
         category="match",
         status="accepted",
@@ -1157,7 +1162,7 @@ def _store_match_prediction(db, item, model_name, labels_fingerprint, tax=None):
     # later stops being a match.
     db.reconcile_match_review_state(
         item["detection_id"], model_name, labels_fingerprint,
-        item["prediction"], "match",
+        species, "match",
     )
 
 
@@ -1275,9 +1280,15 @@ def _store_grouped_predictions(
                 category = categorize(cons["prediction"], existing, tax)
 
             if category == "match":
+                cons_hierarchy = (
+                    tax.get_hierarchy(cons["prediction"]) if tax else {}
+                )
                 for item in group:
                     _store_match_prediction(
                         db, item, model_name, labels_fingerprint, tax,
+                        species=cons["prediction"],
+                        confidence=cons["confidence"],
+                        taxonomy=cons_hierarchy,
                     )
                 skipped_match += len(group)
                 continue
