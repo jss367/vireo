@@ -97,6 +97,17 @@ def test_ingest_recent_destinations_default():
     assert DEFAULTS["ingest"]["recent_destinations"] == []
 
 
+def test_keyboard_shortcut_defaults_include_rapid_review():
+    """Rapid Review owns P/X/Z locally instead of relying on global nav."""
+    from config import DEFAULTS
+
+    shortcuts = DEFAULTS["keyboard_shortcuts"]
+    assert shortcuts["navigation"]["pipeline"] == ""
+    assert shortcuts["pipeline_rapid_review"]["pick"] == "p"
+    assert shortcuts["pipeline_rapid_review"]["reject"] == "x"
+    assert shortcuts["pipeline_rapid_review"]["zoom"] == "z"
+
+
 def test_working_copy_defaults(tmp_path, monkeypatch):
     """Config includes working copy defaults."""
     import config as cfg
@@ -165,6 +176,22 @@ def test_deep_merge_preserves_pipeline(tmp_path):
     assert loaded["pipeline"]["burst_time_gap"] == 3.0
     # Top-level defaults preserved
     assert loaded["photos_per_page"] == 50
+
+
+def test_load_migrates_legacy_pipeline_p_shortcut(tmp_path):
+    """Existing configs with the former Pipeline=P default stop claiming P."""
+    import json
+
+    import config as cfg
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump({"keyboard_shortcuts": {"navigation": {"pipeline": "p"}}}, f)
+
+    loaded = cfg.load()
+
+    assert loaded["keyboard_shortcuts"]["navigation"]["pipeline"] == ""
+    assert loaded["keyboard_shortcuts"]["pipeline_rapid_review"]["pick"] == "p"
 
 
 def test_conftest_autouse_fixture_restores_cfg_path(tmp_path):

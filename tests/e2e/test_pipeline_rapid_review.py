@@ -22,6 +22,24 @@ def _mock_pipeline_rapid_review(
     original_content_type="image/png",
 ):
     image_body = base64.b64decode(_PNG_1X1)
+    shortcut_config = {
+        "keyboard_shortcuts": {
+            # Keep the old collision in this fixture so Rapid Review proves
+            # page shortcuts win even when an existing config still has P for
+            # Pipeline.
+            "navigation": {"pipeline": "p"},
+            "pipeline_rapid_review": {
+                "pick": "p",
+                "reject": "x",
+                "next": "arrowright",
+                "back": "arrowleft",
+                "clear": "u",
+                "apply": "enter",
+                "exit": "escape",
+                "zoom": "z",
+            },
+        }
+    }
     if results is None:
         results = {
             "photos": [
@@ -41,6 +59,7 @@ def _mock_pipeline_rapid_review(
             "summary": {"keep_count": 0, "review_count": 3, "reject_count": 0},
         }
 
+    page.route("**/api/config", lambda route: route.fulfill(json=shortcut_config))
     page.route("**/api/pipeline/results", lambda route: route.fulfill(json=results))
     if state_ok:
         page.route(
@@ -110,6 +129,23 @@ def test_rapid_review_decision_keys_advance_through_queue(live_server, page):
     page.keyboard.press("ArrowLeft")
     expect(page.locator("#filename")).to_have_text("b.jpg")
     expect(page.locator("#metricReviewed")).to_have_text("1/3")
+
+
+def test_rapid_review_pick_key_wins_over_pipeline_nav_shortcut(live_server, page):
+    _mock_pipeline_rapid_review(page)
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    page.wait_for_function(
+        """() => window.Keymap
+          && window.Keymap.getScope() === 'pipeline_rapid_review'
+          && window.Keymap.shortcutsForScope('global').some(s => s.name === 'pipeline' && s.key === 'p')"""
+    )
+
+    page.keyboard.press("p")
+
+    expect(page.locator("#filename")).to_have_text("b.jpg")
+    expect(page.locator("#pickCount")).to_have_text("1")
+    assert page.url.endswith("/pipeline/rapid-review")
 
 
 def test_rapid_review_keeps_apply_disabled_when_state_load_fails(live_server, page):
@@ -243,6 +279,16 @@ def test_rapid_review_click_main_image_opens_original_at_one_to_one(live_server,
     assert stage.evaluate("el => el.scrollWidth") >= 3000
 
     stage.click(position={"x": 12, "y": 12})
+
+    expect(stage).not_to_have_class(re.compile(r"\bzoomed\b"))
+    expect(img).to_have_attribute("src", re.compile(r"/photos/1/preview\?size=2560$"))
+
+    page.keyboard.press("z")
+
+    expect(stage).to_have_class(re.compile(r"\bzoomed\b"))
+    expect(img).to_have_attribute("src", re.compile(r"/photos/1/original$"))
+
+    page.keyboard.press("z")
 
     expect(stage).not_to_have_class(re.compile(r"\bzoomed\b"))
     expect(img).to_have_attribute("src", re.compile(r"/photos/1/preview\?size=2560$"))
