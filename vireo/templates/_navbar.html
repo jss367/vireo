@@ -2979,10 +2979,17 @@ function _lbLoadDetections(photoId) {
 var _lbMaskActiveVariant = null;     // name of the photo's currently-active variant
 var _lbMaskAvailable = [];           // [{variant, url, created_at}, ...]
 var _lbMaskCurrentUrl = null;
+var _lbMaskLoadSeq = 0;
 
 function _lbResetMaskOverlay() {
   var img = document.getElementById('lightboxMaskOverlay');
-  if (img) { img.classList.remove('show'); img.removeAttribute('src'); }
+  _lbMaskLoadSeq++;
+  if (img) {
+    img.classList.remove('show');
+    img.onload = null;
+    img.onerror = null;
+    img.removeAttribute('src');
+  }
   var ctrls = document.getElementById('lightboxMaskControls');
   if (ctrls) ctrls.classList.remove('has-variants');
   var sel = document.getElementById('lightboxMaskSelect');
@@ -3002,24 +3009,36 @@ function _lbApplyMaskVisibility() {
     // while that request is still in flight, the pending callback
     // would override the hide as soon as it fires. Clear both handlers
     // so an in-flight load can't resurrect the overlay.
+    _lbMaskLoadSeq++;
     img.onload = null;
     img.onerror = null;
+    // Detach the decoded mask image while hidden. The class normally
+    // controls display, but removing src avoids stale blended pixels in
+    // WebView/compositor edge cases and forces a clean reload on show.
+    img.removeAttribute('src');
     return;
   }
+  var expectedUrl = _lbMaskCurrentUrl;
+  var seq = ++_lbMaskLoadSeq;
   // onerror guards against the file being deleted out from under us
   // between the /api/photos/<id>/masks call and the GET. The DB row
   // exists but the file is gone → silently hide instead of leaving a
   // broken-image icon over the photo.
-  img.onerror = function() { img.classList.remove('show'); };
+  img.onerror = function() {
+    if (seq === _lbMaskLoadSeq && _lbMaskCurrentUrl === expectedUrl) {
+      img.classList.remove('show');
+    }
+  };
   img.onload = function() {
     // Re-check the toggle: the user may have hidden masks between
     // src assignment and the load resolving.
-    if (_lbMasksVisible && _lbMaskCurrentUrl) {
+    if (seq === _lbMaskLoadSeq && _lbMasksVisible && _lbMaskCurrentUrl === expectedUrl) {
       img.classList.add('show');
     }
   };
-  if (img.getAttribute('src') !== _lbMaskCurrentUrl) {
-    img.src = _lbMaskCurrentUrl;
+  if (img.getAttribute('src') !== expectedUrl) {
+    img.classList.remove('show');
+    img.src = expectedUrl;
   } else if (img.naturalWidth > 0) {
     // Same URL and we know it loaded successfully — safe to re-show
     // without re-fetching.
