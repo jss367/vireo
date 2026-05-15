@@ -2892,6 +2892,19 @@ var _lbFlagEditSeq = 0;      // increments for local flag writes so stale metada
 var _lbOpenSeq = 0;          // increments for every lightbox open so old metadata fetches cannot reapply after reopen
 var _lbFlagPendingWrites = 0;
 
+function _lbIsOneToOneZoom() {
+  if (_lbPending1To1) return true;
+  if (!_lbNativeZoom || _lbNativeZoom <= 1.001) return false;
+  var tolerance = Math.max(0.01, _lbNativeZoom * 0.01);
+  return Math.abs(_lbZoom - _lbNativeZoom) <= tolerance;
+}
+
+function _lbApplyPendingOneToOneZoom() {
+  if (!_lbPending1To1 || !_lbNativeZoom) return;
+  _lbPending1To1 = false;
+  _lbSetZoom(_lbNativeZoom, null, null);
+}
+
 function _lbNormalizeFlag(flag) {
   if (flag === 'flagged' || flag === 'rejected' || flag === 'none') return flag;
   if (flag == null || flag === '') return 'none';
@@ -3342,13 +3355,14 @@ function _lbLoadMaskVariants(photoId) {
     .catch(function() { /* network error → leave control hidden */ });
 }
 
-function openLightbox(photoId, filename, photoList) {
+function openLightbox(photoId, filename, photoList, options) {
   var alreadyOpen = !!window._lbEscToken;
   if (alreadyOpen) Keymap.popEsc(window._lbEscToken);
   window._lbEscToken = Keymap.pushEsc(function() { closeLightbox(); });
   if (!alreadyOpen) Keymap.lockBodyScroll();
   _lbOpenSeq += 1;
   var openSeq = _lbOpenSeq;
+  options = options || {};
 
   _lightboxCurrentId = photoId;
   if (photoList) _lightboxPhotoList = photoList;
@@ -3384,7 +3398,7 @@ function openLightbox(photoId, filename, photoList) {
   _lbPhotoH = null;
   _lbCurrentSrcKey = 'full';
   _lbFullLongEdge = null;
-  _lbPending1To1 = false;
+  _lbPending1To1 = !!options.preserveOneToOne;
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
   _lbApplyTransform();  // Clear any lingering translate/scale from prior photo before the new one renders.
@@ -3401,6 +3415,7 @@ function openLightbox(photoId, filename, photoList) {
       _lbApplyWildlifeExcludedButton();
       _lbRecordFetchedFlag(photoId, data.flag, flagFetchSeq);
       _lbRecomputeNativeZoom();
+      _lbApplyPendingOneToOneZoom();
       _lbRenderEyeCrosshair(data);
     })
     .catch(function() {});
@@ -3417,6 +3432,7 @@ function openLightbox(photoId, filename, photoList) {
       _lbSessionFullLongEdge = _lbFullLongEdge;
     }
     _lbRecomputeNativeZoom();
+    _lbApplyPendingOneToOneZoom();
     _lbApplyTransform();
   };
   label.textContent = filename || '';
@@ -3466,7 +3482,9 @@ function lightboxNav(delta) {
   var newIdx = idx + delta;
   if (newIdx < 0 || newIdx >= _lightboxPhotoList.length) return;
   var next = _lightboxPhotoList[newIdx];
-  openLightbox(next.id, next.filename, _lightboxPhotoList);
+  openLightbox(next.id, next.filename, _lightboxPhotoList, {
+    preserveOneToOne: _lbIsOneToOneZoom()
+  });
 }
 
 function toggleLightboxZoom(e) {
