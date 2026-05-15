@@ -1249,6 +1249,7 @@ var calendarData = null;
 var clipSearchActive = false;
 var searchFilterTimer = null;
 var collectionCountRefreshTimer = null;
+var collectionCountLoadGen = 0;
 
 function refreshPendingSyncBanner() {
   if (typeof checkPendingSync === 'function') {
@@ -1589,8 +1590,10 @@ async function loadCollections() {
 }
 
 async function loadCollectionCounts() {
+  var gen = ++collectionCountLoadGen;
   try {
     var data = await safeFetch('/api/collections', {}, { toast: false });
+    if (gen !== collectionCountLoadGen) return;
     if (!data) return;
     var items = document.querySelectorAll('#collectionList .tree-item');
     var countsById = {};
