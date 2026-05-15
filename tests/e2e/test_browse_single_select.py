@@ -265,6 +265,103 @@ def test_singleton_set_keyboard_shortcut_applies(live_server, page):
     )
 
 
+def test_multiselect_offers_partial_keyword_fill(live_server, page):
+    """Selecting mixed tagged/untagged photos offers one-click keyword fill."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    assert cards.count() >= 5
+
+    page.evaluate("""
+      photos.forEach(function(p) { selectedPhotos.add(p.id); });
+      renderGrid();
+      updateBatchBar();
+    """)
+
+    expect(page.locator("#selectionPanel")).to_be_visible()
+    row = page.locator(".selection-keyword-row", has_text="Red-tailed Hawk")
+    expect(row).to_be_visible()
+    expect(row).to_contain_text("missing from 4")
+
+    original_with_keyword = page.evaluate("""
+      async () => {
+        const ids = photos.map(p => p.id);
+        const details = await Promise.all(
+          ids.map(id => fetch('/api/photos/' + id).then(r => r.json()))
+        );
+        return details
+          .filter(p => (p.keywords || []).some(k => k.name === 'Red-tailed Hawk'))
+          .map(p => p.id)
+          .sort((a, b) => a - b);
+      }
+    """)
+
+    row.locator("button", has_text="Add to 4").click()
+
+    page.wait_for_function("""
+      async () => {
+        const ids = photos.map(p => p.id);
+        const details = await Promise.all(
+          ids.map(id => fetch('/api/photos/' + id).then(r => r.json()))
+        );
+        return details.every(p =>
+          (p.keywords || []).some(k => k.name === 'Red-tailed Hawk')
+        );
+      }
+    """, timeout=3000)
+    expect(
+        page.locator(".selection-keyword-row", has_text="Red-tailed Hawk")
+    ).to_have_count(0)
+
+    page.evaluate("async () => (await fetch('/api/undo', {method: 'POST'})).ok")
+    restored_with_keyword = page.evaluate("""
+      async () => {
+        const ids = photos.map(p => p.id);
+        const details = await Promise.all(
+          ids.map(id => fetch('/api/photos/' + id).then(r => r.json()))
+        );
+        return details
+          .filter(p => (p.keywords || []).some(k => k.name === 'Red-tailed Hawk'))
+          .map(p => p.id)
+          .sort((a, b) => a - b);
+      }
+    """)
+    assert restored_with_keyword == original_with_keyword
+
+
+def test_multiselect_shrink_to_focused_photo_restores_detail(live_server, page):
+    """Leaving multi-select with a focused photo must restore the detail pane."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    page.locator(".grid-card").first.wait_for(state="visible")
+    first_filename = page.evaluate("photos[0].filename")
+
+    page.evaluate("""
+      selectedPhotoId = photos[0].id;
+      selectedIndex = 0;
+      selectedPhotos.clear();
+      selectedPhotos.add(photos[0].id);
+      selectedPhotos.add(photos[1].id);
+      updateBatchBar();
+    """)
+    expect(page.locator("#selectionPanel")).to_be_visible()
+
+    page.evaluate("""
+      selectedPhotos.delete(photos[1].id);
+      updateBatchBar();
+    """)
+
+    expect(page.locator("#selectionPanel")).to_be_hidden()
+    page.wait_for_function(
+        "document.getElementById('detailContent').classList.contains('visible')",
+        timeout=3000,
+    )
+    expect(page.locator("#detailFilename")).to_have_text(first_filename)
+
+
 def test_reject_shortcut_keeps_existing_thumbnail_nodes(live_server, page):
     """Rejecting one photo should not rebuild the whole grid.
 
