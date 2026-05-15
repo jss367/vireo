@@ -1412,7 +1412,7 @@ input[type="range"]::-moz-range-thumb {
       <input type="range" id="grmResSlider" min="0" max="3" step="1" value="3" oninput="grmSetResolution(this.value)">
       <span id="grmResLabel" style="font-size:11px;color:var(--text-dim);min-width:140px;">1920 · preview</span>
     </div>
-    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
+    <span class="grm-hint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);">Apply & Close</button>
   </div>
 </div>
@@ -2352,6 +2352,35 @@ function findEncounterForPhoto(photoId) {
   return null;
 }
 
+var inspectPhotoId = null;
+
+function pipelineReviewBareKey(e, key) {
+  return !e.ctrlKey && !e.metaKey && !e.altKey && e.key && e.key.toLowerCase() === key;
+}
+
+function setPipelineReviewFlag(photoId, flag) {
+  if (flag !== 'flagged' && flag !== 'rejected' && flag !== 'none') return Promise.resolve();
+  photoId = parseInt(photoId, 10);
+  if (!photoId) return Promise.resolve();
+
+  return safeFetch('/api/photos/' + photoId + '/flag', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ flag: flag }),
+  }).then(function() {
+    var photo = findPhotoInResults(photoId);
+    if (photo) photo.flag = flag;
+    renderResults();
+    if (inspectPhotoId === photoId && document.getElementById('inspectOverlay').classList.contains('open')) {
+      openInspect(photoId);
+    }
+    var msg = flag === 'flagged' ? 'Marked as pick' : (flag === 'rejected' ? 'Marked as reject' : 'Flag cleared');
+    showToast(msg, 'success');
+  });
+}
+
+window.setFlagFor = setPipelineReviewFlag;
+
 function openInspect(photoId) {
   var photo = findPhotoInResults(photoId);
   if (!photo) return;
@@ -2359,6 +2388,7 @@ function openInspect(photoId) {
   // Route multi-photo bursts to the GRM
   var burstInfo = findBurstForPhoto(photoId);
   if (burstInfo && burstInfo.photoIds.length >= 2) {
+    closeInspect();
     openGroupReview(burstInfo.encIdx, burstInfo.burstIdx, photoId);
     return;
   }
@@ -2366,6 +2396,7 @@ function openInspect(photoId) {
   var enc = findEncounterForPhoto(photoId);
   var panel = document.getElementById('inspectPanel');
   var overlay = document.getElementById('inspectOverlay');
+  inspectPhotoId = photoId;
 
   var label = (photo.label || '').toLowerCase();
   var q = photo.quality_composite || 0;
@@ -2488,10 +2519,17 @@ function openInspect(photoId) {
 function closeInspect() {
   document.getElementById('inspectOverlay').classList.remove('open');
   document.removeEventListener('keydown', inspectKeyHandler);
+  inspectPhotoId = null;
 }
 
 function inspectKeyHandler(e) {
-  if (e.key === 'Escape') closeInspect();
+  if (e.key === 'Escape') { closeInspect(); return; }
+  if (pipelineReviewBareKey(e, 'p') || pipelineReviewBareKey(e, 'x')) {
+    var flag = pipelineReviewBareKey(e, 'p') ? 'flagged' : 'rejected';
+    setPipelineReviewFlag(inspectPhotoId, flag);
+    e.preventDefault();
+    e.stopPropagation();
+  }
 }
 
 function toggleMask() {
@@ -3940,6 +3978,8 @@ document.addEventListener('keydown', function(e) {
   }
   if (e.key === 'Delete' || e.key === 'Backspace') { grmRemoveFromGroup(); e.preventDefault(); return; }
   if (e.key === ' ') { grmMoveCandidate(); e.preventDefault(); return; }
+  if (pipelineReviewBareKey(e, 'p')) { grmMovePick(); e.preventDefault(); return; }
+  if (pipelineReviewBareKey(e, 'x')) { grmMoveReject(); e.preventDefault(); return; }
 });
 
 /* --- Right-click → open in Browse view ---
