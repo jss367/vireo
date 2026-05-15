@@ -30,7 +30,7 @@ except ImportError:
     load_image = None
     load_working_image = None
 
-from db import Database, commit_with_retry
+from db import AUTO_MATCH_REVIEW_MARKER, Database, commit_with_retry
 from models import get_active_model, get_models
 
 try:
@@ -1148,8 +1148,10 @@ def _store_match_prediction(
         model=model_name,
         category="match",
         status="accepted",
+        individual=AUTO_MATCH_REVIEW_MARKER,
         taxonomy=tax_hierarchy,
         labels_fingerprint=labels_fingerprint,
+        preserve_manual_review=True,
     )
     if store_alternatives:
         for alt in item.get("alternatives", []):
@@ -1165,6 +1167,7 @@ def _store_match_prediction(
                 status="alternative",
                 taxonomy=alt_tax,
                 labels_fingerprint=labels_fingerprint,
+                preserve_manual_review=True,
             )
     # add_prediction is INSERT-OR-IGNORE: a row cached as non-match on an
     # earlier pass keeps its stale category here. Re-stamp it 'match' so the

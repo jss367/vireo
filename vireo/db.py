@@ -15,6 +15,8 @@ log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
 
+AUTO_MATCH_REVIEW_MARKER = "__vireo_auto_match__"
+
 _SQLITE_PARAM_CHUNK_SIZE = 800
 
 
@@ -6537,6 +6539,7 @@ class Database:
         individual=None,
         taxonomy=None,
         labels_fingerprint="legacy",
+        preserve_manual_review=False,
     ):
         """Store a classification prediction for a detection.
 
@@ -6556,6 +6559,9 @@ class Database:
                       family, genus, scientific_name from taxonomy lookup
             labels_fingerprint: fingerprint of the label set used to classify
                 (defaults to 'legacy' for backwards-compatible inserts).
+            preserve_manual_review: when True, do not overwrite an existing
+                accepted/rejected review row unless it was auto-created for an
+                XMP taxonomy match.
         """
         if detection_id is None:
             raise ValueError(
@@ -6614,6 +6620,19 @@ class Database:
         )
         if pred_id is not None and has_review_state:
             ws_id = self._ws_id()
+            if preserve_manual_review:
+                review = self.conn.execute(
+                    """SELECT status, individual FROM prediction_review
+                       WHERE prediction_id = ? AND workspace_id = ?""",
+                    (pred_id, ws_id),
+                ).fetchone()
+                if (
+                    review is not None
+                    and review["status"] in {"accepted", "rejected"}
+                    and review["individual"] != AUTO_MATCH_REVIEW_MARKER
+                ):
+                    self.conn.commit()
+                    return
             self.conn.execute(
                 """INSERT INTO prediction_review
                      (prediction_id, workspace_id, status, reviewed_at,
@@ -6643,14 +6662,13 @@ class Database:
 
         Taxonomy ``match`` predictions are auto-accepted and intentionally
         hidden from the pending review queue (``_store_match_prediction``
-        writes ``status='accepted'``).  That review row is durable, so when a
-        detection stops being a match — e.g. the photo's XMP keywords were
-        edited — a later non-reclassify run reuses the cached prediction but
-        the stale ``accepted`` row would keep it out of the queue until a
-        full reclassify/clear is forced.  Matches are never user-reviewable
-        (they never appear in the queue), so the only ``accepted`` row on a
-        ``category='match'`` prediction is auto-written and safe to drop here
-        so the prediction re-enters pending review.
+        writes ``status='accepted'`` with ``AUTO_MATCH_REVIEW_MARKER``).  That
+        review row is durable, so when a detection stops being a match — e.g.
+        the photo's XMP keywords were edited — a later non-reclassify run
+        reuses the cached prediction but the stale auto-accepted row would keep
+        it out of the queue until a full reclassify/clear is forced.  Only the
+        marked auto-review row is safe to drop here; explicit user decisions
+        from before a temporary XMP match must remain intact.
 
         The persisted ``category`` is always refreshed to the current value:
         ``add_prediction`` is INSERT-OR-IGNORE so it never updates it on
@@ -6671,8 +6689,9 @@ class Database:
         if row["category"] == "match" and category != "match":
             self.conn.execute(
                 "DELETE FROM prediction_review "
-                "WHERE prediction_id = ? AND workspace_id = ?",
-                (pred_id, ws),
+                "WHERE prediction_id = ? AND workspace_id = ? "
+                "AND status = 'accepted' AND individual = ?",
+                (pred_id, ws, AUTO_MATCH_REVIEW_MARKER),
             )
         if row["category"] != category:
             self.conn.execute(

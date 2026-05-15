@@ -1382,6 +1382,73 @@ def test_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatch):
     assert rows["Sparrow"]["status"] == "alternative"   # still nested
 
 
+@pytest.mark.parametrize("manual_status", ["accepted", "rejected"])
+def test_match_flip_preserves_manual_review_on_reuse(
+    tmp_path, monkeypatch, manual_status
+):
+    """A temporary XMP match must not erase an explicit user decision."""
+    import classify_job
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+
+    class Tax:
+        def get_hierarchy(self, _species):
+            return {}
+
+    def run(category):
+        monkeypatch.setattr("compare.categorize", lambda *_a, **_k: category)
+        return classify_job._store_grouped_predictions(
+            raw_results=[{
+                "photo": {
+                    "id": photo_id, "filename": "a.jpg",
+                    "folder_id": folder_id, "timestamp": None, "burst_id": None,
+                },
+                "folder_path": str(tmp_path),
+                "detection_id": det_id,
+                "prediction": "Robin",
+                "confidence": 0.88,
+                "alternatives": [],
+                "taxonomy": {},
+                "timestamp": None,
+                "_existing": True,
+            }],
+            job_id="job-abc",
+            model_name="bioclip-2",
+            grouping_window=0,
+            similarity_threshold=0.99,
+            tax=Tax(),
+            db=db,
+            labels_fingerprint="fp-active",
+        )
+
+    run("disagreement")
+    pred_id = db.get_predictions(photo_ids=[photo_id])[0]["id"]
+    db.update_prediction_status(pred_id, manual_status)
+
+    run("match")
+    matched = db.get_predictions(photo_ids=[photo_id])[0]
+    assert matched["category"] == "match"
+    assert matched["status"] == manual_status
+
+    run("disagreement")
+    downgraded = db.get_predictions(photo_ids=[photo_id])[0]
+    assert downgraded["category"] == "disagreement"
+    assert downgraded["status"] == manual_status
+
+
 def test_group_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatch):
     """Burst groups cached as 'match' must also re-enter review when the
     photos stop matching and the cached predictions are reused.
