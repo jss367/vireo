@@ -2808,6 +2808,37 @@ def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     assert by_name["Sparrow"]["missing_count"] == 2
 
 
+def test_selection_keyword_suggestions_chunks_large_selection(app_and_db):
+    """Large selection suggestions must not exceed SQLite's variable limit."""
+    app, db = app_and_db
+    folder_id = db.get_folder_tree()[0]["id"]
+    ids = [
+        db.add_photo(
+            folder_id,
+            f"large-suggestion-{idx}.jpg",
+            extension=".jpg",
+            file_size=1,
+            file_mtime=1.0,
+        )
+        for idx in range(1000)
+    ]
+    keyword_id = db.add_keyword("Large Suggestion")
+    db.tag_photo(ids[0], keyword_id)
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/selection/keyword-suggestions",
+        json={"photo_ids": ids},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    by_name = {item["name"]: item for item in resp.get_json()["suggestions"]}
+    assert by_name["Large Suggestion"]["count"] == 1
+    assert by_name["Large Suggestion"]["missing_count"] == 999
+    assert len(by_name["Large Suggestion"]["missing_photo_ids"]) == 999
+
+
 def test_batch_keyword_route_accepts_existing_keyword_id(app_and_db):
     """The fill-missing-keywords button preserves pre-existing links on undo."""
     app, db = app_and_db

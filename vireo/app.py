@@ -2135,15 +2135,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     f"Photo {pid} does not belong to the active workspace", 403
                 )
 
-        placeholders = ",".join("?" for _ in photo_ids)
-        rows = db.conn.execute(
-            f"""SELECT pk.photo_id, k.id, k.name, k.type
-                FROM photo_keywords pk
-                JOIN keywords k ON k.id = pk.keyword_id
-                WHERE pk.photo_id IN ({placeholders})
-                ORDER BY LOWER(k.name), k.id""",
-            photo_ids,
-        ).fetchall()
+        rows = []
+        batch_size = 800
+        for i in range(0, len(photo_ids), batch_size):
+            chunk = photo_ids[i:i + batch_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(db.conn.execute(
+                f"""SELECT pk.photo_id, k.id, k.name, k.type
+                    FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id
+                    WHERE pk.photo_id IN ({placeholders})
+                    ORDER BY LOWER(k.name), k.id""",
+                chunk,
+            ).fetchall())
 
         selected_count = len(photo_ids)
         by_keyword = {}
