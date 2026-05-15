@@ -12074,8 +12074,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("Photo not found", 404)
 
         result = dict(photo)
-        # Remove binary embedding and dead detection columns from response
+        # Remove binary embedding and dead detection columns from response.
+        # The inspector only needs display/debug fields; returning BLOBs makes
+        # jsonify fail once the extract stage has populated DINO embeddings.
         result.pop("embedding", None)
+        result.pop("dino_subject_embedding", None)
+        result.pop("dino_global_embedding", None)
         result.pop("detection_box", None)
         result.pop("detection_conf", None)
 
