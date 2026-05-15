@@ -22,6 +22,7 @@ def test_darktable_default_values():
     assert DEFAULTS["darktable_style"] == ""
     assert DEFAULTS["darktable_output_format"] == "jpg"
     assert DEFAULTS["darktable_output_dir"] == ""
+    assert DEFAULTS["darktable_auto_convert_dng"] is True
 
 
 def test_max_edit_history_default():

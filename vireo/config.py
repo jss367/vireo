@@ -39,7 +39,7 @@ DEFAULTS = {
     "darktable_style": "",
     "darktable_output_format": "jpg",
     "darktable_output_dir": "",
-    "darktable_auto_convert_dng": False,
+    "darktable_auto_convert_dng": True,
     "dng_converter_bin": "",
     # When true, the Tauri desktop wrapper opens this UI in the user's
     # default web browser on launch instead of creating its WKWebView
