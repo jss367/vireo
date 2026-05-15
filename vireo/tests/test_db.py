@@ -7562,6 +7562,24 @@ def test_filter_out_subject_tagged_excludes_tagged_photos(tmp_path):
     assert kept == [p2]
 
 
+def test_filter_out_wildlife_excluded_drops_marked_photos(tmp_path):
+    """Explicit Not Wildlife state is independent of keyword subject tagging."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.create_workspace("ws")
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(ws, fid)
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+
+    db.update_photo_wildlife_excluded(p1, True)
+
+    assert db.filter_out_wildlife_excluded([p1, p2]) == [p2]
+
+
 def test_filter_out_subject_tagged_empty_set_returns_all(tmp_path):
     """An empty subject_types set means no type counts as 'identifying',
     so every input photo is kept."""

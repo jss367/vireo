@@ -374,6 +374,19 @@ body {
 .detail-flag-btn:hover { border-color: var(--accent); }
 .detail-flag-btn.active-flag { background: var(--accent); color: var(--bg-primary); border-color: var(--accent); }
 .detail-flag-btn.active-reject { background: var(--danger); color: var(--text-primary); border-color: var(--danger); }
+.detail-wildlife-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.detail-wildlife-btn.active {
+  border-color: var(--warn);
+  color: var(--warn);
+}
 .detail-colors { display: flex; gap: 6px; margin-bottom: 8px; }
 .detail-color-btn {
   width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent;
@@ -796,6 +809,13 @@ body {
   font-size: 9px; padding: 1px 5px; border-radius: 3px;
   pointer-events: none; z-index: 2;
 }
+.no-wildlife-badge {
+  position: absolute; top: 4px; left: 4px;
+  background: rgba(0,0,0,0.72); color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 70%, transparent);
+  font-size: 9px; padding: 1px 5px; border-radius: 3px;
+  pointer-events: none; z-index: 2;
+}
 .species-badges {
   position: absolute; bottom: 4px; left: 4px; right: 4px;
   display: flex; flex-wrap: wrap; gap: 2px;
@@ -1051,6 +1071,11 @@ body {
           <button class="detail-flag-btn" onclick="setFlag('flagged')">Flag (P)</button>
           <button class="detail-flag-btn" onclick="setFlag('rejected')">Reject (X)</button>
         </div>
+      </div>
+
+      <div class="detail-section">
+        <div class="detail-section-title">Wildlife Classification</div>
+        <button class="detail-wildlife-btn" id="detailWildlifeExcluded" onclick="toggleDetailWildlifeExcluded()">Not Wildlife</button>
       </div>
 
       <div class="detail-section">
@@ -2389,6 +2414,7 @@ function renderGrid() {
       clipBadge = '<span class="clip-score-badge">' + Math.round(p._similarity * 100) + '%</span>';
     }
     var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
+    var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
 
     // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
     var speciesBadgeHtml = '';
@@ -2411,6 +2437,7 @@ function renderGrid() {
         clipBadge +
         boxHtml +
         inatBadge +
+        wildlifeBadge +
         speciesBadgeHtml +
       '</div>' +
       '<div class="grid-card-info">' +
@@ -2894,6 +2921,9 @@ function renderDetail(photo) {
   // Color labels
   updateDetailColors();
 
+  // Wildlife classification exclusion
+  updateDetailWildlifeExcluded(photo);
+
   // Keywords
   var kwTypeIcons = {general:'●', taxonomy:'🌿', individual:'👤', location:'📍', genre:'🎭'};
   var kwTypeLabels = {general:'General', taxonomy:'Taxonomy', individual:'Individual', location:'Location', genre:'Genre'};
@@ -3224,6 +3254,40 @@ async function setFlag(flag) {
     if (p) p.flag = flag;
     refreshGridCards([photoId]);
     if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
+  } catch(e) {}
+}
+
+function updateDetailWildlifeExcluded(photo) {
+  var btn = document.getElementById('detailWildlifeExcluded');
+  if (!btn) return;
+  var excluded = !!(photo && photo.wildlife_excluded);
+  btn.classList.toggle('active', excluded);
+  btn.textContent = excluded ? 'Include Wildlife Classification' : 'Not Wildlife';
+  btn.title = excluded
+    ? 'Include this photo in wildlife detection and classification'
+    : 'Exclude this photo from wildlife detection and classification';
+}
+
+async function setWildlifeExcludedFor(photoId, excluded) {
+  await safeFetch('/api/photos/' + photoId + '/wildlife_excluded', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ excluded: excluded }),
+  }, { toast: false });
+  var p = photos.find(function(x) { return x.id === photoId; });
+  if (p) p.wildlife_excluded = excluded ? 1 : 0;
+  renderGrid();
+  if (selectedPhotoId === photoId) loadDetail(photoId);
+  showUndoToast();
+}
+window.setWildlifeExcludedFor = setWildlifeExcludedFor;
+
+async function toggleDetailWildlifeExcluded() {
+  if (!selectedPhotoId) return;
+  var p = photos.find(function(x) { return x.id === selectedPhotoId; });
+  var current = p ? !!p.wildlife_excluded : false;
+  try {
+    await setWildlifeExcludedFor(selectedPhotoId, !current);
   } catch(e) {}
 }
 

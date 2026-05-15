@@ -1486,6 +1486,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
 
+            if collection_id:
+                candidate_photos = _filter_excluded(
+                    thread_db.get_collection_photos(collection_id, per_page=999999)
+                )
+                photo_ids = [p["id"] for p in candidate_photos]
+                candidate_ids = thread_db.filter_out_wildlife_excluded(photo_ids)
+                if candidate_photos and not candidate_ids:
+                    stages["model_loader"]["status"] = "skipped"
+                    runner.update_step(
+                        job["id"], "model_loader", status="completed",
+                        summary="Skipped (all photos marked not wildlife)",
+                    )
+                    _update_stages(runner, job["id"], stages)
+                    models_ready.set()
+                    return
+
             # Specs were pre-resolved at job start so step_defs could carry
             # the model's display name on each `classify:<id>` row. If that
             # resolution raised, surface the same error here — model_loader
@@ -1629,6 +1645,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             photos = _filter_excluded(
                 thread_db.get_collection_photos(collection_id, per_page=999999)
             )
+            photo_ids = [p["id"] for p in photos]
+            kept_ids = set(thread_db.filter_out_wildlife_excluded(photo_ids))
+            skipped_wildlife = len(photos) - len(kept_ids)
+            if skipped_wildlife:
+                log.info(
+                    "Skipping %d photo(s) marked not wildlife",
+                    skipped_wildlife,
+                )
+            photos = [p for p in photos if p["id"] in kept_ids]
             folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
             total = len(photos)
             detect_state["photos"] = photos

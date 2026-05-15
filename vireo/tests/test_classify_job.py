@@ -2602,6 +2602,29 @@ def test_classify_job_reclassify_true_bypasses_subject_skip(tmp_path):
     )
 
 
+def test_classify_job_always_skips_wildlife_excluded_photos(tmp_path):
+    """Explicit Not Wildlife state skips classification even on reclassify."""
+    from db import Database
+
+    db_path, ws, col_id, p1, p2 = _setup_two_photo_classify_workspace(tmp_path)
+    db = Database(db_path)
+    db.set_active_workspace(ws)
+    db.update_photo_wildlife_excluded(p2, True)
+    db.conn.close()
+
+    seen, events, _ = _run_classify_capturing_photos(
+        db_path, ws, col_id, reclassify=True,
+    )
+
+    assert seen == [p1]
+    progress_events = [
+        d for (_jid, kind, d) in events
+        if kind == "progress" and d.get("skipped_wildlife_excluded")
+    ]
+    assert progress_events
+    assert progress_events[0]["skipped_wildlife_excluded"] == 1
+
+
 def test_classify_job_short_circuits_when_all_photos_skipped(tmp_path):
     """Regression: when the subject-skip filter empties the photo set, the
     job must short-circuit before model load. Loading a model is expensive

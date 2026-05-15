@@ -2798,7 +2798,7 @@ async function createWorkspace() {
       <span>Mask:</span>
       <select id="lightboxMaskSelect" onchange="event.stopPropagation(); _lbOnMaskVariantChange();"></select>
     </span>
-    <button id="lightboxNotWildlife" onclick="event.stopPropagation(); lightboxNotWildlife();" style="background:rgba(0,0,0,0.6);color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Mark as Landscape — drops out of Needs Identification and stops the classifier">
+    <button id="lightboxNotWildlife" onclick="event.stopPropagation(); lightboxToggleWildlifeExcluded();" style="background:rgba(0,0,0,0.6);color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Exclude from wildlife detection and classification">
       Not Wildlife
     </button>
     <button id="lightboxInat" onclick="" style="background:rgba(0,0,0,0.6);color:#74ac00;border:1px solid #74ac00;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
@@ -2874,6 +2874,7 @@ var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
 var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
 var _lbSessionFullLongEdge = null;  // last learned /full size across photos; better fallback than hardcoded 1920 for custom preview_max_size
 var _lbPending1To1 = false;  // true when z/click was pressed with unknown nativeZoom; upgrade to true 1:1 once learned
+var _lbCurrentWildlifeExcluded = false;
 var _lbFlagEditSeq = 0;      // increments for local flag writes so stale metadata fetches cannot overwrite the chip
 var _lbOpenSeq = 0;          // increments for every lightbox open so old metadata fetches cannot reapply after reopen
 var _lbFlagPendingWrites = 0;
@@ -3242,6 +3243,15 @@ function _lbApplyMaskToggleButton() {
   if (btn) btn.textContent = _lbMasksVisible ? 'Hide Masks' : 'Show Masks';
 }
 
+function _lbApplyWildlifeExcludedButton() {
+  var btn = document.getElementById('lightboxNotWildlife');
+  if (!btn) return;
+  btn.textContent = _lbCurrentWildlifeExcluded ? 'Include Wildlife' : 'Not Wildlife';
+  btn.title = _lbCurrentWildlifeExcluded
+    ? 'Include this photo in wildlife detection and classification'
+    : 'Exclude from wildlife detection and classification';
+}
+
 function toggleLightboxMasks() {
   _lbMasksVisible = !_lbMasksVisible;
   _lbPersistBool('vireo.lb.masksVisible', _lbMasksVisible);
@@ -3329,6 +3339,8 @@ function openLightbox(photoId, filename, photoList) {
 
   _lightboxCurrentId = photoId;
   if (photoList) _lightboxPhotoList = photoList;
+  var currentFromList = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
+  _lbCurrentWildlifeExcluded = !!(currentFromList && currentFromList.wildlife_excluded);
   _lbSetFlagStatus(_lbFlagFromPhotoList(photoId));
 
   var overlay = document.getElementById('lightboxOverlay');
@@ -3372,6 +3384,8 @@ function openLightbox(photoId, filename, photoList) {
       if (!data || _lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
       _lbPhotoW = data.width || null;
       _lbPhotoH = data.height || null;
+      _lbCurrentWildlifeExcluded = !!data.wildlife_excluded;
+      _lbApplyWildlifeExcludedButton();
       _lbRecordFetchedFlag(photoId, data.flag, flagFetchSeq);
       _lbRecomputeNativeZoom();
       _lbRenderEyeCrosshair(data);
@@ -3410,6 +3424,7 @@ function openLightbox(photoId, filename, photoList) {
   _lbApplyChromeVisibility();
   _lbApplyEyeVisibility();
   _lbApplyMaskToggleButton();
+  _lbApplyWildlifeExcludedButton();
 
   // Fetch and render detection bounding boxes
   _lbLoadDetections(photoId);
@@ -3649,6 +3664,7 @@ function buildLightboxContextMenu(pid) {
   items.push(toggleItem('Eye marker', _lbEyeVisible, toggleLightboxEye));
   items.push(toggleItem('Filename and counter', _lbInfoVisible, toggleLightboxInfo));
   items.push(toggleItem('Lightbox controls', _lbChromeVisible, toggleLightboxChrome));
+  items.push(toggleItem('Wildlife classification', !_lbCurrentWildlifeExcluded, lightboxToggleWildlifeExcluded));
   items.push({ separator: true });
 
   if (has('findSimilar')) {
@@ -3762,25 +3778,30 @@ async function confirmDelete() {
   if (savedCallback) savedCallback(data);
 }
 
-async function lightboxNotWildlife() {
+async function lightboxToggleWildlifeExcluded() {
   if (!_lightboxCurrentId) return;
   var currentId = _lightboxCurrentId;
+  var excluded = !_lbCurrentWildlifeExcluded;
   try {
-    await safeFetch('/api/photos/' + currentId + '/keywords', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'Landscape', type: 'genre' }),
-    }, { toast: false });
-    if (typeof checkPendingSync === 'function') checkPendingSync();
-    // Advance to next photo if more remain
-    var idx = _lightboxPhotoList.findIndex(function(x) { return x.id === currentId; });
-    if (idx >= 0 && _lightboxPhotoList.length > 1) {
-      var nextIdx = (idx + 1) % _lightboxPhotoList.length;
-      var next = _lightboxPhotoList[nextIdx];
-      openLightbox(next.id, next.filename, _lightboxPhotoList);
+    if (typeof window.setWildlifeExcludedFor === 'function') {
+      await window.setWildlifeExcludedFor(currentId, excluded);
+    } else {
+      await safeFetch('/api/photos/' + currentId + '/wildlife_excluded', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ excluded: excluded }),
+      }, { toast: false });
+    }
+    _lbCurrentWildlifeExcluded = excluded;
+    _lbApplyWildlifeExcludedButton();
+    if (window.toast) {
+      window.toast(
+        excluded ? 'Excluded from wildlife classification' : 'Included in wildlife classification',
+        'success'
+      );
     }
   } catch (e) {
-    if (window.toast) window.toast('Tag failed: ' + (e && e.message ? e.message : 'unknown'), 'error');
+    if (window.toast) window.toast('Update failed: ' + (e && e.message ? e.message : 'unknown'), 'error');
   }
 }
 

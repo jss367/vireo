@@ -2771,6 +2771,32 @@ def test_add_keyword_route_handles_non_string_type(app_and_db):
     # Anything other than a crash is acceptable here; the point is no 500.
 
 
+def test_wildlife_excluded_route_does_not_add_landscape_keyword(app_and_db):
+    """Not Wildlife is workflow state, not a hidden Landscape keyword."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/p")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "p.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    client = app.test_client()
+
+    resp = client.post(
+        f"/api/photos/{photo_id}/wildlife_excluded",
+        json={"excluded": True},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["wildlife_excluded"] is True
+    row = db.conn.execute(
+        "SELECT wildlife_excluded FROM photos WHERE id = ?", (photo_id,)
+    ).fetchone()
+    assert row["wildlife_excluded"] == 1
+    keywords = [dict(k) for k in db.get_photo_keywords(photo_id)]
+    assert all(k["name"] != "Landscape" for k in keywords)
+
+
 def test_batch_keyword_route_handles_non_string_type(app_and_db):
     """Same regression for the batch endpoint."""
     app, db = app_and_db
