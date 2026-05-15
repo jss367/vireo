@@ -2523,6 +2523,44 @@ document.getElementById('grid').addEventListener('dblclick', function(e) {
   openLightbox(id, filename, photos);
 });
 
+function getBrowseShortcutPhoto() {
+  var idx = -1;
+  if (selectedPhotoId != null) {
+    idx = photos.findIndex(function(p) { return p.id === selectedPhotoId; });
+  }
+  if (idx < 0 && selectedPhotos.size > 0) {
+    idx = photos.findIndex(function(p) { return selectedPhotos.has(p.id); });
+  }
+  if (idx < 0 && selectedIndex >= 0 && photos[selectedIndex]) {
+    idx = selectedIndex;
+  }
+  if (idx < 0 && photos.length > 0) {
+    idx = 0;
+  }
+  if (idx < 0 || !photos[idx]) return null;
+  return { photo: photos[idx], index: idx };
+}
+
+function openBrowseShortcutPhoto(fullscreen) {
+  var item = getBrowseShortcutPhoto();
+  if (!item) return false;
+  openLightbox(item.photo.id, item.photo.filename || '', photos);
+  if (fullscreen && typeof requestLightboxFullscreen === 'function') {
+    requestLightboxFullscreen();
+  }
+  return true;
+}
+
+function browseKeyMatchesConfiguredShortcut(e) {
+  if (!_shortcuts) return false;
+  for (var action in _shortcuts) {
+    if (Object.prototype.hasOwnProperty.call(_shortcuts, action) && matchesShortcut(e, _shortcuts[action])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /* ---------- Infinite Scroll ---------- */
 var observer = new IntersectionObserver(function(entries) {
   if (entries[0].isIntersecting) loadPhotos();
@@ -3851,15 +3889,33 @@ document.addEventListener('keydown', function(e) {
   if (hasActive) {
     var applyFlag = useBatch ? batchSetFlag : setFlag;
     var applyColor = useBatch ? batchSetColorLabel : setColorLabel;
-    if (matchesShortcut(e, _shortcuts.flag)) { e.preventDefault(); applyFlag('flagged'); }
-    else if (matchesShortcut(e, _shortcuts.reject)) { e.preventDefault(); applyFlag('rejected'); }
-    else if (matchesShortcut(e, _shortcuts.unflag)) { e.preventDefault(); applyFlag('none'); }
+    if (matchesShortcut(e, _shortcuts.flag)) { e.preventDefault(); applyFlag('flagged'); return; }
+    else if (matchesShortcut(e, _shortcuts.reject)) { e.preventDefault(); applyFlag('rejected'); return; }
+    else if (matchesShortcut(e, _shortcuts.unflag)) { e.preventDefault(); applyFlag('none'); return; }
 
     // Color labels
-    if (matchesShortcut(e, _shortcuts.color_red)) { e.preventDefault(); applyColor('red'); }
-    else if (matchesShortcut(e, _shortcuts.color_yellow)) { e.preventDefault(); applyColor('yellow'); }
-    else if (matchesShortcut(e, _shortcuts.color_green)) { e.preventDefault(); applyColor('green'); }
-    else if (matchesShortcut(e, _shortcuts.color_blue)) { e.preventDefault(); applyColor('blue'); }
+    if (matchesShortcut(e, _shortcuts.color_red)) { e.preventDefault(); applyColor('red'); return; }
+    else if (matchesShortcut(e, _shortcuts.color_yellow)) { e.preventDefault(); applyColor('yellow'); return; }
+    else if (matchesShortcut(e, _shortcuts.color_green)) { e.preventDefault(); applyColor('green'); return; }
+    else if (matchesShortcut(e, _shortcuts.color_blue)) { e.preventDefault(); applyColor('blue'); return; }
+  }
+
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !browseKeyMatchesConfiguredShortcut(e)) {
+    var browseViewKey = e.key.toLowerCase();
+    if (browseViewKey === 'e') {
+      if (openBrowseShortcutPhoto(false)) e.preventDefault();
+      return;
+    }
+    if (browseViewKey === 'f') {
+      if (openBrowseShortcutPhoto(true)) e.preventDefault();
+      return;
+    }
+    if (browseViewKey === 'g') {
+      if (typeof exitLightboxFullscreen === 'function') exitLightboxFullscreen();
+      if (document.getElementById('lightboxOverlay').classList.contains('active')) closeLightbox();
+      e.preventDefault();
+      return;
+    }
   }
 });
 
