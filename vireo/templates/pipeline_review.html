@@ -2311,6 +2311,7 @@ function openInspect(photoId) {
   // Route multi-photo bursts to the GRM
   var burstInfo = findBurstForPhoto(photoId);
   if (burstInfo && burstInfo.photoIds.length >= 2) {
+    closeInspect();
     openGroupReview(burstInfo.encIdx, burstInfo.burstIdx, photoId);
     return;
   }
