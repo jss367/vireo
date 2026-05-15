@@ -2260,11 +2260,23 @@ window.NAV_ALL_PAGES = [
   };
 
   var NAV_DEFAULTS = {
-    pipeline: '', lightroom: 'l', pipeline_review: 'e', review: 'r',
-    cull: 'c', browse: 'b', map: 'm', variants: 'v',
-    dashboard: 'd', audit: 'a', compare: 'o', workspace: 'w',
-    shortcuts: '/', settings: ',', keywords: 'k'
+    pipeline: '', lightroom: '', pipeline_review: '', review: '',
+    cull: '', browse: '', map: '', variants: '',
+    dashboard: '', audit: '', compare: '', workspace: '',
+    shortcuts: '', settings: '', keywords: ''
   };
+
+  function isBareShortcut(keyStr) {
+    if (!keyStr) return false;
+    var sc = parseShortcut(keyStr);
+    return !sc.ctrl && !sc.meta && !sc.shift && !sc.alt;
+  }
+
+  function navigationShortcutOrEmpty(keyStr) {
+    // Bare keys are reserved for page/window-local actions, not global
+    // navigation. Modifier chords remain valid for users who customize them.
+    return isBareShortcut(keyStr) ? '' : keyStr;
+  }
 
   // Build reverse map: href → shortcut action name
   var hrefToAction = {};
@@ -2362,8 +2374,8 @@ window.NAV_ALL_PAGES = [
   // CSS selector for any open overlay/modal. The legacy dispatcher used this
   // to bail out before navigating; the new Keymap dispatcher has no such
   // built-in suppression, so each registered nav action checks it itself
-  // (Option B from the migration review). Without this, pressing 'b' while
-  // the lightbox is open would close the lightbox AND navigate.
+  // (Option B from the migration review). Without this, pressing a configured
+  // navigation chord while the lightbox is open would close it AND navigate.
   var OVERLAY_SELECTOR = '.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active';
 
   function setupNavKeydown(navShortcuts) {
@@ -2428,6 +2440,7 @@ window.NAV_ALL_PAGES = [
       if (shortcuts.navigation) {
         for (var key in shortcuts.navigation) navShortcuts[key] = shortcuts.navigation[key];
       }
+      for (var key in navShortcuts) navShortcuts[key] = navigationShortcutOrEmpty(navShortcuts[key]);
       // Store for other scripts to access
       if (!window._vireoShortcuts) window._vireoShortcuts = shortcuts;
       window._vireoShortcuts.navigation = navShortcuts;
@@ -2474,10 +2487,10 @@ window.NAV_ALL_PAGES = [
 
   var SC_DEFAULTS = {
     navigation: {
-      import: 'i', pipeline: '', pipeline_review: 'e', review: 'r',
-      cull: 'c', browse: 'b', map: 'm', variants: 'v',
-      dashboard: 'd', audit: 'a', compare: 'o', workspace: 'w',
-      shortcuts: '/', settings: ',', keywords: 'k',
+      import: '', pipeline: '', pipeline_review: '', review: '',
+      cull: '', browse: '', map: '', variants: '',
+      dashboard: '', audit: '', compare: '', workspace: '',
+      shortcuts: '', settings: '', keywords: '',
     },
     review: { accept: 'a', skip: 's' },
     pipeline_rapid_review: {

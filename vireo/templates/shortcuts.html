@@ -125,10 +125,10 @@ var SHORTCUT_LABELS = {
 
 var SHORTCUT_DEFAULTS = {
   navigation: {
-    import: 'i', pipeline: '', pipeline_review: 'e', review: 'r',
-    cull: 'c', browse: 'b', map: 'm', variants: 'v',
-    dashboard: 'd', audit: 'a', compare: 'o', workspace: 'w',
-    shortcuts: '/', settings: ',', keywords: 'k',
+    import: '', pipeline: '', pipeline_review: '', review: '',
+    cull: '', browse: '', map: '', variants: '',
+    dashboard: '', audit: '', compare: '', workspace: '',
+    shortcuts: '', settings: '', keywords: '',
   },
   review: { accept: 'a', skip: 's' },
   pipeline_rapid_review: {
@@ -181,12 +181,19 @@ function renderShortcutsEditor() {
 }
 
 function findConflict(ctx, action, keyStr) {
+  if (!keyStr) return null;
   if (!currentShortcuts[ctx]) return null;
   for (var other in currentShortcuts[ctx]) {
     if (other === action) continue;
     if (currentShortcuts[ctx][other] === keyStr) return other;
   }
   return null;
+}
+
+function isBareShortcut(keyStr) {
+  if (!keyStr) return false;
+  var sc = parseShortcut(keyStr);
+  return !sc.ctrl && !sc.meta && !sc.shift && !sc.alt;
 }
 
 function startCapture(btn, ctx, action) {
@@ -217,6 +224,7 @@ function startCapture(btn, ctx, action) {
     if (e.altKey) parts.push('alt');
     parts.push(e.key.toLowerCase());
     var keyStr = parts.join('+');
+    if (ctx === 'navigation' && isBareShortcut(keyStr)) keyStr = '';
 
     var conflict = findConflict(ctx, action, keyStr);
     if (conflict) {
@@ -280,6 +288,9 @@ safeFetch('/api/config', {}, { toast: false }).then(function(cfg) {
     if (!currentShortcuts[ctx]) currentShortcuts[ctx] = {};
     for (var action in SHORTCUT_DEFAULTS[ctx]) {
       if (!currentShortcuts[ctx][action]) currentShortcuts[ctx][action] = SHORTCUT_DEFAULTS[ctx][action];
+      if (ctx === 'navigation' && isBareShortcut(currentShortcuts[ctx][action])) {
+        currentShortcuts[ctx][action] = '';
+      }
     }
   }
   renderShortcutsEditor();
