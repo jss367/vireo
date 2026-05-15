@@ -866,7 +866,6 @@ input[type="range"]::-moz-range-thumb {
 }
 .grm-card:hover { border-color: var(--text-ghost); }
 .grm-card.selected { border-color: var(--accent); }
-.grm-card.ai-best { border-color: var(--warning); }
 .grm-card.dragging { cursor: grabbing; }
 .grm-card.dragging img { pointer-events: none; }
 .grm-card.has-offset::after {
@@ -923,7 +922,6 @@ input[type="range"]::-moz-range-thumb {
 .grm-card-species { color: var(--text-primary); font-weight: 600; }
 .grm-card-scores { color: var(--text-dim); }
 .grm-card-scores .score-val { color: var(--text-secondary); }
-.grm-card-ai { color: var(--warning); font-size: 10px; font-weight: 600; }
 
 .grm-footer {
   padding: 12px 20px;
@@ -3033,13 +3031,11 @@ function grmShowSeedError(items, selectPhotoId) {
   }
 }
 
-// Seed picks/rejects on modal open. Photos already flagged/rejected in the
-// DB land in those zones; the quality-score heuristic only fills in zones
-// for photos with no flag set, so re-opening a burst respects prior choices.
+// Seed picks/rejects on modal open only from live DB state. Unflagged photos
+// stay as candidates until the user explicitly moves them.
 function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
   grmState.dbState = dbPhotos || {};
 
-  var unflagged = [];
   items.forEach(function(p) {
     var st = grmState.dbState[p.id];
     var flag = st ? st.flag : null;
@@ -3047,40 +3043,16 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
       grmState.picks.add(p.id);
     } else if (flag === 'rejected') {
       grmState.rejects.add(p.id);
-    } else {
-      unflagged.push(p);
     }
   });
 
-  // Heuristic fallback for photos with no DB flag: auto-pick the highest
-  // quality and auto-reject the worst third (only if no DB picks yet — we
-  // don't want to override the user's prior pick by piling on more).
-  if (grmState.picks.size === 0 && unflagged.length > 0) {
-    var best = unflagged[0];
-    unflagged.forEach(function(p) {
-      if ((p.quality_composite || 0) > (best.quality_composite || 0)) best = p;
-    });
-    grmState.picks.add(best.id);
-  }
-  if (grmState.rejects.size === 0 && items.length > 2) {
-    var sorted = unflagged.slice().sort(function(a, b) {
-      return (a.quality_composite || 0) - (b.quality_composite || 0);
-    });
-    var worstThird = Math.max(1, Math.floor(items.length / 3));
-    for (var i = 0; i < worstThird && i < sorted.length; i++) {
-      if (!grmState.picks.has(sorted[i].id)) {
-        grmState.rejects.add(sorted[i].id);
-      }
-    }
-  }
-
   var initSelect = selectPhotoId;
   if (!initSelect) {
-    var firstPick = null;
+    var firstSelected = null;
     items.forEach(function(p) {
-      if (firstPick == null && grmState.picks.has(p.id)) firstPick = p.id;
+      if (firstSelected == null && (grmState.picks.has(p.id) || grmState.rejects.has(p.id))) firstSelected = p.id;
     });
-    initSelect = firstPick || (items[0] && items[0].id);
+    initSelect = firstSelected || (items[0] && items[0].id);
   }
   // Mark the modal seeded *before* re-rendering so grmUpdateApplyLabel
   // (called from renderGroupModal) re-enables the button.
@@ -3110,17 +3082,9 @@ function closeGroupReview() {
 function renderGroupModal() {
   var items = grmState.items.filter(function(p) { return !grmState.removed.has(p.id); });
 
-  // Find AI best
-  var bestId = null;
-  var bestScore = -1;
-  items.forEach(function(p) {
-    if ((p.quality_composite || 0) > bestScore) { bestScore = p.quality_composite || 0; bestId = p.id; }
-  });
-
   function renderCard(p) {
-    var isBest = p.id === bestId;
     var isSelected = p.id === grmState.selected;
-    var cls = 'grm-card' + (isSelected ? ' selected' : '') + (isBest ? ' ai-best' : '');
+    var cls = 'grm-card' + (isSelected ? ' selected' : '');
     var qScore = p.quality_composite != null ? Math.round(p.quality_composite * 100) : '-';
     var sharp = p.subject_tenengrad != null ? Math.round(p.subject_tenengrad) : '-';
 
@@ -3156,7 +3120,6 @@ function renderGroupModal() {
       '<div class="grm-card-info">' +
         '<div class="grm-card-species">' + escapeHtml(p.filename || '') + '</div>' +
         '<div class="grm-card-scores">Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span></div>' +
-        (isBest ? '<div class="grm-card-ai">AI BEST</div>' : '') +
       '</div>' +
     '</div>';
   }
