@@ -1105,6 +1105,25 @@ def test_api_photo_pipeline_detections(app_and_db):
     assert "crop_box" in data
 
 
+def test_api_photo_pipeline_omits_binary_embeddings(app_and_db):
+    """Pipeline inspector payload must stay JSON-serializable after extract."""
+    app, db = app_and_db
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.conn.execute(
+        "UPDATE photos SET dino_subject_embedding = ?, dino_global_embedding = ? "
+        "WHERE id = ?",
+        (b"\x00\x01subject", b"\x02\x03global", pid),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pid}/pipeline")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "dino_subject_embedding" not in data
+    assert "dino_global_embedding" not in data
+
+
 def test_api_photo_pipeline_predictions_honor_threshold_and_fingerprint(app_and_db):
     """The pipeline-debug endpoint's `predictions` list must apply the same
     detector_confidence floor and fingerprint scoping as `detections`,

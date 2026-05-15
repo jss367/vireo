@@ -290,7 +290,7 @@ body {
 .summary-folder-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 12px; }
 .summary-folder-name { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; margin-right: 8px; }
 .summary-folder-count { color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
-.selection-panel { display: block; }
+.selection-panel { display: block; margin-bottom: 16px; }
 .selection-panel.hidden { display: none; }
 .selection-heading {
   font-size: 18px;
@@ -1303,6 +1303,8 @@ var searchFilterTimer = null;
 var keywordAutocompleteCache = null;
 var keywordAutocompletePromise = null;
 var keywordAutocompleteStates = {};
+var collectionCountRefreshTimer = null;
+var collectionCountLoadGen = 0;
 
 function refreshPendingSyncBanner() {
   if (typeof checkPendingSync === 'function') {
@@ -1817,8 +1819,10 @@ async function loadCollections() {
 }
 
 async function loadCollectionCounts() {
+  var gen = ++collectionCountLoadGen;
   try {
     var data = await safeFetch('/api/collections', {}, { toast: false });
+    if (gen !== collectionCountLoadGen) return;
     if (!data) return;
     var items = document.querySelectorAll('#collectionList .tree-item');
     var countsById = {};
@@ -1837,6 +1841,20 @@ async function loadCollectionCounts() {
       }
     });
   } catch(e) {}
+}
+
+function scheduleCollectionCountsRefresh() {
+  if (collectionCountRefreshTimer) clearTimeout(collectionCountRefreshTimer);
+  collectionCountRefreshTimer = setTimeout(function() {
+    collectionCountRefreshTimer = null;
+    loadCollectionCounts();
+  }, 150);
+}
+
+function refreshBrowseSidebarCounts() {
+  loadFolders();
+  loadKeywords();
+  loadCollectionCounts();
 }
 
 async function filterByCollection(id) {
@@ -2812,6 +2830,10 @@ function getActiveSelection() {
   return [];
 }
 
+function detailMatchesSelectedPhoto() {
+  return selectedPhotoId != null && window._detailPhotoId === selectedPhotoId;
+}
+
 function updateBatchBar() {
   var bar = document.getElementById('batchBar');
   if (!bar) return;
@@ -2850,8 +2872,8 @@ function updateSelectionPanel(ids) {
 
   var detail = document.getElementById('detailContent');
   var summary = document.getElementById('summaryPanel');
-  if (detail) detail.classList.remove('visible');
   if (summary) summary.classList.add('hidden');
+  if (detail) detail.classList.toggle('visible', detailMatchesSelectedPhoto());
   panel.classList.remove('hidden');
   document.getElementById('selectionCount').textContent = ids.length + ' photos selected';
   loadSelectionKeywordSuggestions(ids);
@@ -2935,6 +2957,7 @@ async function batchSetRating(rating) {
     if (p) p.rating = rating;
   });
   refreshGridCards(ids);
+  scheduleCollectionCountsRefresh();
   refreshPendingSyncBanner();
   showUndoToast();
 }
@@ -2955,6 +2978,7 @@ async function batchSetFlag(flag) {
   if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1) {
     updateDetailFlagButtons(flag);
   }
+  scheduleCollectionCountsRefresh();
   showUndoToast();
 }
 
@@ -2973,6 +2997,7 @@ async function batchSetColorLabel(color) {
     else delete colorLabels[id];
   });
   refreshGridCards(ids);
+  scheduleCollectionCountsRefresh();
   showUndoToast();
 }
 
@@ -3013,6 +3038,7 @@ async function confirmBatchKeyword() {
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(ids);
   loadKeywords();
+  scheduleCollectionCountsRefresh();
   refreshPendingSyncBanner();
   showUndoToast();
 }
@@ -3036,6 +3062,7 @@ function batchDelete() {
     renderGrid();
     updateFilterSummary();
     loadSummary();
+    refreshBrowseSidebarCounts();
     // Update total count display
     var countEl = document.getElementById('photoCount');
     if (countEl) {
@@ -3157,6 +3184,7 @@ async function undoLast() {
     var data = await safeFetch('/api/undo', { method: 'POST' });
     showToast('Undone: ' + data.undone + ' — Ctrl+Shift+Z to redo');
     resetAndLoad();
+    scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -3166,6 +3194,7 @@ async function redoLast() {
     var data = await safeFetch('/api/redo', { method: 'POST' });
     showToast('Redone: ' + data.redone);
     resetAndLoad();
+    scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -3181,12 +3210,14 @@ async function showUndoToast() {
 
 async function loadDetail(id) {
   document.getElementById('summaryPanel').classList.add('hidden');
-  document.getElementById('detailContent').classList.add('visible');
+  var detail = document.getElementById('detailContent');
+  if (detail) detail.classList.toggle('visible', window._detailPhotoId === id);
 
   try {
     var photo = await safeFetch('/api/photos/' + id, {}, { toast: false });
-    if (selectedPhotoId === id && getActiveSelection().length === 1) {
+    if (selectedPhotoId === id) {
       renderDetail(photo);
+      if (detail) detail.classList.add('visible');
     }
   } catch(e) {}
 }
@@ -3526,6 +3557,7 @@ async function setRating(photoId, rating) {
     var p = photos.find(function(x) { return x.id === photoId; });
     if (p) p.rating = rating;
     refreshGridCards([photoId]);
+    scheduleCollectionCountsRefresh();
     loadDetail(photoId);
     refreshPendingSyncBanner();
   } catch(e) {}
@@ -3544,6 +3576,7 @@ async function setFlag(flag) {
     if (p) p.flag = flag;
     refreshGridCards([photoId]);
     if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
+    scheduleCollectionCountsRefresh();
   } catch(e) {}
 }
 
@@ -3612,6 +3645,7 @@ async function setColorLabel(color) {
   }
   if (selectedPhotoId === photoId) updateDetailColors();
   refreshGridCards([photoId]);
+  scheduleCollectionCountsRefresh();
 }
 
 function updateDetailColors() {
@@ -3647,6 +3681,7 @@ async function addKeyword(keyword) {
     if (!selectedKeyword) invalidateKeywordAutocompleteCache();
     loadDetail(selectedPhotoId);
     loadKeywords();
+    scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -3657,6 +3692,8 @@ async function removeKeyword(photoId, keywordId) {
       method: 'DELETE',
     });
     loadDetail(photoId);
+    loadKeywords();
+    scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -4119,6 +4156,7 @@ async function setRatingFor(photoId, rating) {
   var p = photos.find(function(x) { return x.id === photoId; });
   if (p) p.rating = rating;
   refreshGridCards([photoId]);
+  scheduleCollectionCountsRefresh();
   if (selectedPhotoId === photoId) loadDetail(photoId);
   refreshPendingSyncBanner();
 }
@@ -4134,6 +4172,7 @@ async function setFlagFor(photoId, flag) {
   if (p) p.flag = flag;
   refreshGridCards([photoId]);
   if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
+  scheduleCollectionCountsRefresh();
   return true;
 }
 
@@ -4149,6 +4188,7 @@ async function setColorLabelFor(photoId, color) {
   else delete colorLabels[photoId];
   refreshGridCards([photoId]);
   if (selectedPhotoId === photoId) updateDetailColors();
+  scheduleCollectionCountsRefresh();
 }
 
 function revealPhoto(photoId) {

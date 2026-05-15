@@ -423,6 +423,67 @@ def test_reject_shortcut_keeps_existing_thumbnail_nodes(live_server, page):
     )
 
 
+def test_reject_shortcut_refreshes_rejected_collection_count(live_server, page):
+    """Flagging a photo as rejected should refresh matching smart-collection counts."""
+    db = live_server["db"]
+    rules = json.dumps([{"field": "flag", "op": "is", "value": "rejected"}])
+    collection_id = db.add_collection("Rejected", rules)
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    count = page.locator(
+        f'.tree-item[data-collection-id="{collection_id}"] .count'
+    )
+    expect(count).to_have_text("0")
+
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.click()
+
+    page.keyboard.press("x")
+
+    expect(count).to_have_text("1")
+
+
+def test_collection_count_refresh_ignores_stale_response(live_server, page):
+    """Older collection-count responses must not overwrite newer badge counts."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.wait_for_load_state("networkidle")
+
+    final_count = page.evaluate(
+        """async () => {
+          renderCollectionList([{id: 999001, name: 'Rejected', photo_count: 0}]);
+          collectionCountLoadGen = 0;
+          var originalSafeFetch = safeFetch;
+          var resolvers = [];
+          safeFetch = function(url, opts, options) {
+            if (url === '/api/collections') {
+              return new Promise(function(resolve) { resolvers.push(resolve); });
+            }
+            return originalSafeFetch(url, opts, options);
+          };
+          try {
+            var first = loadCollectionCounts();
+            var second = loadCollectionCounts();
+            resolvers[1]([{id: 999001, photo_count: 2}]);
+            await second;
+            resolvers[0]([{id: 999001, photo_count: 1}]);
+            await first;
+            return document.querySelector(
+              '.tree-item[data-collection-id="999001"] .count'
+            ).textContent;
+          } finally {
+            safeFetch = originalSafeFetch;
+          }
+        }"""
+    )
+
+    assert final_count == "2"
+
+
 def test_filterByCollection_clears_multiselect_set(live_server, page):
     """Switching to a collection must drop a surviving multi-select set.
 
@@ -456,6 +517,36 @@ def test_filterByCollection_clears_multiselect_set(live_server, page):
     assert page.evaluate("selectedPhotos.size") == 0
     assert page.evaluate("selectedPhotoId") is None
     expect(bar).to_be_hidden()
+
+
+def test_delete_refreshes_smart_collection_count(live_server, page):
+    """Deleting a photo from Browse refreshes smart collection counts."""
+    db = live_server["db"]
+    needs = next(c for c in db.get_collections() if c["name"] == "Needs Identification")
+    collection_id = needs["id"]
+    delete_id = live_server["data"]["photos"][1]
+    before = db.count_collection_photos(collection_id)
+    assert delete_id in db.collection_photo_ids(collection_id)
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    count = page.locator(
+        f"#collectionList .tree-item[data-collection-id='{collection_id}'] .count"
+    )
+    expect(count).to_have_text(str(before))
+
+    page.locator(f".grid-card[data-id='{delete_id}']").click()
+    expect(page.locator("#batchBar")).to_be_visible()
+    page.locator("#batchBar button[title='Delete selected photos']").click()
+    page.locator("#deleteModal.open").wait_for(state="visible", timeout=3000)
+    page.locator("#deleteConfirmBtn").click()
+
+    page.wait_for_function(
+        f"!document.querySelector('.grid-card[data-id=\"{delete_id}\"]')",
+        timeout=3000,
+    )
+    expect(count).to_have_text(str(before - 1), timeout=3000)
 
 
 def test_filterByCollection_cancels_pending_search_debounce(live_server, page):
