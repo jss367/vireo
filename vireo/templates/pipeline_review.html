@@ -1413,7 +1413,7 @@ input[type="range"]::-moz-range-thumb {
       <span id="grmResLabel" style="font-size:11px;color:var(--text-dim);min-width:140px;">1920 · preview</span>
     </div>
     <span class="grm-hint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
-    <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);">Apply & Close</button>
+    <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);" title="Apply pick/reject flag changes and species keywords, then close this burst.">Apply flags/species & Close</button>
   </div>
 </div>
 
@@ -3120,6 +3120,11 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
 
   var items = photoIds.map(function(pid) { return photoMap[pid]; }).filter(Boolean);
 
+  // Reset the species input to this encounter's value so a stale value from a
+  // previously-reviewed group doesn't leak in when the prior modal was closed
+  // via × or Escape (only Apply & Close clears it).
+  var initialSpecies = enc.confirmed_species || (enc.species ? enc.species[0] : '') || '';
+
   // Bump the session id so any in-flight /group/state fetch from a previous
   // openGroupReview call lands as stale and gets ignored when it resolves.
   var sessionId = (grmState.sessionId || 0) + 1;
@@ -3136,6 +3141,8 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     // with, used to (a) render "from DB" markers and (b) compute the
     // change-only Apply button label.
     dbState: {},
+    keywordStateSpecies: initialSpecies,
+    initialSpecies: initialSpecies,
     sessionId: sessionId,
     // False until /group/state resolves and grmSeedFromDbState runs. Apply &
     // Close is gated on this so a click during the seed window can't ship
@@ -3165,10 +3172,6 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     applyBtn.textContent = 'Loading…';
   }
 
-  // Reset the species input to this encounter's value so a stale value from a
-  // previously-reviewed group doesn't leak in when the prior modal was closed
-  // via × or Escape (only Apply & Close clears it).
-  var initialSpecies = enc.confirmed_species || (enc.species ? enc.species[0] : '') || '';
   document.getElementById('grmSpecies').value = initialSpecies;
 
   // Sync slider DOM with persisted resolution choice
@@ -3384,6 +3387,7 @@ function grmRefreshSpeciesKeywordState() {
       if (!grmState.dbState[pid]) grmState.dbState[pid] = { flag: 'none' };
       grmState.dbState[pid].has_species_keyword = !!fresh[pidStr].has_species_keyword;
     });
+    grmState.keywordStateSpecies = species;
     renderGroupModal();
   }).catch(function() {
     // Network/server error: leave previous keyword markers in place. The
@@ -3408,8 +3412,11 @@ function grmUpdateApplyLabel() {
   if (diff.flagNew > 0) parts.push('Flag ' + diff.flagNew);
   if (diff.rejectNew > 0) parts.push('Reject ' + diff.rejectNew);
   if (diff.clearNew > 0) parts.push('Clear ' + diff.clearNew);
+  if (diff.speciesChanged) parts.push('Set species');
   if (diff.tagNew > 0) parts.push('Tag ' + diff.tagNew + (diff.species ? ' as ' + diff.species : ''));
-  btn.textContent = parts.length ? parts.join(' · ') + ' & Close' : 'Apply & Close';
+  if (diff.detachNew > 0) parts.push('Detach ' + diff.detachNew);
+  btn.textContent = parts.length ? parts.join(' · ') + ' & Close' : 'No DB changes & Close';
+  btn.title = grmApplyTitle(diff);
 }
 
 // Diff the current modal zones against the DB snapshot we opened with.
@@ -3418,14 +3425,27 @@ function grmUpdateApplyLabel() {
 function grmComputeDiff() {
   var speciesEl = document.getElementById('grmSpecies');
   var species = speciesEl ? (speciesEl.value || '').trim() : '';
-  var diff = { flagNew: 0, rejectNew: 0, clearNew: 0, tagNew: 0, species: species };
+  var diff = {
+    flagNew: 0,
+    rejectNew: 0,
+    clearNew: 0,
+    tagNew: 0,
+    detachNew: 0,
+    speciesChanged: !!(species && grmState && species !== (grmState.initialSpecies || '')),
+    species: species
+  };
   if (!grmState || !grmState.items) return diff;
 
   grmState.items.forEach(function(p) {
-    if (grmState.removed && grmState.removed.has(p.id)) return;
+    if (grmState.removed && grmState.removed.has(p.id)) {
+      diff.detachNew++;
+      return;
+    }
     var st = (grmState.dbState && grmState.dbState[p.id]) || {};
     var oldFlag = st.flag || 'none';
-    var hasKw = !!st.has_species_keyword;
+    var hasKw = species &&
+      grmState.keywordStateSpecies === species &&
+      !!st.has_species_keyword;
     var newFlag;
     if (grmState.picks.has(p.id)) newFlag = 'flagged';
     else if (grmState.rejects.has(p.id)) newFlag = 'rejected';
@@ -3439,6 +3459,23 @@ function grmComputeDiff() {
     if (species && newFlag === 'flagged' && !hasKw) diff.tagNew++;
   });
   return diff;
+}
+
+function grmPlural(n, one, many) {
+  return n === 1 ? one : (many || one + 's');
+}
+
+function grmApplyTitle(diff) {
+  var actions = [];
+  if (diff.flagNew > 0) actions.push('flag ' + diff.flagNew + ' ' + grmPlural(diff.flagNew, 'photo') + ' as ' + grmPlural(diff.flagNew, 'a pick', 'picks'));
+  if (diff.rejectNew > 0) actions.push('reject ' + diff.rejectNew + ' ' + grmPlural(diff.rejectNew, 'photo'));
+  if (diff.clearNew > 0) actions.push('clear flags on ' + diff.clearNew + ' ' + grmPlural(diff.clearNew, 'photo'));
+  if (diff.speciesChanged) actions.push('set confirmed species to "' + diff.species + '"');
+  if (diff.tagNew > 0) actions.push('add species keyword "' + diff.species + '" to ' + diff.tagNew + ' ' + grmPlural(diff.tagNew, 'pick'));
+  if (diff.detachNew > 0) actions.push('detach ' + diff.detachNew + ' ' + grmPlural(diff.detachNew, 'photo') + ' from this burst');
+  return actions.length
+    ? 'Apply will ' + actions.join(', ') + ', then close this burst.'
+    : 'Apply will make no database changes, then close this burst.';
 }
 
 function grmSelect(photoId) {

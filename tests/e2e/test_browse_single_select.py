@@ -489,6 +489,36 @@ def test_filterByCollection_clears_multiselect_set(live_server, page):
     expect(bar).to_be_hidden()
 
 
+def test_delete_refreshes_smart_collection_count(live_server, page):
+    """Deleting a photo from Browse refreshes smart collection counts."""
+    db = live_server["db"]
+    needs = next(c for c in db.get_collections() if c["name"] == "Needs Identification")
+    collection_id = needs["id"]
+    delete_id = live_server["data"]["photos"][1]
+    before = db.count_collection_photos(collection_id)
+    assert delete_id in db.collection_photo_ids(collection_id)
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    count = page.locator(
+        f"#collectionList .tree-item[data-collection-id='{collection_id}'] .count"
+    )
+    expect(count).to_have_text(str(before))
+
+    page.locator(f".grid-card[data-id='{delete_id}']").click()
+    expect(page.locator("#batchBar")).to_be_visible()
+    page.locator("#batchBar button[title='Delete selected photos']").click()
+    page.locator("#deleteModal.open").wait_for(state="visible", timeout=3000)
+    page.locator("#deleteConfirmBtn").click()
+
+    page.wait_for_function(
+        f"!document.querySelector('.grid-card[data-id=\"{delete_id}\"]')",
+        timeout=3000,
+    )
+    expect(count).to_have_text(str(before - 1), timeout=3000)
+
+
 def test_filterByCollection_cancels_pending_search_debounce(live_server, page):
     """A delayed search apply must not kick the user out of collection mode."""
     db = live_server["db"]

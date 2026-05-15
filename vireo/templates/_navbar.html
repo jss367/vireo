@@ -3843,6 +3843,9 @@ function lightboxDelete() {
       selectedPhotos.delete(currentId);
       if (selectedPhotoId === currentId) selectedPhotoId = null;
       renderGrid();
+      if (typeof refreshBrowseSidebarCounts === 'function') {
+        refreshBrowseSidebarCounts();
+      }
     }
   });
 }

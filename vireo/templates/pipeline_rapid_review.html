@@ -165,6 +165,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 18px;
   padding: 12px 18px;
 }
@@ -186,6 +187,8 @@
 .top-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
   flex-shrink: 0;
 }
@@ -571,8 +574,8 @@
       <div class="top-actions">
         <button class="rapid-btn" id="undoBtn" onclick="undoLast()" title="Undo last decision">Undo</button>
         <button class="rapid-btn" onclick="openClassic()" title="Open this burst in classic pipeline review">Classic</button>
-        <button class="rapid-btn primary" id="applyBtn" onclick="applyCurrent(false)" title="Apply staged changes">Apply</button>
-        <button class="rapid-btn primary" id="applyNextBtn" onclick="applyCurrent(true)" title="Apply staged changes and open the next burst">Apply Next</button>
+        <button class="rapid-btn primary" id="applyBtn" onclick="applyCurrent(false)" title="Apply pick/reject flag changes and species keywords">Apply flags/species</button>
+        <button class="rapid-btn primary" id="applyNextBtn" onclick="applyCurrent(true)" title="Apply pick/reject flag changes and species keywords, then open the next burst">Apply flags/species & Next</button>
       </div>
     </div>
 
@@ -604,7 +607,7 @@
         </div>
         <div class="species-field">
           <label for="speciesInput">Species keyword for picks</label>
-          <input id="speciesInput" type="text" oninput="renderApplyState()">
+          <input id="speciesInput" type="text" oninput="rapidOnSpeciesInput()">
         </div>
         <div class="decision-grid">
           <button class="decision-btn pick" onclick="decideCurrent('pick')" title="Pick and advance">Pick</button>
@@ -646,7 +649,7 @@
     <div class="queue-prompt-actions">
       <button class="rapid-btn" type="button" data-queue-choice="stay">Stay</button>
       <button class="rapid-btn" type="button" data-queue-choice="discard">Discard</button>
-      <button class="rapid-btn primary" type="button" data-queue-choice="apply">Apply</button>
+      <button class="rapid-btn primary" type="button" data-queue-choice="apply">Apply flags/species</button>
     </div>
   </div>
 </div>
@@ -664,6 +667,9 @@ var rapid = {
   reviewed: new Set(),
   touched: new Set(),
   initialFlags: {},
+  initialSpeciesKeywords: {},
+  keywordStateSpecies: '',
+  initialSpecies: '',
   history: [],
   currentIndex: -1,
   seeded: false,
@@ -706,6 +712,8 @@ var RAPID_SC_DEFAULTS = {
 };
 var rapidShortcuts = Object.assign({}, RAPID_SC_DEFAULTS);
 var rapidShortcutsRegistered = false;
+var _rapidSpeciesRefetchTimer = null;
+var _rapidSpeciesRefetchToken = 0;
 
 if (window.Keymap && window.Keymap.setScope) {
   window.Keymap.setScope(RAPID_SCOPE);
@@ -1010,6 +1018,12 @@ function renderQueueControls() {
 
 function promptStagedQueueChange() {
   var prompt = document.getElementById('queuePrompt');
+  var applyBtn = prompt.querySelector('[data-queue-choice="apply"]');
+  if (applyBtn) {
+    var diff = rapidComputeApplyDiff();
+    applyBtn.textContent = rapidApplyButtonText('Apply', diff);
+    applyBtn.title = rapidApplyTitle(diff, false);
+  }
   prompt.hidden = false;
   return new Promise(function(resolve) {
     rapid.queuePromptResolve = resolve;
@@ -1100,6 +1114,9 @@ function showEmptyQueue() {
   rapid.reviewed = new Set();
   rapid.touched = new Set();
   rapid.initialFlags = {};
+  rapid.initialSpeciesKeywords = {};
+  rapid.keywordStateSpecies = '';
+  rapid.initialSpecies = '';
   rapid.history = [];
   rapid.currentIndex = -1;
   rapid.seeded = false;
@@ -1146,6 +1163,9 @@ async function openSession(index) {
   rapid.reviewed = new Set();
   rapid.touched = new Set();
   rapid.initialFlags = {};
+  rapid.initialSpeciesKeywords = {};
+  rapid.keywordStateSpecies = session.species || '';
+  rapid.initialSpecies = session.species || '';
   rapid.history = [];
   rapid.currentIndex = rapid.items.length ? 0 : -1;
   resetRapidZoom();
@@ -1173,6 +1193,7 @@ async function openSession(index) {
       var st = photos[p.id] || {};
       var flag = st.flag || p.flag || 'none';
       rapid.initialFlags[p.id] = flag;
+      rapid.initialSpeciesKeywords[p.id] = !!st.has_species_keyword;
       if (flag === 'flagged') rapid.picks.add(p.id);
       else if (flag === 'rejected') rapid.rejects.add(p.id);
     });
@@ -1535,14 +1556,120 @@ function candidateIdsForApply() {
   }).map(function(p) { return p.id; });
 }
 
+function rapidOnSpeciesInput() {
+  renderApplyState();
+  if (_rapidSpeciesRefetchTimer) clearTimeout(_rapidSpeciesRefetchTimer);
+  _rapidSpeciesRefetchTimer = setTimeout(rapidRefreshSpeciesKeywordState, 250);
+}
+
+function rapidRefreshSpeciesKeywordState() {
+  if (!rapid.items || !rapid.items.length || rapid.sessionIndex < 0) return;
+  var speciesEl = document.getElementById('speciesInput');
+  var species = speciesEl ? (speciesEl.value || '').trim() : '';
+  var token = ++_rapidSpeciesRefetchToken;
+  var openToken = rapid.openToken;
+  var sessionIndex = rapid.sessionIndex;
+  var photoIds = rapid.items.map(function(p) { return p.id; });
+
+  safeFetch('/api/pipeline/group/state', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ photo_ids: photoIds, species: species }),
+  }, { toast: false }).then(function(data) {
+    if (token !== _rapidSpeciesRefetchToken) return;
+    if (rapid.openToken !== openToken || rapid.sessionIndex !== sessionIndex) return;
+    var fresh = (data && data.photos) || {};
+    photoIds.forEach(function(pid) {
+      var row = fresh[pid] || fresh[String(pid)] || {};
+      rapid.initialSpeciesKeywords[pid] = !!row.has_species_keyword;
+    });
+    rapid.keywordStateSpecies = species;
+    renderApplyState();
+  }).catch(function() {
+    // Keep the previous keyword snapshot. If the typed species differs from
+    // that snapshot, the Apply label remains a conservative tag overestimate.
+  });
+}
+
+function rapidPlural(n, one, many) {
+  return n === 1 ? one : (many || one + 's');
+}
+
+function rapidComputeApplyDiff() {
+  var speciesEl = document.getElementById('speciesInput');
+  var species = speciesEl ? (speciesEl.value || '').trim() : '';
+  var diff = {
+    flagNew: 0,
+    rejectNew: 0,
+    clearNew: 0,
+    tagNew: 0,
+    speciesChanged: !!(species && species !== (rapid.initialSpecies || '')),
+    species: species,
+  };
+  if (!rapid.items) return diff;
+
+  rapid.items.forEach(function(p) {
+    var oldFlag = rapid.initialFlags[p.id] || 'none';
+    var newFlag = rapid.picks.has(p.id) ? 'flagged' : rapid.rejects.has(p.id) ? 'rejected' : 'none';
+    if (newFlag !== oldFlag) {
+      if (newFlag === 'flagged') diff.flagNew++;
+      else if (newFlag === 'rejected') diff.rejectNew++;
+      else diff.clearNew++;
+    }
+    var hasSpeciesKeyword = species &&
+      rapid.keywordStateSpecies === species &&
+      !!rapid.initialSpeciesKeywords[p.id];
+    if (species && newFlag === 'flagged' && !hasSpeciesKeyword) diff.tagNew++;
+  });
+  return diff;
+}
+
+function rapidApplyLabelParts(diff) {
+  var parts = [];
+  if (diff.flagNew > 0) parts.push('Flag ' + diff.flagNew);
+  if (diff.rejectNew > 0) parts.push('Reject ' + diff.rejectNew);
+  if (diff.clearNew > 0) parts.push('Clear ' + diff.clearNew);
+  if (diff.speciesChanged) parts.push('Set species');
+  if (diff.tagNew > 0) parts.push('Tag ' + diff.tagNew);
+  return parts;
+}
+
+function rapidApplyTitle(diff, openNext) {
+  var actions = [];
+  if (diff.flagNew > 0) actions.push('flag ' + diff.flagNew + ' ' + rapidPlural(diff.flagNew, 'photo') + ' as ' + rapidPlural(diff.flagNew, 'a pick', 'picks'));
+  if (diff.rejectNew > 0) actions.push('reject ' + diff.rejectNew + ' ' + rapidPlural(diff.rejectNew, 'photo'));
+  if (diff.clearNew > 0) actions.push('clear flags on ' + diff.clearNew + ' ' + rapidPlural(diff.clearNew, 'photo'));
+  if (diff.speciesChanged) actions.push('set confirmed species to "' + diff.species + '"');
+  if (diff.tagNew > 0) {
+    actions.push('add species keyword "' + diff.species + '" to ' + diff.tagNew + ' ' + rapidPlural(diff.tagNew, 'pick'));
+  }
+  var text = actions.length ? ('Apply will ' + actions.join(', ') + '.') : 'Apply will make no database changes for this burst.';
+  if (openNext) text += ' Then open the next burst.';
+  return text;
+}
+
+function rapidApplyButtonText(prefix, diff) {
+  var parts = rapidApplyLabelParts(diff);
+  return parts.length ? (prefix + ': ' + parts.join(' · ')) : (prefix + ': no DB changes');
+}
+
 function renderApplyState() {
   var disabled = !rapid.seeded || rapid.applying || rapid.sessionIndex < 0;
   document.getElementById('undoBtn').disabled = disabled || rapid.history.length === 0;
   document.querySelectorAll('.decision-btn').forEach(function(btn) {
     btn.disabled = disabled || !currentPhoto();
   });
-  document.getElementById('applyBtn').disabled = disabled;
-  document.getElementById('applyNextBtn').disabled = disabled || rapid.sessionIndex >= rapid.sessions.length - 1;
+  var applyBtn = document.getElementById('applyBtn');
+  var applyNextBtn = document.getElementById('applyNextBtn');
+  var diff = rapidComputeApplyDiff();
+  applyBtn.disabled = disabled;
+  applyNextBtn.disabled = disabled || rapid.sessionIndex >= rapid.sessions.length - 1;
+  applyBtn.textContent = rapid.applying ? 'Applying...' : rapidApplyButtonText('Apply', diff);
+  applyNextBtn.textContent = rapid.applying ? 'Applying...' : rapidApplyButtonText('Apply & Next', diff);
+  applyBtn.title = rapidApplyTitle(diff, false);
+  applyNextBtn.title = rapidApplyTitle(diff, true);
+  applyBtn.setAttribute('aria-label', applyBtn.title);
+  applyNextBtn.setAttribute('aria-label', applyNextBtn.title);
 }
 
 function updateSummaryFromPhotos() {
