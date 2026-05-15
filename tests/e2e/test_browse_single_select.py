@@ -393,6 +393,29 @@ def test_reject_shortcut_keeps_existing_thumbnail_nodes(live_server, page):
     )
 
 
+def test_reject_shortcut_refreshes_rejected_collection_count(live_server, page):
+    """Flagging a photo as rejected should refresh matching smart-collection counts."""
+    db = live_server["db"]
+    rules = json.dumps([{"field": "flag", "op": "is", "value": "rejected"}])
+    collection_id = db.add_collection("Rejected", rules)
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    count = page.locator(
+        f'.tree-item[data-collection-id="{collection_id}"] .count'
+    )
+    expect(count).to_have_text("0")
+
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.click()
+
+    page.keyboard.press("x")
+
+    expect(count).to_have_text("1")
+
+
 def test_filterByCollection_clears_multiselect_set(live_server, page):
     """Switching to a collection must drop a surviving multi-select set.
 
