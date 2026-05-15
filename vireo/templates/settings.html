@@ -1258,7 +1258,25 @@ function shouldSkipSettingsFindTextNode(node) {
   var el = node.parentElement;
   if (!el) return true;
   if (el.closest('.settings-find-panel')) return true;
-  return !!el.closest('script, style, noscript, textarea, input, select, option, mark.settings-find-mark');
+  if (el.closest('script, style, noscript, textarea, input, select, option, mark.settings-find-mark')) return true;
+  return isSettingsFindTextHidden(el);
+}
+
+function isSettingsFindTextHidden(el) {
+  var root = getSettingsFindRoot();
+  var current = el;
+  while (current && current !== root) {
+    if (
+      !current.classList.contains('collapsible-body') &&
+      current.id !== 'advancedContent'
+    ) {
+      var style = window.getComputedStyle(current);
+      if (style.display === 'none' || style.visibility === 'hidden') return true;
+    }
+    if (current.hasAttribute('hidden') || current.getAttribute('aria-hidden') === 'true') return true;
+    current = current.parentElement;
+  }
+  return false;
 }
 
 function refreshSettingsFind(query, preferredIndex) {
