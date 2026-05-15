@@ -1610,6 +1610,12 @@ async function loadCollectionCounts() {
   } catch(e) {}
 }
 
+function refreshBrowseSidebarCounts() {
+  loadFolders();
+  loadKeywords();
+  loadCollectionCounts();
+}
+
 async function filterByCollection(id) {
   cancelScheduledSearchFilter();
   activeFolderId = null;
@@ -2795,6 +2801,7 @@ function batchDelete() {
     renderGrid();
     updateFilterSummary();
     loadSummary();
+    refreshBrowseSidebarCounts();
     // Update total count display
     var countEl = document.getElementById('photoCount');
     if (countEl) {
