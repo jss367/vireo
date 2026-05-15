@@ -1118,6 +1118,7 @@ def _record_batch_classifier_runs(db, batch, model_name, labels_fingerprint, raw
 def _store_match_prediction(
     db, item, model_name, labels_fingerprint, tax=None,
     species=None, confidence=None, taxonomy=None,
+    store_alternatives=True,
 ):
     """Persist an already-labeled classifier result as a reusable cache row.
 
@@ -1126,6 +1127,14 @@ def _store_match_prediction(
     still needs a prediction row, though; otherwise the next non-reclassify run
     sees a classifier_runs key with no cached prediction to surface and pays for
     inference again.
+
+    ``store_alternatives`` must be False when ``species``/``confidence`` are a
+    consensus override (burst groups): the per-frame ``item["alternatives"]``
+    are runner-ups for that frame's own top-1, not for the consensus species,
+    and an alternative's confidence can exceed the consensus average. Since
+    ``get_predictions_for_detection`` orders ``confidence DESC``, caching them
+    would let a per-frame alternative outrank the consensus primary and become
+    the cached top-1 on later non-reclassify runs.
     """
     species = species or item["prediction"]
     confidence = item["confidence"] if confidence is None else confidence
@@ -1142,20 +1151,21 @@ def _store_match_prediction(
         taxonomy=tax_hierarchy,
         labels_fingerprint=labels_fingerprint,
     )
-    for alt in item.get("alternatives", []):
-        alt_tax = alt.get("taxonomy") or (
-            tax.get_hierarchy(alt["species"]) if tax else {}
-        )
-        db.add_prediction(
-            detection_id=item["detection_id"],
-            species=alt["species"],
-            confidence=round(alt["confidence"], 4),
-            model=model_name,
-            category="match",
-            status="alternative",
-            taxonomy=alt_tax,
-            labels_fingerprint=labels_fingerprint,
-        )
+    if store_alternatives:
+        for alt in item.get("alternatives", []):
+            alt_tax = alt.get("taxonomy") or (
+                tax.get_hierarchy(alt["species"]) if tax else {}
+            )
+            db.add_prediction(
+                detection_id=item["detection_id"],
+                species=alt["species"],
+                confidence=round(alt["confidence"], 4),
+                model=model_name,
+                category="match",
+                status="alternative",
+                taxonomy=alt_tax,
+                labels_fingerprint=labels_fingerprint,
+            )
     # add_prediction is INSERT-OR-IGNORE: a row cached as non-match on an
     # earlier pass keeps its stale category here. Re-stamp it 'match' so the
     # downgrade in reconcile_match_review_state still fires if this detection
@@ -1289,6 +1299,7 @@ def _store_grouped_predictions(
                         species=cons["prediction"],
                         confidence=cons["confidence"],
                         taxonomy=cons_hierarchy,
+                        store_alternatives=False,
                     )
                 skipped_match += len(group)
                 continue

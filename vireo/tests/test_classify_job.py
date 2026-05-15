@@ -1210,6 +1210,107 @@ def test_store_grouped_predictions_persists_group_match_for_cache(tmp_path, monk
     ]
 
 
+def test_group_match_drops_per_frame_alternatives(tmp_path, monkeypatch):
+    """Burst match caches only the consensus species — per-frame alternatives
+    are dropped so a high-confidence dissenting runner-up can't outrank the
+    consensus primary via get_predictions_for_detection's confidence ordering.
+    """
+    from datetime import datetime
+
+    import classify_job
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_ids = [
+        db.add_photo(
+            folder_id, f"{idx}.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        for idx in range(2)
+    ]
+    det_ids = [
+        db.save_detections(
+            pid,
+            [{
+                "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                "confidence": 0.9,
+                "category": "animal",
+            }],
+            detector_model="MDV6",
+        )[0]
+        for pid in photo_ids
+    ]
+
+    monkeypatch.setattr("compare.categorize", lambda *_a, **_k: "match")
+
+    class Tax:
+        def get_hierarchy(self, _species):
+            return {}
+
+    # Both frames agree on "Robin" at 0.6, so consensus is Robin@~0.6.
+    # Frame 0 carries a dissenting "Hawk" alternative at 0.95 — higher than
+    # the consensus confidence. The old code cached it as an 'alternative'
+    # row that won the confidence-DESC ordering and became the cached top-1.
+    raw_results = [
+        {
+            "photo": {
+                "id": pid,
+                "filename": f"{idx}.jpg",
+                "folder_id": folder_id,
+                "timestamp": None,
+                "burst_id": None,
+            },
+            "folder_path": str(tmp_path),
+            "detection_id": det_id,
+            "prediction": "Robin",
+            "confidence": 0.6,
+            "alternatives": (
+                [{"species": "Hawk", "confidence": 0.95}] if idx == 0 else []
+            ),
+            "taxonomy": {},
+            "timestamp": datetime(2024, 1, 1, 12, 0, idx),
+        }
+        for idx, (pid, det_id) in enumerate(
+            zip(photo_ids, det_ids, strict=True)
+        )
+    ]
+
+    result = classify_job._store_grouped_predictions(
+        raw_results=raw_results,
+        job_id="job-abc",
+        model_name="bioclip-2",
+        grouping_window=10,
+        similarity_threshold=0.99,
+        tax=Tax(),
+        db=db,
+        labels_fingerprint="fp-active",
+    )
+
+    assert result["already_labeled"] == 2
+    # No "Hawk" alternative row was persisted for either detection.
+    rows = db.conn.execute(
+        "SELECT detection_id, species, category, status "
+        "FROM predictions "
+        "LEFT JOIN prediction_review "
+        "  ON prediction_review.prediction_id = predictions.id "
+        "ORDER BY detection_id"
+    ).fetchall()
+    assert [
+        (r["detection_id"], r["species"], r["category"], r["status"])
+        for r in rows
+    ] == [
+        (det_ids[0], "Robin", "match", "accepted"),
+        (det_ids[1], "Robin", "match", "accepted"),
+    ]
+    # The cached top-1 (confidence-DESC) is the consensus species, not Hawk.
+    top = db.get_predictions_for_detection(det_ids[0], min_classifier_conf=0)
+    assert top[0]["species"] == "Robin"
+
+
 def test_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatch):
     """A detection cached as a 'match' is auto-accepted and hidden from the
     review queue.  If the photo's XMP later stops matching, a non-reclassify
