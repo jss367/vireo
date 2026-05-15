@@ -1490,10 +1490,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 candidate_photos = _filter_excluded(
                     thread_db.get_collection_photos(collection_id, per_page=999999)
                 )
-                candidate_ids = thread_db.filter_out_wildlife_excluded(
-                    [p["id"] for p in candidate_photos]
-                )
-                if not candidate_ids:
+                photo_ids = [p["id"] for p in candidate_photos]
+                candidate_ids = thread_db.filter_out_wildlife_excluded(photo_ids)
+                if candidate_photos and not candidate_ids:
                     stages["model_loader"]["status"] = "skipped"
                     runner.update_step(
                         job["id"], "model_loader", status="completed",
@@ -1646,9 +1645,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             photos = _filter_excluded(
                 thread_db.get_collection_photos(collection_id, per_page=999999)
             )
-            kept_ids = set(thread_db.filter_out_wildlife_excluded(
-                [p["id"] for p in photos]
-            ))
+            photo_ids = [p["id"] for p in photos]
+            kept_ids = set(thread_db.filter_out_wildlife_excluded(photo_ids))
             skipped_wildlife = len(photos) - len(kept_ids)
             if skipped_wildlife:
                 log.info(

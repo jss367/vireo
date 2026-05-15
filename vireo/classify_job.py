@@ -1441,10 +1441,14 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         )
         photos = thread_db.get_collection_photos(params.collection_id, per_page=999999)
 
+        photo_ids = [p["id"] for p in photos]
         pre_count = len(photos)
-        kept_ids = set(thread_db.filter_out_wildlife_excluded(
-            [p["id"] for p in photos],
-        ))
+        kept_raw = getattr(
+            thread_db, "filter_out_wildlife_excluded", lambda ids: ids
+        )(photo_ids)
+        if not isinstance(kept_raw, (list, tuple, set)):
+            kept_raw = photo_ids
+        kept_ids = set(kept_raw)
         photos = [p for p in photos if p["id"] in kept_ids]
         skipped_wildlife = pre_count - len(photos)
         if skipped_wildlife:
