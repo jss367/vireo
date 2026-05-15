@@ -15,11 +15,14 @@ def test_index_redirects_to_browse(app_and_db, monkeypatch):
 
 
 def test_browse_page(app_and_db):
-    """GET /browse returns 200."""
+    """GET /browse returns 200 and includes pending-XMP sync UI."""
     app, _ = app_and_db
     client = app.test_client()
     resp = client.get('/browse')
     assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert 'id="syncBanner"' in html
+    assert 'function refreshPendingSyncBanner()' in html
 
 
 def test_help_static_assets_served(app_and_db):

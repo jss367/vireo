@@ -41,7 +41,7 @@ async function checkPendingSync() {
     if (data.pending_count > 0) {
       document.getElementById('syncBannerText').textContent =
         data.pending_count + ' change' + (data.pending_count !== 1 ? 's' : '') +
-        ' pending \u2014 keywords have been added to the database but not written to XMP sidecar files yet.';
+        ' pending \u2014 metadata changes have been saved in Vireo but not written to XMP sidecar files yet.';
       banner.style.display = 'flex';
     } else {
       banner.style.display = 'none';

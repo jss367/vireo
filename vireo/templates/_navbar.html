@@ -3771,6 +3771,7 @@ async function lightboxNotWildlife() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: 'Landscape', type: 'genre' }),
     }, { toast: false });
+    if (typeof checkPendingSync === 'function') checkPendingSync();
     // Advance to next photo if more remain
     var idx = _lightboxPhotoList.findIndex(function(x) { return x.id === currentId; });
     if (idx >= 0 && _lightboxPhotoList.length > 1) {
