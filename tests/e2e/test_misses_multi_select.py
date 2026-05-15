@@ -1,8 +1,8 @@
 """E2E tests for multi-select on /misses.
 
-Covers ctrl-click toggle, shift-click range, shift+J/K keyboard extension,
-Esc-to-clear, and bulk P/X/U acting on the selection. Plain-click behavior
-(open lightbox) is preserved when no modifier is held.
+Covers plain-click selection, ctrl-click toggle, shift-click range, shift+J/K
+keyboard extension, Esc-to-clear, toolbar actions, and bulk P/X/U acting on the
+selection. Double-click opens the shared lightbox.
 """
 import time
 
@@ -75,10 +75,8 @@ def test_shift_click_selects_range_within_category(live_server, page):
         state="visible", timeout=3000,
     )
 
-    # Anchor on the first card via plain click — but plain click opens the
-    # lightbox, so use ctrl-click to set focus + add to selection without
-    # opening the overlay.
-    _ctrl_click(page, page.locator(f"[data-testid='miss-card-clipped-{pids[0]}']"))
+    # Anchor on the first card via plain click.
+    page.locator(f"[data-testid='miss-card-clipped-{pids[0]}']").click()
     page.locator(f"[data-testid='miss-card-clipped-{pids[3]}']").click(
         modifiers=["Shift"],
     )
@@ -347,9 +345,8 @@ def test_per_card_unflag_keeps_selection_when_other_category_still_renders(live_
     assert "selected" in oof_class
 
 
-def test_plain_click_still_opens_lightbox(live_server, page):
-    """Regression: plain (no-modifier) click on a miss card must still open
-    the shared lightbox — the multi-select model only kicks in with Ctrl/Shift."""
+def test_plain_click_selects_without_opening_lightbox(live_server, page):
+    """Plain click highlights/selects the card; it no longer opens lightbox."""
     url = live_server["url"]
     db = live_server["db"]
     pids = live_server["data"]["photos"]
@@ -361,7 +358,89 @@ def test_plain_click_still_opens_lightbox(live_server, page):
 
     card.click()
 
+    assert page.evaluate("selection.size") == 1
+    assert page.evaluate(f"selection.has({pids[0]})")
+    assert "selected" in (card.get_attribute("class") or "")
+    assert not page.evaluate(
+        "document.getElementById('lightboxOverlay').classList.contains('active')"
+    )
+
+
+def test_double_click_opens_lightbox(live_server, page):
+    """Double-click on a miss card opens the shared lightbox."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "oof")
+
+    page.goto(f"{url}/misses")
+    card = page.locator(f"[data-testid='miss-card-oof-{pids[0]}']")
+    card.wait_for(state="visible", timeout=3000)
+
+    card.dblclick()
+
     page.wait_for_function(
         "document.getElementById('lightboxOverlay').classList.contains('active')",
         timeout=3000,
     )
+
+
+def test_selection_bar_unmarks_selected_misses(live_server, page):
+    """The visible toolbar can clear the selected photos' miss flags."""
+    url = live_server["url"]
+    db = live_server["db"]
+    a, b = live_server["data"]["photos"][:2]
+    _seed_misses(db, [a, b], "no_subject")
+
+    page.goto(f"{url}/misses")
+    first = page.locator(f"[data-testid='miss-card-no_subject-{a}']")
+    second = page.locator(f"[data-testid='miss-card-no_subject-{b}']")
+    first.wait_for(state="visible", timeout=3000)
+    second.wait_for(state="visible", timeout=3000)
+
+    first.click()
+    _ctrl_click(page, second)
+    assert page.evaluate("selection.size") == 2
+
+    page.get_by_role("button", name="Unmark missed").click()
+
+    page.wait_for_function(
+        f"!document.querySelector('[data-testid=\"miss-card-no_subject-{a}\"]')"
+        f" && !document.querySelector('[data-testid=\"miss-card-no_subject-{b}\"]')",
+        timeout=3000,
+    )
+    rows = db.conn.execute(
+        "SELECT id, miss_no_subject FROM photos WHERE id IN (?, ?)",
+        (a, b),
+    ).fetchall()
+    assert {r["id"]: r["miss_no_subject"] for r in rows} == {a: 0, b: 0}
+
+
+def test_selection_bar_deletes_selected_misses_from_vireo(live_server, page):
+    """The visible toolbar can delete selected miss photos through the shared confirmation."""
+    url = live_server["url"]
+    db = live_server["db"]
+    a, b = live_server["data"]["photos"][:2]
+    _seed_misses(db, [a, b], "clipped")
+
+    page.goto(f"{url}/misses")
+    first = page.locator(f"[data-testid='miss-card-clipped-{a}']")
+    second = page.locator(f"[data-testid='miss-card-clipped-{b}']")
+    first.wait_for(state="visible", timeout=3000)
+    second.wait_for(state="visible", timeout=3000)
+
+    first.click()
+    _ctrl_click(page, second)
+    assert page.evaluate("selection.size") == 2
+
+    page.get_by_role("button", name="Delete selected").click()
+    page.locator("#deleteModal.open").wait_for(state="visible", timeout=3000)
+    page.locator("#deleteConfirmBtn").click()
+
+    page.wait_for_function(
+        f"!document.querySelector('[data-testid=\"miss-card-clipped-{a}\"]')"
+        f" && !document.querySelector('[data-testid=\"miss-card-clipped-{b}\"]')",
+        timeout=3000,
+    )
+    assert db.get_photo(a) is None
+    assert db.get_photo(b) is None
