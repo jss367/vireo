@@ -575,22 +575,23 @@ def test_classic_pipeline_review_opens_requested_burst_from_url(live_server, pag
         "photos": [
             {"id": 1, "filename": "a.jpg", "label": "REVIEW", "quality_composite": 0.3, "subject_tenengrad": 10},
             {"id": 2, "filename": "b.jpg", "label": "REVIEW", "quality_composite": 0.6, "subject_tenengrad": 20},
+            {"id": 3, "filename": "c.jpg", "label": "REVIEW", "quality_composite": 0.9, "subject_tenengrad": 30},
         ],
         "encounters": [
             {
-                "photo_ids": [1, 2],
-                "photo_count": 2,
+                "photo_ids": [1, 2, 3],
+                "photo_count": 3,
                 "burst_count": 1,
                 "species": ["Test bird"],
-                "bursts": [{"photo_ids": [1, 2]}],
+                "bursts": [{"photo_ids": [1, 2, 3]}],
             }
         ],
         "summary": {
-            "total_photos": 2,
+            "total_photos": 3,
             "encounter_count": 1,
             "burst_count": 1,
             "keep_count": 0,
-            "review_count": 2,
+            "review_count": 3,
             "reject_count": 0,
         },
     }
@@ -600,7 +601,7 @@ def test_classic_pipeline_review_opens_requested_burst_from_url(live_server, pag
             json={
                 "results": results,
                 "workspace_overrides": {},
-                "review_readiness": {"state": "ready", "total_photos": 2},
+                "review_readiness": {"state": "ready", "total_photos": 3},
             }
         ),
     )
@@ -611,6 +612,7 @@ def test_classic_pipeline_review_opens_requested_burst_from_url(live_server, pag
                 "photos": {
                     "1": {"flag": "none", "has_species_keyword": False},
                     "2": {"flag": "none", "has_species_keyword": False},
+                    "3": {"flag": "none", "has_species_keyword": False},
                 },
                 "species_kid": None,
             }
@@ -622,13 +624,17 @@ def test_classic_pipeline_review_opens_requested_burst_from_url(live_server, pag
     page.goto(f"{live_server['url']}/pipeline/review?enc=0&burst=0")
 
     expect(page.locator("#grmOverlay")).to_have_class(re.compile(r"\bopen\b"))
-    expect(page.locator("#grmOverlay .grm-card[data-photo-id]")).to_have_count(2)
+    expect(page.locator("#grmOverlay .grm-card[data-photo-id]")).to_have_count(3)
+    expect(page.locator("#grmPicks .grm-card[data-photo-id]")).to_have_count(0)
+    expect(page.locator("#grmRejects .grm-card[data-photo-id]")).to_have_count(0)
+    expect(page.locator("#grmCandidates .grm-card[data-photo-id]")).to_have_count(3)
+    expect(page.locator("#grmCount")).to_have_text("0 picks, 0 rejects, 3 unsorted")
 
     page.keyboard.press("x")
-    expect(page.locator("#grmCount")).to_have_text("0 picks, 1 rejects, 1 unsorted")
+    expect(page.locator("#grmCount")).to_have_text("0 picks, 1 rejects, 2 unsorted")
 
     page.keyboard.press("p")
-    expect(page.locator("#grmCount")).to_have_text("1 picks, 0 rejects, 1 unsorted")
+    expect(page.locator("#grmCount")).to_have_text("1 picks, 0 rejects, 2 unsorted")
 
 
 def test_classic_pipeline_review_inspector_pick_reject_hotkeys(live_server, page):

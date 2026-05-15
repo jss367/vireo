@@ -4986,24 +4986,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         db = _get_db()
         folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
-        file_paths = []
+        photo_paths = []
         for pid in photo_ids:
             photo = db.get_photo(pid)
             if not photo:
                 continue
             folder_path = folders.get(photo["folder_id"], "")
             if folder_path:
-                file_paths.append(os.path.join(folder_path, photo["filename"]))
+                photo_paths.append((
+                    photo,
+                    os.path.join(folder_path, photo["filename"]),
+                ))
 
-        if not file_paths:
+        if not photo_paths:
             return json_error("No photos found", 404)
 
         editors = cfg.get_editors()
+        selected_editor = None
         editor_index = body.get("editor_index")
         if editor_index is None:
             # No index = use the first configured editor (or fall through to
             # the OS default if no editors are configured at all).
-            editor = editors[0]["path"] if editors else ""
+            selected_editor = editors[0] if editors else None
+            editor = selected_editor["path"] if selected_editor else ""
         else:
             if not isinstance(editor_index, int) or isinstance(editor_index, bool):
                 return json_error("editor_index must be an integer")
@@ -5016,7 +5021,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     f"editor_index {editor_index} out of range "
                     f"(have {len(editors)} editor(s))", 400
                 )
-            editor = editors[editor_index]["path"]
+            selected_editor = editors[editor_index]
+            editor = selected_editor["path"]
         editor_path = os.path.expanduser(editor) if editor else ""
 
         # On macOS, an .app bundle is a directory — execing it raises EACCES.
@@ -5049,6 +5055,67 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "Set the editor to the .app bundle directly.",
                         500,
                     )
+
+        def _is_darktable_editor():
+            parts = [
+                selected_editor.get("name", "") if selected_editor else "",
+                editor_path,
+                app_bundle or "",
+            ]
+            return "darktable" in " ".join(parts).lower()
+
+        file_paths = [path for _photo, path in photo_paths]
+        if _is_darktable_editor() and cfg.get("darktable_auto_convert_dng"):
+            from develop import convert_to_dng, is_nikon_high_efficiency_nef
+
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+            converted_paths = []
+            for photo, input_path in photo_paths:
+                try:
+                    metadata = (
+                        json.loads(photo["exif_data"])
+                        if photo["exif_data"] else None
+                    )
+                except (TypeError, json.JSONDecodeError):
+                    metadata = None
+
+                if not is_nikon_high_efficiency_nef(input_path, metadata=metadata):
+                    converted_paths.append(input_path)
+                    continue
+
+                out_dir = os.path.join(vireo_dir, "external-dng", str(photo["id"]))
+                stem = os.path.splitext(os.path.basename(input_path))[0]
+                cached = os.path.join(out_dir, f"{stem}.dng")
+                cached_alt = os.path.join(out_dir, f"{stem}.DNG")
+                source_mtime = (
+                    os.path.getmtime(input_path)
+                    if os.path.exists(input_path) else 0
+                )
+                fresh_cached = None
+                for candidate in (cached, cached_alt):
+                    if (
+                        os.path.isfile(candidate)
+                        and os.path.getmtime(candidate) >= source_mtime
+                    ):
+                        fresh_cached = candidate
+                        break
+                if fresh_cached:
+                    converted_paths.append(fresh_cached)
+                    continue
+
+                conversion = convert_to_dng(
+                    cfg.get("dng_converter_bin") or "",
+                    input_path,
+                    out_dir,
+                )
+                if not conversion["success"]:
+                    return json_error(
+                        "Nikon High Efficiency NEF detected, but DNG conversion failed: "
+                        f"{conversion['error']}",
+                        500,
+                    )
+                converted_paths.append(conversion["output_path"])
+            file_paths = converted_paths
 
         try:
             if app_bundle:
