@@ -1302,11 +1302,14 @@ def _store_grouped_predictions(
             # Drop any stale auto-accept from a prior 'match' pass first, so
             # the update_prediction_group_info upsert below re-inserts a
             # fresh pending row (its ON CONFLICT keeps the existing status)
-            # and the burst re-enters review.
+            # and the burst re-enters review. A prior match pass cached every
+            # detection under the consensus species, so reconcile that same
+            # species (not each frame's own prediction) or the downgrade
+            # misses a dissenting frame's cached row and it stays hidden.
             for item in group:
                 db.reconcile_match_review_state(
                     item["detection_id"], model_name, labels_fingerprint,
-                    item["prediction"], category,
+                    cons["prediction"], category,
                 )
 
             for item in group:

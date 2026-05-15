@@ -1362,6 +1362,98 @@ def test_group_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatc
         assert r["category"] == "disagreement"
 
 
+def test_mixed_group_match_then_unmatch_reenters_pending_for_dissenters(
+    tmp_path, monkeypatch
+):
+    """A mixed burst is cached as 'match' under the consensus species for
+    every detection. When it later stops matching and the cached rows are
+    reused, the downgrade must reconcile by the consensus species so the
+    dissenting frame's detection also re-enters the pending queue rather
+    than staying durably hidden as an auto-accepted match.
+    """
+    from datetime import datetime
+
+    import classify_job
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_ids = [
+        db.add_photo(
+            folder_id, f"{i}.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        for i in range(2)
+    ]
+    det_ids = [
+        db.save_detections(
+            pid,
+            [{
+                "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                "confidence": 0.9,
+                "category": "animal",
+            }],
+            detector_model="MDV6",
+        )[0]
+        for pid in photo_ids
+    ]
+
+    class Tax:
+        def get_hierarchy(self, _species):
+            return {}
+
+    # Frame 0 predicts Robin, frame 1 dissents with Sparrow -> consensus Robin.
+    species_by_frame = ["Robin", "Sparrow"]
+
+    def run(category, extra):
+        monkeypatch.setattr("compare.categorize", lambda *_a, **_k: category)
+        raw = [
+            {
+                "photo": {
+                    "id": pid, "filename": f"{i}.jpg",
+                    "folder_id": folder_id, "timestamp": None,
+                    "burst_id": None,
+                },
+                "folder_path": str(tmp_path),
+                "detection_id": did,
+                "prediction": species_by_frame[i],
+                "confidence": 0.9 if i == 0 else 0.5,
+                "alternatives": [],
+                "taxonomy": {},
+                "timestamp": datetime(2024, 1, 1, 12, 0, i),
+                **extra,
+            }
+            for i, (pid, did) in enumerate(
+                zip(photo_ids, det_ids, strict=True)
+            )
+        ]
+        return classify_job._store_grouped_predictions(
+            raw_results=raw, job_id="job-abc", model_name="bioclip-2",
+            grouping_window=10, similarity_threshold=0.99, tax=Tax(),
+            db=db, labels_fingerprint="fp-active",
+        )
+
+    run("match", {})
+    accepted = db.get_predictions(photo_ids=photo_ids, status="accepted")
+    assert {r["detection_id"] for r in accepted} == set(det_ids)
+    assert {r["species"] for r in accepted} == {"Robin"}
+
+    run("disagreement", {"_existing": True})
+
+    pending = db.get_predictions(photo_ids=photo_ids, status="pending")
+    by_det = {r["detection_id"]: r for r in pending}
+    # Both detections, including the dissenting Sparrow frame, re-enter
+    # review; none stay hidden as a stale auto-accepted match.
+    assert set(by_det) == set(det_ids)
+    for r in by_det.values():
+        assert r["status"] == "pending"
+        assert r["category"] == "disagreement"
+    assert not db.get_predictions(photo_ids=photo_ids, status="accepted")
+
+
 def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
     """If (detection, classifier_model, fingerprint) already ran, don't invoke again."""
     from db import Database
