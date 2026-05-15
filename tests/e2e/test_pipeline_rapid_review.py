@@ -20,8 +20,28 @@ def _mock_pipeline_rapid_review(
     preview_content_type="image/png",
     original_body=None,
     original_content_type="image/png",
+    shortcut_config=None,
 ):
     image_body = base64.b64decode(_PNG_1X1)
+    if shortcut_config is None:
+        shortcut_config = {
+            "keyboard_shortcuts": {
+                # Keep the old collision in this fixture so Rapid Review proves
+                # page shortcuts win even when an existing config still has P for
+                # Pipeline.
+                "navigation": {"pipeline": "p"},
+                "pipeline_rapid_review": {
+                    "pick": "p",
+                    "reject": "x",
+                    "next": "arrowright",
+                    "back": "arrowleft",
+                    "clear": "u",
+                    "apply": "enter",
+                    "exit": "escape",
+                    "zoom": "z",
+                },
+            }
+        }
     if results is None:
         results = {
             "photos": [
@@ -41,6 +61,7 @@ def _mock_pipeline_rapid_review(
             "summary": {"keep_count": 0, "review_count": 3, "reject_count": 0},
         }
 
+    page.route("**/api/config", lambda route: route.fulfill(json=shortcut_config))
     page.route("**/api/pipeline/results", lambda route: route.fulfill(json=results))
     if state_ok:
         page.route(
@@ -99,7 +120,7 @@ def test_rapid_review_decision_keys_advance_through_queue(live_server, page):
 
     expect(page.locator("#filename")).to_have_text("a.jpg")
 
-    page.keyboard.press("ArrowDown")
+    page.keyboard.press("x")
     expect(page.locator("#filename")).to_have_text("b.jpg")
     expect(page.locator("#rejectCount")).to_have_text("1")
 
@@ -108,6 +129,67 @@ def test_rapid_review_decision_keys_advance_through_queue(live_server, page):
     expect(page.locator("#metricReviewed")).to_have_text("2/3")
 
     page.keyboard.press("ArrowLeft")
+    expect(page.locator("#filename")).to_have_text("b.jpg")
+    expect(page.locator("#metricReviewed")).to_have_text("1/3")
+
+
+def test_rapid_review_pick_key_wins_over_pipeline_nav_shortcut(live_server, page):
+    _mock_pipeline_rapid_review(page)
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    page.wait_for_function(
+        """() => window.Keymap
+          && window.Keymap.getScope() === 'pipeline_rapid_review'
+          && window.Keymap.shortcutsForScope('global').some(s => s.name === 'pipeline' && s.key === 'p')"""
+    )
+
+    page.keyboard.press("p")
+
+    expect(page.locator("#filename")).to_have_text("b.jpg")
+    expect(page.locator("#pickCount")).to_have_text("1")
+    assert page.url.endswith("/pipeline/rapid-review")
+
+
+def test_rapid_review_honors_remapped_decision_shortcuts(live_server, page):
+    _mock_pipeline_rapid_review(
+        page,
+        shortcut_config={
+            "keyboard_shortcuts": {
+                "navigation": {"pipeline": "p"},
+                "pipeline_rapid_review": {
+                    "pick": "k",
+                    "reject": "j",
+                    "next": "n",
+                    "back": "h",
+                    "clear": "u",
+                    "apply": "enter",
+                    "exit": "escape",
+                    "zoom": "z",
+                },
+            }
+        },
+    )
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    page.wait_for_function(
+        """() => window._vireoShortcuts
+          && window._vireoShortcuts.pipeline_rapid_review
+          && window._vireoShortcuts.pipeline_rapid_review.reject === 'j'"""
+    )
+
+    page.keyboard.press("ArrowDown")
+    expect(page.locator("#filename")).to_have_text("a.jpg")
+    expect(page.locator("#rejectCount")).to_have_text("0")
+
+    page.keyboard.press("j")
+    expect(page.locator("#filename")).to_have_text("b.jpg")
+    expect(page.locator("#rejectCount")).to_have_text("1")
+
+    page.keyboard.press("n")
+    expect(page.locator("#filename")).to_have_text("c.jpg")
+    expect(page.locator("#metricReviewed")).to_have_text("2/3")
+
+    page.keyboard.press("h")
     expect(page.locator("#filename")).to_have_text("b.jpg")
     expect(page.locator("#metricReviewed")).to_have_text("1/3")
 
@@ -121,7 +203,7 @@ def test_rapid_review_keeps_apply_disabled_when_state_load_fails(live_server, pa
     expect(page.locator("#applyBtn")).to_be_disabled()
     expect(page.locator("#burstSubtitle")).to_contain_text("Failed to load burst state")
 
-    page.keyboard.press("ArrowDown")
+    page.keyboard.press("x")
     expect(page.locator("#filename")).to_have_text("a.jpg")
     expect(page.locator("#rejectCount")).to_have_text("0")
 
@@ -346,7 +428,7 @@ def test_rapid_review_apply_next_skips_bursts_outside_active_queue(live_server, 
     page.goto(f"{live_server['url']}/pipeline/rapid-review")
     expect(page.locator("#filename")).to_have_text("first.jpg")
     page.locator("#speciesInput").fill("Test bird")
-    page.keyboard.press("ArrowUp")
+    page.keyboard.press("p")
 
     with page.expect_response("**/api/pipeline/save-cache"):
         page.locator("#applyNextBtn").click()
@@ -383,7 +465,7 @@ def test_rapid_review_rebases_active_session_after_apply_rebuild(live_server, pa
     expect(page.locator("#applyBtn")).to_be_enabled()
     expect(page.locator("#filename")).to_have_text("first.jpg")
     page.locator("#speciesInput").fill("Test bird")
-    page.keyboard.press("ArrowUp")
+    page.keyboard.press("p")
 
     page.evaluate(
         """async () => {
@@ -420,7 +502,7 @@ def test_rapid_review_filter_change_prompts_with_staged_decisions(live_server, p
 
     page.goto(f"{live_server['url']}/pipeline/rapid-review")
     expect(page.locator("#applyBtn")).to_be_enabled()
-    page.keyboard.press("ArrowDown")
+    page.keyboard.press("x")
     page.locator("#queueFilter").select_option("all")
 
     expect(page.locator("#queuePrompt")).to_be_visible()
@@ -472,6 +554,16 @@ def test_rapid_review_click_main_image_opens_original_at_one_to_one(live_server,
     assert stage.evaluate("el => el.scrollWidth") >= 3000
 
     stage.click(position={"x": 12, "y": 12})
+
+    expect(stage).not_to_have_class(re.compile(r"\bzoomed\b"))
+    expect(img).to_have_attribute("src", re.compile(r"/photos/1/preview\?size=2560$"))
+
+    page.keyboard.press("z")
+
+    expect(stage).to_have_class(re.compile(r"\bzoomed\b"))
+    expect(img).to_have_attribute("src", re.compile(r"/photos/1/original$"))
+
+    page.keyboard.press("z")
 
     expect(stage).not_to_have_class(re.compile(r"\bzoomed\b"))
     expect(img).to_have_attribute("src", re.compile(r"/photos/1/preview\?size=2560$"))

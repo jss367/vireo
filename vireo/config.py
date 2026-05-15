@@ -129,7 +129,7 @@ DEFAULTS = {
     "keyboard_shortcuts": {
         "navigation": {
             "import": "i",
-            "pipeline": "p",
+            "pipeline": "",
             "pipeline_review": "e",
             "review": "r",
             "cull": "c",
@@ -147,6 +147,16 @@ DEFAULTS = {
         "review": {
             "accept": "a",
             "skip": "s",
+        },
+        "pipeline_rapid_review": {
+            "pick": "p",
+            "reject": "x",
+            "next": "arrowright",
+            "back": "arrowleft",
+            "clear": "u",
+            "apply": "enter",
+            "exit": "escape",
+            "zoom": "z",
         },
         "browse": {
             "rate_0": "0",

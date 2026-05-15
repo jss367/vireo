@@ -89,6 +89,17 @@ var SHORTCUT_LABELS = {
     accept: 'Accept prediction',
     skip: 'Skip / reject prediction',
   },
+  pipeline_rapid_review: {
+    _title: 'Rapid Review',
+    pick: 'Pick photo',
+    reject: 'Reject photo',
+    next: 'Next / leave for review',
+    back: 'Back / undo',
+    clear: 'Clear to review',
+    apply: 'Apply staged changes',
+    exit: 'Exit to classic review',
+    zoom: 'Toggle zoom',
+  },
   browse: {
     _title: 'Browse',
     rate_0: 'Rate 0 (clear)',
@@ -114,12 +125,16 @@ var SHORTCUT_LABELS = {
 
 var SHORTCUT_DEFAULTS = {
   navigation: {
-    import: 'i', pipeline: 'p', pipeline_review: 'e', review: 'r',
+    import: 'i', pipeline: '', pipeline_review: 'e', review: 'r',
     cull: 'c', browse: 'b', map: 'm', variants: 'v',
     dashboard: 'd', audit: 'a', compare: 'o', workspace: 'w',
     shortcuts: '/', settings: ',', keywords: 'k',
   },
   review: { accept: 'a', skip: 's' },
+  pipeline_rapid_review: {
+    pick: 'p', reject: 'x', next: 'arrowright', back: 'arrowleft',
+    clear: 'u', apply: 'enter', exit: 'escape', zoom: 'z',
+  },
   browse: {
     rate_0: '0', rate_1: '1', rate_2: '2', rate_3: '3',
     rate_4: '4', rate_5: '5',

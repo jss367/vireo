@@ -144,7 +144,7 @@ def test_page_scope_shadows_global_for_same_key(live_server, page):
 
 
 def test_navbar_nav_shortcuts_registered_globally(live_server, page):
-    """Each NAV_ROUTES entry is registered as a global Keymap shortcut after config load."""
+    """Navigation entries with default keys are registered globally after config load."""
     url = live_server["url"]
     page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
@@ -156,11 +156,12 @@ def test_navbar_nav_shortcuts_registered_globally(live_server, page):
             .map(s => s.name)
     """)
     expected = {
-        'pipeline', 'lightroom', 'pipeline_review', 'review', 'cull',
+        'lightroom', 'pipeline_review', 'review', 'cull',
         'browse', 'map', 'variants', 'dashboard', 'audit', 'compare',
         'workspace', 'shortcuts', 'settings', 'keywords'
     }
     assert expected.issubset(set(names))
+    assert 'pipeline' not in names
 
 
 def test_pressing_b_navigates_to_browse(live_server, page):

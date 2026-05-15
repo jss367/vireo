@@ -693,6 +693,81 @@ var QUEUE_FILTERS = {
   'all': { label: 'All', empty: 'No cached pipeline bursts.' },
 };
 
+var RAPID_SCOPE = 'pipeline_rapid_review';
+var RAPID_SC_DEFAULTS = {
+  pick: 'p',
+  reject: 'x',
+  next: 'arrowright',
+  back: 'arrowleft',
+  clear: 'u',
+  apply: 'enter',
+  exit: 'escape',
+  zoom: 'z',
+};
+var rapidShortcuts = Object.assign({}, RAPID_SC_DEFAULTS);
+var rapidShortcutsRegistered = false;
+
+if (window.Keymap && window.Keymap.setScope) {
+  window.Keymap.setScope(RAPID_SCOPE);
+}
+
+function rapidShortcutMatches(e, action) {
+  var shortcut = rapidShortcuts[action];
+  if (!shortcut) return false;
+  if (window.Keymap && window.Keymap.matchesShortcut) {
+    return window.Keymap.matchesShortcut(e, shortcut);
+  }
+  if (typeof matchesShortcut === 'function') return matchesShortcut(e, shortcut);
+  return false;
+}
+
+function handleRapidShortcutAction(action) {
+  if (typeof isQueuePromptOpen === 'function' && isQueuePromptOpen()) return true;
+  if (action === 'pick') decideCurrent('pick');
+  else if (action === 'reject') decideCurrent('reject');
+  else if (action === 'next') decideCurrent('review');
+  else if (action === 'back') undoLast();
+  else if (action === 'clear') clearCurrent();
+  else if (action === 'apply') applyCurrent(false);
+  else if (action === 'exit') window.location.href = '/pipeline/review';
+  else if (action === 'zoom') toggleRapidZoom();
+  return true;
+}
+
+function registerRapidShortcuts() {
+  if (rapidShortcutsRegistered || !window.Keymap || !window.Keymap.register) return;
+  Object.keys(RAPID_SC_DEFAULTS).forEach(function(action) {
+    var key = rapidShortcuts[action];
+    if (!key) return;
+    window.Keymap.register(RAPID_SCOPE, {
+      key: key,
+      name: action,
+      description: action,
+      category: 'Rapid Review',
+      action: function() { return handleRapidShortcutAction(action); },
+    });
+  });
+  rapidShortcutsRegistered = true;
+}
+
+async function loadRapidShortcuts() {
+  try {
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
+    var saved = (cfg.keyboard_shortcuts || {})[RAPID_SCOPE] || {};
+    rapidShortcuts = Object.assign({}, RAPID_SC_DEFAULTS, saved);
+    window._vireoShortcuts = window._vireoShortcuts || {};
+    if (cfg.keyboard_shortcuts) {
+      Object.keys(cfg.keyboard_shortcuts).forEach(function(ctx) {
+        if (!window._vireoShortcuts[ctx]) window._vireoShortcuts[ctx] = cfg.keyboard_shortcuts[ctx];
+      });
+    }
+    window._vireoShortcuts[RAPID_SCOPE] = rapidShortcuts;
+  } catch (e) {
+    rapidShortcuts = Object.assign({}, RAPID_SC_DEFAULTS);
+  }
+  registerRapidShortcuts();
+}
+
 function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
@@ -1203,11 +1278,17 @@ function toggleRapidZoom(e) {
   }
   var img = document.getElementById('currentPhoto');
   var rect = img.getBoundingClientRect();
+  var anchorX = 0.5;
+  var anchorY = 0.5;
+  if (e && typeof e.clientX === 'number' && typeof e.clientY === 'number') {
+    anchorX = rect.width ? Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) : 0.5;
+    anchorY = rect.height ? Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height)) : 0.5;
+  }
   rapid.zoomed = true;
   rapid.zoomPhotoId = p.id;
   rapid.zoomAnchor = {
-    x: rect.width ? Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) : 0.5,
-    y: rect.height ? Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height)) : 0.5,
+    x: anchorX,
+    y: anchorY,
   };
   renderCurrent();
 }
@@ -1597,35 +1678,40 @@ function openClassic() {
 }
 
 document.addEventListener('keydown', function(e) {
+  if (e.defaultPrevented) return;
   if (isQueuePromptOpen()) {
     e.preventDefault();
     return;
   }
   if (e.target && e.target.tagName === 'INPUT') return;
-  if (e.key === 'ArrowDown' || e.key === 'x' || e.key === 'X') {
+  if (rapidShortcutMatches(e, 'reject')) {
     e.preventDefault();
     decideCurrent('reject');
-  } else if (e.key === 'ArrowUp' || e.key === 'p' || e.key === 'P') {
+  } else if (rapidShortcutMatches(e, 'pick')) {
     e.preventDefault();
     decideCurrent('pick');
-  } else if (e.key === 'ArrowRight' || e.key === ' ') {
+  } else if (rapidShortcutMatches(e, 'next')) {
     e.preventDefault();
     decideCurrent('review');
-  } else if (e.key === 'ArrowLeft') {
+  } else if (rapidShortcutMatches(e, 'back')) {
     e.preventDefault();
     undoLast();
-  } else if (e.key === 'u' || e.key === 'U') {
+  } else if (rapidShortcutMatches(e, 'clear')) {
     e.preventDefault();
     clearCurrent();
-  } else if (e.key === 'Enter') {
+  } else if (rapidShortcutMatches(e, 'apply')) {
     e.preventDefault();
     applyCurrent(false);
-  } else if (e.key === 'Escape') {
+  } else if (rapidShortcutMatches(e, 'exit')) {
     e.preventDefault();
     window.location.href = '/pipeline/review';
+  } else if (rapidShortcutMatches(e, 'zoom')) {
+    e.preventDefault();
+    toggleRapidZoom();
   }
 });
 
+loadRapidShortcuts();
 initRapidReview();
 document.getElementById('photoStage').addEventListener('pointerdown', rapidZoomPointerDown);
 document.getElementById('photoStage').addEventListener('pointermove', rapidZoomPointerMove);

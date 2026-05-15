@@ -2204,7 +2204,7 @@ window.NAV_ALL_PAGES = [
   };
 
   var NAV_DEFAULTS = {
-    pipeline: 'i', lightroom: 'l', pipeline_review: 'e', review: 'r',
+    pipeline: '', lightroom: 'l', pipeline_review: 'e', review: 'r',
     cull: 'c', browse: 'b', map: 'm', variants: 'v',
     dashboard: 'd', audit: 'a', compare: 'o', workspace: 'w',
     shortcuts: '/', settings: ',', keywords: 'k'
@@ -2355,6 +2355,7 @@ window.NAV_ALL_PAGES = [
   var _pageCtx = null;
   if (_path === '/browse') _pageCtx = 'browse';
   else if (_path === '/review') _pageCtx = 'review';
+  else if (_path.startsWith('/pipeline/rapid-review')) _pageCtx = 'pipeline_rapid_review';
   if (_pageCtx && window.Keymap && window.Keymap.setScope) {
     window.Keymap.setScope(_pageCtx);
   }
@@ -2399,6 +2400,12 @@ window.NAV_ALL_PAGES = [
       _title: 'Review',
       accept: 'Accept prediction', skip: 'Skip / reject',
     },
+    pipeline_rapid_review: {
+      _title: 'Rapid Review',
+      pick: 'Pick', reject: 'Reject', next: 'Next / review',
+      back: 'Back / undo', clear: 'Clear to review',
+      apply: 'Apply', exit: 'Exit', zoom: 'Toggle zoom',
+    },
     browse: {
       _title: 'Browse',
       rate_0: 'Clear rating', rate_1: 'Rate 1', rate_2: 'Rate 2',
@@ -2411,12 +2418,16 @@ window.NAV_ALL_PAGES = [
 
   var SC_DEFAULTS = {
     navigation: {
-      import: 'i', pipeline: 'p', pipeline_review: 'e', review: 'r',
+      import: 'i', pipeline: '', pipeline_review: 'e', review: 'r',
       cull: 'c', browse: 'b', map: 'm', variants: 'v',
       dashboard: 'd', audit: 'a', compare: 'o', workspace: 'w',
       shortcuts: '/', settings: ',', keywords: 'k',
     },
     review: { accept: 'a', skip: 's' },
+    pipeline_rapid_review: {
+      pick: 'p', reject: 'x', next: 'arrowright', back: 'arrowleft',
+      clear: 'u', apply: 'enter', exit: 'escape', zoom: 'z',
+    },
     browse: {
       rate_0: '0', rate_1: '1', rate_2: '2', rate_3: '3',
       rate_4: '4', rate_5: '5',
@@ -3894,8 +3905,9 @@ function matchesShortcut(e, shortcutStr) {
 }
 
 function formatShortcut(str) {
-  if (!str) return '';
+  if (!str) return 'Unassigned';
   return str.split('+').map(function(p) {
+    if (p === ' ') return 'Space';
     return p.charAt(0).toUpperCase() + p.slice(1);
   }).join('+');
 }
