@@ -970,8 +970,9 @@ def _classify_photos(
                 })
 
                 if len(batch) >= _BATCH_SIZE:
+                    pre_len = len(raw_results)
                     failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
-                    _record_batch_classifier_runs(db, batch, model_name, fp, raw_results)
+                    _record_batch_classifier_runs(db, batch, model_name, fp, raw_results, pre_len)
                     batch = []
         else:
             # No detections — use (or create) a full-image synthetic detection
@@ -1065,34 +1066,42 @@ def _classify_photos(
             })
 
             if len(batch) >= _BATCH_SIZE:
+                pre_len = len(raw_results)
                 failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
-                _record_batch_classifier_runs(db, batch, model_name, fp, raw_results)
+                _record_batch_classifier_runs(db, batch, model_name, fp, raw_results, pre_len)
                 batch = []
 
     # Flush remaining images
     if batch:
+        pre_len = len(raw_results)
         failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
-        _record_batch_classifier_runs(db, batch, model_name, fp, raw_results)
+        _record_batch_classifier_runs(db, batch, model_name, fp, raw_results, pre_len)
 
     return raw_results, failed, skipped_existing
 
 
-def _record_batch_classifier_runs(db, batch, model_name, labels_fingerprint, raw_results):
+def _record_batch_classifier_runs(
+    db, batch, model_name, labels_fingerprint, raw_results, raw_results_start=0,
+):
     """Record classifier_runs rows for every detection in ``batch``.
 
-    ``batch`` is the list of entries that were just passed to _flush_batch;
-    ``raw_results`` may already contain entries from prior batches, so we scope
-    the prediction_count lookup to entries that reference this batch's
-    detection_ids.  Called after _flush_batch has committed predictions so the
-    run row is only written for detections that actually produced output.
+    ``batch`` is the list of entries that were just passed to _flush_batch.
+    ``raw_results_start`` is ``len(raw_results)`` captured *before* that
+    _flush_batch call, so only the rows this flush appended
+    (``raw_results[raw_results_start:]``) are tallied. Earlier rows belong to
+    prior batches; re-scanning the whole growing list on every flush would
+    make the bookkeeping O(n^2) across a large collection. Called after
+    _flush_batch has committed predictions so the run row is only written for
+    detections that actually produced output.
     """
     if not batch:
         return
-    # Tally how many raw_results entries reference each detection_id. Entries
-    # without a detection_id (unusual, but possible on synthesized rows) are
-    # ignored. For a per-detection batch this is typically 0 or 1.
+    # Tally how many of this flush's raw_results entries reference each
+    # detection_id. Entries without a detection_id (unusual, but possible on
+    # synthesized rows) are ignored. For a per-detection batch this is
+    # typically 0 or 1.
     counts: dict = {}
-    for r in raw_results:
+    for r in raw_results[raw_results_start:]:
         did = r.get("detection_id")
         if did is not None:
             counts[did] = counts.get(did, 0) + 1
