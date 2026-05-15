@@ -21,6 +21,7 @@ def _mock_pipeline_rapid_review(
     original_body=None,
     original_content_type="image/png",
     shortcut_config=None,
+    state_photos=None,
 ):
     image_body = base64.b64decode(_PNG_1X1)
     if shortcut_config is None:
@@ -64,15 +65,17 @@ def _mock_pipeline_rapid_review(
     page.route("**/api/config", lambda route: route.fulfill(json=shortcut_config))
     page.route("**/api/pipeline/results", lambda route: route.fulfill(json=results))
     if state_ok:
+        if state_photos is None:
+            state_photos = {
+                "1": {"flag": "none", "has_species_keyword": False},
+                "2": {"flag": "none", "has_species_keyword": False},
+                "3": {"flag": "none", "has_species_keyword": False},
+            }
         page.route(
             "**/api/pipeline/group/state",
             lambda route: route.fulfill(
                 json={
-                    "photos": {
-                        "1": {"flag": "none", "has_species_keyword": False},
-                        "2": {"flag": "none", "has_species_keyword": False},
-                        "3": {"flag": "none", "has_species_keyword": False},
-                    },
+                    "photos": state_photos,
                     "species_kid": None,
                 }
             ),
@@ -206,6 +209,58 @@ def test_rapid_review_keeps_apply_disabled_when_state_load_fails(live_server, pa
     page.keyboard.press("x")
     expect(page.locator("#filename")).to_have_text("a.jpg")
     expect(page.locator("#rejectCount")).to_have_text("0")
+
+
+def test_rapid_review_apply_button_summarizes_pending_writes(live_server, page):
+    _mock_pipeline_rapid_review(page)
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+
+    expect(page.locator("#applyBtn")).to_have_text("Apply: no DB changes")
+
+    page.keyboard.press("p")
+    expect(page.locator("#applyBtn")).to_have_text("Apply: Flag 1 · Tag 1")
+
+    page.keyboard.press("x")
+    expect(page.locator("#applyBtn")).to_have_text("Apply: Flag 1 · Reject 1 · Tag 1")
+    expect(page.locator("#applyBtn")).to_have_attribute(
+        "title",
+        'Apply will flag 1 photo as a pick, reject 1 photo, add species keyword "Test bird" to 1 pick.',
+    )
+
+
+def test_rapid_review_species_edit_refreshes_existing_keyword_state(live_server, page):
+    results = {
+        "photos": [
+            {"id": 1, "filename": "a.jpg", "label": "KEEP", "flag": "flagged"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1],
+                "photo_count": 1,
+                "burst_count": 1,
+                "species": ["Test bird"],
+                "bursts": [{"photo_ids": [1]}],
+            }
+        ],
+        "summary": {"keep_count": 1, "review_count": 0, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(
+        page,
+        results=results,
+        state_photos={"1": {"flag": "flagged", "has_species_keyword": True}},
+    )
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    expect(page.locator("#applyBtn")).to_have_text("Apply: no DB changes")
+
+    page.locator("#speciesInput").fill("New bird")
+
+    expect(page.locator("#applyBtn")).to_have_text("Apply: Set species")
+    expect(page.locator("#applyBtn")).to_have_attribute(
+        "title",
+        'Apply will set confirmed species to "New bird".',
+    )
 
 
 def test_rapid_review_rewrites_all_burst_labels_before_saving_cache(live_server, page):
@@ -635,6 +690,11 @@ def test_classic_pipeline_review_opens_requested_burst_from_url(live_server, pag
 
     page.keyboard.press("p")
     expect(page.locator("#grmCount")).to_have_text("1 picks, 0 rejects, 2 unsorted")
+    expect(page.locator("#grmApplyBtn")).to_have_text("Flag 1 · Tag 1 as Test bird & Close")
+    expect(page.locator("#grmApplyBtn")).to_have_attribute(
+        "title",
+        'Apply will flag 1 photo as a pick, add species keyword "Test bird" to 1 pick, then close this burst.',
+    )
 
 
 def test_classic_pipeline_review_inspector_pick_reject_hotkeys(live_server, page):
