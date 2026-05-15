@@ -47,6 +47,52 @@
   font: inherit;
   padding: 0;
 }
+.rapid-filter-bar {
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  padding: 10px;
+  margin-bottom: 12px;
+}
+.rapid-filter-bar label {
+  color: var(--text-dim);
+  display: block;
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+.queue-select {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 6px;
+  font-size: 13px;
+  padding: 7px 8px;
+}
+.queue-toggles {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+.queue-toggle {
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+.queue-toggle input {
+  margin: 0;
+}
+.queue-count {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-top: 10px;
+}
 .burst-list {
   display: flex;
   flex-direction: column;
@@ -85,6 +131,21 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.burst-row-chips {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+.reason-chip {
+  border: 1px solid var(--border-secondary);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 6px;
 }
 .burst-row-count {
   color: var(--text-dim);
@@ -367,6 +428,11 @@
 .thumb.pick::before { background: var(--accent); }
 .thumb.reject::before { background: var(--danger); }
 .thumb.review::before { background: var(--warning); }
+.thumb.rejected-muted img,
+.mini-thumb.rejected-muted img {
+  opacity: 0.42;
+  filter: grayscale(0.55);
+}
 .lanes {
   min-height: 0;
   display: grid;
@@ -416,6 +482,45 @@
   color: var(--text-muted);
   font-size: 14px;
 }
+.queue-prompt {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0,0,0,0.48);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.queue-prompt[hidden] {
+  display: none;
+}
+.queue-prompt-card {
+  width: min(420px, 100%);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 18px 48px rgba(0,0,0,0.42);
+  padding: 18px;
+}
+.queue-prompt-title {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 750;
+  margin-bottom: 8px;
+}
+.queue-prompt-text {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.4;
+  margin-bottom: 16px;
+}
+.queue-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 @media (max-width: 920px) {
   .rapid-layout { grid-template-columns: 1fr; }
   .rapid-sidebar { display: none; }
@@ -432,6 +537,27 @@
     <div class="rapid-title">
       <h1>Rapid Review</h1>
       <a href="/pipeline/review">Classic</a>
+    </div>
+    <div class="rapid-filter-bar">
+      <label for="queueFilter">Queue</label>
+      <select id="queueFilter" class="queue-select" onchange="changeQueue({ filter: this.value })">
+        <option value="needs-species">Needs species</option>
+        <option value="needs-culling">Needs culling</option>
+        <option value="unreviewed">Unreviewed</option>
+        <option value="review-picks">Review picks</option>
+        <option value="all">All</option>
+      </select>
+      <div class="queue-toggles">
+        <label class="queue-toggle">
+          <input id="includeRejectedToggle" type="checkbox" onchange="changeQueue({ includeRejected: this.checked })">
+          Include rejected
+        </label>
+        <label class="queue-toggle">
+          <input id="multiOnlyToggle" type="checkbox" onchange="changeQueue({ multiOnly: this.checked })">
+          Multi-photo only
+        </label>
+      </div>
+      <div class="queue-count" id="queueCount">0 bursts</div>
     </div>
     <div class="burst-list" id="burstList"></div>
   </aside>
@@ -513,10 +639,23 @@
   </main>
 </div>
 
+<div class="queue-prompt" id="queuePrompt" hidden>
+  <div class="queue-prompt-card" role="dialog" aria-modal="true" aria-labelledby="queuePromptTitle">
+    <div class="queue-prompt-title" id="queuePromptTitle">Staged decisions</div>
+    <div class="queue-prompt-text">Apply or discard the current staged decisions before changing the queue.</div>
+    <div class="queue-prompt-actions">
+      <button class="rapid-btn" type="button" data-queue-choice="stay">Stay</button>
+      <button class="rapid-btn" type="button" data-queue-choice="discard">Discard</button>
+      <button class="rapid-btn primary" type="button" data-queue-choice="apply">Apply</button>
+    </div>
+  </div>
+</div>
+
 <script>
 var rapid = {
   results: null,
   photoMap: {},
+  allSessions: [],
   sessions: [],
   sessionIndex: -1,
   items: [],
@@ -538,6 +677,20 @@ var rapid = {
   // Bumped on each openSession; used to drop stale /group/state responses
   // when the user switches bursts before the previous fetch resolves.
   openToken: 0,
+  queue: {
+    filter: 'needs-species',
+    includeRejected: false,
+    multiOnly: false,
+  },
+  queuePromptResolve: null,
+};
+
+var QUEUE_FILTERS = {
+  'needs-species': { label: 'Needs species', empty: 'No bursts need species review.' },
+  'needs-culling': { label: 'Needs culling', empty: 'No bursts need culling review.' },
+  'unreviewed': { label: 'Unreviewed', empty: 'No unreviewed bursts.' },
+  'review-picks': { label: 'Review picks', empty: 'No reviewed picks yet.' },
+  'all': { label: 'All', empty: 'No cached pipeline bursts.' },
 };
 
 function escapeHtml(s) {
@@ -583,6 +736,7 @@ function buildSessions(results) {
       var ids = burstIds(burst).filter(function(id) { return rapid.photoMap[id]; });
       if (!ids.length) return;
       sessions.push({
+        rawIndex: sessions.length,
         encIdx: encIdx,
         burstIdx: burstIdx,
         ids: ids,
@@ -596,21 +750,242 @@ function buildSessions(results) {
   return sessions;
 }
 
-function findInitialSession() {
+function sessionKey(session) {
+  return session ? (session.encIdx + ':' + session.burstIdx) : '';
+}
+
+function photoFlag(p) {
+  return (p && p.flag) || 'none';
+}
+
+function photoSpecies(p) {
+  return (p && p.confirmed_species) || '';
+}
+
+function photoHasSpecies(p) {
+  return !!photoSpecies(p);
+}
+
+function sessionPhotos(session) {
+  return (session ? session.ids : []).map(function(id) { return rapid.photoMap[id]; }).filter(Boolean);
+}
+
+function queueIncludedPhotos(session) {
+  var photos = sessionPhotos(session);
+  if (!rapid.queue.includeRejected) {
+    photos = photos.filter(function(p) { return photoFlag(p) !== 'rejected'; });
+  }
+  return photos;
+}
+
+function hasMixedSpecies(session) {
+  var seen = {};
+  queueIncludedPhotos(session).forEach(function(p) {
+    var species = photoSpecies(p);
+    if (species) seen[species.toLowerCase()] = true;
+  });
+  return Object.keys(seen).length > 1;
+}
+
+function needsSpecies(session) {
+  var photos = queueIncludedPhotos(session);
+  if (!photos.length) return false;
+  if (rapid.queue.multiOnly && photos.length < 2) return false;
+  return photos.some(function(p) {
+    if (!rapid.queue.includeRejected && photoFlag(p) === 'rejected') return false;
+    return !photoHasSpecies(p);
+  });
+}
+
+function cullingState(session) {
+  var photos = queueIncludedPhotos(session);
+  var nonRejected = photos.filter(function(p) { return photoFlag(p) !== 'rejected'; });
+  if (!photos.length) return { needs: false, reason: '' };
+  if (rapid.queue.multiOnly && nonRejected.length < 2) return { needs: false, reason: '' };
+  var flagged = nonRejected.filter(function(p) { return photoFlag(p) === 'flagged'; }).length;
+  var neutral = nonRejected.filter(function(p) { return photoFlag(p) === 'none'; }).length;
+  var rejected = photos.filter(function(p) { return photoFlag(p) === 'rejected'; }).length;
+  if (nonRejected.length > 1 && flagged === 0) return { needs: true, reason: 'No keeper' };
+  if (flagged > 1) return { needs: true, reason: 'Multiple keepers' };
+  if (neutral > 0 && rejected > 0 && flagged === 0) return { needs: true, reason: 'No keeper' };
+  return { needs: false, reason: '' };
+}
+
+function needsCulling(session) {
+  return cullingState(session).needs;
+}
+
+function unreviewed(session) {
+  var photos = queueIncludedPhotos(session);
+  if (!photos.length) return false;
+  if (rapid.queue.multiOnly && photos.length < 2) return false;
+  return photos.some(function(p) {
+    return photoFlag(p) === 'none' && !photoHasSpecies(p);
+  });
+}
+
+function reviewPicks(session) {
+  var photos = queueIncludedPhotos(session);
+  if (!photos.length) return false;
+  if (rapid.queue.multiOnly && photos.length < 2) return false;
+  return photos.some(function(p) {
+    return photoFlag(p) === 'flagged' || photoHasSpecies(p);
+  });
+}
+
+function sessionMatchesQueue(session) {
+  if (rapid.queue.multiOnly && queueIncludedPhotos(session).length < 2) return false;
+  if (rapid.queue.filter === 'all') return true;
+  if (rapid.queue.filter === 'needs-species') return needsSpecies(session);
+  if (rapid.queue.filter === 'needs-culling') return needsCulling(session);
+  if (rapid.queue.filter === 'unreviewed') return unreviewed(session);
+  if (rapid.queue.filter === 'review-picks') return reviewPicks(session);
+  return true;
+}
+
+function sessionReasonChips(session) {
+  var chips = [];
+  if (needsSpecies(session)) chips.push('No species');
+  if (hasMixedSpecies(session)) chips.push('Mixed species');
+  var cull = cullingState(session);
+  if (cull.needs && cull.reason) chips.push(cull.reason);
+  if (reviewPicks(session)) chips.push('Already tagged');
+  if (sessionPhotos(session).some(function(p) { return photoFlag(p) === 'rejected'; })) chips.push('Rejected');
+  if (!chips.length) chips.push('Complete');
+  return chips;
+}
+
+function rebuildFilteredSessions() {
+  rapid.sessions = rapid.allSessions.filter(sessionMatchesQueue);
+}
+
+function findSessionIndexByKeyIn(sessions, key) {
+  for (var i = 0; i < sessions.length; i++) {
+    if (sessionKey(sessions[i]) === key) return i;
+  }
+  return -1;
+}
+
+function findSessionIndexByKey(key) {
+  return findSessionIndexByKeyIn(rapid.sessions, key);
+}
+
+function requestedSessionKey() {
   var params = new URLSearchParams(window.location.search);
   var enc = params.get('enc');
   var burst = params.get('burst');
-  if (enc != null && burst != null) {
-    var encIdx = parseInt(enc, 10);
-    var burstIdx = parseInt(burst, 10);
-    for (var i = 0; i < rapid.sessions.length; i++) {
-      if (rapid.sessions[i].encIdx === encIdx && rapid.sessions[i].burstIdx === burstIdx) return i;
-    }
+  if (enc == null || burst == null) return '';
+  var encIdx = parseInt(enc, 10);
+  var burstIdx = parseInt(burst, 10);
+  if (!Number.isFinite(encIdx) || !Number.isFinite(burstIdx)) return '';
+  return encIdx + ':' + burstIdx;
+}
+
+function findNextFilteredIndexAfterRaw(rawIndex) {
+  for (var i = 0; i < rapid.sessions.length; i++) {
+    if (rapid.sessions[i].rawIndex > rawIndex) return i;
+  }
+  return -1;
+}
+
+function findNearestFilteredIndex(rawIndex) {
+  var next = findNextFilteredIndexAfterRaw(rawIndex);
+  if (next >= 0) return next;
+  for (var i = rapid.sessions.length - 1; i >= 0; i--) {
+    if (rapid.sessions[i].rawIndex < rawIndex) return i;
+  }
+  return -1;
+}
+
+function hasStagedChanges() {
+  var session = rapid.sessions[rapid.sessionIndex];
+  var input = document.getElementById('speciesInput');
+  var currentSpecies = input ? (input.value || '').trim() : '';
+  return rapid.history.length > 0 || (!!session && currentSpecies !== (session.species || ''));
+}
+
+function findInitialSession() {
+  var key = requestedSessionKey();
+  if (key) {
+    var requestedIdx = findSessionIndexByKey(key);
+    if (requestedIdx >= 0) return requestedIdx;
   }
   for (var j = 0; j < rapid.sessions.length; j++) {
     if (rapid.sessions[j].ids.length > 1) return j;
   }
   return rapid.sessions.length ? 0 : -1;
+}
+
+function renderQueueControls() {
+  var select = document.getElementById('queueFilter');
+  var include = document.getElementById('includeRejectedToggle');
+  var multi = document.getElementById('multiOnlyToggle');
+  if (select) select.value = rapid.queue.filter;
+  if (include) include.checked = rapid.queue.includeRejected;
+  if (multi) multi.checked = rapid.queue.multiOnly;
+  var queue = QUEUE_FILTERS[rapid.queue.filter] || QUEUE_FILTERS.all;
+  var count = rapid.sessions.length;
+  var total = rapid.allSessions.length;
+  var text = queue.label + ': ' + count + ' of ' + total + ' bursts';
+  if (rapid.sessionIndex >= 0 && count) {
+    text += ' - ' + (rapid.sessionIndex + 1) + ' of ' + count;
+  }
+  document.getElementById('queueCount').textContent = text;
+}
+
+function promptStagedQueueChange() {
+  var prompt = document.getElementById('queuePrompt');
+  prompt.hidden = false;
+  return new Promise(function(resolve) {
+    rapid.queuePromptResolve = resolve;
+  });
+}
+
+function isQueuePromptOpen() {
+  var prompt = document.getElementById('queuePrompt');
+  return !!(prompt && !prompt.hidden);
+}
+
+document.getElementById('queuePrompt').addEventListener('click', function(e) {
+  var btn = e.target.closest('[data-queue-choice]');
+  if (!btn || !rapid.queuePromptResolve) return;
+  var resolve = rapid.queuePromptResolve;
+  rapid.queuePromptResolve = null;
+  document.getElementById('queuePrompt').hidden = true;
+  resolve(btn.getAttribute('data-queue-choice'));
+});
+
+async function changeQueue(patch) {
+  if (rapid.applying) {
+    renderQueueControls();
+    return;
+  }
+  if (hasStagedChanges()) {
+    var choice = await promptStagedQueueChange();
+    if (choice === 'stay') {
+      renderQueueControls();
+      return;
+    }
+    if (choice === 'apply') {
+      var applied = await applyCurrent(false);
+      if (!applied) {
+        renderQueueControls();
+        return;
+      }
+    }
+  }
+  Object.assign(rapid.queue, patch || {});
+  var key = sessionKey(rapid.sessions[rapid.sessionIndex]);
+  rebuildFilteredSessions();
+  renderQueueControls();
+  var idx = findSessionIndexByKey(key);
+  if (idx < 0 && rapid.sessions.length) idx = 0;
+  if (idx >= 0) openSession(idx);
+  else showEmptyQueue();
+}
+
+function requestOpenSession(index) {
+  openSession(index);
 }
 
 async function initRapidReview() {
@@ -624,14 +999,66 @@ async function initRapidReview() {
   }
   rapid.photoMap = {};
   (rapid.results.photos || []).forEach(function(p) { rapid.photoMap[p.id] = p; });
-  rapid.sessions = buildSessions(rapid.results);
+  rapid.allSessions = buildSessions(rapid.results);
+  var requestedKey = requestedSessionKey();
+  rebuildFilteredSessions();
+  if (requestedKey &&
+      findSessionIndexByKey(requestedKey) < 0 &&
+      findSessionIndexByKeyIn(rapid.allSessions, requestedKey) >= 0) {
+    rapid.queue.filter = 'all';
+    rebuildFilteredSessions();
+  }
+  renderQueueControls();
   renderBurstList();
   var idx = findInitialSession();
   if (idx >= 0) openSession(idx);
   else {
-    document.getElementById('burstTitle').textContent = 'No bursts found';
-    document.getElementById('reviewSurface').innerHTML = '<div class="empty-state">No photos are available for rapid review.</div>';
+    showEmptyQueue();
   }
+}
+
+function showEmptyQueue() {
+  rapid.sessionIndex = -1;
+  rapid.items = [];
+  rapid.picks = new Set();
+  rapid.rejects = new Set();
+  rapid.reviewed = new Set();
+  rapid.touched = new Set();
+  rapid.initialFlags = {};
+  rapid.history = [];
+  rapid.currentIndex = -1;
+  rapid.seeded = false;
+  var queue = QUEUE_FILTERS[rapid.queue.filter] || QUEUE_FILTERS.all;
+  document.getElementById('burstTitle').textContent = queue.label;
+  document.getElementById('burstSubtitle').textContent = '0 matching bursts';
+  var img = document.getElementById('currentPhoto');
+  var empty = document.getElementById('stageEmpty');
+  var pill = document.getElementById('statusPill');
+  if (img) {
+    img.removeAttribute('src');
+    img.style.display = 'none';
+  }
+  if (empty) {
+    empty.style.display = '';
+    empty.textContent = queue.empty;
+  }
+  if (pill) pill.style.display = 'none';
+  document.getElementById('speciesInput').value = '';
+  document.getElementById('filename').textContent = '-';
+  document.getElementById('metricQuality').textContent = '-';
+  document.getElementById('metricSharpness').textContent = '-';
+  document.getElementById('metricLabel').textContent = '-';
+  document.getElementById('metricReviewed').textContent = '0/0';
+  document.getElementById('filmstrip').innerHTML = '';
+  document.getElementById('pickLane').innerHTML = '';
+  document.getElementById('reviewLane').innerHTML = '';
+  document.getElementById('rejectLane').innerHTML = '';
+  document.getElementById('pickCount').textContent = '0';
+  document.getElementById('reviewCount').textContent = '0';
+  document.getElementById('rejectCount').textContent = '0';
+  renderBurstList();
+  renderQueueControls();
+  renderApplyState();
 }
 
 async function openSession(index) {
@@ -685,12 +1112,22 @@ async function openSession(index) {
 }
 
 function renderBurstList() {
+  renderQueueControls();
+  if (!rapid.sessions.length) {
+    var queue = QUEUE_FILTERS[rapid.queue.filter] || QUEUE_FILTERS.all;
+    document.getElementById('burstList').innerHTML = '<div class="empty-state" style="padding:16px 4px;">' + escapeHtml(queue.empty) + '</div>';
+    return;
+  }
   var html = rapid.sessions.map(function(s, idx) {
     var active = idx === rapid.sessionIndex ? ' active' : '';
-    return '<button class="burst-row' + active + '" onclick="openSession(' + idx + ')">' +
+    var chips = sessionReasonChips(s).map(function(chip) {
+      return '<span class="reason-chip">' + escapeHtml(chip) + '</span>';
+    }).join('');
+    return '<button class="burst-row' + active + '" onclick="requestOpenSession(' + idx + ')">' +
       '<span class="burst-row-main">' + escapeHtml(s.title) + '</span>' +
       '<span class="burst-row-count">' + s.ids.length + '</span>' +
       '<span class="burst-row-sub">' + escapeHtml(s.subtitle) + '</span>' +
+      '<span class="burst-row-chips">' + chips + '</span>' +
       '</button>';
   }).join('');
   document.getElementById('burstList').innerHTML = html;
@@ -926,7 +1363,9 @@ function renderCurrent() {
   if (rapid.loadError) {
     subtitle.innerHTML = 'Failed to load burst state. <button type="button" class="rapid-inline-btn" onclick="openSession(rapid.sessionIndex)">Retry</button>';
   } else {
-    subtitle.textContent = session ? session.subtitle : '';
+    var queue = QUEUE_FILTERS[rapid.queue.filter] || QUEUE_FILTERS.all;
+    var position = session ? ((rapid.sessionIndex + 1) + ' of ' + rapid.sessions.length + ' in ' + queue.label) : '';
+    subtitle.textContent = session ? (position + ' - ' + session.subtitle) : '';
   }
   var p = currentPhoto();
   var img = document.getElementById('currentPhoto');
@@ -968,6 +1407,7 @@ function thumbClass(p) {
   var classes = ['thumb', zoneFor(p.id)];
   if (rapid.reviewed.has(p.id)) classes.push('reviewed');
   if (currentPhoto() && currentPhoto().id === p.id) classes.push('current');
+  if (!rapid.queue.includeRejected && photoFlag(p) === 'rejected') classes.push('rejected-muted');
   return classes.join(' ');
 }
 
@@ -981,7 +1421,8 @@ function renderFilmstrip() {
 
 function renderLane(id, photos) {
   var html = photos.map(function(p) {
-    return '<button class="mini-thumb" onclick="selectPhoto(' + p.id + ')" title="' + escapeHtml(p.filename || '') + '">' +
+    var muted = (!rapid.queue.includeRejected && photoFlag(p) === 'rejected') ? ' rejected-muted' : '';
+    return '<button class="mini-thumb' + muted + '" onclick="selectPhoto(' + p.id + ')" title="' + escapeHtml(p.filename || '') + '">' +
       '<img src="' + thumbUrl(p.id) + '" alt=""></button>';
   }).join('');
   document.getElementById(id).innerHTML = html;
@@ -1037,7 +1478,7 @@ function updateSummaryFromPhotos() {
 }
 
 async function applyCurrent(openNext) {
-  if (!rapid.seeded || rapid.applying || rapid.sessionIndex < 0) return;
+  if (!rapid.seeded || rapid.applying || rapid.sessionIndex < 0) return false;
   rapid.applying = true;
   renderApplyState();
   var species = (document.getElementById('speciesInput').value || '').trim();
@@ -1075,12 +1516,16 @@ async function applyCurrent(openNext) {
       if (pickSet.has(p.id)) p.flag = 'flagged';
       else if (rejectSet.has(p.id)) p.flag = 'rejected';
       else p.flag = 'none';
+      if (species && pickSet.has(p.id)) p.confirmed_species = species;
     });
     if (resp && resp.photos) {
       Object.keys(resp.photos).forEach(function(pidStr) {
         var pid = parseInt(pidStr, 10);
         var p = rapid.photoMap[pid];
-        if (p) p.flag = resp.photos[pidStr].flag;
+        if (p) {
+          p.flag = resp.photos[pidStr].flag;
+          if (species && resp.photos[pidStr].has_species_keyword) p.confirmed_species = species;
+        }
       });
     }
     var enc = rapid.results.encounters[session.encIdx];
@@ -1089,8 +1534,11 @@ async function applyCurrent(openNext) {
       enc.species_confirmed = true;
       // sessions[].species is cached at page load, so update every burst in
       // this encounter — otherwise Apply Next stops tagging picks with the
-      // confirmed species until the user retypes it for each burst.
-      rapid.sessions.forEach(function(s) {
+      // confirmed species until the user retypes it for each burst. Iterate
+      // allSessions, not the filtered rapid.sessions: a queue filter/toggle
+      // can hide sibling bursts, and they must still get the confirmed
+      // species so they aren't stale when they re-enter the queue.
+      rapid.allSessions.forEach(function(s) {
         if (s.encIdx === session.encIdx && !s.hasBurstOverride) {
           s.species = species;
           s.subtitle = s.ids.length + ' photos - ' + species;
@@ -1104,18 +1552,38 @@ async function applyCurrent(openNext) {
       body: JSON.stringify(rapid.results),
     }, { toast: false });
     rapid.applying = false;
-    if (openNext && sessionIndex < rapid.sessions.length - 1) {
-      openSession(sessionIndex + 1);
+    var currentKey = sessionKey(session);
+    var activeKey = sessionKey(rapid.sessions[rapid.sessionIndex]);
+    rebuildFilteredSessions();
+    if (openNext) {
+      var nextIdx = findNextFilteredIndexAfterRaw(session.rawIndex);
+      if (nextIdx < 0) nextIdx = findNearestFilteredIndex(session.rawIndex);
+      if (nextIdx >= 0) openSession(nextIdx);
+      else showEmptyQueue();
     } else if (rapid.sessionIndex === sessionIndex) {
-      openSession(sessionIndex);
+      var refreshedIdx = findSessionIndexByKey(currentKey);
+      if (refreshedIdx < 0) refreshedIdx = findNearestFilteredIndex(session.rawIndex);
+      if (refreshedIdx >= 0) openSession(refreshedIdx);
+      else showEmptyQueue();
     } else {
       // User navigated to a different burst during apply; don't disrupt their
-      // view, but rerender so propagated species/subtitle show in the sidebar.
-      renderAll();
+      // view. Rebase the old filtered index onto the rebuilt queue first:
+      // the applied burst may have dropped out and shifted every later index.
+      var activeIdx = findSessionIndexByKey(activeKey);
+      if (activeIdx >= 0) {
+        rapid.sessionIndex = activeIdx;
+        renderAll();
+      } else {
+        activeIdx = findNearestFilteredIndex(session.rawIndex);
+        if (activeIdx >= 0) openSession(activeIdx);
+        else showEmptyQueue();
+      }
     }
+    return true;
   } catch (e) {
     rapid.applying = false;
     renderApplyState();
+    return false;
   }
 }
 
@@ -1129,6 +1597,10 @@ function openClassic() {
 }
 
 document.addEventListener('keydown', function(e) {
+  if (isQueuePromptOpen()) {
+    e.preventDefault();
+    return;
+  }
   if (e.target && e.target.tagName === 'INPUT') return;
   if (e.key === 'ArrowDown' || e.key === 'x' || e.key === 'X') {
     e.preventDefault();
