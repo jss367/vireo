@@ -2164,12 +2164,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             count = len(entry["photo_ids"])
             missing_count = selected_count - count
             if 0 < count < selected_count:
+                missing_photo_ids = [
+                    pid for pid in photo_ids if pid not in entry["photo_ids"]
+                ]
                 suggestions.append({
                     "id": entry["id"],
                     "name": entry["name"],
                     "type": entry["type"],
                     "count": count,
                     "missing_count": missing_count,
+                    "missing_photo_ids": missing_photo_ids,
                 })
         suggestions.sort(
             key=lambda item: (-item["count"], item["name"].lower(), item["id"])
@@ -2722,13 +2726,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 else None
             )
             kid = db.add_keyword(name, kw_type=kw_type)
-        for pid in photo_ids:
+
+        placeholders = ",".join("?" for _ in photo_ids)
+        existing_rows = db.conn.execute(
+            f"""SELECT photo_id FROM photo_keywords
+                WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
+            [kid] + list(photo_ids),
+        ).fetchall()
+        already_tagged = {row["photo_id"] for row in existing_rows}
+        added_ids = [pid for pid in photo_ids if pid not in already_tagged]
+
+        for pid in added_ids:
             db.tag_photo(pid, kid)
             _queue_keyword_add(pid, name)
-        items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)} for pid in photo_ids]
-        db.record_edit('keyword_add', f'Added "{name}" to {len(photo_ids)} photos',
-                       str(kid), items, is_batch=True)
-        return jsonify({"ok": True, "updated": len(photo_ids)})
+        items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)} for pid in added_ids]
+        if items:
+            db.record_edit('keyword_add', f'Added "{name}" to {len(added_ids)} photos',
+                           str(kid), items, is_batch=True)
+        return jsonify({"ok": True, "updated": len(added_ids)})
 
     @app.route("/api/batch/delete", methods=["POST"])
     def api_batch_delete():

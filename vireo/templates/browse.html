@@ -1173,6 +1173,7 @@ var selectedIndex = -1;
 var selectedPhotos = new Set(); // multi-select
 var selectionKeywordRequestSeq = 0;
 var selectionKeywordKey = '';
+var selectionKeywordMissingById = {};
 var showDetectionBoxes = false;
 var cardFields = ["filename", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
@@ -2482,6 +2483,7 @@ function updateSelectionPanel(ids) {
     var wasVisible = !panel.classList.contains('hidden');
     panel.classList.add('hidden');
     selectionKeywordKey = '';
+    selectionKeywordMissingById = {};
     selectionKeywordRequestSeq++;
     var list = document.getElementById('selectionKeywordSuggestions');
     if (list) list.innerHTML = '';
@@ -2531,13 +2533,16 @@ function renderSelectionKeywordSuggestions(suggestions) {
   var list = document.getElementById('selectionKeywordSuggestions');
   if (!list) return;
   if (!suggestions.length) {
+    selectionKeywordMissingById = {};
     list.innerHTML = '<div class="selection-empty">No partial keywords in this selection.</div>';
     return;
   }
 
   var html = '';
+  selectionKeywordMissingById = {};
   suggestions.slice(0, 8).forEach(function(k) {
     var missing = k.missing_count || 0;
+    selectionKeywordMissingById[String(k.id)] = k.missing_photo_ids || [];
     html += '<div class="selection-keyword-row">' +
       '<div style="min-width:0;">' +
         '<div class="selection-keyword-name">' + escapeHtml(k.name) + '</div>' +
@@ -2550,8 +2555,8 @@ function renderSelectionKeywordSuggestions(suggestions) {
 }
 
 async function applySelectionKeyword(keywordId) {
-  var ids = getActiveSelection();
-  if (ids.length <= 1) return;
+  var ids = selectionKeywordMissingById[String(keywordId)] || [];
+  if (!ids.length) return;
   try {
     await safeFetch('/api/batch/keyword', {
       method: 'POST',
@@ -2560,7 +2565,7 @@ async function applySelectionKeyword(keywordId) {
     });
   } catch(e) { return; }
   selectionKeywordKey = '';
-  loadSelectionKeywordSuggestions(ids);
+  loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
   showUndoToast();
 }

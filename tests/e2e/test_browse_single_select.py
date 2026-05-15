@@ -285,6 +285,19 @@ def test_multiselect_offers_partial_keyword_fill(live_server, page):
     expect(row).to_be_visible()
     expect(row).to_contain_text("missing from 4")
 
+    original_with_keyword = page.evaluate("""
+      async () => {
+        const ids = photos.map(p => p.id);
+        const details = await Promise.all(
+          ids.map(id => fetch('/api/photos/' + id).then(r => r.json()))
+        );
+        return details
+          .filter(p => (p.keywords || []).some(k => k.name === 'Red-tailed Hawk'))
+          .map(p => p.id)
+          .sort((a, b) => a - b);
+      }
+    """)
+
     row.locator("button", has_text="Add to 4").click()
 
     page.wait_for_function("""
@@ -301,6 +314,21 @@ def test_multiselect_offers_partial_keyword_fill(live_server, page):
     expect(
         page.locator(".selection-keyword-row", has_text="Red-tailed Hawk")
     ).to_have_count(0)
+
+    page.evaluate("async () => (await fetch('/api/undo', {method: 'POST'})).ok")
+    restored_with_keyword = page.evaluate("""
+      async () => {
+        const ids = photos.map(p => p.id);
+        const details = await Promise.all(
+          ids.map(id => fetch('/api/photos/' + id).then(r => r.json()))
+        );
+        return details
+          .filter(p => (p.keywords || []).some(k => k.name === 'Red-tailed Hawk'))
+          .map(p => p.id)
+          .sort((a, b) => a - b);
+      }
+    """)
+    assert restored_with_keyword == original_with_keyword
 
 
 def test_filterByCollection_clears_multiselect_set(live_server, page):

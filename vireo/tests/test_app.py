@@ -2803,12 +2803,13 @@ def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     by_name = {item["name"]: item for item in data["suggestions"]}
     assert by_name["Cardinal"]["count"] == 1
     assert by_name["Cardinal"]["missing_count"] == 2
+    assert sorted(by_name["Cardinal"]["missing_photo_ids"]) == sorted(ids[1:])
     assert by_name["Sparrow"]["count"] == 1
     assert by_name["Sparrow"]["missing_count"] == 2
 
 
 def test_batch_keyword_route_accepts_existing_keyword_id(app_and_db):
-    """The fill-missing-keywords button applies the exact selected keyword row."""
+    """The fill-missing-keywords button preserves pre-existing links on undo."""
     app, db = app_and_db
     rows = db.conn.execute(
         "SELECT id, filename FROM photos ORDER BY filename"
@@ -2826,6 +2827,7 @@ def test_batch_keyword_route_accepts_existing_keyword_id(app_and_db):
     )
 
     assert resp.status_code == 200
+    assert resp.get_json()["updated"] == 2
     tagged = db.conn.execute(
         """SELECT photo_id FROM photo_keywords
            WHERE keyword_id = ?
@@ -2833,6 +2835,16 @@ def test_batch_keyword_route_accepts_existing_keyword_id(app_and_db):
         (cardinal_id,),
     ).fetchall()
     assert [row["photo_id"] for row in tagged] == sorted(ids)
+
+    undo_resp = client.post("/api/undo")
+    assert undo_resp.status_code == 200
+    tagged_after_undo = db.conn.execute(
+        """SELECT photo_id FROM photo_keywords
+           WHERE keyword_id = ?
+           ORDER BY photo_id""",
+        (cardinal_id,),
+    ).fetchall()
+    assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
 
 
 def test_create_app_runs_wildlife_backfill_synchronously_on_first_boot(tmp_path, monkeypatch):
