@@ -125,6 +125,32 @@ body {
   outline: none;
 }
 .filter-bar label { font-size: 12px; color: var(--text-dim); }
+.flag-filter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.flag-filter-btn {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.flag-filter-btn:hover { border-color: var(--accent); }
+.flag-filter-btn.active-pick {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-tertiary));
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.flag-filter-btn.active-reject {
+  background: color-mix(in srgb, var(--danger) 18%, var(--bg-tertiary));
+  border-color: var(--danger);
+  color: var(--danger);
+}
 
 /* Rating filter */
 .rating-filter { display: flex; align-items: center; gap: 2px; }
@@ -838,6 +864,8 @@ body {
 
 {% include '_navbar.html' %}
 
+{% include '_sync_panel.html' %}
+
 <div class="main-layout">
 
   <!-- Sidebar -->
@@ -886,6 +914,10 @@ body {
         <span class="rating-star" data-val="3" onclick="setFilterRating(3)">&#9733;</span>
         <span class="rating-star" data-val="4" onclick="setFilterRating(4)">&#9733;</span>
         <span class="rating-star" data-val="5" onclick="setFilterRating(5)">&#9733;</span>
+      </div>
+      <div class="flag-filter" aria-label="Flag filters">
+        <button id="pickFilterBtn" class="flag-filter-btn" type="button" onclick="setFlagFilter('flagged')" title="Show only picks">P Picks</button>
+        <button id="rejectFilterBtn" class="flag-filter-btn" type="button" onclick="setFlagFilter('rejected')" title="Show only rejects">X Rejects</button>
       </div>
       <select id="colorFilter" onchange="applyFilters()" title="Filter by color label" style="font-size:12px;">
         <option value="">Color: Any</option>
@@ -1206,6 +1238,7 @@ var colorLabels = {};    // {photo_id: color_string}
 var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch responses
 var loadEpoch = 0;       // bumped on any grid reset; guards against stale loadPhotos responses
 var filterRating = 0;
+var flagFilter = '';
 var activeFolderId = null;
 var activeKeyword = null;
 var activeCollectionId = null;
@@ -1216,6 +1249,12 @@ var calendarData = null;
 var clipSearchActive = false;
 var searchFilterTimer = null;
 var collectionCountRefreshTimer = null;
+
+function refreshPendingSyncBanner() {
+  if (typeof checkPendingSync === 'function') {
+    checkPendingSync();
+  }
+}
 
 function hasActiveBrowseFilter() {
   var searchInput = document.getElementById('searchInput');
@@ -1228,6 +1267,7 @@ function hasActiveBrowseFilter() {
     activeCollectionId ||
     clipSearchActive ||
     filterRating > 0 ||
+    flagFilter ||
     (searchInput && searchInput.value.trim()) ||
     (colorFilter && colorFilter.value) ||
     (dateFrom && dateFrom.value) ||
@@ -1377,6 +1417,7 @@ async function bootstrapBrowse() {
     renderGrid();
     updateFilterSummary();
     loadSummary();
+    refreshPendingSyncBanner();
 
     document.getElementById('loadingState').style.display = 'none';
     // Lazy-load collection photo counts to avoid N+1 on init
@@ -1997,6 +2038,7 @@ async function loadPhotos() {
 
     if (activeFolderId) params.set('folder_id', activeFolderId);
     if (filterRating > 0) params.set('rating_min', filterRating);
+    if (flagFilter) params.set('flag', flagFilter);
 
     var colorFilter = document.getElementById('colorFilter').value;
     if (colorFilter) params.set('color_label', colorFilter);
@@ -2063,6 +2105,7 @@ async function loadCalendarData() {
   params.set('year', calendarYear);
   if (activeFolderId) params.set('folder_id', activeFolderId);
   if (filterRating > 0) params.set('rating_min', filterRating);
+  if (flagFilter) params.set('flag', flagFilter);
   var colorFilter = document.getElementById('colorFilter').value;
   if (colorFilter) params.set('color_label', colorFilter);
   var search = document.getElementById('searchInput').value.trim();
@@ -2241,6 +2284,20 @@ function setFilterRating(val) {
     el.classList.toggle('active', parseInt(el.dataset.val) <= filterRating);
   });
   resetAndLoad();
+}
+
+function setFlagFilter(flag) {
+  flagFilter = flagFilter === flag ? '' : flag;
+  updateFlagFilterButtons();
+  if (timelineMode) loadCalendarData();
+  resetAndLoad();
+}
+
+function updateFlagFilterButtons() {
+  var pick = document.getElementById('pickFilterBtn');
+  var reject = document.getElementById('rejectFilterBtn');
+  if (pick) pick.classList.toggle('active-pick', flagFilter === 'flagged');
+  if (reject) reject.classList.toggle('active-reject', flagFilter === 'rejected');
 }
 
 function updateFilterSummary() {
@@ -2641,6 +2698,7 @@ async function applySelectionKeyword(keywordId) {
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
+  refreshPendingSyncBanner();
   showUndoToast();
 }
 
@@ -2658,6 +2716,7 @@ async function batchSetRating(rating) {
   });
   refreshGridCards(ids);
   scheduleCollectionCountsRefresh();
+  refreshPendingSyncBanner();
   showUndoToast();
 }
 
@@ -2726,6 +2785,7 @@ async function confirmBatchKeyword() {
   loadSelectionKeywordSuggestions(ids);
   loadKeywords();
   scheduleCollectionCountsRefresh();
+  refreshPendingSyncBanner();
   showUndoToast();
 }
 
@@ -2870,6 +2930,7 @@ async function undoLast() {
     showToast('Undone: ' + data.undone + ' — Ctrl+Shift+Z to redo');
     resetAndLoad();
     scheduleCollectionCountsRefresh();
+    refreshPendingSyncBanner();
   } catch(e) {}
 }
 
@@ -2879,6 +2940,7 @@ async function redoLast() {
     showToast('Redone: ' + data.redone);
     resetAndLoad();
     scheduleCollectionCountsRefresh();
+    refreshPendingSyncBanner();
   } catch(e) {}
 }
 
@@ -3167,6 +3229,7 @@ async function loadSummary() {
   var params = new URLSearchParams();
   if (activeFolderId) params.set('folder_id', activeFolderId);
   if (filterRating > 0) params.set('rating_min', filterRating);
+  if (flagFilter) params.set('flag', flagFilter);
   var colorFilter = document.getElementById('colorFilter').value;
   if (colorFilter) params.set('color_label', colorFilter);
   var dateFrom = document.getElementById('dateFrom').value;
@@ -3239,6 +3302,7 @@ async function setRating(photoId, rating) {
     refreshGridCards([photoId]);
     scheduleCollectionCountsRefresh();
     loadDetail(photoId);
+    refreshPendingSyncBanner();
   } catch(e) {}
 }
 
@@ -3349,6 +3413,7 @@ async function addKeyword() {
     loadDetail(selectedPhotoId);
     loadKeywords();
     scheduleCollectionCountsRefresh();
+    refreshPendingSyncBanner();
   } catch(e) {}
 }
 
@@ -3360,6 +3425,7 @@ async function removeKeyword(photoId, keywordId) {
     loadDetail(photoId);
     loadKeywords();
     scheduleCollectionCountsRefresh();
+    refreshPendingSyncBanner();
   } catch(e) {}
 }
 
@@ -3818,6 +3884,7 @@ async function setRatingFor(photoId, rating) {
   refreshGridCards([photoId]);
   scheduleCollectionCountsRefresh();
   if (selectedPhotoId === photoId) loadDetail(photoId);
+  refreshPendingSyncBanner();
 }
 
 async function setFlagFor(photoId, flag) {

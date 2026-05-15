@@ -321,6 +321,34 @@ def test_get_photos_filter_by_rating(tmp_path):
     assert results[0]['filename'] == 'b.jpg'
 
 
+def test_get_photos_filter_by_flag(tmp_path):
+    """get_photos and count_filtered_photos can filter picks and rejects."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    picked = db.add_photo(folder_id=fid, filename='pick.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0,
+                          timestamp='2024-01-01T10:00:00')
+    rejected = db.add_photo(folder_id=fid, filename='reject.jpg', extension='.jpg',
+                            file_size=100, file_mtime=2.0,
+                            timestamp='2024-01-02T10:00:00')
+    db.add_photo(folder_id=fid, filename='plain.jpg', extension='.jpg',
+                 file_size=100, file_mtime=3.0,
+                 timestamp='2024-01-03T10:00:00')
+    db.update_photo_flag(picked, 'flagged')
+    db.update_photo_flag(rejected, 'rejected')
+
+    picks = db.get_photos(flag='flagged')
+    rejects = db.get_photos(flag='rejected')
+
+    assert [p['filename'] for p in picks] == ['pick.jpg']
+    assert [p['filename'] for p in rejects] == ['reject.jpg']
+    assert db.count_filtered_photos(flag='flagged') == 1
+    assert db.count_filtered_photos(flag='rejected') == 1
+    assert db.get_browse_summary(flag='flagged')['filtered_total'] == 1
+    assert db.get_calendar_data(2024, flag='rejected')['days'] == {'2024-01-02': 1}
+
+
 def test_get_photos_filter_by_date_range(tmp_path):
     """get_photos can filter by date range."""
     from db import Database
