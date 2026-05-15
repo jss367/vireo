@@ -3858,7 +3858,7 @@ class Database:
             "detected_count": detected_count,
         }
 
-    def get_calendar_data(self, year, folder_id=None, rating_min=None, keyword=None, color_label=None):
+    def get_calendar_data(self, year, folder_id=None, rating_min=None, keyword=None, color_label=None, flag=None):
         """Return daily photo counts for a given year, scoped to active workspace."""
         ws = self._ws_id()
         conditions = ["wf.workspace_id = ?", "p.timestamp IS NOT NULL",
@@ -3877,6 +3877,9 @@ class Database:
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
+        if flag is not None:
+            conditions.append("COALESCE(p.flag, 'none') = ?")
+            where_params.append(flag)
         if keyword is not None:
             join_clause += """
                 LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
@@ -3933,6 +3936,7 @@ class Database:
         date_to=None,
         keyword=None,
         color_label=None,
+        flag=None,
     ):
         """Return paginated, filtered photo list scoped to active workspace."""
         conditions = ["wf.workspace_id = ?"]
@@ -3953,6 +3957,9 @@ class Database:
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
             where_params.append(_inclusive_date_to(date_to))
+        if flag is not None:
+            conditions.append("COALESCE(p.flag, 'none') = ?")
+            where_params.append(flag)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -4012,6 +4019,7 @@ class Database:
         date_to=None,
         keyword=None,
         color_label=None,
+        flag=None,
     ):
         """Return count of photos matching the given filters, scoped to active workspace."""
         conditions = ["wf.workspace_id = ?"]
@@ -4032,6 +4040,9 @@ class Database:
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
             where_params.append(_inclusive_date_to(date_to))
+        if flag is not None:
+            conditions.append("COALESCE(p.flag, 'none') = ?")
+            where_params.append(flag)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -4072,6 +4083,7 @@ class Database:
         keyword=None,
         collection_id=None,
         color_label=None,
+        flag=None,
     ):
         """Return summary stats for the browse panel, scoped to active workspace and filters."""
         ws = self._ws_id()
@@ -4094,6 +4106,9 @@ class Database:
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
             where_params.append(_inclusive_date_to(date_to))
+        if flag is not None:
+            conditions.append("COALESCE(p.flag, 'none') = ?")
+            where_params.append(flag)
 
         # When browsing a collection, restrict photos to those matching the
         # collection's rules by using a subquery from _build_collection_query.

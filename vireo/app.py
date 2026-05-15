@@ -1339,6 +1339,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             p["detections"] = det_map.get(p["id"], [])
         return photo_dicts
 
+    def _request_flag_filter():
+        flag = request.args.get("flag", None)
+        if flag in (None, ""):
+            return None
+        if flag not in ("none", "flagged", "rejected"):
+            raise ValueError("flag must be 'none', 'flagged', or 'rejected'")
+        return flag
+
     @app.route("/api/browse/init")
     def api_browse_init():
         """Combined endpoint for browse page initial load — one request instead of five."""
@@ -1782,6 +1790,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
         color_label = request.args.get("color_label", None)
+        try:
+            flag = _request_flag_filter()
+        except ValueError as e:
+            return json_error(str(e), 400)
 
         photos = db.get_photos(
             folder_id=folder_id,
@@ -1793,10 +1805,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             date_to=date_to,
             keyword=keyword,
             color_label=color_label,
+            flag=flag,
         )
 
         # Total count — use count_photos for unfiltered, otherwise use efficient COUNT query
-        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label]):
+        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag]):
             total = db.count_photos()
         else:
             total = db.count_filtered_photos(
@@ -1806,6 +1819,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 date_to=date_to,
                 keyword=keyword,
                 color_label=color_label,
+                flag=flag,
             )
 
         photo_dicts = [dict(p) for p in photos]
@@ -1831,9 +1845,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         rating_min = request.args.get("rating_min", None, type=int)
         keyword = request.args.get("keyword", None)
         color_label = request.args.get("color_label", None)
+        try:
+            flag = _request_flag_filter()
+        except ValueError as e:
+            return json_error(str(e), 400)
         data = db.get_calendar_data(
             year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword,
-            color_label=color_label,
+            color_label=color_label, flag=flag,
         )
         return jsonify(data)
 
@@ -1847,6 +1865,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         keyword = request.args.get("keyword", None)
         collection_id = request.args.get("collection_id", None, type=int)
         color_label = request.args.get("color_label", None)
+        try:
+            flag = _request_flag_filter()
+        except ValueError as e:
+            return json_error(str(e), 400)
         return jsonify(
             db.get_browse_summary(
                 folder_id=folder_id,
@@ -1856,6 +1878,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 keyword=keyword,
                 collection_id=collection_id,
                 color_label=color_label,
+                flag=flag,
             )
         )
 
