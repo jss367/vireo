@@ -792,7 +792,7 @@ body {
 
     <!-- Filter Bar -->
     <div class="filter-bar">
-      <input type="text" id="searchInput" placeholder="Search keywords or filenames..." onkeydown="if(event.key==='Enter')applyFilters()" oninput="if(!this.value.trim())applyFilters()">
+      <input type="text" id="searchInput" placeholder="Search keywords or filenames..." onkeydown="if(event.key==='Enter')applySearchFilterNow()" oninput="scheduleSearchFilter()">
       <input type="text" id="clipSearchInput" placeholder="CLIP search: describe what you see..."
              style="flex:1;min-width:200px;"
              onkeydown="if(event.key==='Enter')runClipSearch()">
@@ -1125,6 +1125,7 @@ var calendarYear = new Date().getFullYear();
 var selectedDay = null;
 var calendarData = null;
 var clipSearchActive = false;
+var searchFilterTimer = null;
 
 function hasActiveBrowseFilter() {
   var searchInput = document.getElementById('searchInput');
@@ -2089,6 +2090,22 @@ function calendarChangeYear(delta) {
 function applyFilters() {
   if (timelineMode) loadCalendarData();
   resetAndLoad();
+}
+
+function scheduleSearchFilter() {
+  if (searchFilterTimer) clearTimeout(searchFilterTimer);
+  searchFilterTimer = setTimeout(function() {
+    searchFilterTimer = null;
+    applyFilters();
+  }, 250);
+}
+
+function applySearchFilterNow() {
+  if (searchFilterTimer) {
+    clearTimeout(searchFilterTimer);
+    searchFilterTimer = null;
+  }
+  applyFilters();
 }
 
 function setFilterRating(val) {
