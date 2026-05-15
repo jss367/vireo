@@ -1091,6 +1091,14 @@ def test_pin_tab_rejects_unknown_id(db):
         db.pin_tab("not_a_real_page")
 
 
+def test_all_registered_pages_are_valid_tab_ids():
+    from app import ALL_PAGES
+    from db import ALL_NAV_IDS
+
+    registered_ids = {page["id"] for page in ALL_PAGES}
+    assert registered_ids <= ALL_NAV_IDS
+
+
 def test_unpin_tab_removes(db):
     ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)

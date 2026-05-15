@@ -58,7 +58,7 @@ KEYWORD_TYPES = frozenset({"taxonomy", "individual", "location", "genre", "gener
 SUBJECT_TYPES_DEFAULT = frozenset({"taxonomy", "individual", "genre"})
 
 ALL_NAV_IDS = frozenset({
-    "pipeline", "jobs", "pipeline_review", "review", "cull",
+    "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
     "misses", "highlights", "browse", "map", "variants",
     "dashboard", "audit", "compare",
     "settings", "workspace", "lightroom", "shortcuts",
