@@ -14,6 +14,18 @@
   height: calc(100vh - 48px - var(--bottom-offset, 28px));
   overflow: hidden;
 }
+.pipeline-layout.sidebar-collapsed .pipeline-sidebar {
+  width: 44px;
+  padding: 10px 6px;
+  overflow: hidden;
+}
+.pipeline-layout.sidebar-collapsed .sidebar-content {
+  display: none;
+}
+.pipeline-layout.sidebar-collapsed .pipeline-sidebar-toggle {
+  margin-left: 0;
+  margin-right: 0;
+}
 
 /* -- Sidebar -- */
 .pipeline-sidebar {
@@ -23,6 +35,29 @@
   border-right: 1px solid var(--border-primary);
   padding: 20px 16px;
   overflow-y: auto;
+  transition: width 0.18s ease, padding 0.18s ease;
+}
+.pipeline-sidebar-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  margin: 0 0 14px auto;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.pipeline-sidebar-toggle:hover {
+  border-color: var(--text-muted);
+  color: var(--text-primary);
 }
 .sidebar-section { margin-bottom: 24px; position: relative; }
 .sidebar-title {
@@ -37,6 +72,7 @@
 /* -- Main area -- */
 .pipeline-main {
   flex: 1;
+  min-width: 0;
   padding: 20px 24px;
   overflow-y: auto;
 }
@@ -44,8 +80,8 @@
 /* Summary bar */
 .summary-bar {
   display: flex;
-  gap: 20px;
-  align-items: center;
+  gap: 18px;
+  align-items: stretch;
   flex-wrap: wrap;
   margin-bottom: 20px;
   padding: 16px 20px;
@@ -53,9 +89,33 @@
   border-radius: 8px;
   border: 1px solid var(--border-primary);
 }
-.summary-stat { text-align: center; }
+.summary-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 18px;
+  border-right: 1px solid var(--border-primary);
+}
+.summary-group:last-of-type { border-right: none; padding-right: 0; }
+.summary-group-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+.summary-group-stats {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.summary-stat { min-width: 58px; text-align: left; }
+.summary-stat.wide { min-width: 150px; }
 .summary-stat .num { font-size: 28px; font-weight: 700; }
 .summary-stat .label { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.summary-stat .detail { font-size: 11px; color: var(--text-muted); margin-top: 2px; white-space: nowrap; }
+.summary-stat .ratio { white-space: nowrap; }
 
 /* Empty state */
 .empty-state {
@@ -866,7 +926,6 @@ input[type="range"]::-moz-range-thumb {
 }
 .grm-card:hover { border-color: var(--text-ghost); }
 .grm-card.selected { border-color: var(--accent); }
-.grm-card.ai-best { border-color: var(--warning); }
 .grm-card.dragging { cursor: grabbing; }
 .grm-card.dragging img { pointer-events: none; }
 .grm-card.has-offset::after {
@@ -923,7 +982,6 @@ input[type="range"]::-moz-range-thumb {
 .grm-card-species { color: var(--text-primary); font-weight: 600; }
 .grm-card-scores { color: var(--text-dim); }
 .grm-card-scores .score-val { color: var(--text-secondary); }
-.grm-card-ai { color: var(--warning); font-size: 10px; font-weight: 600; }
 
 .grm-footer {
   padding: 12px 20px;
@@ -1014,9 +1072,19 @@ input[type="range"]::-moz-range-thumb {
 <body>
 {% include '_navbar.html' %}
 
-<div class="pipeline-layout">
+<div class="pipeline-layout" id="pipelineLayout">
   <!-- Sidebar -->
-  <div class="pipeline-sidebar">
+  <div class="pipeline-sidebar" id="pipelineSidebar">
+    <button type="button"
+            class="pipeline-sidebar-toggle"
+            id="pipelineSidebarToggle"
+            data-testid="pipeline-sidebar-toggle"
+            onclick="togglePipelineSidebar()"
+            aria-controls="pipelineSidebarContent"
+            aria-label="Collapse sidebar"
+            aria-expanded="true"
+            title="Collapse sidebar">&#8249;</button>
+    <div class="sidebar-content" id="pipelineSidebarContent">
     <div class="sidebar-section" id="sidebarScoring" style="display:none">
       <div class="sidebar-title">Scoring Thresholds</div>
       <div class="reflow-indicator" id="reflowIndicator">Recomputing...</div>
@@ -1179,6 +1247,7 @@ input[type="range"]::-moz-range-thumb {
     <div class="sidebar-section">
       <a href="/pipeline" class="back-link">&larr; Back to Pipeline</a>
     </div>
+    </div>
   </div>
 
   <!-- Main area -->
@@ -1192,41 +1261,58 @@ input[type="range"]::-moz-range-thumb {
 
     <!-- Summary bar (hidden until data loads) -->
     <div class="summary-bar" id="summaryBar" style="display:none">
-      <div class="summary-stat">
-        <div class="num" id="statTotalPhotos">0</div>
-        <div class="label">Photos</div>
+      <div class="summary-group" aria-label="Inventory counts">
+        <div class="summary-group-title">Inventory</div>
+        <div class="summary-group-stats">
+          <div class="summary-stat" title="Total photos included in this pipeline review result">
+            <div class="num" id="statTotalPhotos">0</div>
+            <div class="label">Photos</div>
+          </div>
+          <div class="summary-stat" title="Encounter groups built from nearby, similar photos">
+            <div class="num" id="statEncounterCount">0</div>
+            <div class="label">Encounters</div>
+          </div>
+          <div class="summary-stat" title="Burst groups inside encounters">
+            <div class="num" id="statBurstCount">0</div>
+            <div class="label">Bursts</div>
+          </div>
+        </div>
       </div>
-      <div class="summary-stat">
-        <div class="num" id="statEncounterCount">0</div>
-        <div class="label">Encounters</div>
+      <div class="summary-group" aria-label="Triage counts">
+        <div class="summary-group-title">Triage</div>
+        <div class="summary-group-stats">
+          <div class="summary-stat" title="Photos currently labeled KEEP by triage">
+            <div class="num" style="color:var(--accent);" id="statKeepCount">0</div>
+            <div class="label">Keep Photos</div>
+          </div>
+          <div class="summary-stat" title="Photos currently labeled REVIEW by triage">
+            <div class="num" style="color:var(--warning);" id="statReviewCount">0</div>
+            <div class="label">Review Photos</div>
+          </div>
+          <div class="summary-stat" title="Photos currently labeled REJECT by triage">
+            <div class="num" style="color:var(--danger);" id="statRejectCount">0</div>
+            <div class="label">Reject Photos</div>
+          </div>
+          <div class="summary-stat" id="statProtectedWrap" style="display:none" title="Protected photos that triage kept out of automatic rejection">
+            <div class="num" style="color:var(--warning);" id="statProtected">0</div>
+            <div class="label">Protected Photos</div>
+          </div>
+        </div>
       </div>
-      <div class="summary-stat">
-        <div class="num" id="statBurstCount">0</div>
-        <div class="label">Bursts</div>
-      </div>
-      <div class="summary-stat">
-        <div class="num" style="color:var(--accent);" id="statKeepCount">0</div>
-        <div class="label">Keep</div>
-      </div>
-      <div class="summary-stat">
-        <div class="num" style="color:var(--warning);" id="statReviewCount">0</div>
-        <div class="label">Review</div>
-      </div>
-      <div class="summary-stat">
-        <div class="num" style="color:var(--danger);" id="statRejectCount">0</div>
-        <div class="label">Reject</div>
-      </div>
-      <div class="summary-stat" id="statProtectedWrap" style="display:none">
-        <div class="num" style="color:var(--warning);" id="statProtected">0</div>
-        <div class="label">Protected</div>
-      </div>
-      <div class="summary-stat">
-        <div class="num" style="color:var(--success, #4caf50);" id="statConfirmedCount">0</div>
-        <div class="label">Confirmed</div>
-      </div>
-      <div class="summary-stat">
-        <div class="num" id="statUnconfirmedCount">0</div>
-        <div class="label">Unconfirmed</div>
+      <div class="summary-group" id="speciesReviewSummary" aria-label="Species review counts" title="Species confirmation is counted by review unit: bursts when an encounter has bursts, otherwise encounters.">
+        <div class="summary-group-title">Species Review</div>
+        <div class="summary-group-stats">
+          <div class="summary-stat wide">
+            <div class="num ratio" style="color:var(--success, #4caf50);" id="statConfirmedCount">0 / 0</div>
+            <div class="label" id="statConfirmedLabel">Review Units Confirmed</div>
+            <div class="detail" id="statConfirmedDetail">0 review units need confirmation</div>
+          </div>
+          <div class="summary-stat wide">
+            <div class="num" id="statUnconfirmedCount">0</div>
+            <div class="label" id="statUnconfirmedLabel">Need Confirmation</div>
+            <div class="detail" id="statUnconfirmedDetail">0 review units total</div>
+          </div>
+        </div>
       </div>
       <a id="missesReviewBtn" href="/misses" data-testid="pipeline-review-misses"
          style="display:none;margin-left:auto;padding:8px 14px;
@@ -1326,7 +1412,7 @@ input[type="range"]::-moz-range-thumb {
       <input type="range" id="grmResSlider" min="0" max="3" step="1" value="3" oninput="grmSetResolution(this.value)">
       <span id="grmResLabel" style="font-size:11px;color:var(--text-dim);min-width:140px;">1920 · preview</span>
     </div>
-    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
+    <span class="grm-hint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);">Apply & Close</button>
   </div>
 </div>
@@ -1351,6 +1437,36 @@ var reviewReadiness = null;
 // instead of letting it migrate to a sibling encounter that happens to
 // share the original first photo_id.
 var collapsedEncounters = new Set();
+var PIPELINE_SIDEBAR_STORAGE_KEY = 'vireo.pipelineReview.sidebarCollapsed';
+
+function setPipelineSidebarCollapsed(collapsed, persist) {
+  var layout = document.getElementById('pipelineLayout');
+  var toggle = document.getElementById('pipelineSidebarToggle');
+  if (!layout || !toggle) return;
+  layout.classList.toggle('sidebar-collapsed', !!collapsed);
+  toggle.textContent = collapsed ? '\u203a' : '\u2039';
+  toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  toggle.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+  toggle.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+  if (persist !== false) {
+    try {
+      window.localStorage.setItem(PIPELINE_SIDEBAR_STORAGE_KEY, collapsed ? '1' : '0');
+    } catch (e) {}
+  }
+}
+
+function togglePipelineSidebar() {
+  var layout = document.getElementById('pipelineLayout');
+  setPipelineSidebarCollapsed(!(layout && layout.classList.contains('sidebar-collapsed')));
+}
+
+function initPipelineSidebarState() {
+  var collapsed = false;
+  try {
+    collapsed = window.localStorage.getItem(PIPELINE_SIDEBAR_STORAGE_KEY) === '1';
+  } catch (e) {}
+  setPipelineSidebarCollapsed(collapsed, false);
+}
 
 function encounterKey(enc) {
   if (!enc || !enc.photo_ids || !enc.photo_ids.length) return null;
@@ -2097,10 +2213,37 @@ function refreshLocalSummaryCounts() {
   return summary;
 }
 
+function getConfirmationUnitName(summary) {
+  var confirmed = Number(summary.confirmed_count || 0);
+  var unconfirmed = Number(summary.unconfirmed_count || 0);
+  var totalUnits = confirmed + unconfirmed;
+  var bursts = Number(summary.burst_count || 0);
+  var encounters = Number(summary.encounter_count || 0);
+  if (totalUnits > 0 && bursts === totalUnits) return totalUnits === 1 ? 'Burst' : 'Bursts';
+  if (totalUnits > 0 && encounters === totalUnits) return totalUnits === 1 ? 'Encounter' : 'Encounters';
+  return totalUnits === 1 ? 'Review Unit' : 'Review Units';
+}
+
+function confirmationUnitForCount(unitName, count) {
+  if (count !== 1) return unitName.toLowerCase();
+  if (unitName === 'Bursts') return 'burst';
+  if (unitName === 'Encounters') return 'encounter';
+  if (unitName === 'Review Units') return 'review unit';
+  return unitName.toLowerCase();
+}
+
+function formatConfirmationDetail(count, unitName, suffix) {
+  return count + ' ' + confirmationUnitForCount(unitName, count) + ' ' + suffix;
+}
+
 function updateSummaryBar(summary) {
   if (pipelineResults && (summary.confirmed_count == null || summary.unconfirmed_count == null)) {
     summary = refreshLocalSummaryCounts() || summary;
   }
+  var confirmed = Number(summary.confirmed_count || 0);
+  var unconfirmed = Number(summary.unconfirmed_count || 0);
+  var confirmationTotal = confirmed + unconfirmed;
+  var confirmationUnit = getConfirmationUnitName(summary);
   var el;
   el = document.getElementById('statTotalPhotos'); if (el) el.textContent = summary.total_photos;
   el = document.getElementById('statEncounterCount'); if (el) el.textContent = summary.encounter_count;
@@ -2108,8 +2251,16 @@ function updateSummaryBar(summary) {
   el = document.getElementById('statKeepCount'); if (el) el.textContent = summary.keep_count;
   el = document.getElementById('statReviewCount'); if (el) el.textContent = summary.review_count;
   el = document.getElementById('statRejectCount'); if (el) el.textContent = summary.reject_count;
-  el = document.getElementById('statConfirmedCount'); if (el) el.textContent = summary.confirmed_count || 0;
-  el = document.getElementById('statUnconfirmedCount'); if (el) el.textContent = summary.unconfirmed_count || 0;
+  el = document.getElementById('statConfirmedCount'); if (el) el.textContent = confirmed + ' / ' + confirmationTotal;
+  el = document.getElementById('statConfirmedLabel'); if (el) el.textContent = confirmationUnit + ' Confirmed';
+  el = document.getElementById('statConfirmedDetail'); if (el) el.textContent = formatConfirmationDetail(unconfirmed, confirmationUnit, 'need confirmation');
+  el = document.getElementById('statUnconfirmedCount'); if (el) el.textContent = unconfirmed;
+  el = document.getElementById('statUnconfirmedLabel'); if (el) el.textContent = 'Need Confirmation';
+  el = document.getElementById('statUnconfirmedDetail'); if (el) el.textContent = formatConfirmationDetail(confirmationTotal, confirmationUnit, 'total');
+  el = document.getElementById('speciesReviewSummary');
+  if (el) {
+    el.title = 'Species confirmation is counted by review unit: bursts when an encounter has bursts, otherwise encounters. Current basis: ' + confirmationUnit.toLowerCase() + '.';
+  }
   var protWrap = document.getElementById('statProtectedWrap');
   if (protWrap) {
     if (summary.rarity_protected) {
@@ -2201,6 +2352,35 @@ function findEncounterForPhoto(photoId) {
   return null;
 }
 
+var inspectPhotoId = null;
+
+function pipelineReviewBareKey(e, key) {
+  return !e.ctrlKey && !e.metaKey && !e.altKey && e.key && e.key.toLowerCase() === key;
+}
+
+function setPipelineReviewFlag(photoId, flag) {
+  if (flag !== 'flagged' && flag !== 'rejected' && flag !== 'none') return Promise.resolve();
+  photoId = parseInt(photoId, 10);
+  if (!photoId) return Promise.resolve();
+
+  return safeFetch('/api/photos/' + photoId + '/flag', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ flag: flag }),
+  }).then(function() {
+    var photo = findPhotoInResults(photoId);
+    if (photo) photo.flag = flag;
+    renderResults();
+    if (inspectPhotoId === photoId && document.getElementById('inspectOverlay').classList.contains('open')) {
+      openInspect(photoId);
+    }
+    var msg = flag === 'flagged' ? 'Marked as pick' : (flag === 'rejected' ? 'Marked as reject' : 'Flag cleared');
+    showToast(msg, 'success');
+  });
+}
+
+window.setFlagFor = setPipelineReviewFlag;
+
 function openInspect(photoId) {
   var photo = findPhotoInResults(photoId);
   if (!photo) return;
@@ -2208,6 +2388,7 @@ function openInspect(photoId) {
   // Route multi-photo bursts to the GRM
   var burstInfo = findBurstForPhoto(photoId);
   if (burstInfo && burstInfo.photoIds.length >= 2) {
+    closeInspect();
     openGroupReview(burstInfo.encIdx, burstInfo.burstIdx, photoId);
     return;
   }
@@ -2215,6 +2396,7 @@ function openInspect(photoId) {
   var enc = findEncounterForPhoto(photoId);
   var panel = document.getElementById('inspectPanel');
   var overlay = document.getElementById('inspectOverlay');
+  inspectPhotoId = photoId;
 
   var label = (photo.label || '').toLowerCase();
   var q = photo.quality_composite || 0;
@@ -2337,10 +2519,17 @@ function openInspect(photoId) {
 function closeInspect() {
   document.getElementById('inspectOverlay').classList.remove('open');
   document.removeEventListener('keydown', inspectKeyHandler);
+  inspectPhotoId = null;
 }
 
 function inspectKeyHandler(e) {
-  if (e.key === 'Escape') closeInspect();
+  if (e.key === 'Escape') { closeInspect(); return; }
+  if (pipelineReviewBareKey(e, 'p') || pipelineReviewBareKey(e, 'x')) {
+    var flag = pipelineReviewBareKey(e, 'p') ? 'flagged' : 'rejected';
+    setPipelineReviewFlag(inspectPhotoId, flag);
+    e.preventDefault();
+    e.stopPropagation();
+  }
 }
 
 function toggleMask() {
@@ -2474,6 +2663,7 @@ function computeReviewNow() {
 }
 
 function initPipelineReviewPage() {
+  initPipelineSidebarState();
   safeFetch('/api/pipeline/page-init', {}, { toast: false })
   .then(function(data) {
     // Capture overrides regardless of state so computeReviewNow() can apply
@@ -3033,13 +3223,11 @@ function grmShowSeedError(items, selectPhotoId) {
   }
 }
 
-// Seed picks/rejects on modal open. Photos already flagged/rejected in the
-// DB land in those zones; the quality-score heuristic only fills in zones
-// for photos with no flag set, so re-opening a burst respects prior choices.
+// Seed picks/rejects on modal open only from live DB state. Unflagged photos
+// stay as candidates until the user explicitly moves them.
 function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
   grmState.dbState = dbPhotos || {};
 
-  var unflagged = [];
   items.forEach(function(p) {
     var st = grmState.dbState[p.id];
     var flag = st ? st.flag : null;
@@ -3047,40 +3235,16 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
       grmState.picks.add(p.id);
     } else if (flag === 'rejected') {
       grmState.rejects.add(p.id);
-    } else {
-      unflagged.push(p);
     }
   });
 
-  // Heuristic fallback for photos with no DB flag: auto-pick the highest
-  // quality and auto-reject the worst third (only if no DB picks yet — we
-  // don't want to override the user's prior pick by piling on more).
-  if (grmState.picks.size === 0 && unflagged.length > 0) {
-    var best = unflagged[0];
-    unflagged.forEach(function(p) {
-      if ((p.quality_composite || 0) > (best.quality_composite || 0)) best = p;
-    });
-    grmState.picks.add(best.id);
-  }
-  if (grmState.rejects.size === 0 && items.length > 2) {
-    var sorted = unflagged.slice().sort(function(a, b) {
-      return (a.quality_composite || 0) - (b.quality_composite || 0);
-    });
-    var worstThird = Math.max(1, Math.floor(items.length / 3));
-    for (var i = 0; i < worstThird && i < sorted.length; i++) {
-      if (!grmState.picks.has(sorted[i].id)) {
-        grmState.rejects.add(sorted[i].id);
-      }
-    }
-  }
-
   var initSelect = selectPhotoId;
   if (!initSelect) {
-    var firstPick = null;
+    var firstSelected = null;
     items.forEach(function(p) {
-      if (firstPick == null && grmState.picks.has(p.id)) firstPick = p.id;
+      if (firstSelected == null && (grmState.picks.has(p.id) || grmState.rejects.has(p.id))) firstSelected = p.id;
     });
-    initSelect = firstPick || (items[0] && items[0].id);
+    initSelect = firstSelected || (items[0] && items[0].id);
   }
   // Mark the modal seeded *before* re-rendering so grmUpdateApplyLabel
   // (called from renderGroupModal) re-enables the button.
@@ -3110,17 +3274,9 @@ function closeGroupReview() {
 function renderGroupModal() {
   var items = grmState.items.filter(function(p) { return !grmState.removed.has(p.id); });
 
-  // Find AI best
-  var bestId = null;
-  var bestScore = -1;
-  items.forEach(function(p) {
-    if ((p.quality_composite || 0) > bestScore) { bestScore = p.quality_composite || 0; bestId = p.id; }
-  });
-
   function renderCard(p) {
-    var isBest = p.id === bestId;
     var isSelected = p.id === grmState.selected;
-    var cls = 'grm-card' + (isSelected ? ' selected' : '') + (isBest ? ' ai-best' : '');
+    var cls = 'grm-card' + (isSelected ? ' selected' : '');
     var qScore = p.quality_composite != null ? Math.round(p.quality_composite * 100) : '-';
     var sharp = p.subject_tenengrad != null ? Math.round(p.subject_tenengrad) : '-';
 
@@ -3156,7 +3312,6 @@ function renderGroupModal() {
       '<div class="grm-card-info">' +
         '<div class="grm-card-species">' + escapeHtml(p.filename || '') + '</div>' +
         '<div class="grm-card-scores">Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span></div>' +
-        (isBest ? '<div class="grm-card-ai">AI BEST</div>' : '') +
       '</div>' +
     '</div>';
   }
@@ -3823,6 +3978,8 @@ document.addEventListener('keydown', function(e) {
   }
   if (e.key === 'Delete' || e.key === 'Backspace') { grmRemoveFromGroup(); e.preventDefault(); return; }
   if (e.key === ' ') { grmMoveCandidate(); e.preventDefault(); return; }
+  if (pipelineReviewBareKey(e, 'p')) { grmMovePick(); e.preventDefault(); return; }
+  if (pipelineReviewBareKey(e, 'x')) { grmMoveReject(); e.preventDefault(); return; }
 });
 
 /* --- Right-click → open in Browse view ---

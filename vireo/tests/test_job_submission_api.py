@@ -1,10 +1,59 @@
 """Tests for job submission and history API routes."""
 
+import json
 import os
+import sys
 import time
+from types import SimpleNamespace
 
 from PIL import Image
 from wait import wait_for_job_via_client
+
+
+def _stub_classify_job(monkeypatch, sleep=0.2):
+    import classify_job
+
+    def fake_run_classify_job(*args, **kwargs):
+        time.sleep(sleep)
+        return {"ok": True}
+
+    monkeypatch.setattr(classify_job, "run_classify_job", fake_run_classify_job)
+
+
+def _set_onnx_providers(monkeypatch, providers):
+    fake_ort = SimpleNamespace(
+        __version__="1.test",
+        get_available_providers=lambda: list(providers),
+    )
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+
+
+def _collection_with_photo_count(db, count):
+    fid = db.get_folder_tree()[0]["id"]
+    photo_ids = [
+        r["id"]
+        for r in db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
+    ]
+    while len(photo_ids) < count:
+        idx = len(photo_ids)
+        photo_ids.append(
+            db.add_photo(
+                folder_id=fid,
+                filename=f"runtime-warning-{idx}.jpg",
+                extension=".jpg",
+                file_size=1000 + idx,
+                file_mtime=float(idx),
+            )
+        )
+    return db.add_collection(
+        f"runtime-warning-{count}",
+        json.dumps([{"field": "photo_ids", "value": photo_ids[:count]}]),
+    )
+
+
+def _job_from_response(client, job_id):
+    data = client.get("/api/jobs").get_json()
+    return next(j for j in data["active"] if j["id"] == job_id)
 
 
 def test_job_thumbnails_returns_job_id(app_and_db):
@@ -16,6 +65,120 @@ def test_job_thumbnails_returns_job_id(app_and_db):
     data = resp.get_json()
     assert "job_id" in data
     assert data["job_id"].startswith("thumbnails-")
+
+
+def test_large_classify_job_gets_cpu_only_runtime_warning(
+    app_and_db, monkeypatch,
+):
+    """Large ML jobs expose a CPU-only warning with provider details."""
+    _stub_classify_job(monkeypatch)
+    _set_onnx_providers(monkeypatch, ["CPUExecutionProvider"])
+    app, db = app_and_db
+    cid = _collection_with_photo_count(db, 30)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/classify", json={"collection_id": cid})
+    assert resp.status_code == 200
+
+    job = _job_from_response(client, resp.get_json()["job_id"])
+    warning = job["runtime_warning"]
+    assert warning["title"] == "Using CPU only"
+    assert warning["onnxruntime_providers"] == ["CPUExecutionProvider"]
+    assert "Available ONNX Runtime providers: CPUExecutionProvider" in warning["detail"]
+
+
+def test_large_classify_job_skips_warning_when_gpu_provider_present(
+    app_and_db, monkeypatch,
+):
+    """A GPU-capable ONNX Runtime provider suppresses the CPU-only warning."""
+    _stub_classify_job(monkeypatch)
+    _set_onnx_providers(monkeypatch, ["CUDAExecutionProvider", "CPUExecutionProvider"])
+    app, db = app_and_db
+    cid = _collection_with_photo_count(db, 30)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/classify", json={"collection_id": cid})
+    assert resp.status_code == 200
+
+    job = _job_from_response(client, resp.get_json()["job_id"])
+    assert job["runtime_warning"] is None
+
+
+def test_large_classify_job_skips_warning_when_directml_provider_present(
+    app_and_db, monkeypatch,
+):
+    """Non-CUDA/CoreML accelerated ONNX providers also suppress warnings."""
+    _stub_classify_job(monkeypatch)
+    _set_onnx_providers(monkeypatch, ["DmlExecutionProvider", "CPUExecutionProvider"])
+    app, db = app_and_db
+    cid = _collection_with_photo_count(db, 30)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/classify", json={"collection_id": cid})
+    assert resp.status_code == 200
+
+    job = _job_from_response(client, resp.get_json()["job_id"])
+    assert job["runtime_warning"] is None
+
+
+def test_small_classify_job_does_not_show_cpu_only_warning(
+    app_and_db, monkeypatch,
+):
+    """Small jobs keep CPU-only execution quiet to avoid warning noise."""
+    _stub_classify_job(monkeypatch)
+    _set_onnx_providers(monkeypatch, ["CPUExecutionProvider"])
+    app, db = app_and_db
+    cid = _collection_with_photo_count(db, 3)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/classify", json={"collection_id": cid})
+    assert resp.status_code == 200
+
+    job = _job_from_response(client, resp.get_json()["job_id"])
+    assert job["runtime_warning"] is None
+
+
+def test_cpu_only_runtime_warning_can_be_dismissed(app_and_db, monkeypatch):
+    """Dismissing a warning is client-local and does not suppress API data."""
+    _stub_classify_job(monkeypatch, sleep=0.4)
+    _set_onnx_providers(monkeypatch, ["CPUExecutionProvider"])
+    app, db = app_and_db
+    cid = _collection_with_photo_count(db, 30)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/classify", json={"collection_id": cid})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    warning = _job_from_response(client, job_id)["runtime_warning"]
+    assert warning["id"] == "cpu-only-ml"
+
+    dismiss = client.post(
+        "/api/jobs/runtime-warning/dismiss",
+        json={"id": warning["id"]},
+    )
+    assert dismiss.status_code == 200
+
+    job = _job_from_response(client, job_id)
+    assert job["runtime_warning"]["id"] == "cpu-only-ml"
+
+
+def test_precompute_embedding_warning_sizing_ignores_decode_errors(
+    app_and_db, monkeypatch, tmp_path,
+):
+    """A non-UTF-8 labels file must not make job submission fail."""
+    _set_onnx_providers(monkeypatch, ["CPUExecutionProvider"])
+    labels_file = tmp_path / "labels.txt"
+    labels_file.write_bytes(b"\xff\xfe\x00")
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/jobs/precompute-embeddings",
+        json={"model_id": "missing-model", "labels_file": str(labels_file)},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["job_id"].startswith("precompute-embeddings-")
 
 
 def test_job_cull_returns_job_id(app_and_db):

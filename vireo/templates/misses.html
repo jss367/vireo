@@ -29,6 +29,43 @@
     max-width: 800px;
   }
 
+  .misses-selection-bar {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    margin: 0 0 12px;
+    padding: 8px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  }
+  .misses-selection-bar.active { display: flex; }
+  .misses-selection-count {
+    font-size: 12px;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    margin-right: auto;
+  }
+  .misses-selection-btn {
+    border: 1px solid var(--border-secondary);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    padding: 5px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .misses-selection-btn:hover { border-color: var(--accent); }
+  .misses-selection-btn.danger {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: #fff;
+  }
+
   .misses-section {
     margin-bottom: 28px;
     border: 1px solid var(--border-primary);
@@ -262,8 +299,22 @@
   <p class="misses-intro">
     Frames flagged as misses by the pipeline. Bulk-reject a category to set
     <code>flag=rejected</code> on every photo in it; photos aren't deleted.
-    Click a thumbnail to open at fit-to-screen; click the photo to toggle 1:1 zoom.
+    Click a thumbnail to select it; Shift-click selects a range. Double-click
+    opens the image at fit-to-screen; click the photo to toggle 1:1 zoom.
   </p>
+
+  <div class="misses-selection-bar" id="missesSelectionBar">
+    <span class="misses-selection-count" id="missesSelectionCount">0 selected</span>
+    <button class="misses-selection-btn" type="button" onclick="bulkUnflagSelection()">
+      Unmark missed
+    </button>
+    <button class="misses-selection-btn danger" type="button" onclick="deleteSelectedMisses()">
+      Delete selected
+    </button>
+    <button class="misses-selection-btn" type="button" onclick="clearSelection()">
+      Clear
+    </button>
+  </div>
 
   <div id="scopeBanner" style="display:none;padding:8px 12px;margin-bottom:12px;
        background:var(--bg-tertiary);border:1px solid var(--border-primary);
@@ -385,6 +436,8 @@ function render() {
       '</div>';
     focusedCategory = null;
     focusedIndex = -1;
+    selection.clear();
+    updateSelectionBar();
     return;
   }
 
@@ -399,9 +452,10 @@ function render() {
       '<kbd>Shift+J/K</kbd> extend selection &middot; ' +
       '<kbd>U</kbd>/<kbd>P</kbd>/<kbd>X</kbd> unflag/flag/reject (focused or selection) &middot; ' +
       '<kbd>Esc</kbd> clear selection &middot; ' +
-      'Ctrl/Shift-click to multi-select; click to open lightbox' +
+      'Click to select; Shift-click range; double-click to open lightbox' +
     '</div>';
   root.innerHTML = html;
+  updateSelectionBar();
 }
 
 function renderSection(cat, photos) {
@@ -475,7 +529,8 @@ function renderCard(cat, p, idx) {
       'data-filename="' + escapeAttr(p.filename || '') + '" ' +
       'data-testid="miss-card-' + cat + '-' + p.id + '" ' +
       'aria-label="' + ariaLabel + '" ' +
-      'onclick="onCardClick(\'' + cat + '\', ' + idx + ', ' + p.id + ', event)">' +
+      'onclick="onCardClick(\'' + cat + '\', ' + idx + ', ' + p.id + ', event)" ' +
+      'ondblclick="onCardDoubleClick(\'' + cat + '\', ' + idx + ', event)">' +
       '<div class="miss-card-img-wrap">' +
         '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename || '') + '">' +
         bboxHtml +
@@ -674,10 +729,9 @@ async function unflagMiss(cat, photoId, e) {
 }
 
 /* ---------- Selection ----------
- * Plain click preserves the legacy "click to open lightbox" behavior — adding
- * a focus side-effect is safe because openMiss already calls setFocused. The
- * selection model is purely additive: only ctrl/shift-click engage it, so a
- * user who never reaches for a modifier sees no behavior change.
+ * Plain click selects exactly one photo. Ctrl/Cmd-click toggles additional
+ * photos, and Shift-click selects a range from the focused anchor. Double-click
+ * opens the shared lightbox.
  *
  * Range selection (shift-click, shift+J/K) stays within a single category
  * because the misses page renders a separate grid per category and the user's
@@ -690,6 +744,7 @@ function clearSelection() {
   document.querySelectorAll('.miss-card.selected').forEach(function(el) {
     el.classList.remove('selected');
   });
+  updateSelectionBar();
 }
 
 function setSelected(photoId, on) {
@@ -701,6 +756,16 @@ function setSelected(photoId, on) {
   // visually out of sync with the selection set.
   var els = document.querySelectorAll('.miss-card[data-photo-id="' + photoId + '"]');
   els.forEach(function(el) { el.classList.toggle('selected', on); });
+  updateSelectionBar();
+}
+
+function updateSelectionBar() {
+  var bar = document.getElementById('missesSelectionBar');
+  var countEl = document.getElementById('missesSelectionCount');
+  if (!bar || !countEl) return;
+  var n = selection.size;
+  bar.classList.toggle('active', n > 0);
+  countEl.textContent = n + ' selected';
 }
 
 function selectRangeWithinCategory(cat, fromIdx, toIdx) {
@@ -732,11 +797,76 @@ function onCardClick(cat, idx, photoId, e) {
     setFocused(cat, idx);
     return;
   }
-  // Plain click: clear any prior selection, then fall through to the legacy
-  // open-lightbox path. openMiss() calls setFocused() so the anchor moves with
-  // the click.
+  // Plain click selects exactly this card and moves the shift-click anchor.
+  if (e) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
   clearSelection();
+  setSelected(photoId, true);
+  setFocused(cat, idx);
+}
+
+function onCardDoubleClick(cat, idx, e) {
+  if (e && e.target && e.target.closest('button')) return;
+  if (e) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
   openMiss(cat, idx, e);
+}
+
+function removePhotosFromMissesData(ids) {
+  var deleted = new Set(ids);
+  CATEGORY_ORDER.forEach(function(cat) {
+    missesData[cat] = (missesData[cat] || []).filter(function(p) {
+      return !deleted.has(p.id);
+    });
+  });
+  pruneSelectionToVisible();
+}
+
+function getSelectedPhotoRows() {
+  var rowsById = {};
+  CATEGORY_ORDER.forEach(function(cat) {
+    (missesData[cat] || []).forEach(function(p) {
+      if (selection.has(p.id) && !rowsById[p.id]) rowsById[p.id] = p;
+    });
+  });
+  return Object.keys(rowsById).map(function(id) { return rowsById[id]; });
+}
+
+async function deleteSelectedMisses() {
+  if (selection.size === 0) return;
+  var rows = getSelectedPhotoRows();
+  var ids = rows.map(function(p) { return p.id; });
+  var companionCount = rows.filter(function(p) { return !!p.companion_path; }).length;
+
+  var afterDelete = function(data) {
+    clearSelection();
+    removePhotosFromMissesData(ids);
+    render();
+    loadMisses();
+  };
+
+  if (typeof showDeleteDialog === 'function') {
+    showDeleteDialog(ids, companionCount, afterDelete);
+    return;
+  }
+
+  if (!confirm('Delete ' + ids.length + ' selected photo' + (ids.length === 1 ? '' : 's') + '?')) return;
+  try {
+    var r = await fetch('/api/batch/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photo_ids: ids, mode: 'vireo' }),
+    });
+    if (!r.ok) throw new Error('http ' + r.status);
+    var data = await r.json();
+    afterDelete(data);
+  } catch (err) {
+    if (typeof showToast === 'function') showToast('Delete failed', 'error');
+  }
 }
 
 /* ---------- Focus tracking + keyboard shortcuts ---------- */

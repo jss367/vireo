@@ -464,6 +464,37 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   pointer-events: none;
   z-index: 1;
 }
+.lightbox-flag-status {
+  position: absolute;
+  bottom: 48px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: none;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0,0,0,0.7);
+  border: 1px solid var(--text-faint);
+  color: var(--text-secondary);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: none;
+  z-index: 10001;
+}
+.lightbox-flag-status.visible { display: inline-flex; }
+.lightbox-flag-status.flagged {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.lightbox-flag-status.rejected {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.lightbox-flag-status.pending {
+  border-color: var(--text-faint);
+  color: var(--text-secondary);
+}
 .lightbox-close {
   position: absolute;
   top: 16px;
@@ -1163,6 +1194,26 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 /* When the missing-folders banner is visible above, new-images stacks
    naturally in document flow — both are non-fixed block-level elements. */
 
+.runtime-warning-banner {
+  background: color-mix(in srgb, var(--warning, #ffb020) 18%, var(--bg-secondary));
+  color: var(--text-primary, #E6F1F5);
+  padding: 8px 16px;
+  font-size: 13px;
+  display: none;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--warning, #ffb020);
+}
+.runtime-warning-banner strong { color: var(--warning, #ffb020); }
+.runtime-warning-banner .runtime-warning-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.4;
+}
+.runtime-warning-banner .banner-dismiss {
+  color: var(--text-secondary, #9fb3bd);
+}
+
 .dup-cleanup-banner {
   background: var(--bg-tertiary, #153D55);
   color: var(--text-primary, #E6F1F5);
@@ -1385,6 +1436,11 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     <span class="activity-dot" id="navActivityDot"></span>
   </span>
 </nav>
+
+<div class="runtime-warning-banner" id="runtimeWarningBanner" data-testid="runtime-warning-banner">
+  <div class="runtime-warning-text" id="runtimeWarningText"></div>
+  <button class="banner-dismiss" type="button" onclick="dismissRuntimeWarning()" title="Dismiss">&times;</button>
+</div>
 
 <!-- Command palette (cmd+K) -->
 <div class="cmd-palette-overlay" id="commandPalette" hidden onclick="if(event.target===this)closeCommandPalette()">
@@ -2720,6 +2776,7 @@ async function createWorkspace() {
     </div>
   </div>
   <div class="lightbox-filename" id="lightboxFilename"></div>
+  <div class="lightbox-flag-status" id="lightboxFlagStatus" aria-live="polite"></div>
   <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
   <div id="lightboxActions" class="lightbox-actions" style="position:absolute;bottom:16px;right:24px;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;max-width:calc(100vw - 48px);">
     <button id="lightboxToggleBoxes" onclick="event.stopPropagation(); toggleLightboxBoxes();" style="background:rgba(0,0,0,0.6);color:var(--text-secondary);border:1px solid var(--text-faint);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Toggle detection boxes (b)">
@@ -2818,6 +2875,126 @@ var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may
 var _lbSessionFullLongEdge = null;  // last learned /full size across photos; better fallback than hardcoded 1920 for custom preview_max_size
 var _lbPending1To1 = false;  // true when z/click was pressed with unknown nativeZoom; upgrade to true 1:1 once learned
 var _lbCurrentWildlifeExcluded = false;
+var _lbFlagEditSeq = 0;      // increments for local flag writes so stale metadata fetches cannot overwrite the chip
+var _lbOpenSeq = 0;          // increments for every lightbox open so old metadata fetches cannot reapply after reopen
+var _lbFlagPendingWrites = 0;
+
+function _lbNormalizeFlag(flag) {
+  if (flag === 'flagged' || flag === 'rejected' || flag === 'none') return flag;
+  if (flag == null || flag === '') return 'none';
+  return null;
+}
+
+function _lbSetFlagStatus(flag) {
+  var el = document.getElementById('lightboxFlagStatus');
+  if (!el) return;
+  if (typeof flag === 'undefined') {
+    el.className = 'lightbox-flag-status';
+    el.textContent = '';
+    return;
+  }
+  var normalized = _lbNormalizeFlag(flag);
+  el.className = 'lightbox-flag-status';
+  if (!normalized) {
+    el.textContent = '';
+    return;
+  }
+  if (normalized === 'flagged') {
+    el.textContent = 'Flagged';
+    el.classList.add('visible', 'flagged');
+  } else if (normalized === 'rejected') {
+    el.textContent = 'Rejected';
+    el.classList.add('visible', 'rejected');
+  } else {
+    el.textContent = 'No flag';
+    el.classList.add('visible');
+  }
+}
+
+function _lbPendingFlagLabel(flag) {
+  if (flag === 'flagged') return 'Flagging...';
+  if (flag === 'rejected') return 'Rejecting...';
+  if (flag === 'none') return 'Clearing flag...';
+  return 'Saving...';
+}
+
+function _lbSetPendingFlagStatus(flag) {
+  var el = document.getElementById('lightboxFlagStatus');
+  if (!el) return;
+  el.className = 'lightbox-flag-status visible pending';
+  el.textContent = _lbPendingFlagLabel(flag);
+}
+
+function _lbFlagFromPhotoList(photoId) {
+  var p = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
+  if (!p || !Object.prototype.hasOwnProperty.call(p, 'flag')) return undefined;
+  return p.flag;
+}
+
+function _lbRecordFlag(photoId, flag) {
+  var normalized = _lbNormalizeFlag(flag);
+  if (!normalized) return;
+  var p = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
+  if (p) p.flag = normalized;
+  if (_lightboxCurrentId === photoId) _lbSetFlagStatus(normalized);
+}
+
+function _lbCacheFlag(photoId, flag) {
+  var normalized = _lbNormalizeFlag(flag);
+  if (!normalized) return;
+  var p = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
+  if (p) p.flag = normalized;
+}
+
+function _lbRecordFetchedFlag(photoId, flag, flagFetchSeq) {
+  if (_lbFlagEditSeq !== flagFetchSeq) return;
+  _lbRecordFlag(photoId, flag);
+}
+
+function _lbApplyFlag(photoId, flag) {
+  var normalized = _lbNormalizeFlag(flag);
+  if (!normalized || photoId == null) return false;
+  var seq = _lbFlagEditSeq + 1;
+  _lbFlagEditSeq = seq;
+  _lbFlagPendingWrites += 1;
+  _lbSetPendingFlagStatus(normalized);
+  var write;
+
+  if (typeof window.setFlagFor === 'function') {
+    write = window.setFlagFor(photoId, normalized);
+  } else if (typeof window.setReviewFlag === 'function') {
+    write = window.setReviewFlag(photoId, normalized);
+  } else if (typeof window.safeFetch === 'function') {
+    write = window.safeFetch('/api/photos/' + photoId + '/flag', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({flag: normalized}),
+    }, { toast: false }).then(function() { return true; }).catch(function() { return false; });
+  } else {
+    _lbSetFlagStatus(_lbFlagFromPhotoList(photoId));
+    return false;
+  }
+
+  Promise.resolve(write).then(function(ok) {
+    _lbFlagPendingWrites = Math.max(0, _lbFlagPendingWrites - 1);
+    if (_lightboxCurrentId !== photoId) return;
+    if (ok === false) {
+      if (_lbFlagEditSeq === seq) _lbSetFlagStatus(_lbFlagFromPhotoList(photoId));
+      return;
+    }
+    if (_lbFlagEditSeq === seq || _lbFlagPendingWrites === 0) {
+      _lbRecordFlag(photoId, normalized);
+    } else {
+      _lbCacheFlag(photoId, normalized);
+    }
+  }).catch(function() {
+    _lbFlagPendingWrites = Math.max(0, _lbFlagPendingWrites - 1);
+    if (_lbFlagEditSeq === seq && _lightboxCurrentId === photoId) {
+      _lbSetFlagStatus(_lbFlagFromPhotoList(photoId));
+    }
+  });
+
+  return true;
+}
 
 function _lbStoredBool(key, fallback) {
   try {
@@ -2980,10 +3157,17 @@ function _lbLoadDetections(photoId) {
 var _lbMaskActiveVariant = null;     // name of the photo's currently-active variant
 var _lbMaskAvailable = [];           // [{variant, url, created_at}, ...]
 var _lbMaskCurrentUrl = null;
+var _lbMaskLoadSeq = 0;
 
 function _lbResetMaskOverlay() {
   var img = document.getElementById('lightboxMaskOverlay');
-  if (img) { img.classList.remove('show'); img.removeAttribute('src'); }
+  _lbMaskLoadSeq++;
+  if (img) {
+    img.classList.remove('show');
+    img.onload = null;
+    img.onerror = null;
+    img.removeAttribute('src');
+  }
   var ctrls = document.getElementById('lightboxMaskControls');
   if (ctrls) ctrls.classList.remove('has-variants');
   var sel = document.getElementById('lightboxMaskSelect');
@@ -3003,24 +3187,36 @@ function _lbApplyMaskVisibility() {
     // while that request is still in flight, the pending callback
     // would override the hide as soon as it fires. Clear both handlers
     // so an in-flight load can't resurrect the overlay.
+    _lbMaskLoadSeq++;
     img.onload = null;
     img.onerror = null;
+    // Detach the decoded mask image while hidden. The class normally
+    // controls display, but removing src avoids stale blended pixels in
+    // WebView/compositor edge cases and forces a clean reload on show.
+    img.removeAttribute('src');
     return;
   }
+  var expectedUrl = _lbMaskCurrentUrl;
+  var seq = ++_lbMaskLoadSeq;
   // onerror guards against the file being deleted out from under us
   // between the /api/photos/<id>/masks call and the GET. The DB row
   // exists but the file is gone → silently hide instead of leaving a
   // broken-image icon over the photo.
-  img.onerror = function() { img.classList.remove('show'); };
+  img.onerror = function() {
+    if (seq === _lbMaskLoadSeq && _lbMaskCurrentUrl === expectedUrl) {
+      img.classList.remove('show');
+    }
+  };
   img.onload = function() {
     // Re-check the toggle: the user may have hidden masks between
     // src assignment and the load resolving.
-    if (_lbMasksVisible && _lbMaskCurrentUrl) {
+    if (seq === _lbMaskLoadSeq && _lbMasksVisible && _lbMaskCurrentUrl === expectedUrl) {
       img.classList.add('show');
     }
   };
-  if (img.getAttribute('src') !== _lbMaskCurrentUrl) {
-    img.src = _lbMaskCurrentUrl;
+  if (img.getAttribute('src') !== expectedUrl) {
+    img.classList.remove('show');
+    img.src = expectedUrl;
   } else if (img.naturalWidth > 0) {
     // Same URL and we know it loaded successfully — safe to re-show
     // without re-fetching.
@@ -3138,11 +3334,14 @@ function openLightbox(photoId, filename, photoList) {
   if (alreadyOpen) Keymap.popEsc(window._lbEscToken);
   window._lbEscToken = Keymap.pushEsc(function() { closeLightbox(); });
   if (!alreadyOpen) Keymap.lockBodyScroll();
+  _lbOpenSeq += 1;
+  var openSeq = _lbOpenSeq;
 
   _lightboxCurrentId = photoId;
   if (photoList) _lightboxPhotoList = photoList;
   var currentFromList = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
   _lbCurrentWildlifeExcluded = !!(currentFromList && currentFromList.wildlife_excluded);
+  _lbSetFlagStatus(_lbFlagFromPhotoList(photoId));
 
   var overlay = document.getElementById('lightboxOverlay');
   var img = document.getElementById('lightboxImg');
@@ -3178,14 +3377,16 @@ function openLightbox(photoId, filename, photoList) {
   _lbApplyTransform();  // Clear any lingering translate/scale from prior photo before the new one renders.
 
   // Fetch original dimensions (async, non-blocking for image display)
+  var flagFetchSeq = _lbFlagEditSeq;
   fetch('/api/photos/' + photoId)
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
-      if (!data || _lightboxCurrentId !== photoId) return;
+      if (!data || _lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
       _lbPhotoW = data.width || null;
       _lbPhotoH = data.height || null;
       _lbCurrentWildlifeExcluded = !!data.wildlife_excluded;
       _lbApplyWildlifeExcludedButton();
+      _lbRecordFetchedFlag(photoId, data.flag, flagFetchSeq);
       _lbRecomputeNativeZoom();
       _lbRenderEyeCrosshair(data);
     })
@@ -3385,6 +3586,7 @@ function closeLightbox(e) {
   document.getElementById('lightboxOverlay').classList.remove('active');
   document.getElementById('lightboxImg').src = '';
   document.getElementById('lightboxZoomBadge').style.display = 'none';
+  _lbSetFlagStatus(undefined);
   var detContainer = document.getElementById('lightboxDetections');
   if (detContainer) detContainer.innerHTML = '';
   // Drop the mask overlay too — otherwise reopening on a photo with
@@ -3400,10 +3602,10 @@ function closeLightbox(e) {
  * `openInEditor`, `revealPhoto`, `copyPhotoPaths`) are defined on pages that
  * carry a photo grid (browse.html). On /review, there is no selection model
  * but per-photo `setReviewRating` / `setReviewFlag` helpers exist and the
- * rating/flag chips fall through to them. Color labels are not part of the
+ * rating/flag chips fall through to them. Pages without a page-local flag
+ * helper use the shared photo flag endpoint. Color labels are not part of the
  * review workflow, so the color row is omitted when `setColorLabelFor` is
- * absent. Any still-missing helper becomes a silent no-op so clicking can
- * never throw.
+ * absent.
  */
 function buildLightboxContextMenu(pid) {
   var has = function(name) { return typeof window[name] === 'function'; };
@@ -3428,8 +3630,7 @@ function buildLightboxContextMenu(pid) {
     return {
       label: icon, title: title,
       onClick: function() {
-        if (has('setFlagFor')) window.setFlagFor(pid, f);
-        else if (has('setReviewFlag')) window.setReviewFlag(pid, f);
+        _lbApplyFlag(pid, f);
       },
     };
   };
@@ -3855,14 +4056,7 @@ document.addEventListener('keydown', function(e) {
     else if (matchesShortcut(e, unflagKey)) lbFlag = 'none';
     if (lbFlag !== null && _lightboxCurrentId != null) {
       var pid = _lightboxCurrentId;
-      if (typeof window.setFlagFor === 'function') window.setFlagFor(pid, lbFlag);
-      else if (typeof window.setReviewFlag === 'function') window.setReviewFlag(pid, lbFlag);
-      else {
-        safeFetch('/api/photos/' + pid + '/flag', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({flag: lbFlag}),
-        }, { toast: false }).catch(function(){});
-      }
+      _lbApplyFlag(pid, lbFlag);
       e.preventDefault();
       e.stopImmediatePropagation();
       return;
@@ -4692,6 +4886,52 @@ function formatDuration(seconds) {
   var _jobPollTimer = null;
   var _navJobPollTimer = null;
 
+  function runtimeWarningDismissKey(id) {
+    return 'vireo_runtime_warning_dismissed_' + String(id || '');
+  }
+
+  function findRuntimeWarning() {
+    for (var i = 0; i < activeJobs.length; i++) {
+      var j = activeJobs[i];
+      if (j.status === 'running' && j.runtime_warning) return j.runtime_warning;
+    }
+    return null;
+  }
+
+  function updateRuntimeWarningBanner() {
+    var banner = document.getElementById('runtimeWarningBanner');
+    var text = document.getElementById('runtimeWarningText');
+    if (!banner || !text) return;
+
+    var warning = findRuntimeWarning();
+    if (!warning || localStorage.getItem(runtimeWarningDismissKey(warning.id)) === '1') {
+      banner.style.display = 'none';
+      banner.dataset.warningId = '';
+      return;
+    }
+
+    banner.dataset.warningId = warning.id || '';
+    text.innerHTML =
+      '<strong>' + bpEscape(warning.title || 'Using CPU only') + '.</strong> ' +
+      bpEscape(warning.message || 'This job may be much slower than expected.') +
+      ' ' + bpEscape(warning.detail || '') +
+      ' ' + bpEscape(warning.next_action || '');
+    banner.style.display = 'flex';
+  }
+
+  window.dismissRuntimeWarning = function() {
+    var banner = document.getElementById('runtimeWarningBanner');
+    if (!banner) return;
+    var id = banner.dataset.warningId || 'cpu-only-ml';
+    localStorage.setItem(runtimeWarningDismissKey(id), '1');
+    banner.style.display = 'none';
+    fetch('/api/jobs/runtime-warning/dismiss', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: id})
+    }).catch(function() {});
+  };
+
   // Theme system
   var THEMES = [
     {id: 'vireo-dark', name: 'Vireo Dark', icon: '\u2600'},
@@ -5076,6 +5316,7 @@ function formatDuration(seconds) {
       updateSummary();
       updateActivityDot();
       updateDockProgress();
+      updateRuntimeWarningBanner();
     }
   });
 
@@ -5089,6 +5330,7 @@ function formatDuration(seconds) {
         updateSummary();
         updateActivityDot();
         updateDockProgress();
+        updateRuntimeWarningBanner();
       })
       .catch(function() {});
   }
@@ -5860,8 +6102,12 @@ function _updateMissingPhotosBulkBtn() {
 }
 
 async function removeOneMissingPhoto(id) {
-  if (!confirm('Remove this photo from Vireo?\n\nCached thumbnail/preview/working copy (if any) will also be deleted. The XMP sidecar on disk will not be touched.')) return;
-  await _deleteMissingPhotoIds([id], false);
+  const deleteSidecars = document.getElementById('missingPhotosDeleteSidecars').checked;
+  const sidecarMsg = deleteSidecars
+    ? '\n\nLeftover XMP sidecars will also be deleted from disk.'
+    : '\n\nThe XMP sidecar on disk will not be touched.';
+  if (!confirm(`Remove this photo from Vireo?\n\nCached thumbnail/preview/working copy (if any) will also be deleted.${sidecarMsg}`)) return;
+  await _deleteMissingPhotoIds([id], deleteSidecars);
   loadMissingPhotos();
 }
 
@@ -5896,6 +6142,16 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({photo_ids: ids, mode: 'vireo'}),
   });
+  // Best-effort: refreshing the Misses page is an auxiliary UI sync. A
+  // failure here must not reject the delete flow or block the caller's
+  // own loadMissingPhotos() refresh.
+  if (typeof loadMisses === 'function') {
+    try {
+      await loadMisses();
+    } catch (err) {
+      console.error('Failed to refresh Misses after delete:', err);
+    }
+  }
 }
 </script>
 <script src="/static/vireo-utils.js"></script>

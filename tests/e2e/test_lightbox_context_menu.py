@@ -274,6 +274,51 @@ def test_mask_toggle_off_then_on_after_failed_load_stays_hidden(live_server, pag
     ), "same-URL re-show after a failed load must not reveal a broken overlay"
 
 
+def test_mask_toggle_off_detaches_loaded_overlay_image(live_server, page):
+    """The Hide Masks button should fully detach a loaded overlay image.
+
+    CSS display normally hides `.show`, but keeping the mask src attached can
+    leave stale composited pixels visible in embedded WebViews. Removing src
+    makes the hidden state unambiguous.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.evaluate("localStorage.removeItem('vireo.lb.masksVisible');")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.dblclick()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+
+    page.evaluate(
+        """
+        _lbMasksVisible = true;
+        _lbMaskCurrentUrl =
+          'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
+        _lbApplyMaskVisibility();
+        """
+    )
+    page.wait_for_function(
+        "document.getElementById('lightboxMaskOverlay').naturalWidth > 0",
+        timeout=3000,
+    )
+    assert page.locator("#lightboxMaskOverlay").evaluate(
+        "el => el.classList.contains('show')"
+    ), "loaded mask overlay should be visible before hiding"
+
+    page.locator("#lightboxToggleMasks").click()
+    assert page.evaluate("localStorage.getItem('vireo.lb.masksVisible')") == "0"
+    assert page.locator("#lightboxToggleMasks").inner_text() == "Show Masks"
+    assert not page.locator("#lightboxMaskOverlay").evaluate(
+        "el => el.classList.contains('show')"
+    ), "hide must remove the visible overlay class"
+    assert page.locator("#lightboxMaskOverlay").evaluate(
+        "el => !el.hasAttribute('src')"
+    ), "hide must detach the loaded mask src"
+
+
 def test_lightbox_close_menu_item_closes_overlay(live_server, page):
     """The 'Close Lightbox' menu item dismisses the overlay."""
     url = live_server["url"]

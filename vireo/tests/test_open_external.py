@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 
@@ -172,6 +173,69 @@ def test_open_external_app_bundle_path_uses_open_a(app_and_db, monkeypatch, tmp_
     assert resp.status_code == 200
     assert launched[0][0] == 'run'
     assert launched[0][1][:3] == ['open', '-a', str(bundle)]
+
+
+def test_open_external_converts_nikon_he_nef_for_darktable(
+        app_and_db, monkeypatch, tmp_path):
+    """Opening a Nikon HE NEF in darktable sends a persistent DNG instead."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    source_dir = tmp_path / "photos"
+    source_dir.mkdir()
+    raw_path = source_dir / "bird.NEF"
+    raw_path.write_bytes(b"nef")
+    fid = db.add_folder(str(source_dir), name="photos")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename="bird.NEF",
+        extension=".nef",
+        file_size=raw_path.stat().st_size,
+        file_mtime=raw_path.stat().st_mtime,
+    )
+    db.conn.execute(
+        "UPDATE photos SET exif_data=? WHERE id=?",
+        (json.dumps({"Nikon": {"NEFCompression": "High Efficiency*"}}), pid),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(sys, 'platform', 'darwin')
+    bundle = tmp_path / "darktable.app"
+    bundle.mkdir()
+
+    client.post('/api/config',
+                data=json.dumps({
+                    "external_editors": [
+                        {"name": "darktable", "path": str(bundle)},
+                    ],
+                    "dng_converter_bin": "/fake/dng-converter",
+                }),
+                content_type='application/json')
+
+    import develop
+
+    def fake_convert_to_dng(dng_converter_bin, input_path, output_dir):
+        assert dng_converter_bin == "/fake/dng-converter"
+        assert input_path == str(raw_path)
+        os.makedirs(output_dir, exist_ok=True)
+        dng_path = os.path.join(output_dir, "bird.dng")
+        with open(dng_path, "wb") as f:
+            f.write(b"dng")
+        return {"success": True, "output_path": dng_path, "error": None}
+
+    monkeypatch.setattr(develop, "convert_to_dng", fake_convert_to_dng)
+    launched = _patch_launchers(monkeypatch)
+
+    resp = client.post('/api/photos/open-external',
+                       data=json.dumps({"photo_ids": [pid]}),
+                       content_type='application/json')
+    assert resp.status_code == 200, resp.get_json()
+    assert launched[0][0] == 'run'
+    assert launched[0][1][:3] == ['open', '-a', str(bundle)]
+    opened_path = launched[0][1][-1]
+    assert opened_path.endswith(os.path.join("external-dng", str(pid), "bird.dng"))
+    assert os.path.exists(opened_path)
+    assert str(raw_path) not in launched[0][1]
 
 
 def test_open_external_surfaces_open_command_failure(app_and_db, monkeypatch, tmp_path):

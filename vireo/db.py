@@ -7868,7 +7868,8 @@ class Database:
             params.append(since)
 
         rows = self.conn.execute(
-            f"SELECT p.id, p.folder_id, p.filename, p.timestamp, p.burst_id, "
+            f"SELECT p.id, p.folder_id, p.filename, p.companion_path, "
+            f"       p.timestamp, p.burst_id, "
             f"       p.subject_size, p.crop_complete, "
             f"       p.subject_tenengrad, p.bg_tenengrad, "
             f"       p.miss_no_subject, p.miss_clipped, p.miss_oof, "

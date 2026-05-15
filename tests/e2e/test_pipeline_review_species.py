@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 from playwright.sync_api import expect
 
@@ -97,3 +98,38 @@ def test_species_name_arg_keeps_nullish_values_empty(live_server, page):
 
     assert page.evaluate("speciesNameArg(null)") == "''"
     assert page.evaluate("speciesNameArg(undefined)") == "''"
+
+
+def test_pipeline_review_sidebar_collapses_and_persists(live_server, page):
+    photo_ids = live_server["data"]["photos"][1:3]
+    _write_predictionless_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+
+    layout = page.locator("#pipelineLayout")
+    sidebar = page.locator("#pipelineSidebar")
+    content = page.locator("#pipelineSidebarContent")
+    toggle = page.locator("[data-testid='pipeline-sidebar-toggle']")
+
+    expect(content).to_be_visible()
+    expanded_width = sidebar.bounding_box()["width"]
+
+    toggle.click()
+
+    expect(layout).to_have_class(re.compile(r"\bsidebar-collapsed\b"))
+    expect(content).to_be_hidden()
+    expect(toggle).to_have_attribute("aria-expanded", "false")
+    page.wait_for_timeout(250)
+    collapsed_width = sidebar.bounding_box()["width"]
+    assert collapsed_width < expanded_width
+    assert collapsed_width <= 60
+
+    page.reload()
+    expect(layout).to_have_class(re.compile(r"\bsidebar-collapsed\b"))
+    expect(content).to_be_hidden()
+    expect(toggle).to_have_attribute("aria-expanded", "false")
+
+    toggle.click()
+    expect(layout).not_to_have_class(re.compile(r"\bsidebar-collapsed\b"))
+    expect(content).to_be_visible()
+    expect(toggle).to_have_attribute("aria-expanded", "true")

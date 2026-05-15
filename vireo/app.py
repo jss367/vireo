@@ -644,6 +644,141 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             g.db = Database(db_path)
         return g.db
 
+    _ACCELERATED_RUNTIME_PROVIDERS = {
+        "ACLExecutionProvider",
+        "ArmNNExecutionProvider",
+        "CANNExecutionProvider",
+        "CoreMLExecutionProvider",
+        "CUDAExecutionProvider",
+        "DmlExecutionProvider",
+        "MIGraphXExecutionProvider",
+        "NNAPIExecutionProvider",
+        "OpenVINOExecutionProvider",
+        "QNNExecutionProvider",
+        "ROCMExecutionProvider",
+        "TensorrtExecutionProvider",
+        "VitisAIExecutionProvider",
+        "WebGPUExecutionProvider",
+    }
+    _PROVIDER_DEVICE_INFO = {
+        "ACLExecutionProvider": ("ACL", "Arm Compute Library acceleration"),
+        "ArmNNExecutionProvider": ("ArmNN", "Arm NN acceleration"),
+        "CANNExecutionProvider": ("CANN", "Huawei CANN acceleration"),
+        "CoreMLExecutionProvider": ("CoreML", "Apple CoreML acceleration"),
+        "CUDAExecutionProvider": ("CUDA", "NVIDIA CUDA acceleration"),
+        "DmlExecutionProvider": ("DirectML", "Microsoft DirectML acceleration"),
+        "MIGraphXExecutionProvider": ("MIGraphX", "AMD MIGraphX acceleration"),
+        "NNAPIExecutionProvider": ("NNAPI", "Android NNAPI acceleration"),
+        "OpenVINOExecutionProvider": ("OpenVINO", "Intel OpenVINO acceleration"),
+        "QNNExecutionProvider": ("QNN", "Qualcomm QNN acceleration"),
+        "ROCMExecutionProvider": ("ROCm", "AMD ROCm acceleration"),
+        "TensorrtExecutionProvider": ("TensorRT", "NVIDIA TensorRT acceleration"),
+        "VitisAIExecutionProvider": ("Vitis AI", "AMD/Xilinx Vitis AI acceleration"),
+        "WebGPUExecutionProvider": ("WebGPU", "WebGPU acceleration"),
+    }
+    _CPU_WARNING_MIN_WORK_ITEMS = 25
+
+    def _runtime_execution_info():
+        """Return ONNX Runtime provider/device information for UI diagnostics."""
+        import platform
+
+        info = {
+            "platform": platform.platform(),
+            "device": "CPU",
+            "device_detail": "No GPU acceleration",
+            "onnxruntime_version": None,
+            "onnxruntime_providers": [],
+            "accelerated_provider_available": False,
+            "gpu_provider_available": False,
+            "cpu_only": True,
+        }
+        try:
+            import onnxruntime as ort
+
+            info["onnxruntime_version"] = ort.__version__
+            available = list(ort.get_available_providers())
+            info["onnxruntime_providers"] = available
+            accelerated = [
+                p for p in available if p in _ACCELERATED_RUNTIME_PROVIDERS
+            ]
+            info["accelerated_provider_available"] = bool(accelerated)
+            # Back-compat for callers that already key off this field.
+            info["gpu_provider_available"] = bool(accelerated)
+            info["cpu_only"] = not bool(accelerated)
+
+            if accelerated:
+                device, detail = _PROVIDER_DEVICE_INFO.get(
+                    accelerated[0],
+                    (accelerated[0].replace("ExecutionProvider", ""), "Hardware acceleration"),
+                )
+                info["device"] = device
+                info["device_detail"] = detail
+            else:
+                info["device"] = "CPU"
+                info["device_detail"] = "GPU not available - using CPU"
+        except ImportError:
+            info["device_detail"] = "onnxruntime not installed"
+
+        return info
+
+    def _build_cpu_runtime_warning(job_type, *, work_units=None, reason=None):
+        """Build a dismissible CPU-only warning for expensive ML jobs."""
+        if work_units is None or work_units < _CPU_WARNING_MIN_WORK_ITEMS:
+            return None
+
+        info = _runtime_execution_info()
+        if info["accelerated_provider_available"]:
+            return None
+
+        providers = info["onnxruntime_providers"]
+        provider_text = ", ".join(providers) if providers else "none detected"
+        label = job_type.replace("-", " ").replace("_", " ").title()
+        warning = {
+            "id": "cpu-only-ml",
+            "kind": "cpu-only-ml",
+            "title": "Using CPU only",
+            "message": f"This {label} job may be much slower than expected.",
+            "detail": f"Available ONNX Runtime providers: {provider_text}",
+            "next_action": (
+                "Install the CUDA/CoreML runtime, check accelerator "
+                "availability, or continue on CPU."
+            ),
+            "device": info["device"],
+            "device_detail": info["device_detail"],
+            "onnxruntime_version": info["onnxruntime_version"],
+            "onnxruntime_providers": providers,
+            "work_units": work_units,
+            "reason": reason or "large_ml_job_cpu_only",
+        }
+        log.warning(
+            "CPU-only runtime warning for %s job (%s work item%s): "
+            "providers=%s device=%s reason=%s",
+            job_type,
+            work_units,
+            "" if work_units == 1 else "s",
+            provider_text,
+            info["device"],
+            warning["reason"],
+        )
+        return warning
+
+    def _count_lines(path):
+        if not path:
+            return None
+        try:
+            with open(path) as f:
+                return sum(1 for line in f if line.strip())
+        except (OSError, UnicodeError):
+            return None
+
+    def _runtime_warning_work_units(description, count_fn):
+        """Best-effort sizing for warnings; never block job submission."""
+        try:
+            return count_fn()
+        except Exception:
+            log.debug("Could not size %s for runtime warning", description, exc_info=True)
+            return None
+
     @app.teardown_appcontext
     def _close_db(exc):
         db = g.pop("db", None)
@@ -2131,6 +2266,83 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                        [{'photo_id': photo_id, 'old_value': str(keyword_id), 'new_value': ''}])
         return jsonify({"ok": True})
 
+    @app.route("/api/selection/keyword-suggestions", methods=["POST"])
+    def api_selection_keyword_suggestions():
+        """Return selected keywords that are present on some, but not all photos."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        raw_ids = body.get("photo_ids", [])
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return json_error("photo_ids required")
+
+        photo_ids = []
+        seen = set()
+        for raw in raw_ids:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return json_error("photo_ids must be integers")
+            if raw not in seen:
+                photo_ids.append(raw)
+                seen.add(raw)
+        if not photo_ids:
+            return json_error("photo_ids required")
+        if len(photo_ids) > 1000:
+            return json_error("too many photo_ids", 400)
+
+        for pid in photo_ids:
+            if not db._photo_in_workspace(pid):
+                return json_error(
+                    f"Photo {pid} does not belong to the active workspace", 403
+                )
+
+        rows = []
+        batch_size = 800
+        for i in range(0, len(photo_ids), batch_size):
+            chunk = photo_ids[i:i + batch_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(db.conn.execute(
+                f"""SELECT pk.photo_id, k.id, k.name, k.type
+                    FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id
+                    WHERE pk.photo_id IN ({placeholders})
+                    ORDER BY LOWER(k.name), k.id""",
+                chunk,
+            ).fetchall())
+
+        selected_count = len(photo_ids)
+        by_keyword = {}
+        for row in rows:
+            entry = by_keyword.setdefault(
+                row["id"],
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "type": row["type"],
+                    "photo_ids": set(),
+                },
+            )
+            entry["photo_ids"].add(row["photo_id"])
+
+        suggestions = []
+        for entry in by_keyword.values():
+            count = len(entry["photo_ids"])
+            missing_count = selected_count - count
+            if 0 < count < selected_count:
+                missing_photo_ids = [
+                    pid for pid in photo_ids if pid not in entry["photo_ids"]
+                ]
+                suggestions.append({
+                    "id": entry["id"],
+                    "name": entry["name"],
+                    "type": entry["type"],
+                    "count": count,
+                    "missing_count": missing_count,
+                    "missing_photo_ids": missing_photo_ids,
+                })
+        suggestions.sort(
+            key=lambda item: (-item["count"], item["name"].lower(), item["id"])
+        )
+        return jsonify({"selected_count": selected_count, "suggestions": suggestions})
+
     @app.route("/api/keywords/<int:keyword_id>", methods=["PUT"])
     def api_update_keyword(keyword_id):
         db = _get_db()
@@ -2649,26 +2861,56 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
-        name = body.get("name", "").strip()
-        if not photo_ids or not name:
-            return json_error("photo_ids and name required")
-        # Route kw_type through add_keyword so its type-reconciliation logic
-        # runs (preserves existing user-typed rows; only upgrades 'general').
-        # See api_add_keyword for the rationale.
-        kw_type_raw = body.get("type")
-        kw_type = (
-            kw_type_raw
-            if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
-            else None
-        )
-        kid = db.add_keyword(name, kw_type=kw_type)
-        for pid in photo_ids:
+        keyword_id = body.get("keyword_id")
+        name = body.get("name", "")
+        name = name.strip() if isinstance(name, str) else ""
+        if not photo_ids:
+            return json_error("photo_ids required")
+        if keyword_id is not None:
+            if isinstance(keyword_id, bool) or not isinstance(keyword_id, int):
+                return json_error("keyword_id must be an integer")
+            keyword_row = db.conn.execute(
+                "SELECT id, name FROM keywords WHERE id = ?", (keyword_id,)
+            ).fetchone()
+            if keyword_row is None:
+                return json_error("keyword not found", 404)
+            kid = keyword_row["id"]
+            name = keyword_row["name"]
+        else:
+            if not name:
+                return json_error("photo_ids and name required")
+            # Route kw_type through add_keyword so its type-reconciliation logic
+            # runs (preserves existing user-typed rows; only upgrades 'general').
+            # See api_add_keyword for the rationale.
+            kw_type_raw = body.get("type")
+            kw_type = (
+                kw_type_raw
+                if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
+                else None
+            )
+            kid = db.add_keyword(name, kw_type=kw_type)
+
+        already_tagged = set()
+        batch_size = 800
+        for i in range(0, len(photo_ids), batch_size):
+            chunk = list(photo_ids[i:i + batch_size])
+            placeholders = ",".join("?" for _ in chunk)
+            existing_rows = db.conn.execute(
+                f"""SELECT photo_id FROM photo_keywords
+                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
+                [kid] + chunk,
+            ).fetchall()
+            already_tagged.update(row["photo_id"] for row in existing_rows)
+        added_ids = [pid for pid in photo_ids if pid not in already_tagged]
+
+        for pid in added_ids:
             db.tag_photo(pid, kid)
             _queue_keyword_add(pid, name)
-        items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)} for pid in photo_ids]
-        db.record_edit('keyword_add', f'Added "{name}" to {len(photo_ids)} photos',
-                       str(kid), items, is_batch=True)
-        return jsonify({"ok": True, "updated": len(photo_ids)})
+        items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)} for pid in added_ids]
+        if items:
+            db.record_edit('keyword_add', f'Added "{name}" to {len(added_ids)} photos',
+                           str(kid), items, is_batch=True)
+        return jsonify({"ok": True, "updated": len(added_ids)})
 
     @app.route("/api/batch/delete", methods=["POST"])
     def api_batch_delete():
@@ -4903,24 +5145,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         db = _get_db()
         folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
-        file_paths = []
+        photo_paths = []
         for pid in photo_ids:
             photo = db.get_photo(pid)
             if not photo:
                 continue
             folder_path = folders.get(photo["folder_id"], "")
             if folder_path:
-                file_paths.append(os.path.join(folder_path, photo["filename"]))
+                photo_paths.append((
+                    photo,
+                    os.path.join(folder_path, photo["filename"]),
+                ))
 
-        if not file_paths:
+        if not photo_paths:
             return json_error("No photos found", 404)
 
         editors = cfg.get_editors()
+        selected_editor = None
         editor_index = body.get("editor_index")
         if editor_index is None:
             # No index = use the first configured editor (or fall through to
             # the OS default if no editors are configured at all).
-            editor = editors[0]["path"] if editors else ""
+            selected_editor = editors[0] if editors else None
+            editor = selected_editor["path"] if selected_editor else ""
         else:
             if not isinstance(editor_index, int) or isinstance(editor_index, bool):
                 return json_error("editor_index must be an integer")
@@ -4933,7 +5180,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     f"editor_index {editor_index} out of range "
                     f"(have {len(editors)} editor(s))", 400
                 )
-            editor = editors[editor_index]["path"]
+            selected_editor = editors[editor_index]
+            editor = selected_editor["path"]
         editor_path = os.path.expanduser(editor) if editor else ""
 
         # On macOS, an .app bundle is a directory — execing it raises EACCES.
@@ -4966,6 +5214,75 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "Set the editor to the .app bundle directly.",
                         500,
                     )
+
+        def _is_darktable_editor():
+            parts = [
+                selected_editor.get("name", "") if selected_editor else "",
+                editor_path,
+                app_bundle or "",
+            ]
+            return "darktable" in " ".join(parts).lower()
+
+        file_paths = [path for _photo, path in photo_paths]
+        if _is_darktable_editor():
+            from develop import convert_to_dng, is_nikon_high_efficiency_nef
+
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+            converted_paths = []
+            for photo, input_path in photo_paths:
+                try:
+                    metadata = (
+                        json.loads(photo["exif_data"])
+                        if photo["exif_data"] else None
+                    )
+                except (TypeError, json.JSONDecodeError):
+                    metadata = None
+
+                if not is_nikon_high_efficiency_nef(input_path, metadata=metadata):
+                    converted_paths.append(input_path)
+                    continue
+
+                out_dir = os.path.join(vireo_dir, "external-dng", str(photo["id"]))
+                stem = os.path.splitext(os.path.basename(input_path))[0]
+                cached = os.path.join(out_dir, f"{stem}.dng")
+                cached_alt = os.path.join(out_dir, f"{stem}.DNG")
+                source_mtime = (
+                    os.path.getmtime(input_path)
+                    if os.path.exists(input_path) else 0
+                )
+                fresh_cached = None
+                for candidate in (cached, cached_alt):
+                    if (
+                        os.path.isfile(candidate)
+                        and os.path.getmtime(candidate) >= source_mtime
+                    ):
+                        log.info(
+                            "Using cached DNG for darktable external editor: %s",
+                            candidate,
+                        )
+                        fresh_cached = candidate
+                        break
+                if fresh_cached:
+                    converted_paths.append(fresh_cached)
+                    continue
+
+                log.info(
+                    "Converting Nikon HE NEF for darktable external editor: %s",
+                    input_path,
+                )
+                conversion = convert_to_dng(
+                    cfg.get("dng_converter_bin") or "",
+                    input_path,
+                    out_dir,
+                )
+                if not conversion["success"]:
+                    return json_error(
+                        "Nikon High Efficiency NEF detected, but DNG conversion failed: "
+                        f"{conversion['error']}",
+                        500,
+                    )
+                converted_paths.append(conversion["output_path"])
+            file_paths = converted_paths
 
         try:
             if app_bundle:
@@ -5581,6 +5898,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "labels_file": labels_file,
             },
             workspace_id=active_ws,
+            runtime_warning=_build_cpu_runtime_warning(
+                "precompute-embeddings",
+                work_units=_runtime_warning_work_units(
+                    "precompute labels file",
+                    lambda: _count_lines(labels_file),
+                ),
+                reason="large_embedding_precompute_cpu_only",
+            ),
         )
         return jsonify({"job_id": job_id})
 
@@ -6874,33 +7199,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/system/info")
     def api_system_info():
         """Return system information: ONNX Runtime, hardware."""
-        import platform
-
-        info = {
-            "platform": platform.platform(),
-            "device": "CPU",
-            "device_detail": "No GPU acceleration",
-            "onnxruntime_version": None,
-            "onnxruntime_providers": [],
-        }
-        try:
-            import onnxruntime as ort
-
-            info["onnxruntime_version"] = ort.__version__
-            available = ort.get_available_providers()
-            info["onnxruntime_providers"] = available
-
-            if "CoreMLExecutionProvider" in available:
-                info["device"] = "CoreML"
-                info["device_detail"] = "Apple CoreML acceleration"
-            elif "CUDAExecutionProvider" in available:
-                info["device"] = "CUDA"
-                info["device_detail"] = "NVIDIA CUDA acceleration"
-            else:
-                info["device"] = "CPU"
-                info["device_detail"] = "GPU not available — using CPU"
-        except ImportError:
-            info["device_detail"] = "onnxruntime not installed"
+        info = _runtime_execution_info()
 
         # "installed" requires both module AND weights — module-only
         # lets classify silently fall back to full-image classification.
@@ -8916,7 +9215,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
         from classify_job import ClassifyParams, run_classify_job
 
-        user_cfg = _get_db().get_effective_config(cfg.load())
+        db = _get_db()
+        user_cfg = db.get_effective_config(cfg.load())
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
 
@@ -8939,8 +9239,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
 
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
+        active_ws = db._active_workspace_id
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        work_units = _runtime_warning_work_units(
+            "classify collection",
+            lambda: db.count_collection_photos(collection_id),
+        )
+        runtime_warning = _build_cpu_runtime_warning(
+            "classify",
+            work_units=work_units,
+            reason="large_classification_job_cpu_only",
+        )
 
         def work(job):
             return run_classify_job(job, runner, db_path, active_ws, params, vireo_dir=vireo_dir)
@@ -8953,6 +9262,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "model_name": params.model_name,
             },
             workspace_id=active_ws,
+            runtime_warning=runtime_warning,
         )
         return jsonify({"job_id": job_id})
 
@@ -8989,6 +9299,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "active_workspace_id": db._active_workspace_id,
             "workspace_names": ws_names,
         })
+
+    @app.route("/api/jobs/runtime-warning/dismiss", methods=["POST"])
+    def api_job_runtime_warning_dismiss():
+        body = request.get_json(silent=True) or {}
+        warning_id = body.get("id")
+        if not warning_id:
+            return json_error("id required")
+        log.info("Client dismissed runtime warning: %s", warning_id)
+        return jsonify({"ok": True, "id": str(warning_id)})
 
     @app.route("/api/jobs/<job_id>")
     def api_job_status(job_id):
@@ -9871,7 +10190,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         import config as cfg
 
-        effective_cfg = _get_db().get_effective_config(cfg.load())
+        db = _get_db()
+        effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
         sam2_variant = pipeline_cfg.get("sam2_variant", "sam2-small")
         dinov2_variant = pipeline_cfg.get("dinov2_variant", "vit-b14")
@@ -9883,7 +10203,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         min_detector_conf = effective_cfg.get("detector_confidence", 0.2)
 
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
+        active_ws = db._active_workspace_id
+        work_units = _runtime_warning_work_units(
+            "extract-masks collection" if collection_id else "extract-masks workspace",
+            lambda: db.count_collection_photos(collection_id)
+            if collection_id
+            else db.count_photos(),
+        )
+        runtime_warning = _build_cpu_runtime_warning(
+            "extract-masks",
+            work_units=work_units,
+            reason="large_segmentation_job_cpu_only",
+        )
 
         def work(job):
             import numpy as np
@@ -10175,6 +10506,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "proxy_longest_edge": proxy_longest_edge,
             },
             workspace_id=active_ws,
+            runtime_warning=runtime_warning,
         )
         return jsonify({"job_id": job_id})
 
@@ -10269,6 +10601,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from pipeline_job import PipelineParams, run_pipeline_job
 
         body = request.get_json(silent=True) or {}
+        db = _get_db()
         source = body.get("source")
         sources = body.get("sources")
         collection_id = body.get("collection_id")
@@ -10291,7 +10624,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # time instead of a 200 followed by an asynchronous job failure.
         if (
             source_snapshot_id is not None
-            and _get_db().get_new_images_snapshot(source_snapshot_id) is None
+            and db.get_new_images_snapshot(source_snapshot_id) is None
         ):
             return json_error(
                 f"source_snapshot_id {source_snapshot_id} not found",
@@ -10402,7 +10735,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 log.warning("Failed to save recent destination to config")
 
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
+        active_ws = db._active_workspace_id
+        work_units = None
+        if collection_id:
+            work_units = _runtime_warning_work_units(
+                "pipeline collection",
+                lambda: db.count_collection_photos(collection_id),
+            )
+        elif source_snapshot_id is not None:
+            work_units = _runtime_warning_work_units(
+                "pipeline new-images snapshot",
+                lambda: (db.get_new_images_snapshot(source_snapshot_id) or {}).get(
+                    "file_count"
+                ),
+            )
+
+        runtime_warning = None
+        if not (params.skip_classify and params.skip_extract_masks):
+            runtime_warning = _build_cpu_runtime_warning(
+                "pipeline",
+                work_units=work_units,
+                reason="large_pipeline_ml_job_cpu_only",
+            )
 
         def work(job):
             return run_pipeline_job(
@@ -10421,6 +10775,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "skip_regroup": params.skip_regroup,
             },
             workspace_id=active_ws,
+            runtime_warning=runtime_warning,
         )
         result = {"job_id": job_id}
         if model_warning:

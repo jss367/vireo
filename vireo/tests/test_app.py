@@ -864,11 +864,18 @@ def test_species_search(app_and_db):
 
 
 def test_pipeline_review_page(app_and_db):
-    """GET /pipeline/review returns 200."""
+    """GET /pipeline/review returns 200 with explicit summary units."""
     app, _ = app_and_db
     client = app.test_client()
     resp = client.get('/pipeline/review')
     assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "Inventory" in html
+    assert "Triage" in html
+    assert "Species Review" in html
+    assert "Keep Photos" in html
+    assert "Review Units Confirmed" in html
+    assert "Species confirmation is counted by review unit" in html
 
 
 def test_classify_route_removed(app_and_db):
@@ -2805,6 +2812,129 @@ def test_batch_keyword_route_handles_non_string_type(app_and_db):
         f"Non-string type must not 500 the batch route: "
         f"{resp.status_code} {resp.get_data(as_text=True)}"
     )
+
+
+def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
+    """Multi-select suggestions should offer keywords present on only some photos."""
+    app, db = app_and_db
+    ids = [
+        row["id"]
+        for row in db.conn.execute(
+            "SELECT id FROM photos ORDER BY filename"
+        ).fetchall()
+    ]
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/selection/keyword-suggestions",
+        json={"photo_ids": ids},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    by_name = {item["name"]: item for item in data["suggestions"]}
+    assert by_name["Cardinal"]["count"] == 1
+    assert by_name["Cardinal"]["missing_count"] == 2
+    assert sorted(by_name["Cardinal"]["missing_photo_ids"]) == sorted(ids[1:])
+    assert by_name["Sparrow"]["count"] == 1
+    assert by_name["Sparrow"]["missing_count"] == 2
+
+
+def test_selection_keyword_suggestions_chunks_large_selection(app_and_db):
+    """Large selection suggestions must not exceed SQLite's variable limit."""
+    app, db = app_and_db
+    folder_id = db.get_folder_tree()[0]["id"]
+    ids = [
+        db.add_photo(
+            folder_id,
+            f"large-suggestion-{idx}.jpg",
+            extension=".jpg",
+            file_size=1,
+            file_mtime=1.0,
+        )
+        for idx in range(1000)
+    ]
+    keyword_id = db.add_keyword("Large Suggestion")
+    db.tag_photo(ids[0], keyword_id)
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/selection/keyword-suggestions",
+        json={"photo_ids": ids},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    by_name = {item["name"]: item for item in resp.get_json()["suggestions"]}
+    assert by_name["Large Suggestion"]["count"] == 1
+    assert by_name["Large Suggestion"]["missing_count"] == 999
+    assert len(by_name["Large Suggestion"]["missing_photo_ids"]) == 999
+
+
+def test_batch_keyword_route_accepts_existing_keyword_id(app_and_db):
+    """The fill-missing-keywords button preserves pre-existing links on undo."""
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+    cardinal_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": ids, "keyword_id": cardinal_id},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["updated"] == 2
+    tagged = db.conn.execute(
+        """SELECT photo_id FROM photo_keywords
+           WHERE keyword_id = ?
+           ORDER BY photo_id""",
+        (cardinal_id,),
+    ).fetchall()
+    assert [row["photo_id"] for row in tagged] == sorted(ids)
+
+    undo_resp = client.post("/api/undo")
+    assert undo_resp.status_code == 200
+    tagged_after_undo = db.conn.execute(
+        """SELECT photo_id FROM photo_keywords
+           WHERE keyword_id = ?
+           ORDER BY photo_id""",
+        (cardinal_id,),
+    ).fetchall()
+    assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
+
+
+def test_batch_keyword_route_chunks_large_existing_keyword_lookup(app_and_db):
+    """Large batch keyword adds must not exceed SQLite's variable limit."""
+    app, db = app_and_db
+    folder_id = db.get_folder_tree()[0]["id"]
+    ids = [
+        db.add_photo(
+            folder_id,
+            f"large-batch-{idx}.jpg",
+            extension=".jpg",
+            file_size=1,
+            file_mtime=1.0,
+        )
+        for idx in range(1005)
+    ]
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": ids, "name": "Large Batch"},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["updated"] == len(ids)
 
 
 def test_create_app_runs_wildlife_backfill_synchronously_on_first_boot(tmp_path, monkeypatch):

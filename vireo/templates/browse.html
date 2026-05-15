@@ -264,6 +264,58 @@ body {
 .summary-folder-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 12px; }
 .summary-folder-name { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; margin-right: 8px; }
 .summary-folder-count { color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
+.selection-panel { display: block; }
+.selection-panel.hidden { display: none; }
+.selection-heading {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+.selection-keyword-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.selection-keyword-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+}
+.selection-keyword-name {
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.selection-keyword-meta {
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.selection-keyword-add {
+  flex-shrink: 0;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.selection-keyword-add:hover { filter: brightness(1.05); }
+.selection-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
 .detail-close {
   float: right;
   background: none;
@@ -812,7 +864,7 @@ body {
 
     <!-- Filter Bar -->
     <div class="filter-bar">
-      <input type="text" id="searchInput" placeholder="Search keywords or filenames..." onkeydown="if(event.key==='Enter')applyFilters()" oninput="if(!this.value.trim())applyFilters()">
+      <input type="text" id="searchInput" placeholder="Search keywords or filenames..." onkeydown="if(event.key==='Enter')applySearchFilterNow()" oninput="scheduleSearchFilter()">
       <input type="text" id="clipSearchInput" placeholder="CLIP search: describe what you see..."
              style="flex:1;min-width:200px;"
              onkeydown="if(event.key==='Enter')runClipSearch()">
@@ -990,6 +1042,15 @@ body {
       </div>
     </div>
 
+    <!-- Multi-select Detail -->
+    <div class="selection-panel hidden" id="selectionPanel">
+      <div class="selection-heading" id="selectionCount">0 photos selected</div>
+      <div class="detail-section">
+        <div class="detail-section-title">Fill Missing Keywords</div>
+        <div class="selection-keyword-list" id="selectionKeywordSuggestions"></div>
+      </div>
+    </div>
+
     <!-- Photo Detail (shown when a photo is selected) -->
     <div class="detail-content" id="detailContent">
       <button class="detail-close" onclick="closeDetail()">&times;</button>
@@ -1135,6 +1196,9 @@ var allLoaded = false;
 var selectedPhotoId = null;
 var selectedIndex = -1;
 var selectedPhotos = new Set(); // multi-select
+var selectionKeywordRequestSeq = 0;
+var selectionKeywordKey = '';
+var selectionKeywordMissingById = {};
 var showDetectionBoxes = false;
 var cardFields = ["filename", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
@@ -1150,6 +1214,7 @@ var calendarYear = new Date().getFullYear();
 var selectedDay = null;
 var calendarData = null;
 var clipSearchActive = false;
+var searchFilterTimer = null;
 
 function hasActiveBrowseFilter() {
   var searchInput = document.getElementById('searchInput');
@@ -1265,6 +1330,25 @@ function renderCardField(field, p) {
     default:
       return '';
   }
+}
+
+function renderCardInfo(p) {
+  var infoHtml = '';
+  cardFields.forEach(function(field) {
+    infoHtml += renderCardField(field, p);
+  });
+  return infoHtml;
+}
+
+function refreshGridCards(photoIds) {
+  photoIds.forEach(function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    if (!p) return;
+    var card = document.querySelector('.grid-card[data-id="' + id + '"]');
+    if (!card) return;
+    var info = card.querySelector('.grid-card-info');
+    if (info) info.innerHTML = renderCardInfo(p);
+  });
 }
 
 /* ---------- Bootstrap ---------- */
@@ -1486,6 +1570,7 @@ async function loadCollectionCounts() {
 }
 
 async function filterByCollection(id) {
+  cancelScheduledSearchFilter();
   activeFolderId = null;
   activeKeyword = null;
   activeCollectionId = id;
@@ -1862,6 +1947,7 @@ async function saveCollection() {
 
 /* ---------- Photo Loading ---------- */
 function resetAndLoad() {
+  cancelScheduledSearchFilter();
   photos = [];
   currentPage = 1;
   allLoaded = false;
@@ -2116,6 +2202,26 @@ function applyFilters() {
   resetAndLoad();
 }
 
+function scheduleSearchFilter() {
+  cancelScheduledSearchFilter();
+  searchFilterTimer = setTimeout(function() {
+    searchFilterTimer = null;
+    applyFilters();
+  }, 250);
+}
+
+function cancelScheduledSearchFilter() {
+  if (searchFilterTimer) {
+    clearTimeout(searchFilterTimer);
+    searchFilterTimer = null;
+  }
+}
+
+function applySearchFilterNow() {
+  cancelScheduledSearchFilter();
+  applyFilters();
+}
+
 function setFilterRating(val) {
   if (filterRating === val) {
     filterRating = 0;
@@ -2316,12 +2422,6 @@ function renderGrid() {
       speciesBadgeHtml += '</div>';
     }
 
-    // Build info area from configured card fields
-    var infoHtml = '';
-    cardFields.forEach(function(field) {
-      infoHtml += renderCardField(field, p);
-    });
-
     html += '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
       '<div class="grid-card-img-wrap">' +
         '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
@@ -2332,7 +2432,7 @@ function renderGrid() {
         speciesBadgeHtml +
       '</div>' +
       '<div class="grid-card-info">' +
-        infoHtml +
+        renderCardInfo(p) +
       '</div>' +
     '</div>';
   });
@@ -2436,6 +2536,103 @@ function updateBatchBar() {
   } else {
     bar.style.display = 'none';
   }
+  updateSelectionPanel(ids);
+}
+
+function updateSelectionPanel(ids) {
+  var panel = document.getElementById('selectionPanel');
+  if (!panel) return;
+  if (ids.length <= 1) {
+    var wasVisible = !panel.classList.contains('hidden');
+    panel.classList.add('hidden');
+    selectionKeywordKey = '';
+    selectionKeywordMissingById = {};
+    selectionKeywordRequestSeq++;
+    var list = document.getElementById('selectionKeywordSuggestions');
+    if (list) list.innerHTML = '';
+    if (wasVisible && selectedPhotoId) {
+      loadDetail(selectedPhotoId);
+    } else if (wasVisible) {
+      var detail = document.getElementById('detailContent');
+      var summary = document.getElementById('summaryPanel');
+      if (detail) detail.classList.remove('visible');
+      if (summary) summary.classList.remove('hidden');
+      loadSummary();
+    }
+    return;
+  }
+
+  var detail = document.getElementById('detailContent');
+  var summary = document.getElementById('summaryPanel');
+  if (detail) detail.classList.remove('visible');
+  if (summary) summary.classList.add('hidden');
+  panel.classList.remove('hidden');
+  document.getElementById('selectionCount').textContent = ids.length + ' photos selected';
+  loadSelectionKeywordSuggestions(ids);
+}
+
+async function loadSelectionKeywordSuggestions(ids) {
+  var key = ids.slice().sort(function(a, b) { return a - b; }).join(',');
+  if (key === selectionKeywordKey) return;
+  selectionKeywordKey = key;
+  var seq = ++selectionKeywordRequestSeq;
+  var list = document.getElementById('selectionKeywordSuggestions');
+  if (list) list.innerHTML = '<div class="selection-empty">Checking selected keywords...</div>';
+
+  try {
+    var data = await safeFetch('/api/selection/keyword-suggestions', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids}),
+    }, { toast: false });
+    if (seq !== selectionKeywordRequestSeq) return;
+    renderSelectionKeywordSuggestions(data.suggestions || []);
+  } catch(e) {
+    if (seq === selectionKeywordRequestSeq && list) {
+      list.innerHTML = '<div class="selection-empty">Could not load keyword suggestions.</div>';
+    }
+  }
+}
+
+function renderSelectionKeywordSuggestions(suggestions) {
+  var list = document.getElementById('selectionKeywordSuggestions');
+  if (!list) return;
+  if (!suggestions.length) {
+    selectionKeywordMissingById = {};
+    list.innerHTML = '<div class="selection-empty">No partial keywords in this selection.</div>';
+    return;
+  }
+
+  var html = '';
+  selectionKeywordMissingById = {};
+  suggestions.slice(0, 8).forEach(function(k) {
+    var missing = k.missing_count || 0;
+    selectionKeywordMissingById[String(k.id)] = k.missing_photo_ids || [];
+    html += '<div class="selection-keyword-row">' +
+      '<div style="min-width:0;">' +
+        '<div class="selection-keyword-name">' + escapeHtml(k.name) + '</div>' +
+        '<div class="selection-keyword-meta">On ' + k.count + ', missing from ' + missing + '</div>' +
+      '</div>' +
+      '<button class="selection-keyword-add" onclick="applySelectionKeyword(' + k.id + ')" title="Add this keyword to the selected photos missing it">Add to ' + missing + '</button>' +
+    '</div>';
+  });
+  list.innerHTML = html;
+}
+
+async function applySelectionKeyword(keywordId) {
+  var ids = selectionKeywordMissingById[String(keywordId)] || [];
+  if (!ids.length) return;
+  try {
+    await safeFetch('/api/batch/keyword', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, keyword_id: keywordId}),
+    });
+  } catch(e) { return; }
+  selectionKeywordKey = '';
+  loadSelectionKeywordSuggestions(getActiveSelection());
+  loadKeywords();
+  showUndoToast();
 }
 
 async function batchSetRating(rating) {
@@ -2450,7 +2647,7 @@ async function batchSetRating(rating) {
     var p = photos.find(function(x) { return x.id === id; });
     if (p) p.rating = rating;
   });
-  renderGrid();
+  refreshGridCards(ids);
   showUndoToast();
 }
 
@@ -2466,7 +2663,10 @@ async function batchSetFlag(flag) {
     var p = photos.find(function(x) { return x.id === id; });
     if (p) p.flag = flag;
   });
-  renderGrid();
+  refreshGridCards(ids);
+  if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1) {
+    updateDetailFlagButtons(flag);
+  }
   showUndoToast();
 }
 
@@ -2484,7 +2684,7 @@ async function batchSetColorLabel(color) {
     if (color) colorLabels[id] = color;
     else delete colorLabels[id];
   });
-  renderGrid();
+  refreshGridCards(ids);
   showUndoToast();
 }
 
@@ -2510,6 +2710,9 @@ async function confirmBatchKeyword() {
       body: JSON.stringify({photo_ids: ids, name: name}),
     });
   } catch(e) { return; }
+  selectionKeywordKey = '';
+  loadSelectionKeywordSuggestions(ids);
+  loadKeywords();
   showUndoToast();
 }
 
@@ -2679,7 +2882,9 @@ async function loadDetail(id) {
 
   try {
     var photo = await safeFetch('/api/photos/' + id, {}, { toast: false });
-    renderDetail(photo);
+    if (selectedPhotoId === id && getActiveSelection().length === 1) {
+      renderDetail(photo);
+    }
   } catch(e) {}
 }
 
@@ -2697,12 +2902,7 @@ function renderDetail(photo) {
   document.getElementById('detailRating').innerHTML = ratingHtml;
 
   // Flags
-  document.querySelectorAll('.detail-flag-btn').forEach(function(btn) {
-    btn.className = 'detail-flag-btn';
-  });
-  var flagBtns = document.querySelectorAll('.detail-flag-btn');
-  if (photo.flag === 'flagged') flagBtns[1].classList.add('active-flag');
-  else if (photo.flag === 'rejected') flagBtns[2].classList.add('active-reject');
+  updateDetailFlagButtons(photo.flag);
 
   // Color labels
   updateDetailColors();
@@ -2815,6 +3015,15 @@ function renderDetail(photo) {
   var searchInput = document.getElementById('metadataSearch');
   if (searchInput) searchInput.value = '';
   renderMetadataGroups(photo.metadata);
+}
+
+function updateDetailFlagButtons(flag) {
+  document.querySelectorAll('.detail-flag-btn').forEach(function(btn) {
+    btn.className = 'detail-flag-btn';
+  });
+  var flagBtns = document.querySelectorAll('.detail-flag-btn');
+  if (flag === 'flagged') flagBtns[1].classList.add('active-flag');
+  else if (flag === 'rejected') flagBtns[2].classList.add('active-reject');
 }
 
 function renderMetadataGroups(metadata) {
@@ -3012,23 +3221,24 @@ async function setRating(photoId, rating) {
     // Update local state
     var p = photos.find(function(x) { return x.id === photoId; });
     if (p) p.rating = rating;
-    renderGrid();
+    refreshGridCards([photoId]);
     loadDetail(photoId);
   } catch(e) {}
 }
 
 async function setFlag(flag) {
   if (!selectedPhotoId) return;
+  var photoId = selectedPhotoId;
   try {
-    await safeFetch('/api/photos/' + selectedPhotoId + '/flag', {
+    await safeFetch('/api/photos/' + photoId + '/flag', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ flag: flag }),
     });
-    var p = photos.find(function(x) { return x.id === selectedPhotoId; });
+    var p = photos.find(function(x) { return x.id === photoId; });
     if (p) p.flag = flag;
-    renderGrid();
-    loadDetail(selectedPhotoId);
+    refreshGridCards([photoId]);
+    if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
   } catch(e) {}
 }
 
@@ -3082,20 +3292,21 @@ async function fetchColorLabels(photoIds) {
 async function setColorLabel(color) {
   if (!selectedPhotoId) return;
   colorLabelGen++;
-  var current = colorLabels[selectedPhotoId] || null;
+  var photoId = selectedPhotoId;
+  var current = colorLabels[photoId] || null;
   var newColor = (current === color) ? null : color;
-  await safeFetch('/api/photos/' + selectedPhotoId + '/color_label', {
+  await safeFetch('/api/photos/' + photoId + '/color_label', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({color: newColor}),
   });
   if (newColor) {
-    colorLabels[selectedPhotoId] = newColor;
+    colorLabels[photoId] = newColor;
   } else {
-    delete colorLabels[selectedPhotoId];
+    delete colorLabels[photoId];
   }
-  updateDetailColors();
-  renderGrid();
+  if (selectedPhotoId === photoId) updateDetailColors();
+  refreshGridCards([photoId]);
 }
 
 function updateDetailColors() {
@@ -3583,7 +3794,7 @@ async function setRatingFor(photoId, rating) {
   } catch(e) { return; }
   var p = photos.find(function(x) { return x.id === photoId; });
   if (p) p.rating = rating;
-  renderGrid();
+  refreshGridCards([photoId]);
   if (selectedPhotoId === photoId) loadDetail(photoId);
 }
 
@@ -3593,11 +3804,12 @@ async function setFlagFor(photoId, flag) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: [photoId], flag: flag}),
     });
-  } catch(e) { return; }
+  } catch(e) { return false; }
   var p = photos.find(function(x) { return x.id === photoId; });
   if (p) p.flag = flag;
-  renderGrid();
-  if (selectedPhotoId === photoId) loadDetail(photoId);
+  refreshGridCards([photoId]);
+  if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
+  return true;
 }
 
 async function setColorLabelFor(photoId, color) {
@@ -3610,7 +3822,7 @@ async function setColorLabelFor(photoId, color) {
   } catch(e) { return; }
   if (color) colorLabels[photoId] = color;
   else delete colorLabels[photoId];
-  renderGrid();
+  refreshGridCards([photoId]);
   if (selectedPhotoId === photoId) updateDetailColors();
 }
 

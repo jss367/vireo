@@ -265,6 +265,134 @@ def test_singleton_set_keyboard_shortcut_applies(live_server, page):
     )
 
 
+def test_multiselect_offers_partial_keyword_fill(live_server, page):
+    """Selecting mixed tagged/untagged photos offers one-click keyword fill."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    assert cards.count() >= 5
+
+    page.evaluate("""
+      photos.forEach(function(p) { selectedPhotos.add(p.id); });
+      renderGrid();
+      updateBatchBar();
+    """)
+
+    expect(page.locator("#selectionPanel")).to_be_visible()
+    row = page.locator(".selection-keyword-row", has_text="Red-tailed Hawk")
+    expect(row).to_be_visible()
+    expect(row).to_contain_text("missing from 4")
+
+    original_with_keyword = page.evaluate("""
+      async () => {
+        const ids = photos.map(p => p.id);
+        const details = await Promise.all(
+          ids.map(id => fetch('/api/photos/' + id).then(r => r.json()))
+        );
+        return details
+          .filter(p => (p.keywords || []).some(k => k.name === 'Red-tailed Hawk'))
+          .map(p => p.id)
+          .sort((a, b) => a - b);
+      }
+    """)
+
+    row.locator("button", has_text="Add to 4").click()
+
+    page.wait_for_function("""
+      async () => {
+        const ids = photos.map(p => p.id);
+        const details = await Promise.all(
+          ids.map(id => fetch('/api/photos/' + id).then(r => r.json()))
+        );
+        return details.every(p =>
+          (p.keywords || []).some(k => k.name === 'Red-tailed Hawk')
+        );
+      }
+    """, timeout=3000)
+    expect(
+        page.locator(".selection-keyword-row", has_text="Red-tailed Hawk")
+    ).to_have_count(0)
+
+    page.evaluate("async () => (await fetch('/api/undo', {method: 'POST'})).ok")
+    restored_with_keyword = page.evaluate("""
+      async () => {
+        const ids = photos.map(p => p.id);
+        const details = await Promise.all(
+          ids.map(id => fetch('/api/photos/' + id).then(r => r.json()))
+        );
+        return details
+          .filter(p => (p.keywords || []).some(k => k.name === 'Red-tailed Hawk'))
+          .map(p => p.id)
+          .sort((a, b) => a - b);
+      }
+    """)
+    assert restored_with_keyword == original_with_keyword
+
+
+def test_multiselect_shrink_to_focused_photo_restores_detail(live_server, page):
+    """Leaving multi-select with a focused photo must restore the detail pane."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    page.locator(".grid-card").first.wait_for(state="visible")
+    first_filename = page.evaluate("photos[0].filename")
+
+    page.evaluate("""
+      selectedPhotoId = photos[0].id;
+      selectedIndex = 0;
+      selectedPhotos.clear();
+      selectedPhotos.add(photos[0].id);
+      selectedPhotos.add(photos[1].id);
+      updateBatchBar();
+    """)
+    expect(page.locator("#selectionPanel")).to_be_visible()
+
+    page.evaluate("""
+      selectedPhotos.delete(photos[1].id);
+      updateBatchBar();
+    """)
+
+    expect(page.locator("#selectionPanel")).to_be_hidden()
+    page.wait_for_function(
+        "document.getElementById('detailContent').classList.contains('visible')",
+        timeout=3000,
+    )
+    expect(page.locator("#detailFilename")).to_have_text(first_filename)
+
+
+def test_reject_shortcut_keeps_existing_thumbnail_nodes(live_server, page):
+    """Rejecting one photo should not rebuild the whole grid.
+
+    Regression: setFlag() called renderGrid(), replacing every thumbnail
+    <img> node and causing the visible grid to briefly blank/reload.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.click()
+    pid = int(first.get_attribute("data-id"))
+
+    page.evaluate(
+        """() => {
+          window.__firstThumbNode = document.querySelector('.grid-card img');
+        }"""
+    )
+
+    page.keyboard.press("x")
+    page.wait_for_function(
+        f"(photos.find(function(p){{return p.id==={pid};}}) || {{}}).flag === 'rejected'",
+        timeout=3000,
+    )
+
+    assert page.evaluate(
+        "() => window.__firstThumbNode === document.querySelector('.grid-card img')"
+    )
+
+
 def test_filterByCollection_clears_multiselect_set(live_server, page):
     """Switching to a collection must drop a surviving multi-select set.
 
@@ -298,3 +426,23 @@ def test_filterByCollection_clears_multiselect_set(live_server, page):
     assert page.evaluate("selectedPhotos.size") == 0
     assert page.evaluate("selectedPhotoId") is None
     expect(bar).to_be_hidden()
+
+
+def test_filterByCollection_cancels_pending_search_debounce(live_server, page):
+    """A delayed search apply must not kick the user out of collection mode."""
+    db = live_server["db"]
+    rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
+    collection_id = db.add_collection("Debounce Collection", rules)
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    page.locator("#searchInput").fill("hum")
+    page.evaluate(f"filterByCollection({collection_id})")
+    page.wait_for_function(
+        f"activeCollectionId === {collection_id}", timeout=2000
+    )
+
+    page.wait_for_timeout(350)
+    assert page.evaluate("activeCollectionId") == collection_id

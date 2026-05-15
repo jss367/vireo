@@ -71,7 +71,7 @@ class JobRunner:
             db.conn.execute("ALTER TABLE job_history ADD COLUMN summary TEXT DEFAULT ''")
 
     def start(self, job_type, work_fn, config=None, workspace_id=None,
-              ephemeral=False):
+              ephemeral=False, runtime_warning=None):
         """Start a background job.
 
         Args:
@@ -86,6 +86,8 @@ class JobRunner:
                        (e.g. the new-images filesystem walk) — it is fine to
                        lose the record on process restart and we don't want
                        it to clutter the history list.
+            runtime_warning: optional user-facing warning metadata to expose
+                       while the job is running.
 
         Returns:
             job_id string
@@ -106,6 +108,7 @@ class JobRunner:
             "workspace_id": workspace_id,
             "steps": [],
             "ephemeral": ephemeral,
+            "runtime_warning": runtime_warning,
         }
 
         with self._lock:
