@@ -838,6 +838,8 @@ body {
 
 {% include '_navbar.html' %}
 
+{% include '_sync_panel.html' %}
+
 <div class="main-layout">
 
   <!-- Sidebar -->
@@ -1216,6 +1218,12 @@ var calendarData = null;
 var clipSearchActive = false;
 var searchFilterTimer = null;
 
+function refreshPendingSyncBanner() {
+  if (typeof checkPendingSync === 'function') {
+    checkPendingSync();
+  }
+}
+
 function hasActiveBrowseFilter() {
   var searchInput = document.getElementById('searchInput');
   var colorFilter = document.getElementById('colorFilter');
@@ -1376,6 +1384,7 @@ async function bootstrapBrowse() {
     renderGrid();
     updateFilterSummary();
     loadSummary();
+    refreshPendingSyncBanner();
 
     document.getElementById('loadingState').style.display = 'none';
     // Lazy-load collection photo counts to avoid N+1 on init
@@ -2632,6 +2641,7 @@ async function applySelectionKeyword(keywordId) {
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
+  refreshPendingSyncBanner();
   showUndoToast();
 }
 
@@ -2648,6 +2658,7 @@ async function batchSetRating(rating) {
     if (p) p.rating = rating;
   });
   refreshGridCards(ids);
+  refreshPendingSyncBanner();
   showUndoToast();
 }
 
@@ -2713,6 +2724,7 @@ async function confirmBatchKeyword() {
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(ids);
   loadKeywords();
+  refreshPendingSyncBanner();
   showUndoToast();
 }
 
@@ -2856,6 +2868,7 @@ async function undoLast() {
     var data = await safeFetch('/api/undo', { method: 'POST' });
     showToast('Undone: ' + data.undone + ' — Ctrl+Shift+Z to redo');
     resetAndLoad();
+    refreshPendingSyncBanner();
   } catch(e) {}
 }
 
@@ -2864,6 +2877,7 @@ async function redoLast() {
     var data = await safeFetch('/api/redo', { method: 'POST' });
     showToast('Redone: ' + data.redone);
     resetAndLoad();
+    refreshPendingSyncBanner();
   } catch(e) {}
 }
 
@@ -3223,6 +3237,7 @@ async function setRating(photoId, rating) {
     if (p) p.rating = rating;
     refreshGridCards([photoId]);
     loadDetail(photoId);
+    refreshPendingSyncBanner();
   } catch(e) {}
 }
 
@@ -3330,6 +3345,7 @@ async function addKeyword() {
     input.value = '';
     loadDetail(selectedPhotoId);
     loadKeywords();
+    refreshPendingSyncBanner();
   } catch(e) {}
 }
 
@@ -3339,6 +3355,7 @@ async function removeKeyword(photoId, keywordId) {
       method: 'DELETE',
     });
     loadDetail(photoId);
+    refreshPendingSyncBanner();
   } catch(e) {}
 }
 
@@ -3796,6 +3813,7 @@ async function setRatingFor(photoId, rating) {
   if (p) p.rating = rating;
   refreshGridCards([photoId]);
   if (selectedPhotoId === photoId) loadDetail(photoId);
+  refreshPendingSyncBanner();
 }
 
 async function setFlagFor(photoId, flag) {
