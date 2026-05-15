@@ -30,7 +30,7 @@ except ImportError:
     load_image = None
     load_working_image = None
 
-from db import Database, commit_with_retry
+from db import AUTO_MATCH_REVIEW_MARKER, Database, commit_with_retry
 from models import get_active_model, get_models
 
 try:
@@ -1124,6 +1124,70 @@ def _record_batch_classifier_runs(
         )
 
 
+def _store_match_prediction(
+    db, item, model_name, labels_fingerprint, tax=None,
+    species=None, confidence=None, taxonomy=None,
+    store_alternatives=True,
+):
+    """Persist an already-labeled classifier result as a reusable cache row.
+
+    A taxonomy ``match`` means the photo's XMP already carries this species, so
+    it should not re-enter the pending review queue.  The raw classifier output
+    still needs a prediction row, though; otherwise the next non-reclassify run
+    sees a classifier_runs key with no cached prediction to surface and pays for
+    inference again.
+
+    ``store_alternatives`` must be False when ``species``/``confidence`` are a
+    consensus override (burst groups): the per-frame ``item["alternatives"]``
+    are runner-ups for that frame's own top-1, not for the consensus species,
+    and an alternative's confidence can exceed the consensus average. Since
+    ``get_predictions_for_detection`` orders ``confidence DESC``, caching them
+    would let a per-frame alternative outrank the consensus primary and become
+    the cached top-1 on later non-reclassify runs.
+    """
+    species = species or item["prediction"]
+    confidence = item["confidence"] if confidence is None else confidence
+    tax_hierarchy = taxonomy or item.get("taxonomy") or (
+        tax.get_hierarchy(species) if tax else {}
+    )
+    db.add_prediction(
+        detection_id=item["detection_id"],
+        species=species,
+        confidence=round(confidence, 4),
+        model=model_name,
+        category="match",
+        status="accepted",
+        individual=AUTO_MATCH_REVIEW_MARKER,
+        taxonomy=tax_hierarchy,
+        labels_fingerprint=labels_fingerprint,
+        preserve_manual_review=True,
+    )
+    if store_alternatives:
+        for alt in item.get("alternatives", []):
+            alt_tax = alt.get("taxonomy") or (
+                tax.get_hierarchy(alt["species"]) if tax else {}
+            )
+            db.add_prediction(
+                detection_id=item["detection_id"],
+                species=alt["species"],
+                confidence=round(alt["confidence"], 4),
+                model=model_name,
+                category="match",
+                status="alternative",
+                taxonomy=alt_tax,
+                labels_fingerprint=labels_fingerprint,
+                preserve_manual_review=True,
+            )
+    # add_prediction is INSERT-OR-IGNORE: a row cached as non-match on an
+    # earlier pass keeps its stale category here. Re-stamp it 'match' so the
+    # downgrade in reconcile_match_review_state still fires if this detection
+    # later stops being a match.
+    db.reconcile_match_review_state(
+        item["detection_id"], model_name, labels_fingerprint,
+        species, "match",
+    )
+
+
 def _store_grouped_predictions(
     raw_results, job_id, model_name, grouping_window, similarity_threshold, tax, db,
     labels_fingerprint="legacy",
@@ -1171,6 +1235,9 @@ def _store_grouped_predictions(
                 category = categorize(item["prediction"], existing, tax)
 
             if category == "match":
+                _store_match_prediction(
+                    db, item, model_name, labels_fingerprint, tax,
+                )
                 skipped_match += 1
                 continue
 
@@ -1185,6 +1252,14 @@ def _store_grouped_predictions(
                 category=category,
                 taxonomy=tax_hierarchy,
                 labels_fingerprint=labels_fingerprint,
+            )
+            # If this detection was a cached 'match', its auto-accepted
+            # review row would otherwise survive the now non-match reuse
+            # (add_prediction's default pending never overwrites it) and
+            # keep it out of the queue. Downgrade it back to pending.
+            db.reconcile_match_review_state(
+                item["detection_id"], model_name, labels_fingerprint,
+                item["prediction"], category,
             )
             # Store alternative predictions
             for alt in item.get("alternatives", []):
@@ -1227,6 +1302,17 @@ def _store_grouped_predictions(
                 category = categorize(cons["prediction"], existing, tax)
 
             if category == "match":
+                cons_hierarchy = (
+                    tax.get_hierarchy(cons["prediction"]) if tax else {}
+                )
+                for item in group:
+                    _store_match_prediction(
+                        db, item, model_name, labels_fingerprint, tax,
+                        species=cons["prediction"],
+                        confidence=cons["confidence"],
+                        taxonomy=cons_hierarchy,
+                        store_alternatives=False,
+                    )
                 skipped_match += len(group)
                 continue
 
@@ -1235,6 +1321,19 @@ def _store_grouped_predictions(
             cons_hierarchy = rep_tax or (
                 tax.get_hierarchy(cons["prediction"]) if tax else {}
             )
+
+            # Drop any stale auto-accept from a prior 'match' pass first, so
+            # the update_prediction_group_info upsert below re-inserts a
+            # fresh pending row (its ON CONFLICT keeps the existing status)
+            # and the burst re-enters review. A prior match pass cached every
+            # detection under the consensus species, so reconcile that same
+            # species (not each frame's own prediction) or the downgrade
+            # misses a dissenting frame's cached row and it stays hidden.
+            for item in group:
+                db.reconcile_match_review_state(
+                    item["detection_id"], model_name, labels_fingerprint,
+                    cons["prediction"], category,
+                )
 
             for item in group:
                 if item.get("_existing"):
