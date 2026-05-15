@@ -9,7 +9,18 @@ _PNG_1X1 = (
 )
 
 
-def _mock_pipeline_rapid_review(page, *, results=None, state_ok=True, apply_photos=None, save_payloads=None):
+def _mock_pipeline_rapid_review(
+    page,
+    *,
+    results=None,
+    state_ok=True,
+    apply_photos=None,
+    save_payloads=None,
+    preview_body=None,
+    preview_content_type="image/png",
+    original_body=None,
+    original_content_type="image/png",
+):
     image_body = base64.b64decode(_PNG_1X1)
     if results is None:
         results = {
@@ -73,7 +84,11 @@ def _mock_pipeline_rapid_review(page, *, results=None, state_ok=True, apply_phot
     )
     page.route(
         "**/photos/*/preview?*",
-        lambda route: route.fulfill(body=image_body, content_type="image/png"),
+        lambda route: route.fulfill(body=preview_body or image_body, content_type=preview_content_type),
+    )
+    page.route(
+        "**/photos/*/original",
+        lambda route: route.fulfill(body=original_body or image_body, content_type=original_content_type),
     )
 
 
@@ -194,6 +209,43 @@ def test_rapid_review_preserves_burst_override_species_on_apply_next(live_server
 
     expect(page.locator("#filename")).to_have_text("d.jpg")
     expect(page.locator("#speciesInput")).to_have_value("Override bird")
+
+
+def test_rapid_review_click_main_image_opens_original_at_one_to_one(live_server, page):
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="3000" height="2000">'
+        '<rect width="3000" height="2000" fill="#101820"/>'
+        '<circle cx="2600" cy="1700" r="180" fill="#f2aa4c"/>'
+        "</svg>"
+    )
+    _mock_pipeline_rapid_review(
+        page,
+        preview_body=original_svg,
+        preview_content_type="image/svg+xml",
+        original_body=original_svg,
+        original_content_type="image/svg+xml",
+    )
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    img = page.locator("#currentPhoto")
+    stage = page.locator("#photoStage")
+
+    stage.click(position={"x": 12, "y": 12})
+
+    expect(stage).to_have_class(re.compile(r"\bzoomed\b"))
+    expect(img).to_have_attribute("src", re.compile(r"/photos/1/original$"))
+    page.wait_for_function(
+        """() => {
+          const img = document.getElementById('currentPhoto');
+          return img && img.naturalWidth === 3000 && img.style.width === '3000px';
+        }"""
+    )
+    assert stage.evaluate("el => el.scrollWidth") >= 3000
+
+    stage.click(position={"x": 12, "y": 12})
+
+    expect(stage).not_to_have_class(re.compile(r"\bzoomed\b"))
+    expect(img).to_have_attribute("src", re.compile(r"/photos/1/preview\?size=2560$"))
 
 
 def test_classic_pipeline_review_opens_requested_burst_from_url(live_server, page):
