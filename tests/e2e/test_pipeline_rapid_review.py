@@ -247,6 +247,235 @@ def test_rapid_review_preserves_burst_override_species_on_apply_next(live_server
     expect(page.locator("#speciesInput")).to_have_value("Override bird")
 
 
+def test_rapid_review_default_queue_excludes_fully_confirmed_bursts(live_server, page):
+    results = {
+        "photos": [
+            {"id": 1, "filename": "confirmed.jpg", "label": "KEEP", "flag": "flagged", "confirmed_species": "Test bird"},
+            {"id": 2, "filename": "needs.jpg", "label": "REVIEW", "flag": "none"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2],
+                "photo_count": 2,
+                "burst_count": 2,
+                "species": ["Test bird"],
+                "bursts": [{"photo_ids": [1]}, {"photo_ids": [2]}],
+            }
+        ],
+        "summary": {"keep_count": 1, "review_count": 1, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(page, results=results)
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+
+    expect(page.locator("#queueFilter")).to_have_value("needs-species")
+    expect(page.locator("#queueCount")).to_contain_text("Needs species: 1 of 2 bursts")
+    expect(page.locator("#filename")).to_have_text("needs.jpg")
+    expect(page.locator(".burst-row")).to_have_count(1)
+
+    page.locator("#queueFilter").select_option("all")
+    expect(page.locator("#queueCount")).to_contain_text("All: 2 of 2 bursts")
+    expect(page.locator(".burst-row")).to_have_count(2)
+
+
+def test_rapid_review_deep_link_opens_filtered_out_burst_via_all(live_server, page):
+    results = {
+        "photos": [
+            {"id": 1, "filename": "confirmed.jpg", "label": "KEEP", "flag": "flagged", "confirmed_species": "Test bird"},
+            {"id": 2, "filename": "needs.jpg", "label": "REVIEW", "flag": "none"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2],
+                "photo_count": 2,
+                "burst_count": 2,
+                "species": ["Test bird"],
+                "bursts": [{"photo_ids": [1]}, {"photo_ids": [2]}],
+            }
+        ],
+        "summary": {"keep_count": 1, "review_count": 1, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(page, results=results)
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review?enc=0&burst=0")
+
+    expect(page.locator("#queueFilter")).to_have_value("all")
+    expect(page.locator("#burstTitle")).to_have_text("Encounter 1, Burst 1")
+    expect(page.locator("#filename")).to_have_text("confirmed.jpg")
+
+
+def test_rapid_review_needs_species_includes_mixed_burst(live_server, page):
+    results = {
+        "photos": [
+            {"id": 1, "filename": "tagged.jpg", "label": "KEEP", "flag": "flagged", "confirmed_species": "Test bird"},
+            {"id": 2, "filename": "untagged.jpg", "label": "REVIEW", "flag": "none"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2],
+                "photo_count": 2,
+                "burst_count": 1,
+                "species": ["Test bird"],
+                "bursts": [{"photo_ids": [1, 2]}],
+            }
+        ],
+        "summary": {"keep_count": 1, "review_count": 1, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(page, results=results)
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+
+    expect(page.locator("#queueCount")).to_contain_text("Needs species: 1 of 1 bursts")
+    expect(page.locator(".reason-chip", has_text="No species")).to_be_visible()
+    expect(page.locator(".reason-chip", has_text="Already tagged")).to_be_visible()
+
+
+def test_rapid_review_needs_species_ignores_rejected_untagged_photos(live_server, page):
+    results = {
+        "photos": [
+            {"id": 1, "filename": "tagged.jpg", "label": "KEEP", "flag": "flagged", "confirmed_species": "Test bird"},
+            {"id": 2, "filename": "rejected.jpg", "label": "REJECT", "flag": "rejected"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2],
+                "photo_count": 2,
+                "burst_count": 1,
+                "species": ["Test bird"],
+                "bursts": [{"photo_ids": [1, 2]}],
+            }
+        ],
+        "summary": {"keep_count": 1, "review_count": 0, "reject_count": 1},
+    }
+    _mock_pipeline_rapid_review(page, results=results)
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+
+    expect(page.locator("#queueCount")).to_contain_text("Needs species: 0 of 1 bursts")
+    expect(page.locator("#burstSubtitle")).to_have_text("0 matching bursts")
+
+    page.locator("#includeRejectedToggle").check()
+    expect(page.locator("#queueCount")).to_contain_text("Needs species: 1 of 1 bursts")
+    expect(page.locator("#filename")).to_have_text("tagged.jpg")
+
+
+def test_rapid_review_apply_next_skips_bursts_outside_active_queue(live_server, page):
+    results = {
+        "photos": [
+            {"id": 1, "filename": "first.jpg", "label": "REVIEW", "flag": "none"},
+            {"id": 2, "filename": "done.jpg", "label": "KEEP", "flag": "flagged", "confirmed_species": "Test bird"},
+            {"id": 3, "filename": "third.jpg", "label": "REVIEW", "flag": "none"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2, 3],
+                "photo_count": 3,
+                "burst_count": 3,
+                "species": ["Test bird"],
+                "bursts": [{"photo_ids": [1]}, {"photo_ids": [2]}, {"photo_ids": [3]}],
+            }
+        ],
+        "summary": {"keep_count": 1, "review_count": 2, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(page, results=results)
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    expect(page.locator("#filename")).to_have_text("first.jpg")
+    page.locator("#speciesInput").fill("Test bird")
+    page.keyboard.press("ArrowUp")
+
+    with page.expect_response("**/api/pipeline/save-cache"):
+        page.locator("#applyNextBtn").click()
+
+    expect(page.locator("#filename")).to_have_text("third.jpg")
+    expect(page.locator("#queueCount")).to_contain_text("Needs species: 1 of 3 bursts")
+
+
+def test_rapid_review_rebases_active_session_after_apply_rebuild(live_server, page):
+    results = {
+        "photos": [
+            {"id": 1, "filename": "first.jpg", "label": "REVIEW", "flag": "none"},
+            {"id": 2, "filename": "done.jpg", "label": "KEEP", "flag": "flagged", "confirmed_species": "Test bird"},
+            {"id": 3, "filename": "third.jpg", "label": "REVIEW", "flag": "none"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2, 3],
+                "photo_count": 3,
+                "burst_count": 3,
+                "species": ["Test bird"],
+                "bursts": [{"photo_ids": [1]}, {"photo_ids": [2]}, {"photo_ids": [3]}],
+            }
+        ],
+        "summary": {"keep_count": 1, "review_count": 2, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(
+        page,
+        results=results,
+        apply_photos={"1": {"flag": "flagged", "has_species_keyword": True}},
+    )
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    expect(page.locator("#applyBtn")).to_be_enabled()
+    expect(page.locator("#filename")).to_have_text("first.jpg")
+    page.locator("#speciesInput").fill("Test bird")
+    page.keyboard.press("ArrowUp")
+
+    page.evaluate(
+        """async () => {
+            const done = applyCurrent(false);
+            openSession(1);
+            await done;
+        }"""
+    )
+
+    expect(page.locator("#burstTitle")).to_have_text("Encounter 1, Burst 3")
+    expect(page.locator("#filename")).to_have_text("third.jpg")
+    expect(page.locator("#queueCount")).to_contain_text("Needs species: 1 of 3 bursts - 1 of 1")
+
+
+def test_rapid_review_filter_change_prompts_with_staged_decisions(live_server, page):
+    save_payloads = []
+    results = {
+        "photos": [
+            {"id": 1, "filename": "needs.jpg", "label": "REVIEW", "flag": "none"},
+            {"id": 2, "filename": "done.jpg", "label": "KEEP", "flag": "flagged", "confirmed_species": "Test bird"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2],
+                "photo_count": 2,
+                "burst_count": 2,
+                "species": ["Test bird"],
+                "bursts": [{"photo_ids": [1]}, {"photo_ids": [2]}],
+            }
+        ],
+        "summary": {"keep_count": 1, "review_count": 1, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(page, results=results, save_payloads=save_payloads)
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    expect(page.locator("#applyBtn")).to_be_enabled()
+    page.keyboard.press("ArrowDown")
+    page.locator("#queueFilter").select_option("all")
+
+    expect(page.locator("#queuePrompt")).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(page.locator("#queuePrompt")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"/pipeline/rapid-review$"))
+    page.keyboard.press("Enter")
+    expect(page.locator("#queuePrompt")).to_be_visible()
+    assert save_payloads == []
+    page.locator('[data-queue-choice="stay"]').click()
+    expect(page.locator("#queueFilter")).to_have_value("needs-species")
+
+    page.locator("#queueFilter").select_option("all")
+    expect(page.locator("#queuePrompt")).to_be_visible()
+    page.locator('[data-queue-choice="discard"]').click()
+    expect(page.locator("#queueFilter")).to_have_value("all")
+    expect(page.locator("#queueCount")).to_contain_text("All: 2 of 2 bursts")
+
+
 def test_rapid_review_click_main_image_opens_original_at_one_to_one(live_server, page):
     original_svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="3000" height="2000">'
