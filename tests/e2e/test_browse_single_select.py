@@ -331,6 +331,37 @@ def test_multiselect_offers_partial_keyword_fill(live_server, page):
     assert restored_with_keyword == original_with_keyword
 
 
+def test_reject_shortcut_keeps_existing_thumbnail_nodes(live_server, page):
+    """Rejecting one photo should not rebuild the whole grid.
+
+    Regression: setFlag() called renderGrid(), replacing every thumbnail
+    <img> node and causing the visible grid to briefly blank/reload.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.click()
+    pid = int(first.get_attribute("data-id"))
+
+    page.evaluate(
+        """() => {
+          window.__firstThumbNode = document.querySelector('.grid-card img');
+        }"""
+    )
+
+    page.keyboard.press("x")
+    page.wait_for_function(
+        f"(photos.find(function(p){{return p.id==={pid};}}) || {{}}).flag === 'rejected'",
+        timeout=3000,
+    )
+
+    assert page.evaluate(
+        "() => window.__firstThumbNode === document.querySelector('.grid-card img')"
+    )
+
+
 def test_filterByCollection_clears_multiselect_set(live_server, page):
     """Switching to a collection must drop a surviving multi-select set.
 

@@ -1306,6 +1306,25 @@ function renderCardField(field, p) {
   }
 }
 
+function renderCardInfo(p) {
+  var infoHtml = '';
+  cardFields.forEach(function(field) {
+    infoHtml += renderCardField(field, p);
+  });
+  return infoHtml;
+}
+
+function refreshGridCards(photoIds) {
+  photoIds.forEach(function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    if (!p) return;
+    var card = document.querySelector('.grid-card[data-id="' + id + '"]');
+    if (!card) return;
+    var info = card.querySelector('.grid-card-info');
+    if (info) info.innerHTML = renderCardInfo(p);
+  });
+}
+
 /* ---------- Bootstrap ---------- */
 bootstrapBrowse();
 
@@ -2354,12 +2373,6 @@ function renderGrid() {
       speciesBadgeHtml += '</div>';
     }
 
-    // Build info area from configured card fields
-    var infoHtml = '';
-    cardFields.forEach(function(field) {
-      infoHtml += renderCardField(field, p);
-    });
-
     html += '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
       '<div class="grid-card-img-wrap">' +
         '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
@@ -2369,7 +2382,7 @@ function renderGrid() {
         speciesBadgeHtml +
       '</div>' +
       '<div class="grid-card-info">' +
-        infoHtml +
+        renderCardInfo(p) +
       '</div>' +
     '</div>';
   });
@@ -2582,7 +2595,7 @@ async function batchSetRating(rating) {
     var p = photos.find(function(x) { return x.id === id; });
     if (p) p.rating = rating;
   });
-  renderGrid();
+  refreshGridCards(ids);
   showUndoToast();
 }
 
@@ -2598,7 +2611,10 @@ async function batchSetFlag(flag) {
     var p = photos.find(function(x) { return x.id === id; });
     if (p) p.flag = flag;
   });
-  renderGrid();
+  refreshGridCards(ids);
+  if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1) {
+    updateDetailFlagButtons(flag);
+  }
   showUndoToast();
 }
 
@@ -2616,7 +2632,7 @@ async function batchSetColorLabel(color) {
     if (color) colorLabels[id] = color;
     else delete colorLabels[id];
   });
-  renderGrid();
+  refreshGridCards(ids);
   showUndoToast();
 }
 
@@ -2834,12 +2850,7 @@ function renderDetail(photo) {
   document.getElementById('detailRating').innerHTML = ratingHtml;
 
   // Flags
-  document.querySelectorAll('.detail-flag-btn').forEach(function(btn) {
-    btn.className = 'detail-flag-btn';
-  });
-  var flagBtns = document.querySelectorAll('.detail-flag-btn');
-  if (photo.flag === 'flagged') flagBtns[1].classList.add('active-flag');
-  else if (photo.flag === 'rejected') flagBtns[2].classList.add('active-reject');
+  updateDetailFlagButtons(photo.flag);
 
   // Color labels
   updateDetailColors();
@@ -2949,6 +2960,15 @@ function renderDetail(photo) {
   var searchInput = document.getElementById('metadataSearch');
   if (searchInput) searchInput.value = '';
   renderMetadataGroups(photo.metadata);
+}
+
+function updateDetailFlagButtons(flag) {
+  document.querySelectorAll('.detail-flag-btn').forEach(function(btn) {
+    btn.className = 'detail-flag-btn';
+  });
+  var flagBtns = document.querySelectorAll('.detail-flag-btn');
+  if (flag === 'flagged') flagBtns[1].classList.add('active-flag');
+  else if (flag === 'rejected') flagBtns[2].classList.add('active-reject');
 }
 
 function renderMetadataGroups(metadata) {
@@ -3146,23 +3166,24 @@ async function setRating(photoId, rating) {
     // Update local state
     var p = photos.find(function(x) { return x.id === photoId; });
     if (p) p.rating = rating;
-    renderGrid();
+    refreshGridCards([photoId]);
     loadDetail(photoId);
   } catch(e) {}
 }
 
 async function setFlag(flag) {
   if (!selectedPhotoId) return;
+  var photoId = selectedPhotoId;
   try {
-    await safeFetch('/api/photos/' + selectedPhotoId + '/flag', {
+    await safeFetch('/api/photos/' + photoId + '/flag', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ flag: flag }),
     });
-    var p = photos.find(function(x) { return x.id === selectedPhotoId; });
+    var p = photos.find(function(x) { return x.id === photoId; });
     if (p) p.flag = flag;
-    renderGrid();
-    loadDetail(selectedPhotoId);
+    refreshGridCards([photoId]);
+    if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
   } catch(e) {}
 }
 
@@ -3182,20 +3203,21 @@ async function fetchColorLabels(photoIds) {
 async function setColorLabel(color) {
   if (!selectedPhotoId) return;
   colorLabelGen++;
-  var current = colorLabels[selectedPhotoId] || null;
+  var photoId = selectedPhotoId;
+  var current = colorLabels[photoId] || null;
   var newColor = (current === color) ? null : color;
-  await safeFetch('/api/photos/' + selectedPhotoId + '/color_label', {
+  await safeFetch('/api/photos/' + photoId + '/color_label', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({color: newColor}),
   });
   if (newColor) {
-    colorLabels[selectedPhotoId] = newColor;
+    colorLabels[photoId] = newColor;
   } else {
-    delete colorLabels[selectedPhotoId];
+    delete colorLabels[photoId];
   }
-  updateDetailColors();
-  renderGrid();
+  if (selectedPhotoId === photoId) updateDetailColors();
+  refreshGridCards([photoId]);
 }
 
 function updateDetailColors() {
@@ -3683,7 +3705,7 @@ async function setRatingFor(photoId, rating) {
   } catch(e) { return; }
   var p = photos.find(function(x) { return x.id === photoId; });
   if (p) p.rating = rating;
-  renderGrid();
+  refreshGridCards([photoId]);
   if (selectedPhotoId === photoId) loadDetail(photoId);
 }
 
@@ -3696,8 +3718,8 @@ async function setFlagFor(photoId, flag) {
   } catch(e) { return; }
   var p = photos.find(function(x) { return x.id === photoId; });
   if (p) p.flag = flag;
-  renderGrid();
-  if (selectedPhotoId === photoId) loadDetail(photoId);
+  refreshGridCards([photoId]);
+  if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
 }
 
 async function setColorLabelFor(photoId, color) {
@@ -3710,7 +3732,7 @@ async function setColorLabelFor(photoId, color) {
   } catch(e) { return; }
   if (color) colorLabels[photoId] = color;
   else delete colorLabels[photoId];
-  renderGrid();
+  refreshGridCards([photoId]);
   if (selectedPhotoId === photoId) updateDetailColors();
 }
 
