@@ -387,3 +387,4 @@ def test_develop_photo_reports_missing_dng_converter_for_nikon_he(tmp_path, monk
     assert result["success"] is False
     assert "Nikon High Efficiency NEF" in result["error"]
     assert "DNG conversion failed" in result["error"]
+    assert "download it from Adobe" in result["error"]

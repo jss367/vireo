@@ -192,7 +192,10 @@ def convert_to_dng(dng_converter_bin, input_path, output_dir):
         return {
             "success": False,
             "output_path": "",
-            "error": "Adobe DNG Converter not found or not configured",
+            "error": (
+                "Adobe DNG Converter not found or not configured. "
+                "You will need to download it from Adobe."
+            ),
         }
 
     os.makedirs(output_dir, exist_ok=True)
