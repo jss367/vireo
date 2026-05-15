@@ -1684,16 +1684,16 @@ document.addEventListener('keydown', function(e) {
     return;
   }
   if (e.target && e.target.tagName === 'INPUT') return;
-  if (e.key === 'ArrowDown' || rapidShortcutMatches(e, 'reject')) {
+  if (rapidShortcutMatches(e, 'reject')) {
     e.preventDefault();
     decideCurrent('reject');
-  } else if (e.key === 'ArrowUp' || rapidShortcutMatches(e, 'pick')) {
+  } else if (rapidShortcutMatches(e, 'pick')) {
     e.preventDefault();
     decideCurrent('pick');
-  } else if (e.key === 'ArrowRight' || e.key === ' ' || rapidShortcutMatches(e, 'next')) {
+  } else if (rapidShortcutMatches(e, 'next')) {
     e.preventDefault();
     decideCurrent('review');
-  } else if (e.key === 'ArrowLeft' || rapidShortcutMatches(e, 'back')) {
+  } else if (rapidShortcutMatches(e, 'back')) {
     e.preventDefault();
     undoLast();
   } else if (rapidShortcutMatches(e, 'clear')) {
