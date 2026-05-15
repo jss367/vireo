@@ -1063,6 +1063,153 @@ def test_store_grouped_predictions_writes_active_fingerprint(tmp_path):
     assert hits == {photo_id}
 
 
+def test_store_grouped_predictions_persists_match_for_cache(tmp_path, monkeypatch):
+    """Already-labeled matches should not be pending review, but they still
+    need prediction rows so the next run can reuse the classifier output.
+    """
+    import classify_job
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+
+    monkeypatch.setattr("compare.categorize", lambda *_args, **_kwargs: "match")
+
+    class Tax:
+        def get_hierarchy(self, _species):
+            return {}
+
+    result = classify_job._store_grouped_predictions(
+        raw_results=[{
+            "photo": {
+                "id": photo_id, "filename": "a.jpg",
+                "folder_id": folder_id, "timestamp": None, "burst_id": None,
+            },
+            "folder_path": str(tmp_path),
+            "detection_id": det_id,
+            "prediction": "Robin",
+            "confidence": 0.88,
+            "alternatives": [{"species": "Sparrow", "confidence": 0.12}],
+            "taxonomy": {},
+            "timestamp": None,
+        }],
+        job_id="job-abc",
+        model_name="bioclip-2",
+        grouping_window=0,
+        similarity_threshold=0.99,
+        tax=Tax(),
+        db=db,
+        labels_fingerprint="fp-active",
+    )
+
+    assert result["predictions_stored"] == 0
+    assert result["already_labeled"] == 1
+
+    cached = db.get_predictions_for_detection(
+        det_id,
+        classifier_model="bioclip-2",
+        labels_fingerprint="fp-active",
+        min_classifier_conf=0,
+    )
+    assert [row["species"] for row in cached] == ["Robin", "Sparrow"]
+    assert cached[0]["category"] == "match"
+
+    reviewed = db.get_predictions(photo_ids=[photo_id])
+    statuses = {row["species"]: row["status"] for row in reviewed}
+    assert statuses == {"Robin": "accepted", "Sparrow": "alternative"}
+
+
+def test_store_grouped_predictions_persists_group_match_for_cache(tmp_path, monkeypatch):
+    """Burst groups that are already labeled also need per-detection cache rows."""
+    from datetime import datetime
+
+    import classify_job
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_ids = [
+        db.add_photo(
+            folder_id, f"{idx}.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        for idx in range(2)
+    ]
+    det_ids = [
+        db.save_detections(
+            pid,
+            [{
+                "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                "confidence": 0.9,
+                "category": "animal",
+            }],
+            detector_model="MDV6",
+        )[0]
+        for pid in photo_ids
+    ]
+
+    monkeypatch.setattr("compare.categorize", lambda *_args, **_kwargs: "match")
+
+    class Tax:
+        def get_hierarchy(self, _species):
+            return {}
+
+    raw_results = [
+        {
+            "photo": {
+                "id": pid,
+                "filename": f"{idx}.jpg",
+                "folder_id": folder_id,
+                "timestamp": None,
+                "burst_id": None,
+            },
+            "folder_path": str(tmp_path),
+            "detection_id": det_id,
+            "prediction": "Robin",
+            "confidence": 0.9 - (idx * 0.01),
+            "alternatives": [],
+            "taxonomy": {},
+            "timestamp": datetime(2024, 1, 1, 12, 0, idx),
+        }
+        for idx, (pid, det_id) in enumerate(zip(photo_ids, det_ids, strict=True))
+    ]
+
+    result = classify_job._store_grouped_predictions(
+        raw_results=raw_results,
+        job_id="job-abc",
+        model_name="bioclip-2",
+        grouping_window=10,
+        similarity_threshold=0.99,
+        tax=Tax(),
+        db=db,
+        labels_fingerprint="fp-active",
+    )
+
+    assert result["predictions_stored"] == 0
+    assert result["already_labeled"] == 2
+    rows = db.conn.execute(
+        "SELECT detection_id, category FROM predictions ORDER BY detection_id"
+    ).fetchall()
+    assert [(r["detection_id"], r["category"]) for r in rows] == [
+        (det_ids[0], "match"),
+        (det_ids[1], "match"),
+    ]
+
+
 def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
     """If (detection, classifier_model, fingerprint) already ran, don't invoke again."""
     from db import Database

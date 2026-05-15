@@ -1115,6 +1115,44 @@ def _record_batch_classifier_runs(db, batch, model_name, labels_fingerprint, raw
         )
 
 
+def _store_match_prediction(db, item, model_name, labels_fingerprint, tax=None):
+    """Persist an already-labeled classifier result as a reusable cache row.
+
+    A taxonomy ``match`` means the photo's XMP already carries this species, so
+    it should not re-enter the pending review queue.  The raw classifier output
+    still needs a prediction row, though; otherwise the next non-reclassify run
+    sees a classifier_runs key with no cached prediction to surface and pays for
+    inference again.
+    """
+    tax_hierarchy = item.get("taxonomy") or (
+        tax.get_hierarchy(item["prediction"]) if tax else {}
+    )
+    db.add_prediction(
+        detection_id=item["detection_id"],
+        species=item["prediction"],
+        confidence=round(item["confidence"], 4),
+        model=model_name,
+        category="match",
+        status="accepted",
+        taxonomy=tax_hierarchy,
+        labels_fingerprint=labels_fingerprint,
+    )
+    for alt in item.get("alternatives", []):
+        alt_tax = alt.get("taxonomy") or (
+            tax.get_hierarchy(alt["species"]) if tax else {}
+        )
+        db.add_prediction(
+            detection_id=item["detection_id"],
+            species=alt["species"],
+            confidence=round(alt["confidence"], 4),
+            model=model_name,
+            category="match",
+            status="alternative",
+            taxonomy=alt_tax,
+            labels_fingerprint=labels_fingerprint,
+        )
+
+
 def _store_grouped_predictions(
     raw_results, job_id, model_name, grouping_window, similarity_threshold, tax, db,
     labels_fingerprint="legacy",
@@ -1162,6 +1200,9 @@ def _store_grouped_predictions(
                 category = categorize(item["prediction"], existing, tax)
 
             if category == "match":
+                _store_match_prediction(
+                    db, item, model_name, labels_fingerprint, tax,
+                )
                 skipped_match += 1
                 continue
 
@@ -1218,6 +1259,10 @@ def _store_grouped_predictions(
                 category = categorize(cons["prediction"], existing, tax)
 
             if category == "match":
+                for item in group:
+                    _store_match_prediction(
+                        db, item, model_name, labels_fingerprint, tax,
+                    )
                 skipped_match += len(group)
                 continue
 
