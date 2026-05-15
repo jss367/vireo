@@ -149,6 +149,49 @@ def test_add_keyword_input_suggests_existing_keyword(live_server, page):
     expect(page.locator("#detailKeywords")).to_contain_text("Alan's Hummingbird")
 
 
+def test_add_keyword_autocomplete_retries_after_fetch_failure(live_server, page):
+    """A transient keyword suggestion fetch failure must not poison the cache."""
+    db = live_server["db"]
+    source_id = live_server["data"]["photos"][0]
+    target_id = live_server["data"]["photos"][1]
+    keyword_id = db.add_keyword("Alan's Hummingbird")
+    db.tag_photo(source_id, keyword_id)
+    calls = {"count": 0}
+
+    def route_keyword_all(route):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            route.fulfill(
+                status=503,
+                content_type="application/json",
+                body='{"error":"temporary"}',
+            )
+            return
+        route.continue_()
+
+    page.route("**/api/keywords/all", route_keyword_all)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(f'.grid-card[data-id="{target_id}"]').click()
+
+    keyword_input = page.locator("#addKeywordInput")
+    with page.expect_response(
+        lambda r: "/api/keywords/all" in r.url and r.status == 503
+    ):
+        keyword_input.click()
+
+    with page.expect_response(
+        lambda r: "/api/keywords/all" in r.url and r.status == 200
+    ):
+        keyword_input.fill("AL")
+
+    expect(
+        page.locator(
+            "#addKeywordSuggestions .keyword-suggestion-option",
+            has_text="Alan's Hummingbird",
+        )
+    ).to_be_visible()
+
+
 def test_cmd_click_toggles_focus_out_of_set_reconciles(live_server, page):
     """click A, cmd-click B, cmd-click A: the focus must not linger on A.
 

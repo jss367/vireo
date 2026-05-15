@@ -1339,8 +1339,7 @@ async function loadKeywordAutocompleteOptions(force) {
       return keywordAutocompleteCache;
     })
     .catch(function() {
-      keywordAutocompleteCache = [];
-      return keywordAutocompleteCache;
+      return [];
     })
     .finally(function() {
       keywordAutocompletePromise = null;
