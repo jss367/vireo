@@ -53,6 +53,190 @@ def test_lightbox_x_rejects_photo(live_server, page):
 
     flag = _wait_for_flag(db, pid, "rejected")
     assert flag == "rejected", f"expected 'rejected', got {flag!r}"
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')"
+        " && document.getElementById('lightboxFlagStatus').textContent.trim() === 'Rejected'"
+        " && document.getElementById('lightboxFlagStatus').classList.contains('rejected')",
+        timeout=3000,
+    )
+
+
+def test_lightbox_x_not_overwritten_by_slow_initial_metadata(live_server, page):
+    """A slow /api/photos/<id> response from lightbox open must not clobber
+    the immediate flag feedback from a hotkey pressed while it is in flight."""
+    url = live_server["url"]
+    db = live_server["db"]
+    page.goto(f"{url}/browse")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    pid = int(first.get_attribute("data-id"))
+
+    held = {}
+
+    def hold_initial_photo_fetch(route):
+        held["response"] = route.fetch()
+        held["route"] = route
+
+    page.route(f"**/api/photos/{pid}", hold_initial_photo_fetch)
+
+    first.dblclick()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "typeof _lightboxCurrentId !== 'undefined' && _lightboxCurrentId !== null",
+        timeout=3000,
+    )
+    deadline = time.time() + 3
+    while "route" not in held and time.time() < deadline:
+        time.sleep(0.05)
+    assert "route" in held, "expected lightbox metadata fetch to be held"
+
+    page.keyboard.press("x")
+    flag = _wait_for_flag(db, pid, "rejected")
+    assert flag == "rejected", f"expected 'rejected', got {flag!r}"
+    page.wait_for_function(
+        "document.getElementById('lightboxFlagStatus').textContent.trim() === 'Rejected'",
+        timeout=3000,
+    )
+
+    held["route"].fulfill(response=held["response"])
+    page.wait_for_timeout(100)
+    assert page.locator("#lightboxFlagStatus").inner_text().strip() == "Rejected"
+
+
+def test_lightbox_reopen_ignores_stale_metadata_from_previous_open(live_server, page):
+    """A delayed metadata response from an earlier open of the same photo
+    should not apply after the lightbox is closed and reopened."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    pid = int(first.get_attribute("data-id"))
+    base_photo = {
+        "id": pid,
+        "filename": first.get_attribute("data-filename") or "photo.jpg",
+        "width": 100,
+        "height": 100,
+        "flag": "none",
+        "metadata": None,
+        "keywords": [],
+        "location": None,
+        "xmp_exists": False,
+        "xmp_keywords": [],
+        "path": "",
+    }
+
+    held = {}
+    count = {"value": 0}
+
+    def hold_first_photo_fetch(route):
+        count["value"] += 1
+        if count["value"] == 1:
+            data = dict(base_photo)
+            data["flag"] = "rejected"
+            held["json"] = data
+            held["route"] = route
+            return
+        route.fulfill(json=base_photo)
+
+    page.route(f"**/api/photos/{pid}", hold_first_photo_fetch)
+
+    page.evaluate(
+        "pid => { const p = photos.find(x => x.id === pid);"
+        " openLightbox(pid, p ? p.filename : '', photos); }",
+        pid,
+    )
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    deadline = time.time() + 3
+    while "route" not in held and time.time() < deadline:
+        time.sleep(0.05)
+    assert "route" in held, "expected first lightbox metadata fetch to be held"
+
+    page.evaluate("closeLightbox()")
+    page.evaluate(
+        "pid => { const p = photos.find(x => x.id === pid);"
+        " openLightbox(pid, p ? p.filename : '', photos); }",
+        pid,
+    )
+    page.wait_for_function(
+        "document.getElementById('lightboxFlagStatus').textContent.trim() === 'No flag'",
+        timeout=3000,
+    )
+
+    held["route"].fulfill(json=held["json"])
+    page.wait_for_timeout(100)
+    assert page.locator("#lightboxFlagStatus").inner_text().strip() == "No flag"
+
+
+def test_lightbox_x_reverts_feedback_when_flag_write_fails(live_server, page):
+    """A failed flag write should not leave a false rejected confirmation."""
+    url = live_server["url"]
+    db = live_server["db"]
+    _open_lightbox_on_browse(page, url)
+    pid = _current_lightbox_id(page)
+
+    page.route(
+        "**/api/batch/flag",
+        lambda route: route.fulfill(
+            status=500,
+            content_type="application/json",
+            body='{"error":"forced failure"}',
+        ),
+    )
+
+    page.keyboard.press("x")
+
+    page.wait_for_function(
+        "document.getElementById('lightboxFlagStatus').textContent.trim() === 'No flag'",
+        timeout=3000,
+    )
+    assert db.get_photo(pid)["flag"] in (None, "none")
+
+
+def test_lightbox_newer_failed_write_falls_back_to_older_success(live_server, page):
+    """If a newer flag write fails while an older write later succeeds, the
+    lightbox should settle on the older confirmed flag rather than stale state."""
+    url = live_server["url"]
+    _open_lightbox_on_browse(page, url)
+
+    held = {}
+    count = {"value": 0}
+
+    def handle_flag_write(route):
+        count["value"] += 1
+        if count["value"] == 1:
+            held["route"] = route
+            return
+        route.fulfill(
+            status=500,
+            content_type="application/json",
+            body='{"error":"forced failure"}',
+        )
+
+    page.route("**/api/batch/flag", handle_flag_write)
+
+    page.keyboard.press("x")
+    deadline = time.time() + 3
+    while "route" not in held and time.time() < deadline:
+        time.sleep(0.05)
+    assert "route" in held, "expected first flag write to be held"
+
+    page.keyboard.press("p")
+    page.wait_for_function(
+        "document.getElementById('lightboxFlagStatus').textContent.trim() === 'No flag'",
+        timeout=3000,
+    )
+
+    held["route"].fulfill(status=200, content_type="application/json", body="{}")
+    page.wait_for_function(
+        "document.getElementById('lightboxFlagStatus').textContent.trim() === 'Rejected'",
+        timeout=3000,
+    )
 
 
 def test_lightbox_p_flags_photo(live_server, page):
@@ -66,6 +250,11 @@ def test_lightbox_p_flags_photo(live_server, page):
 
     flag = _wait_for_flag(db, pid, "flagged")
     assert flag == "flagged", f"expected 'flagged', got {flag!r}"
+    page.wait_for_function(
+        "document.getElementById('lightboxFlagStatus').textContent.trim() === 'Flagged'"
+        " && document.getElementById('lightboxFlagStatus').classList.contains('flagged')",
+        timeout=3000,
+    )
 
 
 def test_lightbox_u_unflags_photo(live_server, page):
@@ -83,6 +272,11 @@ def test_lightbox_u_unflags_photo(live_server, page):
 
     flag = _wait_for_flag(db, pid, "none")
     assert flag == "none", f"expected 'none', got {flag!r}"
+    page.wait_for_function(
+        "document.getElementById('lightboxFlagStatus').textContent.trim() === 'No flag'"
+        " && document.getElementById('lightboxFlagStatus').classList.contains('visible')",
+        timeout=3000,
+    )
 
 
 def test_lightbox_honors_modifier_rebind(live_server, page):

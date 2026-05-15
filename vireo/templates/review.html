@@ -1240,11 +1240,11 @@ function setReviewRating(photoId, rating) {
 }
 
 function setReviewFlag(photoId, flag) {
-  safeFetch('/api/batch/flag', {
+  return safeFetch('/api/batch/flag', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ photo_ids: [photoId], flag: flag }),
-  }, { toast: false }).catch(function() {});
+  }, { toast: false }).then(function() { return true; }).catch(function() { return false; });
 }
 
 function revealReviewPhoto(photoId) {
