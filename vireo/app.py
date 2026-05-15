@@ -747,6 +747,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except OSError:
             return None
 
+    def _runtime_warning_work_units(description, count_fn):
+        """Best-effort sizing for warnings; never block job submission."""
+        try:
+            return count_fn()
+        except Exception:
+            log.debug("Could not size %s for runtime warning", description, exc_info=True)
+            return None
+
     @app.teardown_appcontext
     def _close_db(exc):
         db = g.pop("db", None)
@@ -9001,7 +9009,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         runner = app._job_runner
         active_ws = db._active_workspace_id
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-        work_units = db.count_collection_photos(collection_id)
+        work_units = _runtime_warning_work_units(
+            "classify collection",
+            lambda: db.count_collection_photos(collection_id),
+        )
         runtime_warning = _build_cpu_runtime_warning(
             "classify",
             work_units=work_units,
@@ -9968,10 +9979,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         runner = app._job_runner
         active_ws = db._active_workspace_id
-        work_units = (
-            db.count_collection_photos(collection_id)
+        work_units = _runtime_warning_work_units(
+            "extract-masks collection" if collection_id else "extract-masks workspace",
+            lambda: db.count_collection_photos(collection_id)
             if collection_id
-            else db.count_photos()
+            else db.count_photos(),
         )
         runtime_warning = _build_cpu_runtime_warning(
             "extract-masks",
@@ -10501,10 +10513,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         active_ws = db._active_workspace_id
         work_units = None
         if collection_id:
-            work_units = db.count_collection_photos(collection_id)
+            work_units = _runtime_warning_work_units(
+                "pipeline collection",
+                lambda: db.count_collection_photos(collection_id),
+            )
         elif source_snapshot_id is not None:
-            snap = db.get_new_images_snapshot(source_snapshot_id)
-            work_units = snap["file_count"] if snap else None
+            work_units = _runtime_warning_work_units(
+                "pipeline new-images snapshot",
+                lambda: (db.get_new_images_snapshot(source_snapshot_id) or {}).get(
+                    "file_count"
+                ),
+            )
 
         runtime_warning = None
         if not (params.skip_classify and params.skip_extract_masks):
