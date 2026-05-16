@@ -479,7 +479,7 @@ function setFilter(filter) {
 function hasReviewedPrediction(photo) {
   return Object.keys(photo.predictions || {}).some(function(model) {
     return (photo.predictions[model] || []).some(function(p) {
-      return p.status && p.status !== 'pending';
+      return p.status === 'reviewed';
     });
   });
 }

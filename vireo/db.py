@@ -6602,16 +6602,23 @@ class Database:
         """Return species (taxonomy) keyword names for a batch of photos.
 
         Returns a dict mapping photo_id -> list of species name strings.
+
+        Treats a keyword as species when ``is_species = 1`` *or*
+        ``type = 'taxonomy'`` so that upgraded/legacy data whose species tags
+        are taxonomy-typed but not yet marked ``is_species`` is still
+        recognized. This mirrors the species definition used by
+        ``accept_prediction`` so the Compare page does not misclassify
+        already-tagged photos as ``new``.
         """
         if not photo_ids:
             return {}
         placeholders = ",".join("?" for _ in photo_ids)
         rows = self.conn.execute(
-            f"""SELECT pk.photo_id, k.name
+            f"""SELECT DISTINCT pk.photo_id, k.name
                 FROM photo_keywords pk
                 JOIN keywords k ON k.id = pk.keyword_id
                 WHERE pk.photo_id IN ({placeholders})
-                  AND k.is_species = 1
+                  AND (k.is_species = 1 OR k.type = 'taxonomy')
                 ORDER BY k.name""",
             list(photo_ids),
         ).fetchall()
