@@ -393,6 +393,37 @@ SCHEMA = {
         "label": "Reject: composite",
         "desc": "Combined reject threshold.",
     },
+    "pipeline.sam2_variant": {
+        "type": "enum",
+        "enum": ["sam2-tiny", "sam2-small", "sam2-base-plus", "sam2-large"],
+        "enum_labels": {
+            "sam2-tiny": "SAM2 Tiny",
+            "sam2-small": "SAM2 Small",
+            "sam2-base-plus": "SAM2 Base+",
+            "sam2-large": "SAM2 Large",
+        },
+        "category": "Pipeline", "scope": "both",
+        "label": "SAM2 variant",
+        "desc": "SAM2 model variant used for pipeline mask extraction.",
+    },
+    "pipeline.dinov2_variant": {
+        "type": "enum",
+        "enum": ["vit-s14", "vit-b14", "vit-l14"],
+        "enum_labels": {
+            "vit-s14": "DINOv2 ViT-S/14",
+            "vit-b14": "DINOv2 ViT-B/14",
+            "vit-l14": "DINOv2 ViT-L/14",
+        },
+        "category": "Pipeline", "scope": "both",
+        "label": "DINOv2 variant",
+        "desc": "DINOv2 model variant used for pipeline feature embeddings.",
+    },
+    "pipeline.proxy_longest_edge": {
+        "type": "int", "min": 1024, "max": 2048,
+        "category": "Pipeline", "scope": "both",
+        "label": "Proxy longest edge",
+        "desc": "Maximum proxy image dimension used for masking and embeddings.",
+    },
     "pipeline.miss_enabled": {
         "type": "bool",
         "category": "Pipeline", "scope": "both",
