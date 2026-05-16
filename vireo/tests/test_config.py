@@ -107,6 +107,7 @@ def test_keyboard_shortcut_defaults_include_rapid_review():
     assert shortcuts["pipeline_rapid_review"]["pick"] == "p"
     assert shortcuts["pipeline_rapid_review"]["reject"] == "x"
     assert shortcuts["pipeline_rapid_review"]["zoom"] == "z"
+    assert shortcuts["browse"]["compare"] == "c"
 
 
 def test_working_copy_defaults(tmp_path, monkeypatch):
@@ -319,6 +320,37 @@ def test_eye_focus_config_round_trips_through_settings_api(tmp_path, monkeypatch
     assert p["eye_detection_conf_gate"] == 0.61
     assert p["eye_window_k"] == 0.12
     assert p["reject_eye_focus"] == 0.55
+
+
+def test_compare_shortcut_round_trips_through_config_api(tmp_path, monkeypatch):
+    """The Browse compare shortcut must be in backend defaults or POST validation drops it."""
+    import json as _json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    from app import create_app
+    db_path = str(tmp_path / "vireo.db")
+    thumb_dir = tmp_path / "thumbs"
+    thumb_dir.mkdir()
+    app = create_app(db_path, str(thumb_dir))
+    client = app.test_client()
+
+    r = client.post(
+        "/api/config",
+        data=_json.dumps({
+            "keyboard_shortcuts": {
+                "browse": {
+                    "compare": "shift+c",
+                },
+            },
+        }),
+        headers={"Content-Type": "application/json"},
+    )
+    assert r.status_code == 200
+
+    loaded = cfg.load()
+    assert loaded["keyboard_shortcuts"]["browse"]["compare"] == "shift+c"
 
 
 def test_reject_eye_focus_flows_from_config_to_scoring(tmp_path, monkeypatch):
