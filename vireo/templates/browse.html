@@ -1422,6 +1422,10 @@ function restorePhotoAnchor(anchor) {
   return true;
 }
 
+function anchorSelectionIsCurrent(anchor) {
+  return !!anchor && selectedPhotoId === anchor.photoId && selectedPhotos.size === 0;
+}
+
 async function loadUntilPhotoRendered(photoId) {
   var card = getGridCard(photoId);
   while (!card && !allLoaded) {
@@ -1705,6 +1709,7 @@ async function filterByCollection(id) {
 
   var card = await loadUntilPhotoRendered(anchor.photoId);
   if (collectionLoadEpoch !== loadEpoch || activeCollectionId !== id) return;
+  if (!anchorSelectionIsCurrent(anchor)) return;
   if (!card) {
     clearActiveSelectionAndDetail();
     return;
@@ -1716,6 +1721,7 @@ async function filterByCollection(id) {
   if (anchor.detailVisible) loadDetail(anchor.photoId);
   requestAnimationFrame(function() {
     if (collectionLoadEpoch !== loadEpoch || activeCollectionId !== id) return;
+    if (!anchorSelectionIsCurrent(anchor)) return;
     restorePhotoAnchor(anchor);
     updateScrollPosition();
   });

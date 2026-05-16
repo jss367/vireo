@@ -165,6 +165,7 @@ def test_stale_collection_switch_does_not_restore_anchor(live_server, page):
 
     page.evaluate(
         """() => {
+          perPage = 1;
           window.__restoreAnchorCalls = 0;
           const realRestore = window.restorePhotoAnchor;
           window.restorePhotoAnchor = function(anchor) {
@@ -200,6 +201,71 @@ def test_stale_collection_switch_does_not_restore_anchor(live_server, page):
     page.wait_for_timeout(50)
 
     assert page.evaluate("window.activeCollectionId") == second_id
+    assert page.evaluate("window.__restoreAnchorCalls") == 0
+
+
+def test_collection_anchor_does_not_override_new_selection(live_server, page):
+    """Delayed anchor restore must not clobber a user's newer selection."""
+    import json as _json
+
+    db = live_server["db"]
+    collection_id = db.add_collection(
+        "Delayed Collection",
+        _json.dumps([{"field": "all"}]),
+    )
+    original_id = live_server["data"]["photos"][3]
+    new_id = live_server["data"]["photos"][0]
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    page.locator(f'.grid-card[data-id="{original_id}"]').wait_for(state="visible")
+    page.locator(f'.grid-card[data-id="{original_id}"]').click()
+
+    page.evaluate(
+        """() => {
+          perPage = 1;
+          window.__restoreAnchorCalls = 0;
+          const realRestore = window.restorePhotoAnchor;
+          window.restorePhotoAnchor = function(anchor) {
+            window.__restoreAnchorCalls += 1;
+            return realRestore(anchor);
+          };
+
+          const realLoadPhotos = window.loadPhotos;
+          let calls = 0;
+          window.__releaseSecondLoad = null;
+          window.loadPhotos = async function() {
+            calls += 1;
+            if (calls === 2) {
+              await new Promise(resolve => {
+                window.__releaseSecondLoad = resolve;
+              });
+            }
+            return realLoadPhotos();
+          };
+        }"""
+    )
+
+    page.evaluate(
+        "(collectionId) => { window.__switchPromise = filterByCollection(collectionId); }",
+        collection_id,
+    )
+    page.wait_for_function("typeof window.__releaseSecondLoad === 'function'")
+
+    page.evaluate(
+        """(photoId) => {
+          selectedPhotoId = photoId;
+          selectedIndex = photos.findIndex(p => p.id === photoId);
+        }""",
+        new_id,
+    )
+
+    page.evaluate("window.__releaseSecondLoad()")
+    page.evaluate("() => window.__switchPromise")
+    page.wait_for_timeout(50)
+
+    assert page.evaluate("window.selectedPhotoId") == new_id
     assert page.evaluate("window.__restoreAnchorCalls") == 0
 
 
