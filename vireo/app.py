@@ -4390,12 +4390,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }
 
         for photo in by_photo.values():
-            row_category = "missing_prediction"
-            has_pending_prediction = False
+            highest_category = "missing_prediction"
+            pending_category = None
             for model_preds in photo["predictions"].values():
                 for pred in model_preds:
-                    if pred.get("status") == "pending":
-                        has_pending_prediction = True
                     cat = pred["category"]
                     if cat == "match":
                         summary["matches"] += 1
@@ -4407,16 +4405,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         summary["conflicts"] += 1
                     elif cat == "new":
                         summary["new"] += 1
-                    if priority[cat] > priority[row_category]:
-                        row_category = cat
+                    if priority[cat] > priority[highest_category]:
+                        highest_category = cat
+                    if pred.get("status") == "pending" and (
+                        pending_category is None
+                        or priority[cat] > priority[pending_category]
+                    ):
+                        pending_category = cat
             if not photo["predictions"]:
                 summary["missing_predictions"] += 1
+            row_category = pending_category or highest_category
             photo["row_category"] = row_category
             photo["row_label"] = labels[row_category]
-            photo["needs_review"] = (
-                row_category in {"conflict", "refinement", "broader", "new"}
-                and has_pending_prediction
-            )
+            photo["needs_review"] = row_category in {
+                "conflict", "refinement", "broader", "new",
+            } and pending_category is not None
             if photo["needs_review"]:
                 summary["needs_review"] += 1
 
