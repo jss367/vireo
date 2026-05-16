@@ -4343,6 +4343,18 @@ async function grmApply() {
     if (grmState.removed.size > 0) {
       var encBrowse = pipelineResults.encounters[grmState.encIdx];
       var keepIds = encBrowse.photo_ids.filter(function(pid) { return !grmState.removed.has(pid); });
+      if (keepIds.length === 0) {
+        // Every photo was removed from the temporary Browse burst. Any
+        // flag/species edits were already persisted by /group/apply above,
+        // so there is nothing left to review. Drop the handoff and degrade
+        // to normal pipeline review instead of stranding the page on an
+        // empty browse-selection encounter (0 photos but still 1 encounter/
+        // 1 burst, with a Reopen flow that can no longer reopen).
+        document.getElementById('grmSpecies').value = '';
+        closeGroupReview();
+        fallbackToNormalPipelineReview();
+        return;
+      }
       encBrowse.photo_ids = keepIds;
       encBrowse.photo_count = keepIds.length;
       if (encBrowse.bursts && encBrowse.bursts[grmState.burstIdx]) {
