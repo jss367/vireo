@@ -2926,6 +2926,7 @@ function _waitForPipelineTerminal(jobId, resolve) {
     actionStatus.textContent = 'Connection lost while cancelling. Checking job status...';
   }
   var attempts = 0;
+  var terminalStatuses = {completed: true, failed: true, cancelled: true};
   var timer = setInterval(function() {
     attempts += 1;
     fetch('/api/jobs/' + encodeURIComponent(jobId))
@@ -2934,7 +2935,12 @@ function _waitForPipelineTerminal(jobId, resolve) {
         return resp.json();
       })
       .then(function(job) {
-        if (job.status === 'running' && attempts < 120) return;
+        if (!terminalStatuses[job.status]) {
+          if (attempts === 120 && actionStatus) {
+            actionStatus.textContent = 'Still cancelling. Waiting for pipeline job to stop...';
+          }
+          return;
+        }
         clearInterval(timer);
         _pipelineResolve = null;
         _onPipelineComplete({

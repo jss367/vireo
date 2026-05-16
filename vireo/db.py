@@ -5309,7 +5309,10 @@ class Database:
                     ON d.photo_id = p.id
                    AND d.detector_model != 'full-image'
                    AND d.detector_confidence >= ?
-                 WHERE pm.variant != 'unknown'{scope_sql}
+                 WHERE pm.variant != 'unknown'
+                   AND pm.path IS NOT NULL
+                   AND pm.path != ''
+                   AND p.mask_path IS NOT NULL{scope_sql}
                  GROUP BY pm.variant""",
             (ws, min_conf, *scope_params),
         ).fetchall()

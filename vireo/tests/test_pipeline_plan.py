@@ -320,6 +320,38 @@ def test_extract_plan_warns_when_other_sam_variant_has_coverage(tmp_path):
     assert warning["target_count"] == 2
 
 
+def test_extract_plan_variant_warning_ignores_incomplete_masks(tmp_path):
+    from pipeline_plan import PipelinePlanParams, compute_plan
+
+    db, folder_id = _make_db(tmp_path)
+    p1, _ = _add_photo_with_detection(db, folder_id, "interrupted.jpg")
+    p2, _ = _add_photo_with_detection(db, folder_id, "missing_path.jpg")
+    # p1 simulates an interrupted run: the variant row exists, but
+    # photos.mask_path was never activated.
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-large', '/m/interrupted.png', 0, "
+        "'megadetector-v6', 0.1, 0.1, 0.5, 0.5)",
+        (p1,),
+    )
+    # p2 has an active-looking photo row, but the per-variant row has no
+    # file path, so it should not count as alternate variant coverage.
+    db.conn.execute("UPDATE photos SET mask_path='/m/missing.png' WHERE id=?", (p2,))
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-large', '', 0, "
+        "'megadetector-v6', 0.1, 0.1, 0.5, 0.5)",
+        (p2,),
+    )
+    db.conn.commit()
+
+    plan = compute_plan(db, PipelinePlanParams(), str(tmp_path / "test.db"))
+
+    assert plan["stages"]["Extract"]["detail"].get("sam_variant_warning") is None
+
+
 def test_count_photos_pending_masks_ignores_photos_without_real_detections(tmp_path):
     """A photo with only a synthetic full-image anchor should not be
     counted as eligible for mask extraction — the actual stage skips it.
