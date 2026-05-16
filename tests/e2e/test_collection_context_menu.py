@@ -166,6 +166,7 @@ def test_stale_collection_switch_does_not_restore_anchor(live_server, page):
     page.evaluate(
         """() => {
           perPage = 1;
+          observer.disconnect();
           window.__restoreAnchorCalls = 0;
           const realRestore = window.restorePhotoAnchor;
           window.restorePhotoAnchor = function(anchor) {
@@ -225,6 +226,7 @@ def test_collection_anchor_does_not_override_new_selection(live_server, page):
     page.evaluate(
         """() => {
           perPage = 1;
+          observer.disconnect();
           window.__restoreAnchorCalls = 0;
           const realRestore = window.restorePhotoAnchor;
           window.restorePhotoAnchor = function(anchor) {
@@ -233,11 +235,11 @@ def test_collection_anchor_does_not_override_new_selection(live_server, page):
           };
 
           const realLoadPhotos = window.loadPhotos;
-          let calls = 0;
+          window.__loadPhotoCalls = 0;
           window.__releaseSecondLoad = null;
           window.loadPhotos = async function() {
-            calls += 1;
-            if (calls === 2) {
+            window.__loadPhotoCalls += 1;
+            if (window.__loadPhotoCalls === 2) {
               await new Promise(resolve => {
                 window.__releaseSecondLoad = resolve;
               });
@@ -255,8 +257,8 @@ def test_collection_anchor_does_not_override_new_selection(live_server, page):
 
     page.evaluate(
         """(photoId) => {
-          selectedPhotoId = photoId;
-          selectedIndex = photos.findIndex(p => p.id === photoId);
+          const idx = photos.findIndex(p => p.id === photoId);
+          selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false}, photoId, idx);
         }""",
         new_id,
     )
@@ -267,6 +269,7 @@ def test_collection_anchor_does_not_override_new_selection(live_server, page):
 
     assert page.evaluate("window.selectedPhotoId") == new_id
     assert page.evaluate("window.__restoreAnchorCalls") == 0
+    assert page.evaluate("window.__loadPhotoCalls") == 2
 
 
 def test_collection_switch_clears_selection_during_anchor_scan(live_server, page):

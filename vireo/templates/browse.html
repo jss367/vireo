@@ -1716,11 +1716,14 @@ async function filterByCollection(id) {
   function collectionRequestIsCurrent() {
     return collectionLoadEpoch === loadEpoch && activeCollectionId === id;
   }
+  function anchorScanShouldContinue() {
+    return collectionRequestIsCurrent() && anchorRestoreEpoch === restoreEpoch;
+  }
   await loadPhotos();
   if (!collectionRequestIsCurrent()) return;
   if (!anchor) return;
 
-  var card = await loadUntilPhotoRendered(anchor.photoId, collectionRequestIsCurrent);
+  var card = await loadUntilPhotoRendered(anchor.photoId, anchorScanShouldContinue);
   if (!collectionRequestIsCurrent()) return;
   if (!anchorRestoreIsPending(anchor, restoreEpoch)) return;
   if (!card) {
