@@ -1100,6 +1100,7 @@ body { padding-bottom: 36px; }
       Start Pipeline
     </button>
   </div>
+  <div id="pipelineActionStatus" class="status-msg" style="margin-top:8px;"></div>
   <div id="modelWarningBanner" style="display:none;background:var(--warning,#f0c040);color:#000;padding:8px 14px;border-radius:6px;margin:8px 0;font-size:13px;">
     <span id="modelWarningText"></span>
     <button onclick="this.parentElement.style.display='none'" style="float:right;background:none;border:none;cursor:pointer;font-size:16px;line-height:1;padding:0 4px;">&times;</button>
@@ -1172,6 +1173,9 @@ function initPipelinePage() {
       if (typeof updateExtractReadiness === 'function') updateExtractReadiness();
       if (typeof renderSam2Coverage === 'function') {
         renderSam2Coverage(data.mask_variant_coverage || []);
+      }
+      if (typeof updateSamVariantWarning === 'function') {
+        updateSamVariantWarning(data.sam_variant_warning || null);
       }
 
       // Populate recent destinations
@@ -2207,7 +2211,21 @@ function getIngestFileTypes() {
 
 function updateStartButton() {
   var btn = document.getElementById('btnStartPipeline');
-  if (_pipelineRunning) { btn.disabled = true; return; }
+  var actionStatus = document.getElementById('pipelineActionStatus');
+  if (_pipelineRunning) {
+    if (actionStatus) {
+      actionStatus.textContent = _pipelineCancelling
+        ? 'Cancelling the running pipeline. Start will be available after the job stops.'
+        : 'A pipeline is running. Stop it or wait for it to finish before starting another.';
+      actionStatus.className = 'status-msg';
+    }
+    btn.disabled = !!_pipelineCancelling;
+    return;
+  }
+  if (actionStatus) {
+    actionStatus.textContent = '';
+    actionStatus.className = 'status-msg';
+  }
 
   if (_sourceMode === 'import') {
     var hasFolders = _sourceFolders.length > 0;
@@ -2308,13 +2326,17 @@ function onStageToggle(stage) {
 // -- Pipeline orchestration --
 var _pipelineRunning = false;
 var _pipelineAbort = false;
+var _pipelineCancelling = false;
 var _pipelineEventSource = null;
 var _pipelineResolve = null;
+var _currentPipelineJobId = null;
 
 async function startPipeline() {
   if (_pipelineRunning) return;
   _pipelineRunning = true;
   _pipelineAbort = false;
+  _pipelineCancelling = false;
+  _currentPipelineJobId = null;
   document.getElementById('modelWarningBanner').style.display = 'none';
 
   // Create new workspace if requested
@@ -2324,6 +2346,7 @@ async function startPipeline() {
       document.getElementById('destWsError').textContent = 'Name is required';
       document.getElementById('destWsError').style.display = '';
       _pipelineRunning = false;
+      _pipelineCancelling = false;
       return;
     }
     try {
@@ -2346,6 +2369,7 @@ async function startPipeline() {
       document.getElementById('destWsError').textContent = e.message || 'Failed to create workspace';
       document.getElementById('destWsError').style.display = '';
       _pipelineRunning = false;
+      _pipelineCancelling = false;
       return;
     }
   }
@@ -2467,10 +2491,16 @@ async function startPipeline() {
       document.getElementById('statusSource').textContent = (data && data.error) || 'Failed to start pipeline';
       return;
     }
+    _currentPipelineJobId = data.job_id;
+    if (_pipelineCancelling) {
+      _pipelineCancelling = false;
+      stopPipeline();
+    }
 
     // Show model warning banner if returned
     if (data.model_warning) {
       var banner = document.getElementById('modelWarningBanner');
+      banner.dataset.kind = 'model';
       document.getElementById('modelWarningText').textContent = data.model_warning;
       banner.style.display = '';
     }
@@ -2482,16 +2512,21 @@ async function startPipeline() {
       _pipelineResolve = resolve;
       _pipelineEventSource = safeEventSource('/api/jobs/' + data.job_id + '/stream', {
         onProgress: function(p) {
-          if (_pipelineAbort) return;
           _updatePipelineStageUI(p);
         },
         onComplete: function(result) {
           _pipelineResolve = null;
+          _pipelineEventSource = null;
           window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
           _onPipelineComplete(result);
           resolve();
         },
         onError: function() {
+          _pipelineEventSource = null;
+          if (_pipelineCancelling) {
+            _waitForPipelineTerminal(data.job_id, resolve);
+            return;
+          }
           _pipelineResolve = null;
           document.getElementById('statusSource').textContent = 'Connection lost';
           resolve();
@@ -2502,6 +2537,9 @@ async function startPipeline() {
     document.getElementById('statusSource').textContent = 'Error: ' + e.message;
   } finally {
     _pipelineRunning = false;
+    _pipelineCancelling = false;
+    _pipelineAbort = false;
+    _currentPipelineJobId = null;
     btn.textContent = 'Start Pipeline';
     btn.onclick = startPipeline;
     updateStartButton();
@@ -2730,6 +2768,23 @@ function _updatePipelineStageUI(p) {
 }
 
 function _onPipelineComplete(result) {
+  if (result.status === 'cancelled') {
+    var actionStatus = document.getElementById('pipelineActionStatus');
+    if (actionStatus) {
+      actionStatus.textContent = 'Pipeline cancelled.';
+      actionStatus.className = 'status-msg';
+    }
+    ['Source', 'Scan', 'Previews', 'Classify', 'Extract', 'EyeKeypoints', 'Group'].forEach(function(cardSuffix) {
+      if (_runningStages[cardSuffix]) {
+        delete _runningStages[cardSuffix];
+        _stageOutcomes[cardSuffix] = 'will-skip';
+        _setPill(cardSuffix, 'will-skip', 'Cancelled');
+      }
+    });
+    refreshPipelineUI();
+    return;
+  }
+
   var succeeded = (result.status === 'completed');
   var r = result.result || {};
   var stageResults = r.stages || {};
@@ -2865,20 +2920,79 @@ function _onPipelineComplete(result) {
   }
 }
 
-function stopPipeline() {
+function _waitForPipelineTerminal(jobId, resolve) {
+  var actionStatus = document.getElementById('pipelineActionStatus');
+  if (actionStatus) {
+    actionStatus.textContent = 'Connection lost while cancelling. Checking job status...';
+  }
+  var attempts = 0;
+  var timer = setInterval(function() {
+    attempts += 1;
+    fetch('/api/jobs/' + encodeURIComponent(jobId))
+      .then(function(resp) {
+        if (!resp.ok) throw new Error('job status unavailable');
+        return resp.json();
+      })
+      .then(function(job) {
+        if (job.status === 'running' && attempts < 120) return;
+        clearInterval(timer);
+        _pipelineResolve = null;
+        _onPipelineComplete({
+          status: job.status,
+          result: job.result,
+          errors: job.errors || [],
+        });
+        resolve();
+      })
+      .catch(function() {
+        if (attempts < 10) return;
+        clearInterval(timer);
+        _pipelineResolve = null;
+        document.getElementById('statusSource').textContent = 'Connection lost';
+        resolve();
+      });
+  }, 1000);
+}
+
+async function stopPipeline() {
+  if (_pipelineCancelling) return;
   _pipelineAbort = true;
-  if (_pipelineEventSource) {
-    _pipelineEventSource.close();
-    _pipelineEventSource = null;
-  }
-  // Resolve the pending stream promise so the finally block runs
-  if (_pipelineResolve) {
-    _pipelineResolve();
-    _pipelineResolve = null;
-  }
+  _pipelineCancelling = true;
   var btn = document.getElementById('btnStartPipeline');
   btn.disabled = true;
-  btn.textContent = 'Stopping...';
+  btn.textContent = 'Cancelling...';
+  var actionStatus = document.getElementById('pipelineActionStatus');
+  if (actionStatus) {
+    actionStatus.textContent = 'Sending cancellation request...';
+    actionStatus.className = 'status-msg';
+  }
+  if (!_currentPipelineJobId) {
+    if (actionStatus) actionStatus.textContent = 'Waiting for pipeline job id before cancelling...';
+    return;
+  }
+  try {
+    var resp = await fetch('/api/jobs/' + encodeURIComponent(_currentPipelineJobId) + '/cancel', {
+      method: 'POST',
+    });
+    if (!resp.ok) {
+      var data = {};
+      try { data = await resp.json(); } catch(e) {}
+      throw new Error((data && data.error) || 'Unable to cancel pipeline');
+    }
+    btn.textContent = 'Stopping...';
+    if (actionStatus) {
+      actionStatus.textContent = 'Cancellation requested. Waiting for the running stage to stop...';
+    }
+  } catch(e) {
+    _pipelineAbort = false;
+    _pipelineCancelling = false;
+    btn.disabled = false;
+    btn.textContent = 'Stop Pipeline';
+    if (actionStatus) {
+      actionStatus.textContent = e.message || 'Unable to cancel pipeline';
+      actionStatus.className = 'status-msg error';
+    }
+  }
 }
 
 async function runImportStep() {
@@ -3259,11 +3373,35 @@ async function runClassifyStep(collectionId) {
 
 // -- Card 3: Extract Features --
 
-var _savedModelConfig = {
-  sam2_variant: 'sam2-small',
-  dinov2_variant: 'vit-b14',
-  proxy_longest_edge: 1536,
-};
+function _currentModelConfigFromDom() {
+  var samEl = document.getElementById('cfgSam2');
+  var dinoEl = document.getElementById('cfgDinov2');
+  var proxyEl = document.getElementById('cfgProxy');
+  return {
+    sam2_variant: samEl ? samEl.value : '',
+    dinov2_variant: dinoEl ? dinoEl.value : '',
+    proxy_longest_edge: proxyEl ? parseInt(proxyEl.value, 10) : 0,
+  };
+}
+
+var _savedModelConfig = _currentModelConfigFromDom();
+var _samVariantWarning = null;
+
+function updateSamVariantWarning(warning) {
+  _samVariantWarning = warning || null;
+  var banner = document.getElementById('modelWarningBanner');
+  var text = document.getElementById('modelWarningText');
+  if (!banner || !text) return;
+  if (_samVariantWarning && _samVariantWarning.message) {
+    banner.dataset.kind = 'sam-variant';
+    text.textContent = _samVariantWarning.message;
+    banner.style.display = '';
+  } else if (banner.dataset.kind === 'sam-variant') {
+    text.textContent = '';
+    banner.style.display = 'none';
+    delete banner.dataset.kind;
+  }
+}
 
 function onModelConfigChange() {
   var proxyEl = document.getElementById('cfgProxy');
@@ -3288,6 +3426,7 @@ function onModelConfigChange() {
   }).catch(function() {});
 
   updateExtractReadiness();
+  schedulePlanRefresh();
 }
 
 async function updateExtractReadiness() {
@@ -3306,6 +3445,14 @@ async function updateExtractReadiness() {
     panel.appendChild(renderModelReadiness('SAM2', r.sam2, r.sam2_known));
     panel.appendChild(document.createElement('br'));
     panel.appendChild(renderModelReadiness('DINOv2', r.dinov2, r.dinov2_known));
+    if (r.sam_variant_warning && r.sam_variant_warning.message) {
+      panel.appendChild(document.createElement('br'));
+      var warn = document.createElement('div');
+      warn.style.cssText = 'margin-top:6px;color:var(--warning,#f0c040);';
+      warn.textContent = r.sam_variant_warning.message;
+      panel.appendChild(warn);
+    }
+    updateSamVariantWarning(r.sam_variant_warning || null);
     panel.style.display = '';
   } catch(e) {
     panel.style.display = 'none';
@@ -3892,9 +4039,14 @@ async function refreshPipelinePlan() {
     // back to stale state right after the user changed a setting.
     if (seq !== _planFetchSeq) return;
     _pipelinePlan = data;
+    var extract = data && data.stages ? data.stages.Extract : null;
+    var warning = extract && extract.detail
+      ? extract.detail.sam_variant_warning : null;
+    updateSamVariantWarning(warning || null);
   } catch(e) {
     if (seq !== _planFetchSeq) return;
     _pipelinePlan = null;
+    updateSamVariantWarning(null);
   }
   refreshPipelineUI();
 }

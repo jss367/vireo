@@ -79,6 +79,9 @@ def test_pipeline_defaults_exist():
     assert p["reject_composite"] == 0.40
     assert p["hard_cut_score"] == 0.42
     assert p["merge_score"] == 0.62
+    assert p["sam2_variant"] == "sam2-small"
+    assert p["dinov2_variant"] == "vit-b14"
+    assert p["proxy_longest_edge"] == 1536
 
 
 def test_ingest_defaults_present():

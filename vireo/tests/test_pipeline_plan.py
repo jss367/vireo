@@ -233,6 +233,37 @@ def test_count_classify_stale_counts_old_only_runs(tmp_path):
     assert db.count_classify_stale("BioCLIP-2", TOL_SENTINEL) == 1
 
 
+def test_primary_classify_counts_ignore_secondary_detections(tmp_path):
+    """Pipeline classify uses one primary detection per photo.
+
+    Secondary boxes may exist in the detector cache, but they are not work the
+    streaming pipeline will classify, so primary-scoped plan helpers must not
+    count them as pending or stale.
+    """
+    db, folder_id = _make_db(tmp_path)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="multi.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+             "confidence": 0.95, "category": "animal"},
+            {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2},
+             "confidence": 0.85, "category": "animal"},
+        ],
+        detector_model="megadetector-v6",
+    )
+    db.record_classifier_run(det_ids[0], "BioCLIP-2", "fp1", prediction_count=1)
+    db.record_classifier_run(det_ids[1], "BioCLIP-2", "fp_old", prediction_count=1)
+
+    assert db.count_real_detections_in_scope()["total_dets"] == 2
+    assert db.count_primary_detections_in_scope()["total_dets"] == 1
+    assert db.count_primary_classify_pending_pairs("BioCLIP-2", "fp1") == 0
+    assert db.count_primary_classify_stale("BioCLIP-2", "fp1") == 0
+
+
 def test_count_photos_pending_masks(tmp_path):
     db, folder_id = _make_db(tmp_path)
     pid_unmasked, _ = _add_photo_with_detection(db, folder_id, "no_mask.jpg")
@@ -245,6 +276,48 @@ def test_count_photos_pending_masks(tmp_path):
 
     counts = db.count_photos_pending_masks()
     assert counts == {"eligible": 2, "pending": 1}
+
+
+def test_count_photos_pending_masks_is_variant_aware(tmp_path):
+    db, folder_id = _make_db(tmp_path)
+    p1, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    p2, _ = _add_photo_with_detection(db, folder_id, "b.jpg")
+    for pid in (p1, p2):
+        db.upsert_photo_mask(
+            pid, "sam2-large", f"/m/{pid}.large.png",
+            detector_model="megadetector-v6",
+            prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+        )
+        db.set_active_mask_variant(pid, "sam2-large")
+
+    assert db.count_photos_pending_masks() == {"eligible": 2, "pending": 0}
+    assert db.count_photos_pending_masks(
+        sam2_variant="sam2-small",
+    ) == {"eligible": 2, "pending": 2}
+
+
+def test_extract_plan_warns_when_other_sam_variant_has_coverage(tmp_path):
+    from pipeline_plan import PipelinePlanParams, compute_plan
+
+    db, folder_id = _make_db(tmp_path)
+    p1, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    p2, _ = _add_photo_with_detection(db, folder_id, "b.jpg")
+    for pid in (p1, p2):
+        db.upsert_photo_mask(
+            pid, "sam2-large", f"/m/{pid}.large.png",
+            detector_model="megadetector-v6",
+            prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+        )
+        db.set_active_mask_variant(pid, "sam2-large")
+
+    plan = compute_plan(db, PipelinePlanParams(), str(tmp_path / "test.db"))
+    extract = plan["stages"]["Extract"]
+    assert extract["state"] == "will-run"
+    assert extract["detail"]["pending"] == 2
+    warning = extract["detail"]["sam_variant_warning"]
+    assert warning["selected_variant"] == "sam2-small"
+    assert warning["alternate_variant"] == "sam2-large"
+    assert warning["target_count"] == 2
 
 
 def test_count_photos_pending_masks_ignores_photos_without_real_detections(tmp_path):
@@ -551,6 +624,85 @@ def test_classify_plan_done_prior_when_all_pairs_recorded(tmp_path, monkeypatch)
     classify = plan["stages"]["Classify"]
     assert classify["state"] == "done-prior"
     assert "Already classified" in classify["summary"]
+
+
+def test_classify_plan_timm_intrinsic_uses_runtime_fingerprint(
+    tmp_path, monkeypatch,
+):
+    """timm/iNat21 has a fixed class head and runtime records it as `tol`.
+
+    The planner must use the same fingerprint or cached iNat21 rows render as
+    stale/outdated even though the next pipeline run will skip them.
+    """
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+
+    db, folder_id = _make_db(tmp_path)
+    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+
+    import labels as labels_mod
+    import models as models_mod
+
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "inat", "name": "iNat21 (EVA-02 Large)",
+         "model_str": "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21",
+         "model_type": "timm", "downloaded": True},
+    ])
+    # Label files do not apply to timm models; keep the environment out of it.
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+    db.record_classifier_run(
+        did, "iNat21 (EVA-02 Large)", TOL_SENTINEL, prediction_count=1,
+    )
+
+    plan = compute_plan(
+        db, _params(model_ids=["inat"]), str(tmp_path / "test.db"),
+    )
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "done-prior"
+    assert classify["detail"]["pending"] == 0
+    assert classify["detail"]["stale"] == 0
+    assert classify["detail"]["fingerprint_outdated"] is False
+
+
+def test_classify_plan_counts_primary_detections_only(tmp_path, monkeypatch):
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+
+    db, folder_id = _make_db(tmp_path)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="multi.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+             "confidence": 0.95, "category": "animal"},
+            {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2},
+             "confidence": 0.85, "category": "animal"},
+        ],
+        detector_model="megadetector-v6",
+    )
+
+    import labels as labels_mod
+    import models as models_mod
+
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+    db.record_classifier_run(det_ids[0], "BioCLIP-2", TOL_SENTINEL, 1)
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "done-prior"
+    assert classify["detail"]["eligible"] == 1
+    assert classify["detail"]["pending"] == 0
+    assert classify["detail"]["stale"] == 0
 
 
 def test_classify_plan_will_run_when_new_model_added(tmp_path, monkeypatch):

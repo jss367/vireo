@@ -566,6 +566,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     runner, job["id"], stages, "scan", message,
                 )
 
+            def cancel_check():
+                return _should_abort(abort) or runner.is_cancelled(job["id"])
+
             # Accumulator so multi-folder scans (repair loop, scan-in-place
             # with sources=[...]) don't rewind the overall progress at each
             # folder boundary. scan() reports (current, total) local to the
@@ -675,14 +678,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             restrict_files=set(file_paths),
                             vireo_dir=effective_vireo_dir,
                             thumb_cache_dir=effective_thumb_cache_dir,
+                            cancel_check=cancel_check,
                         )
                     except (OSError, RuntimeError) as e:
+                        if str(e) == "scan cancelled" and (
+                            _should_abort(abort) or runner.is_cancelled(job["id"])
+                        ):
+                            abort.set()
+                            stages["scan"]["status"] = "skipped"
+                            runner.update_step(
+                                job["id"], "scan",
+                                status="completed",
+                                summary="Cancelled",
+                            )
+                            break
                         log.warning(
                             "Repair scan failed for %s: %s", folder_path, e,
                         )
                         unreachable += 1
                     finally:
                         advance_scan_acc()
+
+                if _should_abort(abort) or runner.is_cancelled(job["id"]):
+                    scan_to_thumb.put(_SENTINEL)
+                    return
 
                 summary = f"{total_broken} photos repaired"
                 if unreachable:
@@ -848,6 +867,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     vireo_dir=effective_vireo_dir,
                     thumb_cache_dir=effective_thumb_cache_dir,
                     permission_error_callback=_on_denied,
+                    cancel_check=cancel_check,
                 )
             else:
                 # Scan-in-place: scan each source folder independently.
@@ -884,18 +904,34 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             vireo_dir=effective_vireo_dir,
                             thumb_cache_dir=effective_thumb_cache_dir,
                             permission_error_callback=_on_denied,
+                            cancel_check=cancel_check,
                         )
                     finally:
                         advance_scan_acc()
-            stages["scan"]["status"] = "completed"
-            runner.update_step(job["id"], "scan", status="completed",
-                               summary=f"{stages['scan']['count']} photos")
+            if _should_abort(abort) or runner.is_cancelled(job["id"]):
+                stages["scan"]["status"] = "skipped"
+                runner.update_step(
+                    job["id"], "scan", status="completed", summary="Cancelled",
+                )
+            else:
+                stages["scan"]["status"] = "completed"
+                runner.update_step(job["id"], "scan", status="completed",
+                                   summary=f"{stages['scan']['count']} photos")
         except Exception as e:
-            errors.append(f"[scan] Fatal: {e}")
-            log.exception("Pipeline scan stage failed")
-            abort.set()
-            stages["scan"]["status"] = "failed"
-            runner.update_step(job["id"], "scan", status="failed", error=str(e))
+            if str(e) == "scan cancelled" and (
+                _should_abort(abort) or runner.is_cancelled(job["id"])
+            ):
+                abort.set()
+                stages["scan"]["status"] = "skipped"
+                runner.update_step(
+                    job["id"], "scan", status="completed", summary="Cancelled",
+                )
+            else:
+                errors.append(f"[scan] Fatal: {e}")
+                log.exception("Pipeline scan stage failed")
+                abort.set()
+                stages["scan"]["status"] = "failed"
+                runner.update_step(job["id"], "scan", status="failed", error=str(e))
         finally:
             # Invalidate the new-images cache for every root fed to do_scan,
             # on both success and exception paths. scanner.scan commits photo
@@ -926,7 +962,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # Wait for scanner to complete (don't check abort -- we want the
         # collection regardless so the user can see scanned photos)
         while True:
-            if stages["scan"]["status"] in ("completed", "failed"):
+            if stages["scan"]["status"] in ("completed", "failed", "skipped"):
                 break
             time.sleep(0.1)
 
@@ -2454,9 +2490,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
             effective_cfg = thread_db.get_effective_config(cfg.load())
             pipeline_cfg = effective_cfg.get("pipeline", {})
-            sam2_variant = pipeline_cfg.get("sam2_variant", "sam2-small")
-            dinov2_variant = pipeline_cfg.get("dinov2_variant", "vit-b14")
-            proxy_longest_edge = pipeline_cfg.get("proxy_longest_edge", 1536)
+            sam2_variant = pipeline_cfg.get("sam2_variant")
+            dinov2_variant = pipeline_cfg.get("dinov2_variant")
+            proxy_longest_edge = pipeline_cfg.get("proxy_longest_edge")
 
             masks_dir = os.path.join(os.path.dirname(db_path), "masks")
             os.makedirs(masks_dir, exist_ok=True)
