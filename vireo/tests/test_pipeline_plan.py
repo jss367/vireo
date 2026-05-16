@@ -600,6 +600,40 @@ def test_count_extract_stale_excludes_photos_with_null_mask_path(tmp_path):
     assert db.count_extract_stale("sam2-small") == 0
 
 
+def test_count_extract_stale_excludes_incomplete_variant_paths(tmp_path):
+    """Incomplete selected-variant rows are pending, not stale.
+
+    A migrated/interrupted row can have ``photos.mask_path`` set but no
+    selected-variant row, or an empty ``photo_masks.path`` for the configured
+    variant. The planner counts those as pending, so stale must not count
+    them again.
+    """
+    db, folder_id = _make_db(tmp_path)
+    pid_missing, _ = _add_photo_with_detection(db, folder_id, "missing-row.jpg")
+    pid_empty, _ = _add_photo_with_detection(db, folder_id, "empty-path.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/missing-row.png' WHERE id=?",
+        (pid_missing,),
+    )
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/empty-path.png' WHERE id=?",
+        (pid_empty,),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '', 0, 'megadetector-v6', "
+        "0.9, 0.9, 0.05, 0.05)",
+        (pid_empty,),
+    )
+    db.conn.commit()
+
+    counts = db.count_photos_pending_masks(sam2_variant="sam2-small")
+    assert counts["eligible"] == 2
+    assert counts["pending"] == 2
+    assert db.count_extract_stale("sam2-small") == 0
+
+
 def test_count_extract_stale_ignores_photos_without_primary_detection(tmp_path):
     """Photos with only ``full-image`` detections aren't eligible for
     extract — a stale ``photo_masks`` row left over from a prior detector

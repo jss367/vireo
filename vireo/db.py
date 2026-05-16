@@ -3730,13 +3730,13 @@ class Database:
         Counting those would inflate ``detail.stale`` and keep the
         stage flagged Outdated/Will run forever in mixed workspaces.
 
-        The ``photos.mask_path IS NOT NULL`` gate keeps this count
-        disjoint from ``count_photos_pending_masks``'s ``pending``
-        (``mask_path IS NULL``). Photos with ``mask_path IS NULL`` are
-        already pending — they will be re-extracted regardless of
-        whether their ``photo_masks`` row's prompt matches — so
-        counting them here would double-count when a planner combines
-        ``pending + stale`` as total work.
+        The active-mask and variant-path gates keep this count disjoint from
+        ``count_photos_pending_masks``'s ``pending``. Photos with no active
+        mask, no selected-variant row, or an incomplete selected-variant path
+        are already pending — they will be re-extracted regardless of whether
+        their ``photo_masks`` row's prompt matches — so counting them here
+        would double-count when a planner combines ``pending + stale`` as
+        total work.
         """
         import config as cfg
         ws = self._ws_id()
@@ -3753,6 +3753,8 @@ class Database:
                   ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                WHERE pm.variant = ?
                  AND p.mask_path IS NOT NULL
+                 AND pm.path IS NOT NULL
+                 AND pm.path != ''
                  AND EXISTS (
                     SELECT 1 FROM detections d0
                      WHERE d0.photo_id = pm.photo_id
