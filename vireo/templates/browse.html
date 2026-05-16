@@ -1431,6 +1431,7 @@ var loading = false;
 var allLoaded = false;
 var selectedPhotoId = null;
 var selectedIndex = -1;
+var anchorRestoreEpoch = 0;
 var selectedPhotos = new Set(); // multi-select
 var selectionKeywordRequestSeq = 0;
 var selectionKeywordKey = '';
@@ -1777,6 +1778,65 @@ function refreshGridCards(photoIds) {
   });
 }
 
+function getGridCard(photoId) {
+  return document.querySelector('.grid-card[data-id="' + photoId + '"]');
+}
+
+function captureSelectedPhotoAnchor() {
+  if (selectedPhotoId == null || selectedPhotos.size > 0) return null;
+  var card = getGridCard(selectedPhotoId);
+  if (!card) return null;
+  var container = document.getElementById('gridContainer');
+  var containerRect = container.getBoundingClientRect();
+  var cardRect = card.getBoundingClientRect();
+  return {
+    photoId: selectedPhotoId,
+    topOffset: cardRect.top - containerRect.top,
+    detailVisible: document.getElementById('detailContent').classList.contains('visible'),
+  };
+}
+
+function restorePhotoAnchor(anchor) {
+  if (!anchor) return false;
+  var card = getGridCard(anchor.photoId);
+  if (!card) return false;
+  var container = document.getElementById('gridContainer');
+  var containerRect = container.getBoundingClientRect();
+  var cardRect = card.getBoundingClientRect();
+  container.scrollTop += (cardRect.top - containerRect.top) - anchor.topOffset;
+  return true;
+}
+
+function anchorRestoreIsPending(anchor, restoreEpoch) {
+  return !!anchor && anchorRestoreEpoch === restoreEpoch && selectedPhotoId == null && selectedPhotos.size === 0;
+}
+
+function anchorSelectionIsCurrent(anchor, restoreEpoch) {
+  if (restoreEpoch != null && anchorRestoreEpoch !== restoreEpoch) return false;
+  return !!anchor && selectedPhotoId === anchor.photoId && selectedPhotos.size === 0;
+}
+
+async function loadUntilPhotoRendered(photoId, shouldContinue) {
+  var card = getGridCard(photoId);
+  while (!card && !allLoaded) {
+    if (shouldContinue && !shouldContinue()) return null;
+    var beforePage = currentPage;
+    var beforeLen = photos.length;
+    await loadPhotos();
+    if (shouldContinue && !shouldContinue()) return null;
+    if (currentPage === beforePage && photos.length === beforeLen) break;
+    card = getGridCard(photoId);
+  }
+  return card;
+}
+
+function clearActiveSelectionAndDetail() {
+  selectedPhotos.clear();
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  closeDetail();
+}
+
 /* ---------- Bootstrap ---------- */
 bootstrapBrowse();
 
@@ -2014,24 +2074,57 @@ function refreshBrowseSidebarCounts() {
 
 async function filterByCollection(id) {
   cancelScheduledSearchFilter();
+  var anchor = captureSelectedPhotoAnchor();
+  var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
   activeFolderId = null;
   activeKeyword = null;
   activeCollectionId = id;
   photos = [];
   currentPage = 1;
   allLoaded = false;
-  loadEpoch++;         // invalidate any in-flight loadPhotos response
+  var collectionLoadEpoch = ++loadEpoch;  // invalidate any in-flight loadPhotos response
   loading = false;     // safe to clear: the stale response will be dropped
-  // Dataset is about to change; a surviving multi-select Set points at
-  // photos from the previous collection. Without this clear, closeDetail()
-  // keeps selectedPhotos intact and updateBatchBar() shows "N selected" with
-  // stale ids, arming Delete/Export/Develop against hidden photos.
+  // Selection cannot be safely carried across a dataset switch: a surviving
+  // Set or single-focus id can arm actions against hidden photos. A single
+  // focused photo is restored below only after proving it exists in the
+  // destination collection and no user interaction has superseded it.
   selectedPhotos.clear();
   selectedPhotoId = null;
   selectedIndex = -1;
+  refreshCardSelectionVisuals();
+  updateBatchBar();
   document.getElementById('grid').innerHTML = '';
-  closeDetail();
+  document.getElementById('gridContainer').scrollTop = 0;
+  if (anchor) hideDetailPanel();
+  else closeDetail();
+  function collectionRequestIsCurrent() {
+    return collectionLoadEpoch === loadEpoch && activeCollectionId === id;
+  }
+  function anchorScanShouldContinue() {
+    return collectionRequestIsCurrent() && anchorRestoreEpoch === restoreEpoch;
+  }
   await loadPhotos();
+  if (!collectionRequestIsCurrent()) return;
+  if (!anchor) return;
+
+  var card = await loadUntilPhotoRendered(anchor.photoId, anchorScanShouldContinue);
+  if (!collectionRequestIsCurrent()) return;
+  if (!anchorRestoreIsPending(anchor, restoreEpoch)) return;
+  if (!card) {
+    clearActiveSelectionAndDetail();
+    return;
+  }
+  selectedPhotoId = anchor.photoId;
+  selectedIndex = photos.findIndex(function(p) { return p.id === anchor.photoId; });
+  refreshCardSelectionVisuals();
+  updateBatchBar();
+  if (anchor.detailVisible) loadDetail(anchor.photoId);
+  requestAnimationFrame(function() {
+    if (!collectionRequestIsCurrent()) return;
+    if (!anchorSelectionIsCurrent(anchor, restoreEpoch)) return;
+    restorePhotoAnchor(anchor);
+    updateScrollPosition();
+  });
 }
 
 /* ---------- Collection Modal ---------- */
@@ -2960,6 +3053,7 @@ document.getElementById('gridContainer').addEventListener('scroll', function() {
 
 /* ---------- Photo Selection & Detail ---------- */
 function selectPhoto(e, id, idx) {
+  anchorRestoreEpoch++;
   if (e.shiftKey && selectedIndex >= 0) {
     // Shift-click: range select
     var start = Math.min(selectedIndex, idx);
@@ -3481,6 +3575,7 @@ async function confirmBatchCollection() {
 }
 
 function clearSelection() {
+  anchorRestoreEpoch++;
   // Clear both tracks that feed getActiveSelection(), otherwise the batch bar
   // reappears immediately with the single-focus photo still armed for actions.
   selectedPhotos.clear();
@@ -3788,9 +3883,14 @@ function filterMetadata(query) {
   });
 }
 
-function closeDetail() {
+function hideDetailPanel() {
   document.getElementById('detailContent').classList.remove('visible');
   document.getElementById('summaryPanel').classList.remove('hidden');
+}
+
+function closeDetail() {
+  anchorRestoreEpoch++;
+  hideDetailPanel();
   selectedPhotoId = null;
   selectedIndex = -1;
   // Re-highlight any cmd/shift-click selections that survive detail close.
