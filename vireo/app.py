@@ -3520,6 +3520,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         rules = body.get("rules", [])
         if not name:
             return json_error("name required")
+        try:
+            db.count_photos_for_rules(rules)
+        except ValueError as e:
+            return json_error(str(e), 400)
         cid = db.add_collection(name, json.dumps(rules))
         return jsonify({"ok": True, "id": cid})
 
@@ -3569,16 +3573,40 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/collections/<int:collection_id>", methods=["PUT"])
     def api_update_collection(collection_id):
-        """Rename a collection. Body: {"name": "..."}."""
+        """Update a collection. Body: {"name": "...", "rules": [...|group]}."""
         db = _get_db()
         body = request.get_json(silent=True) or {}
-        name = (body.get("name") or "").strip()
-        if not name:
-            return json_error("name required")
-        try:
-            db.rename_collection(collection_id, name)
-        except ValueError:
+        row = db.conn.execute(
+            "SELECT id, name, rules FROM collections WHERE id = ? AND workspace_id = ?",
+            (collection_id, db._ws_id()),
+        ).fetchone()
+        if not row:
             return json_error("collection not found", 404)
+
+        updates = []
+        params = []
+        if "name" in body:
+            name = (body.get("name") or "").strip()
+            if not name:
+                return json_error("name required")
+            updates.append("name = ?")
+            params.append(name)
+        if "rules" in body:
+            rules = body.get("rules")
+            try:
+                db.count_photos_for_rules(rules)
+            except ValueError as e:
+                return json_error(str(e), 400)
+            updates.append("rules = ?")
+            params.append(json.dumps(rules))
+        if updates:
+            params.extend([collection_id, db._ws_id()])
+            db.conn.execute(
+                f"UPDATE collections SET {', '.join(updates)} "
+                "WHERE id = ? AND workspace_id = ?",
+                params,
+            )
+            db.conn.commit()
         return jsonify({"ok": True})
 
     @app.route("/api/collections/<int:collection_id>/add-photos", methods=["POST"])
@@ -3600,17 +3628,62 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Refuse to mutate smart/system collections like "All Photos" — adding
         # a photo_ids rule would AND-combine with the sentinel and silently
         # convert the dynamic default into a static subset.
-        if any(r.get("field") == "all" for r in rules):
+        def _has_all_rule(node):
+            if isinstance(node, list):
+                return any(_has_all_rule(child) for child in node)
+            if not isinstance(node, dict):
+                return False
+            if node.get("field") == "all":
+                return True
+            return _has_all_rule(node.get("rules"))
+
+        if _has_all_rule(rules):
             return json_error("Cannot add photos to this collection", 400)
-        # Find or create a photo_ids rule
-        ids_rule = None
-        for r in rules:
-            if r.get("field") == "photo_ids":
-                ids_rule = r
-                break
+        def _find_photo_ids_rule(node, group_modes=()):
+            if isinstance(node, list):
+                for child in node:
+                    found = _find_photo_ids_rule(child, group_modes)
+                    if found is not None:
+                        return found
+            elif isinstance(node, dict):
+                if node.get("field") == "photo_ids":
+                    return node, group_modes
+                if "rules" in node:
+                    mode = node.get("mode", "all")
+                    return _find_photo_ids_rule(
+                        node.get("rules"), group_modes + (mode,)
+                    )
+            return None
+
+        def _has_non_all_group(node):
+            if isinstance(node, list):
+                return any(_has_non_all_group(child) for child in node)
+            if not isinstance(node, dict):
+                return False
+            if "rules" in node and node.get("field") is None:
+                if node.get("mode", "all") != "all":
+                    return True
+                return _has_non_all_group(node.get("rules"))
+            return False
+
+        found_ids_rule = _find_photo_ids_rule(rules)
+        if found_ids_rule is not None:
+            ids_rule, group_modes = found_ids_rule
+            if any(mode != "all" for mode in group_modes):
+                return json_error("Cannot add photos to this collection", 400)
+        else:
+            ids_rule = None
+            if _has_non_all_group(rules):
+                return json_error("Cannot add photos to this collection", 400)
+
         if ids_rule is None:
             ids_rule = {"field": "photo_ids", "value": []}
-            rules.append(ids_rule)
+            if isinstance(rules, list):
+                rules.append(ids_rule)
+            elif isinstance(rules, dict) and isinstance(rules.get("rules"), list):
+                rules["rules"].append(ids_rule)
+            else:
+                rules = [ids_rule]
 
         # Merge new IDs
         existing = set(ids_rule["value"])
