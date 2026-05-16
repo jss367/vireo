@@ -1781,7 +1781,12 @@ function renderResults() {
     ce = document.getElementById('countKeep'); if (ce) ce.textContent = ' (' + Number(summary.keep_count || 0) + ')';
     ce = document.getElementById('countReview'); if (ce) ce.textContent = ' (' + Number(summary.review_count || 0) + ')';
     ce = document.getElementById('countReject'); if (ce) ce.textContent = ' (' + Number(summary.reject_count || 0) + ')';
-    container.innerHTML = '<div class="empty-state" style="display:block;">Temporary Browse selection. Use the burst review modal to pick, reject, or tag these photos.</div>';
+    container.innerHTML = '<div class="empty-state" style="display:block;">'
+      + '<p>Temporary Browse selection. Use the burst review modal to pick, reject, or tag these photos.</p>'
+      + '<button type="button" onclick="reopenBrowseBurstReview()" '
+      + 'style="margin-top:12px;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);" '
+      + 'title="Reopen the burst review modal for this Browse selection.">Reopen burst review</button>'
+      + '</div>';
     _focusedEncounterIdx = null;
     renderAlgorithmTrace();
     return;
@@ -3146,15 +3151,24 @@ function renderBrowseBurstReviewShell() {
   if (sg) sg.style.display = 'none';
 }
 
+// Drop the one-shot Browse→burst handoff (session storage + ?browse_burst=1).
+// Only call this once the burst workflow has actually completed (flags
+// applied) or we've decided to degrade to normal review — clearing it while
+// the modal is still in play makes Esc/× and the /group/state retry path
+// non-recoverable.
+function clearBrowseBurstHandoff() {
+  try {
+    window.sessionStorage.removeItem('vireo.browseBurstReviewIds');
+    window.history.replaceState(null, '', '/pipeline/review');
+  } catch (e) {}
+}
+
 // Stale URL, cleared session storage, or a failed handoff should not strand
 // the user on an empty page reachable only from Browse. Clear the one-shot
 // handoff state and degrade to the standard page-init flow so the route
 // stays self-recoverable on reload.
 function fallbackToNormalPipelineReview(message) {
-  try {
-    window.sessionStorage.removeItem('vireo.browseBurstReviewIds');
-    window.history.replaceState(null, '', '/pipeline/review');
-  } catch (e) {}
+  clearBrowseBurstHandoff();
   if (message) showToast(message, 'error');
   loadPipelinePageInit();
 }
@@ -3208,14 +3222,32 @@ function openBrowseBurstReviewFromStorage() {
     renderBrowseBurstReviewShell();
     updateSummaryBar(pipelineResults.summary);
     renderResults();
+    // Keep the handoff state (session storage + ?browse_burst=1) in place.
+    // The body is just a placeholder in browse-selection mode, so closing
+    // the modal via Esc/× or hitting the /group/state "reopen to retry"
+    // path must remain recoverable — both via the in-page Reopen button and
+    // via a plain reload. clearBrowseBurstHandoff() runs only once the user
+    // applies (workflow complete) or we fall back to normal review.
     openGroupReview(0, 0, loadedIds[0]);
-    try {
-      window.sessionStorage.removeItem('vireo.browseBurstReviewIds');
-      window.history.replaceState(null, '', '/pipeline/review');
-    } catch (e) {}
   }).catch(function() {
     fallbackToNormalPipelineReview('Could not open burst review — showing the latest pipeline review instead.');
   });
+}
+
+// Recover from a closed/errored burst modal. If the temporary group is still
+// in memory (same-page Esc/× or /group/state failure), just reopen it.
+// Otherwise (e.g. after a reload) re-run the handoff from session storage.
+function reopenBrowseBurstReview() {
+  if (pipelineResults && pipelineResults.source === 'browse-selection') {
+    var enc = pipelineResults.encounters && pipelineResults.encounters[0];
+    var firstId = enc && enc.photo_ids && enc.photo_ids[0];
+    if (firstId) {
+      renderBrowseBurstReviewShell();
+      openGroupReview(0, 0, firstId);
+      return;
+    }
+  }
+  openBrowseBurstReviewFromStorage();
 }
 
 function findBurstForPhoto(photoId) {
@@ -4320,6 +4352,10 @@ async function grmApply() {
         return !grmState.removed.has(p.id);
       });
     }
+    // Flags/species are now persisted to the DB — the one-shot handoff has
+    // served its purpose, so drop it. A later reload degrades to normal
+    // review; the in-memory group stays reopenable via the Reopen button.
+    clearBrowseBurstHandoff();
     closeGroupReview();
     document.getElementById('grmSpecies').value = '';
     renderResults();
