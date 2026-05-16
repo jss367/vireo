@@ -3427,8 +3427,9 @@ function openLightbox(photoId, filename, photoList, options) {
     })
     .catch(function() {});
 
-  img.onload = function() {
+  function handleInitialImageLoad() {
     img.onload = null;
+    img.onerror = null;
     // Only record the /full tier size if the currently loaded source is still /full.
     // A quick user zoom can trigger a debounced swap to a higher tier before /full
     // finishes loading, which would otherwise make us record the swapped source's
@@ -3444,7 +3445,22 @@ function openLightbox(photoId, filename, photoList, options) {
     _lbRecomputeNativeZoom();
     _lbApplyPendingOneToOneZoom();
     _lbApplyTransform();
-  };
+  }
+  function handleInitialImageError() {
+    if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
+    if (_lbCurrentSrcKey !== 'original') {
+      img.onload = null;
+      img.onerror = null;
+      return;
+    }
+    _lbCurrentSrcKey = 'full';
+    _lbDesiredSrcKey = null;
+    img.onload = handleInitialImageLoad;
+    img.onerror = handleInitialImageError;
+    img.src = _lbSrcUrl(photoId, 'full');
+  }
+  img.onload = handleInitialImageLoad;
+  img.onerror = handleInitialImageError;
   img.src = _lbSrcUrl(photoId, _lbCurrentSrcKey);
   label.textContent = filename || '';
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };

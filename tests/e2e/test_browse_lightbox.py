@@ -1,4 +1,11 @@
+import base64
+
 from playwright.sync_api import expect
+
+_PNG_1X1 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+    "/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+)
 
 
 def test_browse_lightbox_arrows_navigate(live_server, page):
@@ -71,6 +78,39 @@ def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
     )
     assert restored
     assert page.evaluate("window._lbZoom") > 1.001
+
+
+def test_browse_lightbox_one_to_one_nav_falls_back_when_original_fails(live_server, page):
+    """1:1 arrow navigation falls back to /full when the original is unavailable."""
+    image_body = base64.b64decode(_PNG_1X1)
+    page.route("**/photos/*/original", lambda route: route.fulfill(status=503, body="missing"))
+    page.route("**/photos/*/full", lambda route: route.fulfill(body=image_body, content_type="image/png"))
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.evaluate(
+        """() => {
+            window._lbNativeZoom = 2;
+            window._lbZoom = 2;
+            window._lbPending1To1 = false;
+        }"""
+    )
+
+    page.locator("[title='Next (→)']").click()
+    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbCurrentSrcKey === 'full' && img && img.complete && img.naturalWidth > 0;
+        }"""
+    )
+    assert "/full" in page.locator("#lightboxImg").get_attribute("src")
 
 
 def test_browse_e_f_g_keyboard_modes(live_server, page):
