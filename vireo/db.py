@@ -3149,6 +3149,46 @@ class Database:
             "total_dets": row["total_dets"] or 0,
         }
 
+    def count_primary_detections_in_scope(self, photo_ids=None, min_conf=None):
+        """Count photos whose primary real detection is pipeline-classifiable.
+
+        The streaming pipeline classifies at most one detection per photo: the
+        highest-confidence non-full-image detection above the active threshold.
+        This mirrors that gate for the Pipeline page plan so secondary boxes
+        do not inflate pending classify work.
+        """
+        ws = self._ws_id()
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""WITH ranked AS (
+                    SELECT d.id, d.photo_id,
+                           ROW_NUMBER() OVER (
+                             PARTITION BY d.photo_id
+                             ORDER BY d.detector_confidence DESC, d.id ASC
+                           ) AS rn
+                      FROM detections d
+                      JOIN photos p ON p.id = d.photo_id
+                      JOIN workspace_folders wf
+                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                     WHERE d.detector_model != 'full-image'
+                       AND d.detector_confidence >= ?{scope_sql}
+                )
+                SELECT COUNT(*) AS primary_dets,
+                       COUNT(DISTINCT photo_id) AS photos_with_dets
+                  FROM ranked
+                 WHERE rn = 1""",
+            (ws, min_conf, *scope_params),
+        ).fetchone()
+        return {
+            "photos_with_dets": row["photos_with_dets"] or 0,
+            "total_dets": row["primary_dets"] or 0,
+        }
+
     def count_classify_pending_pairs(
         self, classifier_model, labels_fingerprint,
         photo_ids=None, min_conf=None,
@@ -3181,6 +3221,48 @@ class Database:
                   AND d.detector_confidence >= ?
                   AND cr.detection_id IS NULL{scope_sql}""",
             (ws, classifier_model, labels_fingerprint, min_conf, *scope_params),
+        ).fetchone()
+        return row["pending"] or 0
+
+    def count_primary_classify_pending_pairs(
+        self, classifier_model, labels_fingerprint,
+        photo_ids=None, min_conf=None,
+    ):
+        """Count primary detections lacking a classifier run for (model, fp).
+
+        Mirrors pipeline_job.classify_stage, which picks one primary detection
+        per photo rather than classifying every detection row.
+        """
+        ws = self._ws_id()
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""WITH ranked AS (
+                    SELECT d.id, d.photo_id,
+                           ROW_NUMBER() OVER (
+                             PARTITION BY d.photo_id
+                             ORDER BY d.detector_confidence DESC, d.id ASC
+                           ) AS rn
+                      FROM detections d
+                      JOIN photos p ON p.id = d.photo_id
+                      JOIN workspace_folders wf
+                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                     WHERE d.detector_model != 'full-image'
+                       AND d.detector_confidence >= ?{scope_sql}
+                )
+                SELECT COUNT(*) AS pending
+                  FROM ranked d
+                  LEFT JOIN classifier_runs cr
+                    ON cr.detection_id = d.id
+                   AND cr.classifier_model = ?
+                   AND cr.labels_fingerprint = ?
+                 WHERE d.rn = 1
+                   AND cr.detection_id IS NULL""",
+            (ws, min_conf, *scope_params, classifier_model, labels_fingerprint),
         ).fetchone()
         return row["pending"] or 0
 
@@ -3227,6 +3309,52 @@ class Database:
                  ){scope_sql}""",
             (ws, min_conf, classifier_model, labels_fingerprint,
              classifier_model, labels_fingerprint, *scope_params),
+        ).fetchone()
+        return row["n"] or 0
+
+    def count_primary_classify_stale(
+        self, classifier_model, labels_fingerprint,
+        photo_ids=None, min_conf=None,
+    ):
+        """Count stale classifier runs on primary detections only."""
+        ws = self._ws_id()
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""WITH ranked AS (
+                    SELECT d.id, d.photo_id,
+                           ROW_NUMBER() OVER (
+                             PARTITION BY d.photo_id
+                             ORDER BY d.detector_confidence DESC, d.id ASC
+                           ) AS rn
+                      FROM detections d
+                      JOIN photos p ON p.id = d.photo_id
+                      JOIN workspace_folders wf
+                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                     WHERE d.detector_model != 'full-image'
+                       AND d.detector_confidence >= ?{scope_sql}
+                )
+                SELECT COUNT(*) AS n
+                  FROM ranked d
+                 WHERE d.rn = 1
+                   AND EXISTS (
+                      SELECT 1 FROM classifier_runs cr_stale
+                       WHERE cr_stale.detection_id = d.id
+                         AND cr_stale.classifier_model = ?
+                         AND cr_stale.labels_fingerprint != ?
+                   )
+                   AND NOT EXISTS (
+                      SELECT 1 FROM classifier_runs cr_cur
+                       WHERE cr_cur.detection_id = d.id
+                         AND cr_cur.classifier_model = ?
+                         AND cr_cur.labels_fingerprint = ?
+                   )""",
+            (ws, min_conf, *scope_params, classifier_model, labels_fingerprint,
+             classifier_model, labels_fingerprint),
         ).fetchone()
         return row["n"] or 0
 
@@ -3418,15 +3546,19 @@ class Database:
             out[key] = (float(med), n)
         return out
 
-    def count_photos_pending_masks(self, photo_ids=None, min_conf=None):
+    def count_photos_pending_masks(self, photo_ids=None, min_conf=None,
+                                   sam2_variant=None):
         """Return (pending, eligible) for the extract-masks stage.
 
         eligible = photos in scope with at least one real detection above the
             workspace's effective detector_confidence
-        pending  = eligible photos whose mask_path IS NULL
+        pending  = eligible photos whose mask_path IS NULL, or when
+            ``sam2_variant`` is supplied, whose ``photo_masks`` row for that
+            variant is missing/incomplete
 
-        Mirrors extract_masks_stage's per-photo gate (which keys solely on
-        mask_path being unset for photos with non-full-image detections).
+        The variant-aware mode mirrors extract_masks_stage's current per-photo
+        cache check: masks made by another SAM variant do not make the selected
+        variant complete.
         """
         ws = self._ws_id()
         if min_conf is None:
@@ -3435,21 +3567,44 @@ class Database:
                 "detector_confidence", 0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""SELECT
-                  COUNT(DISTINCT p.id) AS eligible,
-                  COUNT(DISTINCT CASE WHEN p.mask_path IS NULL THEN p.id END)
-                    AS pending
-                FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                JOIN detections d
-                  ON d.photo_id = p.id
-                 AND d.detector_model != 'full-image'
-                 AND d.detector_confidence >= ?
-                WHERE 1=1{scope_sql}""",
-            (ws, min_conf, *scope_params),
-        ).fetchone()
+        if sam2_variant:
+            row = self.conn.execute(
+                f"""SELECT
+                      COUNT(DISTINCT p.id) AS eligible,
+                      COUNT(DISTINCT CASE
+                        WHEN p.mask_path IS NULL
+                          OR pm.photo_id IS NULL
+                          OR pm.path IS NULL
+                          OR pm.path = ''
+                        THEN p.id END) AS pending
+                    FROM photos p
+                    JOIN workspace_folders wf
+                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                    JOIN detections d
+                      ON d.photo_id = p.id
+                     AND d.detector_model != 'full-image'
+                     AND d.detector_confidence >= ?
+                    LEFT JOIN photo_masks pm
+                      ON pm.photo_id = p.id AND pm.variant = ?
+                    WHERE 1=1{scope_sql}""",
+                (ws, min_conf, sam2_variant, *scope_params),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                f"""SELECT
+                      COUNT(DISTINCT p.id) AS eligible,
+                      COUNT(DISTINCT CASE WHEN p.mask_path IS NULL THEN p.id END)
+                        AS pending
+                    FROM photos p
+                    JOIN workspace_folders wf
+                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                    JOIN detections d
+                      ON d.photo_id = p.id
+                     AND d.detector_model != 'full-image'
+                     AND d.detector_confidence >= ?
+                    WHERE 1=1{scope_sql}""",
+                (ws, min_conf, *scope_params),
+            ).fetchone()
         return {
             "eligible": row["eligible"] or 0,
             "pending": row["pending"] or 0,
@@ -3575,13 +3730,13 @@ class Database:
         Counting those would inflate ``detail.stale`` and keep the
         stage flagged Outdated/Will run forever in mixed workspaces.
 
-        The ``photos.mask_path IS NOT NULL`` gate keeps this count
-        disjoint from ``count_photos_pending_masks``'s ``pending``
-        (``mask_path IS NULL``). Photos with ``mask_path IS NULL`` are
-        already pending — they will be re-extracted regardless of
-        whether their ``photo_masks`` row's prompt matches — so
-        counting them here would double-count when a planner combines
-        ``pending + stale`` as total work.
+        The active-mask and variant-path gates keep this count disjoint from
+        ``count_photos_pending_masks``'s ``pending``. Photos with no active
+        mask, no selected-variant row, or an incomplete selected-variant path
+        are already pending — they will be re-extracted regardless of whether
+        their ``photo_masks`` row's prompt matches — so counting them here
+        would double-count when a planner combines ``pending + stale`` as
+        total work.
         """
         import config as cfg
         ws = self._ws_id()
@@ -3598,6 +3753,8 @@ class Database:
                   ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                WHERE pm.variant = ?
                  AND p.mask_path IS NOT NULL
+                 AND pm.path IS NOT NULL
+                 AND pm.path != ''
                  AND EXISTS (
                     SELECT 1 FROM detections d0
                      WHERE d0.photo_id = pm.photo_id
@@ -5095,6 +5252,101 @@ class Database:
              "active_count": r["active_count"] or 0}
             for r in rows
         ]
+
+    def sam_variant_rerun_warning(
+        self,
+        sam2_variant,
+        photo_ids=None,
+        min_conf=None,
+        selected_max_ratio=0.25,
+        alternate_min_ratio=0.80,
+    ):
+        """Warn when selected SAM coverage is poor but another variant is high.
+
+        The target set matches the extract-masks stage's existing-photo
+        eligibility: active-workspace photos in scope with at least one real
+        detection above the workspace detector-confidence floor. This keeps a
+        workspace-level SAM configuration from looking empty just because a
+        different variant already produced masks for those same target photos.
+        """
+        if not sam2_variant or sam2_variant == "unknown":
+            return None
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+
+        ws = self._ws_id()
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        target_row = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT p.id) AS n
+                  FROM photos p
+                  JOIN workspace_folders wf
+                    ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                  JOIN detections d
+                    ON d.photo_id = p.id
+                   AND d.detector_model != 'full-image'
+                   AND d.detector_confidence >= ?
+                 WHERE 1=1{scope_sql}""",
+            (ws, min_conf, *scope_params),
+        ).fetchone()
+        target_count = target_row["n"] or 0
+        if target_count == 0:
+            return None
+
+        coverage_rows = self.conn.execute(
+            f"""SELECT pm.variant, COUNT(DISTINCT pm.photo_id) AS count
+                  FROM photo_masks pm
+                  JOIN photos p ON p.id = pm.photo_id
+                  JOIN workspace_folders wf
+                    ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                  JOIN detections d
+                    ON d.photo_id = p.id
+                   AND d.detector_model != 'full-image'
+                   AND d.detector_confidence >= ?
+                 WHERE pm.variant != 'unknown'
+                   AND pm.path IS NOT NULL
+                   AND pm.path != ''
+                   AND p.mask_path IS NOT NULL{scope_sql}
+                 GROUP BY pm.variant""",
+            (ws, min_conf, *scope_params),
+        ).fetchall()
+        counts = {r["variant"]: r["count"] or 0 for r in coverage_rows}
+        selected_count = counts.get(sam2_variant, 0)
+        selected_ratio = selected_count / target_count
+        if selected_ratio > selected_max_ratio:
+            return None
+
+        alternates = [
+            (variant, count, count / target_count)
+            for variant, count in counts.items()
+            if variant != sam2_variant
+        ]
+        if not alternates:
+            return None
+        alt_variant, alt_count, alt_ratio = max(
+            alternates, key=lambda item: (item[2], item[1], item[0])
+        )
+        if alt_ratio < alternate_min_ratio:
+            return None
+
+        return {
+            "code": "sam_variant_rerun",
+            "selected_variant": sam2_variant,
+            "selected_count": selected_count,
+            "selected_ratio": selected_ratio,
+            "alternate_variant": alt_variant,
+            "alternate_count": alt_count,
+            "alternate_ratio": alt_ratio,
+            "target_count": target_count,
+            "message": (
+                f"{sam2_variant} has masks for {selected_count} of "
+                f"{target_count} target photos, while {alt_variant} already "
+                f"has masks for {alt_count}. Starting will rerun SAM for the "
+                f"selected variant."
+            ),
+        }
 
     def mask_variants_summary(self):
         """Per-variant summary: count, total bytes (best-effort, sums

@@ -73,6 +73,51 @@ def test_scan_discovers_photos(tmp_path):
     assert filenames == {'img1.jpg', 'img2.jpg', 'img3.jpg'}
 
 
+def test_scan_cancel_check_aborts_before_discovery(tmp_path):
+    """scan() honors cancel_check before doing scan work."""
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['img1.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    with pytest.raises(RuntimeError, match="scan cancelled"):
+        scan(root, db, cancel_check=lambda: True)
+
+    assert db.get_photos(per_page=100) == []
+
+
+def test_scan_cancel_check_aborts_before_metadata_extraction(tmp_path, monkeypatch):
+    """A cancel requested after discovery stops before expensive metadata work."""
+    import scanner
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['img1.jpg', 'img2.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+    cancelled = {"value": False}
+
+    def progress_cb(current, total):
+        if current == 0 and total == 2:
+            cancelled["value"] = True
+
+    def fail_extract_metadata(_paths):
+        raise AssertionError("extract_metadata should not run after cancellation")
+
+    monkeypatch.setattr(scanner, "extract_metadata", fail_extract_metadata)
+
+    with pytest.raises(RuntimeError, match="scan cancelled"):
+        scanner.scan(
+            root,
+            db,
+            progress_callback=progress_cb,
+            cancel_check=lambda: cancelled["value"],
+        )
+
+    assert db.get_photos(per_page=100) == []
+
+
 def test_scan_non_recursive_only_finds_root_photos(tmp_path):
     """scan(recursive=False) only finds photos in the root folder, not subfolders."""
     from db import Database
