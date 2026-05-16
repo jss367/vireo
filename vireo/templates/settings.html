@@ -716,10 +716,10 @@
       <div class="setting-row">
         <div class="setting-label">Embedding distance</div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgBurstEmb" min="1" max="100" value="60"
+          <input type="range" id="cfgBurstEmb" min="1" max="100"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgBurstEmbVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgBurstEmbVal">60%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgBurstEmbVal"></span>
         </div>
       </div>
 
@@ -1655,94 +1655,97 @@ async function loadConfig() {
     document.getElementById('cfgCullPhash').value = cph;
     document.getElementById('cfgCullPhashVal').textContent = cph;
     // Load pipeline settings
-    var p = cfg.pipeline || {};
-    var wf = Math.round((p.w_focus != null ? p.w_focus : 0.45) * 100);
+    var p = VireoPipelineConfig.pipelineFromConfig(cfg);
+    var wf = VireoPipelineConfig.percent(p.w_focus, 'w_focus');
     document.getElementById('cfgWFocus').value = wf;
     document.getElementById('cfgWFocusVal').textContent = wf + '%';
-    var we = Math.round((p.w_exposure != null ? p.w_exposure : 0.20) * 100);
+    var we = VireoPipelineConfig.percent(p.w_exposure, 'w_exposure');
     document.getElementById('cfgWExposure').value = we;
     document.getElementById('cfgWExposureVal').textContent = we + '%';
-    var wc = Math.round((p.w_composition != null ? p.w_composition : 0.15) * 100);
+    var wc = VireoPipelineConfig.percent(p.w_composition, 'w_composition');
     document.getElementById('cfgWComposition').value = wc;
     document.getElementById('cfgWCompositionVal').textContent = wc + '%';
-    var wa = Math.round((p.w_area != null ? p.w_area : 0.10) * 100);
+    var wa = VireoPipelineConfig.percent(p.w_area, 'w_area');
     document.getElementById('cfgWArea').value = wa;
     document.getElementById('cfgWAreaVal').textContent = wa + '%';
-    var wn = Math.round((p.w_noise != null ? p.w_noise : 0.10) * 100);
+    var wn = VireoPipelineConfig.percent(p.w_noise, 'w_noise');
     document.getElementById('cfgWNoise').value = wn;
     document.getElementById('cfgWNoiseVal').textContent = wn + '%';
-    var rc = Math.round((p.reject_crop_complete != null ? p.reject_crop_complete : 0.60) * 100);
+    var rc = VireoPipelineConfig.percent(p.reject_crop_complete, 'reject_crop_complete');
     document.getElementById('cfgRejectCrop').value = rc;
     document.getElementById('cfgRejectCropVal').textContent = rc + '%';
-    var rf = Math.round((p.reject_focus != null ? p.reject_focus : 0.35) * 100);
+    var rf = VireoPipelineConfig.percent(p.reject_focus, 'reject_focus');
     document.getElementById('cfgRejectFocus').value = rf;
     document.getElementById('cfgRejectFocusVal').textContent = rf + '%';
-    var rcl = Math.round((p.reject_clip_high != null ? p.reject_clip_high : 0.30) * 100);
+    var rcl = VireoPipelineConfig.percent(p.reject_clip_high, 'reject_clip_high');
     document.getElementById('cfgRejectClip').value = rcl;
     document.getElementById('cfgRejectClipVal').textContent = rcl + '%';
-    var rco = Math.round((p.reject_composite != null ? p.reject_composite : 0.40) * 100);
+    var rco = VireoPipelineConfig.percent(p.reject_composite, 'reject_composite');
     document.getElementById('cfgRejectComposite').value = rco;
     document.getElementById('cfgRejectCompositeVal').textContent = rco + '%';
 
     // Miss detection tunables
     document.getElementById('cfgMissEnabled').checked = p.miss_enabled !== false;
-    var mdc = Math.round((p.miss_det_confidence != null ? p.miss_det_confidence : 0.25) * 100);
+    var mdc = VireoPipelineConfig.percent(p.miss_det_confidence, 'miss_det_confidence');
     document.getElementById('cfgMissDetConf').value = mdc;
     document.getElementById('cfgMissDetConfVal').textContent = mdc + '%';
-    var mbm = Math.round((p.miss_bbox_area_min != null ? p.miss_bbox_area_min : 0.005) * 1000);
+    var mbm = Math.round(VireoPipelineConfig.asNumber(p.miss_bbox_area_min, 'miss_bbox_area_min') * 1000);
     document.getElementById('cfgMissBboxMin').value = mbm;
     document.getElementById('cfgMissBboxMinVal').textContent = (mbm / 1000).toFixed(3);
-    var mor = Math.round((p.miss_oof_ratio != null ? p.miss_oof_ratio : 0.50) * 100);
+    var mor = VireoPipelineConfig.percent(p.miss_oof_ratio, 'miss_oof_ratio');
     document.getElementById('cfgMissOofRatio').value = mor;
     document.getElementById('cfgMissOofRatioVal').textContent = (mor / 100).toFixed(2);
 
     // Eye-focus detection tunables
     document.getElementById('cfgEyeDetectEnabled').checked =
       p.eye_detect_enabled !== false;  // default true
-    var ecg = Math.round((p.eye_classifier_conf_gate != null ? p.eye_classifier_conf_gate : 0.50) * 100);
+    var ecg = VireoPipelineConfig.percent(p.eye_classifier_conf_gate, 'eye_classifier_conf_gate');
     document.getElementById('cfgEyeClassifierConfGate').value = ecg;
     document.getElementById('cfgEyeClassifierConfGateVal').textContent = ecg + '%';
-    var edg = Math.round((p.eye_detection_conf_gate != null ? p.eye_detection_conf_gate : 0.50) * 100);
+    var edg = VireoPipelineConfig.percent(p.eye_detection_conf_gate, 'eye_detection_conf_gate');
     document.getElementById('cfgEyeDetectionConfGate').value = edg;
     document.getElementById('cfgEyeDetectionConfGateVal').textContent = edg + '%';
-    var ewk = Math.round((p.eye_window_k != null ? p.eye_window_k : 0.08) * 100);
+    var ewk = VireoPipelineConfig.percent(p.eye_window_k, 'eye_window_k');
     document.getElementById('cfgEyeWindowK').value = ewk;
     document.getElementById('cfgEyeWindowKVal').textContent = (ewk / 100).toFixed(2);
-    var rejectEye = Math.round((p.reject_eye_focus != null ? p.reject_eye_focus : 0.35) * 100);
+    var rejectEye = VireoPipelineConfig.percent(p.reject_eye_focus, 'reject_eye_focus');
     document.getElementById('cfgRejectEyeFocus').value = rejectEye;
     document.getElementById('cfgRejectEyeFocusVal').textContent = rejectEye + '%';
-    var btg = p.burst_time_gap != null ? p.burst_time_gap : 3;
+    var btg = VireoPipelineConfig.asNumber(p.burst_time_gap, 'burst_time_gap');
     document.getElementById('cfgBurstTimeGap').value = btg;
     document.getElementById('cfgBurstTimeGapVal').textContent = btg + 's';
-    // Stored as cosine similarity; UI shows distance = 1 - similarity.
-    var bemb = Math.round((1 - (p.burst_embedding_threshold != null ? p.burst_embedding_threshold : 0.40)) * 100);
+    var bemb = VireoPipelineConfig.embeddingThresholdToDistancePercent(
+      p.burst_embedding_threshold
+    );
     document.getElementById('cfgBurstEmb').value = bemb;
     document.getElementById('cfgBurstEmbVal').textContent = bemb + '%';
-    var bl = Math.round((p.burst_lambda != null ? p.burst_lambda : 0.85) * 100);
+    var bl = VireoPipelineConfig.percent(p.burst_lambda, 'burst_lambda');
     document.getElementById('cfgBurstLambda').value = bl;
     document.getElementById('cfgBurstLambdaVal').textContent = bl + '%';
-    document.getElementById('cfgBurstMaxKeep').value = p.burst_max_keep != null ? p.burst_max_keep : 3;
-    var el = Math.round((p.encounter_lambda != null ? p.encounter_lambda : 0.70) * 100);
+    document.getElementById('cfgBurstMaxKeep').value = VireoPipelineConfig.asNumber(p.burst_max_keep, 'burst_max_keep');
+    var el = VireoPipelineConfig.percent(p.encounter_lambda, 'encounter_lambda');
     document.getElementById('cfgEncLambda').value = el;
     document.getElementById('cfgEncLambdaVal').textContent = el + '%';
-    document.getElementById('cfgEncMaxKeep').value = p.encounter_max_keep != null ? p.encounter_max_keep : 5;
-    document.getElementById('cfgWTime').value = Math.round((p.w_time != null ? p.w_time : 0.35) * 100);
-    document.getElementById('cfgWSubj').value = Math.round((p.w_subj != null ? p.w_subj : 0.35) * 100);
-    document.getElementById('cfgWGlobal').value = Math.round((p.w_global != null ? p.w_global : 0.15) * 100);
-    document.getElementById('cfgWSpecies').value = Math.round((p.w_species != null ? p.w_species : 0.10) * 100);
-    document.getElementById('cfgWMeta').value = Math.round((p.w_meta != null ? p.w_meta : 0.05) * 100);
-    document.getElementById('cfgHardCutTime').value = p.hard_cut_time != null ? p.hard_cut_time : 180;
-    var hcs = Math.round((p.hard_cut_score != null ? p.hard_cut_score : 0.42) * 100);
+    document.getElementById('cfgEncMaxKeep').value = VireoPipelineConfig.asNumber(p.encounter_max_keep, 'encounter_max_keep');
+    document.getElementById('cfgWTime').value = VireoPipelineConfig.percent(p.w_time, 'w_time');
+    document.getElementById('cfgWSubj').value = VireoPipelineConfig.percent(p.w_subj, 'w_subj');
+    document.getElementById('cfgWGlobal').value = VireoPipelineConfig.percent(p.w_global, 'w_global');
+    document.getElementById('cfgWSpecies').value = VireoPipelineConfig.percent(p.w_species, 'w_species');
+    document.getElementById('cfgWMeta').value = VireoPipelineConfig.percent(p.w_meta, 'w_meta');
+    document.getElementById('cfgHardCutTime').value = VireoPipelineConfig.asNumber(p.hard_cut_time, 'hard_cut_time');
+    var hcs = VireoPipelineConfig.percent(p.hard_cut_score, 'hard_cut_score');
     document.getElementById('cfgHardCutScore').value = hcs;
     document.getElementById('cfgHardCutScoreVal').textContent = hcs + '%';
-    var scs = Math.round((p.soft_cut_score != null ? p.soft_cut_score : 0.52) * 100);
+    var scs = VireoPipelineConfig.percent(p.soft_cut_score, 'soft_cut_score');
     document.getElementById('cfgSoftCutScore').value = scs;
     document.getElementById('cfgSoftCutScoreVal').textContent = scs + '%';
-    var ms = Math.round((p.merge_score != null ? p.merge_score : 0.62) * 100);
+    var ms = VireoPipelineConfig.percent(p.merge_score, 'merge_score');
     document.getElementById('cfgMergeScore').value = ms;
     document.getElementById('cfgMergeScoreVal').textContent = ms + '%';
-    document.getElementById('cfgMergeMaxGap').value = p.merge_max_gap != null ? p.merge_max_gap : 60;
-  } catch(e) {}
+    document.getElementById('cfgMergeMaxGap').value = VireoPipelineConfig.asNumber(p.merge_max_gap, 'merge_max_gap');
+  } catch(e) {
+    console.warn('Could not load settings config:', e);
+  }
 }
 
 var CARD_FIELD_OPTIONS = [
@@ -1877,7 +1880,9 @@ function saveConfig() {
             eye_window_k: parseInt(document.getElementById('cfgEyeWindowK').value, 10) / 100,
             reject_eye_focus: parseInt(document.getElementById('cfgRejectEyeFocus').value, 10) / 100,
             burst_time_gap: parseInt(document.getElementById('cfgBurstTimeGap').value, 10) || 3,
-            burst_embedding_threshold: 1 - parseInt(document.getElementById('cfgBurstEmb').value, 10) / 100,
+            burst_embedding_threshold: VireoPipelineConfig.embeddingDistancePercentToThreshold(
+              parseInt(document.getElementById('cfgBurstEmb').value, 10)
+            ),
             burst_lambda: parseInt(document.getElementById('cfgBurstLambda').value, 10) / 100,
             burst_max_keep: parseInt(document.getElementById('cfgBurstMaxKeep').value, 10) || 3,
             encounter_lambda: parseInt(document.getElementById('cfgEncLambda').value, 10) / 100,

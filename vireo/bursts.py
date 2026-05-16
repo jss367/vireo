@@ -10,13 +10,16 @@ All thresholds are configurable with defaults from the pipeline design doc.
 import logging
 
 import numpy as np
+from config import DEFAULTS as CONFIG_DEFAULTS
 
 log = logging.getLogger(__name__)
 
-# Default thresholds (from design doc, subject to calibration)
+# Default thresholds mirror the application config source of truth.
 DEFAULTS = {
-    "burst_time_gap": 3.0,  # seconds — cut if delta_t exceeds this
-    "burst_embedding_threshold": 0.40,  # cosine similarity — cut if below this
+    "burst_time_gap": CONFIG_DEFAULTS["pipeline"]["burst_time_gap"],
+    "burst_embedding_threshold": CONFIG_DEFAULTS["pipeline"][
+        "burst_embedding_threshold"
+    ],
 }
 
 

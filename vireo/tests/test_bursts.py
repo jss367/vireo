@@ -140,6 +140,19 @@ def test_burst_empty():
     assert detect_bursts([]) == []
 
 
+def test_burst_defaults_mirror_config():
+    """Burst helper defaults come from the application config defaults."""
+    from bursts import DEFAULTS as BURST_DEFAULTS
+    from config import DEFAULTS as CONFIG_DEFAULTS
+
+    assert BURST_DEFAULTS["burst_time_gap"] == CONFIG_DEFAULTS["pipeline"][
+        "burst_time_gap"
+    ]
+    assert BURST_DEFAULTS["burst_embedding_threshold"] == CONFIG_DEFAULTS[
+        "pipeline"
+    ]["burst_embedding_threshold"]
+
+
 # -- Configurable thresholds --
 
 
