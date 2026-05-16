@@ -3164,6 +3164,10 @@ function openSelectedInBurstReview() {
     showToast('Select at least two photos to review as a burst.', 'error');
     return;
   }
+  if (ids.length > 500) {
+    showToast('Select 500 or fewer photos to review as a burst.', 'error');
+    return;
+  }
   try {
     window.sessionStorage.setItem('vireo.browseBurstReviewIds', JSON.stringify(ids));
   } catch (e) {

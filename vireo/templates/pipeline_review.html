@@ -2675,6 +2675,10 @@ function initPipelineReviewPage() {
     openBrowseBurstReviewFromStorage();
     return;
   }
+  loadPipelinePageInit();
+}
+
+function loadPipelinePageInit() {
   safeFetch('/api/pipeline/page-init', {}, { toast: false })
   .then(function(data) {
     // Capture overrides regardless of state so computeReviewNow() can apply
@@ -3142,11 +3146,23 @@ function renderBrowseBurstReviewShell() {
   if (sg) sg.style.display = 'none';
 }
 
+// Stale URL, cleared session storage, or a failed handoff should not strand
+// the user on an empty page reachable only from Browse. Clear the one-shot
+// handoff state and degrade to the standard page-init flow so the route
+// stays self-recoverable on reload.
+function fallbackToNormalPipelineReview(message) {
+  try {
+    window.sessionStorage.removeItem('vireo.browseBurstReviewIds');
+    window.history.replaceState(null, '', '/pipeline/review');
+  } catch (e) {}
+  if (message) showToast(message, 'error');
+  loadPipelinePageInit();
+}
+
 function openBrowseBurstReviewFromStorage() {
   var ids = browseBurstStoredIds();
   if (ids.length < 2) {
-    renderEmptyState({state: 'empty', total_photos: 0});
-    showToast('Select at least two photos in Browse before opening burst review.', 'error');
+    fallbackToNormalPipelineReview('Burst review selection was missing — showing the latest pipeline review instead.');
     return;
   }
 
@@ -3159,8 +3175,7 @@ function openBrowseBurstReviewFromStorage() {
     (data.photos || []).forEach(function(p) { byId[p.id] = normalizeBrowseBurstPhoto(p); });
     var photos = ids.map(function(id) { return byId[id]; }).filter(Boolean);
     if (photos.length < 2) {
-      renderEmptyState({state: 'empty', total_photos: 0});
-      showToast('Could not load the selected photos for burst review.', 'error');
+      fallbackToNormalPipelineReview('Could not load the selected photos for burst review — showing the latest pipeline review instead.');
       return;
     }
 
@@ -3199,7 +3214,7 @@ function openBrowseBurstReviewFromStorage() {
       window.history.replaceState(null, '', '/pipeline/review');
     } catch (e) {}
   }).catch(function() {
-    renderEmptyState({state: 'empty', total_photos: 0});
+    fallbackToNormalPipelineReview('Could not open burst review — showing the latest pipeline review instead.');
   });
 }
 
