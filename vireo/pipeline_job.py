@@ -700,6 +700,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         advance_scan_acc()
 
                 if _should_abort(abort) or runner.is_cancelled(job["id"]):
+                    stages["scan"]["status"] = "skipped"
+                    runner.update_step(
+                        job["id"], "scan",
+                        status="completed",
+                        summary="Cancelled",
+                    )
                     scan_to_thumb.put(_SENTINEL)
                     return
 
