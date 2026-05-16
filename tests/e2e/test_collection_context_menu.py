@@ -269,6 +269,62 @@ def test_collection_anchor_does_not_override_new_selection(live_server, page):
     assert page.evaluate("window.__restoreAnchorCalls") == 0
 
 
+def test_collection_switch_clears_selection_during_anchor_scan(live_server, page):
+    """Old-view selections must not stay armed while the anchor scan is pending."""
+    import json as _json
+
+    db = live_server["db"]
+    collection_id = db.add_collection(
+        "Slow Anchor Collection",
+        _json.dumps([{"field": "all"}]),
+    )
+    target_id = live_server["data"]["photos"][3]
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    page.locator(f'.grid-card[data-id="{target_id}"]').wait_for(state="visible")
+    page.locator(f'.grid-card[data-id="{target_id}"]').click()
+    page.wait_for_function(f"window.selectedPhotoId === {target_id}")
+
+    page.evaluate(
+        """() => {
+          perPage = 1;
+          observer.disconnect();
+          const realLoadPhotos = window.loadPhotos;
+          let calls = 0;
+          window.__releaseSecondLoad = null;
+          window.loadPhotos = async function() {
+            calls += 1;
+            if (calls === 2) {
+              await new Promise(resolve => {
+                window.__releaseSecondLoad = resolve;
+              });
+            }
+            return realLoadPhotos();
+          };
+        }"""
+    )
+
+    page.evaluate(
+        "(collectionId) => { window.__switchPromise = filterByCollection(collectionId); }",
+        collection_id,
+    )
+    page.wait_for_function("typeof window.__releaseSecondLoad === 'function'")
+
+    assert page.evaluate("window.selectedPhotoId") is None
+    assert page.evaluate("window.getActiveSelection().length") == 0
+    assert page.evaluate("document.getElementById('batchBar').style.display") == "none"
+
+    page.evaluate("window.__releaseSecondLoad()")
+    page.evaluate("() => window.__switchPromise")
+
+    page.wait_for_function(
+        f"window.activeCollectionId === {collection_id} && window.selectedPhotoId === {target_id}",
+        timeout=3000,
+    )
+
+
 def test_stale_anchor_scan_stops_after_collection_changes(live_server, page):
     """A stale anchor scan must not keep paginating a newer collection."""
     import json as _json
