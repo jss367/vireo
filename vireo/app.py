@@ -2249,23 +2249,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_add_keyword(photo_id):
         db = _get_db()
         body = request.get_json(silent=True) or {}
-        name = body.get("name", "").strip()
-        if not name:
-            return json_error("name required")
-        # Validate kw_type at the boundary (isinstance guard against
-        # non-hashable JSON; membership against the canonical enum).
-        # Pass it through to add_keyword so its type-reconciliation logic
-        # runs — a post-update SQL `UPDATE keywords SET type = ?` would
-        # silently rewrite an existing user-typed row (e.g. someone's
-        # 'individual' Charlie) and bypass the taxonomy/general upgrade
-        # rules in add_keyword.
-        kw_type_raw = body.get("type")
-        kw_type = (
-            kw_type_raw
-            if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
-            else None
-        )
-        kid = db.add_keyword(name, kw_type=kw_type)
+        keyword_id = body.get("keyword_id")
+        name = body.get("name", "")
+        name = name.strip() if isinstance(name, str) else ""
+        if keyword_id is not None:
+            if isinstance(keyword_id, bool) or not isinstance(keyword_id, int):
+                return json_error("keyword_id must be an integer")
+            keyword_row = db.conn.execute(
+                "SELECT id, name FROM keywords WHERE id = ?", (keyword_id,)
+            ).fetchone()
+            if keyword_row is None:
+                return json_error("keyword not found", 404)
+            kid = keyword_row["id"]
+            name = keyword_row["name"]
+        else:
+            if not name:
+                return json_error("name required")
+            # Validate kw_type at the boundary (isinstance guard against
+            # non-hashable JSON; membership against the canonical enum).
+            # Pass it through to add_keyword so its type-reconciliation logic
+            # runs — a post-update SQL `UPDATE keywords SET type = ?` would
+            # silently rewrite an existing user-typed row (e.g. someone's
+            # 'individual' Charlie) and bypass the taxonomy/general upgrade
+            # rules in add_keyword.
+            kw_type_raw = body.get("type")
+            kw_type = (
+                kw_type_raw
+                if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
+                else None
+            )
+            kid = db.add_keyword(name, kw_type=kw_type)
         db.tag_photo(photo_id, kid)
         _queue_keyword_add(photo_id, name)
         db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
