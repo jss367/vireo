@@ -336,3 +336,26 @@ def test_drag_reorder_persists_via_reorder_endpoint(live_server, page):
         const t = window._navTabs.getTabs();
         return t.indexOf('browse') > t.indexOf('review');
     }""", timeout=3000)
+
+
+def test_mouse_drag_reorder_commits_when_released_in_tab_strip(live_server, page):
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1366, "height": 800})
+    page.goto(f"{url}/browse")
+    page.wait_for_selector(".nav-tab[data-nav-id='browse']")
+    page.wait_for_selector(".nav-tab[data-nav-id='review']")
+
+    browse = page.locator(".nav-tab[data-nav-id='browse']").bounding_box()
+    review = page.locator(".nav-tab[data-nav-id='review']").bounding_box()
+    assert browse is not None
+    assert review is not None
+
+    page.mouse.move(browse["x"] + browse["width"] / 2, browse["y"] + browse["height"] / 2)
+    page.mouse.down()
+    page.mouse.move(review["x"] + review["width"] + 12, review["y"] + review["height"] / 2, steps=12)
+    page.mouse.up()
+
+    page.wait_for_function("""() => {
+        const t = window._navTabs.getTabs();
+        return t.indexOf('browse') > t.indexOf('review');
+    }""", timeout=3000)
