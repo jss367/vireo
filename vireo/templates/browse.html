@@ -4419,11 +4419,11 @@ document.addEventListener('keydown', function(e) {
   // Arrow keys: navigate grid (not configurable)
   if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
     e.preventDefault();
-    moveBrowseSelection(1);
+    moveBrowseSelection(1, e);
     return;
   } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
     e.preventDefault();
-    moveBrowseSelection(-1);
+    moveBrowseSelection(-1, e);
     return;
   }
 
@@ -4487,14 +4487,19 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
-async function moveBrowseSelection(delta) {
+async function moveBrowseSelection(delta, e) {
   var nextIndex = selectedIndex + delta;
   if (delta > 0 && nextIndex >= photos.length && !allLoaded) {
     await loadPhotos();
     nextIndex = selectedIndex + delta;
   }
   if (nextIndex < 0 || nextIndex >= photos.length || !photos[nextIndex]) return;
-  selectPhoto({ shiftKey: false, metaKey: false, ctrlKey: false }, photos[nextIndex].id, nextIndex);
+  var selectionEvent = {
+    shiftKey: !!(e && e.shiftKey),
+    metaKey: !!(e && e.metaKey),
+    ctrlKey: !!(e && e.ctrlKey),
+  };
+  selectPhoto(selectionEvent, photos[nextIndex].id, nextIndex);
   scrollToCard(selectedIndex);
 }
 

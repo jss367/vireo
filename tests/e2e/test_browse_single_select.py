@@ -386,6 +386,31 @@ def test_arrow_navigation_loads_next_page_at_loaded_boundary(live_server, page):
     assert page.evaluate("selectedPhotoId === photos[2].id")
 
 
+def test_shift_arrow_navigation_preserves_range_selection_at_loaded_boundary(
+    live_server, page
+):
+    """Loading another page for keyboard navigation must preserve modifiers."""
+    url = live_server["url"]
+    page.route(
+        "**/api/config",
+        lambda route: route.fulfill(
+            json={"photos_per_page": 2, "keyboard_shortcuts": {}}
+        ),
+    )
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.nth(1).wait_for(state="visible")
+    page.wait_for_function("photos.length === 2 && totalPhotos > photos.length")
+
+    cards.nth(1).click()
+    page.keyboard.press("Shift+ArrowRight")
+
+    page.wait_for_function("photos.length > 2 && selectedPhotos.has(photos[2].id)")
+    assert page.evaluate("selectedPhotos.has(photos[1].id)")
+    assert page.evaluate("selectedPhotoId === photos[1].id")
+
+
 def test_multiselect_offers_partial_keyword_fill(live_server, page):
     """Selecting mixed tagged/untagged photos offers one-click keyword fill."""
     url = live_server["url"]
