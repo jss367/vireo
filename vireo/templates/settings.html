@@ -1745,6 +1745,10 @@ async function loadConfig() {
     document.getElementById('cfgMergeMaxGap').value = VireoPipelineConfig.asNumber(p.merge_max_gap, 'merge_max_gap');
   } catch(e) {
     console.warn('Could not load settings config:', e);
+    var fallbackDistance = VireoPipelineConfig.buildSliderDefaults()
+      .grouping.burst_embedding_distance;
+    document.getElementById('cfgBurstEmb').value = fallbackDistance;
+    document.getElementById('cfgBurstEmbVal').textContent = fallbackDistance + '%';
   }
 }
 
