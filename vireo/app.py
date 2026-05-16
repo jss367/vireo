@@ -1963,6 +1963,38 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return jsonify(result)
 
+    @app.route("/api/photos/by-ids", methods=["POST"])
+    def api_photos_by_ids():
+        """Return selected photos in caller order, scoped to the active workspace."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        raw_ids = body.get("photo_ids", [])
+        if not isinstance(raw_ids, list):
+            return json_error("photo_ids must be a list", 400)
+        if not raw_ids:
+            return json_error("photo_ids required", 400)
+        if len(raw_ids) > 500:
+            return json_error("too many photo_ids", 400)
+
+        photo_ids = []
+        seen = set()
+        for raw in raw_ids:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return json_error("photo_ids must be integers", 400)
+            if raw in seen:
+                continue
+            seen.add(raw)
+            photo_ids.append(raw)
+
+        photos = []
+        for pid in photo_ids:
+            photo = db.get_photo(pid, verify_workspace=True)
+            if photo:
+                photos.append(dict(photo))
+        _attach_species(db, photos)
+        _attach_detections(db, photos)
+        return jsonify({"photos": photos})
+
     @app.route("/api/photos/geo")
     def api_photos_geo():
         db = _get_db()

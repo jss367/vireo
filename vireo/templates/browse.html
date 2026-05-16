@@ -1146,6 +1146,7 @@ body {
       <button onclick="batchAddKeyword()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
       <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
       <button id="compareBtn" onclick="openBrowseCompare()" title="Compare two selected photos side by side" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Compare</button>
+      <button id="burstReviewBtn" onclick="openSelectedInBurstReview()" title="Open selected photos in burst review" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Review Burst</button>
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
       <button onclick="openInEditorBatch(event)" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Open in Editor</button>
       <button onclick="batchSubmitInat()" style="background:var(--bg-tertiary);color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
@@ -3130,6 +3131,14 @@ function updateCompareButton(ids) {
   btn.disabled = !canCompare;
 }
 
+function updateBurstReviewButton(ids) {
+  var btn = document.getElementById('burstReviewBtn');
+  if (!btn) return;
+  var canReview = ids.length >= 2;
+  btn.style.display = canReview ? '' : 'none';
+  btn.disabled = !canReview;
+}
+
 function detailMatchesSelectedPhoto() {
   return selectedPhotoId != null && window._detailPhotoId === selectedPhotoId;
 }
@@ -3145,7 +3154,23 @@ function updateBatchBar() {
     bar.style.display = 'none';
   }
   updateCompareButton(ids);
+  updateBurstReviewButton(ids);
   updateSelectionPanel(ids);
+}
+
+function openSelectedInBurstReview() {
+  var ids = getActiveSelection();
+  if (ids.length < 2) {
+    showToast('Select at least two photos to review as a burst.', 'error');
+    return;
+  }
+  try {
+    window.sessionStorage.setItem('vireo.browseBurstReviewIds', JSON.stringify(ids));
+  } catch (e) {
+    showToast('Could not open burst review for this selection.', 'error');
+    return;
+  }
+  window.location.href = '/pipeline/review?browse_burst=1';
 }
 
 function updateSelectionPanel(ids) {
@@ -4769,6 +4794,8 @@ function buildPhotoContextMenu(photoIds) {
       onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
     { label: 'Compare', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openBrowseCompare(); } },
+    { label: 'Review Burst', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
+      onClick: function() { openSelectedInBurstReview(); } },
   ].concat(buildOpenInEditorMenuItems(photoIds)).concat([
     { label: 'Reveal in Finder/Folder', disabled: !one, disabledHint: hint,
       onClick: function() { revealPhoto(photoIds[0]); } },
