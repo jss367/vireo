@@ -1426,12 +1426,14 @@ function anchorSelectionIsCurrent(anchor) {
   return !!anchor && selectedPhotoId === anchor.photoId && selectedPhotos.size === 0;
 }
 
-async function loadUntilPhotoRendered(photoId) {
+async function loadUntilPhotoRendered(photoId, shouldContinue) {
   var card = getGridCard(photoId);
   while (!card && !allLoaded) {
+    if (shouldContinue && !shouldContinue()) return null;
     var beforePage = currentPage;
     var beforeLen = photos.length;
     await loadPhotos();
+    if (shouldContinue && !shouldContinue()) return null;
     if (currentPage === beforePage && photos.length === beforeLen) break;
     card = getGridCard(photoId);
   }
@@ -1703,12 +1705,15 @@ async function filterByCollection(id) {
   document.getElementById('grid').innerHTML = '';
   document.getElementById('gridContainer').scrollTop = 0;
   if (!anchor) closeDetail();
+  function collectionRequestIsCurrent() {
+    return collectionLoadEpoch === loadEpoch && activeCollectionId === id;
+  }
   await loadPhotos();
-  if (collectionLoadEpoch !== loadEpoch || activeCollectionId !== id) return;
+  if (!collectionRequestIsCurrent()) return;
   if (!anchor) return;
 
-  var card = await loadUntilPhotoRendered(anchor.photoId);
-  if (collectionLoadEpoch !== loadEpoch || activeCollectionId !== id) return;
+  var card = await loadUntilPhotoRendered(anchor.photoId, collectionRequestIsCurrent);
+  if (!collectionRequestIsCurrent()) return;
   if (!anchorSelectionIsCurrent(anchor)) return;
   if (!card) {
     clearActiveSelectionAndDetail();
@@ -1720,7 +1725,7 @@ async function filterByCollection(id) {
   updateBatchBar();
   if (anchor.detailVisible) loadDetail(anchor.photoId);
   requestAnimationFrame(function() {
-    if (collectionLoadEpoch !== loadEpoch || activeCollectionId !== id) return;
+    if (!collectionRequestIsCurrent()) return;
     if (!anchorSelectionIsCurrent(anchor)) return;
     restorePhotoAnchor(anchor);
     updateScrollPosition();

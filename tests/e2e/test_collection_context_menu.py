@@ -269,6 +269,61 @@ def test_collection_anchor_does_not_override_new_selection(live_server, page):
     assert page.evaluate("window.__restoreAnchorCalls") == 0
 
 
+def test_stale_anchor_scan_stops_after_collection_changes(live_server, page):
+    """A stale anchor scan must not keep paginating a newer collection."""
+    import json as _json
+
+    db = live_server["db"]
+    first_id = db.add_collection(
+        "First Scan Collection",
+        _json.dumps([{"field": "all"}]),
+    )
+    second_id = db.add_collection(
+        "Second Scan Collection",
+        _json.dumps([{"field": "all"}]),
+    )
+    original_id = live_server["data"]["photos"][3]
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    page.locator(f'.grid-card[data-id="{original_id}"]').wait_for(state="visible")
+    page.locator(f'.grid-card[data-id="{original_id}"]').click()
+
+    page.evaluate(
+        """() => {
+          perPage = 1;
+          observer.disconnect();
+          window.__loadPhotoCalls = 0;
+          const realLoadPhotos = window.loadPhotos;
+          window.__releaseSecondLoad = null;
+          window.loadPhotos = async function() {
+            window.__loadPhotoCalls += 1;
+            if (window.__loadPhotoCalls === 2) {
+              await new Promise(resolve => {
+                window.__releaseSecondLoad = resolve;
+              });
+            }
+            return realLoadPhotos();
+          };
+        }"""
+    )
+
+    page.evaluate("(collectionId) => { window.__firstSwitch = filterByCollection(collectionId); }", first_id)
+    page.wait_for_function("typeof window.__releaseSecondLoad === 'function'")
+
+    page.evaluate("window.selectedPhotoId = null")
+    page.evaluate("(collectionId) => filterByCollection(collectionId)", second_id)
+    page.wait_for_function(f"window.activeCollectionId === {second_id}")
+
+    page.evaluate("window.__releaseSecondLoad()")
+    page.evaluate("() => window.__firstSwitch")
+    page.wait_for_timeout(50)
+
+    assert page.evaluate("window.activeCollectionId") == second_id
+    assert page.evaluate("window.__loadPhotoCalls") == 3
+
+
 def test_collection_duplicate_fires_endpoint_and_rerenders(live_server, page):
     """Clicking 'Duplicate' POSTs to /duplicate and re-renders the list."""
     _seed_collection(live_server, "Picks B")
