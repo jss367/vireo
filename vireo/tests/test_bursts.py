@@ -178,8 +178,9 @@ def test_burst_custom_embedding_threshold():
         _make_photo(0.5, subj_emb=similar),
     ]
 
-    # Default 0.80 → likely cut if cosine < 0.80
+    # Default 0.40 → likely keep moderate flying-bird pose changes together.
     result_default = detect_bursts(photos)
+    assert len(result_default) == 1
 
     # Very low threshold → no cut
     result_low = detect_bursts(photos, config={"burst_embedding_threshold": 0.3})

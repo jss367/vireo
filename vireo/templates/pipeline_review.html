@@ -1229,8 +1229,8 @@ input[type="range"]::-moz-range-thumb {
         </div>
         <div class="slider-row">
           <span class="slider-label" title="Max embedding distance — higher tolerates more visually different shots">Emb. distance</span>
-          <input type="range" min="0" max="100" value="20" step="1" id="slBurstEmb" oninput="onGroupingChange(this)">
-          <span class="slider-val" id="valBurstEmb">0.20</span>
+          <input type="range" min="0" max="100" value="60" step="1" id="slBurstEmb" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valBurstEmb">0.60</span>
         </div>
       </div>
 
@@ -2013,7 +2013,7 @@ var GROUPING_DEFAULTS = {
   // Merge
   merge_score: 62, merge_max_gap: 60, merge_tau: 20,
   // Bursts
-  burst_time_gap: 3, burst_embedding_threshold: 20,
+  burst_time_gap: 3, burst_embedding_threshold: 60,
 };
 
 /* Load slider defaults from server config (overrides hard-coded values above) */
@@ -2043,7 +2043,7 @@ var GROUPING_DEFAULTS = {
     GROUPING_DEFAULTS.merge_tau = p.merge_tau != null ? p.merge_tau : 20;
     GROUPING_DEFAULTS.burst_time_gap = p.burst_time_gap != null ? p.burst_time_gap : 3;
     // Stored as cosine similarity; UI shows distance = 1 - similarity.
-    GROUPING_DEFAULTS.burst_embedding_threshold = Math.round((1 - (p.burst_embedding_threshold != null ? p.burst_embedding_threshold : 0.80)) * 100);
+    GROUPING_DEFAULTS.burst_embedding_threshold = Math.round((1 - (p.burst_embedding_threshold != null ? p.burst_embedding_threshold : 0.40)) * 100);
     applyScoringDefaults();
     applyGroupingDefaults();
   } catch(e) {

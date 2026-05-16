@@ -372,8 +372,8 @@ body { padding-bottom: 36px; }
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Max embedding distance - higher tolerates more visually different shots">Emb. distance</span>
-        <input type="range" min="0" max="100" value="20" step="1" id="slBurstEmb" oninput="onGroupingChange(this)">
-        <span class="slider-val" id="valBurstEmb">0.20</span>
+        <input type="range" min="0" max="100" value="60" step="1" id="slBurstEmb" oninput="onGroupingChange(this)">
+        <span class="slider-val" id="valBurstEmb">0.60</span>
       </div>
     </div>
 
@@ -408,7 +408,7 @@ var GROUPING_DEFAULTS = {
   w_time: 35, w_subj: 35, w_global: 15, w_species: 10, w_meta: 5,
   tau_enc: 40, hard_cut_time: 180, hard_cut_score: 42, soft_cut_score: 52,
   merge_score: 62, merge_max_gap: 60, merge_tau: 20,
-  burst_time_gap: 3, burst_embedding_threshold: 20,
+  burst_time_gap: 3, burst_embedding_threshold: 60,
 };
 
 (async function() {
@@ -469,7 +469,7 @@ async function loadPipelineSliderDefaults() {
     GROUPING_DEFAULTS.merge_max_gap = p.merge_max_gap != null ? p.merge_max_gap : 60;
     GROUPING_DEFAULTS.merge_tau = p.merge_tau != null ? p.merge_tau : 20;
     GROUPING_DEFAULTS.burst_time_gap = p.burst_time_gap != null ? p.burst_time_gap : 3;
-    GROUPING_DEFAULTS.burst_embedding_threshold = Math.round((1 - (p.burst_embedding_threshold != null ? p.burst_embedding_threshold : 0.80)) * 100);
+    GROUPING_DEFAULTS.burst_embedding_threshold = Math.round((1 - (p.burst_embedding_threshold != null ? p.burst_embedding_threshold : 0.40)) * 100);
   } catch(e) {}
   applyScoringDefaults();
   applyGroupingDefaults();

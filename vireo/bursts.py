@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 # Default thresholds (from design doc, subject to calibration)
 DEFAULTS = {
     "burst_time_gap": 3.0,  # seconds — cut if delta_t exceeds this
-    "burst_embedding_threshold": 0.80,  # cosine similarity — cut if below this
+    "burst_embedding_threshold": 0.40,  # cosine similarity — cut if below this
 }
 
 
