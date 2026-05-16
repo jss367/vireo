@@ -749,6 +749,125 @@ body {
 }
 .calendar-selection .clear-btn:hover { color: var(--accent); }
 
+/* ---------- Browse Compare ---------- */
+.browse-compare-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 12000;
+  background: rgba(6, 8, 10, 0.92);
+  color: var(--text-primary);
+}
+.browse-compare-overlay.active {
+  display: flex;
+  flex-direction: column;
+}
+.browse-compare-toolbar {
+  height: 48px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.35);
+}
+.browse-compare-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.browse-compare-count {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.browse-compare-spacer { flex: 1; }
+.browse-compare-btn {
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--text-secondary);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.browse-compare-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+.browse-compare-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.browse-compare-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 8px;
+}
+.browse-compare-close:hover { color: var(--text-primary); }
+.browse-compare-stage {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1px;
+  background: rgba(255, 255, 255, 0.12);
+}
+.browse-compare-pane {
+  min-width: 0;
+  min-height: 0;
+  background: #080a0d;
+  display: flex;
+  flex-direction: column;
+}
+.browse-compare-image-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+.browse-compare-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.browse-compare-meta {
+  flex-shrink: 0;
+  padding: 10px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.38);
+}
+.browse-compare-name {
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.browse-compare-sub {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 800px) {
+  .browse-compare-stage {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .browse-compare-toolbar { flex-wrap: wrap; height: auto; min-height: 48px; padding: 8px 12px; }
+}
+
 /* ---------- Empty / Loading ---------- */
 .empty-state {
   text-align: center;
@@ -980,6 +1099,7 @@ body {
       <button onclick="batchSetFlag('rejected')" style="background:var(--bg-tertiary);color:var(--danger);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
       <button onclick="batchAddKeyword()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
       <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
+      <button id="compareBtn" onclick="openBrowseCompare()" title="Compare two selected photos side by side" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Compare</button>
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
       <button onclick="openInEditorBatch(event)" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Open in Editor</button>
       <button onclick="batchSubmitInat()" style="background:var(--bg-tertiary);color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
@@ -1211,6 +1331,38 @@ body {
   </div>
 </div>
 
+<!-- Browse Compare Overlay -->
+<div class="browse-compare-overlay" id="browseCompareOverlay" onclick="closeBrowseCompare(event)">
+  <div class="browse-compare-toolbar" onclick="event.stopPropagation()">
+    <span class="browse-compare-title">Compare</span>
+    <span class="browse-compare-count" id="browseCompareCount"></span>
+    <span class="browse-compare-spacer"></span>
+    <button class="browse-compare-btn" id="browseComparePrev" onclick="browseCompareStep(-1)" title="Previous pair">Previous</button>
+    <button class="browse-compare-btn" id="browseCompareNext" onclick="browseCompareStep(1)" title="Next pair">Next</button>
+    <button class="browse-compare-close" onclick="closeBrowseCompare(event)" title="Close">&times;</button>
+  </div>
+  <div class="browse-compare-stage" onclick="event.stopPropagation()">
+    <div class="browse-compare-pane">
+      <div class="browse-compare-image-wrap">
+        <img class="browse-compare-image" id="browseCompareImgA" src="" alt="">
+      </div>
+      <div class="browse-compare-meta">
+        <div class="browse-compare-name" id="browseCompareNameA"></div>
+        <div class="browse-compare-sub" id="browseCompareMetaA"></div>
+      </div>
+    </div>
+    <div class="browse-compare-pane">
+      <div class="browse-compare-image-wrap">
+        <img class="browse-compare-image" id="browseCompareImgB" src="" alt="">
+      </div>
+      <div class="browse-compare-meta">
+        <div class="browse-compare-name" id="browseCompareNameB"></div>
+        <div class="browse-compare-sub" id="browseCompareMetaB"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 
 <script>
 /* Google Maps API key — populated from /api/config below (window._cfgPromise).
@@ -1250,6 +1402,10 @@ var clipSearchActive = false;
 var searchFilterTimer = null;
 var collectionCountRefreshTimer = null;
 var collectionCountLoadGen = 0;
+var browseCompareIds = [];
+var browseCompareOffset = 0;
+var browseCompareSeq = 0;
+var browseCompareEscToken = null;
 
 function refreshPendingSyncBanner() {
   if (typeof checkPendingSync === 'function') {
@@ -1279,7 +1435,7 @@ function hasActiveBrowseFilter() {
 var _shortcuts = null;
 var _BROWSE_SC_DEFAULTS = {rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
   flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',redo:'ctrl+shift+z',select_all:'ctrl+a',zoom:'z',
-  color_red:'6',color_yellow:'7',color_green:'8',color_blue:'9'};
+  compare:'c',color_red:'6',color_yellow:'7',color_green:'8',color_blue:'9'};
 var _cfgPromise = (async function() {
   try {
     var cfg = await safeFetch('/api/config', {}, { toast: false });
@@ -2601,6 +2757,19 @@ function getActiveSelection() {
   return [];
 }
 
+function isBrowseCompareOpen() {
+  var overlay = document.getElementById('browseCompareOverlay');
+  return !!(overlay && overlay.classList.contains('active'));
+}
+
+function updateCompareButton(ids) {
+  var btn = document.getElementById('compareBtn');
+  if (!btn) return;
+  var canCompare = ids.length >= 2;
+  btn.style.display = canCompare ? '' : 'none';
+  btn.disabled = !canCompare;
+}
+
 function detailMatchesSelectedPhoto() {
   return selectedPhotoId != null && window._detailPhotoId === selectedPhotoId;
 }
@@ -2615,6 +2784,7 @@ function updateBatchBar() {
   } else {
     bar.style.display = 'none';
   }
+  updateCompareButton(ids);
   updateSelectionPanel(ids);
 }
 
@@ -2648,6 +2818,123 @@ function updateSelectionPanel(ids) {
   panel.classList.remove('hidden');
   document.getElementById('selectionCount').textContent = ids.length + ' photos selected';
   loadSelectionKeywordSuggestions(ids);
+}
+
+function openBrowseCompare() {
+  var ids = getActiveSelection();
+  if (ids.length < 2) {
+    showToast('Select at least two photos to compare.', 'error');
+    return;
+  }
+  browseCompareIds = ids.slice();
+  browseCompareOffset = 0;
+
+  var overlay = document.getElementById('browseCompareOverlay');
+  if (!overlay) return;
+  var alreadyOpen = overlay.classList.contains('active');
+  if (alreadyOpen && browseCompareEscToken && window.Keymap) {
+    Keymap.popEsc(browseCompareEscToken);
+    browseCompareEscToken = null;
+  }
+  if (window.Keymap) {
+    browseCompareEscToken = Keymap.pushEsc(function() { closeBrowseCompare(); });
+    if (!alreadyOpen) Keymap.lockBodyScroll();
+  }
+  overlay.classList.add('active');
+  renderBrowseCompare();
+}
+
+function closeBrowseCompare(e) {
+  if (e) {
+    e.stopPropagation();
+    if (e.target && e.currentTarget && e.target !== e.currentTarget && !e.target.classList.contains('browse-compare-close')) {
+      return;
+    }
+  }
+  var overlay = document.getElementById('browseCompareOverlay');
+  var wasOpen = overlay && overlay.classList.contains('active');
+  if (overlay) overlay.classList.remove('active');
+  if (browseCompareEscToken && window.Keymap) {
+    Keymap.popEsc(browseCompareEscToken);
+    browseCompareEscToken = null;
+  }
+  if (wasOpen && window.Keymap) Keymap.unlockBodyScroll();
+}
+
+function browseCompareStep(delta) {
+  if (!isBrowseCompareOpen()) return;
+  var maxOffset = Math.max(0, browseCompareIds.length - 2);
+  var next = Math.max(0, Math.min(maxOffset, browseCompareOffset + delta));
+  if (next === browseCompareOffset) return;
+  browseCompareOffset = next;
+  renderBrowseCompare();
+}
+
+function findBrowsePhoto(id) {
+  return photos.find(function(p) { return p.id === id; }) || null;
+}
+
+async function getBrowseComparePhoto(id) {
+  var local = findBrowsePhoto(id);
+  if (local) return local;
+  try {
+    return await safeFetch('/api/photos/' + id, {}, { toast: false });
+  } catch(e) {
+    return { id: id, filename: 'Photo ' + id };
+  }
+}
+
+function browseCompareMeta(photo) {
+  var parts = [];
+  if (photo.width && photo.height) parts.push(photo.width + ' × ' + photo.height);
+  if (photo.timestamp) parts.push(photo.timestamp.replace('T', ' ').substring(0, 16));
+  if (photo.rating != null && photo.rating > 0) parts.push(photo.rating + ' star' + (photo.rating === 1 ? '' : 's'));
+  if (photo.sharpness != null) parts.push('sharpness ' + Math.round(photo.sharpness));
+  if (photo.flag && photo.flag !== 'none') parts.push(photo.flag);
+  return parts.join(' · ');
+}
+
+function setBrowseComparePane(prefix, photo) {
+  var img = document.getElementById('browseCompareImg' + prefix);
+  var name = document.getElementById('browseCompareName' + prefix);
+  var meta = document.getElementById('browseCompareMeta' + prefix);
+  if (img) {
+    img.alt = photo.filename || '';
+    img.src = '/photos/' + photo.id + '/full';
+  }
+  if (name) name.textContent = photo.filename || ('Photo ' + photo.id);
+  if (meta) meta.textContent = browseCompareMeta(photo);
+}
+
+async function renderBrowseCompare() {
+  if (!browseCompareIds.length) return;
+  var seq = ++browseCompareSeq;
+  var leftId = browseCompareIds[browseCompareOffset];
+  var rightId = browseCompareIds[browseCompareOffset + 1];
+  if (leftId == null || rightId == null) return;
+
+  var count = document.getElementById('browseCompareCount');
+  if (count) {
+    count.textContent = (browseCompareOffset + 1) + '-' + (browseCompareOffset + 2) + ' of ' + browseCompareIds.length;
+  }
+  var prev = document.getElementById('browseComparePrev');
+  var next = document.getElementById('browseCompareNext');
+  if (prev) prev.disabled = browseCompareOffset <= 0;
+  if (next) next.disabled = browseCompareOffset >= browseCompareIds.length - 2;
+
+  var nameA = document.getElementById('browseCompareNameA');
+  var nameB = document.getElementById('browseCompareNameB');
+  var metaA = document.getElementById('browseCompareMetaA');
+  var metaB = document.getElementById('browseCompareMetaB');
+  if (nameA) nameA.textContent = 'Loading...';
+  if (nameB) nameB.textContent = 'Loading...';
+  if (metaA) metaA.textContent = '';
+  if (metaB) metaB.textContent = '';
+
+  var pair = await Promise.all([getBrowseComparePhoto(leftId), getBrowseComparePhoto(rightId)]);
+  if (seq !== browseCompareSeq || !isBrowseCompareOpen()) return;
+  setBrowseComparePane('A', pair[0]);
+  setBrowseComparePane('B', pair[1]);
 }
 
 async function loadSelectionKeywordSuggestions(ids) {
@@ -3775,6 +4062,25 @@ document.addEventListener('click', function(e) {
 
 /* ---------- Keyboard Shortcuts ---------- */
 document.addEventListener('keydown', function(e) {
+  if (isBrowseCompareOpen()) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeBrowseCompare();
+      return;
+    }
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      browseCompareStep(1);
+      return;
+    }
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      browseCompareStep(-1);
+      return;
+    }
+    return;
+  }
+
   // Suppress browse shortcuts while any modal is open
   var openModal = document.querySelector('.modal-overlay.open');
   if (openModal) {
@@ -3835,6 +4141,15 @@ document.addEventListener('keydown', function(e) {
   // the bar advertises "1 selected" after cmd-click reduces the set to one.
   var useBatch = selectedPhotos.size >= 1;
   var hasActive = useBatch || selectedPhotoId;
+
+  if (matchesShortcut(e, _shortcuts.compare || 'c')) {
+    var compareIds = getActiveSelection();
+    if (compareIds.length >= 2) {
+      e.preventDefault();
+      openBrowseCompare();
+    }
+    return;
+  }
 
   // Ratings: 0-5
   if (hasActive) {
@@ -4027,6 +4342,8 @@ function buildPhotoContextMenu(photoIds) {
     { separator: true },
     { label: 'Find Similar', disabled: !one, disabledHint: hint,
       onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
+    { label: 'Compare', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
+      onClick: function() { openBrowseCompare(); } },
   ].concat(buildOpenInEditorMenuItems(photoIds)).concat([
     { label: 'Reveal in Finder/Folder', disabled: !one, disabledHint: hint,
       onClick: function() { revealPhoto(photoIds[0]); } },

@@ -170,6 +170,7 @@ DEFAULTS = {
             "unflag": "u",
             "undo": "ctrl+z",
             "select_all": "ctrl+a",
+            "compare": "c",
             "zoom": "z",
             "toggle_boxes": "b",
         },
