@@ -260,6 +260,35 @@ def test_cannot_add_photos_to_all_photos_default(app_and_db):
     assert json.loads(row["rules"]) == [{"field": "all"}]
 
 
+def test_cannot_add_photos_to_none_grouped_collection(app_and_db):
+    """Adding photos to a "none" group would exclude the selected IDs."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    rules = {
+        "mode": "none",
+        "rules": [{"field": "flag", "op": "is", "value": "rejected"}],
+    }
+    resp = client.post(
+        "/api/collections",
+        json={"name": "Not rejected", "rules": rules},
+    )
+    cid = resp.get_json()["id"]
+
+    pid = db.get_photos()[0]["id"]
+    resp = client.post(
+        f"/api/collections/{cid}/add-photos",
+        json={"photo_ids": [pid]},
+    )
+    assert resp.status_code == 400
+
+    row = db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,)
+    ).fetchone()
+    assert json.loads(row["rules"]) == rules
+
+
 def test_collection_add_photos_empty_list(app_and_db):
     """POST /api/collections/<id>/add-photos with empty photo_ids returns 400."""
     app, db = app_and_db

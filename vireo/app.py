@@ -3603,19 +3603,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if _has_all_rule(rules):
             return json_error("Cannot add photos to this collection", 400)
-        def _find_photo_ids_rule(node):
+        def _find_photo_ids_rule(node, group_modes=()):
             if isinstance(node, list):
                 for child in node:
-                    found = _find_photo_ids_rule(child)
+                    found = _find_photo_ids_rule(child, group_modes)
                     if found is not None:
                         return found
             elif isinstance(node, dict):
                 if node.get("field") == "photo_ids":
-                    return node
-                return _find_photo_ids_rule(node.get("rules"))
+                    return node, group_modes
+                if "rules" in node:
+                    mode = node.get("mode", "all")
+                    return _find_photo_ids_rule(
+                        node.get("rules"), group_modes + (mode,)
+                    )
             return None
 
-        ids_rule = _find_photo_ids_rule(rules)
+        def _has_non_all_group(node):
+            if isinstance(node, list):
+                return any(_has_non_all_group(child) for child in node)
+            if not isinstance(node, dict):
+                return False
+            if "rules" in node and node.get("field") is None:
+                if node.get("mode", "all") != "all":
+                    return True
+                return _has_non_all_group(node.get("rules"))
+            return False
+
+        found_ids_rule = _find_photo_ids_rule(rules)
+        if found_ids_rule is not None:
+            ids_rule, group_modes = found_ids_rule
+            if any(mode != "all" for mode in group_modes):
+                return json_error("Cannot add photos to this collection", 400)
+        else:
+            ids_rule = None
+            if _has_non_all_group(rules):
+                return json_error("Cannot add photos to this collection", 400)
+
         if ids_rule is None:
             ids_rule = {"field": "photo_ids", "value": []}
             if isinstance(rules, list):
