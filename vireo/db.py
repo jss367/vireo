@@ -7588,11 +7588,18 @@ class Database:
         ).fetchone()
         return bool(row["is_species"]) if row else False
 
-    def accept_prediction(self, prediction_id):
+    def accept_prediction(self, prediction_id, replace_species=False):
         """Accept a prediction: mark as accepted and add species keyword.
 
         If the prediction belongs to a group, derives the consensus species
         from the individual votes and applies that to all photos.
+
+        When ``replace_species`` is True, every photo that receives the new
+        keyword first has its existing species/taxonomy keywords removed, so
+        grouped photos are replaced consistently rather than accumulating both
+        the old and new species tags. Each entry in the returned ``affected``
+        list carries the ``old_species`` names that were stripped from that
+        photo (empty when ``replace_species`` is False).
 
         All database changes are performed atomically in a single transaction.
         On failure, all changes are rolled back.
@@ -7660,7 +7667,39 @@ class Database:
                     pass
 
             kid = self.add_keyword(species, is_species=True, _commit=False)
-            affected = []  # list of {"photo_id": int, "prediction_id": int}
+            # list of {"photo_id", "prediction_id", "old_species"}
+            affected = []
+
+            def _accept_for_photo(photo_id, this_pred_id):
+                self.update_prediction_status(this_pred_id, "accepted", _commit=False)
+                old_species = []
+                if replace_species:
+                    old_species = [
+                        row["name"] for row in self.conn.execute(
+                            """SELECT k.name
+                               FROM photo_keywords pk
+                               JOIN keywords k ON k.id = pk.keyword_id
+                               WHERE pk.photo_id = ?
+                                 AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                            (photo_id,),
+                        ).fetchall()
+                    ]
+                    self.conn.execute(
+                        """DELETE FROM photo_keywords
+                           WHERE photo_id = ?
+                             AND keyword_id IN (
+                               SELECT id FROM keywords
+                               WHERE is_species = 1 OR type = 'taxonomy'
+                             )""",
+                        (photo_id,),
+                    )
+                self.tag_photo(photo_id, kid, _commit=False)
+                self.queue_change(photo_id, "keyword_add", species, _commit=False)
+                affected.append({
+                    "photo_id": photo_id,
+                    "prediction_id": this_pred_id,
+                    "old_species": old_species,
+                })
 
             # If grouped, accept all predictions in the group (in this workspace).
             if pred["group_id"]:
@@ -7677,15 +7716,9 @@ class Database:
                     (ws, ws, pred["group_id"], pred["model"]),
                 ).fetchall()
                 for gp in group_preds:
-                    self.update_prediction_status(gp["id"], "accepted", _commit=False)
-                    self.tag_photo(gp["photo_id"], kid, _commit=False)
-                    self.queue_change(gp["photo_id"], "keyword_add", species, _commit=False)
-                    affected.append({"photo_id": gp["photo_id"], "prediction_id": gp["id"]})
+                    _accept_for_photo(gp["photo_id"], gp["id"])
             else:
-                self.update_prediction_status(prediction_id, "accepted", _commit=False)
-                self.tag_photo(pred["photo_id"], kid, _commit=False)
-                self.queue_change(pred["photo_id"], "keyword_add", species, _commit=False)
-                affected.append({"photo_id": pred["photo_id"], "prediction_id": prediction_id})
+                _accept_for_photo(pred["photo_id"], prediction_id)
 
             self.conn.commit()
             return {"species": species, "keyword_id": kid, "affected": affected}
