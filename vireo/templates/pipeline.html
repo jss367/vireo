@@ -2927,6 +2927,7 @@ function _waitForPipelineTerminal(jobId, resolve) {
   }
   var attempts = 0;
   var statusFailures = 0;
+  var maxStatusFailures = 300;
   var terminalStatuses = {completed: true, failed: true, cancelled: true};
   var timer = setInterval(function() {
     attempts += 1;
@@ -2956,6 +2957,16 @@ function _waitForPipelineTerminal(jobId, resolve) {
         statusFailures += 1;
         if (statusFailures === 10 && actionStatus) {
           actionStatus.textContent = 'Still cancelling. Job status is temporarily unavailable...';
+        }
+        if (statusFailures >= maxStatusFailures) {
+          clearInterval(timer);
+          _pipelineResolve = null;
+          _onPipelineComplete({
+            status: 'cancelled',
+            result: {cancelled: true},
+            errors: ['Cancellation status stayed unavailable after repeated retries.'],
+          });
+          resolve();
         }
       });
   }, 1000);
