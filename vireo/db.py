@@ -6579,6 +6579,25 @@ class Database:
             (photo_id,),
         ).fetchall()
 
+    def get_keywords_for_photos(self, photo_ids):
+        """Return keywords for a batch of photos keyed by photo id."""
+        if not photo_ids:
+            return {}
+        placeholders = ",".join("?" for _ in photo_ids)
+        rows = self.conn.execute(
+            f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type,
+                       k.is_species
+                FROM photo_keywords pk
+                JOIN keywords k ON k.id = pk.keyword_id
+                WHERE pk.photo_id IN ({placeholders})
+                ORDER BY k.type, k.name""",
+            list(photo_ids),
+        ).fetchall()
+        result = {}
+        for r in rows:
+            result.setdefault(r["photo_id"], []).append(dict(r))
+        return result
+
     def get_species_keywords_for_photos(self, photo_ids):
         """Return species (taxonomy) keyword names for a batch of photos.
 

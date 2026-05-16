@@ -4276,6 +4276,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/predictions/compare")
     def api_predictions_compare():
+        from compare import compare_prediction_to_keywords
+        from taxonomy import load_local_taxonomy
+
         db = _get_db()
         collection_id = request.args.get("collection_id", None, type=int)
         if not collection_id:
@@ -4284,36 +4287,215 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photos = db.get_collection_photos(collection_id, per_page=999999)
         photo_ids = [p["id"] for p in photos]
         if not photo_ids:
-            return jsonify({"models": [], "photos": []})
+            return jsonify({
+                "models": [],
+                "photos": [],
+                "summary": {
+                    "photos": 0,
+                    "models": 0,
+                    "matches": 0,
+                    "refinements": 0,
+                    "broader": 0,
+                    "conflicts": 0,
+                    "new": 0,
+                    "missing_predictions": 0,
+                    "needs_review": 0,
+                },
+                "taxonomy_available": False,
+            })
 
         preds = db.get_predictions(photo_ids=photo_ids)
+        keywords_by_photo = db.get_keywords_for_photos(photo_ids)
+        species_by_photo = db.get_species_keywords_for_photos(photo_ids)
+        taxonomy = load_local_taxonomy()
+
+        def summarize_photo(row):
+            return {
+                "photo_id": row["id"],
+                "filename": row["filename"],
+                "timestamp": row["timestamp"],
+                "rating": row["rating"],
+                "flag": row["flag"],
+                "width": row["width"],
+                "height": row["height"],
+                "keywords": keywords_by_photo.get(row["id"], []),
+                "species_keywords": species_by_photo.get(row["id"], []),
+                "predictions": {},
+                "row_category": "missing_prediction",
+                "row_label": "Missing prediction",
+            }
 
         # Collect distinct models and build per-photo lookup
         # With multi-detection, each photo may have multiple predictions per model
         models = set()
-        by_photo = {}
+        by_photo = {p["id"]: summarize_photo(p) for p in photos}
         for pr in preds:
             d = dict(pr)
+            if d.get("status") == "alternative":
+                continue
             pid = d["photo_id"]
             model = d["model"]
             models.add(model)
             if pid not in by_photo:
-                by_photo[pid] = {"photo_id": pid, "filename": d["filename"], "predictions": {}}
+                continue
             if model not in by_photo[pid]["predictions"]:
                 by_photo[pid]["predictions"][model] = []
+            comparison = compare_prediction_to_keywords(
+                d["species"],
+                species_by_photo.get(pid, []),
+                taxonomy,
+            )
             by_photo[pid]["predictions"][model].append({
+                "id": d["id"],
                 "species": d["species"],
                 "confidence": d["confidence"],
+                "status": d["status"],
+                "category": comparison["category"],
+                "category_label": comparison["label"],
+                "category_detail": comparison["detail"],
+                "matched_keyword": comparison["matched_keyword"],
+                "shared_rank": comparison["shared_rank"],
                 "box_x": d.get("box_x"),
                 "box_y": d.get("box_y"),
                 "box_w": d.get("box_w"),
                 "box_h": d.get("box_h"),
             })
 
+        priority = {
+            "conflict": 6,
+            "refinement": 5,
+            "broader": 4,
+            "new": 3,
+            "missing_prediction": 2,
+            "match": 1,
+        }
+        labels = {
+            "conflict": "Conflict",
+            "refinement": "Refinement",
+            "broader": "Broader",
+            "new": "No species keyword",
+            "missing_prediction": "Missing prediction",
+            "match": "Match",
+        }
+        summary = {
+            "photos": len(photos),
+            "models": 0,
+            "matches": 0,
+            "refinements": 0,
+            "broader": 0,
+            "conflicts": 0,
+            "new": 0,
+            "missing_predictions": 0,
+            "needs_review": 0,
+        }
+
+        for photo in by_photo.values():
+            row_category = "missing_prediction"
+            has_pending_prediction = False
+            for model_preds in photo["predictions"].values():
+                for pred in model_preds:
+                    if pred.get("status") == "pending":
+                        has_pending_prediction = True
+                    cat = pred["category"]
+                    if cat == "match":
+                        summary["matches"] += 1
+                    elif cat == "refinement":
+                        summary["refinements"] += 1
+                    elif cat == "broader":
+                        summary["broader"] += 1
+                    elif cat == "conflict":
+                        summary["conflicts"] += 1
+                    elif cat == "new":
+                        summary["new"] += 1
+                    if priority[cat] > priority[row_category]:
+                        row_category = cat
+            if not photo["predictions"]:
+                summary["missing_predictions"] += 1
+            photo["row_category"] = row_category
+            photo["row_label"] = labels[row_category]
+            photo["needs_review"] = (
+                row_category in {"conflict", "refinement", "broader", "new"}
+                and has_pending_prediction
+            )
+            if photo["needs_review"]:
+                summary["needs_review"] += 1
+
+        model_list = sorted(models)
+        summary["models"] = len(model_list)
+
         return jsonify({
-            "models": sorted(models),
+            "models": model_list,
             "photos": list(by_photo.values()),
+            "summary": summary,
+            "taxonomy_available": taxonomy is not None,
         })
+
+    @app.route("/api/predictions/<int:pred_id>/reviewed", methods=["POST"])
+    def api_mark_prediction_reviewed(pred_id):
+        db = _get_db()
+        pred = db.conn.execute(
+            """SELECT pr.id, pr.species, d.photo_id
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE pr.id = ?""",
+            (pred_id,),
+        ).fetchone()
+        if pred is None:
+            return json_error("prediction not found", 404)
+        db.update_prediction_status(pred_id, "reviewed")
+        db.record_edit(
+            "prediction_reviewed",
+            f'Marked prediction "{pred["species"]}" reviewed',
+            "reviewed",
+            [{"photo_id": pred["photo_id"], "old_value": "pending", "new_value": "reviewed"}],
+        )
+        return jsonify({"ok": True})
+
+    @app.route("/api/predictions/<int:pred_id>/replace-keywords", methods=["POST"])
+    def api_replace_species_keywords_with_prediction(pred_id):
+        db = _get_db()
+        pred = db.conn.execute(
+            """SELECT pr.id, pr.species, d.photo_id
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE pr.id = ?""",
+            (pred_id,),
+        ).fetchone()
+        if pred is None:
+            return json_error("prediction not found", 404)
+        old_species = [
+            row["name"] for row in db.conn.execute(
+                """SELECT k.name
+                   FROM photo_keywords pk
+                   JOIN keywords k ON k.id = pk.keyword_id
+                   WHERE pk.photo_id = ?
+                     AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                (pred["photo_id"],),
+            ).fetchall()
+        ]
+        db.conn.execute(
+            """DELETE FROM photo_keywords
+               WHERE photo_id = ?
+                 AND keyword_id IN (
+                   SELECT id FROM keywords
+                   WHERE is_species = 1 OR type = 'taxonomy'
+                 )""",
+            (pred["photo_id"],),
+        )
+        result = db.accept_prediction(pred_id)
+        if result is None:
+            return json_error("prediction not found", 404)
+        db.record_edit(
+            "prediction_replace_species",
+            f'Replaced species keyword with "{result["species"]}"',
+            result["species"],
+            [{
+                "photo_id": pred["photo_id"],
+                "old_value": ", ".join(old_species),
+                "new_value": result["species"],
+            }],
+        )
+        return jsonify({"ok": True})
 
     @app.route("/api/predictions/<int:pred_id>/accept", methods=["POST"])
     def api_accept_prediction(pred_id):
