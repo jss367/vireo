@@ -354,6 +354,8 @@
     background: rgba(0,0,0,0.8);
     z-index: 500;
     flex-direction: column;
+    --grm-card-w: 180px;
+    --grm-card-h: 120px;
   }
   .grm-overlay.open { display: flex; }
 
@@ -377,13 +379,14 @@
     padding: 10px 20px;
     min-height: 80px;
     border-bottom: 1px solid var(--border-primary, #14374E);
+    flex-shrink: 0;
   }
   .grm-zone-label {
     font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
     margin-bottom: 6px; font-weight: 600;
   }
   .grm-picks .grm-zone-label { color: var(--accent, #24E5CA); }
-  .grm-candidates { flex: 1; overflow-x: auto; overflow-y: hidden; }
+  .grm-candidates { flex: 0 0 auto; overflow: visible; }
   .grm-candidates .grm-zone-label { color: var(--text-dim, #888); }
   .grm-rejects .grm-zone-label { color: var(--danger, #e74c3c); }
 
@@ -392,12 +395,13 @@
     gap: 10px;
     padding: 4px 0;
     min-height: 60px;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
+    align-items: flex-start;
   }
 
   .grm-card {
     flex-shrink: 0;
-    width: 180px;
+    width: var(--grm-card-w);
     background: var(--bg-tertiary, #14374E);
     border-radius: 6px;
     overflow: hidden;
@@ -439,13 +443,13 @@
   .grm-reset-offsets-btn.visible { display: inline-block; }
   .grm-reset-offsets-btn:hover { color: var(--text-primary, #E0F0F0); }
   /* Card image is laid out at its natural source-pixel size and then scaled
-   * down via CSS transform into the 180x120 viewport. Laying out at natural
+   * down via CSS transform into the thumbnail viewport. Laying out at natural
    * size forces the browser to rasterize the layer at full source resolution,
    * so detail survives the transform — instead of being bilinearly upsampled
    * from a tiny pre-scale bitmap (the WKWebView burst-loupe quality bug). */
   .grm-card-img-box {
-    width: 180px;
-    height: 120px;
+    width: var(--grm-card-w);
+    height: var(--grm-card-h);
     position: relative;
     overflow: hidden;
   }
@@ -476,6 +480,21 @@
     flex-shrink: 0;
   }
   .grm-footer .grm-hint { font-size: 11px; color: var(--text-ghost, #555); flex: 1; }
+  .grm-thumb-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .grm-thumb-control input[type="range"] {
+    width: 110px;
+    accent-color: var(--accent, #24E5CA);
+  }
+  .grm-thumb-control label,
+  .grm-thumb-control span {
+    font-size: 12px;
+    color: var(--text-muted, #888);
+  }
 
   /* Loupe mode — split layout with preview on right */
   .grm-body {
@@ -1464,6 +1483,7 @@ function openGroupReview(groupId, model) {
   _grmPendingSnap = false;
   grmRefreshResetAllVisibility();
   document.getElementById('grmOverlay').classList.add('open');
+  grmSetThumbSize(GRM_CARD_W, false);
   loadGroupData(groupId);
 }
 
@@ -1644,9 +1664,9 @@ function renderLoupePreds(item) {
 // Multiplier above each card's cover-fit scale. 1 = cover-fit (no zoom);
 // values past 1 zoom in towards CSS 1:1 and beyond to device 1:1 on Retina.
 var _grmZoomLevel = 1;
-// Card thumbnails are 180px wide x 120px tall (3:2). The image inside is
-// laid out at the served photo's natural pixel dimensions; transform-scale
-// shrinks it to fit the viewport.
+// Card thumbnails default to 180px wide x 120px tall (3:2). The image inside
+// is laid out at the served photo's natural pixel dimensions; transform-scale
+// shrinks it to fit the current viewport.
 var GRM_CARD_W = 180;
 var GRM_CARD_H = 120;
 var _grmLoupeLocked = false;
@@ -1672,6 +1692,39 @@ var _grmLoupeHovering = false;
 // reconciles dims so the 1:1 zoom is computed against the axes the browser
 // actually paints.
 var _grmPendingSnap = false;
+var GRM_THUMB_STORAGE_KEY = 'vireo.burstReviewThumbSize';
+
+function _grmInitialThumbSize() {
+  try {
+    var stored = parseInt(window.localStorage.getItem(GRM_THUMB_STORAGE_KEY), 10);
+    if (stored) return Math.max(100, Math.min(320, stored));
+  } catch(e) {}
+  return 180;
+}
+
+function grmSetThumbSize(value, persist) {
+  var size = parseInt(value, 10);
+  if (!size) size = 180;
+  size = Math.max(100, Math.min(320, size));
+  GRM_CARD_W = size;
+  GRM_CARD_H = Math.round(size * 2 / 3);
+  var overlay = document.getElementById('grmOverlay');
+  if (overlay) {
+    overlay.style.setProperty('--grm-card-w', GRM_CARD_W + 'px');
+    overlay.style.setProperty('--grm-card-h', GRM_CARD_H + 'px');
+  }
+  var slider = document.getElementById('grmThumbSizeSlider');
+  if (slider) slider.value = GRM_CARD_W;
+  var label = document.getElementById('grmThumbSizeVal');
+  if (label) label.textContent = GRM_CARD_W + 'px';
+  if (persist !== false) {
+    try { window.localStorage.setItem(GRM_THUMB_STORAGE_KEY, String(GRM_CARD_W)); } catch(e) {}
+  }
+  _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
+}
+
+GRM_CARD_W = _grmInitialThumbSize();
+GRM_CARD_H = Math.round(GRM_CARD_W * 2 / 3);
 
 // Natural-size dims for one card. When the strip is still on the 400px
 // thumbnail, we use a 400px-fit; once upgraded to /original we use the
@@ -1913,7 +1966,7 @@ function grmLoupeReset() {
   if (_grmDragging) return;
   // Re-apply transforms in their default (cover-fit, centred) state. We
   // can't just clear `style.transform` because the natural-size <img> needs
-  // a scale-down transform at all times to fit the 180x120 viewport.
+  // a scale-down transform at all times to fit the thumbnail viewport.
   _grmLoupeHovering = false;
   _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
 }
@@ -2210,6 +2263,11 @@ document.addEventListener('keydown', function(e) {
     <label style="font-size:12px;color:var(--text-muted,#888);">Consensus species:</label>
     <input type="text" id="grmSpecies" oninput="grmUpdateApplyLabel()" style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
     <button onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary,#14374E);color:var(--text-muted,#888);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
+    <div class="grm-thumb-control" title="Thumbnail size">
+      <label for="grmThumbSizeSlider">Thumbs</label>
+      <input type="range" id="grmThumbSizeSlider" min="100" max="320" step="20" value="180" oninput="grmSetThumbSize(this.value)">
+      <span id="grmThumbSizeVal">180px</span>
+    </div>
     <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; 1 = 1:1 zoom &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;">Apply & Close</button>
   </div>

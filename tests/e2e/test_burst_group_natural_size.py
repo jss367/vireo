@@ -173,3 +173,39 @@ def test_burst_card_box_is_180x120(live_server, page, tmp_path):
     assert bbox is not None
     assert abs(bbox["width"] - 180) < 1, f"box width {bbox['width']} != 180"
     assert abs(bbox["height"] - 120) < 1, f"box height {bbox['height']} != 120"
+
+
+def test_burst_modal_thumb_slider_resizes_wrapped_grid(live_server, page, tmp_path):
+    """The burst modal should expose the same kind of thumbnail-size control as
+    other review grids, and the strips should wrap instead of requiring
+    horizontal scrolling for large bursts.
+    """
+    db = live_server["db"]
+    n = _seed_burst_with_real_photos(db, tmp_path)
+    if n < 1:
+        pytest.skip("could not seed burst group")
+    _ensure_photo_files_on_disk(db, tmp_path)
+
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    page.wait_for_load_state("networkidle")
+    _open_burst_modal(page)
+
+    assert page.locator("#grmThumbSizeSlider").is_visible()
+    flex_wrap = page.locator("#grmCandidates").evaluate(
+        "el => getComputedStyle(el).flexWrap"
+    )
+    assert flex_wrap == "wrap"
+
+    page.locator("#grmThumbSizeSlider").evaluate(
+        """el => {
+          el.value = 220;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }"""
+    )
+
+    box = page.locator(".grm-card .grm-card-img-box").first
+    bbox = box.bounding_box()
+    assert bbox is not None
+    assert abs(bbox["width"] - 220) < 1, f"box width {bbox['width']} != 220"
+    assert abs(bbox["height"] - 147) < 1, f"box height {bbox['height']} != 147"
