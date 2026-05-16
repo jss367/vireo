@@ -150,12 +150,18 @@ def test_sync_from_xmp_preserves_keyword_when_only_case_differs(tmp_path):
     assert {k['name'] for k in keywords} == {'Sparrow'}
 
 
-def test_sync_to_xmp_reports_unsupported_flag_changes(tmp_path):
-    """Legacy flag pending changes remain queued and are reported as unsupported."""
+def test_sync_to_xmp_reports_unsupported_flag_changes_when_disabled(tmp_path, monkeypatch):
+    """Flag pending changes remain queued when XMP flag sync is disabled."""
     from xml.etree import ElementTree as ET
 
+    import config as cfg
     from db import Database
     from sync import sync_to_xmp
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    config = cfg.load()
+    config["sync_flags_to_xmp"] = False
+    cfg.save(config)
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -173,3 +179,37 @@ def test_sync_to_xmp_reports_unsupported_flag_changes(tmp_path):
     assert result['failures'][0]['error'] == 'unsupported change type: flag'
     assert before == after
     assert len(db.get_pending_changes()) == 1
+
+
+def test_sync_to_xmp_writes_flag_when_enabled(tmp_path, monkeypatch):
+    """sync_to_xmp writes xmpDM:pick when flag sync is enabled."""
+    from xml.etree import ElementTree as ET
+
+    import config as cfg
+    from db import Database
+    from sync import sync_to_xmp
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    config = cfg.load()
+    config["sync_flags_to_xmp"] = True
+    cfg.save(config)
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    db.queue_change(pid, 'flag', 'rejected')
+
+    result = sync_to_xmp(db)
+
+    assert result['synced'] == 1
+    assert result['failed'] == 0
+    assert len(db.get_pending_changes()) == 0
+
+    tree = ET.parse(xmp_path)
+    desc = tree.getroot().find(
+        './/{http://www.w3.org/1999/02/22-rdf-syntax-ns#}Description'
+    )
+    pick = desc.get('{http://ns.adobe.com/xmp/1.0/DynamicMedia/}pick')
+    assert pick == '-1'

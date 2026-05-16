@@ -2112,6 +2112,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.update_photo_flag(photo_id, flag)
         except ValueError as e:
             return json_error(str(e), 403)
+        db.queue_flag_change_if_enabled(photo_id, flag)
         db.record_edit('flag', f'Set flag to {flag}', flag,
                        [{'photo_id': photo_id, 'old_value': old_flag, 'new_value': flag}])
         return jsonify({"ok": True})
@@ -2878,6 +2879,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.batch_update_photo_flag(valid_ids, flag)
         except ValueError as e:
             return json_error(str(e), 403)
+        for pid in valid_ids:
+            db.queue_flag_change_if_enabled(pid, flag, _commit=False)
+        db.conn.commit()
         items = [{'photo_id': pid, 'old_value': old_values[pid], 'new_value': flag} for pid in old_values]
         db.record_edit('flag', f'Set flag to {flag} on {len(photo_ids)} photos',
                        flag, items, is_batch=True)
@@ -4445,6 +4449,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if pid in old_flags:
                 flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'rejected'})
         if flag_items:
+            for item in flag_items:
+                db.queue_flag_change_if_enabled(
+                    item["photo_id"], item["new_value"], _commit=False
+                )
+            db.conn.commit()
             desc = f'Group prediction: flagged {len(picks)}, rejected {len(rejects)}'
             db.record_edit('flag', desc, 'group_apply', flag_items, is_batch=True)
 
@@ -4520,6 +4529,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                  "new_value": "rejected"}
                 for a in affected
             ]
+            for item in items:
+                db.queue_flag_change_if_enabled(
+                    item["photo_id"], item["new_value"], _commit=False
+                )
+            db.conn.commit()
             db.record_edit(
                 "flag",
                 f"Rejected {len(items)} miss photos (category={category})",
@@ -11749,6 +11763,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), 403)
 
         if flag_items:
+            for item in flag_items:
+                db.queue_flag_change_if_enabled(
+                    item["photo_id"], item["new_value"], _commit=False
+                )
+            db.conn.commit()
             desc = (
                 f"Pipeline burst group: flagged {len(picks)}, rejected {len(rejects)}, "
                 f"cleared {sum(1 for it in flag_items if it['new_value'] == 'none')}"
@@ -11948,6 +11967,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if pid in old_flags:
                 flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'rejected'})
         if flag_items:
+            for item in flag_items:
+                db.queue_flag_change_if_enabled(
+                    item["photo_id"], item["new_value"], _commit=False
+                )
+            db.conn.commit()
             db.record_edit('flag',
                            f'Culling: flagged {len(keepers)}, rejected {len(rejects)}',
                            'culling_apply', flag_items, is_batch=True)

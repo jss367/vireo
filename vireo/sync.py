@@ -4,7 +4,7 @@ import logging
 import os
 from collections import defaultdict
 
-from xmp import read_keywords, remove_keywords, write_rating, write_sidecar
+from xmp import read_keywords, remove_keywords, write_pick_flag, write_rating, write_sidecar
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +18,17 @@ def _get_xmp_path_for_photo(db, photo_id):
     folder_path = folders.get(photo["folder_id"], "")
     base = os.path.splitext(photo["filename"])[0]
     return os.path.join(folder_path, base + ".xmp")
+
+
+def _sync_flags_to_xmp_enabled(db):
+    """Return whether the active workspace should write flags to XMP."""
+    try:
+        import config as cfg
+
+        return bool(db.get_effective_config(cfg.load()).get("sync_flags_to_xmp", False))
+    except Exception:
+        log.warning("Failed to read sync_flags_to_xmp config", exc_info=True)
+        return False
 
 
 def sync_to_xmp(db, progress_callback=None):
@@ -39,6 +50,7 @@ def sync_to_xmp(db, progress_callback=None):
     for c in changes:
         by_photo[c["photo_id"]].append(c)
 
+    sync_flags = _sync_flags_to_xmp_enabled(db)
     synced = 0
     failed = 0
     failures = []
@@ -66,6 +78,7 @@ def sync_to_xmp(db, progress_callback=None):
             keywords_to_add = set()
             keywords_to_remove = set()
             new_rating = None
+            new_flag = None
             supported_ids = []
             unsupported_changes = []
 
@@ -80,7 +93,11 @@ def sync_to_xmp(db, progress_callback=None):
                     new_rating = int(c["value"])
                     supported_ids.append(c["id"])
                 elif c["change_type"] == "flag":
-                    unsupported_changes.append(c)
+                    if sync_flags:
+                        new_flag = c["value"]
+                        supported_ids.append(c["id"])
+                    else:
+                        unsupported_changes.append(c)
 
             # Write keywords
             if keywords_to_add:
@@ -91,6 +108,12 @@ def sync_to_xmp(db, progress_callback=None):
             # Handle keyword removals: remove matching li elements from bags
             if keywords_to_remove:
                 remove_keywords(xmp_path, keywords_to_remove)
+
+            # Write flag before rating: write_pick_flag creates a sidecar if
+            # needed, while write_rating intentionally only updates existing
+            # sidecars.
+            if new_flag is not None:
+                write_pick_flag(xmp_path, new_flag)
 
             # Write rating
             if new_rating is not None:

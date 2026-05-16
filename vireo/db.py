@@ -8155,6 +8155,29 @@ class Database:
         )
         self.conn.commit()
 
+    def queue_flag_change_if_enabled(self, photo_id, flag, workspace_id=None, _commit=True):
+        """Queue a flag write when the active config opts into XMP flag sync."""
+        try:
+            import config as cfg
+
+            enabled = bool(
+                self.get_effective_config(cfg.load()).get("sync_flags_to_xmp", False)
+            )
+        except Exception:
+            log.warning("Failed to read sync_flags_to_xmp config", exc_info=True)
+            enabled = False
+        if not enabled:
+            return None
+
+        ws_id = workspace_id if workspace_id is not None else self._ws_id()
+        self.remove_pending_changes(photo_id, "flag", workspace_id=ws_id, _commit=False)
+        token = self.queue_change(
+            photo_id, "flag", flag, workspace_id=ws_id, _commit=False
+        )
+        if _commit:
+            self.conn.commit()
+        return token
+
     # -- Edit History --
 
     def record_edit(self, action_type, description, new_value, items, is_batch=False, _commit=True):
@@ -8275,6 +8298,7 @@ class Database:
                     self.queue_change(pid, 'rating', old_val)
             elif entry['action_type'] == 'flag':
                 self.update_photo_flag(pid, old_val, verify_workspace=False)
+                self.queue_flag_change_if_enabled(pid, old_val)
             elif entry['action_type'] == 'wildlife_excluded':
                 self.update_photo_wildlife_excluded(
                     pid, old_val == "1", verify_workspace=False
@@ -8398,6 +8422,7 @@ class Database:
                     self.queue_change(pid, 'rating', new_val)
             elif entry['action_type'] == 'flag':
                 self.update_photo_flag(pid, entry['new_value'], verify_workspace=False)
+                self.queue_flag_change_if_enabled(pid, entry['new_value'])
             elif entry['action_type'] == 'wildlife_excluded':
                 self.update_photo_wildlife_excluded(
                     pid, new_val == "1", verify_workspace=False

@@ -30,6 +30,7 @@ CATEGORIES = (
     "Detection",
     "Pipeline",
     "Culling",
+    "Metadata",
     "Display",
     "Working copy",
     "Preview",
@@ -115,6 +116,12 @@ SCHEMA = {
         "category": "Behavior", "scope": "global",
         "label": "Keyword case",
         "desc": "Capitalization convention for species keywords.",
+    },
+    "sync_flags_to_xmp": {
+        "type": "bool",
+        "category": "Metadata", "scope": "both",
+        "label": "Sync pick/reject flags to XMP",
+        "desc": "Write Vireo pick/reject flags to XMP sidecars using Lightroom-compatible pick metadata.",
     },
     "scan_workers": {
         "type": "int", "min": 0, "max": 64,

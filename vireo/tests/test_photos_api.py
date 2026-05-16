@@ -176,6 +176,27 @@ def test_api_photos_rejects_unknown_flag_filter(app_and_db):
     assert resp.status_code == 400
 
 
+def test_api_set_flag_queues_xmp_when_enabled(app_and_db):
+    """POST /api/photos/<id>/flag queues a flag sync when configured."""
+    import config as cfg
+
+    app, db = app_and_db
+    config = cfg.load()
+    config["sync_flags_to_xmp"] = True
+    cfg.save(config)
+
+    target = [p for p in db.get_photos() if p["filename"] == "bird1.jpg"][0]
+
+    client = app.test_client()
+    resp = client.post(f'/api/photos/{target["id"]}/flag', json={"flag": "flagged"})
+
+    assert resp.status_code == 200
+    changes = db.get_pending_changes()
+    assert len(changes) == 1
+    assert changes[0]["change_type"] == "flag"
+    assert changes[0]["value"] == "flagged"
+
+
 def test_api_photo_detail(app_and_db):
     """GET /api/photos/<id> returns photo with keywords."""
     app, db = app_and_db
