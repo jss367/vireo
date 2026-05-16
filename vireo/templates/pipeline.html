@@ -2926,6 +2926,7 @@ function _waitForPipelineTerminal(jobId, resolve) {
     actionStatus.textContent = 'Connection lost while cancelling. Checking job status...';
   }
   var attempts = 0;
+  var statusFailures = 0;
   var terminalStatuses = {completed: true, failed: true, cancelled: true};
   var timer = setInterval(function() {
     attempts += 1;
@@ -2935,6 +2936,7 @@ function _waitForPipelineTerminal(jobId, resolve) {
         return resp.json();
       })
       .then(function(job) {
+        statusFailures = 0;
         if (!terminalStatuses[job.status]) {
           if (attempts === 120 && actionStatus) {
             actionStatus.textContent = 'Still cancelling. Waiting for pipeline job to stop...';
@@ -2951,11 +2953,10 @@ function _waitForPipelineTerminal(jobId, resolve) {
         resolve();
       })
       .catch(function() {
-        if (attempts < 10) return;
-        clearInterval(timer);
-        _pipelineResolve = null;
-        document.getElementById('statusSource').textContent = 'Connection lost';
-        resolve();
+        statusFailures += 1;
+        if (statusFailures === 10 && actionStatus) {
+          actionStatus.textContent = 'Still cancelling. Job status is temporarily unavailable...';
+        }
       });
   }, 1000);
 }

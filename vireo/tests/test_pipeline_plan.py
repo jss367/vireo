@@ -36,6 +36,15 @@ def _add_photo_with_detection(db, folder_id, filename, conf=0.9,
     return photo_id, det_ids[0]
 
 
+def _mark_sam_done(db, photo_id, path, variant="sam2-small"):
+    db.upsert_photo_mask(
+        photo_id, variant, path,
+        detector_model="megadetector-v6",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+    )
+    db.set_active_mask_variant(photo_id, variant)
+
+
 # -------- db helpers --------
 
 def test_photos_by_paths_returns_known_and_omits_unknown(tmp_path):
@@ -294,6 +303,53 @@ def test_count_photos_pending_masks_is_variant_aware(tmp_path):
     assert db.count_photos_pending_masks(
         sam2_variant="sam2-small",
     ) == {"eligible": 2, "pending": 2}
+
+
+def test_count_photos_pending_masks_selected_variant_requires_cache_row(tmp_path):
+    db, folder_id = _make_db(tmp_path)
+    p_done, _ = _add_photo_with_detection(db, folder_id, "done.jpg")
+    p_legacy, _ = _add_photo_with_detection(db, folder_id, "legacy.jpg")
+
+    db.upsert_photo_mask(
+        p_done, "sam2-small", "/m/done.small.png",
+        detector_model="megadetector-v6",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+    )
+    db.set_active_mask_variant(p_done, "sam2-small")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/legacy.png' WHERE id=?",
+        (p_legacy,),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'unknown', '/m/legacy.png', 0, "
+        "'unknown', -1, -1, -1, -1)",
+        (p_legacy,),
+    )
+    db.conn.commit()
+
+    assert db.count_photos_pending_masks(
+        sam2_variant="sam2-small",
+    ) == {"eligible": 2, "pending": 1}
+
+
+def test_count_photos_pending_masks_treats_empty_variant_path_as_pending(tmp_path):
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _add_photo_with_detection(db, folder_id, "empty.jpg")
+    db.conn.execute("UPDATE photos SET mask_path='/m/empty.png' WHERE id=?", (pid,))
+    db.conn.execute(
+        "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "VALUES (?, 'sam2-small', '', 0, "
+        "'megadetector-v6', 0.1, 0.1, 0.5, 0.5)",
+        (pid,),
+    )
+    db.conn.commit()
+
+    assert db.count_photos_pending_masks(
+        sam2_variant="sam2-small",
+    ) == {"eligible": 1, "pending": 1}
 
 
 def test_extract_plan_warns_when_other_sam_variant_has_coverage(tmp_path):
@@ -1358,8 +1414,12 @@ def test_extract_plan_done_prior_when_all_masks_present(tmp_path):
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
     pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
-    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
-    db.conn.commit()
+    db.upsert_photo_mask(
+        pid, "sam2-small", "/m/a.png",
+        detector_model="megadetector-v6",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+    )
+    db.set_active_mask_variant(pid, "sam2-small")
     plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
     extract = plan["stages"]["Extract"]
     assert extract["state"] == "done-prior"
@@ -1370,9 +1430,12 @@ def test_extract_plan_will_run_when_some_photos_missing_masks(tmp_path):
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
     pid_done, _ = _add_photo_with_detection(db, folder_id, "done.jpg")
-    db.conn.execute(
-        "UPDATE photos SET mask_path='/m/done.png' WHERE id=?", (pid_done,),
+    db.upsert_photo_mask(
+        pid_done, "sam2-small", "/m/done.png",
+        detector_model="megadetector-v6",
+        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
     )
+    db.set_active_mask_variant(pid_done, "sam2-small")
     _add_photo_with_detection(db, folder_id, "todo.jpg")
     db.conn.commit()
 
@@ -1725,8 +1788,7 @@ def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path
     db, folder_id = _make_db(tmp_path)
     # Make Classify and Extract done-prior so upstream_will_run is False.
     pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
-    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
-    db.conn.commit()
+    _mark_sam_done(db, pid, "/m/a.png")
     from labels_fingerprint import TOL_SENTINEL
     db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
 
@@ -1796,8 +1858,7 @@ def test_regroup_plan_will_run_when_workspace_fingerprint_outdated(tmp_path, mon
     db, folder_id = _make_db(tmp_path)
 
     pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
-    db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
-    db.conn.commit()
+    _mark_sam_done(db, pid, "/m/a.png")
     from labels_fingerprint import TOL_SENTINEL
     db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
 
@@ -2079,8 +2140,7 @@ def test_import_plan_does_not_leak_active_workspace_state(tmp_path):
     # Fully-classified detection + masked photo in the active workspace.
     pid, did = _add_photo_with_detection(db, folder_id, "old.jpg")
     db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
-    db.conn.execute("UPDATE photos SET mask_path='/m/old.png' WHERE id=?", (pid,))
-    db.conn.commit()
+    _mark_sam_done(db, pid, "/m/old.png")
 
     # Without source_paths → plan is whole-workspace (the old buggy
     # behaviour), so Extract reports done-prior.
@@ -2408,8 +2468,7 @@ def test_compute_plan_distinguishes_none_from_empty_source_paths(tmp_path, monke
     _stub_models(monkeypatch)
     pid, did = _add_photo_with_detection(db, folder_id, "old.jpg")
     db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
-    db.conn.execute("UPDATE photos SET mask_path='/m/old.png' WHERE id=?", (pid,))
-    db.conn.commit()
+    _mark_sam_done(db, pid, "/m/old.png")
 
     # source_paths=None → whole-workspace fallback (Extract sees the
     # masked photo and reports "done-prior").

@@ -3573,15 +3573,9 @@ class Database:
                       COUNT(DISTINCT p.id) AS eligible,
                       COUNT(DISTINCT CASE
                         WHEN p.mask_path IS NULL
-                          OR (pm.photo_id IS NOT NULL AND pm.path IS NULL)
-                          OR (
-                            pm.photo_id IS NULL
-                            AND EXISTS (
-                              SELECT 1 FROM photo_masks pm_any
-                               WHERE pm_any.photo_id = p.id
-                                 AND pm_any.variant != 'unknown'
-                            )
-                          )
+                          OR pm.photo_id IS NULL
+                          OR pm.path IS NULL
+                          OR pm.path = ''
                         THEN p.id END) AS pending
                     FROM photos p
                     JOIN workspace_folders wf

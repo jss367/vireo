@@ -9,7 +9,7 @@ import multiprocessing
 import os
 import sys
 from collections import defaultdict, deque
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, TimeoutError
 from datetime import datetime
 from pathlib import Path
 
@@ -1152,12 +1152,21 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     def _iter_features():
         if workers > 1:
             mp_ctx = multiprocessing.get_context(_SCAN_MP_METHOD)
-            with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as pool:
+            pool = ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx)
+            try:
                 # Bounded in-flight window instead of pool.map(): on Python
                 # 3.11 Executor.map eagerly submits every input, so on a
                 # 200k-file scan we would hold 200k queued futures in RAM.
                 # A few submissions per worker is enough to keep them fed
                 # while the main thread drains results in order.
+                def _feature_result(fut):
+                    while True:
+                        _check_cancelled()
+                        try:
+                            return fut.result(timeout=0.2)
+                        except TimeoutError:
+                            continue
+
                 max_in_flight = workers * 4
                 pending = deque()
                 inputs = zip(files_to_process, paths_to_extract, strict=True)
@@ -1167,11 +1176,16 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     if len(pending) >= max_in_flight:
                         done_path, done_fut = pending.popleft()
                         _check_cancelled()
-                        yield done_path, done_fut.result()
+                        yield done_path, _feature_result(done_fut)
                 while pending:
                     done_path, done_fut = pending.popleft()
                     _check_cancelled()
-                    yield done_path, done_fut.result()
+                    yield done_path, _feature_result(done_fut)
+            except BaseException:
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                pool.shutdown(wait=True)
         else:
             for image_path, path_str in zip(files_to_process, paths_to_extract, strict=True):
                 _check_cancelled()
