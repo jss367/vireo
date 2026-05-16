@@ -6441,6 +6441,103 @@ def test_collection_color_label_not_equals_rule(tmp_path):
     assert 'c.jpg' in filenames
 
 
+def test_collection_group_any_and_none_rules(tmp_path):
+    """Smart collections support grouped OR and NONE logic."""
+    import json
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='five.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='pick.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p3 = db.add_photo(folder_id=fid, filename='other.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET rating = 5 WHERE id = ?", (p1,))
+    db.conn.execute("UPDATE photos SET flag = 'flagged' WHERE id = ?", (p2,))
+    db.conn.commit()
+
+    any_rules = {
+        "mode": "any",
+        "rules": [
+            {"field": "rating", "op": ">=", "value": 5},
+            {"field": "flag", "op": "equals", "value": "flagged"},
+        ],
+    }
+    cid = db.add_collection("Five or Pick", json.dumps(any_rules))
+    assert [p["filename"] for p in db.get_collection_photos(cid, per_page=10)] == [
+        "five.jpg",
+        "pick.jpg",
+    ]
+
+    none_rules = {
+        "mode": "none",
+        "rules": [
+            {"field": "rating", "op": ">=", "value": 5},
+            {"field": "flag", "op": "equals", "value": "flagged"},
+        ],
+    }
+    cid = db.add_collection("Neither", json.dumps(none_rules))
+    assert [p["filename"] for p in db.get_collection_photos(cid, per_page=10)] == [
+        "other.jpg",
+    ]
+
+
+def test_collection_vireo_native_fields(tmp_path):
+    """Smart collections can target Vireo AI/quality workflow fields."""
+    import json
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='match.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='miss.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.91, mask_path = ?, "
+        "active_mask_variant = 'sam2-large', latitude = 1.0, longitude = 2.0 "
+        "WHERE id = ?",
+        (str(tmp_path / "mask.png"), p1),
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.20, latitude = 3.0, longitude = 4.0 "
+        "WHERE id = ?",
+        (p2,),
+    )
+    loc_kw = db.add_keyword("Yosemite", kw_type="location")
+    db.tag_photo(p2, loc_kw)
+    db.conn.execute(
+        "INSERT INTO inat_submissions (photo_id, observation_id, observation_url) "
+        "VALUES (?, 123, 'https://example.test/obs/123')",
+        (p1,),
+    )
+    det_id = db.save_detections(
+        p1,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.95, "category": "animal"}],
+        "megadetector-v6",
+    )[0]
+    db.add_prediction(det_id, "Red Fox", 0.93, "bioclip", status="accepted")
+
+    rules = {
+        "mode": "all",
+        "rules": [
+            {"field": "quality_score", "op": ">=", "value": 0.9},
+            {"field": "has_mask", "op": "equals", "value": 1},
+            {"field": "active_mask_variant", "op": "equals", "value": "sam2-large"},
+            {"field": "has_gps", "op": "equals", "value": 1},
+            {"field": "location_keyword_missing", "op": "equals", "value": 1},
+            {"field": "inat_submitted", "op": "equals", "value": 1},
+            {"field": "prediction_confidence", "op": ">=", "value": 0.9},
+            {"field": "classifier_model", "op": "equals", "value": "bioclip"},
+            {"field": "prediction_status", "op": "equals", "value": "accepted"},
+        ],
+    }
+    cid = db.add_collection("Vireo Native", json.dumps(rules))
+    photos = db.get_collection_photos(cid, per_page=10)
+    assert [p["filename"] for p in photos] == ["match.jpg"]
+
+
 def test_undo_color_label(tmp_path):
     """Undo reverts a color label change."""
     from db import Database

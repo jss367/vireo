@@ -1343,13 +1343,14 @@ body {
 <!-- Collection Modal -->
 <div class="modal-overlay" id="collectionModal">
   <div class="modal">
-    <h3>New Smart Collection</h3>
+    <h3 id="collectionModalTitle">New Smart Collection</h3>
     <input class="modal-input" id="collectionName" placeholder="Collection name">
     <div id="ruleRows"></div>
     <button onclick="addRuleRow()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;margin-bottom:8px;">+ Add Rule</button>
+    <button onclick="addRuleGroup()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;margin-bottom:8px;">+ Add Group</button>
     <div class="modal-preview" id="rulePreview"></div>
     <div class="modal-actions">
-      <button class="modal-btn modal-btn-primary" onclick="saveCollection()">Save</button>
+      <button class="modal-btn modal-btn-primary" id="collectionSaveBtn" onclick="saveCollection()">Save</button>
       <button class="modal-btn modal-btn-cancel" onclick="hideCollectionModal()">Cancel</button>
     </div>
   </div>
@@ -1458,6 +1459,7 @@ var keywordAutocompletePromise = null;
 var keywordAutocompleteStates = {};
 var collectionCountRefreshTimer = null;
 var collectionCountLoadGen = 0;
+var collectionsById = {};
 var browseCompareIds = [];
 var browseCompareOffset = 0;
 var browseCompareSeq = 0;
@@ -1874,8 +1876,10 @@ async function bootstrapBrowse() {
 }
 
 function renderCollectionList(collections) {
+  collectionsById = {};
   var html = '';
   collections.forEach(function(c) {
+    collectionsById[c.id] = c;
     var count = c.photo_count != null ? c.photo_count : '';
     html += '<div class="tree-item" data-collection-id="' + c.id + '" onclick="filterByCollection(' + c.id + ')">' +
       '<span>' + escapeHtml(c.name) + '</span>' +
@@ -2128,7 +2132,8 @@ async function filterByCollection(id) {
 }
 
 /* ---------- Collection Modal ---------- */
-var collectionRules = [];
+var collectionEditorRoot = {mode: 'all', rules: []};
+var collectionEditingId = null;
 // Cached dropdown sources for the rule editor. Filled on first modal open
 // and reused across rule rows so toggling field=Extension or field=Folder
 // doesn't refetch on every render. Re-fetched each time the modal opens
@@ -2140,6 +2145,7 @@ var collectionFolders = [];
    The UI only shows ops the backend handles; non-matching combos used to
    silently produce zero matches. */
 var FIELD_OPS = {
+  all:         ['equals'],
   keyword:     ['is', 'is not', 'contains', 'not_contains'],
   rating:      ['is', 'is not', '>=', '<='],
   flag:        ['is', 'is not'],
@@ -2147,8 +2153,49 @@ var FIELD_OPS = {
   extension:   ['is', 'is not'],
   folder:      ['under', 'not_under'],
   timestamp:   ['between', 'recent_days'],
+  quality_score: ['is', 'is not', '>=', '<='],
+  sharpness: ['is', 'is not', '>=', '<='],
+  subject_sharpness: ['is', 'is not', '>=', '<='],
+  noise_estimate: ['is', 'is not', '>=', '<='],
+  crop_complete: ['is', 'is not', '>=', '<='],
+  has_mask: ['equals'],
+  active_mask_variant: ['is', 'is not', 'contains'],
+  has_gps: ['equals'],
+  location_keyword_missing: ['equals'],
+  inat_submitted: ['equals'],
+  is_duplicate: ['equals'],
+  prediction_confidence: ['is', 'is not', '>=', '<='],
+  classifier_model: ['is', 'is not', 'contains'],
+  prediction_status: ['is', 'is not'],
+  needs_review: ['equals'],
+};
+var FIELD_LABELS = {
+  all: 'All Photos',
+  keyword: 'Keyword',
+  rating: 'Rating',
+  flag: 'Flag',
+  color_label: 'Color Label',
+  extension: 'Extension',
+  folder: 'Folder',
+  timestamp: 'Date',
+  quality_score: 'Quality Score',
+  sharpness: 'Sharpness',
+  subject_sharpness: 'Subject Sharpness',
+  noise_estimate: 'Noise',
+  crop_complete: 'Crop Complete',
+  has_mask: 'Has Mask',
+  active_mask_variant: 'Mask Variant',
+  has_gps: 'Has GPS',
+  location_keyword_missing: 'GPS Without Location Keyword',
+  inat_submitted: 'iNaturalist Submitted',
+  is_duplicate: 'Duplicate',
+  prediction_confidence: 'Prediction Confidence',
+  classifier_model: 'Classifier Model',
+  prediction_status: 'Prediction Status',
+  needs_review: 'Needs Review',
 };
 var OP_LABELS = {
+  'equals':       'is',
   'is':           'is',
   'is not':       'is not',
   'contains':     'contains',
@@ -2162,37 +2209,54 @@ var OP_LABELS = {
 };
 
 function defaultValueForRule(field, op) {
+  if (field === 'all') return 1;
   if (field === 'color_label') return 'red';
   if (field === 'flag') return 'flagged';
   if (field === 'rating') return 0;
+  if (['quality_score', 'sharpness', 'subject_sharpness', 'noise_estimate',
+       'crop_complete', 'prediction_confidence'].indexOf(field) !== -1) return 0;
   if (field === 'extension') return collectionExtensions[0] || '';
   if (field === 'folder') return (collectionFolders[0] && collectionFolders[0].path) || '';
   if (field === 'timestamp') {
     if (op === 'between') return ['', ''];
     if (op === 'recent_days') return 7;
   }
+  if (field === 'active_mask_variant') return 'sam2-large';
+  if (field === 'prediction_status') return 'pending';
+  if (['has_mask', 'has_gps', 'location_keyword_missing', 'inat_submitted',
+       'is_duplicate', 'needs_review'].indexOf(field) !== -1) return 1;
   return '';
 }
 
-async function showCollectionModal() {
-  // Cancel any pending/in-flight preview from a previous session before
-  // resetting state — otherwise a stale response can land on the DOM and
-  // briefly show the previous rule set's count in the freshly opened modal.
-  resetPreviewState();
-  collectionRules = [];
-  document.getElementById('rulePreview').textContent = '';
-  document.getElementById('collectionName').value = '';
-  // Clear the rule-row DOM before awaiting the dropdown fetches. Without
-  // this, a slow/failed fetch leaves the previous session's <select>s
-  // visible and interactive while collectionRules is already empty, so
-  // changing one fires updateRule(idx, ...) against an undefined row and
-  // throws.
-  renderRules();
-  document.getElementById('collectionModal').classList.add('open');
-  // Fetch the dropdown sources before adding the first rule row so the
-  // initial render already has data — otherwise the user sees an empty
-  // <select> until they click off and back on. safeFetch already parses
-  // JSON for us (see _navbar.html), so the resolved values are arrays.
+function normalizeCollectionRules(rawRules) {
+  var parsed = rawRules;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch (e) { parsed = []; }
+  }
+  if (Array.isArray(parsed)) return {mode: 'all', rules: parsed};
+  if (parsed && typeof parsed === 'object' && Array.isArray(parsed.rules)) {
+    return {
+      mode: (['all', 'any', 'none'].indexOf(parsed.mode) !== -1) ? parsed.mode : 'all',
+      rules: parsed.rules,
+    };
+  }
+  return {mode: 'all', rules: []};
+}
+
+function walkRuleTree(node, fn) {
+  if (!node) return;
+  if (Array.isArray(node)) {
+    node.forEach(function(child) { walkRuleTree(child, fn); });
+    return;
+  }
+  if (node.rules && !node.field) {
+    node.rules.forEach(function(child) { walkRuleTree(child, fn); });
+  } else {
+    fn(node);
+  }
+}
+
+async function loadCollectionEditorSources() {
   try {
     var [exts, folders] = await Promise.all([
       safeFetch('/api/photos/extensions'),
@@ -2204,11 +2268,34 @@ async function showCollectionModal() {
     collectionExtensions = [];
     collectionFolders = [];
   }
+}
+
+async function showCollectionModal(collection) {
+  // Cancel any pending/in-flight preview from a previous session before
+  // resetting state — otherwise a stale response can land on the DOM and
+  // briefly show the previous rule set's count in the freshly opened modal.
+  resetPreviewState();
+  collectionEditingId = collection && collection.id ? collection.id : null;
+  collectionEditorRoot = normalizeCollectionRules(collection ? collection.rules : []);
+  document.getElementById('collectionModalTitle').textContent =
+    collectionEditingId ? 'Edit Smart Collection' : 'New Smart Collection';
+  document.getElementById('collectionSaveBtn').textContent =
+    collectionEditingId ? 'Update' : 'Save';
+  document.getElementById('rulePreview').textContent = '';
+  document.getElementById('collectionName').value = collection ? (collection.name || '') : '';
+  // Clear the rule-row DOM before awaiting the dropdown fetches. Without
+  // this, a slow/failed fetch leaves the previous session's <select>s
+  // visible and interactive while editor state is already reset, so
+  // changing one fires updateRule(idx, ...) against an undefined row and
+  // throws.
+  renderRules();
+  document.getElementById('collectionModal').classList.add('open');
+  await loadCollectionEditorSources();
   // Backfill any extension/folder rules added during the await: they got
   // value '' from defaultValueForRule because the source lists were empty.
   // After fetch, the <select> visually picks the first option but state
   // still holds '', so save/preview would run with an empty filter.
-  collectionRules.forEach(function(r) {
+  walkRuleTree(collectionEditorRoot, function(r) {
     if (r.field === 'extension' && !r.value) {
       r.value = collectionExtensions[0] || '';
     } else if (r.field === 'folder' && !r.value) {
@@ -2220,7 +2307,7 @@ async function showCollectionModal() {
   // clicks "+ Add Rule" while the fetch is in flight gets a phantom
   // keyword/contains/"" row tacked on when fetches resolve, silently
   // changing the saved collection's semantics.
-  if (collectionRules.length === 0 &&
+  if (collectionEditorRoot.rules.length === 0 &&
       document.getElementById('collectionModal').classList.contains('open')) {
     addRuleRow();
   } else {
@@ -2232,24 +2319,59 @@ async function showCollectionModal() {
 
 function hideCollectionModal() {
   resetPreviewState();
+  collectionEditingId = null;
   document.getElementById('collectionModal').classList.remove('open');
 }
 
-function addRuleRow() {
-  var idx = collectionRules.length;
-  collectionRules.push({field: 'keyword', op: 'contains', value: ''});
+function getRuleContainer(path) {
+  if (!path) return collectionEditorRoot;
+  var parts = path.split('.').filter(Boolean).map(function(p) { return parseInt(p, 10); });
+  var node = collectionEditorRoot;
+  parts.forEach(function(idx) { node = node.rules[idx]; });
+  return node;
+}
+
+function getRuleParent(path) {
+  var parts = path.split('.').filter(Boolean);
+  var idx = parseInt(parts.pop(), 10);
+  var parent = parts.length ? getRuleContainer(parts.join('.')) : collectionEditorRoot;
+  return {parent: parent, index: idx};
+}
+
+function addRuleRow(groupPath) {
+  var group = getRuleContainer(groupPath || '');
+  if (!group.rules) group.rules = [];
+  group.rules.push({field: 'keyword', op: 'contains', value: ''});
   renderRules();
 }
 
-function removeRule(idx) {
-  collectionRules.splice(idx, 1);
+function addRuleGroup(groupPath) {
+  var group = getRuleContainer(groupPath || '');
+  if (!group.rules) group.rules = [];
+  group.rules.push({mode: 'all', rules: [
+    {field: 'keyword', op: 'contains', value: ''}
+  ]});
   renderRules();
 }
 
-function updateRule(idx, key, val) {
-  var r = collectionRules[idx];
+function removeRule(path) {
+  var ref = getRuleParent(path);
+  ref.parent.rules.splice(ref.index, 1);
+  renderRules();
+}
+
+function updateRule(path, key, val) {
+  var r = getRuleContainer(path);
+  if (!r) return;
+  if (key === 'mode') {
+    r.mode = val;
+    renderRules();
+    return;
+  }
   if (key === 'field') {
     r.field = val;
+    delete r.rules;
+    delete r.mode;
     var ops = FIELD_OPS[val] || [];
     // If current op isn't valid for the new field, default to the field's
     // first listed op. Otherwise keep the user's selection.
@@ -2309,25 +2431,7 @@ async function updatePreviewNow() {
   _previewTimer = null;
   var el = document.getElementById('rulePreview');
   if (!el) return;
-  // An empty rules list is a valid save state — it matches every photo in
-  // the workspace — so we still query the API rather than blanking the
-  // preview text. Otherwise removing all rule rows would hide the count
-  // for what is actually a "match all photos" save.
-  // Coerce numeric fields the same way saveCollection() does, so the
-  // preview matches what would be saved.
-  var rules = collectionRules.map(function(r) {
-    var val = r.value;
-    if (r.field === 'rating') {
-      val = parseInt(val, 10) || 0;
-    } else if (r.field === 'timestamp' && r.op === 'recent_days') {
-      val = parseInt(val, 10) || 0;
-    } else if (r.field === 'timestamp' && r.op === 'between') {
-      var from = Array.isArray(val) ? (val[0] || '') : '';
-      var to   = Array.isArray(val) ? (val[1] || '') : '';
-      val = [from, to];
-    }
-    return {field: r.field, op: r.op, value: val};
-  });
+  var rules = serializeCollectionRules();
   var seq = ++_previewSeq;
   try {
     var data = await safeFetch('/api/collections/preview', {
@@ -2347,8 +2451,20 @@ async function updatePreviewNow() {
 }
 
 function renderRuleValueInput(r, i) {
+  var p = escapeAttr(i);
+  if (r.field === 'all') {
+    return '<span style="flex:1;color:var(--text-ghost);font-size:12px;">Matches every photo in this workspace</span>';
+  }
+  if (['has_mask', 'has_gps', 'location_keyword_missing', 'inat_submitted',
+       'is_duplicate', 'needs_review'].indexOf(r.field) !== -1) {
+    var boolVal = (r.value === true || r.value === 1 || r.value === '1' || r.value === 'true') ? '1' : '0';
+    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
+        '<option value="1"' + (boolVal==='1'?' selected':'') + '>Yes</option>' +
+        '<option value="0"' + (boolVal==='0'?' selected':'') + '>No</option>' +
+      '</select>';
+  }
   if (r.field === 'color_label') {
-    return '<select onchange="updateRule(' + i + ',\'value\',this.value)" style="flex:1;">' +
+    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
         '<option value="red"' + (r.value==='red'?' selected':'') + '>Red</option>' +
         '<option value="yellow"' + (r.value==='yellow'?' selected':'') + '>Yellow</option>' +
         '<option value="green"' + (r.value==='green'?' selected':'') + '>Green</option>' +
@@ -2357,10 +2473,17 @@ function renderRuleValueInput(r, i) {
       '</select>';
   }
   if (r.field === 'flag') {
-    return '<select onchange="updateRule(' + i + ',\'value\',this.value)" style="flex:1;">' +
+    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
         '<option value="flagged"' + (r.value==='flagged'?' selected':'') + '>Pick</option>' +
         '<option value="rejected"' + (r.value==='rejected'?' selected':'') + '>Reject</option>' +
         '<option value="none"' + (r.value==='none'?' selected':'') + '>No flag</option>' +
+      '</select>';
+  }
+  if (r.field === 'prediction_status') {
+    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
+        '<option value="pending"' + (r.value==='pending'?' selected':'') + '>Pending</option>' +
+        '<option value="accepted"' + (r.value==='accepted'?' selected':'') + '>Accepted</option>' +
+        '<option value="rejected"' + (r.value==='rejected'?' selected':'') + '>Rejected</option>' +
       '</select>';
   }
   if (r.field === 'extension') {
@@ -2369,7 +2492,7 @@ function renderRuleValueInput(r, i) {
     // (legacy rule, freshly switched field), include it as a sticky
     // option so the user can see+keep it instead of having it silently
     // snap to the first known extension on next render.
-    return '<select onchange="updateRule(' + i + ',\'value\',this.value)" style="flex:1;">' +
+    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
         (collectionExtensions.length === 0
           ? '<option value="">(no extensions yet — scan a folder)</option>'
           : '') +
@@ -2390,7 +2513,7 @@ function renderRuleValueInput(r, i) {
     var stickyFolder = (r.value && paths.indexOf(r.value) === -1)
       ? '<option value="' + escapeAttr(String(r.value)) + '" selected>' + escapeHtml(String(r.value)) + '</option>'
       : '';
-    return '<select onchange="updateRule(' + i + ',\'value\',this.value)" style="flex:1;">' +
+    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
         (collectionFolders.length === 0
           ? '<option value="">(no folders in this workspace)</option>'
           : '') +
@@ -2405,79 +2528,134 @@ function renderRuleValueInput(r, i) {
       var from = Array.isArray(r.value) ? (r.value[0] || '') : '';
       var to   = Array.isArray(r.value) ? (r.value[1] || '') : '';
       return '<div style="flex:1;display:flex;gap:6px;align-items:center;">' +
-          '<input type="date" value="' + escapeAttr(from) + '" onchange="updateRule(' + i + ',\'value_from\',this.value)" style="flex:1;">' +
+          '<input type="date" value="' + escapeAttr(from) + '" onchange="updateRule(\'' + p + '\',\'value_from\',this.value)" style="flex:1;">' +
           '<span style="color:var(--text-ghost);font-size:11px;">and</span>' +
-          '<input type="date" value="' + escapeAttr(to) + '" onchange="updateRule(' + i + ',\'value_to\',this.value)" style="flex:1;">' +
+          '<input type="date" value="' + escapeAttr(to) + '" onchange="updateRule(\'' + p + '\',\'value_to\',this.value)" style="flex:1;">' +
         '</div>';
     }
     if (r.op === 'recent_days') {
       var n = (typeof r.value === 'number' || (typeof r.value === 'string' && r.value !== '')) ? r.value : 7;
       return '<div style="flex:1;display:flex;gap:6px;align-items:center;">' +
-          '<input type="number" min="1" value="' + escapeAttr(String(n)) + '" onchange="updateRule(' + i + ',\'value\',this.value)" style="width:80px;">' +
+          '<input type="number" min="1" value="' + escapeAttr(String(n)) + '" onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="width:80px;">' +
           '<span style="color:var(--text-ghost);font-size:11px;">days</span>' +
         '</div>';
     }
   }
-  return '<input type="text" value="' + escapeAttr(String(r.value == null ? '' : r.value)) + '" onchange="updateRule(' + i + ',\'value\',this.value)" placeholder="value" style="flex:1;">';
+  var numeric = ['rating', 'quality_score', 'sharpness', 'subject_sharpness',
+    'noise_estimate', 'crop_complete', 'prediction_confidence'].indexOf(r.field) !== -1;
+  return '<input type="' + (numeric ? 'number' : 'text') + '" value="' +
+    escapeAttr(String(r.value == null ? '' : r.value)) +
+    '" onchange="updateRule(\'' + p + '\',\'value\',this.value)" placeholder="value" style="flex:1;">';
+}
+
+function renderFieldOptions(selected) {
+  return Object.keys(FIELD_LABELS).map(function(field) {
+    return '<option value="' + escapeAttr(field) + '"' + (selected === field ? ' selected' : '') + '>' +
+      escapeHtml(FIELD_LABELS[field]) + '</option>';
+  }).join('');
+}
+
+function renderRuleNode(node, path, depth) {
+  var p = escapeAttr(path);
+  var indent = Math.min(depth, 4) * 12;
+  if (node.rules && !node.field) {
+    var groupHtml = '<div style="margin-left:' + indent + 'px;margin-bottom:8px;padding:8px;border:1px solid var(--border-subtle);border-radius:4px;">' +
+      '<div class="rule-row" style="margin-bottom:6px;">' +
+      '<span style="font-size:12px;color:var(--text-dim);">Match</span>' +
+      '<select onchange="updateRule(\'' + p + '\',\'mode\',this.value)">' +
+        '<option value="all"' + (node.mode==='all'?' selected':'') + '>all</option>' +
+        '<option value="any"' + (node.mode==='any'?' selected':'') + '>any</option>' +
+        '<option value="none"' + (node.mode==='none'?' selected':'') + '>none</option>' +
+      '</select>' +
+      '<span style="font-size:12px;color:var(--text-dim);flex:1;">of these rules</span>';
+    if (path) {
+      groupHtml += '<span class="remove-rule" onclick="removeRule(\'' + p + '\')">&times;</span>';
+    }
+    groupHtml += '</div>';
+    (node.rules || []).forEach(function(child, idx) {
+      groupHtml += renderRuleNode(child, path ? path + '.' + idx : String(idx), depth + 1);
+    });
+    groupHtml += '<button onclick="addRuleRow(\'' + p + '\')" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;margin-right:4px;">+ Rule</button>' +
+      '<button onclick="addRuleGroup(\'' + p + '\')" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">+ Group</button>' +
+      '</div>';
+    return groupHtml;
+  }
+  var ops = FIELD_OPS[node.field] || [];
+  var opOptions = ops.map(function(op) {
+    var label = OP_LABELS[op] || op;
+    return '<option value="' + escapeAttr(op) + '"' + (node.op===op?' selected':'') + '>' + escapeHtml(label) + '</option>';
+  }).join('');
+  return '<div class="rule-row" style="margin-left:' + indent + 'px;">' +
+    '<select onchange="updateRule(\'' + p + '\',\'field\',this.value)">' +
+      renderFieldOptions(node.field) +
+    '</select>' +
+    '<select onchange="updateRule(\'' + p + '\',\'op\',this.value)">' +
+      opOptions +
+    '</select>' +
+    renderRuleValueInput(node, path) +
+    '<span class="remove-rule" onclick="removeRule(\'' + p + '\')">&times;</span>' +
+  '</div>';
 }
 
 function renderRules() {
-  var html = '';
-  collectionRules.forEach(function(r, i) {
-    var ops = FIELD_OPS[r.field] || [];
-    var opOptions = ops.map(function(op) {
-      var label = OP_LABELS[op] || op;
-      return '<option value="' + escapeAttr(op) + '"' + (r.op===op?' selected':'') + '>' + escapeHtml(label) + '</option>';
-    }).join('');
-    html += '<div class="rule-row">' +
-      '<select onchange="updateRule(' + i + ',\'field\',this.value)">' +
-        '<option value="keyword"' + (r.field==='keyword'?' selected':'') + '>Keyword</option>' +
-        '<option value="rating"' + (r.field==='rating'?' selected':'') + '>Rating</option>' +
-        '<option value="flag"' + (r.field==='flag'?' selected':'') + '>Flag</option>' +
-        '<option value="color_label"' + (r.field==='color_label'?' selected':'') + '>Color Label</option>' +
-        '<option value="extension"' + (r.field==='extension'?' selected':'') + '>Extension</option>' +
-        '<option value="folder"' + (r.field==='folder'?' selected':'') + '>Folder</option>' +
-        '<option value="timestamp"' + (r.field==='timestamp'?' selected':'') + '>Date</option>' +
-      '</select>' +
-      '<select onchange="updateRule(' + i + ',\'op\',this.value)">' +
-        opOptions +
-      '</select>' +
-      renderRuleValueInput(r, i) +
-      '<span class="remove-rule" onclick="removeRule(' + i + ')">&times;</span>' +
-    '</div>';
-  });
-  document.getElementById('ruleRows').innerHTML = html;
+  document.getElementById('ruleRows').innerHTML = renderRuleNode(collectionEditorRoot, '', 0);
   schedulePreviewUpdate();
+}
+
+function coerceRuleForSave(node) {
+  if (node.rules && !node.field) {
+    return {
+      mode: (['all', 'any', 'none'].indexOf(node.mode) !== -1) ? node.mode : 'all',
+      rules: (node.rules || []).map(coerceRuleForSave),
+    };
+  }
+  var val = node.value;
+  if (['rating', 'quality_score', 'sharpness', 'subject_sharpness',
+       'noise_estimate', 'crop_complete', 'prediction_confidence'].indexOf(node.field) !== -1) {
+    val = parseFloat(val);
+    if (isNaN(val)) val = 0;
+  } else if (['has_mask', 'has_gps', 'location_keyword_missing', 'inat_submitted',
+              'is_duplicate', 'needs_review', 'all'].indexOf(node.field) !== -1) {
+    val = (val === true || val === 1 || val === '1' || val === 'true') ? 1 : 0;
+  } else if (node.field === 'timestamp' && node.op === 'recent_days') {
+    val = parseInt(val, 10) || 0;
+  } else if (node.field === 'timestamp' && node.op === 'between') {
+      var from = Array.isArray(val) ? (val[0] || '') : '';
+      var to   = Array.isArray(val) ? (val[1] || '') : '';
+      val = [from, to];
+  }
+  return {field: node.field, op: node.op, value: val};
+}
+
+function serializeCollectionRules() {
+  return coerceRuleForSave(collectionEditorRoot);
+}
+
+async function editCollection(cid) {
+  var collection = collectionsById[cid];
+  if (!collection) {
+    var list = await safeFetch('/api/collections', {}, {toast: false});
+    renderCollectionList(list || []);
+    collection = collectionsById[cid];
+  }
+  if (collection) showCollectionModal(collection);
 }
 
 async function saveCollection() {
   var name = document.getElementById('collectionName').value.trim();
   if (!name) return;
-
-  // Convert string values to numbers / lists where the backend expects them.
-  // See vireo/db.py::_build_collection_query for the per-field/op shapes.
-  var rules = collectionRules.map(function(r) {
-    var val = r.value;
-    if (r.field === 'rating') {
-      val = parseInt(val, 10) || 0;
-    } else if (r.field === 'timestamp' && r.op === 'recent_days') {
-      val = parseInt(val, 10) || 0;
-    } else if (r.field === 'timestamp' && r.op === 'between') {
-      var from = Array.isArray(val) ? (val[0] || '') : '';
-      var to   = Array.isArray(val) ? (val[1] || '') : '';
-      val = [from, to];
-    }
-    return {field: r.field, op: r.op, value: val};
-  });
+  var rules = serializeCollectionRules();
 
   try {
-    await safeFetch('/api/collections', {
-      method: 'POST',
+    var url = collectionEditingId ? '/api/collections/' + collectionEditingId : '/api/collections';
+    await safeFetch(url, {
+      method: collectionEditingId ? 'PUT' : 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name: name, rules: rules}),
     });
     hideCollectionModal();
     loadCollections();
+    loadCollectionCounts();
   } catch(e) {}
 }
 
@@ -4930,6 +5108,8 @@ document.addEventListener('contextmenu', function(e) {
     { label: 'Filter by this Collection',
       onClick: function() { filterByCollection(cid); } },
     { separator: true },
+    { label: 'Edit Rules',
+      onClick: function() { editCollection(cid); } },
     { label: 'Rename',
       onClick: function() { renameCollection(cid, name); } },
     { label: 'Duplicate',

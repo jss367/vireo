@@ -4850,15 +4850,27 @@ class Database:
                 (self._ws_id(),),
             ).fetchall()
             deleted_set = set(all_ids)
+            def _remove_deleted_photo_ids(node):
+                if isinstance(node, list):
+                    changed_any = False
+                    for child in node:
+                        changed_any = _remove_deleted_photo_ids(child) or changed_any
+                    return changed_any
+                if not isinstance(node, dict):
+                    return False
+                changed_any = _remove_deleted_photo_ids(node.get("rules"))
+                if node.get("field") == "photo_ids" and "value" in node:
+                    values = node.get("value")
+                    if not isinstance(values, list):
+                        return changed_any
+                    original_len = len(values)
+                    node["value"] = [v for v in values if v not in deleted_set]
+                    return changed_any or len(node["value"]) != original_len
+                return changed_any
+
             for coll in collections:
                 rules = _json.loads(coll["rules"])
-                changed = False
-                for rule in rules:
-                    if rule.get("field") == "photo_ids" and "value" in rule:
-                        original_len = len(rule["value"])
-                        rule["value"] = [v for v in rule["value"] if v not in deleted_set]
-                        if len(rule["value"]) != original_len:
-                            changed = True
+                changed = _remove_deleted_photo_ids(rules)
                 if changed:
                     self.conn.execute(
                         "UPDATE collections SET rules = ? WHERE id = ?",
@@ -8904,43 +8916,109 @@ class Database:
         return self._build_query_from_rules(rules)
 
     def _build_query_from_rules(self, rules):
-        """Build SQL clauses from a rules list (not yet persisted).
+        """Build SQL clauses from a smart-collection rule tree.
 
         Returns (folder_join, join_clause, where, params). Raises ValueError on
         malformed input — callers that accept rules from untrusted sources
         (e.g. the live-preview API) should catch and surface a 400.
+
+        Backward compatibility: the original collection format was a flat list
+        of rule objects, implicitly combined with AND. Newer collections may use
+        a grouped tree:
+
+            {"mode": "all"|"any"|"none", "rules": [rule_or_group, ...]}
         """
-        if not isinstance(rules, list):
-            raise ValueError("rules must be a list")
-        # Only photo_ids and timestamp/between consume list values; every other
-        # field binds `value` as a single SQL parameter, so a list there raises
-        # sqlite3.ProgrammingError ("type 'list' is not supported"). Without
-        # this distinction the preview route would surface those as 500s on
-        # inputs like {"field":"rating","value":[4]}.
-        for r in rules:
-            if not isinstance(r, dict) or "field" not in r:
-                raise ValueError("each rule must be an object with a 'field'")
-            field = r.get("field")
-            op = r.get("op")
-            val = r.get("value")
-            list_allowed = field == "photo_ids" or (field == "timestamp" and op == "between")
-            if isinstance(val, list):
+        if isinstance(rules, list):
+            root = {"mode": "all", "rules": rules}
+        elif isinstance(rules, dict) and "rules" in rules:
+            root = rules
+        else:
+            raise ValueError("rules must be a list or group object")
+
+        def _is_scalar(value):
+            return value is None or isinstance(value, (str, int, float, bool))
+
+        def _validate_node(node):
+            if not isinstance(node, dict):
+                raise ValueError("each rule must be an object")
+            if "rules" in node and "field" not in node:
+                mode = node.get("mode", "all")
+                if mode not in ("all", "any", "none"):
+                    raise ValueError("rule group mode must be all, any, or none")
+                children = node.get("rules")
+                if not isinstance(children, list):
+                    raise ValueError("rule group rules must be a list")
+                for child in children:
+                    _validate_node(child)
+                return
+            if "field" not in node:
+                raise ValueError("each rule must have a 'field'")
+            field = node.get("field")
+            op = node.get("op")
+            value = node.get("value")
+            list_allowed = (
+                field == "photo_ids"
+                or (field == "timestamp" and op == "between")
+            )
+            if isinstance(value, list):
                 if not list_allowed:
                     raise ValueError(f"rule field {field!r} does not accept a list value")
-                for item in val:
-                    if item is not None and not isinstance(item, (str, int, float, bool)):
+                for item in value:
+                    if not _is_scalar(item):
                         raise ValueError("rule list values must be scalars")
-                continue
-            if val is None or isinstance(val, (str, int, float, bool)):
-                continue
-            raise ValueError("rule value must be a scalar")
+                return
+            if not _is_scalar(value):
+                raise ValueError("rule value must be a scalar")
 
-        conditions = []
-        params = []
-        need_keyword_join = False
-        need_prediction_join = False
+        def _truthy(value):
+            return value is True or value == 1 or value == "1" or value == "true"
 
-        for rule in rules:
+        def _falsey(value):
+            return value is False or value == 0 or value == "0" or value == "false"
+
+        def _numeric_condition(column, op, value, allow_null=False):
+            if op == ">=":
+                return f"{column} >= ?", [value]
+            if op == "<=":
+                return f"{column} <= ?", [value]
+            if op in ("equals", "is"):
+                return f"{column} = ?", [value]
+            if op == "is not":
+                prefix = f"{column} IS NULL OR " if allow_null else ""
+                return f"({prefix}{column} != ?)", [value]
+            return "0", []
+
+        def _keyword_exists(predicate, predicate_params):
+            return (
+                "EXISTS (SELECT 1 FROM photo_keywords pk "
+                "JOIN keywords k ON k.id = pk.keyword_id "
+                f"WHERE pk.photo_id = p.id AND {predicate})",
+                list(predicate_params),
+            )
+
+        def _keyword_not_exists(predicate, predicate_params):
+            return (
+                "NOT EXISTS (SELECT 1 FROM photo_keywords pk "
+                "JOIN keywords k ON k.id = pk.keyword_id "
+                f"WHERE pk.photo_id = p.id AND {predicate})",
+                list(predicate_params),
+            )
+
+        def _prediction_exists(predicate, predicate_params, review_join=False):
+            review = (
+                " LEFT JOIN prediction_review prv "
+                "ON prv.prediction_id = pred.id AND prv.workspace_id = ?"
+                if review_join else ""
+            )
+            params = ([self._ws_id()] if review_join else []) + list(predicate_params)
+            return (
+                "EXISTS (SELECT 1 FROM detections det "
+                "JOIN predictions pred ON pred.detection_id = det.id"
+                f"{review} WHERE det.photo_id = p.id AND {predicate})",
+                params,
+            )
+
+        def _build_leaf(rule):
             field = rule["field"]
             op = rule.get("op", "")
             value = rule.get("value")
@@ -8948,172 +9026,84 @@ class Database:
             if field == "all":
                 # Sentinel for defaults like "All Photos" — adds no condition,
                 # so the workspace-folder join alone determines matches.
-                continue
-            elif field == "photo_ids":
-                # Static collection — explicit list of photo IDs
+                return None, []
+            if field == "photo_ids":
                 ids = value if isinstance(value, list) else []
-                if ids:
-                    placeholders = ",".join("?" for _ in ids)
-                    conditions.append(f"p.id IN ({placeholders})")
-                    params.extend(ids)
-                else:
-                    conditions.append("0")  # empty collection
-            elif field == "rating":
-                if op == ">=":
-                    conditions.append("p.rating >= ?")
-                    params.append(value)
-                elif op == "<=":
-                    conditions.append("p.rating <= ?")
-                    params.append(value)
-                elif op in ("equals", "is"):
-                    conditions.append("p.rating = ?")
-                    params.append(value)
-                elif op == "is not":
-                    conditions.append("p.rating != ?")
-                    params.append(value)
-            elif field == "keyword":
+                if not ids:
+                    return "0", []
+                placeholders = ",".join("?" for _ in ids)
+                return f"p.id IN ({placeholders})", list(ids)
+            if field in ("rating", "quality_score", "sharpness",
+                         "subject_sharpness", "noise_estimate",
+                         "crop_complete"):
+                column = "p.subject_tenengrad" if field == "subject_sharpness" else f"p.{field}"
+                return _numeric_condition(column, op, value, allow_null=True)
+            if field == "keyword":
                 if op == "contains":
-                    need_keyword_join = True
-                    conditions.append("k.name LIKE ?")
-                    params.append(f"%{value}%")
-                elif op == "not_contains":
-                    conditions.append(
-                        """NOT EXISTS (
-                        SELECT 1 FROM photo_keywords pk4
-                        JOIN keywords k4 ON k4.id = pk4.keyword_id
-                        WHERE pk4.photo_id = p.id AND k4.name LIKE ?)"""
-                    )
-                    params.append(f"%{value}%")
-                elif op in ("equals", "is"):
-                    need_keyword_join = True
-                    conditions.append("k.name = ?")
-                    params.append(value)
-                elif op == "is not":
-                    conditions.append(
-                        """NOT EXISTS (
-                        SELECT 1 FROM photo_keywords pk4
-                        JOIN keywords k4 ON k4.id = pk4.keyword_id
-                        WHERE pk4.photo_id = p.id AND k4.name = ?)"""
-                    )
-                    params.append(value)
-            elif field == "folder":
+                    return _keyword_exists("k.name LIKE ?", [f"%{value}%"])
+                if op == "not_contains":
+                    return _keyword_not_exists("k.name LIKE ?", [f"%{value}%"])
+                if op in ("equals", "is"):
+                    return _keyword_exists("k.name = ?", [value])
+                if op == "is not":
+                    return _keyword_not_exists("k.name = ?", [value])
+            if field == "folder":
                 if op == "under":
-                    conditions.append("f.path LIKE ?")
-                    params.append(f"{value}%")
-                elif op == "not_under":
-                    conditions.append("(f.path IS NULL OR f.path NOT LIKE ?)")
-                    params.append(f"{value}%")
-            elif field == "flag":
+                    return "f.path LIKE ?", [f"{value}%"]
+                if op == "not_under":
+                    return "(f.path IS NULL OR f.path NOT LIKE ?)", [f"{value}%"]
+            if field == "flag":
                 if op in ("equals", "is"):
-                    conditions.append("p.flag = ?")
-                    params.append(value)
-                elif op == "is not":
-                    conditions.append("p.flag != ?")
-                    params.append(value)
-            elif field == "color_label":
+                    return "p.flag = ?", [value]
+                if op == "is not":
+                    return "p.flag != ?", [value]
+            if field == "color_label":
+                exists = (
+                    "EXISTS (SELECT 1 FROM photo_color_labels pcl "
+                    "WHERE pcl.photo_id = p.id AND pcl.workspace_id = ? "
+                    "AND pcl.color = ?)"
+                )
+                params = [self._ws_id(), value]
                 if op in ("equals", "is"):
-                    conditions.append(
-                        """EXISTS (
-                        SELECT 1 FROM photo_color_labels pcl
-                        WHERE pcl.photo_id = p.id AND pcl.workspace_id = ? AND pcl.color = ?)"""
-                    )
-                    params.append(self._ws_id())
-                    params.append(value)
-                elif op == "is not":
-                    conditions.append(
-                        """NOT EXISTS (
-                        SELECT 1 FROM photo_color_labels pcl
-                        WHERE pcl.photo_id = p.id AND pcl.workspace_id = ? AND pcl.color = ?)"""
-                    )
-                    params.append(self._ws_id())
-                    params.append(value)
-            elif field == "has_species":
-                if op == "equals" and value is False or value == 0:
-                    conditions.append(
-                        """NOT EXISTS (
-                        SELECT 1 FROM photo_keywords pk3
-                        JOIN keywords k3 ON k3.id = pk3.keyword_id
-                        WHERE pk3.photo_id = p.id AND k3.is_species = 1)"""
-                    )
-                elif op == "equals" and value is True or value == 1:
-                    conditions.append(
-                        """EXISTS (
-                        SELECT 1 FROM photo_keywords pk3
-                        JOIN keywords k3 ON k3.id = pk3.keyword_id
-                        WHERE pk3.photo_id = p.id AND k3.is_species = 1)"""
-                    )
-            elif field == "has_subject":
-                # Match the has_species pattern, but resolve "subject" via
-                # the workspace's configured subject_types (a set of keyword
-                # types). Sorted for deterministic SQL parameter order.
-                #
-                # When 'taxonomy' is among the subject types, also count
-                # legacy species rows (is_species=1 with a non-taxonomy
-                # type). Upgraded databases retain those rows until the
-                # background mark_species_keywords pass retypes them; the
-                # type-only predicate would otherwise place already-
-                # identified photos into 'Needs Identification'.
+                    return exists, params
+                if op == "is not":
+                    return f"NOT {exists}", params
+            if field == "has_species":
+                if op == "equals" and _falsey(value):
+                    return _keyword_not_exists("k.is_species = 1", [])
+                if op == "equals" and _truthy(value):
+                    return _keyword_exists("k.is_species = 1", [])
+            if field == "has_subject":
                 subject_types = sorted(self.get_subject_types())
                 if not subject_types:
-                    if op == "equals" and (value is True or value == 1):
-                        conditions.append("0")  # nothing matches
-                    # value==0 with empty subject_types is a no-op (every
-                    # photo is "not identified" by the empty set)
-                    continue
-                type_placeholders = ",".join("?" * len(subject_types))
-                type_clause = f"k5.type IN ({type_placeholders})"
+                    if op == "equals" and _truthy(value):
+                        return "0", []
+                    return None, []
+                placeholders = ",".join("?" * len(subject_types))
+                type_clause = f"k.type IN ({placeholders})"
                 if "taxonomy" in subject_types:
-                    type_clause = f"({type_clause} OR k5.is_species = 1)"
-                if op == "equals" and (value is False or value == 0):
-                    conditions.append(
-                        f"""NOT EXISTS (
-                        SELECT 1 FROM photo_keywords pk5
-                        JOIN keywords k5 ON k5.id = pk5.keyword_id
-                        WHERE pk5.photo_id = p.id AND {type_clause})"""
-                    )
-                    params.extend(subject_types)
-                elif op == "equals" and (value is True or value == 1):
-                    conditions.append(
-                        f"""EXISTS (
-                        SELECT 1 FROM photo_keywords pk5
-                        JOIN keywords k5 ON k5.id = pk5.keyword_id
-                        WHERE pk5.photo_id = p.id AND {type_clause})"""
-                    )
-                    params.extend(subject_types)
-            elif field == "keyword_count":
-                if op == "equals":
-                    conditions.append(
-                        """(SELECT COUNT(*) FROM photo_keywords pk2
-                                         WHERE pk2.photo_id = p.id) = ?"""
-                    )
-                    params.append(value)
-                elif op == ">=":
-                    conditions.append(
-                        """(SELECT COUNT(*) FROM photo_keywords pk2
-                                         WHERE pk2.photo_id = p.id) >= ?"""
-                    )
-                    params.append(value)
-            elif field == "timestamp":
+                    type_clause = f"({type_clause} OR k.is_species = 1)"
+                if op == "equals" and _falsey(value):
+                    return _keyword_not_exists(type_clause, subject_types)
+                if op == "equals" and _truthy(value):
+                    return _keyword_exists(type_clause, subject_types)
+            if field == "keyword_count":
+                expr = "(SELECT COUNT(*) FROM photo_keywords pk2 WHERE pk2.photo_id = p.id)"
+                return _numeric_condition(expr, op, value)
+            if field == "timestamp":
                 if op == "between" and isinstance(value, list) and len(value) == 2:
-                    conditions.append("p.timestamp >= ? AND p.timestamp <= ?")
-                    params.append(value[0])
-                    params.append(_inclusive_date_to(value[1]))
-                elif op == "recent_days":
-                    conditions.append("p.timestamp >= datetime('now', ?)")
-                    params.append(f"-{value} days")
-            elif field == "extension":
-                # Match case-insensitively: get_workspace_extensions() returns
-                # lowercased options, but photos imported by older scans may
-                # have stored mixed-case extensions (.JPG vs .jpg). SQLite's
-                # default = / != is case-sensitive, so without LOWER() a
-                # rule saved as ".jpg" would silently miss .JPG rows.
+                    return "p.timestamp >= ? AND p.timestamp <= ?", [
+                        value[0],
+                        _inclusive_date_to(value[1]),
+                    ]
+                if op == "recent_days":
+                    return "p.timestamp >= datetime('now', ?)", [f"-{value} days"]
+            if field == "extension":
                 if op in ("equals", "is"):
-                    conditions.append("LOWER(p.extension) = LOWER(?)")
-                    params.append(value)
-                elif op == "is not":
-                    conditions.append("LOWER(p.extension) != LOWER(?)")
-                    params.append(value)
-            elif field in (
+                    return "LOWER(p.extension) = LOWER(?)", [value]
+                if op == "is not":
+                    return "LOWER(p.extension) != LOWER(?)", [value]
+            if field in (
                 "taxonomy_kingdom",
                 "taxonomy_phylum",
                 "taxonomy_class",
@@ -9121,29 +9111,108 @@ class Database:
                 "taxonomy_family",
                 "taxonomy_genus",
             ):
-                need_prediction_join = True
                 col = f"pred.{field}"
                 if op in ("equals", "is"):
-                    conditions.append(f"{col} = ?")
-                    params.append(value)
-                elif op == "is not":
-                    conditions.append(f"({col} IS NULL OR {col} != ?)")
-                    params.append(value)
-                elif op == "contains":
-                    conditions.append(f"{col} LIKE ?")
-                    params.append(f"%{value}%")
+                    return _prediction_exists(f"{col} = ?", [value])
+                if op == "is not":
+                    return (
+                        "NOT " + _prediction_exists(f"{col} = ?", [value])[0],
+                        [value],
+                    )
+                if op == "contains":
+                    return _prediction_exists(f"{col} LIKE ?", [f"%{value}%"])
+            if field == "prediction_confidence":
+                cond, cond_params = _numeric_condition("pred.confidence", op, value)
+                return _prediction_exists(cond, cond_params)
+            if field == "classifier_model":
+                if op in ("equals", "is"):
+                    return _prediction_exists("pred.classifier_model = ?", [value])
+                if op == "is not":
+                    return (
+                        "NOT " + _prediction_exists("pred.classifier_model = ?", [value])[0],
+                        [value],
+                    )
+                if op == "contains":
+                    return _prediction_exists("pred.classifier_model LIKE ?", [f"%{value}%"])
+            if field == "prediction_status":
+                if op in ("equals", "is"):
+                    return _prediction_exists(
+                        "COALESCE(prv.status, 'pending') = ?",
+                        [value],
+                        review_join=True,
+                    )
+                if op == "is not":
+                    exists, params = _prediction_exists(
+                        "COALESCE(prv.status, 'pending') = ?",
+                        [value],
+                        review_join=True,
+                    )
+                    return "NOT " + exists, params
+            if field == "needs_review":
+                exists, params = _prediction_exists(
+                    "COALESCE(prv.status, 'pending') = 'pending'",
+                    [],
+                    review_join=True,
+                )
+                return (exists if _truthy(value) else "NOT " + exists), params
+            if field == "has_mask":
+                has = "p.mask_path IS NOT NULL"
+                return (has if _truthy(value) else f"NOT ({has})"), []
+            if field == "active_mask_variant":
+                if op in ("equals", "is"):
+                    return "p.active_mask_variant = ?", [value]
+                if op == "is not":
+                    return "(p.active_mask_variant IS NULL OR p.active_mask_variant != ?)", [value]
+                if op == "contains":
+                    return "p.active_mask_variant LIKE ?", [f"%{value}%"]
+            if field == "has_gps":
+                has = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
+                return (has if _truthy(value) else f"NOT ({has})"), []
+            if field == "location_keyword_missing":
+                gps = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
+                no_loc = (
+                    "NOT EXISTS (SELECT 1 FROM photo_keywords pk "
+                    "JOIN keywords k ON k.id = pk.keyword_id "
+                    "WHERE pk.photo_id = p.id AND k.type = 'location')"
+                )
+                cond = f"({gps}) AND ({no_loc})"
+                return (cond if _truthy(value) else f"NOT ({cond})"), []
+            if field == "inat_submitted":
+                has = "EXISTS (SELECT 1 FROM inat_submissions ins WHERE ins.photo_id = p.id)"
+                return (has if _truthy(value) else f"NOT {has}"), []
+            if field == "is_duplicate":
+                has = (
+                    "p.file_hash IS NOT NULL AND EXISTS ("
+                    "SELECT 1 FROM photos p2 "
+                    "JOIN workspace_folders wf2 ON wf2.folder_id = p2.folder_id "
+                    "AND wf2.workspace_id = ? "
+                    "WHERE p2.id != p.id AND p2.file_hash = p.file_hash "
+                    "AND p2.flag != 'rejected')"
+                )
+                return (has if _truthy(value) else f"NOT ({has})"), [self._ws_id()]
+            raise ValueError(f"unsupported collection rule field/op: {field}/{op}")
 
-        join_clause = ""
-        if need_keyword_join:
-            join_clause += " JOIN photo_keywords pk ON pk.photo_id = p.id"
-            join_clause += " JOIN keywords k ON k.id = pk.keyword_id"
-        if need_prediction_join:
-            # Detections are global (no workspace_id); workspace scoping is
-            # enforced by the folder_join on workspace_folders below.
-            join_clause += (
-                " JOIN detections det ON det.photo_id = p.id"
-                " JOIN predictions pred ON pred.detection_id = det.id"
-            )
+        def _build_node(node):
+            if "rules" in node and "field" not in node:
+                mode = node.get("mode", "all")
+                child_sql = []
+                params = []
+                for child in node.get("rules", []):
+                    sql, child_params = _build_node(child)
+                    if sql:
+                        child_sql.append(f"({sql})")
+                        params.extend(child_params)
+                if not child_sql:
+                    return ("0", []) if mode == "any" else (None, [])
+                if mode == "all":
+                    return " AND ".join(child_sql), params
+                if mode == "any":
+                    return " OR ".join(child_sql), params
+                return "NOT (" + " OR ".join(child_sql) + ")", params
+            return _build_leaf(node)
+
+        _validate_node(root)
+        condition, params = _build_node(root)
 
         # Always join folders for folder-under rules, scoped to workspace
         folder_join = " JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
@@ -9152,11 +9221,9 @@ class Database:
         # folder_join comes before join_clause in the query, so its param goes first
         params.insert(0, self._ws_id())
 
-        where = ""
-        if conditions:
-            where = "WHERE " + " AND ".join(conditions)
+        where = f"WHERE {condition}" if condition else ""
 
-        return folder_join, join_clause, where, params
+        return folder_join, "", where, params
 
     def get_collection_photos(self, collection_id, page=1, per_page=50):
         """Build SQL from collection rules and return matching photos."""
