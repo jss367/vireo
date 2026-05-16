@@ -142,6 +142,67 @@ def test_collection_click_preserves_selected_member_position(live_server, page):
     assert abs(after_top - before_top) <= 1
 
 
+def test_stale_collection_switch_does_not_restore_anchor(live_server, page):
+    """An older collection switch must not restore after a newer switch wins."""
+    import json as _json
+
+    db = live_server["db"]
+    first_id = db.add_collection(
+        "First Collection",
+        _json.dumps([{"field": "all"}]),
+    )
+    second_id = db.add_collection(
+        "Second Collection",
+        _json.dumps([{"field": "all"}]),
+    )
+    target_id = live_server["data"]["photos"][3]
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    page.locator(f'.grid-card[data-id="{target_id}"]').wait_for(state="visible")
+    page.locator(f'.grid-card[data-id="{target_id}"]').click()
+
+    page.evaluate(
+        """() => {
+          window.__restoreAnchorCalls = 0;
+          const realRestore = window.restorePhotoAnchor;
+          window.restorePhotoAnchor = function(anchor) {
+            window.__restoreAnchorCalls += 1;
+            return realRestore(anchor);
+          };
+
+          const realLoadPhotos = window.loadPhotos;
+          let calls = 0;
+          window.__releaseFirstCollectionLoad = null;
+          window.loadPhotos = async function() {
+            calls += 1;
+            if (calls === 1) {
+              await new Promise(resolve => {
+                window.__releaseFirstCollectionLoad = resolve;
+              });
+            }
+            return realLoadPhotos();
+          };
+        }"""
+    )
+
+    page.evaluate("(collectionId) => { window.__firstSwitch = filterByCollection(collectionId); }", first_id)
+    page.wait_for_function("typeof window.__releaseFirstCollectionLoad === 'function'")
+
+    page.evaluate("window.selectedPhotoId = null")
+    page.evaluate("(collectionId) => filterByCollection(collectionId)", second_id)
+    page.wait_for_function(f"window.activeCollectionId === {second_id}")
+
+    page.evaluate("window.__releaseFirstCollectionLoad()")
+    page.wait_for_function("window.__firstSwitch && true")
+    page.evaluate("() => window.__firstSwitch")
+    page.wait_for_timeout(50)
+
+    assert page.evaluate("window.activeCollectionId") == second_id
+    assert page.evaluate("window.__restoreAnchorCalls") == 0
+
+
 def test_collection_duplicate_fires_endpoint_and_rerenders(live_server, page):
     """Clicking 'Duplicate' POSTs to /duplicate and re-renders the list."""
     _seed_collection(live_server, "Picks B")

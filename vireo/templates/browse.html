@@ -1685,7 +1685,7 @@ async function filterByCollection(id) {
   photos = [];
   currentPage = 1;
   allLoaded = false;
-  loadEpoch++;         // invalidate any in-flight loadPhotos response
+  var collectionLoadEpoch = ++loadEpoch;  // invalidate any in-flight loadPhotos response
   loading = false;     // safe to clear: the stale response will be dropped
   // Multi-selects cannot be safely carried across a dataset switch: a
   // surviving Set can arm batch actions against hidden photos. A single
@@ -1700,9 +1700,11 @@ async function filterByCollection(id) {
   document.getElementById('gridContainer').scrollTop = 0;
   if (!anchor) closeDetail();
   await loadPhotos();
+  if (collectionLoadEpoch !== loadEpoch || activeCollectionId !== id) return;
   if (!anchor) return;
 
   var card = await loadUntilPhotoRendered(anchor.photoId);
+  if (collectionLoadEpoch !== loadEpoch || activeCollectionId !== id) return;
   if (!card) {
     clearActiveSelectionAndDetail();
     return;
@@ -1713,6 +1715,7 @@ async function filterByCollection(id) {
   updateBatchBar();
   if (anchor.detailVisible) loadDetail(anchor.photoId);
   requestAnimationFrame(function() {
+    if (collectionLoadEpoch !== loadEpoch || activeCollectionId !== id) return;
     restorePhotoAnchor(anchor);
     updateScrollPosition();
   });
