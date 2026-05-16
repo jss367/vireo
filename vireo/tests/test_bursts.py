@@ -140,6 +140,19 @@ def test_burst_empty():
     assert detect_bursts([]) == []
 
 
+def test_burst_defaults_mirror_config():
+    """Burst helper defaults come from the application config defaults."""
+    from bursts import DEFAULTS as BURST_DEFAULTS
+    from config import DEFAULTS as CONFIG_DEFAULTS
+
+    assert BURST_DEFAULTS["burst_time_gap"] == CONFIG_DEFAULTS["pipeline"][
+        "burst_time_gap"
+    ]
+    assert BURST_DEFAULTS["burst_embedding_threshold"] == CONFIG_DEFAULTS[
+        "pipeline"
+    ]["burst_embedding_threshold"]
+
+
 # -- Configurable thresholds --
 
 
@@ -178,8 +191,9 @@ def test_burst_custom_embedding_threshold():
         _make_photo(0.5, subj_emb=similar),
     ]
 
-    # Default 0.80 → likely cut if cosine < 0.80
+    # Default 0.40 → likely keep moderate flying-bird pose changes together.
     result_default = detect_bursts(photos)
+    assert len(result_default) == 1
 
     # Very low threshold → no cut
     result_low = detect_bursts(photos, config={"burst_embedding_threshold": 0.3})

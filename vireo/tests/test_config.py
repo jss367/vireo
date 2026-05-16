@@ -74,6 +74,7 @@ def test_pipeline_defaults_exist():
     p = DEFAULTS["pipeline"]
     assert p["w_focus"] == 0.45
     assert p["burst_time_gap"] == 3.0
+    assert p["burst_embedding_threshold"] == 0.40
     assert p["burst_lambda"] == 0.85
     assert p["encounter_lambda"] == 0.70
     assert p["reject_composite"] == 0.40
