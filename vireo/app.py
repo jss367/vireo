@@ -4437,14 +4437,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_mark_prediction_reviewed(pred_id):
         db = _get_db()
         pred = db.conn.execute(
-            """SELECT pr.id, pr.species, d.photo_id
+            """SELECT pr.id, pr.species, d.photo_id,
+                      COALESCE(pr_rev.status, 'pending') AS status
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id
+                AND pr_rev.workspace_id = ?
                WHERE pr.id = ?""",
-            (pred_id,),
+            (db._ws_id(), pred_id),
         ).fetchone()
         if pred is None:
             return json_error("prediction not found", 404)
+        # Only pending predictions may transition to reviewed. Without this
+        # guard a stale/double request or a direct API call against an
+        # already accepted/rejected prediction would silently overwrite the
+        # prior decision, corrupting review state and audit history.
+        if pred["status"] != "pending":
+            return json_error(
+                f'prediction already {pred["status"]}; cannot mark reviewed',
+                409,
+            )
         db.update_prediction_status(pred_id, "reviewed")
         db.record_edit(
             "prediction_reviewed",
