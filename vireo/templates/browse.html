@@ -1318,7 +1318,7 @@ function invalidateKeywordAutocompleteCache() {
 }
 
 async function loadKeywordAutocompleteOptions(force) {
-  if (!force && keywordAutocompleteCache) return keywordAutocompleteCache;
+  if (!force && keywordAutocompleteCache !== null) return keywordAutocompleteCache;
   if (!force && keywordAutocompletePromise) return keywordAutocompletePromise;
   keywordAutocompletePromise = safeFetch('/api/keywords/all', {}, { toast: false })
     .then(function(rows) {

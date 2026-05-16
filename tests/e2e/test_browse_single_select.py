@@ -192,6 +192,30 @@ def test_add_keyword_autocomplete_retries_after_fetch_failure(live_server, page)
     ).to_be_visible()
 
 
+def test_add_keyword_autocomplete_caches_empty_result(live_server, page):
+    """A successful empty keyword list should be treated as loaded."""
+    target_id = live_server["data"]["photos"][1]
+    calls = {"count": 0}
+
+    def route_keyword_all(route):
+        calls["count"] += 1
+        route.fulfill(status=200, content_type="application/json", body="[]")
+
+    page.route("**/api/keywords/all", route_keyword_all)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(f'.grid-card[data-id="{target_id}"]').click()
+
+    keyword_input = page.locator("#addKeywordInput")
+    with page.expect_response(
+        lambda r: "/api/keywords/all" in r.url and r.status == 200
+    ):
+        keyword_input.click()
+
+    keyword_input.fill("AL")
+    page.wait_for_timeout(100)
+    assert calls["count"] == 1
+
+
 def test_cmd_click_toggles_focus_out_of_set_reconciles(live_server, page):
     """click A, cmd-click B, cmd-click A: the focus must not linger on A.
 
