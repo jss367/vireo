@@ -7693,6 +7693,24 @@ class Database:
                              )""",
                         (photo_id,),
                     )
+                    # The DB rows are gone, but sync_to_xmp only strips a
+                    # keyword from the sidecar when a matching keyword_remove
+                    # pending change exists. Queue one per removed species so a
+                    # "replace" actually clears the stale tags downstream. A
+                    # still-pending add for the same keyword cancels out
+                    # instead of stacking (mirrors _queue_keyword_remove).
+                    new_species_lower = species.lower()
+                    for old_name in old_species:
+                        if old_name.lower() == new_species_lower:
+                            continue
+                        cancelled = self.remove_pending_changes(
+                            photo_id, "keyword_add", old_name, _commit=False,
+                        )
+                        if cancelled == 0:
+                            self.queue_change(
+                                photo_id, "keyword_remove", old_name,
+                                _commit=False,
+                            )
                 self.tag_photo(photo_id, kid, _commit=False)
                 self.queue_change(photo_id, "keyword_add", species, _commit=False)
                 affected.append({

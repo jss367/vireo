@@ -1089,6 +1089,25 @@ def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
         assert "Old Species One" not in names
         assert "Old Species Two" not in names
 
+    # The DB rows are gone, but sync_to_xmp only strips a sidecar keyword
+    # when a matching keyword_remove pending change exists. Without one the
+    # old species would silently linger in the XMP files.
+    changes = db.get_pending_changes()
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in changes
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (photo_ids[0], "Old Species One") in removed
+    assert (photo_ids[1], "Old Species Two") in removed
+    for pid in photo_ids:
+        assert any(
+            c["photo_id"] == pid
+            and c["change_type"] == "keyword_add"
+            and c["value"] == "New Species"
+            for c in changes
+        )
+
 
 def test_api_predictions_include_bounding_box(app_and_db):
     """GET /api/predictions should return bounding box data from detections."""
