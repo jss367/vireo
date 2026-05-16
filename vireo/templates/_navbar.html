@@ -3365,6 +3365,10 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbOpenSeq += 1;
   var openSeq = _lbOpenSeq;
   options = options || {};
+  var preserveOneToOne = !!options.preserveOneToOne;
+  var transitionZoom = preserveOneToOne
+    ? Math.max(1.0, _lbZoom || _lbNativeZoom || 1.0)
+    : 1.0;
 
   _lightboxCurrentId = photoId;
   if (photoList) _lightboxPhotoList = photoList;
@@ -3379,8 +3383,10 @@ function openLightbox(photoId, filename, photoList, options) {
   var similarBtn = document.getElementById('lightboxSimilar');
   var inatBtn = document.getElementById('lightboxInat');
   var wrap = document.getElementById('lightboxWrap');
-  // Reset zoom when loading a new image
-  wrap.classList.remove('zoomed');
+  // Reset pan for the new photo, but keep a 1:1 transform during arrow
+  // navigation so the outgoing image does not visibly snap back to fit before
+  // the replacement finishes loading.
+  wrap.classList.toggle('zoomed', transitionZoom > 1.001);
   wrap.scrollTop = 0;
   wrap.scrollLeft = 0;
   document.getElementById('lightboxZoomBadge').style.display = 'none';
@@ -3392,18 +3398,18 @@ function openLightbox(photoId, filename, photoList, options) {
   if (eyeContainer) { eyeContainer.innerHTML = ''; eyeContainer.style.display = 'none'; }
 
   // Reset continuous zoom state for new photo
-  _lbZoom = 1.0;
+  _lbZoom = transitionZoom;
   _lbPanX = 0;
   _lbPanY = 0;
   _lbNativeZoom = null;
   _lbPhotoW = null;
   _lbPhotoH = null;
-  _lbCurrentSrcKey = 'full';
+  _lbCurrentSrcKey = preserveOneToOne ? 'original' : 'full';
   _lbFullLongEdge = null;
-  _lbPending1To1 = !!options.preserveOneToOne;
+  _lbPending1To1 = preserveOneToOne;
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
-  _lbApplyTransform();  // Clear any lingering translate/scale from prior photo before the new one renders.
+  _lbApplyTransform();  // Clear stale pan while preserving 1:1 scale when requested.
 
   // Fetch original dimensions (async, non-blocking for image display)
   var flagFetchSeq = _lbFlagEditSeq;
@@ -3422,9 +3428,9 @@ function openLightbox(photoId, filename, photoList, options) {
     })
     .catch(function() {});
 
-  img.src = '/photos/' + photoId + '/full';
-  img.onload = function() {
+  function handleInitialImageLoad() {
     img.onload = null;
+    img.onerror = null;
     // Only record the /full tier size if the currently loaded source is still /full.
     // A quick user zoom can trigger a debounced swap to a higher tier before /full
     // finishes loading, which would otherwise make us record the swapped source's
@@ -3433,10 +3439,30 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
       _lbSessionFullLongEdge = _lbFullLongEdge;
     }
+    if (_lightboxCurrentId === photoId && _lbCurrentSrcKey === 'original' && !_lbPhotoW && img.naturalWidth) {
+      _lbPhotoW = img.naturalWidth;
+      _lbPhotoH = img.naturalHeight;
+    }
     _lbRecomputeNativeZoom();
     _lbApplyPendingOneToOneZoom();
     _lbApplyTransform();
-  };
+  }
+  function handleInitialImageError() {
+    if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
+    if (_lbCurrentSrcKey !== 'original') {
+      img.onload = null;
+      img.onerror = null;
+      return;
+    }
+    _lbCurrentSrcKey = 'full';
+    _lbDesiredSrcKey = null;
+    img.onload = handleInitialImageLoad;
+    img.onerror = handleInitialImageError;
+    img.src = _lbSrcUrl(photoId, 'full');
+  }
+  img.onload = handleInitialImageLoad;
+  img.onerror = handleInitialImageError;
+  img.src = _lbSrcUrl(photoId, _lbCurrentSrcKey);
   label.textContent = filename || '';
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
   similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
@@ -4238,7 +4264,7 @@ function _lbRecomputeNativeZoom() {
   // Compute zoom value that corresponds to 1:1 (one screen pixel == one image pixel).
   // We need the displayed size of the image at zoom=1.0 (fit) to compare against native.
   var img = document.getElementById('lightboxImg');
-  if (!img || !_lbPhotoW || !_lbPhotoH || !img.naturalWidth || !img.naturalHeight) {
+  if (!img || !img.complete || !_lbPhotoW || !_lbPhotoH || !img.naturalWidth || !img.naturalHeight) {
     _lbNativeZoom = null;
     return;
   }
