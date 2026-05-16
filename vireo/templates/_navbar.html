@@ -3488,6 +3488,39 @@ function lightboxNav(delta) {
   });
 }
 
+function requestLightboxFullscreen() {
+  var overlay = document.getElementById('lightboxOverlay');
+  if (!overlay || !overlay.classList.contains('active')) return;
+  if (document.fullscreenElement === overlay || document.webkitFullscreenElement === overlay) return;
+  var request = overlay.requestFullscreen || overlay.webkitRequestFullscreen;
+  if (!request) return;
+  try {
+    var result = request.call(overlay);
+    if (result && typeof result.catch === 'function') result.catch(function() {});
+  } catch(e) {}
+}
+
+function exitLightboxFullscreen() {
+  if (!document.fullscreenElement && !document.webkitFullscreenElement) return;
+  var exit = document.exitFullscreen || document.webkitExitFullscreen;
+  if (!exit) return;
+  try {
+    var result = exit.call(document);
+    if (result && typeof result.catch === 'function') result.catch(function() {});
+  } catch(e) {}
+}
+
+function lightboxKeyMatchesConfiguredBrowseShortcut(e) {
+  var browse = window._vireoShortcuts && window._vireoShortcuts.browse;
+  if (!browse) return false;
+  for (var action in browse) {
+    if (Object.prototype.hasOwnProperty.call(browse, action) && matchesShortcut(e, browse[action])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function toggleLightboxZoom(e) {
   // Fit to 1:1 toggle. Preserved for existing 'z' shortcut and click-to-zoom.
   var wrap = document.getElementById('lightboxWrap');
@@ -4042,11 +4075,30 @@ async function inatDoSubmit() {
 document.addEventListener('keydown', function(e) {
   // Esc handling for the lightbox + overlay cascade is owned by the Keymap.pushEsc
   // stack now: each open*() pushes its close*() and each close*() pops it. The
-  // listener below still handles arrow keys / +/-/0 / B / Z while the lightbox
-  // is open.
+  // listener below still handles arrow keys / +/-/0 / B / Z / F / G while the
+  // lightbox is open.
   if (!document.getElementById('lightboxOverlay').classList.contains('active')) return;
+  if (document.querySelector('.pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;
   if (e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
   if (e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }
+  var tag0 = e.target && e.target.tagName;
+  var editable0 = tag0 === 'INPUT' || tag0 === 'TEXTAREA' || tag0 === 'SELECT' ||
+    (e.target && e.target.isContentEditable);
+  if (!editable0 && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !lightboxKeyMatchesConfiguredBrowseShortcut(e)) {
+    if (e.key.toLowerCase() === 'f') {
+      requestLightboxFullscreen();
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
+    if (e.key.toLowerCase() === 'g') {
+      exitLightboxFullscreen();
+      closeLightbox();
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
+  }
   var boxesKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.toggle_boxes) || 'b';
   if (matchesShortcut(e, boxesKey)) {
     var tag2 = e.target && e.target.tagName;
@@ -4066,6 +4118,7 @@ document.addEventListener('keydown', function(e) {
     var rect = wrap.getBoundingClientRect();
     toggleLightboxZoom({clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2, stopPropagation: function(){}});
     e.preventDefault();
+    e.stopImmediatePropagation();
     return;  // Stop here so a user-remapped zoomKey (e.g. '+') doesn't also trigger step-zoom below.
   }
   // Skip when focus is in a form field — modals opened from the lightbox (e.g. iNaturalist)
