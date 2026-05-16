@@ -3072,6 +3072,8 @@ var grmState = {
   rejects: new Set(),
   removed: new Set(),
   selected: null,     // photo id
+  selectedIds: new Set(),
+  selectionAnchor: null,
   sessionId: 0        // bumped on each openGroupReview; used to drop stale fetches
 };
 
@@ -3131,6 +3133,8 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     rejects: new Set(),
     removed: new Set(),
     selected: null,
+    selectedIds: new Set(),
+    selectionAnchor: null,
     // Filled in by the /group/state fetch below. Keys: photo_id → {flag,
     // has_species_keyword}. This is the live DB snapshot the modal opened
     // with, used to (a) render "from DB" markers and (b) compute the
@@ -3274,7 +3278,7 @@ function renderGroupModal() {
   var items = grmState.items.filter(function(p) { return !grmState.removed.has(p.id); });
 
   function renderCard(p) {
-    var isSelected = p.id === grmState.selected;
+    var isSelected = grmState.selectedIds && grmState.selectedIds.has(p.id);
     var cls = 'grm-card' + (isSelected ? ' selected' : '');
     var qScore = p.quality_composite != null ? Math.round(p.quality_composite * 100) : '-';
     var sharp = p.subject_tenengrad != null ? Math.round(p.subject_tenengrad) : '-';
@@ -3474,8 +3478,61 @@ function grmApplyTitle(diff) {
     : 'Apply will make no database changes, then close this burst.';
 }
 
-function grmSelect(photoId) {
-  grmState.selected = (grmState.selected === photoId) ? null : photoId;
+function _grmVisibleItems() {
+  return grmState.items.filter(function(p) { return !grmState.removed.has(p.id); });
+}
+
+function _grmEnsureSelectedIds() {
+  if (!grmState.selectedIds) grmState.selectedIds = new Set();
+  return grmState.selectedIds;
+}
+
+function _grmSelectRange(anchorId, photoId) {
+  var selectedIds = _grmEnsureSelectedIds();
+  var items = _grmVisibleItems();
+  var a = items.findIndex(function(p) { return p.id === anchorId; });
+  var b = items.findIndex(function(p) { return p.id === photoId; });
+  if (a < 0 || b < 0) {
+    selectedIds.add(photoId);
+    return;
+  }
+  var start = Math.min(a, b);
+  var end = Math.max(a, b);
+  for (var i = start; i <= end; i++) {
+    selectedIds.add(items[i].id);
+  }
+}
+
+function grmSelect(photoId, mode) {
+  var selectedIds = _grmEnsureSelectedIds();
+  if (mode === 'toggle') {
+    if (selectedIds.has(photoId)) {
+      selectedIds.delete(photoId);
+      if (grmState.selected === photoId) {
+        var remaining = Array.from(selectedIds);
+        grmState.selected = remaining.length ? remaining[remaining.length - 1] : null;
+      }
+    } else {
+      selectedIds.add(photoId);
+      grmState.selected = photoId;
+      grmState.selectionAnchor = photoId;
+    }
+  } else if (mode === 'range') {
+    if (!grmState.selectionAnchor) grmState.selectionAnchor = grmState.selected || photoId;
+    _grmSelectRange(grmState.selectionAnchor, photoId);
+    grmState.selected = photoId;
+  } else {
+    if (grmState.selected === photoId && selectedIds.size === 1 && selectedIds.has(photoId)) {
+      selectedIds.clear();
+      grmState.selected = null;
+      grmState.selectionAnchor = null;
+    } else {
+      selectedIds.clear();
+      selectedIds.add(photoId);
+      grmState.selected = photoId;
+      grmState.selectionAnchor = photoId;
+    }
+  }
   renderGroupModal();
 
   // Update loupe preview
@@ -3846,14 +3903,27 @@ function grmCardMouseDown(e) {
   if (e.button !== 0) return;
   var card = e.currentTarget;
   var photoId = card.dataset.photoId;
-  var cur = _grmOffsets[photoId] || { tx: 0, ty: 0 };
+  var selectedIds = _grmEnsureSelectedIds();
+  var numericPhotoId = parseInt(photoId, 10);
+  var targetIds = selectedIds.has(numericPhotoId) || selectedIds.has(photoId)
+    ? Array.from(selectedIds)
+    : [photoId];
+  var targets = targetIds.map(function(pid) {
+    var targetCard = document.querySelector('#grmOverlay .grm-card[data-photo-id="' + pid + '"]');
+    if (!targetCard) return null;
+    var cur = _grmOffsets[pid] || { tx: 0, ty: 0 };
+    return { card: targetCard, photoId: String(pid), origTx: cur.tx, origTy: cur.ty };
+  }).filter(Boolean);
+  if (!targets.length) {
+    var cur = _grmOffsets[photoId] || { tx: 0, ty: 0 };
+    targets = [{ card: card, photoId: String(photoId), origTx: cur.tx, origTy: cur.ty }];
+  }
   _grmDragging = {
     card: card,
     photoId: photoId,
+    targets: targets,
     startX: e.clientX,
     startY: e.clientY,
-    origTx: cur.tx,
-    origTy: cur.ty,
     moved: false,
   };
   document.addEventListener('mousemove', grmCardMouseMove);
@@ -3874,32 +3944,34 @@ function grmCardMouseMove(e) {
   var dy = e.clientY - _grmDragging.startY;
   if (!_grmDragging.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
     _grmDragging.moved = true;
-    _grmDragging.card.classList.add('dragging');
+    _grmDragging.targets.forEach(function(target) { target.card.classList.add('dragging'); });
   }
   if (!_grmDragging.moved) return;
-  // Use the actual displayed scale so dx/dy in screen pixels translate to
-  // pre-scale offset units that, when re-scaled, follow the cursor 1:1.
-  // Must mirror _grmComputeCardTransform's hover/non-hover branch: after a
-  // zoom-in followed by mouseleave (grmLoupeReset clears _grmLastHoverX) the
-  // card is displayed at cover-fit while _grmZoomMultiplier stays at its
-  // hovered value, so the denominator must match what's actually on screen
-  // or pans would jump when hover resumes.
-  var coverFit = grmCardCoverFit(_grmDragging.card);
-  var hovering = _grmLastHoverX != null;
-  var scale = hovering ? Math.max(coverFit, _grmZoomMultiplier) : coverFit;
-  var z = scale > 0.01 ? scale : 1;
-  var newTx = _grmDragging.origTx + dx / z;
-  var newTy = _grmDragging.origTy + dy / z;
-  _grmOffsets[_grmDragging.photoId] = { tx: newTx, ty: newTy };
-  _grmApplyCardTransform(_grmDragging.card);
-  _grmUpdateIndicator(_grmDragging.card);
+  // Use each card's actual displayed scale so the same screen drag produces
+  // the same visible pan on every selected photo, even across mixed sizes.
+  _grmDragging.targets.forEach(function(target) {
+    // Must mirror _grmComputeCardTransform's hover/non-hover branch: after a
+    // zoom-in followed by mouseleave (grmLoupeReset clears _grmLastHoverX) the
+    // card is displayed at cover-fit while _grmZoomMultiplier stays at its
+    // hovered value, so the denominator must match what's actually on screen
+    // or pans would jump when hover resumes.
+    var coverFit = grmCardCoverFit(target.card);
+    var hovering = _grmLastHoverX != null;
+    var scale = hovering ? Math.max(coverFit, _grmZoomMultiplier) : coverFit;
+    var z = scale > 0.01 ? scale : 1;
+    var newTx = target.origTx + dx / z;
+    var newTy = target.origTy + dy / z;
+    _grmOffsets[target.photoId] = { tx: newTx, ty: newTy };
+    _grmApplyCardTransform(target.card);
+    _grmUpdateIndicator(target.card);
+  });
 }
 
 function grmCardMouseUp(e) {
   if (!_grmDragging) return;
   var moved = _grmDragging.moved;
   var card = _grmDragging.card;
-  card.classList.remove('dragging');
+  _grmDragging.targets.forEach(function(target) { target.card.classList.remove('dragging'); });
   document.removeEventListener('mousemove', grmCardMouseMove);
   document.removeEventListener('mouseup', grmCardMouseUp);
   _grmDragging = null;
@@ -3918,7 +3990,8 @@ function grmCardClick(e, photoId) {
     _grmSuppressNextClick = false;
     return;
   }
-  grmSelect(photoId);
+  var mode = e && (e.metaKey || e.ctrlKey) ? 'toggle' : (e && e.shiftKey ? 'range' : 'single');
+  grmSelect(photoId, mode);
 }
 
 function grmCardDblClick(e) {
@@ -4017,6 +4090,8 @@ function grmRemoveFromGroup() {
   grmState.picks.delete(grmState.selected);
   grmState.rejects.delete(grmState.selected);
   grmState.selected = null;
+  if (grmState.selectedIds) grmState.selectedIds.clear();
+  grmState.selectionAnchor = null;
   renderGroupModal();
   document.getElementById('grmLoupeDetail').innerHTML = '';
 }
