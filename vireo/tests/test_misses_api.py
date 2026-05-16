@@ -201,6 +201,12 @@ def test_api_bulk_reject_undo_restores_original_null_flag(client, db_with_misses
     assert after is None, (
         "undo must restore NULL, not an empty string — saw: %r" % after
     )
+    assert any(
+        c["photo_id"] == pid
+        and c["change_type"] == "flag"
+        and c["value"] == "none"
+        for c in db.get_pending_changes()
+    )
 
 
 def test_api_bulk_reject_no_matches_skips_edit_history(client, db_with_misses):

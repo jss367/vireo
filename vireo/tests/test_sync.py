@@ -213,3 +213,37 @@ def test_sync_to_xmp_writes_flag_when_enabled(tmp_path, monkeypatch):
     )
     pick = desc.get('{http://ns.adobe.com/xmp/1.0/DynamicMedia/}pick')
     assert pick == '-1'
+
+
+def test_sync_to_xmp_treats_legacy_null_flag_as_none(tmp_path, monkeypatch):
+    """Legacy queued NULL flag values should clear XMP pick state."""
+    from xml.etree import ElementTree as ET
+
+    import config as cfg
+    from db import Database
+    from sync import sync_to_xmp
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    config = cfg.load()
+    config["sync_flags_to_xmp"] = True
+    cfg.save(config)
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    db.queue_change(pid, 'flag', None)
+
+    result = sync_to_xmp(db)
+
+    assert result['synced'] == 1
+    assert result['failed'] == 0
+    assert len(db.get_pending_changes()) == 0
+
+    tree = ET.parse(xmp_path)
+    desc = tree.getroot().find(
+        './/{http://www.w3.org/1999/02/22-rdf-syntax-ns#}Description'
+    )
+    pick = desc.get('{http://ns.adobe.com/xmp/1.0/DynamicMedia/}pick')
+    assert pick == '0'

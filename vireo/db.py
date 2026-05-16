@@ -8158,6 +8158,13 @@ class Database:
     def queue_flag_change_if_enabled(self, photo_id, flag, workspace_id=None, _commit=True):
         """Queue a flag write when the active config opts into XMP flag sync."""
         ws_id = workspace_id if workspace_id is not None else self._ws_id()
+        flag = flag or "none"
+        self.remove_pending_changes(photo_id, "flag", workspace_id=ws_id, _commit=False)
+        if flag not in {"none", "flagged", "rejected"}:
+            log.warning("Not queueing invalid XMP flag value for photo %s: %r", photo_id, flag)
+            if _commit:
+                self.conn.commit()
+            return None
         try:
             import config as cfg
 
@@ -8167,7 +8174,6 @@ class Database:
         except Exception:
             log.warning("Failed to read sync_flags_to_xmp config", exc_info=True)
             enabled = False
-        self.remove_pending_changes(photo_id, "flag", workspace_id=ws_id, _commit=False)
         if not enabled:
             if _commit:
                 self.conn.commit()

@@ -94,7 +94,7 @@ def sync_to_xmp(db, progress_callback=None):
                     supported_ids.append(c["id"])
                 elif c["change_type"] == "flag":
                     if sync_flags:
-                        new_flag = c["value"]
+                        new_flag = c["value"] or "none"
                         supported_ids.append(c["id"])
                     else:
                         unsupported_changes.append(c)
