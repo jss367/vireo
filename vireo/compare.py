@@ -169,7 +169,7 @@ def compare_prediction_to_keywords(prediction, existing_species, taxonomy):
                 "shared_rank": shared,
             }
 
-        if best is None or _CATEGORY_PRIORITY[result["category"]] < _CATEGORY_PRIORITY[best["category"]]:
+        if best is None or _CATEGORY_PRIORITY[result["category"]] > _CATEGORY_PRIORITY[best["category"]]:
             best = result
         if result["category"] == "match":
             return result

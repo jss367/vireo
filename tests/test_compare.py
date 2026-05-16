@@ -83,6 +83,26 @@ def test_compare_prediction_to_keywords_conflict_with_shared_rank():
     assert result["shared_rank"] == "genus"
 
 
+def test_compare_prediction_to_keywords_conflict_outranks_refinement():
+    # Prediction refines "Sparrow" but conflicts with "Red-tailed Hawk".
+    # The most severe relationship (conflict) must win regardless of the
+    # order keywords are evaluated in, so the row stays in the review flow.
+    result = compare_prediction_to_keywords(
+        "White-crowned Sparrow",
+        ["Sparrow", "Red-tailed Hawk"],
+        FakeTaxonomy(),
+    )
+    assert result["category"] == "conflict"
+
+    # Same keywords, reversed order — result must be stable.
+    reversed_result = compare_prediction_to_keywords(
+        "White-crowned Sparrow",
+        ["Red-tailed Hawk", "Sparrow"],
+        FakeTaxonomy(),
+    )
+    assert reversed_result["category"] == "conflict"
+
+
 def test_compare_prediction_to_keywords_new_without_species_keyword():
     result = compare_prediction_to_keywords(
         "Red-tailed Hawk",
