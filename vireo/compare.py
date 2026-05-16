@@ -115,6 +115,19 @@ def compare_prediction_to_keywords(prediction, existing_species, taxonomy):
 
     pred_taxon = taxonomy.lookup(prediction)
     if pred_taxon is None:
+        # Taxonomy is loaded but doesn't know this prediction (custom,
+        # legacy, or not-yet-indexed taxon). An exact text match against an
+        # existing species keyword is still an obvious agreement — treat it
+        # as a match instead of flagging a needless conflict.
+        for kw in existing_species:
+            if kw.lower() == prediction.lower():
+                return {
+                    "category": "match",
+                    "label": "Match",
+                    "detail": "Prediction text matches an existing species keyword.",
+                    "matched_keyword": kw,
+                    "shared_rank": None,
+                }
         return {
             "category": "conflict",
             "label": "Unknown prediction",
