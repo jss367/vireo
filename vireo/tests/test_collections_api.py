@@ -104,6 +104,39 @@ def test_create_collection_with_rules(app_and_db):
     assert stored_rules == rules
 
 
+def test_update_collection_can_replace_rules(app_and_db):
+    """PUT /api/collections/<id> updates rules as well as the name."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/collections",
+        json={"name": "Draft", "rules": [{"field": "rating", "op": ">=", "value": 5}]},
+    )
+    assert resp.status_code == 200
+    cid = resp.get_json()["id"]
+
+    grouped = {
+        "mode": "any",
+        "rules": [
+            {"field": "rating", "op": ">=", "value": 3},
+            {"field": "flag", "op": "equals", "value": "flagged"},
+        ],
+    }
+    resp = client.put(
+        f"/api/collections/{cid}",
+        json={"name": "Useful", "rules": grouped},
+    )
+    assert resp.status_code == 200
+
+    row = db.conn.execute(
+        "SELECT name, rules FROM collections WHERE id = ?", (cid,)
+    ).fetchone()
+    assert row["name"] == "Useful"
+    assert json.loads(row["rules"]) == grouped
+
+
 def test_collection_photos_with_rating_rule(app_and_db):
     """Collection with rating >= 3 rule returns photos with rating >= 3."""
     app, db = app_and_db
