@@ -564,9 +564,15 @@ function renderPhotoCell(photo) {
     encodeURIComponent(photo.photo_id) + '">Open photo</a></div></div></div>';
 }
 
+function isSpeciesKeyword(k) {
+  // Mirror the backend species definition (get_species_keywords_for_photos):
+  // upgraded/legacy taxonomy tags can be type='taxonomy' with is_species=0.
+  return !!k.is_species || k.type === 'taxonomy';
+}
+
 function renderKeywordCell(photo) {
-  var species = (photo.keywords || []).filter(function(k) { return !!k.is_species; });
-  var other = (photo.keywords || []).filter(function(k) { return !k.is_species; });
+  var species = (photo.keywords || []).filter(isSpeciesKeyword);
+  var other = (photo.keywords || []).filter(function(k) { return !isSpeciesKeyword(k); });
   var html = '';
   if (species.length) {
     html += '<div class="keyword-group">' + species.map(function(k) {
