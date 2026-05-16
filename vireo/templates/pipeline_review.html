@@ -1392,7 +1392,7 @@ input[type="range"]::-moz-range-thumb {
 <!-- Group Review Modal -->
 <div class="grm-overlay" id="grmOverlay">
   <div class="grm-header">
-    <h3>Review Burst Group</h3>
+    <h3 id="grmTitle">Review Burst Group</h3>
     <span id="grmCount" style="font-size:12px;color:var(--text-dim);"></span>
     <button class="grm-close" onclick="closeGroupReview()">&times;</button>
   </div>
@@ -1425,7 +1425,7 @@ input[type="range"]::-moz-range-thumb {
   <div class="grm-footer">
     <label style="font-size:12px;color:var(--text-muted);">Species:</label>
     <input type="text" id="grmSpecies" oninput="grmOnSpeciesInput()" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
-    <button onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary);color:var(--text-muted);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
+    <button id="grmRemoveBtn" onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary);color:var(--text-muted);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
     <div class="grm-thumb-control" title="Thumbnail size">
       <label for="grmThumbSizeSlider">Thumbs</label>
       <input type="range" id="grmThumbSizeSlider" min="100" max="320" step="20" value="180" oninput="grmSetThumbSize(this.value)">
@@ -1774,6 +1774,23 @@ function renderResults() {
   if (!pipelineResults) return;
   var container = document.getElementById('encountersContainer');
   if (!container) return;
+  if (pipelineResults.source === 'browse-selection') {
+    var summary = refreshLocalSummaryCounts() || pipelineResults.summary || {};
+    var total = Number(summary.total_photos || 0);
+    var ce = document.getElementById('countAll'); if (ce) ce.textContent = ' (' + total + ')';
+    ce = document.getElementById('countKeep'); if (ce) ce.textContent = ' (' + Number(summary.keep_count || 0) + ')';
+    ce = document.getElementById('countReview'); if (ce) ce.textContent = ' (' + Number(summary.review_count || 0) + ')';
+    ce = document.getElementById('countReject'); if (ce) ce.textContent = ' (' + Number(summary.reject_count || 0) + ')';
+    container.innerHTML = '<div class="empty-state" style="display:block;">'
+      + '<p>Temporary Browse selection. Use the burst review modal to pick, reject, or tag these photos.</p>'
+      + '<button type="button" onclick="reopenBrowseBurstReview()" '
+      + 'style="margin-top:12px;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);" '
+      + 'title="Reopen the burst review modal for this Browse selection.">Reopen burst review</button>'
+      + '</div>';
+    _focusedEncounterIdx = null;
+    renderAlgorithmTrace();
+    return;
+  }
 
   // Build photo lookup
   var photoMap = {};
@@ -2659,6 +2676,14 @@ function computeReviewNow() {
 
 function initPipelineReviewPage() {
   initPipelineSidebarState();
+  if (isBrowseBurstReviewRequest()) {
+    openBrowseBurstReviewFromStorage();
+    return;
+  }
+  loadPipelinePageInit();
+}
+
+function loadPipelinePageInit() {
   safeFetch('/api/pipeline/page-init', {}, { toast: false })
   .then(function(data) {
     // Capture overrides regardless of state so computeReviewNow() can apply
@@ -3077,6 +3102,156 @@ var grmState = {
   sessionId: 0        // bumped on each openGroupReview; used to drop stale fetches
 };
 
+function isBrowseBurstReviewRequest() {
+  var params = new URLSearchParams(window.location.search || '');
+  return params.get('browse_burst') === '1';
+}
+
+function browseBurstStoredIds() {
+  try {
+    var raw = window.sessionStorage.getItem('vireo.browseBurstReviewIds');
+    var parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    var seen = {};
+    return parsed.map(function(id) { return parseInt(id, 10); })
+      .filter(function(id) {
+        if (!Number.isInteger(id) || seen[id]) return false;
+        seen[id] = true;
+        return true;
+      });
+  } catch (e) {
+    return [];
+  }
+}
+
+function browseBurstTimeRange(photos) {
+  var stamps = photos.map(function(p) { return p.timestamp; }).filter(Boolean).sort();
+  if (!stamps.length) return [null, null];
+  return [stamps[0], stamps[stamps.length - 1]];
+}
+
+function normalizeBrowseBurstPhoto(p) {
+  var copy = Object.assign({}, p);
+  copy.label = copy.flag === 'flagged' ? 'KEEP' : copy.flag === 'rejected' ? 'REJECT' : 'REVIEW';
+  copy.quality_composite = copy.quality_composite != null ? copy.quality_composite : copy.quality_score;
+  copy.subject_tenengrad = copy.subject_tenengrad != null
+    ? copy.subject_tenengrad
+    : (copy.subject_sharpness != null ? copy.subject_sharpness : copy.sharpness);
+  return copy;
+}
+
+function renderBrowseBurstReviewShell() {
+  var empty = document.getElementById('emptyState');
+  if (empty) empty.style.display = 'none';
+  var sb = document.getElementById('summaryBar');
+  if (sb) sb.style.display = '';
+  var fb = document.getElementById('filterBar');
+  if (fb) fb.style.display = '';
+  var ss = document.getElementById('sidebarScoring');
+  if (ss) ss.style.display = 'none';
+  var sg = document.getElementById('sidebarGrouping');
+  if (sg) sg.style.display = 'none';
+}
+
+// Drop the one-shot Browse→burst handoff (session storage + ?browse_burst=1).
+// Only call this once the burst workflow has actually completed (flags
+// applied) or we've decided to degrade to normal review — clearing it while
+// the modal is still in play makes Esc/× and the /group/state retry path
+// non-recoverable.
+function clearBrowseBurstHandoff() {
+  try {
+    window.sessionStorage.removeItem('vireo.browseBurstReviewIds');
+    window.history.replaceState(null, '', '/pipeline/review');
+  } catch (e) {}
+}
+
+// Stale URL, cleared session storage, or a failed handoff should not strand
+// the user on an empty page reachable only from Browse. Clear the one-shot
+// handoff state and degrade to the standard page-init flow so the route
+// stays self-recoverable on reload.
+function fallbackToNormalPipelineReview(message) {
+  clearBrowseBurstHandoff();
+  if (message) showToast(message, 'error');
+  loadPipelinePageInit();
+}
+
+function openBrowseBurstReviewFromStorage() {
+  var ids = browseBurstStoredIds();
+  if (ids.length < 2) {
+    fallbackToNormalPipelineReview('Burst review selection was missing — showing the latest pipeline review instead.');
+    return;
+  }
+
+  safeFetch('/api/photos/by-ids', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_ids: ids}),
+  }).then(function(data) {
+    var byId = {};
+    (data.photos || []).forEach(function(p) { byId[p.id] = normalizeBrowseBurstPhoto(p); });
+    var photos = ids.map(function(id) { return byId[id]; }).filter(Boolean);
+    if (photos.length < 2) {
+      fallbackToNormalPipelineReview('Could not load the selected photos for burst review — showing the latest pipeline review instead.');
+      return;
+    }
+
+    var loadedIds = photos.map(function(p) { return p.id; });
+    pipelineResults = {
+      source: 'browse-selection',
+      photos: photos,
+      encounters: [{
+        photo_ids: loadedIds,
+        photo_count: loadedIds.length,
+        burst_count: 1,
+        bursts: [{photo_ids: loadedIds, species_predictions: [], species_override: null}],
+        species: [],
+        species_predictions: [],
+        confirmed_species: '',
+        species_confirmed: false,
+        time_range: browseBurstTimeRange(photos),
+      }],
+      summary: {
+        total_photos: loadedIds.length,
+        keep_count: photos.filter(function(p) { return p.label === 'KEEP'; }).length,
+        review_count: photos.filter(function(p) { return p.label === 'REVIEW'; }).length,
+        reject_count: photos.filter(function(p) { return p.label === 'REJECT'; }).length,
+        encounter_count: 1,
+        burst_count: 1,
+      },
+    };
+
+    collapsedEncounters = new Set();
+    renderBrowseBurstReviewShell();
+    updateSummaryBar(pipelineResults.summary);
+    renderResults();
+    // Keep the handoff state (session storage + ?browse_burst=1) in place.
+    // The body is just a placeholder in browse-selection mode, so closing
+    // the modal via Esc/× or hitting the /group/state "reopen to retry"
+    // path must remain recoverable — both via the in-page Reopen button and
+    // via a plain reload. clearBrowseBurstHandoff() runs only once the user
+    // applies (workflow complete) or we fall back to normal review.
+    openGroupReview(0, 0, loadedIds[0]);
+  }).catch(function() {
+    fallbackToNormalPipelineReview('Could not open burst review — showing the latest pipeline review instead.');
+  });
+}
+
+// Recover from a closed/errored burst modal. If the temporary group is still
+// in memory (same-page Esc/× or /group/state failure), just reopen it.
+// Otherwise (e.g. after a reload) re-run the handoff from session storage.
+function reopenBrowseBurstReview() {
+  if (pipelineResults && pipelineResults.source === 'browse-selection') {
+    var enc = pipelineResults.encounters && pipelineResults.encounters[0];
+    var firstId = enc && enc.photo_ids && enc.photo_ids[0];
+    if (firstId) {
+      renderBrowseBurstReviewShell();
+      openGroupReview(0, 0, firstId);
+      return;
+    }
+  }
+  openBrowseBurstReviewFromStorage();
+}
+
 function findBurstForPhoto(photoId) {
   if (!pipelineResults) return null;
   for (var ei = 0; ei < pipelineResults.encounters.length; ei++) {
@@ -3110,6 +3285,9 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   var enc = pipelineResults.encounters[encIdx];
   var burst = enc.bursts[burstIdx];
   var photoIds = burst.photo_ids || burst;
+  var source = pipelineResults && pipelineResults.source === 'browse-selection'
+    ? 'browse-selection'
+    : 'pipeline';
 
   // Build items array from pipelineResults.photos
   var photoMap = {};
@@ -3142,6 +3320,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     dbState: {},
     keywordStateSpecies: initialSpecies,
     initialSpecies: initialSpecies,
+    source: source,
     sessionId: sessionId,
     // False until /group/state resolves and grmSeedFromDbState runs. Apply &
     // Close is gated on this so a click during the seed window can't ship
@@ -3159,6 +3338,15 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   grmRefreshResetAllVisibility();
 
   document.getElementById('grmOverlay').classList.add('open');
+  var title = document.getElementById('grmTitle');
+  if (title) title.textContent = source === 'browse-selection' ? 'Review Selected Photos' : 'Review Burst Group';
+  var removeBtn = document.getElementById('grmRemoveBtn');
+  if (removeBtn) {
+    removeBtn.textContent = source === 'browse-selection' ? 'Remove from review' : 'Remove from group';
+    removeBtn.title = source === 'browse-selection'
+      ? 'Remove this photo from the temporary review set'
+      : 'Detach this photo from the burst group on apply';
+  }
   grmSetThumbSize(GRM_CARD_W, false);
 
   // Disable Apply while we wait for /group/state — clicking it before
@@ -3560,6 +3748,23 @@ function grmSelect(photoId, mode) {
 }
 
 function buildPipelineMetadataHtml(photo) {
+  if (grmState && grmState.source === 'browse-selection') {
+    var flag = photo.flag || 'none';
+    var dims = (photo.width && photo.height) ? (photo.width + '×' + photo.height) : '—';
+    var rating = photo.rating != null ? photo.rating : 0;
+    var sharpBrowse = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '—';
+    var htmlBrowse = '<span class="triage-badge review">BROWSE SELECTION</span>';
+    htmlBrowse += '<table class="feature-table">';
+    htmlBrowse += '<tr><td>Filename</td><td>' + escapeHtml(photo.filename || '') + '</td></tr>';
+    htmlBrowse += '<tr><td>Flag</td><td>' + escapeHtml(flag) + '</td></tr>';
+    htmlBrowse += '<tr><td>Rating</td><td>' + rating + '</td></tr>';
+    htmlBrowse += '<tr><td>Dimensions</td><td>' + dims + '</td></tr>';
+    htmlBrowse += '<tr><td>Timestamp</td><td>' + escapeHtml(photo.timestamp || '—') + '</td></tr>';
+    htmlBrowse += '<tr><td>Sharpness</td><td>' + sharpBrowse + '</td></tr>';
+    htmlBrowse += '</table>';
+    return htmlBrowse;
+  }
+
   var enc = pipelineResults.encounters[grmState.encIdx];
   var label = (photo.label || '').toLowerCase();
   var q = photo.quality_composite || 0;
@@ -4207,6 +4412,42 @@ async function grmApply() {
       var p = photoMap[pid];
       if (p) p.flag = applyResp.photos[pidStr].flag;
     });
+  }
+
+  if (grmState.source === 'browse-selection') {
+    if (grmState.removed.size > 0) {
+      var encBrowse = pipelineResults.encounters[grmState.encIdx];
+      var keepIds = encBrowse.photo_ids.filter(function(pid) { return !grmState.removed.has(pid); });
+      if (keepIds.length === 0) {
+        // Every photo was removed from the temporary Browse burst. Any
+        // flag/species edits were already persisted by /group/apply above,
+        // so there is nothing left to review. Drop the handoff and degrade
+        // to normal pipeline review instead of stranding the page on an
+        // empty browse-selection encounter (0 photos but still 1 encounter/
+        // 1 burst, with a Reopen flow that can no longer reopen).
+        document.getElementById('grmSpecies').value = '';
+        closeGroupReview();
+        fallbackToNormalPipelineReview();
+        return;
+      }
+      encBrowse.photo_ids = keepIds;
+      encBrowse.photo_count = keepIds.length;
+      if (encBrowse.bursts && encBrowse.bursts[grmState.burstIdx]) {
+        encBrowse.bursts[grmState.burstIdx].photo_ids = keepIds.slice();
+      }
+      pipelineResults.photos = pipelineResults.photos.filter(function(p) {
+        return !grmState.removed.has(p.id);
+      });
+    }
+    // Flags/species are now persisted to the DB — the one-shot handoff has
+    // served its purpose, so drop it. A later reload degrades to normal
+    // review; the in-memory group stays reopenable via the Reopen button.
+    clearBrowseBurstHandoff();
+    closeGroupReview();
+    document.getElementById('grmSpecies').value = '';
+    renderResults();
+    updateSummaryBar(refreshLocalSummaryCounts());
+    return;
   }
 
   // Detach removed photos from the burst into new single-photo bursts

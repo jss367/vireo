@@ -21,6 +21,31 @@ def test_right_click_photo_opens_menu(live_server, page):
     expect(menu.locator(".vireo-ctx-item", has_text="Delete")).to_be_visible()
 
 
+def test_browse_selection_opens_burst_review(live_server, page):
+    """Selected Browse photos can be opened as a temporary burst review group."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    assert cards.count() >= 2
+
+    cards.nth(0).click(modifiers=["Meta"])
+    cards.nth(1).click(modifiers=["Meta"])
+    assert page.evaluate("selectedPhotos.size") == 2
+
+    expect(page.locator("#burstReviewBtn")).to_be_visible()
+    page.locator("#burstReviewBtn").click()
+
+    page.wait_for_function(
+        """() => location.pathname === '/pipeline/review'
+          && document.querySelector('#grmOverlay.open')
+          && document.querySelector('#grmTitle')?.textContent === 'Review Selected Photos'""",
+        timeout=5000,
+    )
+    expect(page.locator("#grmCount")).to_contain_text("unsorted")
+
+
 def test_right_click_rating_applies(live_server, page):
     """Clicking a rating chip applies the rating to the right-clicked photo."""
     url = live_server["url"]

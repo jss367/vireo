@@ -217,6 +217,31 @@ def test_api_photo_detail_includes_on_disk_path(app_and_db):
     assert data['path'] == expected_path
 
 
+def test_api_photos_by_ids_preserves_selection_order(app_and_db):
+    """POST /api/photos/by-ids returns active-workspace photos in caller order."""
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    by_name = {p["filename"]: p["id"] for p in photos}
+    ordered_ids = [by_name["bird3.jpg"], by_name["bird1.jpg"], by_name["bird3.jpg"]]
+
+    client = app.test_client()
+    resp = client.post("/api/photos/by-ids", json={"photo_ids": ordered_ids})
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert [p["filename"] for p in data["photos"]] == ["bird3.jpg", "bird1.jpg"]
+    assert all("detections" in p for p in data["photos"])
+
+
+def test_api_photos_by_ids_validates_payload(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+
+    resp = client.post("/api/photos/by-ids", json={"photo_ids": ["1"]})
+
+    assert resp.status_code == 400
+
+
 def test_api_photos_calendar(app_and_db):
     """GET /api/photos/calendar returns daily photo counts for a year."""
     app, _ = app_and_db
