@@ -6579,20 +6579,46 @@ class Database:
             (photo_id,),
         ).fetchall()
 
+    def get_keywords_for_photos(self, photo_ids):
+        """Return keywords for a batch of photos keyed by photo id."""
+        if not photo_ids:
+            return {}
+        placeholders = ",".join("?" for _ in photo_ids)
+        rows = self.conn.execute(
+            f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type,
+                       k.is_species
+                FROM photo_keywords pk
+                JOIN keywords k ON k.id = pk.keyword_id
+                WHERE pk.photo_id IN ({placeholders})
+                ORDER BY k.type, k.name""",
+            list(photo_ids),
+        ).fetchall()
+        result = {}
+        for r in rows:
+            result.setdefault(r["photo_id"], []).append(dict(r))
+        return result
+
     def get_species_keywords_for_photos(self, photo_ids):
         """Return species (taxonomy) keyword names for a batch of photos.
 
         Returns a dict mapping photo_id -> list of species name strings.
+
+        Treats a keyword as species when ``is_species = 1`` *or*
+        ``type = 'taxonomy'`` so that upgraded/legacy data whose species tags
+        are taxonomy-typed but not yet marked ``is_species`` is still
+        recognized. This mirrors the species definition used by
+        ``accept_prediction`` so the Compare page does not misclassify
+        already-tagged photos as ``new``.
         """
         if not photo_ids:
             return {}
         placeholders = ",".join("?" for _ in photo_ids)
         rows = self.conn.execute(
-            f"""SELECT pk.photo_id, k.name
+            f"""SELECT DISTINCT pk.photo_id, k.name
                 FROM photo_keywords pk
                 JOIN keywords k ON k.id = pk.keyword_id
                 WHERE pk.photo_id IN ({placeholders})
-                  AND k.is_species = 1
+                  AND (k.is_species = 1 OR k.type = 'taxonomy')
                 ORDER BY k.name""",
             list(photo_ids),
         ).fetchall()
@@ -7569,11 +7595,18 @@ class Database:
         ).fetchone()
         return bool(row["is_species"]) if row else False
 
-    def accept_prediction(self, prediction_id):
+    def accept_prediction(self, prediction_id, replace_species=False):
         """Accept a prediction: mark as accepted and add species keyword.
 
         If the prediction belongs to a group, derives the consensus species
         from the individual votes and applies that to all photos.
+
+        When ``replace_species`` is True, every photo that receives the new
+        keyword first has its existing species/taxonomy keywords removed, so
+        grouped photos are replaced consistently rather than accumulating both
+        the old and new species tags. Each entry in the returned ``affected``
+        list carries the ``old_species`` names that were stripped from that
+        photo (empty when ``replace_species`` is False).
 
         All database changes are performed atomically in a single transaction.
         On failure, all changes are rolled back.
@@ -7641,7 +7674,57 @@ class Database:
                     pass
 
             kid = self.add_keyword(species, is_species=True, _commit=False)
-            affected = []  # list of {"photo_id": int, "prediction_id": int}
+            # list of {"photo_id", "prediction_id", "old_species"}
+            affected = []
+
+            def _accept_for_photo(photo_id, this_pred_id):
+                self.update_prediction_status(this_pred_id, "accepted", _commit=False)
+                old_species = []
+                if replace_species:
+                    old_species = [
+                        row["name"] for row in self.conn.execute(
+                            """SELECT k.name
+                               FROM photo_keywords pk
+                               JOIN keywords k ON k.id = pk.keyword_id
+                               WHERE pk.photo_id = ?
+                                 AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                            (photo_id,),
+                        ).fetchall()
+                    ]
+                    self.conn.execute(
+                        """DELETE FROM photo_keywords
+                           WHERE photo_id = ?
+                             AND keyword_id IN (
+                               SELECT id FROM keywords
+                               WHERE is_species = 1 OR type = 'taxonomy'
+                             )""",
+                        (photo_id,),
+                    )
+                    # The DB rows are gone, but sync_to_xmp only strips a
+                    # keyword from the sidecar when a matching keyword_remove
+                    # pending change exists. Queue one per removed species so a
+                    # "replace" actually clears the stale tags downstream. A
+                    # still-pending add for the same keyword cancels out
+                    # instead of stacking (mirrors _queue_keyword_remove).
+                    new_species_lower = species.lower()
+                    for old_name in old_species:
+                        if old_name.lower() == new_species_lower:
+                            continue
+                        cancelled = self.remove_pending_changes(
+                            photo_id, "keyword_add", old_name, _commit=False,
+                        )
+                        if cancelled == 0:
+                            self.queue_change(
+                                photo_id, "keyword_remove", old_name,
+                                _commit=False,
+                            )
+                self.tag_photo(photo_id, kid, _commit=False)
+                self.queue_change(photo_id, "keyword_add", species, _commit=False)
+                affected.append({
+                    "photo_id": photo_id,
+                    "prediction_id": this_pred_id,
+                    "old_species": old_species,
+                })
 
             # If grouped, accept all predictions in the group (in this workspace).
             if pred["group_id"]:
@@ -7658,15 +7741,9 @@ class Database:
                     (ws, ws, pred["group_id"], pred["model"]),
                 ).fetchall()
                 for gp in group_preds:
-                    self.update_prediction_status(gp["id"], "accepted", _commit=False)
-                    self.tag_photo(gp["photo_id"], kid, _commit=False)
-                    self.queue_change(gp["photo_id"], "keyword_add", species, _commit=False)
-                    affected.append({"photo_id": gp["photo_id"], "prediction_id": gp["id"]})
+                    _accept_for_photo(gp["photo_id"], gp["id"])
             else:
-                self.update_prediction_status(prediction_id, "accepted", _commit=False)
-                self.tag_photo(pred["photo_id"], kid, _commit=False)
-                self.queue_change(pred["photo_id"], "keyword_add", species, _commit=False)
-                affected.append({"photo_id": pred["photo_id"], "prediction_id": prediction_id})
+                _accept_for_photo(pred["photo_id"], prediction_id)
 
             self.conn.commit()
             return {"species": species, "keyword_id": kid, "affected": affected}
@@ -8461,6 +8538,11 @@ class Database:
         # would silently advance the undo cursor without reverting state.
         # Adding undo support is a follow-up if it becomes important.
         'location_set', 'location_clear', 'location_link',
+        # Compare-page review actions are auditable but not undoable in v1
+        # for the same reason: _apply_undo/_apply_redo have no handlers, so
+        # leaving them undoable would mark the entry undone without
+        # restoring the prediction status or the replaced species keywords.
+        'prediction_reviewed', 'prediction_replace_species',
     )
 
     def undo_last_edit(self):

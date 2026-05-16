@@ -9523,6 +9523,29 @@ def test_update_keyword_rename_general_to_matching_taxon_visible_to_species_quer
     assert db.get_species_keywords_for_photos([pid]) == {pid: ["Lesser Scaup"]}
 
 
+def test_get_species_keywords_includes_taxonomy_typed_without_is_species(tmp_path):
+    """Legacy/upgraded data may carry species tags typed 'taxonomy' but with
+    is_species=0. get_species_keywords_for_photos must still surface them so
+    the Compare page does not misclassify already-tagged photos as 'new'
+    (mirrors the is_species OR type='taxonomy' definition accept_prediction
+    uses)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    kid = db.add_keyword("Lesser Scaup")
+    db.tag_photo(pid, kid)
+    db.conn.execute(
+        "UPDATE keywords SET is_species = 0, type = 'taxonomy' WHERE id = ?",
+        (kid,),
+    )
+    db.conn.commit()
+
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Lesser Scaup"]}
+
+
 def test_update_keyword_rename_general_no_match_stays_general(tmp_path):
     """Renaming a 'general' keyword to a name with no taxon match leaves
     it as 'general' with NULL taxon_id."""

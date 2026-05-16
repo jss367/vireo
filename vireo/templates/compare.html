@@ -6,69 +6,254 @@
 <link rel="icon" type="image/png" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="stylesheet" href="/static/vireo-base.css">
-<title>Vireo - Compare Models</title>
+<title>Vireo - Compare Keywords</title>
 <style>
 body { padding-bottom: 36px; }
-.content { max-width: 1200px; }
+.content { max-width: 1440px; }
 
-.compare-bar {
+.compare-toolbar {
   background: var(--bg-secondary);
   border: 1px solid var(--border-primary);
   border-radius: 8px;
   padding: 12px 16px;
-  margin-bottom: 16px;
-  display: flex;
-  align-items: center;
+  margin-bottom: 14px;
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) repeat(2, minmax(160px, 0.9fr)) minmax(180px, 1fr);
   gap: 12px;
+  align-items: end;
 }
-.compare-bar label { font-size: 13px; color: var(--text-secondary); }
-.compare-bar select {
-  background: var(--bg-input); color: var(--text-primary);
-  border: 1px solid var(--border-primary); border-radius: 4px;
-  padding: 4px 8px; font-size: 13px;
+.control label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 5px;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.control select,
+.control input {
+  width: 100%;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  padding: 7px 9px;
+  font-size: 13px;
 }
 
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(110px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.summary-item {
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+.summary-value {
+  display: block;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.summary-label {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.filter-row,
+.batch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.filter-btn,
+.batch-btn,
+.inline-btn {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.filter-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.batch-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.inline-btn {
+  padding: 4px 7px;
+  font-size: 11px;
+  text-decoration: none;
+}
+.inline-btn.primary {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border-primary));
+}
+.inline-btn.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--border-primary));
+}
+.inline-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.batch-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-right: 4px;
+}
+
+.taxonomy-note {
+  display: none;
+  margin-bottom: 12px;
+  color: var(--warning);
+  font-size: 12px;
+}
+.taxonomy-note.visible { display: block; }
+
+.compare-empty {
+  text-align: center;
+  padding: 48px 16px;
+  color: var(--text-muted);
+}
+.table-wrap {
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  overflow: auto;
+  background: var(--bg-primary);
+}
 .compare-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
 }
 .compare-table th {
-  background: var(--bg-tertiary);
-  color: var(--text-secondary);
-  padding: 8px 12px;
-  text-align: left;
-  border-bottom: 1px solid var(--border-primary);
   position: sticky;
   top: 0;
   z-index: 1;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-primary);
+  white-space: nowrap;
 }
 .compare-table td {
-  padding: 6px 12px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border-subtle);
-  vertical-align: middle;
+  vertical-align: top;
 }
-.compare-table tr:hover { background: var(--bg-tertiary); }
-.compare-table tr.disagree { background: color-mix(in srgb, var(--warning) 8%, transparent); }
-.compare-table tr.disagree:hover { background: color-mix(in srgb, var(--warning) 14%, transparent); }
+.compare-table tr:hover { background: var(--bg-secondary); }
+.select-col { width: 30px; }
+.photo-col { min-width: 220px; }
+.keyword-col { min-width: 220px; }
+.model-col { min-width: 250px; }
 
-.thumb-cell {
+.photo-cell {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
+  min-width: 0;
 }
-.thumb-cell img {
-  width: 40px; height: 40px;
+.photo-cell img {
+  width: 44px;
+  height: 44px;
   object-fit: cover;
   border-radius: 4px;
+  flex: 0 0 auto;
 }
-.conf { color: var(--text-muted); font-size: 11px; }
+.photo-name {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.photo-meta {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-top: 3px;
+}
+
+.keyword-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 5px;
+}
+.keyword-pill,
+.status-pill,
+.category-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 4px;
+  border: 1px solid var(--border-primary);
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.keyword-pill.species {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary));
+}
+.keyword-pill.general { color: var(--text-muted); }
 .empty-cell { color: var(--text-ghost); }
 
-.compare-empty {
-  text-align: center;
-  padding: 48px 16px;
+.category-pill.match { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary)); }
+.category-pill.refinement { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary)); }
+.category-pill.broader { color: var(--info); border-color: color-mix(in srgb, var(--info) 45%, var(--border-primary)); }
+.category-pill.conflict { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 55%, var(--border-primary)); }
+.category-pill.new { color: var(--text-primary); }
+.category-pill.missing_prediction { color: var(--text-muted); }
+
+.pred {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.pred:last-child { border-bottom: none; }
+.pred-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.pred-species { color: var(--text-primary); font-weight: 600; }
+.pred-confidence { color: var(--text-muted); font-size: 11px; }
+.pred-detail {
+  margin-top: 4px;
   color: var(--text-muted);
+  font-size: 11px;
+}
+.pred-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+.status-pill {
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+.status-pill.accepted { color: var(--accent); }
+.status-pill.rejected { color: var(--danger); }
+.status-pill.reviewed { color: var(--accent); }
+
+@media (max-width: 900px) {
+  .compare-toolbar { grid-template-columns: 1fr; }
+  .summary-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
 }
 </style>
 </head>
@@ -77,24 +262,86 @@ body { padding-bottom: 36px; }
 {% include '_navbar.html' %}
 
 <div class="content">
-  <div class="compare-bar">
-    <label>Collection:</label>
-    <select id="collectionPicker" onchange="loadComparison()">
-      <option value="">Select collection...</option>
-    </select>
-    <span id="compareStatus" style="font-size:12px;color:var(--text-muted);"></span>
+  <div class="compare-toolbar">
+    <div class="control">
+      <label for="collectionPicker">Collection</label>
+      <select id="collectionPicker" onchange="loadComparison()">
+        <option value="">Select collection...</option>
+      </select>
+    </div>
+    <div class="control">
+      <label for="modelA">Model A</label>
+      <select id="modelA" onchange="renderCompare()">
+        <option value="all">All models</option>
+      </select>
+    </div>
+    <div class="control">
+      <label for="modelB">Model B</label>
+      <select id="modelB" onchange="renderCompare()">
+        <option value="">No second model</option>
+      </select>
+    </div>
+    <div class="control">
+      <label for="compareSearch">Search</label>
+      <input id="compareSearch" type="search" placeholder="Filename, keyword, species" oninput="renderCompare()">
+    </div>
+  </div>
+
+  <div id="summaryGrid" class="summary-grid" style="display:none;"></div>
+  <div id="taxonomyNote" class="taxonomy-note">Taxonomy data is unavailable. Compare can confirm exact keyword matches, but broader/refinement/conflict labels are limited.</div>
+  <div id="filterRow" class="filter-row" style="display:none;"></div>
+  <div id="batchRow" class="batch-row" style="display:none;">
+    <span id="batchCount" class="batch-count">0 selected</span>
+    <button class="batch-btn" id="batchAccept" onclick="batchAction('accept')">Add prediction keyword</button>
+    <button class="batch-btn" id="batchReplace" onclick="batchAction('replace')">Replace species keyword</button>
+    <button class="batch-btn" id="batchReject" onclick="batchAction('reject')">Reject prediction</button>
+    <button class="batch-btn" id="batchReviewed" onclick="batchAction('reviewed')">Mark reviewed</button>
   </div>
 
   <div id="compareContent">
-    <div class="compare-empty">Select a collection to compare model predictions.</div>
+    <div class="compare-empty">Select a collection to compare keywords and predictions.</div>
   </div>
 </div>
 
 <script>
+var compareData = null;
+var activeFilter = 'needs_review';
+var selectedRows = new Set();
+var loadingSeq = 0;
+
+var FILTERS = [
+  { id: 'needs_review', label: 'Needs review' },
+  { id: 'conflict', label: 'Conflicts' },
+  { id: 'refinement', label: 'Refinements' },
+  { id: 'broader', label: 'Broader' },
+  { id: 'new', label: 'No species keyword' },
+  { id: 'missing_prediction', label: 'Missing predictions' },
+  { id: 'match', label: 'Matches' },
+  { id: 'reviewed', label: 'Reviewed' },
+  { id: 'all', label: 'All' },
+];
+
+var CATEGORY_ORDER = {
+  conflict: 6,
+  refinement: 5,
+  broader: 4,
+  new: 3,
+  missing_prediction: 2,
+  match: 1,
+};
+
+async function jsonFetch(url, options) {
+  var resp = await fetch(url, options || {});
+  var data = await resp.json().catch(function() { return {}; });
+  if (!resp.ok || data.error) {
+    throw new Error(data.error || ('Request failed: ' + resp.status));
+  }
+  return data;
+}
+
 async function loadCollections() {
   try {
-    var resp = await fetch('/api/collections');
-    var data = await resp.json();
+    var data = await jsonFetch('/api/collections');
     var sel = document.getElementById('collectionPicker');
     data.forEach(function(c) {
       var opt = document.createElement('option');
@@ -102,85 +349,344 @@ async function loadCollections() {
       opt.textContent = c.name;
       sel.appendChild(opt);
     });
-  } catch(e) { console.error('loadCollections error:', e); }
+    var all = data.find(function(c) { return c.name === 'All Photos'; });
+    if (all) {
+      sel.value = all.id;
+      loadComparison();
+    }
+  } catch(e) {
+    document.getElementById('compareContent').innerHTML =
+      '<div class="compare-empty">Could not load collections.</div>';
+  }
 }
 
 async function loadComparison() {
   var collId = document.getElementById('collectionPicker').value;
   var content = document.getElementById('compareContent');
-  var status = document.getElementById('compareStatus');
+  selectedRows.clear();
+  updateBatchControls();
 
   if (!collId) {
-    content.innerHTML = '<div class="compare-empty">Select a collection to compare model predictions.</div>';
+    compareData = null;
+    document.getElementById('summaryGrid').style.display = 'none';
+    document.getElementById('filterRow').style.display = 'none';
+    document.getElementById('batchRow').style.display = 'none';
+    content.innerHTML = '<div class="compare-empty">Select a collection to compare keywords and predictions.</div>';
     return;
   }
 
-  status.textContent = 'Loading...';
+  var seq = ++loadingSeq;
+  content.innerHTML = '<div class="compare-empty">Loading keyword comparison...</div>';
   try {
-    var resp = await fetch('/api/predictions/compare?collection_id=' + collId);
-    var data = await resp.json();
-    status.textContent = '';
-
-    if (data.models.length === 0) {
-      content.innerHTML = '<div class="compare-empty">No predictions found for this collection. Run classification first.</div>';
-      return;
-    }
-
-    if (data.models.length < 2) {
-      content.innerHTML = '<div class="compare-empty">Only one model has predictions. Run classification with at least two models to compare.</div>';
-      return;
-    }
-
-    renderTable(data);
+    var data = await jsonFetch('/api/predictions/compare?collection_id=' + encodeURIComponent(collId));
+    if (seq !== loadingSeq) return;
+    compareData = data;
+    populateModelSelects(data.models || []);
+    activeFilter = data.summary && data.summary.needs_review > 0 ? 'needs_review' : 'all';
+    renderCompare();
   } catch(e) {
-    status.textContent = 'Error loading data';
-    console.error('loadComparison error:', e);
+    if (seq !== loadingSeq) return;
+    content.innerHTML = '<div class="compare-empty">Error loading comparison: ' + escapeHtml(e.message) + '</div>';
   }
 }
 
-function renderTable(data) {
+function populateModelSelects(models) {
+  var a = document.getElementById('modelA');
+  var b = document.getElementById('modelB');
+  var oldA = a.value || 'all';
+  var oldB = b.value || '';
+  a.innerHTML = '<option value="all">All models</option>';
+  b.innerHTML = '<option value="">No second model</option>';
+  models.forEach(function(m) {
+    a.innerHTML += '<option value="' + escapeAttr(m) + '">' + escapeHtml(m) + '</option>';
+    b.innerHTML += '<option value="' + escapeAttr(m) + '">' + escapeHtml(m) + '</option>';
+  });
+  a.value = models.indexOf(oldA) >= 0 ? oldA : 'all';
+  b.value = models.indexOf(oldB) >= 0 ? oldB : '';
+}
+
+function visibleModels() {
+  if (!compareData) return [];
+  var a = document.getElementById('modelA').value;
+  var b = document.getElementById('modelB').value;
+  if (a === 'all') return compareData.models || [];
+  var models = [a];
+  if (b && b !== a) models.push(b);
+  return models;
+}
+
+function renderCompare() {
+  if (!compareData) return;
+  renderSummary();
+  renderFilters();
+  renderTaxonomyNote();
+  var rows = filteredRows();
+  selectedRows.forEach(function(id) {
+    if (!rows.some(function(p) { return p.photo_id === id; })) selectedRows.delete(id);
+  });
+  renderTable(rows);
+  updateBatchControls();
+}
+
+function renderSummary() {
+  var s = compareData.summary || {};
+  var items = [
+    ['photos', 'Photos'],
+    ['models', 'Models'],
+    ['needs_review', 'Needs review'],
+    ['conflicts', 'Conflicts'],
+    ['refinements', 'Refinements'],
+    ['broader', 'Broader'],
+    ['new', 'No species keyword'],
+    ['missing_predictions', 'Missing predictions'],
+  ];
+  document.getElementById('summaryGrid').style.display = '';
+  document.getElementById('summaryGrid').innerHTML = items.map(function(item) {
+    return '<div class="summary-item"><span class="summary-value">' +
+      escapeHtml(s[item[0]] || 0) + '</span><span class="summary-label">' +
+      escapeHtml(item[1]) + '</span></div>';
+  }).join('');
+}
+
+function renderTaxonomyNote() {
+  document.getElementById('taxonomyNote').classList.toggle(
+    'visible',
+    compareData && compareData.taxonomy_available === false
+  );
+}
+
+function filterCount(filter) {
+  return (compareData.photos || []).filter(function(photo) {
+    return photoMatchesFilter(photo, filter.id);
+  }).length;
+}
+
+function renderFilters() {
+  var row = document.getElementById('filterRow');
+  row.style.display = '';
+  row.innerHTML = FILTERS.map(function(f) {
+    var cls = f.id === activeFilter ? 'filter-btn active' : 'filter-btn';
+    return '<button class="' + cls + '" onclick="setFilter(\'' + f.id + '\')">' +
+      escapeHtml(f.label) + ' <span>' + filterCount(f) + '</span></button>';
+  }).join('');
+}
+
+function setFilter(filter) {
+  activeFilter = filter;
+  renderCompare();
+}
+
+function hasReviewedPrediction(photo) {
+  return Object.keys(photo.predictions || {}).some(function(model) {
+    return (photo.predictions[model] || []).some(function(p) {
+      return p.status === 'reviewed';
+    });
+  });
+}
+
+function photoMatchesFilter(photo, filter) {
+  if (filter === 'all') return true;
+  if (filter === 'needs_review') return !!photo.needs_review;
+  if (filter === 'reviewed') return hasReviewedPrediction(photo);
+  return photo.row_category === filter;
+}
+
+function searchableText(photo) {
+  var parts = [photo.filename, photo.row_label];
+  (photo.keywords || []).forEach(function(k) { parts.push(k.name, k.type); });
+  Object.keys(photo.predictions || {}).forEach(function(model) {
+    parts.push(model);
+    (photo.predictions[model] || []).forEach(function(p) {
+      parts.push(p.species, p.category_label, p.matched_keyword, p.status);
+    });
+  });
+  return parts.join(' ').toLowerCase();
+}
+
+function filteredRows() {
+  var q = document.getElementById('compareSearch').value.trim().toLowerCase();
+  return (compareData.photos || []).filter(function(photo) {
+    if (!photoMatchesFilter(photo, activeFilter)) return false;
+    if (q && searchableText(photo).indexOf(q) < 0) return false;
+    return true;
+  });
+}
+
+function renderTable(rows) {
   var content = document.getElementById('compareContent');
-  var html = '<table class="compare-table"><thead><tr>';
-  html += '<th>Photo</th>';
-  data.models.forEach(function(m) {
-    html += '<th>' + escapeHtml(m) + '</th>';
+  var models = visibleModels();
+  if (!compareData.photos.length) {
+    content.innerHTML = '<div class="compare-empty">This collection has no photos.</div>';
+    return;
+  }
+  if (!rows.length) {
+    content.innerHTML = '<div class="compare-empty">No photos match the current filter.</div>';
+    return;
+  }
+
+  var html = '<div class="table-wrap"><table class="compare-table"><thead><tr>' +
+    '<th class="select-col"><input type="checkbox" onchange="toggleAllRows(this.checked)"></th>' +
+    '<th class="photo-col">Photo</th>' +
+    '<th>Status</th>' +
+    '<th class="keyword-col">Current keywords</th>';
+  models.forEach(function(m) {
+    html += '<th class="model-col">' + escapeHtml(m) + '</th>';
   });
   html += '</tr></thead><tbody>';
 
-  data.photos.forEach(function(photo) {
-    // Determine if models disagree — collect top species per model
-    var topSpecies = new Set();
-    data.models.forEach(function(m) {
-      var preds = photo.predictions[m];
-      if (preds && preds.length > 0) topSpecies.add(preds[0].species);
+  rows.forEach(function(photo) {
+    html += '<tr data-photo-id="' + photo.photo_id + '">' +
+      '<td><input type="checkbox" ' + (selectedRows.has(photo.photo_id) ? 'checked' : '') +
+      ' onchange="toggleRow(' + photo.photo_id + ', this.checked)"></td>' +
+      '<td>' + renderPhotoCell(photo) + '</td>' +
+      '<td><span class="category-pill ' + escapeAttr(photo.row_category) + '">' +
+      escapeHtml(photo.row_label) + '</span></td>' +
+      '<td>' + renderKeywordCell(photo) + '</td>';
+    models.forEach(function(m) {
+      html += '<td>' + renderPredictionCell(photo, m) + '</td>';
     });
-    var disagree = topSpecies.size > 1;
-
-    html += '<tr class="' + (disagree ? 'disagree' : '') + '">';
-    html += '<td><div class="thumb-cell">';
-    html += '<img src="/thumbnails/' + photo.photo_id + '.jpg" loading="lazy" alt="">';
-    html += '<span>' + escapeHtml(photo.filename) + '</span>';
-    html += '</div></td>';
-
-    data.models.forEach(function(m) {
-      var preds = photo.predictions[m];
-      if (preds && preds.length > 0) {
-        var parts = [];
-        preds.forEach(function(pred) {
-          parts.push(escapeHtml(pred.species) +
-            ' <span class="conf">' + Math.round(pred.confidence * 100) + '%</span>');
-        });
-        html += '<td>' + parts.join('<br>') + '</td>';
-      } else {
-        html += '<td class="empty-cell">&mdash;</td>';
-      }
-    });
-
     html += '</tr>';
   });
-
-  html += '</tbody></table>';
+  html += '</tbody></table></div>';
   content.innerHTML = html;
+}
+
+function renderPhotoCell(photo) {
+  var meta = [];
+  if (photo.timestamp) meta.push(photo.timestamp.replace('T', ' ').substring(0, 16));
+  if (photo.rating) meta.push(photo.rating + ' star' + (photo.rating === 1 ? '' : 's'));
+  if (photo.flag && photo.flag !== 'none') meta.push(photo.flag);
+  return '<div class="photo-cell">' +
+    '<img src="/thumbnails/' + photo.photo_id + '.jpg" loading="lazy" alt="">' +
+    '<div><div class="photo-name">' + escapeHtml(photo.filename) + '</div>' +
+    '<div class="photo-meta">' + escapeHtml(meta.join(' · ')) + '</div>' +
+    '<div class="pred-actions"><a class="inline-btn" href="/browse?photo_id=' +
+    encodeURIComponent(photo.photo_id) + '">Open photo</a></div></div></div>';
+}
+
+function isSpeciesKeyword(k) {
+  // Mirror the backend species definition (get_species_keywords_for_photos):
+  // upgraded/legacy taxonomy tags can be type='taxonomy' with is_species=0.
+  return !!k.is_species || k.type === 'taxonomy';
+}
+
+function renderKeywordCell(photo) {
+  var species = (photo.keywords || []).filter(isSpeciesKeyword);
+  var other = (photo.keywords || []).filter(function(k) { return !isSpeciesKeyword(k); });
+  var html = '';
+  if (species.length) {
+    html += '<div class="keyword-group">' + species.map(function(k) {
+      return '<span class="keyword-pill species" title="Species keyword">' +
+        escapeHtml(k.name) + '</span>';
+    }).join('') + '</div>';
+  } else {
+    html += '<div class="empty-cell">No species keyword</div>';
+  }
+  if (other.length) {
+    html += '<div class="keyword-group">' + other.map(function(k) {
+      return '<span class="keyword-pill general" title="' + escapeAttr(k.type || 'keyword') + '">' +
+        escapeHtml(k.name) + '</span>';
+    }).join('') + '</div>';
+  }
+  return html;
+}
+
+function renderPredictionCell(photo, model) {
+  var preds = (photo.predictions || {})[model] || [];
+  if (!preds.length) return '<span class="empty-cell">No prediction</span>';
+  return preds.map(function(pred) {
+    var status = pred.status || 'pending';
+    var disabled = status !== 'pending' ? ' disabled' : '';
+    var detail = pred.category_detail || '';
+    if (pred.matched_keyword) detail += ' Keyword: ' + pred.matched_keyword + '.';
+    if (pred.shared_rank) detail += ' Shared ' + pred.shared_rank + '.';
+    return '<div class="pred">' +
+      '<div class="pred-main"><span class="pred-species">' + escapeHtml(pred.species) + '</span>' +
+      '<span class="pred-confidence">' + Math.round((pred.confidence || 0) * 100) + '%</span>' +
+      '<span class="category-pill ' + escapeAttr(pred.category) + '">' + escapeHtml(pred.category_label) + '</span>' +
+      '<span class="status-pill ' + escapeAttr(status) + '">' + escapeHtml(status) + '</span></div>' +
+      '<div class="pred-detail">' + escapeHtml(detail) + '</div>' +
+      '<div class="pred-actions">' +
+      '<button class="inline-btn primary" onclick="predictionAction(' + pred.id + ', \'accept\')"' + disabled + '>Add keyword</button>' +
+      '<button class="inline-btn primary" onclick="predictionAction(' + pred.id + ', \'replace\')"' + disabled + '>Replace keyword</button>' +
+      '<button class="inline-btn danger" onclick="predictionAction(' + pred.id + ', \'reject\')"' + disabled + '>Reject</button>' +
+      '<button class="inline-btn" onclick="predictionAction(' + pred.id + ', \'reviewed\')"' + disabled + '>Reviewed</button>' +
+      '</div></div>';
+  }).join('');
+}
+
+function toggleRow(photoId, checked) {
+  if (checked) selectedRows.add(photoId);
+  else selectedRows.delete(photoId);
+  updateBatchControls();
+}
+
+function toggleAllRows(checked) {
+  filteredRows().forEach(function(photo) {
+    if (checked) selectedRows.add(photo.photo_id);
+    else selectedRows.delete(photo.photo_id);
+  });
+  renderCompare();
+}
+
+function updateBatchControls() {
+  var row = document.getElementById('batchRow');
+  if (!compareData) {
+    row.style.display = 'none';
+    return;
+  }
+  row.style.display = '';
+  document.getElementById('batchCount').textContent = selectedRows.size + ' selected';
+  ['batchAccept', 'batchReplace', 'batchReject', 'batchReviewed'].forEach(function(id) {
+    document.getElementById(id).disabled = selectedRows.size === 0;
+  });
+}
+
+function bestPrediction(photo) {
+  var models = visibleModels();
+  var best = null;
+  models.forEach(function(model) {
+    ((photo.predictions || {})[model] || []).forEach(function(pred) {
+      if (pred.status && pred.status !== 'pending') return;
+      if (!best) {
+        best = pred;
+        return;
+      }
+      var predScore = CATEGORY_ORDER[pred.category] || 0;
+      var bestScore = CATEGORY_ORDER[best.category] || 0;
+      if (predScore > bestScore || (predScore === bestScore && pred.confidence > best.confidence)) {
+        best = pred;
+      }
+    });
+  });
+  return best;
+}
+
+async function predictionAction(predId, action) {
+  var url = '/api/predictions/' + predId + '/' + endpointForAction(action);
+  await jsonFetch(url, { method: 'POST' });
+  await loadComparison();
+}
+
+function endpointForAction(action) {
+  if (action === 'accept') return 'accept';
+  if (action === 'replace') return 'replace-keywords';
+  if (action === 'reject') return 'reject';
+  return 'reviewed';
+}
+
+async function batchAction(action) {
+  var ids = Array.from(selectedRows);
+  var photos = (compareData.photos || []).filter(function(photo) {
+    return ids.indexOf(photo.photo_id) >= 0;
+  });
+  for (var i = 0; i < photos.length; i++) {
+    var pred = bestPrediction(photos[i]);
+    if (!pred) continue;
+    await jsonFetch('/api/predictions/' + pred.id + '/' + endpointForAction(action), { method: 'POST' });
+  }
+  selectedRows.clear();
+  await loadComparison();
 }
 
 loadCollections();

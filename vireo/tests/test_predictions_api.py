@@ -114,6 +114,71 @@ def test_reject_prediction(app_and_db):
     assert 'Northern Cardinal' not in kw_names
 
 
+def test_mark_prediction_reviewed(app_and_db):
+    """POST reviewed marks a pending prediction as reviewed."""
+    app, db = app_and_db
+    photos = _seed_predictions(db)
+    client = app.test_client()
+
+    det = _make_detection(db, photos[2]['id'])
+    db.add_prediction(detection_id=det, species='Blue Jay', confidence=0.90,
+                      model='test-model', category='new', group_id=None)
+    pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE species = 'Blue Jay'"
+    ).fetchone()
+
+    resp = client.post(f'/api/predictions/{pred["id"]}/reviewed')
+    assert resp.status_code == 200
+    assert resp.get_json()['ok'] is True
+    assert db.get_review_status(pred['id'], db._active_workspace_id) == 'reviewed'
+
+
+def test_mark_prediction_reviewed_rejects_non_pending(app_and_db):
+    """Only pending predictions may transition to reviewed.
+
+    A stale/double request or direct API call against an already
+    accepted/rejected prediction must not silently overwrite the prior
+    decision; the endpoint returns 409 and the status is preserved.
+    """
+    app, db = app_and_db
+    photos = _seed_predictions(db)
+    client = app.test_client()
+
+    det_acc = _make_detection(db, photos[2]['id'])
+    db.add_prediction(detection_id=det_acc, species='Blue Jay', confidence=0.90,
+                      model='test-model', category='new', group_id=None)
+    accepted = db.conn.execute(
+        "SELECT id FROM predictions WHERE species = 'Blue Jay'"
+    ).fetchone()
+    db.update_prediction_status(accepted['id'], 'accepted')
+
+    resp = client.post(f'/api/predictions/{accepted["id"]}/reviewed')
+    assert resp.status_code == 409
+    assert db.get_review_status(
+        accepted['id'], db._active_workspace_id) == 'accepted'
+
+    rejected = db.conn.execute(
+        "SELECT id FROM predictions WHERE species = 'Northern Cardinal'"
+    ).fetchone()
+    db.update_prediction_status(rejected['id'], 'rejected')
+
+    resp = client.post(f'/api/predictions/{rejected["id"]}/reviewed')
+    assert resp.status_code == 409
+    assert db.get_review_status(
+        rejected['id'], db._active_workspace_id) == 'rejected'
+
+
+def test_mark_prediction_reviewed_missing_id_returns_404(app_and_db):
+    """Stale prediction IDs should 404, not 500 or a silent write."""
+    app, db = app_and_db
+    _seed_predictions(db)
+    client = app.test_client()
+
+    resp = client.post('/api/predictions/999999/reviewed')
+    assert resp.status_code == 404
+    assert db.get_review_status(999999, db._active_workspace_id) == 'pending'
+
+
 def test_reject_prediction_missing_id_returns_404(app_and_db):
     """Stale prediction IDs should 404, not 500.
 

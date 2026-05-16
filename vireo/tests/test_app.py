@@ -1,3 +1,4 @@
+import json
 import os
 
 
@@ -1017,6 +1018,95 @@ def test_compare_predictions_api(app_and_db):
         assert len(model_preds) >= 1
         assert "species" in model_preds[0]
         assert "confidence" in model_preds[0]
+
+
+def test_compare_ignores_resolved_predictions_for_needs_review(app_and_db):
+    """A resolved conflict plus a pending match should not stay in review."""
+    app, db = app_and_db
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    species_id = db.add_keyword("Cardinal", is_species=True)
+    db.tag_photo(photo_id, species_id)
+    rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
+    cid = db.add_collection("Single Photo", rules)
+
+    det_ids = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.85, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(
+        det_ids[0], "Blue Jay", 0.95, "model-a", status="accepted",
+    )
+    db.add_prediction(det_ids[1], "Cardinal", 0.92, "model-b")
+
+    resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
+
+    assert resp.status_code == 200
+    row = resp.get_json()["photos"][0]
+    assert row["row_category"] == "match"
+    assert row["needs_review"] is False
+    assert resp.get_json()["summary"]["needs_review"] == 0
+
+
+def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
+    """Replacing a grouped prediction removes old species keywords from the group."""
+    app, db = app_and_db
+    photos = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    photo_ids = [p["id"] for p in photos]
+
+    old_one = db.add_keyword("Old Species One", is_species=True)
+    old_two = db.add_keyword("Old Species Two", is_species=True)
+    db.tag_photo(photo_ids[0], old_one)
+    db.tag_photo(photo_ids[1], old_two)
+
+    first_det = db.save_detections(photo_ids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")[0]
+    second_det = db.save_detections(photo_ids[1], [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.85, "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.add_prediction(
+        first_det, "New Species", 0.95, "model-a", group_id="group-1",
+    )
+    db.add_prediction(
+        second_det, "New Species", 0.92, "model-a", group_id="group-1",
+    )
+    pred = db.conn.execute(
+        """SELECT id FROM predictions
+           WHERE detection_id = ? AND classifier_model = ?""",
+        (first_det, "model-a"),
+    ).fetchone()
+
+    resp = app.test_client().post(
+        f"/api/predictions/{pred['id']}/replace-keywords"
+    )
+
+    assert resp.status_code == 200
+    for pid in photo_ids:
+        names = {k["name"] for k in db.get_photo_keywords(pid)}
+        assert "New Species" in names
+        assert "Old Species One" not in names
+        assert "Old Species Two" not in names
+
+    # The DB rows are gone, but sync_to_xmp only strips a sidecar keyword
+    # when a matching keyword_remove pending change exists. Without one the
+    # old species would silently linger in the XMP files.
+    changes = db.get_pending_changes()
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in changes
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (photo_ids[0], "Old Species One") in removed
+    assert (photo_ids[1], "Old Species Two") in removed
+    for pid in photo_ids:
+        assert any(
+            c["photo_id"] == pid
+            and c["change_type"] == "keyword_add"
+            and c["value"] == "New Species"
+            for c in changes
+        )
 
 
 def test_api_predictions_include_bounding_box(app_and_db):
