@@ -4454,46 +4454,71 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/predictions/<int:pred_id>/replace-keywords", methods=["POST"])
     def api_replace_species_keywords_with_prediction(pred_id):
         db = _get_db()
+        ws = db._ws_id()
         pred = db.conn.execute(
-            """SELECT pr.id, pr.species, d.photo_id
+            """SELECT pr.id, pr.species, pr.classifier_model AS model,
+                      pr_rev.group_id, d.photo_id
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                WHERE pr.id = ?""",
-            (pred_id,),
+            (ws, pred_id),
         ).fetchone()
         if pred is None:
             return json_error("prediction not found", 404)
-        old_species = [
-            row["name"] for row in db.conn.execute(
-                """SELECT k.name
-                   FROM photo_keywords pk
-                   JOIN keywords k ON k.id = pk.keyword_id
-                   WHERE pk.photo_id = ?
-                     AND (k.is_species = 1 OR k.type = 'taxonomy')""",
-                (pred["photo_id"],),
-            ).fetchall()
-        ]
+        affected_photo_ids = [pred["photo_id"]]
+        if pred["group_id"]:
+            affected_photo_ids = [
+                row["photo_id"] for row in db.conn.execute(
+                    """SELECT DISTINCT d.photo_id
+                       FROM predictions pr
+                       JOIN prediction_review pr_rev
+                         ON pr_rev.prediction_id = pr.id
+                        AND pr_rev.workspace_id = ?
+                       JOIN detections d ON d.id = pr.detection_id
+                       JOIN photos ph ON ph.id = d.photo_id
+                       JOIN workspace_folders wf
+                         ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                       WHERE pr_rev.group_id = ? AND pr.classifier_model = ?""",
+                    (ws, ws, pred["group_id"], pred["model"]),
+                ).fetchall()
+            ]
+
+        placeholders = ",".join("?" for _ in affected_photo_ids)
+        old_species_by_photo = {pid: [] for pid in affected_photo_ids}
+        for row in db.conn.execute(
+            f"""SELECT pk.photo_id, k.name
+                FROM photo_keywords pk
+                JOIN keywords k ON k.id = pk.keyword_id
+                WHERE pk.photo_id IN ({placeholders})
+                  AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+            affected_photo_ids,
+        ).fetchall():
+            old_species_by_photo.setdefault(row["photo_id"], []).append(row["name"])
         db.conn.execute(
-            """DELETE FROM photo_keywords
-               WHERE photo_id = ?
-                 AND keyword_id IN (
-                   SELECT id FROM keywords
-                   WHERE is_species = 1 OR type = 'taxonomy'
-                 )""",
-            (pred["photo_id"],),
+            f"""DELETE FROM photo_keywords
+                WHERE photo_id IN ({placeholders})
+                  AND keyword_id IN (
+                    SELECT id FROM keywords
+                    WHERE is_species = 1 OR type = 'taxonomy'
+                  )""",
+            affected_photo_ids,
         )
         result = db.accept_prediction(pred_id)
         if result is None:
             return json_error("prediction not found", 404)
+        items = [{
+            "photo_id": pid,
+            "old_value": ", ".join(old_species_by_photo.get(pid, [])),
+            "new_value": result["species"],
+        } for pid in affected_photo_ids]
         db.record_edit(
             "prediction_replace_species",
             f'Replaced species keyword with "{result["species"]}"',
             result["species"],
-            [{
-                "photo_id": pred["photo_id"],
-                "old_value": ", ".join(old_species),
-                "new_value": result["species"],
-            }],
+            items,
+            is_batch=len(items) > 1,
         )
         return jsonify({"ok": True})
 

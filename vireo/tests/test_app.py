@@ -1019,6 +1019,47 @@ def test_compare_predictions_api(app_and_db):
         assert "confidence" in model_preds[0]
 
 
+def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
+    """Replacing a grouped prediction removes old species keywords from the group."""
+    app, db = app_and_db
+    photos = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    photo_ids = [p["id"] for p in photos]
+
+    old_one = db.add_keyword("Old Species One", is_species=True)
+    old_two = db.add_keyword("Old Species Two", is_species=True)
+    db.tag_photo(photo_ids[0], old_one)
+    db.tag_photo(photo_ids[1], old_two)
+
+    first_det = db.save_detections(photo_ids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")[0]
+    second_det = db.save_detections(photo_ids[1], [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.85, "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.add_prediction(
+        first_det, "New Species", 0.95, "model-a", group_id="group-1",
+    )
+    db.add_prediction(
+        second_det, "New Species", 0.92, "model-a", group_id="group-1",
+    )
+    pred = db.conn.execute(
+        """SELECT id FROM predictions
+           WHERE detection_id = ? AND classifier_model = ?""",
+        (first_det, "model-a"),
+    ).fetchone()
+
+    resp = app.test_client().post(
+        f"/api/predictions/{pred['id']}/replace-keywords"
+    )
+
+    assert resp.status_code == 200
+    for pid in photo_ids:
+        names = {k["name"] for k in db.get_photo_keywords(pid)}
+        assert "New Species" in names
+        assert "Old Species One" not in names
+        assert "Old Species Two" not in names
+
+
 def test_api_predictions_include_bounding_box(app_and_db):
     """GET /api/predictions should return bounding box data from detections."""
     app, db = app_and_db

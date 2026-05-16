@@ -330,19 +330,6 @@ var CATEGORY_ORDER = {
   match: 1,
 };
 
-function escapeHtml(value) {
-  return String(value == null ? '' : value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
-
-function escapeAttr(value) {
-  return escapeHtml(value).replace(/`/g, '&#096;');
-}
-
 async function jsonFetch(url, options) {
   var resp = await fetch(url, options || {});
   var data = await resp.json().catch(function() { return {}; });
