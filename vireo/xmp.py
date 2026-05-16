@@ -16,6 +16,7 @@ NS_RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 NS_DC = "http://purl.org/dc/elements/1.1/"
 NS_LR = "http://ns.adobe.com/lightroom/1.0/"
 NS_XMP = "http://ns.adobe.com/xap/1.0/"
+NS_XMPDM = "http://ns.adobe.com/xmp/1.0/DynamicMedia/"
 
 # Register namespaces so ET preserves prefixes on output
 ET.register_namespace("x", NS_X)
@@ -23,6 +24,7 @@ ET.register_namespace("rdf", NS_RDF)
 ET.register_namespace("dc", NS_DC)
 ET.register_namespace("lr", NS_LR)
 ET.register_namespace("xmp", NS_XMP)
+ET.register_namespace("xmpDM", NS_XMPDM)
 ET.register_namespace("crs", "http://ns.adobe.com/camera-raw-settings/1.0/")
 ET.register_namespace("photoshop", "http://ns.adobe.com/photoshop/1.0/")
 ET.register_namespace("exif", "http://ns.adobe.com/exif/1.0/")
@@ -66,6 +68,34 @@ def _parse_xmp(xmp_path):
         return None
 
     return tree.getroot(), tree
+
+
+def _load_or_create_xmp(xmp_path):
+    """Load an XMP tree, or create a minimal sidecar tree."""
+    path = Path(xmp_path)
+
+    if path.exists():
+        try:
+            tree = ET.parse(path)
+            return tree.getroot(), tree
+        except ET.ParseError:
+            log.warning("Corrupt XMP file %s — creating new sidecar", path)
+
+    root = ET.Element(f"{{{NS_X}}}xmpmeta")
+    tree = ET.ElementTree(root)
+    return root, tree
+
+
+def _get_or_create_description(root):
+    """Find or create the first rdf:Description in an XMP tree."""
+    rdf = root.find(f"{{{NS_RDF}}}RDF")
+    if rdf is None:
+        rdf = ET.SubElement(root, f"{{{NS_RDF}}}RDF")
+
+    desc = rdf.find(f"{{{NS_RDF}}}Description")
+    if desc is None:
+        desc = ET.SubElement(rdf, f"{{{NS_RDF}}}Description")
+    return desc
 
 
 # ── Public API ──────────────────────────────────────────────────────────
@@ -183,6 +213,28 @@ def write_rating(xmp_path, rating):
         desc.set(f"{{{NS_XMP}}}Rating", str(rating))
         ET.indent(tree, space="  ")
         tree.write(xmp_path, xml_declaration=True, encoding="unicode")
+
+
+def write_pick_flag(xmp_path, flag):
+    """Write Lightroom-compatible pick/reject flag metadata.
+
+    Vireo stores flags as ``flagged`` / ``none`` / ``rejected``. Lightroom
+    Classic 13.2+ persists the equivalent pick state in ``xmpDM:pick`` using
+    values ``1`` / ``0`` / ``-1``.
+    """
+    values = {
+        "flagged": "1",
+        "none": "0",
+        "rejected": "-1",
+    }
+    if flag not in values:
+        raise ValueError("flag must be 'none', 'flagged', or 'rejected'")
+
+    root, tree = _load_or_create_xmp(xmp_path)
+    desc = _get_or_create_description(root)
+    desc.set(f"{{{NS_XMPDM}}}pick", values[flag])
+    ET.indent(tree, space="  ")
+    tree.write(xmp_path, xml_declaration=True, encoding="unicode")
 
 
 def remove_keywords(xmp_path, keywords_to_remove):
