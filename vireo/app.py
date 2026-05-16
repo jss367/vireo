@@ -1209,6 +1209,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Page routes --
 
+    @app.route("/config-defaults.js")
+    def config_defaults_js():
+        """Expose backend defaults to browser code without template literals."""
+        return Response(
+            "window.VIREO_CONFIG_DEFAULTS = "
+            + json.dumps(cfg.DEFAULTS, separators=(",", ":"))
+            + ";\n",
+            mimetype="application/javascript",
+        )
+
     @app.route("/")
     def index():
         from models import get_active_model

@@ -18,6 +18,19 @@ function escapeAttr(str) {
 }
 
 var VireoPipelineConfig = (function() {
+  function defaultPipeline() {
+    var defaults = window.VIREO_CONFIG_DEFAULTS;
+    if (!defaults || typeof defaults.pipeline !== 'object' || defaults.pipeline === null) {
+      throw new Error('Missing rendered pipeline defaults');
+    }
+    return defaults.pipeline;
+  }
+
+  function pipelineValue(pipeline, key) {
+    if (pipeline && pipeline[key] != null) return pipeline[key];
+    return defaultPipeline()[key];
+  }
+
   function asNumber(value, key) {
     var n = Number(value);
     if (!Number.isFinite(n)) {
@@ -31,8 +44,9 @@ var VireoPipelineConfig = (function() {
   }
 
   function pipelineFromConfig(config) {
-    if (!config || typeof config.pipeline !== 'object' || config.pipeline === null) {
-      throw new Error('Missing pipeline config');
+    if (!config) return defaultPipeline();
+    if (typeof config.pipeline !== 'object' || config.pipeline === null) {
+      return defaultPipeline();
     }
     return config.pipeline;
   }
@@ -49,37 +63,61 @@ var VireoPipelineConfig = (function() {
     var p = pipelineFromConfig(config);
     return {
       scoring: {
-        reject_crop_complete: percent(p.reject_crop_complete, 'reject_crop_complete'),
-        reject_focus: percent(p.reject_focus, 'reject_focus'),
-        reject_clip_high: percent(p.reject_clip_high, 'reject_clip_high'),
-        reject_composite: percent(p.reject_composite, 'reject_composite'),
-        burst_lambda: percent(p.burst_lambda, 'burst_lambda'),
-        burst_max_keep: asNumber(p.burst_max_keep, 'burst_max_keep'),
-        encounter_lambda: percent(p.encounter_lambda, 'encounter_lambda'),
-        encounter_max_keep: asNumber(p.encounter_max_keep, 'encounter_max_keep'),
+        reject_crop_complete: percent(
+          pipelineValue(p, 'reject_crop_complete'), 'reject_crop_complete'
+        ),
+        reject_focus: percent(pipelineValue(p, 'reject_focus'), 'reject_focus'),
+        reject_clip_high: percent(
+          pipelineValue(p, 'reject_clip_high'), 'reject_clip_high'
+        ),
+        reject_composite: percent(
+          pipelineValue(p, 'reject_composite'), 'reject_composite'
+        ),
+        burst_lambda: percent(pipelineValue(p, 'burst_lambda'), 'burst_lambda'),
+        burst_max_keep: asNumber(
+          pipelineValue(p, 'burst_max_keep'), 'burst_max_keep'
+        ),
+        encounter_lambda: percent(
+          pipelineValue(p, 'encounter_lambda'), 'encounter_lambda'
+        ),
+        encounter_max_keep: asNumber(
+          pipelineValue(p, 'encounter_max_keep'), 'encounter_max_keep'
+        ),
       },
       grouping: {
-        w_time: percent(p.w_time, 'w_time'),
-        w_subj: percent(p.w_subj, 'w_subj'),
-        w_global: percent(p.w_global, 'w_global'),
-        w_species: percent(p.w_species, 'w_species'),
-        w_meta: percent(p.w_meta, 'w_meta'),
-        tau_enc: asNumber(p.tau_enc, 'tau_enc'),
-        hard_cut_time: asNumber(p.hard_cut_time, 'hard_cut_time'),
-        hard_cut_score: percent(p.hard_cut_score, 'hard_cut_score'),
-        soft_cut_score: percent(p.soft_cut_score, 'soft_cut_score'),
-        merge_score: percent(p.merge_score, 'merge_score'),
-        merge_max_gap: asNumber(p.merge_max_gap, 'merge_max_gap'),
-        merge_tau: asNumber(p.merge_tau, 'merge_tau'),
-        burst_time_gap: asNumber(p.burst_time_gap, 'burst_time_gap'),
+        w_time: percent(pipelineValue(p, 'w_time'), 'w_time'),
+        w_subj: percent(pipelineValue(p, 'w_subj'), 'w_subj'),
+        w_global: percent(pipelineValue(p, 'w_global'), 'w_global'),
+        w_species: percent(pipelineValue(p, 'w_species'), 'w_species'),
+        w_meta: percent(pipelineValue(p, 'w_meta'), 'w_meta'),
+        tau_enc: asNumber(pipelineValue(p, 'tau_enc'), 'tau_enc'),
+        hard_cut_time: asNumber(
+          pipelineValue(p, 'hard_cut_time'), 'hard_cut_time'
+        ),
+        hard_cut_score: percent(
+          pipelineValue(p, 'hard_cut_score'), 'hard_cut_score'
+        ),
+        soft_cut_score: percent(
+          pipelineValue(p, 'soft_cut_score'), 'soft_cut_score'
+        ),
+        merge_score: percent(pipelineValue(p, 'merge_score'), 'merge_score'),
+        merge_max_gap: asNumber(
+          pipelineValue(p, 'merge_max_gap'), 'merge_max_gap'
+        ),
+        merge_tau: asNumber(pipelineValue(p, 'merge_tau'), 'merge_tau'),
+        burst_time_gap: asNumber(
+          pipelineValue(p, 'burst_time_gap'), 'burst_time_gap'
+        ),
         burst_embedding_distance: embeddingThresholdToDistancePercent(
-          p.burst_embedding_threshold
+          pipelineValue(p, 'burst_embedding_threshold')
         ),
       },
     };
   }
 
   return {
+    defaultPipeline: defaultPipeline,
+    pipelineValue: pipelineValue,
     asNumber: asNumber,
     percent: percent,
     pipelineFromConfig: pipelineFromConfig,

@@ -1911,46 +1911,71 @@ function saveConfig() {
 }
 
 function resetPipelineDefaults() {
-  var defs = {
-    cfgWFocus: [45, '%'], cfgWExposure: [20, '%'], cfgWComposition: [15, '%'],
-    cfgWArea: [10, '%'], cfgWNoise: [10, '%'],
-    cfgRejectCrop: [60, '%'], cfgRejectFocus: [35, '%'], cfgRejectClip: [30, '%'],
-    cfgRejectComposite: [40, '%'],
-    cfgEyeClassifierConfGate: [50, '%'], cfgEyeDetectionConfGate: [50, '%'],
-    cfgRejectEyeFocus: [35, '%'],
-    cfgBurstTimeGap: [3, 's'], cfgBurstEmb: [20, '%'],
-    cfgBurstLambda: [85, '%'], cfgEncLambda: [70, '%'],
-    cfgHardCutScore: [42, '%'], cfgSoftCutScore: [52, '%'], cfgMergeScore: [62, '%'],
-  };
-  for (var id in defs) {
-    var val = defs[id][0], suffix = defs[id][1];
+  var p = VireoPipelineConfig.defaultPipeline();
+  function setPercent(id, key) {
+    setValue(id, VireoPipelineConfig.percent(p[key], key), '%');
+  }
+  function setValue(id, val, suffix) {
     document.getElementById(id).value = val;
     var span = document.getElementById(id + 'Val');
     if (span) span.textContent = val + suffix;
   }
-  // cfgEyeWindowK shows its display value as a ratio, not a percent — reset
-  // separately so the visible label stays consistent with how loadConfig
-  // renders it.
-  document.getElementById('cfgEyeWindowK').value = 8;
-  document.getElementById('cfgEyeWindowKVal').textContent = '0.08';
-  document.getElementById('cfgEyeDetectEnabled').checked = true;
-  // Miss-detection defaults (non-percent display values).
-  document.getElementById('cfgMissEnabled').checked = true;
-  document.getElementById('cfgMissDetConf').value = 25;
-  document.getElementById('cfgMissDetConfVal').textContent = '25%';
-  document.getElementById('cfgMissBboxMin').value = 5;
-  document.getElementById('cfgMissBboxMinVal').textContent = '0.005';
-  document.getElementById('cfgMissOofRatio').value = 50;
-  document.getElementById('cfgMissOofRatioVal').textContent = '0.50';
-  document.getElementById('cfgBurstMaxKeep').value = 3;
-  document.getElementById('cfgEncMaxKeep').value = 5;
-  document.getElementById('cfgWTime').value = 35;
-  document.getElementById('cfgWSubj').value = 35;
-  document.getElementById('cfgWGlobal').value = 15;
-  document.getElementById('cfgWSpecies').value = 10;
-  document.getElementById('cfgWMeta').value = 5;
-  document.getElementById('cfgHardCutTime').value = 180;
-  document.getElementById('cfgMergeMaxGap').value = 60;
+  setPercent('cfgWFocus', 'w_focus');
+  setPercent('cfgWExposure', 'w_exposure');
+  setPercent('cfgWComposition', 'w_composition');
+  setPercent('cfgWArea', 'w_area');
+  setPercent('cfgWNoise', 'w_noise');
+  setPercent('cfgRejectCrop', 'reject_crop_complete');
+  setPercent('cfgRejectFocus', 'reject_focus');
+  setPercent('cfgRejectClip', 'reject_clip_high');
+  setPercent('cfgRejectComposite', 'reject_composite');
+  setPercent('cfgEyeClassifierConfGate', 'eye_classifier_conf_gate');
+  setPercent('cfgEyeDetectionConfGate', 'eye_detection_conf_gate');
+  setPercent('cfgRejectEyeFocus', 'reject_eye_focus');
+  setValue('cfgBurstTimeGap', p.burst_time_gap, 's');
+  setValue(
+    'cfgBurstEmb',
+    VireoPipelineConfig.embeddingThresholdToDistancePercent(
+      p.burst_embedding_threshold
+    ),
+    '%'
+  );
+  setPercent('cfgBurstLambda', 'burst_lambda');
+  setPercent('cfgEncLambda', 'encounter_lambda');
+  setPercent('cfgHardCutScore', 'hard_cut_score');
+  setPercent('cfgSoftCutScore', 'soft_cut_score');
+  setPercent('cfgMergeScore', 'merge_score');
+  var eyeWindow = VireoPipelineConfig.percent(p.eye_window_k, 'eye_window_k');
+  document.getElementById('cfgEyeWindowK').value = eyeWindow;
+  document.getElementById('cfgEyeWindowKVal').textContent =
+    (eyeWindow / 100).toFixed(2);
+  document.getElementById('cfgEyeDetectEnabled').checked = p.eye_detect_enabled !== false;
+  document.getElementById('cfgMissEnabled').checked = p.miss_enabled !== false;
+  setPercent('cfgMissDetConf', 'miss_det_confidence');
+  var bboxMin = Math.round(
+    VireoPipelineConfig.asNumber(p.miss_bbox_area_min, 'miss_bbox_area_min') * 1000
+  );
+  document.getElementById('cfgMissBboxMin').value = bboxMin;
+  document.getElementById('cfgMissBboxMinVal').textContent =
+    (bboxMin / 1000).toFixed(3);
+  var missOofRatio = VireoPipelineConfig.percent(p.miss_oof_ratio, 'miss_oof_ratio');
+  document.getElementById('cfgMissOofRatio').value = missOofRatio;
+  document.getElementById('cfgMissOofRatioVal').textContent =
+    (missOofRatio / 100).toFixed(2);
+  document.getElementById('cfgBurstMaxKeep').value = p.burst_max_keep;
+  document.getElementById('cfgEncMaxKeep').value = p.encounter_max_keep;
+  document.getElementById('cfgWTime').value =
+    VireoPipelineConfig.percent(p.w_time, 'w_time');
+  document.getElementById('cfgWSubj').value =
+    VireoPipelineConfig.percent(p.w_subj, 'w_subj');
+  document.getElementById('cfgWGlobal').value =
+    VireoPipelineConfig.percent(p.w_global, 'w_global');
+  document.getElementById('cfgWSpecies').value =
+    VireoPipelineConfig.percent(p.w_species, 'w_species');
+  document.getElementById('cfgWMeta').value =
+    VireoPipelineConfig.percent(p.w_meta, 'w_meta');
+  document.getElementById('cfgHardCutTime').value = p.hard_cut_time;
+  document.getElementById('cfgMergeMaxGap').value = p.merge_max_gap;
   saveConfig();
 }
 

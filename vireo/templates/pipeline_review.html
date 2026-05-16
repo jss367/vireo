@@ -2011,12 +2011,14 @@ var GROUPING_DEFAULTS = {};
     var defaults = VireoPipelineConfig.buildSliderDefaults(cfg);
     SCORING_DEFAULTS = defaults.scoring;
     GROUPING_DEFAULTS = defaults.grouping;
-    applyScoringDefaults();
-    applyGroupingDefaults();
   } catch(e) {
     console.warn('Could not load pipeline config:', e);
-    return;
+    var defaults = VireoPipelineConfig.buildSliderDefaults();
+    SCORING_DEFAULTS = defaults.scoring;
+    GROUPING_DEFAULTS = defaults.grouping;
   }
+  applyScoringDefaults();
+  applyGroupingDefaults();
 })();
 
 function sliderVal(id) {

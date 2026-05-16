@@ -444,7 +444,9 @@ async function loadPipelineSliderDefaults() {
     GROUPING_DEFAULTS = defaults.grouping;
   } catch(e) {
     console.warn('Could not load pipeline config:', e);
-    return;
+    var defaults = VireoPipelineConfig.buildSliderDefaults();
+    SCORING_DEFAULTS = defaults.scoring;
+    GROUPING_DEFAULTS = defaults.grouping;
   }
   applyScoringDefaults();
   applyGroupingDefaults();
