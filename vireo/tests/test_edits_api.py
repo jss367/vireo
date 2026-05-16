@@ -126,7 +126,7 @@ def test_undo_old_rating_action_does_not_clear_new_pending_change_reusing_id(app
 
 
 def test_set_flag(app_and_db):
-    """POST /api/photos/<id>/flag updates the local flag without queuing XMP sync."""
+    """POST /api/photos/<id>/flag updates the flag and queues XMP sync by default."""
     app, db = app_and_db
     client = app.test_client()
     photos = db.get_photos()
@@ -140,7 +140,12 @@ def test_set_flag(app_and_db):
     assert photo['flag'] == 'flagged'
 
     changes = db.get_pending_changes()
-    assert not any(c['photo_id'] == pid and c['change_type'] == 'flag' for c in changes)
+    assert any(
+        c['photo_id'] == pid
+        and c['change_type'] == 'flag'
+        and c['value'] == 'flagged'
+        for c in changes
+    )
 
 
 def test_add_keyword_to_photo(app_and_db):
