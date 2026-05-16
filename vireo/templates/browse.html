@@ -4519,16 +4519,12 @@ document.addEventListener('keydown', function(e) {
   // Arrow keys: navigate grid (not configurable)
   if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
     e.preventDefault();
-    if (selectedIndex < photos.length - 1) {
-      selectPhoto(e, photos[selectedIndex + 1].id, selectedIndex + 1);
-      scrollToCard(selectedIndex);
-    }
+    moveBrowseSelection(1, e);
+    return;
   } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
     e.preventDefault();
-    if (selectedIndex > 0) {
-      selectPhoto(e, photos[selectedIndex - 1].id, selectedIndex - 1);
-      scrollToCard(selectedIndex);
-    }
+    moveBrowseSelection(-1, e);
+    return;
   }
 
   // Must stay aligned with updateBatchBar(): any non-empty selectedPhotos is
@@ -4590,6 +4586,22 @@ document.addEventListener('keydown', function(e) {
     }
   }
 });
+
+async function moveBrowseSelection(delta, e) {
+  var nextIndex = selectedIndex + delta;
+  if (delta > 0 && nextIndex >= photos.length && !allLoaded) {
+    await loadPhotos();
+    nextIndex = selectedIndex + delta;
+  }
+  if (nextIndex < 0 || nextIndex >= photos.length || !photos[nextIndex]) return;
+  var selectionEvent = {
+    shiftKey: !!(e && e.shiftKey),
+    metaKey: !!(e && e.metaKey),
+    ctrlKey: !!(e && e.ctrlKey),
+  };
+  selectPhoto(selectionEvent, photos[nextIndex].id, nextIndex);
+  scrollToCard(selectedIndex);
+}
 
 function scrollToCard(idx) {
   var cards = document.querySelectorAll('.grid-card');
