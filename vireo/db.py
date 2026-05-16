@@ -8157,6 +8157,7 @@ class Database:
 
     def queue_flag_change_if_enabled(self, photo_id, flag, workspace_id=None, _commit=True):
         """Queue a flag write when the active config opts into XMP flag sync."""
+        ws_id = workspace_id if workspace_id is not None else self._ws_id()
         try:
             import config as cfg
 
@@ -8166,11 +8167,12 @@ class Database:
         except Exception:
             log.warning("Failed to read sync_flags_to_xmp config", exc_info=True)
             enabled = False
+        self.remove_pending_changes(photo_id, "flag", workspace_id=ws_id, _commit=False)
         if not enabled:
+            if _commit:
+                self.conn.commit()
             return None
 
-        ws_id = workspace_id if workspace_id is not None else self._ws_id()
-        self.remove_pending_changes(photo_id, "flag", workspace_id=ws_id, _commit=False)
         token = self.queue_change(
             photo_id, "flag", flag, workspace_id=ws_id, _commit=False
         )
@@ -8421,8 +8423,8 @@ class Database:
                     self.remove_pending_changes(pid, 'rating', old_val)
                     self.queue_change(pid, 'rating', new_val)
             elif entry['action_type'] == 'flag':
-                self.update_photo_flag(pid, entry['new_value'], verify_workspace=False)
-                self.queue_flag_change_if_enabled(pid, entry['new_value'])
+                self.update_photo_flag(pid, new_val, verify_workspace=False)
+                self.queue_flag_change_if_enabled(pid, new_val)
             elif entry['action_type'] == 'wildlife_excluded':
                 self.update_photo_wildlife_excluded(
                     pid, new_val == "1", verify_workspace=False
