@@ -8513,6 +8513,11 @@ class Database:
         # would silently advance the undo cursor without reverting state.
         # Adding undo support is a follow-up if it becomes important.
         'location_set', 'location_clear', 'location_link',
+        # Compare-page review actions are auditable but not undoable in v1
+        # for the same reason: _apply_undo/_apply_redo have no handlers, so
+        # leaving them undoable would mark the entry undone without
+        # restoring the prediction status or the replaced species keywords.
+        'prediction_reviewed', 'prediction_replace_species',
     )
 
     def undo_last_edit(self):

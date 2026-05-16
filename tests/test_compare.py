@@ -103,6 +103,36 @@ def test_compare_prediction_to_keywords_conflict_outranks_refinement():
     assert reversed_result["category"] == "conflict"
 
 
+def test_compare_prediction_to_keywords_match_does_not_hide_conflict():
+    # An exact match must not short-circuit the scan: a contradictory
+    # species keyword on the same photo still has to surface as a conflict
+    # so the row stays in the review flow.
+    result = compare_prediction_to_keywords(
+        "Red-tailed Hawk",
+        ["Red-tailed Hawk", "White-crowned Sparrow"],
+        FakeTaxonomy(),
+    )
+    assert result["category"] == "conflict"
+
+    # Order must not matter.
+    reversed_result = compare_prediction_to_keywords(
+        "Red-tailed Hawk",
+        ["White-crowned Sparrow", "Red-tailed Hawk"],
+        FakeTaxonomy(),
+    )
+    assert reversed_result["category"] == "conflict"
+
+
+def test_compare_prediction_to_keywords_pure_match():
+    # With only an agreeing keyword the result is still a match.
+    result = compare_prediction_to_keywords(
+        "Red-tailed Hawk",
+        ["Red-tailed Hawk"],
+        FakeTaxonomy(),
+    )
+    assert result["category"] == "match"
+
+
 def test_compare_prediction_to_keywords_new_without_species_keyword():
     result = compare_prediction_to_keywords(
         "Red-tailed Hawk",

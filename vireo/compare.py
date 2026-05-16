@@ -171,8 +171,6 @@ def compare_prediction_to_keywords(prediction, existing_species, taxonomy):
 
         if best is None or _CATEGORY_PRIORITY[result["category"]] > _CATEGORY_PRIORITY[best["category"]]:
             best = result
-        if result["category"] == "match":
-            return result
 
     return best or {
         "category": "conflict",
