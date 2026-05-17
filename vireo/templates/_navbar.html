@@ -4888,6 +4888,12 @@ function nativeMenuSetPhotoIdsOverride(ids) {
   window._vireoNativeMenuPhotoIdsOverride = ids ? ids.slice() : null;
 }
 
+function nativeMenuCloseLightboxForModal() {
+  if (nativeMenuLightboxOpen() && typeof closeLightbox === 'function') {
+    closeLightbox();
+  }
+}
+
 async function nativeMenuSetRating(rating) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
@@ -4940,19 +4946,7 @@ async function nativeMenuSetFlag(flag) {
   await nativeMenuBatch('/api/batch/flag', {photo_ids: ids, flag: flag}, 'Flag updated');
 }
 
-async function nativeMenuSetWildlifeExcluded(excluded) {
-  var ids = nativeMenuPhotoIdsForWrite();
-  if (!ids) return;
-  await Promise.all(ids.map(function(id) {
-    if (typeof window.setWildlifeExcludedFor === 'function') {
-      return window.setWildlifeExcludedFor(id, excluded);
-    }
-    return safeFetch('/api/photos/' + id + '/wildlife_excluded', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({excluded: excluded}),
-    }, {toast: false});
-  }));
+function nativeMenuRefreshWildlifeExcludedState(ids, excluded) {
   if (typeof photos !== 'undefined' && Array.isArray(photos)) {
     ids.forEach(function(id) {
       var p = photos.find(function(x) { return x.id === id; });
@@ -4964,6 +4958,23 @@ async function nativeMenuSetWildlifeExcluded(excluded) {
       loadDetail(selectedPhotoId);
     }
   }
+}
+
+async function nativeMenuSetWildlifeExcluded(excluded) {
+  var ids = nativeMenuPhotoIdsForWrite();
+  if (!ids) return;
+  var usePageHelper = typeof window.setWildlifeExcludedFor === 'function';
+  await Promise.all(ids.map(function(id) {
+    if (usePageHelper) {
+      return window.setWildlifeExcludedFor(id, excluded);
+    }
+    return safeFetch('/api/photos/' + id + '/wildlife_excluded', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({excluded: excluded}),
+    }, {toast: false});
+  }));
+  if (!usePageHelper) nativeMenuRefreshWildlifeExcludedState(ids, excluded);
   if (typeof _lightboxCurrentId !== 'undefined' && ids.indexOf(_lightboxCurrentId) !== -1) {
     _lbCurrentWildlifeExcluded = excluded;
     if (typeof _lbApplyWildlifeExcludedButton === 'function') _lbApplyWildlifeExcludedButton();
@@ -5076,6 +5087,7 @@ window.handleNativeMenuCommand = async function(command) {
           var keywordIds = nativeMenuRequirePhotos('Add Keyword');
           if (!keywordIds) break;
           nativeMenuSetPhotoIdsOverride(keywordIds);
+          nativeMenuCloseLightboxForModal();
           batchAddKeyword();
         } else {
           nativeMenuError('Add Keyword is available from Browse after selecting photos.');
@@ -5086,6 +5098,7 @@ window.handleNativeMenuCommand = async function(command) {
           var collectionIds = nativeMenuRequirePhotos('Add to Collection');
           if (!collectionIds) break;
           nativeMenuSetPhotoIdsOverride(collectionIds);
+          nativeMenuCloseLightboxForModal();
           addToCollection();
         } else {
           nativeMenuError('Add to Collection is available from Browse after selecting photos.');
