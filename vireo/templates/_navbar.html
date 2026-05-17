@@ -4939,7 +4939,7 @@ async function nativeMenuJob(endpoint, body, label) {
 
 async function nativeMenuCancelCurrentJob() {
   var jobs = await safeFetch('/api/jobs', {}, {toast: false});
-  var list = Array.isArray(jobs) ? jobs : (jobs.jobs || []);
+  var list = Array.isArray(jobs) ? jobs : (jobs.active || jobs.jobs || []);
   var running = list.find(function(j) { return j.status === 'running' || j.status === 'pending'; });
   if (!running) {
     nativeMenuInfo('No running job to cancel');
