@@ -233,15 +233,15 @@ def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server
                 nativeZoom: window._lbNativeZoom,
                 pending: window._lbPending1To1,
                 zoom: window._lbZoom,
-                sourceKey: window._lbPickSourceKey(),
+                desiredSource: window._lbDesiredSrcKey,
             };
         }"""
     )
 
     assert state["nativeZoom"] is None
     assert state["pending"] is True
-    assert state["zoom"] > 1
-    assert state["sourceKey"] == "original"
+    assert state["zoom"] == 1
+    assert state["desiredSource"] == "original"
 
     upgraded = page.evaluate(
         """() => {
@@ -255,6 +255,83 @@ def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server
     assert upgraded is True
     if "route" in held_original:
         held_original.pop("route").abort()
+
+
+def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, page):
+    """Known 1:1 zoom waits for the high-res source instead of enlarging /full."""
+    page.add_init_script(
+        "Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });"
+    )
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#3a7"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    held_original = {}
+
+    def hold_first_original(route):
+        if "released" in held_original:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
+        elif "route" not in held_original:
+            held_original["route"] = route
+        else:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", hold_first_original)
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 1920;
+        }"""
+    )
+    page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+        }"""
+    )
+    page.wait_for_function("window._lbNativeZoom > 1")
+
+    page.keyboard.press("z")
+    page.wait_for_function(
+        "window._lbPending1To1 === true && window._lbDesiredSrcKey === 'original'"
+    )
+    assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+    assert page.evaluate("window._lbCurrentSrcKey") == "full"
+    page.wait_for_timeout(250)
+
+    original_route = held_original.pop("route")
+    held_original["released"] = True
+    original_route.fulfill(
+        body=original_svg,
+        content_type="image/svg+xml",
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbCurrentSrcKey === 'original'
+                && img && img.complete && img.naturalWidth === 4000
+                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }"""
+    )
 
 
 def test_browse_lightbox_does_not_retry_original_after_unavailable(live_server, page):
@@ -445,7 +522,7 @@ def test_browse_e_f_g_keyboard_modes(live_server, page):
     )
     page.keyboard.press("f")
     assert page.evaluate("window.__fullscreenRequested") is False
-    assert page.evaluate("window._lbZoom") > 1
+    assert page.evaluate("window._lbZoom > 1 || window._lbPending1To1") is True
 
     page.evaluate(
         """() => {

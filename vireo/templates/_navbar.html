@@ -2920,6 +2920,7 @@ var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
 var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
 var _lbSessionFullLongEdge = null;  // last learned /full size across photos; better fallback than hardcoded 1920 for custom preview_max_size
 var _lbPending1To1 = false;  // true when z/click was pressed with unknown nativeZoom; upgrade to true 1:1 once learned
+var _lbPending1To1Anchor = null; // optional client-space anchor for a deferred 1:1 snap
 var _lbOriginalUnavailable = false;  // true after /original fails; fall back to current decoded source dimensions
 var _lbCurrentWildlifeExcluded = false;
 var _lbFlagEditSeq = 0;      // increments for local flag writes so stale metadata fetches cannot overwrite the chip
@@ -2936,7 +2937,13 @@ function _lbIsOneToOneZoom() {
 function _lbApplyPendingOneToOneZoom() {
   if (!_lbPending1To1 || !_lbNativeZoom) return;
   _lbPending1To1 = false;
-  _lbSetZoom(_lbNativeZoom, null, null);
+  var anchor = _lbPending1To1Anchor;
+  _lbPending1To1Anchor = null;
+  _lbSetZoom(
+    _lbNativeZoom,
+    anchor ? anchor.x : null,
+    anchor ? anchor.y : null
+  );
 }
 
 function _lbNormalizeFlag(flag) {
@@ -3599,20 +3606,32 @@ function toggleLightboxZoom(e) {
   if (isZoomed) {
     _lbSetZoom(1.0, null, null);
     _lbPending1To1 = false;
+    _lbPending1To1Anchor = null;
   } else {
     // Anchor zoom on click position (or center if no event)
     var rect = img.getBoundingClientRect();
     var anchorX = e && e.clientX ? e.clientX : rect.left + rect.width / 2;
     var anchorY = e && e.clientY ? e.clientY : rect.top + rect.height / 2;
     if (_lbNativeZoom) {
-      _lbSetZoom(_lbNativeZoom, anchorX, anchorY);
-      _lbPending1To1 = false;
+      var desiredSource = _lbPickSourceKey(_lbNativeZoom);
+      if (desiredSource !== _lbCurrentSrcKey) {
+        _lbPending1To1 = true;
+        _lbPending1To1Anchor = { x: anchorX, y: anchorY };
+        _lbScheduleSourceSwap(_lbNativeZoom);
+        _lbApplyTransform();
+      } else {
+        _lbSetZoom(_lbNativeZoom, anchorX, anchorY);
+        _lbPending1To1 = false;
+        _lbPending1To1Anchor = null;
+      }
     } else {
-      // Dimensions unknown — fall back to the max zoom (clamps to 4) and flag
-      // the request so we can upgrade to true 1:1 once /original loads and
-      // nativeZoom is learned.
-      _lbSetZoom(4, anchorX, anchorY);
+      // Dimensions unknown. Load the high-resolution source first, then apply
+      // 1:1 after the browser has decoded it; otherwise the user sees an
+      // enlarged preview and reads that as a soft 1:1 view.
       _lbPending1To1 = true;
+      _lbPending1To1Anchor = { x: anchorX, y: anchorY };
+      _lbScheduleSourceSwap(4);
+      _lbApplyTransform();
     }
   }
 }
@@ -4292,7 +4311,10 @@ function _lbApplyTransform() {
   t.style.transform = 'translate(' + tx + 'px, ' + ty + 'px) scale(' + metrics.scale + ')';
   var badge = document.getElementById('lightboxZoomBadge');
   if (!badge) return;
-  if (_lbZoom <= 1.001) {
+  if (_lbPending1To1) {
+    badge.style.display = '';
+    badge.textContent = 'loading 1:1';
+  } else if (_lbZoom <= 1.001) {
     badge.style.display = 'none';
   } else if (_lbNativeZoom) {
     badge.style.display = '';
@@ -4381,6 +4403,7 @@ function _lbSetZoom(newZoom, anchorClientX, anchorClientY) {
   // Callers that still want it (toggleLightboxZoom's fallback path) re-set the flag
   // after calling us.
   _lbPending1To1 = false;
+  _lbPending1To1Anchor = null;
   // Clamp to valid range. Max is 4x native (or 4x fit if no nativeZoom).
   var maxZoom = _lbNativeZoom ? _lbNativeZoom * 4 : 4;
   newZoom = Math.max(1.0, Math.min(maxZoom, newZoom));
@@ -4469,18 +4492,19 @@ function _lbClampPan() {
 var _lbSwapTimer = null;
 var _lbDesiredSrcKey = null;
 
-function _lbPickSourceKey() {
+function _lbPickSourceKey(targetZoom) {
   // Returns 'full' | '2560' | '3840' | 'original' based on current display needs.
   // Fall back to /full at fit and /original when zoomed whenever we can't compute
   // a proper displayed-long-edge (photo dims missing, or nativeZoom not yet
   // established — the latter happens briefly when API dims arrive before the
   // initial image load completes).
   var dims = _lbLayoutDims();
+  var zoom = targetZoom != null ? targetZoom : _lbZoom;
   if (!dims || !_lbNativeZoom) {
-    return (_lbZoom > 1.001 && !_lbOriginalUnavailable) ? 'original' : 'full';
+    return (zoom > 1.001 && !_lbOriginalUnavailable) ? 'original' : 'full';
   }
   var longEdge = Math.max(dims.w, dims.h);
-  var displayedLong = longEdge * _lbFitScale * _lbZoom;
+  var displayedLong = longEdge * _lbFitScale * zoom;
   // DPR consideration: high-DPI screens need more pixels for a crisp display.
   var dpr = window.devicePixelRatio || 1;
   var needed = displayedLong * dpr;
@@ -4500,9 +4524,9 @@ function _lbSrcUrl(photoId, key) {
   return '/photos/' + photoId + '/preview?size=' + key;
 }
 
-function _lbScheduleSourceSwap() {
+function _lbScheduleSourceSwap(targetZoom) {
   if (!_lightboxCurrentId) return;
-  var desired = _lbPickSourceKey();
+  var desired = _lbPickSourceKey(targetZoom);
   _lbDesiredSrcKey = desired;
   if (desired === _lbCurrentSrcKey) return;
 
@@ -4557,8 +4581,9 @@ function _lbScheduleSourceSwap() {
       if (key === 'original') {
         _lbOriginalUnavailable = true;
         _lbRecomputeNativeZoom();
+        _lbApplyPendingOneToOneZoom();
         _lbApplyTransform();
-        _lbScheduleSourceSwap();
+        _lbScheduleSourceSwap(_lbPending1To1 && _lbNativeZoom ? _lbNativeZoom : null);
       }
       // Keep current source on failure
     };
