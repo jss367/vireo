@@ -65,6 +65,7 @@ ALL_PAGES = [
     {"id": "dashboard",       "label": "Dashboard",       "href": "/dashboard"},
     {"id": "audit",           "label": "Audit",           "href": "/audit"},
     {"id": "compare",         "label": "Compare",         "href": "/compare"},
+    {"id": "zoom_test",       "label": "Zoom Test",       "href": "/zoom-test"},
     {"id": "settings",        "label": "Settings",        "href": "/settings"},
     {"id": "workspace",       "label": "Workspace",       "href": "/workspace"},
     {"id": "lightroom",       "label": "Lightroom",       "href": "/lightroom"},
@@ -1250,6 +1251,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def browse():
         return render_template("browse.html")
 
+    @app.route("/zoom-test")
+    def zoom_test_page():
+        return render_template("zoom_test.html")
+
     @app.route("/review")
     def review():
         return render_template("review.html")
@@ -1272,6 +1277,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/pipeline/review")
     def pipeline_review_page():
+        return render_template("pipeline_review.html")
+
+    @app.route("/pipeline/eye-review")
+    def pipeline_eye_review_page():
         return render_template("pipeline_review.html")
 
     @app.route("/pipeline/rapid-review")
