@@ -1849,6 +1849,7 @@ window.NAV_ALL_PAGES = [
   {id: 'pipeline',        label: 'Pipeline',        href: '/pipeline'},
   {id: 'jobs',            label: 'Jobs',            href: '/jobs'},
   {id: 'pipeline_review', label: 'Pipeline Review', href: '/pipeline/review'},
+  {id: 'pipeline_eye_review', label: 'Eye Compare', href: '/pipeline/eye-review'},
   {id: 'pipeline_rapid_review', label: 'Rapid Review', href: '/pipeline/rapid-review'},
   {id: 'review',          label: 'Review',          href: '/review'},
   {id: 'cull',            label: 'Cull',            href: '/cull'},
@@ -1894,6 +1895,7 @@ window.NAV_ALL_PAGES = [
   function currentNavId() {
     const p = window.location.pathname;
     if (p.startsWith('/pipeline/rapid-review')) return 'pipeline_rapid_review';
+    if (p.startsWith('/pipeline/eye-review')) return 'pipeline_eye_review';
     if (p.startsWith('/pipeline/review')) return 'pipeline_review';
     if (p === '/' || p.startsWith('/browse')) return 'browse';
     const seg = (p.split('/')[1] || '').replace(/-/g, '_');
