@@ -1278,6 +1278,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def pipeline_review_page():
         return render_template("pipeline_review.html")
 
+    @app.route("/pipeline/eye-review")
+    def pipeline_eye_review_page():
+        return render_template("pipeline_review.html")
+
     @app.route("/pipeline/rapid-review")
     def pipeline_rapid_review_page():
         return render_template("pipeline_rapid_review.html")
