@@ -104,6 +104,39 @@ def test_create_collection_with_rules(app_and_db):
     assert stored_rules == rules
 
 
+def test_update_collection_can_replace_rules(app_and_db):
+    """PUT /api/collections/<id> updates rules as well as the name."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/collections",
+        json={"name": "Draft", "rules": [{"field": "rating", "op": ">=", "value": 5}]},
+    )
+    assert resp.status_code == 200
+    cid = resp.get_json()["id"]
+
+    grouped = {
+        "mode": "any",
+        "rules": [
+            {"field": "rating", "op": ">=", "value": 3},
+            {"field": "flag", "op": "equals", "value": "flagged"},
+        ],
+    }
+    resp = client.put(
+        f"/api/collections/{cid}",
+        json={"name": "Useful", "rules": grouped},
+    )
+    assert resp.status_code == 200
+
+    row = db.conn.execute(
+        "SELECT name, rules FROM collections WHERE id = ?", (cid,)
+    ).fetchone()
+    assert row["name"] == "Useful"
+    assert json.loads(row["rules"]) == grouped
+
+
 def test_collection_photos_with_rating_rule(app_and_db):
     """Collection with rating >= 3 rule returns photos with rating >= 3."""
     app, db = app_and_db
@@ -225,6 +258,35 @@ def test_cannot_add_photos_to_all_photos_default(app_and_db):
         "SELECT rules FROM collections WHERE id = ?", (all_photos["id"],)
     ).fetchone()
     assert json.loads(row["rules"]) == [{"field": "all"}]
+
+
+def test_cannot_add_photos_to_none_grouped_collection(app_and_db):
+    """Adding photos to a "none" group would exclude the selected IDs."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    rules = {
+        "mode": "none",
+        "rules": [{"field": "flag", "op": "is", "value": "rejected"}],
+    }
+    resp = client.post(
+        "/api/collections",
+        json={"name": "Not rejected", "rules": rules},
+    )
+    cid = resp.get_json()["id"]
+
+    pid = db.get_photos()[0]["id"]
+    resp = client.post(
+        f"/api/collections/{cid}/add-photos",
+        json={"photo_ids": [pid]},
+    )
+    assert resp.status_code == 400
+
+    row = db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,)
+    ).fetchone()
+    assert json.loads(row["rules"]) == rules
 
 
 def test_collection_add_photos_empty_list(app_and_db):

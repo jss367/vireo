@@ -192,6 +192,65 @@ def test_burst_move_to_picks_updates_state(live_server, page):
     assert in_picks is True
 
 
+def test_burst_multi_selected_cards_drag_together(live_server, page):
+    """Ctrl/Cmd-style multi-selection should pan selected burst cards together."""
+    n = _seed_burst_group(live_server["db"])
+    if n < 2:
+        pytest.skip("need at least 2 burst cards")
+
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    page.wait_for_load_state("networkidle")
+    _open_burst_modal(page)
+
+    cards = page.locator("#grmOverlay .grm-card[data-photo-id]")
+    assert cards.count() >= 2
+    first_pid = cards.nth(0).get_attribute("data-photo-id")
+    second_pid = cards.nth(1).get_attribute("data-photo-id")
+    assert first_pid and second_pid
+
+    # Start from an empty selection so this exercises normal click + additive
+    # Ctrl-click rather than depending on the modal's auto-selected AI best.
+    page.evaluate(
+        """() => {
+          grmState.selected = null;
+          grmState.selectedIds.clear();
+          grmState.selectionAnchor = null;
+          renderGroupModal();
+        }"""
+    )
+
+    first = page.locator(f'#grmOverlay .grm-card[data-photo-id="{first_pid}"]')
+    second = page.locator(f'#grmOverlay .grm-card[data-photo-id="{second_pid}"]')
+    first.click()
+    second.click(modifiers=["Control"])
+
+    selected = page.evaluate("Array.from(grmState.selectedIds).map(String).sort()")
+    assert selected == sorted([first_pid, second_pid])
+
+    bbox = first.bounding_box()
+    assert bbox is not None
+    x = bbox["x"] + bbox["width"] / 2
+    y = bbox["y"] + bbox["height"] / 2
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + 30, y + 12)
+    page.mouse.up()
+
+    offsets = page.evaluate(
+        """([a, b]) => ({
+          a: _grmOffsets[a],
+          b: _grmOffsets[b],
+        })""",
+        [first_pid, second_pid],
+    )
+    assert offsets["a"] and offsets["b"]
+    assert abs(offsets["a"]["tx"] - offsets["b"]["tx"]) < 0.01
+    assert abs(offsets["a"]["ty"] - offsets["b"]["ty"]) < 0.01
+    assert abs(offsets["a"]["tx"]) > 0
+    assert abs(offsets["a"]["ty"]) > 0
+
+
 def test_review_card_menu_has_no_burst_items(live_server, page):
     """The ordinary review-card menu must not expose burst-only actions.
 

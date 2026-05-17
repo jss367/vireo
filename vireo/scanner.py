@@ -9,7 +9,7 @@ import multiprocessing
 import os
 import sys
 from collections import defaultdict, deque
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, TimeoutError
 from datetime import datetime
 from pathlib import Path
 
@@ -773,7 +773,7 @@ def backfill_working_copies(db, vireo_dir, progress_callback=None,
     }
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -812,14 +812,22 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             continues; accessible siblings are still discovered. Without
             this hook, a denied subdir would silently produce zero hits
             — a "Found 0 images" black box from the user's perspective.
+        cancel_check: optional callable returning truthy when the caller
+            wants scanning to stop promptly. When set, scan raises
+            RuntimeError("scan cancelled") at cancellation checkpoints.
     """
     root_path = Path(root)
     if not root_path.is_dir():
         log.warning("Root path does not exist or is not a directory: %s", root)
         return
 
+    def _check_cancelled():
+        if cancel_check is not None and cancel_check():
+            raise RuntimeError("scan cancelled")
+
     # Discover all image files (incremental enumeration for progress reporting)
     log.info("Discovering files in %s ...", root)
+    _check_cancelled()
     if status_callback:
         status_callback("Discovering files...")
     image_files = []
@@ -864,6 +872,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # root is still used as the folder hierarchy root for _ensure_folder.
         restrict_files_set = set(restrict_files) if restrict_files is not None else None
         for d in restrict_dirs:
+            _check_cancelled()
             dp = Path(d)
             if dp.is_dir():
                 # iterdir() raises PermissionError when the kernel refuses
@@ -882,6 +891,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     _on_walk_error(e)
                     continue
                 for f in entries:
+                    _check_cancelled()
                     if (f.is_file()
                             and f.suffix.lower() in SUPPORTED_EXTENSIONS
                             and not f.name.startswith(".")
@@ -895,8 +905,11 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             for dirpath, _dirnames, filenames in os.walk(
                 str(root_path), onerror=_on_walk_error,
             ):
+                _check_cancelled()
                 for name in filenames:
                     checked += 1
+                    if checked % 100 == 0:
+                        _check_cancelled()
                     if checked % 500 == 0 and status_callback:
                         status_callback(
                             f"Discovering files... ({len(image_files)} found)"
@@ -924,6 +937,8 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 _on_walk_error(e)
                 entries = []
             for checked, f in enumerate(entries, 1):
+                if checked % 100 == 0:
+                    _check_cancelled()
                 if checked % 500 == 0 and status_callback:
                     status_callback(
                         f"Discovering files... ({len(image_files)} found)"
@@ -934,6 +949,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                         and (skip_paths is None or str(f) not in skip_paths)):
                     image_files.append(f)
     image_files.sort()
+    _check_cancelled()
 
     total = len(image_files)
     log.info("Found %d images in %s", total, root)
@@ -1044,6 +1060,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     _ensure_folder(dp)
 
         for image_path in image_files:
+            _check_cancelled()
             stat = image_path.stat()
             file_mtime = stat.st_mtime
             xmp_path = image_path.with_suffix(".xmp")
@@ -1117,7 +1134,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     paths_to_extract = [str(ip) for ip in files_to_process]
     if paths_to_extract and status_callback:
         status_callback(f"Extracting metadata ({len(paths_to_extract)} files)...")
+    _check_cancelled()
     metadata_map = extract_metadata(paths_to_extract) if paths_to_extract else {}
+    _check_cancelled()
 
     # Compute phash + file_hash in parallel across all files that need
     # processing. These are the two per-file operations that actually read
@@ -1133,29 +1152,48 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     def _iter_features():
         if workers > 1:
             mp_ctx = multiprocessing.get_context(_SCAN_MP_METHOD)
-            with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as pool:
+            pool = ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx)
+            try:
                 # Bounded in-flight window instead of pool.map(): on Python
                 # 3.11 Executor.map eagerly submits every input, so on a
                 # 200k-file scan we would hold 200k queued futures in RAM.
                 # A few submissions per worker is enough to keep them fed
                 # while the main thread drains results in order.
+                def _feature_result(fut):
+                    while True:
+                        _check_cancelled()
+                        try:
+                            return fut.result(timeout=0.2)
+                        except TimeoutError:
+                            continue
+
                 max_in_flight = workers * 4
                 pending = deque()
                 inputs = zip(files_to_process, paths_to_extract, strict=True)
                 for image_path, path_str in inputs:
+                    _check_cancelled()
                     pending.append((image_path, pool.submit(_compute_file_features, path_str)))
                     if len(pending) >= max_in_flight:
                         done_path, done_fut = pending.popleft()
-                        yield done_path, done_fut.result()
+                        _check_cancelled()
+                        yield done_path, _feature_result(done_fut)
                 while pending:
                     done_path, done_fut = pending.popleft()
-                    yield done_path, done_fut.result()
+                    _check_cancelled()
+                    yield done_path, _feature_result(done_fut)
+            except BaseException:
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                pool.shutdown(wait=True)
         else:
             for image_path, path_str in zip(files_to_process, paths_to_extract, strict=True):
+                _check_cancelled()
                 yield image_path, _compute_file_features(path_str)
 
     try:
         for image_path, (phash, file_hash) in _iter_features():
+            _check_cancelled()
             folder_id = _ensure_folder(image_path.parent)
             touched_folder_ids.add(folder_id)
 
@@ -1387,6 +1425,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 progress_callback=None,
                 status_callback=status_callback,
                 scope=wc_scope,
+                cancel_check=cancel_check,
             )
 
         # Batched untracked-preview sweep. One os.listdir(previews/) for

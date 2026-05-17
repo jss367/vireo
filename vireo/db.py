@@ -3149,6 +3149,46 @@ class Database:
             "total_dets": row["total_dets"] or 0,
         }
 
+    def count_primary_detections_in_scope(self, photo_ids=None, min_conf=None):
+        """Count photos whose primary real detection is pipeline-classifiable.
+
+        The streaming pipeline classifies at most one detection per photo: the
+        highest-confidence non-full-image detection above the active threshold.
+        This mirrors that gate for the Pipeline page plan so secondary boxes
+        do not inflate pending classify work.
+        """
+        ws = self._ws_id()
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""WITH ranked AS (
+                    SELECT d.id, d.photo_id,
+                           ROW_NUMBER() OVER (
+                             PARTITION BY d.photo_id
+                             ORDER BY d.detector_confidence DESC, d.id ASC
+                           ) AS rn
+                      FROM detections d
+                      JOIN photos p ON p.id = d.photo_id
+                      JOIN workspace_folders wf
+                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                     WHERE d.detector_model != 'full-image'
+                       AND d.detector_confidence >= ?{scope_sql}
+                )
+                SELECT COUNT(*) AS primary_dets,
+                       COUNT(DISTINCT photo_id) AS photos_with_dets
+                  FROM ranked
+                 WHERE rn = 1""",
+            (ws, min_conf, *scope_params),
+        ).fetchone()
+        return {
+            "photos_with_dets": row["photos_with_dets"] or 0,
+            "total_dets": row["primary_dets"] or 0,
+        }
+
     def count_classify_pending_pairs(
         self, classifier_model, labels_fingerprint,
         photo_ids=None, min_conf=None,
@@ -3181,6 +3221,48 @@ class Database:
                   AND d.detector_confidence >= ?
                   AND cr.detection_id IS NULL{scope_sql}""",
             (ws, classifier_model, labels_fingerprint, min_conf, *scope_params),
+        ).fetchone()
+        return row["pending"] or 0
+
+    def count_primary_classify_pending_pairs(
+        self, classifier_model, labels_fingerprint,
+        photo_ids=None, min_conf=None,
+    ):
+        """Count primary detections lacking a classifier run for (model, fp).
+
+        Mirrors pipeline_job.classify_stage, which picks one primary detection
+        per photo rather than classifying every detection row.
+        """
+        ws = self._ws_id()
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""WITH ranked AS (
+                    SELECT d.id, d.photo_id,
+                           ROW_NUMBER() OVER (
+                             PARTITION BY d.photo_id
+                             ORDER BY d.detector_confidence DESC, d.id ASC
+                           ) AS rn
+                      FROM detections d
+                      JOIN photos p ON p.id = d.photo_id
+                      JOIN workspace_folders wf
+                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                     WHERE d.detector_model != 'full-image'
+                       AND d.detector_confidence >= ?{scope_sql}
+                )
+                SELECT COUNT(*) AS pending
+                  FROM ranked d
+                  LEFT JOIN classifier_runs cr
+                    ON cr.detection_id = d.id
+                   AND cr.classifier_model = ?
+                   AND cr.labels_fingerprint = ?
+                 WHERE d.rn = 1
+                   AND cr.detection_id IS NULL""",
+            (ws, min_conf, *scope_params, classifier_model, labels_fingerprint),
         ).fetchone()
         return row["pending"] or 0
 
@@ -3227,6 +3309,52 @@ class Database:
                  ){scope_sql}""",
             (ws, min_conf, classifier_model, labels_fingerprint,
              classifier_model, labels_fingerprint, *scope_params),
+        ).fetchone()
+        return row["n"] or 0
+
+    def count_primary_classify_stale(
+        self, classifier_model, labels_fingerprint,
+        photo_ids=None, min_conf=None,
+    ):
+        """Count stale classifier runs on primary detections only."""
+        ws = self._ws_id()
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""WITH ranked AS (
+                    SELECT d.id, d.photo_id,
+                           ROW_NUMBER() OVER (
+                             PARTITION BY d.photo_id
+                             ORDER BY d.detector_confidence DESC, d.id ASC
+                           ) AS rn
+                      FROM detections d
+                      JOIN photos p ON p.id = d.photo_id
+                      JOIN workspace_folders wf
+                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                     WHERE d.detector_model != 'full-image'
+                       AND d.detector_confidence >= ?{scope_sql}
+                )
+                SELECT COUNT(*) AS n
+                  FROM ranked d
+                 WHERE d.rn = 1
+                   AND EXISTS (
+                      SELECT 1 FROM classifier_runs cr_stale
+                       WHERE cr_stale.detection_id = d.id
+                         AND cr_stale.classifier_model = ?
+                         AND cr_stale.labels_fingerprint != ?
+                   )
+                   AND NOT EXISTS (
+                      SELECT 1 FROM classifier_runs cr_cur
+                       WHERE cr_cur.detection_id = d.id
+                         AND cr_cur.classifier_model = ?
+                         AND cr_cur.labels_fingerprint = ?
+                   )""",
+            (ws, min_conf, *scope_params, classifier_model, labels_fingerprint,
+             classifier_model, labels_fingerprint),
         ).fetchone()
         return row["n"] or 0
 
@@ -3418,15 +3546,19 @@ class Database:
             out[key] = (float(med), n)
         return out
 
-    def count_photos_pending_masks(self, photo_ids=None, min_conf=None):
+    def count_photos_pending_masks(self, photo_ids=None, min_conf=None,
+                                   sam2_variant=None):
         """Return (pending, eligible) for the extract-masks stage.
 
         eligible = photos in scope with at least one real detection above the
             workspace's effective detector_confidence
-        pending  = eligible photos whose mask_path IS NULL
+        pending  = eligible photos whose mask_path IS NULL, or when
+            ``sam2_variant`` is supplied, whose ``photo_masks`` row for that
+            variant is missing/incomplete
 
-        Mirrors extract_masks_stage's per-photo gate (which keys solely on
-        mask_path being unset for photos with non-full-image detections).
+        The variant-aware mode mirrors extract_masks_stage's current per-photo
+        cache check: masks made by another SAM variant do not make the selected
+        variant complete.
         """
         ws = self._ws_id()
         if min_conf is None:
@@ -3435,21 +3567,44 @@ class Database:
                 "detector_confidence", 0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
-        row = self.conn.execute(
-            f"""SELECT
-                  COUNT(DISTINCT p.id) AS eligible,
-                  COUNT(DISTINCT CASE WHEN p.mask_path IS NULL THEN p.id END)
-                    AS pending
-                FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-                JOIN detections d
-                  ON d.photo_id = p.id
-                 AND d.detector_model != 'full-image'
-                 AND d.detector_confidence >= ?
-                WHERE 1=1{scope_sql}""",
-            (ws, min_conf, *scope_params),
-        ).fetchone()
+        if sam2_variant:
+            row = self.conn.execute(
+                f"""SELECT
+                      COUNT(DISTINCT p.id) AS eligible,
+                      COUNT(DISTINCT CASE
+                        WHEN p.mask_path IS NULL
+                          OR pm.photo_id IS NULL
+                          OR pm.path IS NULL
+                          OR pm.path = ''
+                        THEN p.id END) AS pending
+                    FROM photos p
+                    JOIN workspace_folders wf
+                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                    JOIN detections d
+                      ON d.photo_id = p.id
+                     AND d.detector_model != 'full-image'
+                     AND d.detector_confidence >= ?
+                    LEFT JOIN photo_masks pm
+                      ON pm.photo_id = p.id AND pm.variant = ?
+                    WHERE 1=1{scope_sql}""",
+                (ws, min_conf, sam2_variant, *scope_params),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                f"""SELECT
+                      COUNT(DISTINCT p.id) AS eligible,
+                      COUNT(DISTINCT CASE WHEN p.mask_path IS NULL THEN p.id END)
+                        AS pending
+                    FROM photos p
+                    JOIN workspace_folders wf
+                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                    JOIN detections d
+                      ON d.photo_id = p.id
+                     AND d.detector_model != 'full-image'
+                     AND d.detector_confidence >= ?
+                    WHERE 1=1{scope_sql}""",
+                (ws, min_conf, *scope_params),
+            ).fetchone()
         return {
             "eligible": row["eligible"] or 0,
             "pending": row["pending"] or 0,
@@ -3575,13 +3730,13 @@ class Database:
         Counting those would inflate ``detail.stale`` and keep the
         stage flagged Outdated/Will run forever in mixed workspaces.
 
-        The ``photos.mask_path IS NOT NULL`` gate keeps this count
-        disjoint from ``count_photos_pending_masks``'s ``pending``
-        (``mask_path IS NULL``). Photos with ``mask_path IS NULL`` are
-        already pending — they will be re-extracted regardless of
-        whether their ``photo_masks`` row's prompt matches — so
-        counting them here would double-count when a planner combines
-        ``pending + stale`` as total work.
+        The active-mask and variant-path gates keep this count disjoint from
+        ``count_photos_pending_masks``'s ``pending``. Photos with no active
+        mask, no selected-variant row, or an incomplete selected-variant path
+        are already pending — they will be re-extracted regardless of whether
+        their ``photo_masks`` row's prompt matches — so counting them here
+        would double-count when a planner combines ``pending + stale`` as
+        total work.
         """
         import config as cfg
         ws = self._ws_id()
@@ -3598,6 +3753,8 @@ class Database:
                   ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                WHERE pm.variant = ?
                  AND p.mask_path IS NOT NULL
+                 AND pm.path IS NOT NULL
+                 AND pm.path != ''
                  AND EXISTS (
                     SELECT 1 FROM detections d0
                      WHERE d0.photo_id = pm.photo_id
@@ -4693,15 +4850,27 @@ class Database:
                 (self._ws_id(),),
             ).fetchall()
             deleted_set = set(all_ids)
+            def _remove_deleted_photo_ids(node):
+                if isinstance(node, list):
+                    changed_any = False
+                    for child in node:
+                        changed_any = _remove_deleted_photo_ids(child) or changed_any
+                    return changed_any
+                if not isinstance(node, dict):
+                    return False
+                changed_any = _remove_deleted_photo_ids(node.get("rules"))
+                if node.get("field") == "photo_ids" and "value" in node:
+                    values = node.get("value")
+                    if not isinstance(values, list):
+                        return changed_any
+                    original_len = len(values)
+                    node["value"] = [v for v in values if v not in deleted_set]
+                    return changed_any or len(node["value"]) != original_len
+                return changed_any
+
             for coll in collections:
                 rules = _json.loads(coll["rules"])
-                changed = False
-                for rule in rules:
-                    if rule.get("field") == "photo_ids" and "value" in rule:
-                        original_len = len(rule["value"])
-                        rule["value"] = [v for v in rule["value"] if v not in deleted_set]
-                        if len(rule["value"]) != original_len:
-                            changed = True
+                changed = _remove_deleted_photo_ids(rules)
                 if changed:
                     self.conn.execute(
                         "UPDATE collections SET rules = ? WHERE id = ?",
@@ -5095,6 +5264,101 @@ class Database:
              "active_count": r["active_count"] or 0}
             for r in rows
         ]
+
+    def sam_variant_rerun_warning(
+        self,
+        sam2_variant,
+        photo_ids=None,
+        min_conf=None,
+        selected_max_ratio=0.25,
+        alternate_min_ratio=0.80,
+    ):
+        """Warn when selected SAM coverage is poor but another variant is high.
+
+        The target set matches the extract-masks stage's existing-photo
+        eligibility: active-workspace photos in scope with at least one real
+        detection above the workspace detector-confidence floor. This keeps a
+        workspace-level SAM configuration from looking empty just because a
+        different variant already produced masks for those same target photos.
+        """
+        if not sam2_variant or sam2_variant == "unknown":
+            return None
+        if min_conf is None:
+            import config as cfg
+            min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2,
+            )
+
+        ws = self._ws_id()
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        target_row = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT p.id) AS n
+                  FROM photos p
+                  JOIN workspace_folders wf
+                    ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                  JOIN detections d
+                    ON d.photo_id = p.id
+                   AND d.detector_model != 'full-image'
+                   AND d.detector_confidence >= ?
+                 WHERE 1=1{scope_sql}""",
+            (ws, min_conf, *scope_params),
+        ).fetchone()
+        target_count = target_row["n"] or 0
+        if target_count == 0:
+            return None
+
+        coverage_rows = self.conn.execute(
+            f"""SELECT pm.variant, COUNT(DISTINCT pm.photo_id) AS count
+                  FROM photo_masks pm
+                  JOIN photos p ON p.id = pm.photo_id
+                  JOIN workspace_folders wf
+                    ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                  JOIN detections d
+                    ON d.photo_id = p.id
+                   AND d.detector_model != 'full-image'
+                   AND d.detector_confidence >= ?
+                 WHERE pm.variant != 'unknown'
+                   AND pm.path IS NOT NULL
+                   AND pm.path != ''
+                   AND p.mask_path IS NOT NULL{scope_sql}
+                 GROUP BY pm.variant""",
+            (ws, min_conf, *scope_params),
+        ).fetchall()
+        counts = {r["variant"]: r["count"] or 0 for r in coverage_rows}
+        selected_count = counts.get(sam2_variant, 0)
+        selected_ratio = selected_count / target_count
+        if selected_ratio > selected_max_ratio:
+            return None
+
+        alternates = [
+            (variant, count, count / target_count)
+            for variant, count in counts.items()
+            if variant != sam2_variant
+        ]
+        if not alternates:
+            return None
+        alt_variant, alt_count, alt_ratio = max(
+            alternates, key=lambda item: (item[2], item[1], item[0])
+        )
+        if alt_ratio < alternate_min_ratio:
+            return None
+
+        return {
+            "code": "sam_variant_rerun",
+            "selected_variant": sam2_variant,
+            "selected_count": selected_count,
+            "selected_ratio": selected_ratio,
+            "alternate_variant": alt_variant,
+            "alternate_count": alt_count,
+            "alternate_ratio": alt_ratio,
+            "target_count": target_count,
+            "message": (
+                f"{sam2_variant} has masks for {selected_count} of "
+                f"{target_count} target photos, while {alt_variant} already "
+                f"has masks for {alt_count}. Starting will rerun SAM for the "
+                f"selected variant."
+            ),
+        }
 
     def mask_variants_summary(self):
         """Per-variant summary: count, total bytes (best-effort, sums
@@ -6327,20 +6591,46 @@ class Database:
             (photo_id,),
         ).fetchall()
 
+    def get_keywords_for_photos(self, photo_ids):
+        """Return keywords for a batch of photos keyed by photo id."""
+        if not photo_ids:
+            return {}
+        placeholders = ",".join("?" for _ in photo_ids)
+        rows = self.conn.execute(
+            f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type,
+                       k.is_species
+                FROM photo_keywords pk
+                JOIN keywords k ON k.id = pk.keyword_id
+                WHERE pk.photo_id IN ({placeholders})
+                ORDER BY k.type, k.name""",
+            list(photo_ids),
+        ).fetchall()
+        result = {}
+        for r in rows:
+            result.setdefault(r["photo_id"], []).append(dict(r))
+        return result
+
     def get_species_keywords_for_photos(self, photo_ids):
         """Return species (taxonomy) keyword names for a batch of photos.
 
         Returns a dict mapping photo_id -> list of species name strings.
+
+        Treats a keyword as species when ``is_species = 1`` *or*
+        ``type = 'taxonomy'`` so that upgraded/legacy data whose species tags
+        are taxonomy-typed but not yet marked ``is_species`` is still
+        recognized. This mirrors the species definition used by
+        ``accept_prediction`` so the Compare page does not misclassify
+        already-tagged photos as ``new``.
         """
         if not photo_ids:
             return {}
         placeholders = ",".join("?" for _ in photo_ids)
         rows = self.conn.execute(
-            f"""SELECT pk.photo_id, k.name
+            f"""SELECT DISTINCT pk.photo_id, k.name
                 FROM photo_keywords pk
                 JOIN keywords k ON k.id = pk.keyword_id
                 WHERE pk.photo_id IN ({placeholders})
-                  AND k.is_species = 1
+                  AND (k.is_species = 1 OR k.type = 'taxonomy')
                 ORDER BY k.name""",
             list(photo_ids),
         ).fetchall()
@@ -7317,11 +7607,18 @@ class Database:
         ).fetchone()
         return bool(row["is_species"]) if row else False
 
-    def accept_prediction(self, prediction_id):
+    def accept_prediction(self, prediction_id, replace_species=False):
         """Accept a prediction: mark as accepted and add species keyword.
 
         If the prediction belongs to a group, derives the consensus species
         from the individual votes and applies that to all photos.
+
+        When ``replace_species`` is True, every photo that receives the new
+        keyword first has its existing species/taxonomy keywords removed, so
+        grouped photos are replaced consistently rather than accumulating both
+        the old and new species tags. Each entry in the returned ``affected``
+        list carries the ``old_species`` names that were stripped from that
+        photo (empty when ``replace_species`` is False).
 
         All database changes are performed atomically in a single transaction.
         On failure, all changes are rolled back.
@@ -7389,7 +7686,57 @@ class Database:
                     pass
 
             kid = self.add_keyword(species, is_species=True, _commit=False)
-            affected = []  # list of {"photo_id": int, "prediction_id": int}
+            # list of {"photo_id", "prediction_id", "old_species"}
+            affected = []
+
+            def _accept_for_photo(photo_id, this_pred_id):
+                self.update_prediction_status(this_pred_id, "accepted", _commit=False)
+                old_species = []
+                if replace_species:
+                    old_species = [
+                        row["name"] for row in self.conn.execute(
+                            """SELECT k.name
+                               FROM photo_keywords pk
+                               JOIN keywords k ON k.id = pk.keyword_id
+                               WHERE pk.photo_id = ?
+                                 AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                            (photo_id,),
+                        ).fetchall()
+                    ]
+                    self.conn.execute(
+                        """DELETE FROM photo_keywords
+                           WHERE photo_id = ?
+                             AND keyword_id IN (
+                               SELECT id FROM keywords
+                               WHERE is_species = 1 OR type = 'taxonomy'
+                             )""",
+                        (photo_id,),
+                    )
+                    # The DB rows are gone, but sync_to_xmp only strips a
+                    # keyword from the sidecar when a matching keyword_remove
+                    # pending change exists. Queue one per removed species so a
+                    # "replace" actually clears the stale tags downstream. A
+                    # still-pending add for the same keyword cancels out
+                    # instead of stacking (mirrors _queue_keyword_remove).
+                    new_species_lower = species.lower()
+                    for old_name in old_species:
+                        if old_name.lower() == new_species_lower:
+                            continue
+                        cancelled = self.remove_pending_changes(
+                            photo_id, "keyword_add", old_name, _commit=False,
+                        )
+                        if cancelled == 0:
+                            self.queue_change(
+                                photo_id, "keyword_remove", old_name,
+                                _commit=False,
+                            )
+                self.tag_photo(photo_id, kid, _commit=False)
+                self.queue_change(photo_id, "keyword_add", species, _commit=False)
+                affected.append({
+                    "photo_id": photo_id,
+                    "prediction_id": this_pred_id,
+                    "old_species": old_species,
+                })
 
             # If grouped, accept all predictions in the group (in this workspace).
             if pred["group_id"]:
@@ -7406,15 +7753,9 @@ class Database:
                     (ws, ws, pred["group_id"], pred["model"]),
                 ).fetchall()
                 for gp in group_preds:
-                    self.update_prediction_status(gp["id"], "accepted", _commit=False)
-                    self.tag_photo(gp["photo_id"], kid, _commit=False)
-                    self.queue_change(gp["photo_id"], "keyword_add", species, _commit=False)
-                    affected.append({"photo_id": gp["photo_id"], "prediction_id": gp["id"]})
+                    _accept_for_photo(gp["photo_id"], gp["id"])
             else:
-                self.update_prediction_status(prediction_id, "accepted", _commit=False)
-                self.tag_photo(pred["photo_id"], kid, _commit=False)
-                self.queue_change(pred["photo_id"], "keyword_add", species, _commit=False)
-                affected.append({"photo_id": pred["photo_id"], "prediction_id": prediction_id})
+                _accept_for_photo(pred["photo_id"], prediction_id)
 
             self.conn.commit()
             return {"species": species, "keyword_id": kid, "affected": affected}
@@ -8155,6 +8496,37 @@ class Database:
         )
         self.conn.commit()
 
+    def queue_flag_change_if_enabled(self, photo_id, flag, workspace_id=None, _commit=True):
+        """Queue a flag write when the active config opts into XMP flag sync."""
+        ws_id = workspace_id if workspace_id is not None else self._ws_id()
+        flag = flag or "none"
+        self.remove_pending_changes(photo_id, "flag", workspace_id=ws_id, _commit=False)
+        if flag not in {"none", "flagged", "rejected"}:
+            log.warning("Not queueing invalid XMP flag value for photo %s: %r", photo_id, flag)
+            if _commit:
+                self.conn.commit()
+            return None
+        try:
+            import config as cfg
+
+            enabled = bool(
+                self.get_effective_config(cfg.load()).get("sync_flags_to_xmp", False)
+            )
+        except Exception:
+            log.warning("Failed to read sync_flags_to_xmp config", exc_info=True)
+            enabled = False
+        if not enabled:
+            if _commit:
+                self.conn.commit()
+            return None
+
+        token = self.queue_change(
+            photo_id, "flag", flag, workspace_id=ws_id, _commit=False
+        )
+        if _commit:
+            self.conn.commit()
+        return token
+
     # -- Edit History --
 
     def record_edit(self, action_type, description, new_value, items, is_batch=False, _commit=True):
@@ -8209,6 +8581,11 @@ class Database:
         # would silently advance the undo cursor without reverting state.
         # Adding undo support is a follow-up if it becomes important.
         'location_set', 'location_clear', 'location_link',
+        # Compare-page review actions are auditable but not undoable in v1
+        # for the same reason: _apply_undo/_apply_redo have no handlers, so
+        # leaving them undoable would mark the entry undone without
+        # restoring the prediction status or the replaced species keywords.
+        'prediction_reviewed', 'prediction_replace_species',
     )
 
     def undo_last_edit(self):
@@ -8275,6 +8652,7 @@ class Database:
                     self.queue_change(pid, 'rating', old_val)
             elif entry['action_type'] == 'flag':
                 self.update_photo_flag(pid, old_val, verify_workspace=False)
+                self.queue_flag_change_if_enabled(pid, old_val)
             elif entry['action_type'] == 'wildlife_excluded':
                 self.update_photo_wildlife_excluded(
                     pid, old_val == "1", verify_workspace=False
@@ -8397,7 +8775,8 @@ class Database:
                     self.remove_pending_changes(pid, 'rating', old_val)
                     self.queue_change(pid, 'rating', new_val)
             elif entry['action_type'] == 'flag':
-                self.update_photo_flag(pid, entry['new_value'], verify_workspace=False)
+                self.update_photo_flag(pid, new_val, verify_workspace=False)
+                self.queue_flag_change_if_enabled(pid, new_val)
             elif entry['action_type'] == 'wildlife_excluded':
                 self.update_photo_wildlife_excluded(
                     pid, new_val == "1", verify_workspace=False
@@ -8652,43 +9031,109 @@ class Database:
         return self._build_query_from_rules(rules)
 
     def _build_query_from_rules(self, rules):
-        """Build SQL clauses from a rules list (not yet persisted).
+        """Build SQL clauses from a smart-collection rule tree.
 
         Returns (folder_join, join_clause, where, params). Raises ValueError on
         malformed input — callers that accept rules from untrusted sources
         (e.g. the live-preview API) should catch and surface a 400.
+
+        Backward compatibility: the original collection format was a flat list
+        of rule objects, implicitly combined with AND. Newer collections may use
+        a grouped tree:
+
+            {"mode": "all"|"any"|"none", "rules": [rule_or_group, ...]}
         """
-        if not isinstance(rules, list):
-            raise ValueError("rules must be a list")
-        # Only photo_ids and timestamp/between consume list values; every other
-        # field binds `value` as a single SQL parameter, so a list there raises
-        # sqlite3.ProgrammingError ("type 'list' is not supported"). Without
-        # this distinction the preview route would surface those as 500s on
-        # inputs like {"field":"rating","value":[4]}.
-        for r in rules:
-            if not isinstance(r, dict) or "field" not in r:
-                raise ValueError("each rule must be an object with a 'field'")
-            field = r.get("field")
-            op = r.get("op")
-            val = r.get("value")
-            list_allowed = field == "photo_ids" or (field == "timestamp" and op == "between")
-            if isinstance(val, list):
+        if isinstance(rules, list):
+            root = {"mode": "all", "rules": rules}
+        elif isinstance(rules, dict) and "rules" in rules:
+            root = rules
+        else:
+            raise ValueError("rules must be a list or group object")
+
+        def _is_scalar(value):
+            return value is None or isinstance(value, (str, int, float, bool))
+
+        def _validate_node(node):
+            if not isinstance(node, dict):
+                raise ValueError("each rule must be an object")
+            if "rules" in node and "field" not in node:
+                mode = node.get("mode", "all")
+                if mode not in ("all", "any", "none"):
+                    raise ValueError("rule group mode must be all, any, or none")
+                children = node.get("rules")
+                if not isinstance(children, list):
+                    raise ValueError("rule group rules must be a list")
+                for child in children:
+                    _validate_node(child)
+                return
+            if "field" not in node:
+                raise ValueError("each rule must have a 'field'")
+            field = node.get("field")
+            op = node.get("op")
+            value = node.get("value")
+            list_allowed = (
+                field == "photo_ids"
+                or (field == "timestamp" and op == "between")
+            )
+            if isinstance(value, list):
                 if not list_allowed:
                     raise ValueError(f"rule field {field!r} does not accept a list value")
-                for item in val:
-                    if item is not None and not isinstance(item, (str, int, float, bool)):
+                for item in value:
+                    if not _is_scalar(item):
                         raise ValueError("rule list values must be scalars")
-                continue
-            if val is None or isinstance(val, (str, int, float, bool)):
-                continue
-            raise ValueError("rule value must be a scalar")
+                return
+            if not _is_scalar(value):
+                raise ValueError("rule value must be a scalar")
 
-        conditions = []
-        params = []
-        need_keyword_join = False
-        need_prediction_join = False
+        def _truthy(value):
+            return value is True or value == 1 or value == "1" or value == "true"
 
-        for rule in rules:
+        def _falsey(value):
+            return value is False or value == 0 or value == "0" or value == "false"
+
+        def _numeric_condition(column, op, value, allow_null=False):
+            if op == ">=":
+                return f"{column} >= ?", [value]
+            if op == "<=":
+                return f"{column} <= ?", [value]
+            if op in ("equals", "is"):
+                return f"{column} = ?", [value]
+            if op == "is not":
+                prefix = f"{column} IS NULL OR " if allow_null else ""
+                return f"({prefix}{column} != ?)", [value]
+            return "0", []
+
+        def _keyword_exists(predicate, predicate_params):
+            return (
+                "EXISTS (SELECT 1 FROM photo_keywords pk "
+                "JOIN keywords k ON k.id = pk.keyword_id "
+                f"WHERE pk.photo_id = p.id AND {predicate})",
+                list(predicate_params),
+            )
+
+        def _keyword_not_exists(predicate, predicate_params):
+            return (
+                "NOT EXISTS (SELECT 1 FROM photo_keywords pk "
+                "JOIN keywords k ON k.id = pk.keyword_id "
+                f"WHERE pk.photo_id = p.id AND {predicate})",
+                list(predicate_params),
+            )
+
+        def _prediction_exists(predicate, predicate_params, review_join=False):
+            review = (
+                " LEFT JOIN prediction_review prv "
+                "ON prv.prediction_id = pred.id AND prv.workspace_id = ?"
+                if review_join else ""
+            )
+            params = ([self._ws_id()] if review_join else []) + list(predicate_params)
+            return (
+                "EXISTS (SELECT 1 FROM detections det "
+                "JOIN predictions pred ON pred.detection_id = det.id"
+                f"{review} WHERE det.photo_id = p.id AND {predicate})",
+                params,
+            )
+
+        def _build_leaf(rule):
             field = rule["field"]
             op = rule.get("op", "")
             value = rule.get("value")
@@ -8696,172 +9141,84 @@ class Database:
             if field == "all":
                 # Sentinel for defaults like "All Photos" — adds no condition,
                 # so the workspace-folder join alone determines matches.
-                continue
-            elif field == "photo_ids":
-                # Static collection — explicit list of photo IDs
+                return None, []
+            if field == "photo_ids":
                 ids = value if isinstance(value, list) else []
-                if ids:
-                    placeholders = ",".join("?" for _ in ids)
-                    conditions.append(f"p.id IN ({placeholders})")
-                    params.extend(ids)
-                else:
-                    conditions.append("0")  # empty collection
-            elif field == "rating":
-                if op == ">=":
-                    conditions.append("p.rating >= ?")
-                    params.append(value)
-                elif op == "<=":
-                    conditions.append("p.rating <= ?")
-                    params.append(value)
-                elif op in ("equals", "is"):
-                    conditions.append("p.rating = ?")
-                    params.append(value)
-                elif op == "is not":
-                    conditions.append("p.rating != ?")
-                    params.append(value)
-            elif field == "keyword":
+                if not ids:
+                    return "0", []
+                placeholders = ",".join("?" for _ in ids)
+                return f"p.id IN ({placeholders})", list(ids)
+            if field in ("rating", "quality_score", "sharpness",
+                         "subject_sharpness", "noise_estimate",
+                         "crop_complete"):
+                column = "p.subject_tenengrad" if field == "subject_sharpness" else f"p.{field}"
+                return _numeric_condition(column, op, value, allow_null=True)
+            if field == "keyword":
                 if op == "contains":
-                    need_keyword_join = True
-                    conditions.append("k.name LIKE ?")
-                    params.append(f"%{value}%")
-                elif op == "not_contains":
-                    conditions.append(
-                        """NOT EXISTS (
-                        SELECT 1 FROM photo_keywords pk4
-                        JOIN keywords k4 ON k4.id = pk4.keyword_id
-                        WHERE pk4.photo_id = p.id AND k4.name LIKE ?)"""
-                    )
-                    params.append(f"%{value}%")
-                elif op in ("equals", "is"):
-                    need_keyword_join = True
-                    conditions.append("k.name = ?")
-                    params.append(value)
-                elif op == "is not":
-                    conditions.append(
-                        """NOT EXISTS (
-                        SELECT 1 FROM photo_keywords pk4
-                        JOIN keywords k4 ON k4.id = pk4.keyword_id
-                        WHERE pk4.photo_id = p.id AND k4.name = ?)"""
-                    )
-                    params.append(value)
-            elif field == "folder":
+                    return _keyword_exists("k.name LIKE ?", [f"%{value}%"])
+                if op == "not_contains":
+                    return _keyword_not_exists("k.name LIKE ?", [f"%{value}%"])
+                if op in ("equals", "is"):
+                    return _keyword_exists("k.name = ?", [value])
+                if op == "is not":
+                    return _keyword_not_exists("k.name = ?", [value])
+            if field == "folder":
                 if op == "under":
-                    conditions.append("f.path LIKE ?")
-                    params.append(f"{value}%")
-                elif op == "not_under":
-                    conditions.append("(f.path IS NULL OR f.path NOT LIKE ?)")
-                    params.append(f"{value}%")
-            elif field == "flag":
+                    return "f.path LIKE ?", [f"{value}%"]
+                if op == "not_under":
+                    return "(f.path IS NULL OR f.path NOT LIKE ?)", [f"{value}%"]
+            if field == "flag":
                 if op in ("equals", "is"):
-                    conditions.append("p.flag = ?")
-                    params.append(value)
-                elif op == "is not":
-                    conditions.append("p.flag != ?")
-                    params.append(value)
-            elif field == "color_label":
+                    return "p.flag = ?", [value]
+                if op == "is not":
+                    return "p.flag != ?", [value]
+            if field == "color_label":
+                exists = (
+                    "EXISTS (SELECT 1 FROM photo_color_labels pcl "
+                    "WHERE pcl.photo_id = p.id AND pcl.workspace_id = ? "
+                    "AND pcl.color = ?)"
+                )
+                params = [self._ws_id(), value]
                 if op in ("equals", "is"):
-                    conditions.append(
-                        """EXISTS (
-                        SELECT 1 FROM photo_color_labels pcl
-                        WHERE pcl.photo_id = p.id AND pcl.workspace_id = ? AND pcl.color = ?)"""
-                    )
-                    params.append(self._ws_id())
-                    params.append(value)
-                elif op == "is not":
-                    conditions.append(
-                        """NOT EXISTS (
-                        SELECT 1 FROM photo_color_labels pcl
-                        WHERE pcl.photo_id = p.id AND pcl.workspace_id = ? AND pcl.color = ?)"""
-                    )
-                    params.append(self._ws_id())
-                    params.append(value)
-            elif field == "has_species":
-                if op == "equals" and value is False or value == 0:
-                    conditions.append(
-                        """NOT EXISTS (
-                        SELECT 1 FROM photo_keywords pk3
-                        JOIN keywords k3 ON k3.id = pk3.keyword_id
-                        WHERE pk3.photo_id = p.id AND k3.is_species = 1)"""
-                    )
-                elif op == "equals" and value is True or value == 1:
-                    conditions.append(
-                        """EXISTS (
-                        SELECT 1 FROM photo_keywords pk3
-                        JOIN keywords k3 ON k3.id = pk3.keyword_id
-                        WHERE pk3.photo_id = p.id AND k3.is_species = 1)"""
-                    )
-            elif field == "has_subject":
-                # Match the has_species pattern, but resolve "subject" via
-                # the workspace's configured subject_types (a set of keyword
-                # types). Sorted for deterministic SQL parameter order.
-                #
-                # When 'taxonomy' is among the subject types, also count
-                # legacy species rows (is_species=1 with a non-taxonomy
-                # type). Upgraded databases retain those rows until the
-                # background mark_species_keywords pass retypes them; the
-                # type-only predicate would otherwise place already-
-                # identified photos into 'Needs Identification'.
+                    return exists, params
+                if op == "is not":
+                    return f"NOT {exists}", params
+            if field == "has_species":
+                if op == "equals" and _falsey(value):
+                    return _keyword_not_exists("k.is_species = 1", [])
+                if op == "equals" and _truthy(value):
+                    return _keyword_exists("k.is_species = 1", [])
+            if field == "has_subject":
                 subject_types = sorted(self.get_subject_types())
                 if not subject_types:
-                    if op == "equals" and (value is True or value == 1):
-                        conditions.append("0")  # nothing matches
-                    # value==0 with empty subject_types is a no-op (every
-                    # photo is "not identified" by the empty set)
-                    continue
-                type_placeholders = ",".join("?" * len(subject_types))
-                type_clause = f"k5.type IN ({type_placeholders})"
+                    if op == "equals" and _truthy(value):
+                        return "0", []
+                    return None, []
+                placeholders = ",".join("?" * len(subject_types))
+                type_clause = f"k.type IN ({placeholders})"
                 if "taxonomy" in subject_types:
-                    type_clause = f"({type_clause} OR k5.is_species = 1)"
-                if op == "equals" and (value is False or value == 0):
-                    conditions.append(
-                        f"""NOT EXISTS (
-                        SELECT 1 FROM photo_keywords pk5
-                        JOIN keywords k5 ON k5.id = pk5.keyword_id
-                        WHERE pk5.photo_id = p.id AND {type_clause})"""
-                    )
-                    params.extend(subject_types)
-                elif op == "equals" and (value is True or value == 1):
-                    conditions.append(
-                        f"""EXISTS (
-                        SELECT 1 FROM photo_keywords pk5
-                        JOIN keywords k5 ON k5.id = pk5.keyword_id
-                        WHERE pk5.photo_id = p.id AND {type_clause})"""
-                    )
-                    params.extend(subject_types)
-            elif field == "keyword_count":
-                if op == "equals":
-                    conditions.append(
-                        """(SELECT COUNT(*) FROM photo_keywords pk2
-                                         WHERE pk2.photo_id = p.id) = ?"""
-                    )
-                    params.append(value)
-                elif op == ">=":
-                    conditions.append(
-                        """(SELECT COUNT(*) FROM photo_keywords pk2
-                                         WHERE pk2.photo_id = p.id) >= ?"""
-                    )
-                    params.append(value)
-            elif field == "timestamp":
+                    type_clause = f"({type_clause} OR k.is_species = 1)"
+                if op == "equals" and _falsey(value):
+                    return _keyword_not_exists(type_clause, subject_types)
+                if op == "equals" and _truthy(value):
+                    return _keyword_exists(type_clause, subject_types)
+            if field == "keyword_count":
+                expr = "(SELECT COUNT(*) FROM photo_keywords pk2 WHERE pk2.photo_id = p.id)"
+                return _numeric_condition(expr, op, value)
+            if field == "timestamp":
                 if op == "between" and isinstance(value, list) and len(value) == 2:
-                    conditions.append("p.timestamp >= ? AND p.timestamp <= ?")
-                    params.append(value[0])
-                    params.append(_inclusive_date_to(value[1]))
-                elif op == "recent_days":
-                    conditions.append("p.timestamp >= datetime('now', ?)")
-                    params.append(f"-{value} days")
-            elif field == "extension":
-                # Match case-insensitively: get_workspace_extensions() returns
-                # lowercased options, but photos imported by older scans may
-                # have stored mixed-case extensions (.JPG vs .jpg). SQLite's
-                # default = / != is case-sensitive, so without LOWER() a
-                # rule saved as ".jpg" would silently miss .JPG rows.
+                    return "p.timestamp >= ? AND p.timestamp <= ?", [
+                        value[0],
+                        _inclusive_date_to(value[1]),
+                    ]
+                if op == "recent_days":
+                    return "p.timestamp >= datetime('now', ?)", [f"-{value} days"]
+            if field == "extension":
                 if op in ("equals", "is"):
-                    conditions.append("LOWER(p.extension) = LOWER(?)")
-                    params.append(value)
-                elif op == "is not":
-                    conditions.append("LOWER(p.extension) != LOWER(?)")
-                    params.append(value)
-            elif field in (
+                    return "LOWER(p.extension) = LOWER(?)", [value]
+                if op == "is not":
+                    return "LOWER(p.extension) != LOWER(?)", [value]
+            if field in (
                 "taxonomy_kingdom",
                 "taxonomy_phylum",
                 "taxonomy_class",
@@ -8869,29 +9226,108 @@ class Database:
                 "taxonomy_family",
                 "taxonomy_genus",
             ):
-                need_prediction_join = True
                 col = f"pred.{field}"
                 if op in ("equals", "is"):
-                    conditions.append(f"{col} = ?")
-                    params.append(value)
-                elif op == "is not":
-                    conditions.append(f"({col} IS NULL OR {col} != ?)")
-                    params.append(value)
-                elif op == "contains":
-                    conditions.append(f"{col} LIKE ?")
-                    params.append(f"%{value}%")
+                    return _prediction_exists(f"{col} = ?", [value])
+                if op == "is not":
+                    return (
+                        "NOT " + _prediction_exists(f"{col} = ?", [value])[0],
+                        [value],
+                    )
+                if op == "contains":
+                    return _prediction_exists(f"{col} LIKE ?", [f"%{value}%"])
+            if field == "prediction_confidence":
+                cond, cond_params = _numeric_condition("pred.confidence", op, value)
+                return _prediction_exists(cond, cond_params)
+            if field == "classifier_model":
+                if op in ("equals", "is"):
+                    return _prediction_exists("pred.classifier_model = ?", [value])
+                if op == "is not":
+                    return (
+                        "NOT " + _prediction_exists("pred.classifier_model = ?", [value])[0],
+                        [value],
+                    )
+                if op == "contains":
+                    return _prediction_exists("pred.classifier_model LIKE ?", [f"%{value}%"])
+            if field == "prediction_status":
+                if op in ("equals", "is"):
+                    return _prediction_exists(
+                        "COALESCE(prv.status, 'pending') = ?",
+                        [value],
+                        review_join=True,
+                    )
+                if op == "is not":
+                    exists, params = _prediction_exists(
+                        "COALESCE(prv.status, 'pending') = ?",
+                        [value],
+                        review_join=True,
+                    )
+                    return "NOT " + exists, params
+            if field == "needs_review":
+                exists, params = _prediction_exists(
+                    "COALESCE(prv.status, 'pending') = 'pending'",
+                    [],
+                    review_join=True,
+                )
+                return (exists if _truthy(value) else "NOT " + exists), params
+            if field == "has_mask":
+                has = "p.mask_path IS NOT NULL"
+                return (has if _truthy(value) else f"NOT ({has})"), []
+            if field == "active_mask_variant":
+                if op in ("equals", "is"):
+                    return "p.active_mask_variant = ?", [value]
+                if op == "is not":
+                    return "(p.active_mask_variant IS NULL OR p.active_mask_variant != ?)", [value]
+                if op == "contains":
+                    return "p.active_mask_variant LIKE ?", [f"%{value}%"]
+            if field == "has_gps":
+                has = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
+                return (has if _truthy(value) else f"NOT ({has})"), []
+            if field == "location_keyword_missing":
+                gps = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
+                no_loc = (
+                    "NOT EXISTS (SELECT 1 FROM photo_keywords pk "
+                    "JOIN keywords k ON k.id = pk.keyword_id "
+                    "WHERE pk.photo_id = p.id AND k.type = 'location')"
+                )
+                cond = f"({gps}) AND ({no_loc})"
+                return (cond if _truthy(value) else f"NOT ({cond})"), []
+            if field == "inat_submitted":
+                has = "EXISTS (SELECT 1 FROM inat_submissions ins WHERE ins.photo_id = p.id)"
+                return (has if _truthy(value) else f"NOT {has}"), []
+            if field == "is_duplicate":
+                has = (
+                    "p.file_hash IS NOT NULL AND EXISTS ("
+                    "SELECT 1 FROM photos p2 "
+                    "JOIN workspace_folders wf2 ON wf2.folder_id = p2.folder_id "
+                    "AND wf2.workspace_id = ? "
+                    "WHERE p2.id != p.id AND p2.file_hash = p.file_hash "
+                    "AND p2.flag != 'rejected')"
+                )
+                return (has if _truthy(value) else f"NOT ({has})"), [self._ws_id()]
+            raise ValueError(f"unsupported collection rule field/op: {field}/{op}")
 
-        join_clause = ""
-        if need_keyword_join:
-            join_clause += " JOIN photo_keywords pk ON pk.photo_id = p.id"
-            join_clause += " JOIN keywords k ON k.id = pk.keyword_id"
-        if need_prediction_join:
-            # Detections are global (no workspace_id); workspace scoping is
-            # enforced by the folder_join on workspace_folders below.
-            join_clause += (
-                " JOIN detections det ON det.photo_id = p.id"
-                " JOIN predictions pred ON pred.detection_id = det.id"
-            )
+        def _build_node(node):
+            if "rules" in node and "field" not in node:
+                mode = node.get("mode", "all")
+                child_sql = []
+                params = []
+                for child in node.get("rules", []):
+                    sql, child_params = _build_node(child)
+                    if sql:
+                        child_sql.append(f"({sql})")
+                        params.extend(child_params)
+                if not child_sql:
+                    return ("0", []) if mode == "any" else (None, [])
+                if mode == "all":
+                    return " AND ".join(child_sql), params
+                if mode == "any":
+                    return " OR ".join(child_sql), params
+                return "NOT (" + " OR ".join(child_sql) + ")", params
+            return _build_leaf(node)
+
+        _validate_node(root)
+        condition, params = _build_node(root)
 
         # Always join folders for folder-under rules, scoped to workspace
         folder_join = " JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
@@ -8900,11 +9336,9 @@ class Database:
         # folder_join comes before join_clause in the query, so its param goes first
         params.insert(0, self._ws_id())
 
-        where = ""
-        if conditions:
-            where = "WHERE " + " AND ".join(conditions)
+        where = f"WHERE {condition}" if condition else ""
 
-        return folder_join, join_clause, where, params
+        return folder_join, "", where, params
 
     def get_collection_photos(self, collection_id, page=1, per_page=50):
         """Build SQL from collection rules and return matching photos."""

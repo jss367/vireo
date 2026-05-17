@@ -103,7 +103,7 @@ def _resolve_labels_for_models(models, labels_files, db):
     job would write. Returns: model_id -> {fingerprint, n, blocked?}.
     """
     from labels import get_active_labels, get_saved_labels, load_merged_labels
-    from labels_fingerprint import LEGACY_SENTINEL, TOL_SENTINEL, compute_fingerprint
+    from labels_fingerprint import TOL_SENTINEL, compute_fingerprint
 
     saved_by_file = {s["labels_file"]: s for s in get_saved_labels()}
 
@@ -136,7 +136,10 @@ def _resolve_labels_for_models(models, labels_files, db):
     out = {}
     for m in models:
         if m["model_type"] == "timm":
-            out[m["id"]] = {"fingerprint": LEGACY_SENTINEL, "n": 0}
+            # timm models have an intrinsic, fixed class head. The runtime
+            # computes the same sentinel by calling compute_fingerprint(None),
+            # and the inventory page keys intrinsic timm coverage this way too.
+            out[m["id"]] = {"fingerprint": TOL_SENTINEL, "n": 0}
         elif not labels:
             if m["model_str"] in tol_supported:
                 out[m["id"]] = {"fingerprint": TOL_SENTINEL, "n": 0}
@@ -174,7 +177,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
 
     label_resolution = _resolve_labels_for_models(models, params.labels_files, db)
 
-    det_counts = db.count_real_detections_in_scope(photo_ids)
+    det_counts = db.count_primary_detections_in_scope(photo_ids)
     total_dets = det_counts["total_dets"]
     photos_with_dets = det_counts["photos_with_dets"]
 
@@ -190,7 +193,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
             if info.get("blocked"):
                 continue
             fp = info["fingerprint"]
-            stale_total += db.count_classify_stale(
+            stale_total += db.count_primary_classify_stale(
                 classifier_model=m["name"],
                 labels_fingerprint=fp,
                 photo_ids=photo_ids,
@@ -236,7 +239,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
         if params.reclassify:
             pending = total_dets
         else:
-            pending = db.count_classify_pending_pairs(
+            pending = db.count_primary_classify_pending_pairs(
                 classifier_model=m["name"],
                 labels_fingerprint=fp,
                 photo_ids=photo_ids,
@@ -353,11 +356,14 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
             "state": "will-skip",
             "summary": "Disabled — stage will be skipped",
         }
-    counts = db.count_photos_pending_masks(photo_ids)
+    sam2_variant = pipeline_cfg.get("sam2_variant")
+    counts = db.count_photos_pending_masks(
+        photo_ids, sam2_variant=sam2_variant,
+    )
     eligible = counts["eligible"]
     pending = counts["pending"]
-    sam2_variant = pipeline_cfg.get("sam2_variant", "sam2-small")
     stale = db.count_extract_stale(sam2_variant, photo_ids)
+    sam_warning = db.sam_variant_rerun_warning(sam2_variant, photo_ids)
     if eligible == 0:
         # Without imports: classify hasn't run yet, no photos eligible —
         # the pill renders "Will run" with no count, which is honest.
@@ -403,12 +409,10 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
     # Roll them into ``pending`` so the UI's pill text ("N to redo") and
     # progress bar (`(eligible - pending) / eligible`) reflect the actual
     # work — otherwise stale-only states render as "0 to redo" + 100% bar.
-    # The two sets are disjoint by construction: pending requires
-    # ``mask_path IS NULL`` while ``count_extract_stale`` requires
-    # ``mask_path IS NOT NULL``. Without that gate, a photo in an
-    # interrupted state (photo_masks row inserted but mask_path not
-    # yet updated) would land in both buckets and inflate work past
-    # eligible.
+    # The two sets are disjoint by construction: pending includes missing or
+    # incomplete selected-variant rows, while ``count_extract_stale`` requires
+    # a complete active row. Without those gates, interrupted rows would land
+    # in both buckets and inflate work past eligible.
     work = pending + stale
     if new_count > 0:
         # Up-to-N new imports will need masks once classify produces
@@ -430,6 +434,8 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
         "stale": stale,
         "fingerprint_outdated": stale > 0,
     }
+    if sam_warning:
+        detail["sam_variant_warning"] = sam_warning
     if new_count > 0:
         detail["new_photos"] = new_count
     return {

@@ -20,6 +20,7 @@ DEFAULTS = {
     "similarity_threshold": 0.85,
     "preview_max_size": 1920,
     "keyword_case": "auto",
+    "sync_flags_to_xmp": True,
     "max_edit_history": 1000,
     "inat_token": "",
     "hf_token": "",
@@ -81,6 +82,9 @@ DEFAULTS = {
         "reject_clip_high": 0.30,
         "reject_composite": 0.40,
         # Miss detection
+        "sam2_variant": "sam2-small",
+        "dinov2_variant": "vit-b14",
+        "proxy_longest_edge": 1536,
         "miss_enabled": True,
         "miss_det_confidence": 0.25,
         "miss_det_confidence_burst": 0.15,

@@ -126,7 +126,7 @@ def test_undo_old_rating_action_does_not_clear_new_pending_change_reusing_id(app
 
 
 def test_set_flag(app_and_db):
-    """POST /api/photos/<id>/flag updates the local flag without queuing XMP sync."""
+    """POST /api/photos/<id>/flag updates the flag and queues XMP sync by default."""
     app, db = app_and_db
     client = app.test_client()
     photos = db.get_photos()
@@ -140,7 +140,43 @@ def test_set_flag(app_and_db):
     assert photo['flag'] == 'flagged'
 
     changes = db.get_pending_changes()
-    assert not any(c['photo_id'] == pid and c['change_type'] == 'flag' for c in changes)
+    assert any(
+        c['photo_id'] == pid
+        and c['change_type'] == 'flag'
+        and c['value'] == 'flagged'
+        for c in changes
+    )
+
+
+def test_set_flag_clears_pending_xmp_when_sync_disabled(app_and_db):
+    """Changing a flag with flag sync disabled clears stale queued flag writes."""
+    import config as cfg
+
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]['id']
+
+    resp = client.post(f'/api/photos/{pid}/flag', json={'flag': 'flagged'})
+    assert resp.status_code == 200
+    assert any(
+        c['photo_id'] == pid
+        and c['change_type'] == 'flag'
+        and c['value'] == 'flagged'
+        for c in db.get_pending_changes()
+    )
+
+    config = cfg.load()
+    config['sync_flags_to_xmp'] = False
+    cfg.save(config)
+
+    resp = client.post(f'/api/photos/{pid}/flag', json={'flag': 'rejected'})
+    assert resp.status_code == 200
+    assert db.get_photo(pid)['flag'] == 'rejected'
+    assert not any(
+        c['photo_id'] == pid and c['change_type'] == 'flag'
+        for c in db.get_pending_changes()
+    )
 
 
 def test_add_keyword_to_photo(app_and_db):
@@ -725,6 +761,38 @@ def test_undo_batch_flag_restores_all_photos(app_and_db):
 
     for pid in pids:
         assert (db.get_photo(pid)['flag'] or 'none') == originals[pid]
+
+
+def test_redo_batch_flag_restores_per_photo_flag_values(app_and_db):
+    """Redoing a batch flag action uses per-item values, not the action summary."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pids = [p['id'] for p in photos[:3]]
+
+    resp = client.post('/api/culling/apply',
+                       json={'keepers': [pids[0]], 'rejects': [pids[1], pids[2]]})
+    assert resp.status_code == 200
+
+    resp = client.post('/api/undo')
+    assert resp.status_code == 200
+    resp = client.post('/api/redo')
+    assert resp.status_code == 200
+
+    assert db.get_photo(pids[0])['flag'] == 'flagged'
+    assert db.get_photo(pids[1])['flag'] == 'rejected'
+    assert db.get_photo(pids[2])['flag'] == 'rejected'
+
+    queued = {
+        c['photo_id']: c['value']
+        for c in db.get_pending_changes()
+        if c['change_type'] == 'flag' and c['photo_id'] in pids
+    }
+    assert queued == {
+        pids[0]: 'flagged',
+        pids[1]: 'rejected',
+        pids[2]: 'rejected',
+    }
 
 
 def test_undo_batch_keyword_add_removes_from_all_photos(app_and_db):

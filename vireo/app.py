@@ -1424,8 +1424,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # reflects what /api/pipeline/regroup-live would actually consume —
         # mismatched-variant embeddings are dropped at load time, so counting
         # them here would lie about readiness.
+        dinov2_variant = pipeline_cfg.get("dinov2_variant")
+        sam2_variant = pipeline_cfg.get("sam2_variant")
+        proxy_longest_edge = pipeline_cfg.get("proxy_longest_edge")
         review_readiness = compute_review_readiness(
-            db, dinov2_variant=pipeline_cfg.get("dinov2_variant"),
+            db, dinov2_variant=dinov2_variant,
         )
         if results is not None:
             # Cache exists — even if features have changed underneath,
@@ -1460,12 +1463,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "total_photos": total_photos,
             "taxonomy_available": taxonomy_available,
             "pipeline_config": {
-                "sam2_variant": pipeline_cfg.get("sam2_variant", "sam2-small"),
-                "dinov2_variant": pipeline_cfg.get("dinov2_variant", "vit-b14"),
-                "proxy_longest_edge": pipeline_cfg.get("proxy_longest_edge", 1536),
+                "sam2_variant": sam2_variant,
+                "dinov2_variant": dinov2_variant,
+                "proxy_longest_edge": proxy_longest_edge,
                 "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", True),
             },
             "mask_variant_coverage": db.mask_variant_coverage(),
+            "sam_variant_warning": db.sam_variant_rerun_warning(sam2_variant),
             "results": results,
             "review_readiness": review_readiness,
             "workspace_overrides": ws_overrides,
@@ -1964,6 +1968,38 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return jsonify(result)
 
+    @app.route("/api/photos/by-ids", methods=["POST"])
+    def api_photos_by_ids():
+        """Return selected photos in caller order, scoped to the active workspace."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        raw_ids = body.get("photo_ids", [])
+        if not isinstance(raw_ids, list):
+            return json_error("photo_ids must be a list", 400)
+        if not raw_ids:
+            return json_error("photo_ids required", 400)
+        if len(raw_ids) > 500:
+            return json_error("too many photo_ids", 400)
+
+        photo_ids = []
+        seen = set()
+        for raw in raw_ids:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return json_error("photo_ids must be integers", 400)
+            if raw in seen:
+                continue
+            seen.add(raw)
+            photo_ids.append(raw)
+
+        photos = []
+        for pid in photo_ids:
+            photo = db.get_photo(pid, verify_workspace=True)
+            if photo:
+                photos.append(dict(photo))
+        _attach_species(db, photos)
+        _attach_detections(db, photos)
+        return jsonify({"photos": photos})
+
     @app.route("/api/photos/geo")
     def api_photos_geo():
         db = _get_db()
@@ -2117,6 +2153,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.update_photo_flag(photo_id, flag)
         except ValueError as e:
             return json_error(str(e), 403)
+        db.queue_flag_change_if_enabled(photo_id, flag)
         db.record_edit('flag', f'Set flag to {flag}', flag,
                        [{'photo_id': photo_id, 'old_value': old_flag, 'new_value': flag}])
         return jsonify({"ok": True})
@@ -2883,6 +2920,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.batch_update_photo_flag(valid_ids, flag)
         except ValueError as e:
             return json_error(str(e), 403)
+        for pid in valid_ids:
+            db.queue_flag_change_if_enabled(pid, flag, _commit=False)
+        db.conn.commit()
         items = [{'photo_id': pid, 'old_value': old_values[pid], 'new_value': flag} for pid in old_values]
         db.record_edit('flag', f'Set flag to {flag} on {len(photo_ids)} photos',
                        flag, items, is_batch=True)
@@ -3485,6 +3525,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         rules = body.get("rules", [])
         if not name:
             return json_error("name required")
+        try:
+            db.count_photos_for_rules(rules)
+        except ValueError as e:
+            return json_error(str(e), 400)
         cid = db.add_collection(name, json.dumps(rules))
         return jsonify({"ok": True, "id": cid})
 
@@ -3534,16 +3578,40 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/collections/<int:collection_id>", methods=["PUT"])
     def api_update_collection(collection_id):
-        """Rename a collection. Body: {"name": "..."}."""
+        """Update a collection. Body: {"name": "...", "rules": [...|group]}."""
         db = _get_db()
         body = request.get_json(silent=True) or {}
-        name = (body.get("name") or "").strip()
-        if not name:
-            return json_error("name required")
-        try:
-            db.rename_collection(collection_id, name)
-        except ValueError:
+        row = db.conn.execute(
+            "SELECT id, name, rules FROM collections WHERE id = ? AND workspace_id = ?",
+            (collection_id, db._ws_id()),
+        ).fetchone()
+        if not row:
             return json_error("collection not found", 404)
+
+        updates = []
+        params = []
+        if "name" in body:
+            name = (body.get("name") or "").strip()
+            if not name:
+                return json_error("name required")
+            updates.append("name = ?")
+            params.append(name)
+        if "rules" in body:
+            rules = body.get("rules")
+            try:
+                db.count_photos_for_rules(rules)
+            except ValueError as e:
+                return json_error(str(e), 400)
+            updates.append("rules = ?")
+            params.append(json.dumps(rules))
+        if updates:
+            params.extend([collection_id, db._ws_id()])
+            db.conn.execute(
+                f"UPDATE collections SET {', '.join(updates)} "
+                "WHERE id = ? AND workspace_id = ?",
+                params,
+            )
+            db.conn.commit()
         return jsonify({"ok": True})
 
     @app.route("/api/collections/<int:collection_id>/add-photos", methods=["POST"])
@@ -3565,17 +3633,62 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Refuse to mutate smart/system collections like "All Photos" — adding
         # a photo_ids rule would AND-combine with the sentinel and silently
         # convert the dynamic default into a static subset.
-        if any(r.get("field") == "all" for r in rules):
+        def _has_all_rule(node):
+            if isinstance(node, list):
+                return any(_has_all_rule(child) for child in node)
+            if not isinstance(node, dict):
+                return False
+            if node.get("field") == "all":
+                return True
+            return _has_all_rule(node.get("rules"))
+
+        if _has_all_rule(rules):
             return json_error("Cannot add photos to this collection", 400)
-        # Find or create a photo_ids rule
-        ids_rule = None
-        for r in rules:
-            if r.get("field") == "photo_ids":
-                ids_rule = r
-                break
+        def _find_photo_ids_rule(node, group_modes=()):
+            if isinstance(node, list):
+                for child in node:
+                    found = _find_photo_ids_rule(child, group_modes)
+                    if found is not None:
+                        return found
+            elif isinstance(node, dict):
+                if node.get("field") == "photo_ids":
+                    return node, group_modes
+                if "rules" in node:
+                    mode = node.get("mode", "all")
+                    return _find_photo_ids_rule(
+                        node.get("rules"), group_modes + (mode,)
+                    )
+            return None
+
+        def _has_non_all_group(node):
+            if isinstance(node, list):
+                return any(_has_non_all_group(child) for child in node)
+            if not isinstance(node, dict):
+                return False
+            if "rules" in node and node.get("field") is None:
+                if node.get("mode", "all") != "all":
+                    return True
+                return _has_non_all_group(node.get("rules"))
+            return False
+
+        found_ids_rule = _find_photo_ids_rule(rules)
+        if found_ids_rule is not None:
+            ids_rule, group_modes = found_ids_rule
+            if any(mode != "all" for mode in group_modes):
+                return json_error("Cannot add photos to this collection", 400)
+        else:
+            ids_rule = None
+            if _has_non_all_group(rules):
+                return json_error("Cannot add photos to this collection", 400)
+
         if ids_rule is None:
             ids_rule = {"field": "photo_ids", "value": []}
-            rules.append(ids_rule)
+            if isinstance(rules, list):
+                rules.append(ids_rule)
+            elif isinstance(rules, dict) and isinstance(rules.get("rules"), list):
+                rules["rules"].append(ids_rule)
+            else:
+                rules = [ids_rule]
 
         # Merge new IDs
         existing = set(ids_rule["value"])
@@ -4277,6 +4390,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/predictions/compare")
     def api_predictions_compare():
+        from compare import compare_prediction_to_keywords
+        from taxonomy import load_local_taxonomy
+
         db = _get_db()
         collection_id = request.args.get("collection_id", None, type=int)
         if not collection_id:
@@ -4285,36 +4401,216 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photos = db.get_collection_photos(collection_id, per_page=999999)
         photo_ids = [p["id"] for p in photos]
         if not photo_ids:
-            return jsonify({"models": [], "photos": []})
+            return jsonify({
+                "models": [],
+                "photos": [],
+                "summary": {
+                    "photos": 0,
+                    "models": 0,
+                    "matches": 0,
+                    "refinements": 0,
+                    "broader": 0,
+                    "conflicts": 0,
+                    "new": 0,
+                    "missing_predictions": 0,
+                    "needs_review": 0,
+                },
+                "taxonomy_available": False,
+            })
 
         preds = db.get_predictions(photo_ids=photo_ids)
+        keywords_by_photo = db.get_keywords_for_photos(photo_ids)
+        species_by_photo = db.get_species_keywords_for_photos(photo_ids)
+        taxonomy = load_local_taxonomy()
+
+        def summarize_photo(row):
+            return {
+                "photo_id": row["id"],
+                "filename": row["filename"],
+                "timestamp": row["timestamp"],
+                "rating": row["rating"],
+                "flag": row["flag"],
+                "width": row["width"],
+                "height": row["height"],
+                "keywords": keywords_by_photo.get(row["id"], []),
+                "species_keywords": species_by_photo.get(row["id"], []),
+                "predictions": {},
+                "row_category": "missing_prediction",
+                "row_label": "Missing prediction",
+            }
 
         # Collect distinct models and build per-photo lookup
         # With multi-detection, each photo may have multiple predictions per model
         models = set()
-        by_photo = {}
+        by_photo = {p["id"]: summarize_photo(p) for p in photos}
         for pr in preds:
             d = dict(pr)
+            if d.get("status") == "alternative":
+                continue
             pid = d["photo_id"]
             model = d["model"]
             models.add(model)
             if pid not in by_photo:
-                by_photo[pid] = {"photo_id": pid, "filename": d["filename"], "predictions": {}}
+                continue
             if model not in by_photo[pid]["predictions"]:
                 by_photo[pid]["predictions"][model] = []
+            comparison = compare_prediction_to_keywords(
+                d["species"],
+                species_by_photo.get(pid, []),
+                taxonomy,
+            )
             by_photo[pid]["predictions"][model].append({
+                "id": d["id"],
                 "species": d["species"],
                 "confidence": d["confidence"],
+                "status": d["status"],
+                "category": comparison["category"],
+                "category_label": comparison["label"],
+                "category_detail": comparison["detail"],
+                "matched_keyword": comparison["matched_keyword"],
+                "shared_rank": comparison["shared_rank"],
                 "box_x": d.get("box_x"),
                 "box_y": d.get("box_y"),
                 "box_w": d.get("box_w"),
                 "box_h": d.get("box_h"),
             })
 
+        priority = {
+            "conflict": 6,
+            "refinement": 5,
+            "broader": 4,
+            "new": 3,
+            "missing_prediction": 2,
+            "match": 1,
+        }
+        labels = {
+            "conflict": "Conflict",
+            "refinement": "Refinement",
+            "broader": "Broader",
+            "new": "No species keyword",
+            "missing_prediction": "Missing prediction",
+            "match": "Match",
+        }
+        summary = {
+            "photos": len(photos),
+            "models": 0,
+            "matches": 0,
+            "refinements": 0,
+            "broader": 0,
+            "conflicts": 0,
+            "new": 0,
+            "missing_predictions": 0,
+            "needs_review": 0,
+        }
+
+        for photo in by_photo.values():
+            highest_category = "missing_prediction"
+            pending_category = None
+            for model_preds in photo["predictions"].values():
+                for pred in model_preds:
+                    cat = pred["category"]
+                    if cat == "match":
+                        summary["matches"] += 1
+                    elif cat == "refinement":
+                        summary["refinements"] += 1
+                    elif cat == "broader":
+                        summary["broader"] += 1
+                    elif cat == "conflict":
+                        summary["conflicts"] += 1
+                    elif cat == "new":
+                        summary["new"] += 1
+                    if priority[cat] > priority[highest_category]:
+                        highest_category = cat
+                    if pred.get("status") == "pending" and (
+                        pending_category is None
+                        or priority[cat] > priority[pending_category]
+                    ):
+                        pending_category = cat
+            if not photo["predictions"]:
+                summary["missing_predictions"] += 1
+            row_category = pending_category or highest_category
+            photo["row_category"] = row_category
+            photo["row_label"] = labels[row_category]
+            photo["needs_review"] = row_category in {
+                "conflict", "refinement", "broader", "new",
+            } and pending_category is not None
+            if photo["needs_review"]:
+                summary["needs_review"] += 1
+
+        model_list = sorted(models)
+        summary["models"] = len(model_list)
+
         return jsonify({
-            "models": sorted(models),
+            "models": model_list,
             "photos": list(by_photo.values()),
+            "summary": summary,
+            "taxonomy_available": taxonomy is not None,
         })
+
+    @app.route("/api/predictions/<int:pred_id>/reviewed", methods=["POST"])
+    def api_mark_prediction_reviewed(pred_id):
+        db = _get_db()
+        pred = db.conn.execute(
+            """SELECT pr.id, pr.species, d.photo_id,
+                      COALESCE(pr_rev.status, 'pending') AS status
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id
+                AND pr_rev.workspace_id = ?
+               WHERE pr.id = ?""",
+            (db._ws_id(), pred_id),
+        ).fetchone()
+        if pred is None:
+            return json_error("prediction not found", 404)
+        # Only pending predictions may transition to reviewed. Without this
+        # guard a stale/double request or a direct API call against an
+        # already accepted/rejected prediction would silently overwrite the
+        # prior decision, corrupting review state and audit history.
+        if pred["status"] != "pending":
+            return json_error(
+                f'prediction already {pred["status"]}; cannot mark reviewed',
+                409,
+            )
+        db.update_prediction_status(pred_id, "reviewed")
+        db.record_edit(
+            "prediction_reviewed",
+            f'Marked prediction "{pred["species"]}" reviewed',
+            "reviewed",
+            [{"photo_id": pred["photo_id"], "old_value": "pending", "new_value": "reviewed"}],
+        )
+        return jsonify({"ok": True})
+
+    @app.route("/api/predictions/<int:pred_id>/replace-keywords", methods=["POST"])
+    def api_replace_species_keywords_with_prediction(pred_id):
+        db = _get_db()
+        # accept_prediction(replace_species=True) strips existing
+        # species/taxonomy keywords from *every* photo it tags (the whole
+        # group, not just this photo) inside one transaction, so grouped
+        # photos are replaced consistently.
+        result = db.accept_prediction(pred_id, replace_species=True)
+        if result is None:
+            return json_error("prediction not found", 404)
+        items = [
+            {
+                "photo_id": a["photo_id"],
+                "old_value": ", ".join(a.get("old_species", [])),
+                "new_value": result["species"],
+            }
+            for a in result["affected"]
+        ]
+        is_batch = len(items) > 1
+        desc = f'Replaced species keyword with "{result["species"]}"'
+        if is_batch:
+            desc += f" across {len(items)} photos"
+        db.record_edit(
+            "prediction_replace_species",
+            desc,
+            result["species"],
+            items,
+            is_batch=is_batch,
+        )
+        return jsonify({"ok": True})
 
     @app.route("/api/predictions/<int:pred_id>/accept", methods=["POST"])
     def api_accept_prediction(pred_id):
@@ -4450,6 +4746,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if pid in old_flags:
                 flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'rejected'})
         if flag_items:
+            for item in flag_items:
+                db.queue_flag_change_if_enabled(
+                    item["photo_id"], item["new_value"], _commit=False
+                )
+            db.conn.commit()
             desc = f'Group prediction: flagged {len(picks)}, rejected {len(rejects)}'
             db.record_edit('flag', desc, 'group_apply', flag_items, is_batch=True)
 
@@ -4525,6 +4826,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                  "new_value": "rejected"}
                 for a in affected
             ]
+            for item in items:
+                db.queue_flag_change_if_enabled(
+                    item["photo_id"], item["new_value"], _commit=False
+                )
+            db.conn.commit()
             db.record_edit(
                 "flag",
                 f"Rejected {len(items)} miss photos (category={category})",
@@ -4678,23 +4984,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/pipeline/extract-readiness")
     def api_extract_readiness():
         """Report SAM2/DINOv2 download status for the Extract Features card."""
+        import config as cfg
         from dino_embed import DINOV2_VARIANTS, dinov2_status
         from masking import SAM2_VARIANTS, sam2_status
 
         db = _get_db()
         pipeline_cfg = db.get_effective_config(cfg.load()).get("pipeline", {})
-        sam2_variant = request.args.get("sam2_variant") or pipeline_cfg.get(
-            "sam2_variant", "sam2-small"
-        )
-        dinov2_variant = request.args.get("dinov2_variant") or pipeline_cfg.get(
-            "dinov2_variant", "vit-b14"
-        )
+        sam2_variant = request.args.get("sam2_variant") or pipeline_cfg.get("sam2_variant")
+        dinov2_variant = request.args.get("dinov2_variant") or pipeline_cfg.get("dinov2_variant")
 
         return jsonify({
             "sam2": sam2_status(sam2_variant),
             "sam2_known": sam2_variant in SAM2_VARIANTS,
             "dinov2": dinov2_status(dinov2_variant),
             "dinov2_known": dinov2_variant in DINOV2_VARIANTS,
+            "sam_variant_warning": db.sam_variant_rerun_warning(sam2_variant),
         })
 
     @app.route("/api/system/install-exiftool", methods=["POST"])
@@ -10244,9 +10548,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
-        sam2_variant = pipeline_cfg.get("sam2_variant", "sam2-small")
-        dinov2_variant = pipeline_cfg.get("dinov2_variant", "vit-b14")
-        proxy_longest_edge = pipeline_cfg.get("proxy_longest_edge", 1536)
+        sam2_variant = pipeline_cfg.get("sam2_variant")
+        dinov2_variant = pipeline_cfg.get("dinov2_variant")
+        proxy_longest_edge = pipeline_cfg.get("proxy_longest_edge")
         # Workspace-effective detector_confidence floor. Both the
         # collection branch (via get_detections) and the workspace SQL
         # below filter on this so we don't run SAM/DINO on noisy
@@ -11754,6 +12058,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), 403)
 
         if flag_items:
+            for item in flag_items:
+                db.queue_flag_change_if_enabled(
+                    item["photo_id"], item["new_value"], _commit=False
+                )
+            db.conn.commit()
             desc = (
                 f"Pipeline burst group: flagged {len(picks)}, rejected {len(rejects)}, "
                 f"cleared {sum(1 for it in flag_items if it['new_value'] == 'none')}"
@@ -11953,6 +12262,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if pid in old_flags:
                 flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'rejected'})
         if flag_items:
+            for item in flag_items:
+                db.queue_flag_change_if_enabled(
+                    item["photo_id"], item["new_value"], _commit=False
+                )
+            db.conn.commit()
             db.record_edit('flag',
                            f'Culling: flagged {len(keepers)}, rejected {len(rejects)}',
                            'culling_apply', flag_items, is_batch=True)

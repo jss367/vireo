@@ -10,6 +10,7 @@ from xmp import (
     read_hierarchical_keywords,
     read_keywords,
     remove_keywords,
+    write_pick_flag,
     write_rating,
     write_sidecar,
 )
@@ -128,6 +129,24 @@ def test_write_rating_no_file(missing_xmp):
     # Should be a no-op, not raise
     write_rating(missing_xmp, 3)
     assert not os.path.exists(missing_xmp)
+
+
+# ── write_pick_flag ─────────────────────────────────────────────────────
+
+def test_write_pick_flag_existing_sidecar(sample_xmp):
+    write_pick_flag(sample_xmp, "flagged")
+
+    with open(sample_xmp) as f:
+        content = f.read()
+    assert 'xmpDM:pick="1"' in content
+
+
+def test_write_pick_flag_rejected_creates_sidecar(missing_xmp):
+    write_pick_flag(missing_xmp, "rejected")
+
+    with open(missing_xmp) as f:
+        content = f.read()
+    assert 'xmpDM:pick="-1"' in content
 
 
 # ── remove_keywords ─────────────────────────────────────────────────────

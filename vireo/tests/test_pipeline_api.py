@@ -705,6 +705,33 @@ def _seed_workspace_with_masks(db_path):
     return p1, p2
 
 
+def _seed_workspace_with_large_only_masks(db_path):
+    from db import Database
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.add_folder("/photos/large-only", name="large-only")
+    db.add_workspace_folder(ws_id, fid)
+    photo_ids = []
+    for name in ("a.jpg", "b.jpg"):
+        pid = db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+                           file_size=1, file_mtime=1.0)
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+              "confidence": 0.9, "category": "animal"}],
+            detector_model="megadetector-v6",
+        )
+        db.upsert_photo_mask(
+            pid, "sam2-large", f"/m/{pid}.large.png",
+            detector_model="megadetector-v6",
+            prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+        )
+        db.set_active_mask_variant(pid, "sam2-large")
+        photo_ids.append(pid)
+    db.close()
+    return photo_ids
+
+
 def test_pipeline_page_init_includes_mask_variant_coverage(setup):
     """page-init exposes mask_variant_coverage so the SAM2 dropdown card
     can render per-variant counts and an active-variant selector."""
@@ -721,6 +748,33 @@ def test_pipeline_page_init_includes_mask_variant_coverage(setup):
         assert cov["sam2-small"]["active_count"] == 2
         assert cov["sam2-large"]["count"] == 1
         assert cov["sam2-large"]["active_count"] == 0
+
+
+def test_pipeline_page_init_warns_when_selected_sam_has_poor_coverage(setup):
+    app, db_path = setup
+    _seed_workspace_with_large_only_masks(db_path)
+
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/page-init")
+        assert resp.status_code == 200
+        warning = resp.get_json()["sam_variant_warning"]
+        assert warning["selected_variant"] == "sam2-small"
+        assert warning["alternate_variant"] == "sam2-large"
+        assert warning["target_count"] == 2
+        assert "Starting will rerun SAM" in warning["message"]
+
+
+def test_extract_readiness_includes_sam_variant_coverage_warning(setup, tmp_path, monkeypatch):
+    app, db_path = setup
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _seed_workspace_with_large_only_masks(db_path)
+
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/extract-readiness?sam2_variant=sam2-small")
+        assert resp.status_code == 200
+        warning = resp.get_json()["sam_variant_warning"]
+        assert warning["selected_variant"] == "sam2-small"
+        assert warning["alternate_count"] == 2
 
 
 def test_pipeline_page_init_includes_review_readiness(setup):

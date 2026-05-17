@@ -176,6 +176,27 @@ def test_api_photos_rejects_unknown_flag_filter(app_and_db):
     assert resp.status_code == 400
 
 
+def test_api_set_flag_queues_xmp_when_enabled(app_and_db):
+    """POST /api/photos/<id>/flag queues a flag sync when configured."""
+    import config as cfg
+
+    app, db = app_and_db
+    config = cfg.load()
+    config["sync_flags_to_xmp"] = True
+    cfg.save(config)
+
+    target = [p for p in db.get_photos() if p["filename"] == "bird1.jpg"][0]
+
+    client = app.test_client()
+    resp = client.post(f'/api/photos/{target["id"]}/flag', json={"flag": "flagged"})
+
+    assert resp.status_code == 200
+    changes = db.get_pending_changes()
+    assert len(changes) == 1
+    assert changes[0]["change_type"] == "flag"
+    assert changes[0]["value"] == "flagged"
+
+
 def test_api_photo_detail(app_and_db):
     """GET /api/photos/<id> returns photo with keywords."""
     app, db = app_and_db
@@ -215,6 +236,31 @@ def test_api_photo_detail_includes_on_disk_path(app_and_db):
     data = resp.get_json()
     assert 'path' in data, "photo detail should expose full on-disk path"
     assert data['path'] == expected_path
+
+
+def test_api_photos_by_ids_preserves_selection_order(app_and_db):
+    """POST /api/photos/by-ids returns active-workspace photos in caller order."""
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    by_name = {p["filename"]: p["id"] for p in photos}
+    ordered_ids = [by_name["bird3.jpg"], by_name["bird1.jpg"], by_name["bird3.jpg"]]
+
+    client = app.test_client()
+    resp = client.post("/api/photos/by-ids", json={"photo_ids": ordered_ids})
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert [p["filename"] for p in data["photos"]] == ["bird3.jpg", "bird1.jpg"]
+    assert all("detections" in p for p in data["photos"])
+
+
+def test_api_photos_by_ids_validates_payload(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+
+    resp = client.post("/api/photos/by-ids", json={"photo_ids": ["1"]})
+
+    assert resp.status_code == 400
 
 
 def test_api_photos_calendar(app_and_db):
