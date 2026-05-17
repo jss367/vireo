@@ -3776,11 +3776,6 @@ function grmSelect(photoId, mode) {
     if (!grmState.selectionAnchor) grmState.selectionAnchor = grmState.selected || photoId;
     _grmSelectRange(grmState.selectionAnchor, photoId);
     grmState.selected = photoId;
-  } else if (mode === 'force') {
-    selectedIds.clear();
-    selectedIds.add(photoId);
-    grmState.selected = photoId;
-    grmState.selectionAnchor = photoId;
   } else {
     if (grmState.selected === photoId && selectedIds.size === 1 && selectedIds.has(photoId)) {
       selectedIds.clear();
@@ -3816,6 +3811,35 @@ function grmSelect(photoId, mode) {
   } else {
     loupeImg.removeAttribute('src');
     loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
+    detailEl.innerHTML = '';
+    grmLoupeReset();
+  }
+}
+
+function grmRefreshSelectedLoupe() {
+  var loupeImg = document.getElementById('grmLoupePhoto');
+  var loupeInfo = document.getElementById('grmLoupeInfo');
+  var detailEl = document.getElementById('grmLoupeDetail');
+  if (!loupeImg || !loupeInfo || !detailEl) return;
+
+  if (grmState.selected) {
+    loupeImg.src = grmPhotoUrl(grmState.selected);
+    grmApplyLoupeZoom();
+    var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
+    if (photo) {
+      var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
+      var boxSharp = photo.box_sharpness != null ? ' - box sharpness: ' + Math.round(photo.box_sharpness) : '';
+      loupeInfo.textContent = PIPELINE_EYE_COMPARE
+        ? (photo.filename || '') + ' - sharpness: ' + sharp + boxSharp + ' - click/drag to set eye target'
+        : (photo.filename || '') + ' - sharpness: ' + sharp + boxSharp + ' - move cursor to compare';
+      detailEl.innerHTML = buildPipelineMetadataHtml(photo);
+    }
+    grmUpdateResLabel();
+  } else {
+    loupeImg.removeAttribute('src');
+    loupeInfo.textContent = PIPELINE_EYE_COMPARE
+      ? 'Select a reference photo. Click the large photo to place the eye target.'
+      : 'Select a photo to preview. Hover to compare sharpness across all frames.';
     detailEl.innerHTML = '';
     grmLoupeReset();
   }
@@ -4347,7 +4371,7 @@ async function grmCalculateBoxSharpness() {
       if (r && r.sharpness != null) photo.box_sharpness = r.sharpness;
     });
     renderGroupModal();
-    if (grmState.selected) grmSelect(grmState.selected, 'force');
+    grmRefreshSelectedLoupe();
   } catch(e) {
     console.error('Box sharpness failed:', e);
   } finally {

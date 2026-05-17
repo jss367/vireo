@@ -4701,8 +4701,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         regions = body.get("regions")
         if not isinstance(regions, list):
             return json_error("regions must be a list")
-        if len(regions) > 100:
-            return json_error("too many regions", 413)
 
         from image_loader import load_working_image
         from sharpness import _score_from_pil

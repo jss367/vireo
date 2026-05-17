@@ -1701,11 +1701,6 @@ function grmSelect(photoId, mode) {
     if (!grmState.selectionAnchor) grmState.selectionAnchor = grmState.selected || photoId;
     _grmSelectRange(grmState.selectionAnchor, photoId);
     grmState.selected = photoId;
-  } else if (mode === 'force') {
-    selectedIds.clear();
-    selectedIds.add(photoId);
-    grmState.selected = photoId;
-    grmState.selectionAnchor = photoId;
   } else {
     if (grmState.selected === photoId && selectedIds.size === 1 && selectedIds.has(photoId)) {
       selectedIds.clear();
@@ -1724,6 +1719,30 @@ function grmSelect(photoId, mode) {
   var loupeImg = document.getElementById('grmLoupePhoto');
   var loupeInfo = document.getElementById('grmLoupeInfo');
   var loupePreds = document.getElementById('grmLoupePreds');
+  if (grmState.selected) {
+    loupeImg.src = grmLoupePhotoUrl(grmState.selected);
+    grmApplyLoupeZoom();
+    var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
+    if (item) {
+      var sharp = item.subject_sharpness != null ? Math.round(item.subject_sharpness) : (item.sharpness != null ? Math.round(item.sharpness) : '?');
+      var boxSharp = item.box_sharpness != null ? ' — box sharpness: ' + Math.round(item.box_sharpness) : '';
+      loupeInfo.textContent = (item.filename || '') + ' — sharpness: ' + sharp + boxSharp + ' — move cursor to compare';
+      loupePreds.innerHTML = renderLoupePreds(item);
+    }
+    grmUpdateResLabel();
+  } else {
+    loupeImg.src = '';
+    loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
+    loupePreds.innerHTML = '';
+    grmLoupeReset();
+  }
+}
+
+function grmRefreshSelectedLoupe() {
+  var loupeImg = document.getElementById('grmLoupePhoto');
+  var loupeInfo = document.getElementById('grmLoupeInfo');
+  var loupePreds = document.getElementById('grmLoupePreds');
+  if (!loupeImg || !loupeInfo || !loupePreds) return;
   if (grmState.selected) {
     loupeImg.src = grmLoupePhotoUrl(grmState.selected);
     grmApplyLoupeZoom();
@@ -1798,8 +1817,8 @@ var _grmPendingSnap = false;
 var GRM_THUMB_STORAGE_KEY = 'vireo.burstReviewThumbSize';
 var GRM_RES_STOPS = [
   { size: 400,  label: '400',      kind: 'thumb' },
-  { size: 1024, label: '1024',     kind: 'preview' },
   { size: 1920, label: '1920',     kind: 'preview' },
+  { size: 3840, label: '4K',       kind: 'preview' },
   { size: 0,    label: 'Original', kind: 'original' }
 ];
 var grmResolutionIdx = 1;
@@ -2315,9 +2334,7 @@ async function grmCalculateBoxSharpness() {
       if (r && r.sharpness != null) item.box_sharpness = r.sharpness;
     });
     renderGroupModal();
-    if (grmState.selected) {
-      grmSelect(grmState.selected, 'force');
-    }
+    grmRefreshSelectedLoupe();
   } catch(e) {
     console.error('Box sharpness failed:', e);
   } finally {
@@ -2537,7 +2554,7 @@ document.addEventListener('keydown', function(e) {
     <div class="grm-res-control" title="Image source resolution">
       <label for="grmResSlider">Res</label>
       <input type="range" id="grmResSlider" min="0" max="3" step="1" value="1" oninput="grmSetResolution(this.value)">
-      <span id="grmResLabel">1024 · preview</span>
+      <span id="grmResLabel">1920 · preview</span>
     </div>
     <div class="grm-loupe-zoom-control" title="Right preview zoom">
       <label for="grmLoupeZoomSlider">Right</label>

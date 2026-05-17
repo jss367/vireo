@@ -256,6 +256,59 @@ def test_burst_modal_scores_visible_box_sharpness(live_server, page, tmp_path):
     page.wait_for_load_state("networkidle")
     _open_burst_modal(page)
 
+    cards = page.locator("#grmOverlay .grm-card[data-photo-id]")
+    if cards.count() >= 2:
+        first_pid = cards.nth(0).get_attribute("data-photo-id")
+        second_pid = cards.nth(1).get_attribute("data-photo-id")
+        page.evaluate(
+            """([first, second]) => {
+              const a = parseInt(first, 10);
+              const b = parseInt(second, 10);
+              grmState.selected = b;
+              grmState.selectedIds = new Set([a, b]);
+              grmState.selectionAnchor = a;
+              renderGroupModal();
+            }""",
+            [first_pid, second_pid],
+        )
+        before = page.evaluate("Array.from(grmState.selectedIds).map(String).sort()")
+        assert before == sorted([first_pid, second_pid])
+
     expect(page.locator("#grmBoxSharpnessBtn")).to_be_visible()
     page.locator("#grmBoxSharpnessBtn").click()
     expect(page.locator(".grm-card-scores", has_text="Box:")).to_have_count(n)
+
+    if cards.count() >= 2:
+        after = page.evaluate("Array.from(grmState.selectedIds).map(String).sort()")
+        assert after == before
+
+
+def test_region_sharpness_endpoint_accepts_large_batches(live_server, page, tmp_path):
+    db = live_server["db"]
+    n = _seed_burst_with_real_photos(db, tmp_path)
+    if n < 1:
+        pytest.skip("could not seed burst group")
+    _ensure_photo_files_on_disk(db, tmp_path)
+
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    page.wait_for_load_state("networkidle")
+    _open_burst_modal(page)
+
+    pid = int(page.locator("#grmOverlay .grm-card[data-photo-id]").first.get_attribute("data-photo-id"))
+    regions = [{
+        "photo_id": pid,
+        "x": 0,
+        "y": 0,
+        "w": 120,
+        "h": 80,
+        "source_w": 600,
+        "source_h": 400,
+    } for _ in range(101)]
+    response = page.request.post(
+        f"{url}/api/photos/sharpness/regions",
+        data={"regions": regions},
+    )
+    assert response.status == 200
+    body = response.json()
+    assert len(body["results"]) == 101
