@@ -3161,6 +3161,7 @@ var grmState = {
   selected: null,     // photo id
   selectedIds: new Set(),
   selectionAnchor: null,
+  touched: new Set(), // photo ids changed by the user before DB seeding lands
   sessionId: 0        // bumped on each openGroupReview; used to drop stale fetches
 };
 
@@ -3365,6 +3366,10 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   // Bump the session id so any in-flight /group/state fetch from a previous
   // openGroupReview call lands as stale and gets ignored when it resolves.
   var sessionId = (grmState.sessionId || 0) + 1;
+  var initialSelectedId = selectPhotoId || (items[0] && items[0].id) || null;
+  var initialSelectedIds = new Set();
+  if (initialSelectedId) initialSelectedIds.add(initialSelectedId);
+
   grmState = {
     encIdx: encIdx,
     burstIdx: burstIdx,
@@ -3372,9 +3377,10 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     picks: new Set(),
     rejects: new Set(),
     removed: new Set(),
-    selected: null,
-    selectedIds: new Set(),
-    selectionAnchor: null,
+    selected: initialSelectedId,
+    selectedIds: initialSelectedIds,
+    selectionAnchor: initialSelectedId,
+    touched: new Set(),
     // Filled in by the /group/state fetch below. Keys: photo_id → {flag,
     // has_species_keyword}. This is the live DB snapshot the modal opened
     // with, used to (a) render "from DB" markers and (b) compute the
@@ -3434,6 +3440,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   // Render an empty modal first so it appears responsive while we fetch DB
   // state. The seed pass below populates picks/rejects and re-renders.
   renderGroupModal();
+  grmRefreshSelectedLoupe();
 
   safeFetch('/api/pipeline/group/state', {
     method: 'POST',
@@ -3463,7 +3470,16 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
 function grmShowSeedError(items, selectPhotoId) {
   grmState.dbState = {};
   var initSelect = selectPhotoId || (items[0] && items[0].id);
-  if (initSelect) {
+  if (
+    initSelect &&
+    grmState.selected === initSelect &&
+    grmState.selectedIds &&
+    grmState.selectedIds.size === 1 &&
+    grmState.selectedIds.has(initSelect)
+  ) {
+    renderGroupModal();
+    grmRefreshSelectedLoupe();
+  } else if (initSelect) {
     grmSelect(initSelect);
   } else {
     renderGroupModal();
@@ -3484,6 +3500,7 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
   grmState.dbState = dbPhotos || {};
 
   items.forEach(function(p) {
+    if (grmState.touched && grmState.touched.has(p.id)) return;
     var st = grmState.dbState[p.id];
     var flag = st ? st.flag : null;
     if (flag === 'flagged') {
@@ -3511,7 +3528,16 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
     applyBtn.style.cursor = '';
   }
 
-  if (initSelect) {
+  if (
+    initSelect &&
+    grmState.selected === initSelect &&
+    grmState.selectedIds &&
+    grmState.selectedIds.size === 1 &&
+    grmState.selectedIds.has(initSelect)
+  ) {
+    renderGroupModal();
+    grmRefreshSelectedLoupe();
+  } else if (initSelect) {
     grmSelect(initSelect);
   } else {
     renderGroupModal();
@@ -4411,8 +4437,14 @@ function _grmGetZone(photoId) {
   return 'candidates';
 }
 
+function _grmMarkTouched(photoId) {
+  if (!grmState.touched) grmState.touched = new Set();
+  if (photoId) grmState.touched.add(photoId);
+}
+
 function grmMoveUp() {
   if (!grmState.selected) return;
+  _grmMarkTouched(grmState.selected);
   var zone = _grmGetZone(grmState.selected);
   if (zone === 'rejects') {
     grmState.rejects.delete(grmState.selected);
@@ -4424,6 +4456,7 @@ function grmMoveUp() {
 
 function grmMoveDown() {
   if (!grmState.selected) return;
+  _grmMarkTouched(grmState.selected);
   var zone = _grmGetZone(grmState.selected);
   if (zone === 'picks') {
     grmState.picks.delete(grmState.selected);
@@ -4435,6 +4468,7 @@ function grmMoveDown() {
 
 function grmMovePick() {
   if (!grmState.selected) return;
+  _grmMarkTouched(grmState.selected);
   grmState.rejects.delete(grmState.selected);
   grmState.picks.add(grmState.selected);
   renderGroupModal();
@@ -4442,6 +4476,7 @@ function grmMovePick() {
 
 function grmMoveReject() {
   if (!grmState.selected) return;
+  _grmMarkTouched(grmState.selected);
   grmState.picks.delete(grmState.selected);
   grmState.rejects.add(grmState.selected);
   renderGroupModal();
@@ -4449,6 +4484,7 @@ function grmMoveReject() {
 
 function grmMoveCandidate() {
   if (!grmState.selected) return;
+  _grmMarkTouched(grmState.selected);
   grmState.picks.delete(grmState.selected);
   grmState.rejects.delete(grmState.selected);
   renderGroupModal();
@@ -4456,6 +4492,7 @@ function grmMoveCandidate() {
 
 function grmRemoveFromGroup() {
   if (!grmState.selected) return;
+  _grmMarkTouched(grmState.selected);
   grmState.removed.add(grmState.selected);
   grmState.picks.delete(grmState.selected);
   grmState.rejects.delete(grmState.selected);
