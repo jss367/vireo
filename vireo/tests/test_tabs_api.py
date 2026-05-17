@@ -122,7 +122,7 @@ def test_get_tabs_endpoint_new_shape(app_and_db):
     ids = [p["id"] for p in body["all_pages"]]
     assert "duplicates" in ids
     assert "browse" in ids
-    expected_ids = {p["id"] for p in ALL_PAGES}
-    assert set(ids) == expected_ids
+    expected_ids = [p["id"] for p in ALL_PAGES]
+    assert ids == expected_ids
     sample = next(p for p in body["all_pages"] if p["id"] == "duplicates")
     assert sample == {"id": "duplicates", "label": "Duplicates", "href": "/duplicates"}
