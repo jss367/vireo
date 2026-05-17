@@ -3032,6 +3032,16 @@ function _lbApplyViewportState(state) {
   return true;
 }
 
+function _lbClearPendingViewportRestore() {
+  // Called from user-driven viewport mutations (wheel/keyboard/click zoom,
+  // drag pan) so a still-armed restore carried over by arrow navigation
+  // cannot be reapplied by a later async metadata/image-load callback and
+  // stomp the user's manual zoom/pan. Programmatic restore paths
+  // (_lbTryApplyPendingViewportState) own clearing their own state and must
+  // not route through here.
+  _lbPendingViewportState = null;
+}
+
 function _lbTryApplyPendingViewportState() {
   if (!_lbPendingViewportState) return false;
   var state = _lbPendingViewportState;
@@ -3718,6 +3728,9 @@ function toggleLightboxZoom(e) {
   var wrap = document.getElementById('lightboxWrap');
   var img = document.getElementById('lightboxImg');
   if (!img) return;
+  // Explicit user zoom toggle ('z' shortcut or click-to-zoom) supersedes any
+  // restore carried over by arrow navigation.
+  _lbClearPendingViewportRestore();
 
   // If we don't know native zoom yet (e.g. dimensions fetch still pending),
   // fall back to old two-tier behavior: load original, no continuous control.
@@ -3762,6 +3775,7 @@ function toggleLightboxZoom(e) {
     var scale = e.ctrlKey ? 0.02 : 0.0015;
     var zoomFactor = Math.exp(-e.deltaY * scale);
     var newZoom = _lbZoom * zoomFactor;
+    _lbClearPendingViewportRestore();
     _lbSetZoom(newZoom, e.clientX, e.clientY);
   }, { passive: false });
 })();
@@ -3808,8 +3822,11 @@ function toggleLightboxZoom(e) {
     if (!dragging) return;
     var dx = e.clientX - startX;
     var dy = e.clientY - startY;
-    if (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD) {
+    if (!didDrag && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
       didDrag = true;
+      // First real pan movement cancels a pending restore so an async
+      // image-load retry cannot snap the viewport back mid-drag.
+      _lbClearPendingViewportRestore();
     }
     _lbPanX = panStartX + dx;
     _lbPanY = panStartY + dy;
@@ -3822,6 +3839,7 @@ function toggleLightboxZoom(e) {
     dragging = false;
     if (!didDrag && _lbZoom > 1.001) {
       // Single click without dragging = zoom out to fit
+      _lbClearPendingViewportRestore();
       _lbSetZoom(1.0, null, null);
       window._lightboxZoomHandled = true;
     } else if (didDrag) {
@@ -3840,7 +3858,7 @@ function closeLightbox(e) {
   _lbZoom = 1.0;
   _lbPanX = 0;
   _lbPanY = 0;
-  _lbPendingViewportState = null;
+  _lbClearPendingViewportRestore();
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
   _lbApplyTransform();
@@ -4353,14 +4371,17 @@ document.addEventListener('keydown', function(e) {
   // would also fire rate_0 and silently clear the photo's rating.
   if (!editable && !e.ctrlKey && !e.metaKey && !e.altKey) {
     if (e.key === '+' || e.key === '=') {
+      _lbClearPendingViewportRestore();
       _lbSetZoom(_lbZoom * 1.25, null, null);
       e.preventDefault();
       e.stopImmediatePropagation();
     } else if (e.key === '-' || e.key === '_') {
+      _lbClearPendingViewportRestore();
       _lbSetZoom(_lbZoom * 0.8, null, null);
       e.preventDefault();
       e.stopImmediatePropagation();
     } else if (e.key === '0') {
+      _lbClearPendingViewportRestore();
       _lbSetZoom(1.0, null, null);
       e.preventDefault();
       e.stopImmediatePropagation();

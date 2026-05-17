@@ -249,6 +249,102 @@ def test_browse_lightbox_pending_high_zoom_survives_native_zoom_race(live_server
     assert restored["stillPending"] is False
 
 
+def test_browse_lightbox_manual_zoom_cancels_pending_restore(live_server, page):
+    """A manual wheel zoom cancels a still-armed pending viewport restore.
+
+    Regression: _lbPendingViewportState is intentionally kept until native
+    zoom is known so a high-zoom restore survives the metadata/image-load
+    race (see test above). But that same window let a later
+    _lbTryApplyPendingViewportState() (image-load callback) snap the
+    viewport back after the user had already zoomed the new photo. A
+    user-driven viewport mutation must cancel the pending restore.
+    """
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/>'
+        '<circle cx="1000" cy="1400" r="180" fill="#fff"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/photos/*/original",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 4000;
+        }"""
+    )
+
+    # Arm a high-zoom restore while native zoom is unknown — this is the
+    # carried-navigation race where the pending state survives an async
+    # retry (the precondition for the snap-back bug).
+    setup = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            const native = window._lbNativeZoom;
+            const target = Math.min(native * 2, native * 4 - 0.5);
+            window._lbNativeZoom = null;
+            window._lbPendingViewportState = {
+                zoom: target, centerX: 0.3, centerY: 0.6,
+                oneToOne: false, pending1To1: false,
+            };
+            window._lbTryApplyPendingViewportState();
+            return {
+                native: native,
+                target: target,
+                stillPending: window._lbPendingViewportState !== null,
+            };
+        }"""
+    )
+    assert setup["native"] is not None and setup["native"] > 2.0
+    # Sanity: pending must survive the native-zoom race, else there is no bug.
+    assert setup["stillPending"] is True
+
+    # The user manually zooms out with the wheel over the image.
+    page.locator("#lightboxWrap").hover()
+    page.mouse.wheel(0, 600)
+
+    after_wheel = page.evaluate(
+        """() => ({
+            zoom: window._lbZoom,
+            stillPending: window._lbPendingViewportState !== null,
+        })"""
+    )
+    # The manual wheel zoom must have cancelled the pending restore...
+    assert after_wheel["stillPending"] is False
+    # ...and produced a zoom clearly distinct from the stale pending target.
+    assert abs(after_wheel["zoom"] - setup["target"]) > 0.5
+
+    # A later image-load retry (native zoom now known) must NOT snap the
+    # viewport back to the stale pending state.
+    retried = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            const applied = window._lbTryApplyPendingViewportState();
+            return {applied: applied, zoom: window._lbZoom};
+        }"""
+    )
+    assert retried["applied"] is False
+    assert abs(retried["zoom"] - after_wheel["zoom"]) < 0.01
+
+
 def test_browse_lightbox_one_to_one_nav_falls_back_when_original_fails(live_server, page):
     """1:1 arrow navigation falls back to /full when the original is unavailable."""
     image_body = base64.b64decode(_PNG_1X1)
