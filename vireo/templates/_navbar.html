@@ -1495,7 +1495,6 @@ document.addEventListener('keydown', function(e) {
     const cur = (function() {
       const p = window.location.pathname;
       if (p.startsWith('/pipeline/rapid-review')) return 'pipeline_rapid_review';
-      if (p.startsWith('/pipeline/eye-review')) return 'pipeline_review';
       if (p.startsWith('/pipeline/review')) return 'pipeline_review';
       if (p === '/' || p.startsWith('/browse')) return 'browse';
       return (p.split('/')[1] || '').replace(/-/g, '_');
@@ -1895,7 +1894,6 @@ window.NAV_ALL_PAGES = [
   function currentNavId() {
     const p = window.location.pathname;
     if (p.startsWith('/pipeline/rapid-review')) return 'pipeline_rapid_review';
-    if (p.startsWith('/pipeline/eye-review')) return 'pipeline_review';
     if (p.startsWith('/pipeline/review')) return 'pipeline_review';
     if (p === '/' || p.startsWith('/browse')) return 'browse';
     const seg = (p.split('/')[1] || '').replace(/-/g, '_');
@@ -6346,7 +6344,6 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
   function currentNavId() {
     const p = window.location.pathname;
     if (p.startsWith('/pipeline/rapid-review')) return 'pipeline_rapid_review';
-    if (p.startsWith('/pipeline/eye-review')) return 'pipeline_review';
     if (p.startsWith('/pipeline/review')) return 'pipeline_review';
     if (p === '/' || p.startsWith('/browse')) return 'browse';
     return (p.split('/')[1] || '').replace(/-/g, '_');
