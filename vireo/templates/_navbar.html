@@ -3306,6 +3306,7 @@ function _lbApplyWildlifeExcludedButton() {
   btn.title = _lbCurrentWildlifeExcluded
     ? 'Include this photo in wildlife detection and classification'
     : 'Exclude from wildlife detection and classification';
+  btn.setAttribute('aria-label', btn.title);
 }
 
 function toggleLightboxMasks() {
