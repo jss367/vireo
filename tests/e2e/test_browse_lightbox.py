@@ -1,4 +1,5 @@
 import base64
+import time
 
 from playwright.sync_api import expect
 
@@ -111,6 +112,292 @@ def test_browse_lightbox_one_to_one_nav_falls_back_when_original_fails(live_serv
         }"""
     )
     assert "/full" in page.locator("#lightboxImg").get_attribute("src")
+
+
+def test_browse_lightbox_one_to_one_uses_device_pixels_and_natural_layout(live_server, page):
+    """1:1 uses natural image coordinates and maps source pixels to device pixels."""
+    page.add_init_script(
+        "Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });"
+    )
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#3a7"/>'
+        '<path d="M0 0L4000 2000M4000 0L0 2000" stroke="#fff" stroke-width="12"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/photos/*/original",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 4000;
+        }"""
+    )
+    page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+        }"""
+    )
+    page.wait_for_function("window._lbNativeZoom > 1")
+
+    page.keyboard.press("z")
+    metrics = page.evaluate(
+        """() => {
+            const t = document.getElementById('lightboxTransform');
+            const rect = t.getBoundingClientRect();
+            return {
+                dpr: window.devicePixelRatio,
+                zoom: window._lbZoom,
+                nativeZoom: window._lbNativeZoom,
+                fitScale: window._lbFitScale,
+                styleWidth: t.style.width,
+                styleHeight: t.style.height,
+                rectWidth: rect.width,
+                rectHeight: rect.height,
+            };
+        }"""
+    )
+
+    expected_native_zoom = (1 / metrics["dpr"]) / metrics["fitScale"]
+    assert abs(metrics["nativeZoom"] - expected_native_zoom) < 0.01
+    assert abs(metrics["zoom"] - metrics["nativeZoom"]) < 0.01
+    assert metrics["styleWidth"] == "4000px"
+    assert metrics["styleHeight"] == "2000px"
+    assert abs(metrics["rectWidth"] - 2000) < 2
+    assert abs(metrics["rectHeight"] - 1000) < 2
+
+
+def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server, page):
+    """A loaded preview/full tier must not masquerade as true 1:1."""
+    page.add_init_script(
+        "Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });"
+    )
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+    held_original = {}
+
+    def hold_original(route):
+        held_original["route"] = route
+
+    page.route("**/photos/*/original", hold_original)
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 1920;
+        }"""
+    )
+
+    state = page.evaluate(
+        """() => {
+            window._lbPhotoW = null;
+            window._lbPhotoH = null;
+            window._lbOriginalUnavailable = false;
+            window._lbCurrentSrcKey = 'full';
+            window._lbZoom = 1;
+            window._lbRecomputeNativeZoom();
+            window.toggleLightboxZoom();
+            return {
+                nativeZoom: window._lbNativeZoom,
+                pending: window._lbPending1To1,
+                zoom: window._lbZoom,
+                sourceKey: window._lbPickSourceKey(),
+            };
+        }"""
+    )
+
+    assert state["nativeZoom"] is None
+    assert state["pending"] is True
+    assert state["zoom"] > 1
+    assert state["sourceKey"] == "original"
+
+    upgraded = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            window._lbApplyPendingOneToOneZoom();
+            return Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }"""
+    )
+    assert upgraded is True
+    if "route" in held_original:
+        held_original.pop("route").abort()
+
+
+def test_browse_lightbox_does_not_retry_original_after_unavailable(live_server, page):
+    """After /original fails, source selection should stay on preview/full tiers."""
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="8000" height="4000" '
+        'viewBox="0 0 8000 4000"><rect width="8000" height="4000" fill="#246"/></svg>'
+    )
+    fallback_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="1920" '
+        'viewBox="0 0 3840 1920"><rect width="3840" height="1920" fill="#642"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/photos/*/original",
+        lambda route: route.abort(),
+    )
+    page.route(
+        "**/photos/*/preview?size=3840",
+        lambda route: route.fulfill(body=fallback_svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 8000;
+        }"""
+    )
+    choices = page.evaluate(
+        """() => {
+            window._lbOriginalUnavailable = true;
+            window._lbZoom = 2;
+            window._lbNativeZoom = null;
+            const unknownDimsChoice = window._lbPickSourceKey();
+            window._lbPhotoW = 8000;
+            window._lbPhotoH = 4000;
+            window._lbFullLongEdge = 1000;
+            window._lbFitScale = 0.1;
+            window._lbNativeZoom = 100;
+            window._lbZoom = 100;
+            const largeNeededChoice = window._lbPickSourceKey();
+            return { unknownDimsChoice, largeNeededChoice };
+        }"""
+    )
+
+    assert choices["unknownDimsChoice"] == "full"
+    assert choices["largeNeededChoice"] == "3840"
+
+    page.evaluate(
+        """() => {
+            window._lbOriginalUnavailable = false;
+            window._lbZoom = 100;
+            window._lbNativeZoom = 100;
+            window._lbFullLongEdge = 1000;
+            window._lbScheduleSourceSwap();
+        }"""
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbOriginalUnavailable &&
+                   window._lbCurrentSrcKey === '3840' &&
+                   img && img.complete && img.naturalWidth === 3840;
+        }"""
+    )
+
+
+def test_browse_lightbox_ignores_stale_original_failure_after_nav(live_server, page):
+    """A late /original error from the previous photo must not poison the next photo."""
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="8000" height="4000" '
+        'viewBox="0 0 8000 4000"><rect width="8000" height="4000" fill="#246"/></svg>'
+    )
+    held_original = {}
+
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+
+    def hold_original(route):
+        if "route" not in held_original:
+            held_original["route"] = route
+        else:
+            route.abort()
+
+    page.route("**/photos/*/original", hold_original)
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 8000;
+        }"""
+    )
+
+    with page.expect_request("**/photos/*/original"):
+        page.evaluate(
+            """() => {
+                window._lbPhotoW = 8000;
+                window._lbPhotoH = 4000;
+                window._lbFullLongEdge = 1000;
+                window._lbOriginalUnavailable = false;
+                window._lbZoom = 100;
+                window._lbNativeZoom = 100;
+                window._lbCurrentSrcKey = 'full';
+                window._lbScheduleSourceSwap();
+            }"""
+        )
+    deadline = time.time() + 2
+    while "route" not in held_original and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_original
+
+    page.evaluate(
+        """() => {
+            const next = window._lightboxPhotoList[1];
+            window.openLightbox(next.id, next.filename, window._lightboxPhotoList);
+        }"""
+    )
+    page.wait_for_function("window._lightboxCurrentId === window._lightboxPhotoList[1].id")
+    held_original.pop("route").abort()
+    page.wait_for_timeout(100)
+
+    assert page.evaluate("window._lbOriginalUnavailable") is False
 
 
 def test_browse_e_f_g_keyboard_modes(live_server, page):
