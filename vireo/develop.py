@@ -60,13 +60,14 @@ def find_darktable(configured_path):
 
 def find_dng_converter(configured_path):
     """Find Adobe DNG Converter or another compatible DNG converter binary."""
-    if configured_path and os.path.isfile(configured_path):
-        return os.path.realpath(configured_path)
+    if configured_path:
+        if os.path.isfile(configured_path):
+            return os.path.realpath(configured_path)
+        return None
 
     candidates = [
         shutil.which("Adobe DNG Converter"),
         shutil.which("Adobe DNG Converter.exe"),
-        "/Applications/Adobe DNG Converter.app/Contents/MacOS/Adobe DNG Converter",
     ]
 
     # Adobe DNG Converter on Windows has shipped under a few layouts: the
@@ -88,6 +89,8 @@ def find_dng_converter(configured_path):
                 "Adobe DNG Converter.exe",
             )
         )
+
+    candidates.append("/Applications/Adobe DNG Converter.app/Contents/MacOS/Adobe DNG Converter")
 
     for candidate in candidates:
         if candidate and os.path.isfile(candidate):
