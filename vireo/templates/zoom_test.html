@@ -285,6 +285,7 @@ var sourceImage = null;
 var sourceUrl = '';
 var panX = 50;
 var panY = 50;
+var loadSeq = 0;
 
 var strategies = [
   {
@@ -542,23 +543,31 @@ async function loadFirstPhotoId() {
 }
 
 async function loadComparison(photoId, source) {
+  loadSeq += 1;
+  var seq = loadSeq;
   setError('');
   try {
     if (!photoId) photoId = await loadFirstPhotoId();
+    if (seq !== loadSeq) return;
     document.getElementById('photoIdInput').value = String(photoId);
     var detailResp = await fetch('/api/photos/' + photoId);
     if (!detailResp.ok) throw new Error('Photo ' + photoId + ' was not found');
-    currentPhoto = await detailResp.json();
-    sourceUrl = sourceFor(photoId, source);
+    var nextPhoto = await detailResp.json();
+    if (seq !== loadSeq) return;
+    var nextSourceUrl = sourceFor(photoId, source);
 
-    sourceImage = new Image();
-    sourceImage.decoding = 'sync';
+    var nextSourceImage = new Image();
+    nextSourceImage.decoding = 'sync';
     await new Promise(function(resolve, reject) {
-      sourceImage.onload = resolve;
-      sourceImage.onerror = function() { reject(new Error('Could not load ' + sourceUrl)); };
-      sourceImage.src = sourceUrl;
+      nextSourceImage.onload = resolve;
+      nextSourceImage.onerror = function() { reject(new Error('Could not load ' + nextSourceUrl)); };
+      nextSourceImage.src = nextSourceUrl;
     });
+    if (seq !== loadSeq) return;
 
+    currentPhoto = nextPhoto;
+    sourceUrl = nextSourceUrl;
+    sourceImage = nextSourceImage;
     document.getElementById('filenameMeta').textContent = currentPhoto.filename || String(photoId);
     document.getElementById('photoDimsMeta').textContent = formatDims(currentPhoto.width, currentPhoto.height);
     document.getElementById('decodedDimsMeta').textContent = formatDims(sourceImage.naturalWidth, sourceImage.naturalHeight);
@@ -566,6 +575,7 @@ async function loadComparison(photoId, source) {
     document.getElementById('sourceMeta').textContent = sourceUrl;
     renderAll();
   } catch (err) {
+    if (seq !== loadSeq) return;
     setError(err && err.message ? err.message : String(err));
   }
 }
