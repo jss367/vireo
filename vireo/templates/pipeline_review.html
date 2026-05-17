@@ -1453,7 +1453,7 @@ input[type="range"]::-moz-range-thumb {
     </div>
     <div class="grm-loupe" id="grmLoupe">
       <div class="grm-loupe-img" id="grmLoupeImg" onmousedown="grmLoupePointerDown(event)" onmousemove="grmLoupeMove(event)" onmouseup="grmLoupePointerUp(event)" onmouseleave="grmLoupeReset()" onclick="grmLoupeToggleLock(event)" onwheel="grmLoupeZoom(event)">
-        <img id="grmLoupePhoto" src="" alt="">
+        <img id="grmLoupePhoto" alt="">
         <div class="grm-loupe-crosshair-h" id="grmCrosshairH"></div>
         <div class="grm-loupe-crosshair-v" id="grmCrosshairV"></div>
       </div>
@@ -3806,7 +3806,7 @@ function grmSelect(photoId, mode) {
     }
     grmUpdateResLabel();
   } else {
-    loupeImg.src = '';
+    loupeImg.removeAttribute('src');
     loupeInfo.textContent = PIPELINE_EYE_COMPARE
       ? 'Select a reference photo. Click the large photo to place the eye target.'
       : 'Select a photo to preview. Hover to compare sharpness across all frames.';
