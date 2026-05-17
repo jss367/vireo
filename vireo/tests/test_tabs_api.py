@@ -109,6 +109,7 @@ def test_reorder_tabs_rejects_non_string_entries(app_and_db):
 
 
 def test_get_tabs_endpoint_new_shape(app_and_db):
+    from app import ALL_PAGES
     from db import DEFAULT_TABS
     app, db = app_and_db
     client = app.test_client()
@@ -121,6 +122,7 @@ def test_get_tabs_endpoint_new_shape(app_and_db):
     ids = [p["id"] for p in body["all_pages"]]
     assert "duplicates" in ids
     assert "browse" in ids
-    assert len(ids) == 21
+    expected_ids = [p["id"] for p in ALL_PAGES]
+    assert ids == expected_ids
     sample = next(p for p in body["all_pages"] if p["id"] == "duplicates")
     assert sample == {"id": "duplicates", "label": "Duplicates", "href": "/duplicates"}
