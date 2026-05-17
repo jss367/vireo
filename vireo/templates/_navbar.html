@@ -3036,7 +3036,11 @@ function _lbTryApplyPendingViewportState() {
   if (!_lbPendingViewportState) return false;
   var state = _lbPendingViewportState;
   if (!_lbApplyViewportState(state)) return false;
-  if (!state.oneToOne || _lbNativeZoom) {
+  // Keep the pending state until native zoom is known. Until then
+  // _lbApplyViewportState clamps with a fallback max of 4, so a saved
+  // zoom > 4 would be permanently degraded if cleared here and never
+  // retried once the image load event establishes _lbNativeZoom.
+  if (_lbNativeZoom) {
     _lbPendingViewportState = null;
   }
   return true;

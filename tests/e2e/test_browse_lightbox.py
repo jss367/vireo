@@ -154,6 +154,101 @@ def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page)
     assert abs(restored_view["centerY"] - first_view["centerY"]) < 0.03
 
 
+def test_browse_lightbox_pending_high_zoom_survives_native_zoom_race(live_server, page):
+    """A saved zoom > 4 is not lost when native zoom is unknown at first apply.
+
+    Race: if /api/photos/<id> resolves before the image load event,
+    _lbTryApplyPendingViewportState runs while _lbNativeZoom is null. The
+    fallback max clamps zoom to 4, so the pending state must be kept (not
+    cleared) so a later apply, once native zoom is known, can restore the
+    original high zoom.
+    """
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/>'
+        '<circle cx="1000" cy="1400" r="180" fill="#fff"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/photos/*/original",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 4000;
+        }"""
+    )
+
+    # Establish native zoom and pick a target zoom > 4 that is within the
+    # real max (nativeZoom * 4) so it would survive an accurate apply.
+    setup = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            const native = window._lbNativeZoom;
+            const target = Math.min(native * 2, native * 4 - 0.5);
+            return {native: native, target: target};
+        }"""
+    )
+    assert setup["native"] is not None and setup["native"] > 2.0
+    assert setup["target"] > 4.0
+
+    # Simulate the race: native zoom unknown when the pending high-zoom
+    # state is applied (e.g. API fetch resolved before image load).
+    degraded = page.evaluate(
+        """(target) => {
+            window._lbNativeZoom = null;
+            window._lbPendingViewportState = {
+                zoom: target, centerX: 0.3, centerY: 0.6,
+                oneToOne: false, pending1To1: false,
+            };
+            const applied = window._lbTryApplyPendingViewportState();
+            return {
+                applied: applied,
+                zoom: window._lbZoom,
+                stillPending: window._lbPendingViewportState !== null,
+            };
+        }""",
+        setup["target"],
+    )
+    assert degraded["applied"] is True
+    # Clamped to the fallback max while native zoom was unknown...
+    assert abs(degraded["zoom"] - 4.0) < 0.01
+    # ...but the pending state must survive so it can be retried.
+    assert degraded["stillPending"] is True
+
+    # Native zoom becomes known (image load path): the high zoom is
+    # restored accurately and the pending state is finally cleared.
+    restored = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            window._lbTryApplyPendingViewportState();
+            return {
+                zoom: window._lbZoom,
+                stillPending: window._lbPendingViewportState !== null,
+            };
+        }"""
+    )
+    assert abs(restored["zoom"] - setup["target"]) < 0.1
+    assert restored["stillPending"] is False
+
+
 def test_browse_lightbox_one_to_one_nav_falls_back_when_original_fails(live_server, page):
     """1:1 arrow navigation falls back to /full when the original is unavailable."""
     image_body = base64.b64decode(_PNG_1X1)
