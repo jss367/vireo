@@ -316,7 +316,10 @@ def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, 
     )
     assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
     assert page.evaluate("window._lbCurrentSrcKey") == "full"
-    page.wait_for_timeout(250)
+    deadline = time.time() + 2
+    while "route" not in held_original and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_original
 
     original_route = held_original.pop("route")
     held_original["released"] = True

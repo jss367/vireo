@@ -3602,7 +3602,10 @@ function toggleLightboxZoom(e) {
     _lbRecomputeNativeZoom();
   }
 
-  var isZoomed = _lbZoom > 1.001;
+  // A deferred 1:1 leaves _lbZoom at 1 while the high-res source loads, so treat
+  // a pending 1:1 as "zoomed" too — otherwise a second toggle re-enters the
+  // zoom-in path and the image still snaps to 1:1 once it finishes loading.
+  var isZoomed = _lbZoom > 1.001 || _lbPending1To1;
   if (isZoomed) {
     _lbSetZoom(1.0, null, null);
     _lbPending1To1 = false;
@@ -4579,11 +4582,22 @@ function _lbScheduleSourceSwap(targetZoom) {
       if (_lightboxCurrentId !== photoId) return;
       if (_lbOpenSeq !== swapOpenSeq) return;
       if (key === 'original') {
+        // Capture the pending-1:1 target before recompute/clear so the fallback
+        // tier is sized for the resolution true 1:1 needs (2560/3840) instead
+        // of the post-clear state, which would keep us on /full or snap early.
+        var pendingTargetZoom = _lbPending1To1 && _lbNativeZoom ? _lbNativeZoom : null;
         _lbOriginalUnavailable = true;
         _lbRecomputeNativeZoom();
-        _lbApplyPendingOneToOneZoom();
+        // With a deferred 1:1 still pending, leave it set so the snap happens
+        // once the fallback tier loads (onSwapLoad). Otherwise apply the
+        // (no-op) pending state now.
+        if (pendingTargetZoom == null) {
+          _lbApplyPendingOneToOneZoom();
+        }
         _lbApplyTransform();
-        _lbScheduleSourceSwap(_lbPending1To1 && _lbNativeZoom ? _lbNativeZoom : null);
+        // Always reschedule: /original is gone, so re-pick the best remaining
+        // tier (3840) rather than staying stuck on the lower current source.
+        _lbScheduleSourceSwap(pendingTargetZoom);
       }
       // Keep current source on failure
     };
