@@ -1,4 +1,5 @@
 import base64
+import time
 
 from playwright.sync_api import expect
 
@@ -330,6 +331,73 @@ def test_browse_lightbox_does_not_retry_original_after_unavailable(live_server, 
                    img && img.complete && img.naturalWidth === 3840;
         }"""
     )
+
+
+def test_browse_lightbox_ignores_stale_original_failure_after_nav(live_server, page):
+    """A late /original error from the previous photo must not poison the next photo."""
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="8000" height="4000" '
+        'viewBox="0 0 8000 4000"><rect width="8000" height="4000" fill="#246"/></svg>'
+    )
+    held_original = {}
+
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+
+    def hold_original(route):
+        if "route" not in held_original:
+            held_original["route"] = route
+        else:
+            route.abort()
+
+    page.route("**/photos/*/original", hold_original)
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 8000;
+        }"""
+    )
+
+    with page.expect_request("**/photos/*/original"):
+        page.evaluate(
+            """() => {
+                window._lbPhotoW = 8000;
+                window._lbPhotoH = 4000;
+                window._lbFullLongEdge = 1000;
+                window._lbOriginalUnavailable = false;
+                window._lbZoom = 100;
+                window._lbNativeZoom = 100;
+                window._lbCurrentSrcKey = 'full';
+                window._lbScheduleSourceSwap();
+            }"""
+        )
+    deadline = time.time() + 2
+    while "route" not in held_original and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_original
+
+    page.evaluate(
+        """() => {
+            const next = window._lightboxPhotoList[1];
+            window.openLightbox(next.id, next.filename, window._lightboxPhotoList);
+        }"""
+    )
+    page.wait_for_function("window._lightboxCurrentId === window._lightboxPhotoList[1].id")
+    held_original.pop("route").abort()
+    page.wait_for_timeout(100)
+
+    assert page.evaluate("window._lbOriginalUnavailable") is False
 
 
 def test_browse_e_f_g_keyboard_modes(live_server, page):
