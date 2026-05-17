@@ -35,6 +35,7 @@ def test_zoom_test_page(app_and_db):
     assert resp.status_code == 200
     html = resp.get_data(as_text=True)
     assert 'Current Lightbox: CSS 1:1' in html
+    assert 'Current Lightbox: Device 1:1' in html
     assert 'Natural Layout: Device 1:1' in html
     assert 'Direct Image: Device 1:1' in html
 

@@ -534,6 +534,27 @@ function renderAll() {
   });
 }
 
+function clearComparison() {
+  currentPhoto = null;
+  sourceImage = null;
+  sourceUrl = '';
+  document.getElementById('filenameMeta').textContent = '-';
+  document.getElementById('photoDimsMeta').textContent = '-';
+  document.getElementById('decodedDimsMeta').textContent = '-';
+  document.getElementById('dprMeta').textContent = String(window.devicePixelRatio || 1);
+  document.getElementById('sourceMeta').textContent = '-';
+  document.querySelectorAll('.zt-pane').forEach(function(pane) {
+    pane._ztRenderData = null;
+    var viewer = pane.querySelector('.zt-viewer');
+    if (!viewer) return;
+    Array.from(viewer.children).forEach(function(child) {
+      if (!child.classList.contains('zt-crosshair')) child.remove();
+    });
+    var info = pane.querySelector('.zt-info');
+    if (info) info.textContent = '';
+  });
+}
+
 async function loadFirstPhotoId() {
   var response = await fetch('/api/photos?per_page=1');
   if (!response.ok) throw new Error('Could not load photo list');
@@ -576,17 +597,19 @@ async function loadComparison(photoId, source) {
     renderAll();
   } catch (err) {
     if (seq !== loadSeq) return;
+    clearComparison();
     setError(err && err.message ? err.message : String(err));
   }
 }
 
 function loadFromControls() {
   var idRaw = document.getElementById('photoIdInput').value.trim();
-  var photoId = idRaw ? parseInt(idRaw, 10) : null;
-  if (idRaw && !photoId) {
+  if (idRaw && !/^\d+$/.test(idRaw)) {
+    clearComparison();
     setError('Photo ID must be a number');
     return;
   }
+  var photoId = idRaw ? parseInt(idRaw, 10) : null;
   setPanForRegion(document.getElementById('fitSelect').value);
   var source = document.getElementById('sourceSelect').value;
   var params = new URLSearchParams();
