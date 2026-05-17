@@ -177,6 +177,7 @@ def misses_seed(db_path, thumb_dir, photos_root):
             [{"box": {"x": 0.35, "y": 0.35, "w": 0.2, "h": 0.2},
               "confidence": 0.10 if _cat == "no_subject" else 0.85,
               "category": "animal"}],
+            detector_model="megadetector-v6",
         )
     db.conn.commit()
 
