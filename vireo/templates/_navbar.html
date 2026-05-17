@@ -4801,6 +4801,319 @@ async function safeFetch(url, opts, options) {
   return JSON.parse(text);
 }
 
+/* ---------- Native Menu Commands ----------
+ * The Tauri menu bar dispatches command IDs here. Keep this layer thin:
+ * call the same page helpers, modals, and API endpoints used by visible UI.
+ */
+function nativeMenuInfo(msg) {
+  if (typeof showToast === 'function') showToast(msg, 'info');
+  else console.info(msg);
+}
+
+function nativeMenuError(msg) {
+  if (typeof showToast === 'function') showToast(msg, 'error');
+  else console.error(msg);
+}
+
+function nativeMenuRoute(path) {
+  window.location.href = path;
+}
+
+function nativeMenuActivePhotoIds() {
+  if (typeof getActiveSelection === 'function') {
+    var ids = getActiveSelection();
+    if (ids && ids.length) return ids;
+  }
+  if (typeof _lightboxCurrentId !== 'undefined' && _lightboxCurrentId != null) {
+    return [_lightboxCurrentId];
+  }
+  if (typeof selectedPhotoId !== 'undefined' && selectedPhotoId != null) {
+    return [selectedPhotoId];
+  }
+  return [];
+}
+
+function nativeMenuRequirePhotos(commandName) {
+  var ids = nativeMenuActivePhotoIds();
+  if (!ids.length) {
+    nativeMenuError(commandName + ' needs a selected photo.');
+    return null;
+  }
+  return ids;
+}
+
+async function nativeMenuBatch(endpoint, payload, success) {
+  await safeFetch(endpoint, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload || {}),
+  });
+  if (success) nativeMenuInfo(success);
+}
+
+function nativeMenuOpenLightbox() {
+  if (typeof openBrowseShortcutPhoto === 'function' && openBrowseShortcutPhoto(false)) return;
+  var ids = nativeMenuRequirePhotos('Open in Lightbox');
+  if (!ids) return;
+  if (typeof openLightbox === 'function' && typeof photos !== 'undefined') {
+    var p = photos.find(function(x) { return x.id === ids[0]; });
+    if (p) {
+      openLightbox(p.id, p.filename, photos);
+      return;
+    }
+  }
+  nativeMenuError('Open in Lightbox is available from photo grids.');
+}
+
+function nativeMenuPhotoIdsForWrite() {
+  var ids = nativeMenuActivePhotoIds();
+  if (ids.length) return ids;
+  nativeMenuError('Select one or more photos first.');
+  return null;
+}
+
+async function nativeMenuSetRating(rating) {
+  var ids = nativeMenuPhotoIdsForWrite();
+  if (!ids) return;
+  if (typeof batchSetRating === 'function') {
+    await batchSetRating(rating);
+    return;
+  }
+  if (ids.length === 1 && typeof setReviewRating === 'function') {
+    setReviewRating(ids[0], rating);
+    nativeMenuInfo('Rating updated');
+    return;
+  }
+  await nativeMenuBatch('/api/batch/rating', {photo_ids: ids, rating: rating}, 'Rating updated');
+}
+
+async function nativeMenuSetFlag(flag) {
+  var ids = nativeMenuPhotoIdsForWrite();
+  if (!ids) return;
+  if (typeof batchSetFlag === 'function') {
+    await batchSetFlag(flag);
+    return;
+  }
+  if (ids.length === 1 && typeof _lbApplyFlag === 'function' && ids[0] === _lightboxCurrentId) {
+    _lbApplyFlag(ids[0], flag);
+    return;
+  }
+  if (ids.length === 1 && typeof setReviewFlag === 'function') {
+    await setReviewFlag(ids[0], flag);
+    nativeMenuInfo('Flag updated');
+    return;
+  }
+  await nativeMenuBatch('/api/batch/flag', {photo_ids: ids, flag: flag}, 'Flag updated');
+}
+
+async function nativeMenuSetWildlifeExcluded(excluded) {
+  var ids = nativeMenuPhotoIdsForWrite();
+  if (!ids) return;
+  await Promise.all(ids.map(function(id) {
+    return safeFetch('/api/photos/' + id + '/wildlife_excluded', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({excluded: excluded}),
+    }, {toast: false});
+  }));
+  if (typeof _lightboxCurrentId !== 'undefined' && ids.indexOf(_lightboxCurrentId) !== -1) {
+    _lbCurrentWildlifeExcluded = excluded;
+  }
+  nativeMenuInfo(excluded ? 'Excluded from wildlife classification' : 'Marked as wildlife');
+}
+
+function nativeMenuPendingPredictions() {
+  if (typeof predictions === 'undefined') return [];
+  return predictions.filter(function(p) { return p.status === 'pending'; });
+}
+
+async function nativeMenuJob(endpoint, body, label) {
+  var data = await safeFetch(endpoint, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body || {}),
+  });
+  var suffix = data && data.job_id ? ' (' + data.job_id + ')' : '';
+  nativeMenuInfo(label + suffix);
+}
+
+async function nativeMenuCancelCurrentJob() {
+  var jobs = await safeFetch('/api/jobs', {}, {toast: false});
+  var list = Array.isArray(jobs) ? jobs : (jobs.jobs || []);
+  var running = list.find(function(j) { return j.status === 'running' || j.status === 'pending'; });
+  if (!running) {
+    nativeMenuInfo('No running job to cancel');
+    return;
+  }
+  await safeFetch('/api/jobs/' + running.id + '/cancel', {method: 'POST'});
+  nativeMenuInfo('Cancel requested');
+}
+
+async function nativeMenuCopyDiagnostics() {
+  var parts = [];
+  try { parts.push({version: await safeFetch('/api/version', {}, {toast: false})}); } catch(e) {}
+  try { parts.push({system: await safeFetch('/api/system/info', {}, {toast: false})}); } catch(e) {}
+  try { parts.push({jobs: await safeFetch('/api/jobs', {}, {toast: false})}); } catch(e) {}
+  try { parts.push({logs: await safeFetch('/api/logs/recent?count=50', {}, {toast: false})}); } catch(e) {}
+  var text = JSON.stringify({generated_at: new Date().toISOString(), diagnostics: parts}, null, 2);
+  if (!navigator.clipboard) {
+    nativeMenuError('Clipboard access is unavailable.');
+    return;
+  }
+  await navigator.clipboard.writeText(text);
+  nativeMenuInfo('Diagnostics copied');
+}
+
+window.handleNativeMenuCommand = async function(command) {
+  try {
+    switch (command) {
+      case 'new_workspace':
+        if (typeof showCreateWorkspaceModal === 'function') showCreateWorkspaceModal();
+        else nativeMenuRoute('/workspace');
+        break;
+      case 'open_workspace':
+        if (typeof toggleWsDropdown === 'function') toggleWsDropdown();
+        else nativeMenuRoute('/workspace');
+        break;
+      case 'import_photos':
+        nativeMenuRoute('/lightroom');
+        break;
+      case 'import_folder':
+        nativeMenuRoute('/pipeline');
+        break;
+      case 'export_selected':
+        if (typeof openExportModal === 'function') openExportModal();
+        else nativeMenuError('Export is available from Browse after selecting photos.');
+        break;
+      case 'photo_open_lightbox':
+        nativeMenuOpenLightbox();
+        break;
+      case 'photo_reveal': {
+        var revealIds = nativeMenuRequirePhotos('Reveal in Finder');
+        if (!revealIds) break;
+        if (typeof revealPhoto === 'function') revealPhoto(revealIds[0]);
+        else if (typeof revealReviewPhoto === 'function') revealReviewPhoto(revealIds[0]);
+        else await nativeMenuBatch('/api/files/reveal', {photo_id: revealIds[0]});
+        break;
+      }
+      case 'photo_open_editor': {
+        var editorIds = nativeMenuRequirePhotos('Open in External Editor');
+        if (!editorIds) break;
+        if (typeof openInEditor === 'function') await openInEditor(editorIds);
+        else nativeMenuError('No external editor command is available here.');
+        break;
+      }
+      case 'photo_copy_paths': {
+        var copyIds = nativeMenuRequirePhotos('Copy Path');
+        if (!copyIds) break;
+        if (typeof copyPhotoPaths === 'function') await copyPhotoPaths(copyIds);
+        else nativeMenuError('Copy Path is available from Browse.');
+        break;
+      }
+      case 'photo_find_similar': {
+        var similarIds = nativeMenuRequirePhotos('Find Similar');
+        if (!similarIds) break;
+        if (similarIds.length !== 1) nativeMenuError('Find Similar needs one selected photo.');
+        else if (typeof findSimilar === 'function') findSimilar(similarIds[0]);
+        else nativeMenuError('Find Similar is available from Browse and Lightbox.');
+        break;
+      }
+      case 'photo_compare':
+        if (typeof openBrowseCompare === 'function') openBrowseCompare();
+        else nativeMenuRoute('/compare');
+        break;
+      case 'photo_add_keyword':
+        if (typeof batchAddKeyword === 'function') batchAddKeyword();
+        else nativeMenuError('Add Keyword is available from Browse after selecting photos.');
+        break;
+      case 'photo_add_collection':
+        if (typeof addToCollection === 'function') addToCollection();
+        else nativeMenuError('Add to Collection is available from Browse after selecting photos.');
+        break;
+      case 'photo_delete':
+        if (typeof batchDelete === 'function') batchDelete();
+        else if (typeof lightboxDelete === 'function') lightboxDelete();
+        else nativeMenuError('Delete is available from Browse or Lightbox.');
+        break;
+      case 'photo_rate_0': await nativeMenuSetRating(0); break;
+      case 'photo_rate_1': await nativeMenuSetRating(1); break;
+      case 'photo_rate_2': await nativeMenuSetRating(2); break;
+      case 'photo_rate_3': await nativeMenuSetRating(3); break;
+      case 'photo_rate_4': await nativeMenuSetRating(4); break;
+      case 'photo_rate_5': await nativeMenuSetRating(5); break;
+      case 'photo_flag_pick': await nativeMenuSetFlag('flagged'); break;
+      case 'photo_flag_reject': await nativeMenuSetFlag('rejected'); break;
+      case 'photo_flag_clear': await nativeMenuSetFlag('none'); break;
+      case 'review_accept': {
+        var acceptPending = nativeMenuPendingPredictions();
+        if (acceptPending.length && typeof acceptPrediction === 'function') await acceptPrediction(acceptPending[0].id);
+        else nativeMenuError('No pending prediction to accept.');
+        break;
+      }
+      case 'review_reject': {
+        var rejectPending = nativeMenuPendingPredictions();
+        if (rejectPending.length && typeof rejectPrediction === 'function') await rejectPrediction(rejectPending[0].id);
+        else nativeMenuError('No pending prediction to reject.');
+        break;
+      }
+      case 'review_accept_all':
+        if (typeof acceptAllPending === 'function') await acceptAllPending();
+        else nativeMenuRoute('/review');
+        break;
+      case 'review_previous':
+        if (typeof lightboxNav === 'function' && typeof _lightboxCurrentId !== 'undefined' && _lightboxCurrentId != null) lightboxNav(-1);
+        else if (typeof moveBrowseSelection === 'function') moveBrowseSelection(-1, {});
+        break;
+      case 'review_next':
+        if (typeof lightboxNav === 'function' && typeof _lightboxCurrentId !== 'undefined' && _lightboxCurrentId != null) lightboxNav(1);
+        else if (typeof moveBrowseSelection === 'function') moveBrowseSelection(1, {});
+        break;
+      case 'review_mark_wildlife':
+        await nativeMenuSetWildlifeExcluded(false);
+        break;
+      case 'review_exclude_wildlife':
+        await nativeMenuSetWildlifeExcluded(true);
+        break;
+      case 'tools_run_pipeline':
+        if (typeof startPipeline === 'function') await startPipeline();
+        else nativeMenuRoute('/pipeline');
+        break;
+      case 'tools_scan_library':
+        nativeMenuRoute('/workspace');
+        nativeMenuInfo('Choose a folder or workspace root to scan.');
+        break;
+      case 'tools_find_duplicates':
+        if (typeof startScan === 'function') await startScan();
+        else nativeMenuRoute('/duplicates');
+        break;
+      case 'tools_build_previews':
+        await nativeMenuJob('/api/jobs/previews', {}, 'Preview job started');
+        break;
+      case 'tools_sync_metadata':
+        if (typeof runSync === 'function') await runSync();
+        else await nativeMenuJob('/api/jobs/sync', {}, 'Metadata sync started');
+        break;
+      case 'tools_verify_models':
+        if (typeof verifyAllModels === 'function') await verifyAllModels();
+        else await nativeMenuJob('/api/jobs/verify-all-models', {}, 'Model verification started');
+        break;
+      case 'tools_cancel_job':
+        await nativeMenuCancelCurrentJob();
+        break;
+      case 'help_open_help':
+        if (typeof openHelpModal === 'function') openHelpModal();
+        break;
+      case 'help_copy_diagnostics':
+        await nativeMenuCopyDiagnostics();
+        break;
+      default:
+        console.warn('Unknown native menu command:', command);
+    }
+  } catch (e) {
+    nativeMenuError(e && e.message ? e.message : 'Menu command failed');
+  }
+};
+
 /* ---------- Open in External Editor ----------
  * Three entry points for opening photos in an external editor:
  *   - openInEditor(ids, editorIndex)         — direct call, posts to backend
