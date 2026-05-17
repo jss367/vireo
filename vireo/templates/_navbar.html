@@ -2934,8 +2934,25 @@ function _lbIsOneToOneZoom() {
   return Math.abs(_lbZoom - _lbNativeZoom) <= tolerance;
 }
 
+function _lbSrcRank(key) {
+  // Tier ordering by available source resolution (higher = sharper).
+  if (key === 'original') return 3;
+  if (key === '3840') return 2;
+  if (key === '2560') return 1;
+  return 0; // 'full' or unknown
+}
+
 function _lbApplyPendingOneToOneZoom() {
   if (!_lbPending1To1 || !_lbNativeZoom) return;
+  // Don't snap to true 1:1 until the displayed source is at least the tier
+  // that 1:1 needs. Otherwise the /api/photos/<id> metadata fetch resolving
+  // before the held /original load would learn _lbNativeZoom, clear the
+  // pending state, and snap on the upscaled lower tier — the soft-1:1 flash
+  // this deferral exists to prevent. Compare by tier rank (not equality) so a
+  // source that is already sharper than required — e.g. /original kept during
+  // 1:1-preserving navigation — still applies immediately instead of waiting
+  // forever for a downgrade that never comes.
+  if (_lbSrcRank(_lbCurrentSrcKey) < _lbSrcRank(_lbPickSourceKey(_lbNativeZoom))) return;
   _lbPending1To1 = false;
   var anchor = _lbPending1To1Anchor;
   _lbPending1To1Anchor = null;
@@ -4587,22 +4604,28 @@ function _lbScheduleSourceSwap(targetZoom) {
       if (_lightboxCurrentId !== photoId) return;
       if (_lbOpenSeq !== swapOpenSeq) return;
       if (key === 'original') {
-        // Capture the pending-1:1 target before recompute/clear so the fallback
-        // tier is sized for the resolution true 1:1 needs (2560/3840) instead
-        // of the post-clear state, which would keep us on /full or snap early.
-        var pendingTargetZoom = _lbPending1To1 && _lbNativeZoom ? _lbNativeZoom : null;
+        var had1To1Pending = _lbPending1To1;
         _lbOriginalUnavailable = true;
         _lbRecomputeNativeZoom();
-        // With a deferred 1:1 still pending, leave it set so the snap happens
-        // once the fallback tier loads (onSwapLoad). Otherwise apply the
-        // (no-op) pending state now.
-        if (pendingTargetZoom == null) {
+        if (had1To1Pending) {
+          // /original is gone but the user still wants true 1:1. Keep the
+          // deferral pending and aim the reschedule at the sharpest remaining
+          // preview tier instead of snapping now on an upscaled /full (the
+          // soft-1:1 flash). A large target zoom forces _lbPickSourceKey past
+          // the /full threshold even when true dimensions — and therefore
+          // _lbNativeZoom — are still unknown at failure time; rescheduling
+          // with the post-clear state would otherwise keep us pinned to /full.
+          // The pending snap then completes in onSwapLoad once the higher tier
+          // is the current source (gated by the tier-rank guard).
+          _lbApplyTransform();
+          _lbScheduleSourceSwap(4);
+        } else {
           _lbApplyPendingOneToOneZoom();
+          _lbApplyTransform();
+          // /original is gone, so re-pick the best remaining tier rather than
+          // staying stuck on the lower current source.
+          _lbScheduleSourceSwap();
         }
-        _lbApplyTransform();
-        // Always reschedule: /original is gone, so re-pick the best remaining
-        // tier (3840) rather than staying stuck on the lower current source.
-        _lbScheduleSourceSwap(pendingTargetZoom);
       }
       // Keep current source on failure
     };

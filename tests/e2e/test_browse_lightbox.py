@@ -185,22 +185,37 @@ def test_browse_lightbox_one_to_one_uses_device_pixels_and_natural_layout(live_s
 
 
 def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server, page):
-    """A loaded preview/full tier must not masquerade as true 1:1."""
+    """Metadata resolving before the held /original must not flash a soft 1:1.
+
+    Regression guard for the metadata-before-/original race: learning the true
+    dimensions (and therefore _lbNativeZoom) while /original is still loading
+    must NOT clear the pending 1:1 and snap on the upscaled /full tier. The
+    snap may only happen once the high-resolution source is actually current.
+    """
     page.add_init_script(
         "Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });"
     )
-    svg = (
+    full_svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
         'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
     )
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#3a7"/></svg>'
+    )
     page.route(
         "**/photos/*/full",
-        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     held_original = {}
 
     def hold_original(route):
-        held_original["route"] = route
+        if "released" in held_original:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
+        elif "route" not in held_original:
+            held_original["route"] = route
+        else:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
 
     page.route("**/photos/*/original", hold_original)
 
@@ -220,6 +235,8 @@ def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server
         }"""
     )
 
+    # Press 1:1 while the true size is still unknown: it must defer (stay at
+    # fit, pending) and request /original rather than enlarging /full.
     state = page.evaluate(
         """() => {
             window._lbPhotoW = null;
@@ -243,18 +260,50 @@ def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server
     assert state["zoom"] == 1
     assert state["desiredSource"] == "original"
 
-    upgraded = page.evaluate(
+    # Wait until the deferred swap has actually issued the /original request
+    # and it is being held, so the metadata step below genuinely races a
+    # still-loading high-res source.
+    deadline = time.time() + 2
+    while "route" not in held_original and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_original
+
+    # Metadata resolves before the held /original finishes. Learning the true
+    # dimensions must NOT clear the pending state or snap on the upscaled /full.
+    still_deferred = page.evaluate(
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
             window._lbRecomputeNativeZoom();
             window._lbApplyPendingOneToOneZoom();
-            return Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+            return {
+                pending: window._lbPending1To1,
+                zoom: window._lbZoom,
+                currentSource: window._lbCurrentSrcKey,
+                nativeZoom: window._lbNativeZoom,
+            };
         }"""
     )
-    assert upgraded is True
-    if "route" in held_original:
-        held_original.pop("route").abort()
+    assert still_deferred["pending"] is True
+    assert abs(still_deferred["zoom"] - 1) < 0.001
+    assert still_deferred["currentSource"] == "full"
+    assert still_deferred["nativeZoom"] > 1
+
+    # Releasing /original lets the deferred 1:1 finally snap against the
+    # high-resolution source.
+    held_original["released"] = True
+    held_original.pop("route").fulfill(
+        body=original_svg, content_type="image/svg+xml"
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbCurrentSrcKey === 'original'
+                && window._lbPending1To1 === false
+                && img && img.complete && img.naturalWidth === 4000
+                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }"""
+    )
 
 
 def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, page):
