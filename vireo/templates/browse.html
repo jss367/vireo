@@ -4697,7 +4697,11 @@ document.addEventListener('keydown', function(e) {
   // Suppress browse shortcuts while any modal is open
   var openModal = document.querySelector('.modal-overlay.open');
   if (openModal) {
-    if (e.key === 'Escape') { openModal.classList.remove('open'); }
+    if (e.key === 'Escape') {
+      if (openModal.id === 'batchKeywordModal') hideBatchKeywordModal();
+      else if (openModal.id === 'batchCollectionModal') hideBatchCollectionModal();
+      else openModal.classList.remove('open');
+    }
     return;
   }
 
