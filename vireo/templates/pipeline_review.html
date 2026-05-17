@@ -1413,7 +1413,7 @@ input[type="range"]::-moz-range-thumb {
     </div>
     <div class="grm-loupe" id="grmLoupe">
       <div class="grm-loupe-img" id="grmLoupeImg" onmousemove="grmLoupeMove(event)" onmouseleave="grmLoupeReset()" onclick="grmLoupeToggleLock(event)" onwheel="grmLoupeZoom(event)">
-        <img id="grmLoupePhoto" src="" alt="">
+        <img id="grmLoupePhoto" alt="">
         <div class="grm-loupe-crosshair-h" id="grmCrosshairH"></div>
         <div class="grm-loupe-crosshair-v" id="grmCrosshairV"></div>
       </div>
@@ -3740,7 +3740,7 @@ function grmSelect(photoId, mode) {
     }
     grmUpdateResLabel();
   } else {
-    loupeImg.src = '';
+    loupeImg.removeAttribute('src');
     loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
     detailEl.innerHTML = '';
     grmLoupeReset();
