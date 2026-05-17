@@ -167,26 +167,6 @@
   padding: 0 4px;
 }
 
-.eye-review-banner {
-  margin: 12px 20px 0;
-  padding: 8px 12px;
-  border: 1px solid var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--text-primary);
-  border-radius: 6px;
-  font-size: 12px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.eye-review-banner a {
-  margin-left: auto;
-  color: var(--accent);
-  text-decoration: none;
-  font-weight: 600;
-}
-.eye-review-banner a:hover { text-decoration: underline; }
-
 /* Filter bar */
 .filter-bar {
   display: flex;
@@ -907,16 +887,8 @@ input[type="range"]::-moz-range-thumb {
   flex-shrink: 0;
 }
 .grm-header h3 { font-size: 15px; color: var(--text-primary); }
-.grm-mode-switch {
-  margin-left: auto;
-  color: var(--accent);
-  text-decoration: none;
-  font-size: 12px;
-  font-weight: 600;
-}
-.grm-mode-switch:hover { text-decoration: underline; }
 .grm-close {
-  margin-left: 0;
+  margin-left: auto;
   background: none; border: none; color: var(--text-muted);
   font-size: 20px; cursor: pointer;
 }
@@ -1305,10 +1277,6 @@ input[type="range"]::-moz-range-thumb {
       <a href="/pipeline" class="degraded-banner-link">Open Pipeline</a>
       <button class="degraded-banner-close" onclick="dismissDegradedBanner()" aria-label="Dismiss">&times;</button>
     </div>
-    <div class="eye-review-banner" id="eyeReviewBanner" style="display:none;">
-      Eye Compare experiment: click the large photo to place the eye target, then drag left frames to align each crop.
-      <a href="/pipeline/review">Classic review</a>
-    </div>
 
     <!-- Summary bar (hidden until data loads) -->
     <div class="summary-bar" id="summaryBar" style="display:none">
@@ -1376,7 +1344,6 @@ input[type="range"]::-moz-range-thumb {
     <!-- Filter bar (hidden until data loads) -->
     <div class="filter-bar" id="filterBar" style="display:none">
       <a class="filter-btn" href="/pipeline/rapid-review" style="text-decoration:none;">Rapid Review</a>
-      <a class="filter-btn" id="eyeModeFilterLink" href="/pipeline/eye-review" style="text-decoration:none;">Eye Compare</a>
       <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">All<span class="count" id="countAll"></span></button>
       <button class="filter-btn" data-filter="KEEP" onclick="setFilter('KEEP')">Keep<span class="count" id="countKeep"></span></button>
       <button class="filter-btn" data-filter="REVIEW" onclick="setFilter('REVIEW')">Review<span class="count" id="countReview"></span></button>
@@ -1427,7 +1394,6 @@ input[type="range"]::-moz-range-thumb {
   <div class="grm-header">
     <h3 id="grmTitle">Review Burst Group</h3>
     <span id="grmCount" style="font-size:12px;color:var(--text-dim);"></span>
-    <a id="grmModeSwitch" class="grm-mode-switch" href="/pipeline/eye-review">Try Eye Compare</a>
     <button class="grm-close" onclick="closeGroupReview()">&times;</button>
   </div>
   <div class="grm-body">
@@ -1446,8 +1412,8 @@ input[type="range"]::-moz-range-thumb {
       </div>
     </div>
     <div class="grm-loupe" id="grmLoupe">
-      <div class="grm-loupe-img" id="grmLoupeImg" onmousedown="grmLoupePointerDown(event)" onmousemove="grmLoupeMove(event)" onmouseup="grmLoupePointerUp(event)" onmouseleave="grmLoupeReset()" onclick="grmLoupeToggleLock(event)" onwheel="grmLoupeZoom(event)">
-        <img id="grmLoupePhoto" alt="">
+      <div class="grm-loupe-img" id="grmLoupeImg" onmousemove="grmLoupeMove(event)" onmouseleave="grmLoupeReset()" onclick="grmLoupeToggleLock(event)" onwheel="grmLoupeZoom(event)">
+        <img id="grmLoupePhoto" src="" alt="">
         <div class="grm-loupe-crosshair-h" id="grmCrosshairH"></div>
         <div class="grm-loupe-crosshair-v" id="grmCrosshairV"></div>
       </div>
@@ -1470,13 +1436,12 @@ input[type="range"]::-moz-range-thumb {
       <input type="range" id="grmResSlider" min="0" max="3" step="1" value="3" oninput="grmSetResolution(this.value)">
       <span id="grmResLabel" style="font-size:11px;color:var(--text-dim);min-width:140px;">1920 · preview</span>
     </div>
-    <span class="grm-hint" id="grmHint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
+    <span class="grm-hint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);" title="Apply pick/reject flag changes and species keywords, then close this burst.">Apply flags/species & Close</button>
   </div>
 </div>
 
 <script>
-var PIPELINE_EYE_COMPARE = window.location.pathname.indexOf('/pipeline/eye-review') === 0;
 var pipelineResults = null;
 var activeFilter = 'all';
 var minConfidence = 40;
@@ -2710,57 +2675,12 @@ function computeReviewNow() {
 }
 
 function initPipelineReviewPage() {
-  applyPipelineReviewModeChrome();
   initPipelineSidebarState();
   if (isBrowseBurstReviewRequest()) {
     openBrowseBurstReviewFromStorage();
     return;
   }
   loadPipelinePageInit();
-}
-
-function applyPipelineReviewModeChrome() {
-  var preserveBrowseBurst = isBrowseBurstReviewRequest();
-  var classicPath = '/pipeline/review' + (preserveBrowseBurst ? '?browse_burst=1' : '');
-  var eyeComparePath = '/pipeline/eye-review' + (preserveBrowseBurst ? '?browse_burst=1' : '');
-  var banner = document.getElementById('eyeReviewBanner');
-  var filterLink = document.getElementById('eyeModeFilterLink');
-  var modeSwitch = document.getElementById('grmModeSwitch');
-
-  if (!PIPELINE_EYE_COMPARE) {
-    if (filterLink) {
-      filterLink.href = eyeComparePath;
-    }
-    if (modeSwitch) {
-      modeSwitch.href = eyeComparePath;
-    }
-    return;
-  }
-
-  document.title = 'Vireo - Eye Compare';
-  if (banner) {
-    banner.style.display = 'flex';
-    var bannerLink = banner.querySelector('a');
-    if (bannerLink) {
-      bannerLink.href = classicPath;
-    }
-  }
-  if (filterLink) {
-    filterLink.href = classicPath;
-    filterLink.textContent = 'Classic Review';
-  }
-  if (modeSwitch) {
-    modeSwitch.href = classicPath;
-    modeSwitch.textContent = 'Classic Review';
-  }
-  var loupeInfo = document.getElementById('grmLoupeInfo');
-  if (loupeInfo) {
-    loupeInfo.textContent = 'Select a reference photo. Click the large photo to place the eye target.';
-  }
-  var hint = document.getElementById('grmHint');
-  if (hint) {
-    hint.textContent = 'P = pick   X = reject   ↑↓ move zone   ←→ navigate   Space = unsort   Del = remove   Click/drag preview to set eye target   Drag a thumbnail to align it; double-click to reset';
-  }
 }
 
 function loadPipelinePageInit() {
@@ -3310,10 +3230,7 @@ function openBrowseBurstReviewFromStorage() {
     // path must remain recoverable — both via the in-page Reopen button and
     // via a plain reload. clearBrowseBurstHandoff() runs only once the user
     // applies (workflow complete) or we fall back to normal review.
-    var params = new URLSearchParams(window.location.search || '');
-    var requestedPhotoId = params.has('photo') ? parseInt(params.get('photo'), 10) : null;
-    var initialPhotoId = loadedIds.indexOf(requestedPhotoId) !== -1 ? requestedPhotoId : loadedIds[0];
-    openGroupReview(0, 0, initialPhotoId);
+    openGroupReview(0, 0, loadedIds[0]);
   }).catch(function() {
     fallbackToNormalPipelineReview('Could not open burst review — showing the latest pipeline review instead.');
   });
@@ -3413,23 +3330,16 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   };
   _grmLoupeLocked = false;
   _grmZoomMultiplier = 1;
-  _grmLastHoverX = PIPELINE_EYE_COMPARE ? 50 : null;
-  _grmLastHoverY = PIPELINE_EYE_COMPARE ? 50 : null;
+  _grmLastHoverX = null;
+  _grmLastHoverY = null;
   _grmOffsets = {};
   _grmDragging = null;
-  _grmLoupeTargetDragging = false;
   _grmSuppressNextClick = false;
   grmRefreshResetAllVisibility();
 
   document.getElementById('grmOverlay').classList.add('open');
   var title = document.getElementById('grmTitle');
-  if (title) {
-    if (source === 'browse-selection') {
-      title.textContent = PIPELINE_EYE_COMPARE ? 'Eye Compare Selected Photos' : 'Review Selected Photos';
-    } else {
-      title.textContent = PIPELINE_EYE_COMPARE ? 'Eye Compare Burst Group' : 'Review Burst Group';
-    }
-  }
+  if (title) title.textContent = source === 'browse-selection' ? 'Review Selected Photos' : 'Review Burst Group';
   var removeBtn = document.getElementById('grmRemoveBtn');
   if (removeBtn) {
     removeBtn.textContent = source === 'browse-selection' ? 'Remove from review' : 'Remove from group';
@@ -3438,7 +3348,6 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
       : 'Detach this photo from the burst group on apply';
   }
   grmSetThumbSize(GRM_CARD_W, false);
-  grmUpdateModeSwitchLink();
 
   // Disable Apply while we wait for /group/state — clicking it before
   // seed completes would send empty picks/rejects, which the server treats
@@ -3456,7 +3365,6 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   // Sync slider DOM with persisted resolution choice
   var slider = document.getElementById('grmResSlider');
   if (slider) slider.value = grmResolutionIdx;
-  if (PIPELINE_EYE_COMPARE) grmPositionCrosshair(50, 50);
   grmUpdateResLabel();
 
   // Render an empty modal first so it appears responsive while we fetch DB
@@ -3551,23 +3459,7 @@ function closeGroupReview() {
   document.getElementById('grmOverlay').classList.remove('open');
   _grmOffsets = {};
   _grmDragging = null;
-  _grmLoupeTargetDragging = false;
   grmRefreshResetAllVisibility();
-}
-
-function grmUpdateModeSwitchLink() {
-  var link = document.getElementById('grmModeSwitch');
-  if (!link || !grmState) return;
-  var path = PIPELINE_EYE_COMPARE ? '/pipeline/review' : '/pipeline/eye-review';
-  var params = new URLSearchParams();
-  if (grmState.source === 'browse-selection' || isBrowseBurstReviewRequest()) {
-    params.set('browse_burst', '1');
-  }
-  if (Number.isInteger(grmState.encIdx)) params.set('enc', String(grmState.encIdx));
-  if (Number.isInteger(grmState.burstIdx)) params.set('burst', String(grmState.burstIdx));
-  if (grmState.selected) params.set('photo', String(grmState.selected));
-  var qs = params.toString();
-  link.href = path + (qs ? '?' + qs : '');
 }
 
 function renderGroupModal() {
@@ -3818,7 +3710,7 @@ function grmSelect(photoId, mode) {
     _grmSelectRange(grmState.selectionAnchor, photoId);
     grmState.selected = photoId;
   } else {
-    if (!PIPELINE_EYE_COMPARE && grmState.selected === photoId && selectedIds.size === 1 && selectedIds.has(photoId)) {
+    if (grmState.selected === photoId && selectedIds.size === 1 && selectedIds.has(photoId)) {
       selectedIds.clear();
       grmState.selected = null;
       grmState.selectionAnchor = null;
@@ -3829,7 +3721,6 @@ function grmSelect(photoId, mode) {
       grmState.selectionAnchor = photoId;
     }
   }
-  grmUpdateModeSwitchLink();
   renderGroupModal();
 
   // Update loupe preview
@@ -3842,19 +3733,15 @@ function grmSelect(photoId, mode) {
     var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
     if (photo) {
       var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
-      loupeInfo.textContent = PIPELINE_EYE_COMPARE
-        ? (photo.filename || '') + ' - sharpness: ' + sharp + ' - click/drag to set eye target'
-        : (photo.filename || '') + ' - sharpness: ' + sharp + ' - move cursor to compare';
+      loupeInfo.textContent = (photo.filename || '') + ' — sharpness: ' + sharp + ' — move cursor to compare';
 
       // Render pipeline metadata in detail panel
       detailEl.innerHTML = buildPipelineMetadataHtml(photo);
     }
     grmUpdateResLabel();
   } else {
-    loupeImg.removeAttribute('src');
-    loupeInfo.textContent = PIPELINE_EYE_COMPARE
-      ? 'Select a reference photo. Click the large photo to place the eye target.'
-      : 'Select a photo to preview. Hover to compare sharpness across all frames.';
+    loupeImg.src = '';
+    loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
     detailEl.innerHTML = '';
     grmLoupeReset();
   }
@@ -3985,7 +3872,6 @@ var _grmLastHoverY = null;
 var _grmOffsets = {};
 var _grmDragging = null;
 var _grmSuppressNextClick = false;
-var _grmLoupeTargetDragging = false;
 
 function _grmInitialThumbSize() {
   try {
@@ -4160,45 +4046,7 @@ function grmCardImgLoaded(img) {
   }
 }
 
-function grmPositionCrosshair(x, y) {
-  var ch = document.getElementById('grmCrosshairH');
-  var cv = document.getElementById('grmCrosshairV');
-  if (ch) ch.style.top = y + '%';
-  if (cv) cv.style.left = x + '%';
-}
-
-function grmSetEyeTargetFromEvent(e) {
-  var rect = e.currentTarget.getBoundingClientRect();
-  var x = ((e.clientX - rect.left) / rect.width) * 100;
-  var y = ((e.clientY - rect.top) / rect.height) * 100;
-  x = Math.max(0, Math.min(100, x));
-  y = Math.max(0, Math.min(100, y));
-  _grmLastHoverX = x;
-  _grmLastHoverY = y;
-  grmPositionCrosshair(x, y);
-  grmApplyCardTransforms();
-}
-
-function grmLoupePointerDown(e) {
-  if (!PIPELINE_EYE_COMPARE) return;
-  if (e.button !== 0) return;
-  _grmLoupeTargetDragging = true;
-  grmSetEyeTargetFromEvent(e);
-  e.preventDefault();
-}
-
-function grmLoupePointerUp(e) {
-  if (!PIPELINE_EYE_COMPARE) return;
-  if (_grmLoupeTargetDragging) grmSetEyeTargetFromEvent(e);
-  _grmLoupeTargetDragging = false;
-}
-
 function grmLoupeToggleLock(e) {
-  if (PIPELINE_EYE_COMPARE) {
-    grmSetEyeTargetFromEvent(e);
-    _grmLoupeTargetDragging = false;
-    return;
-  }
   _grmLoupeLocked = !_grmLoupeLocked;
   var ch = document.getElementById('grmCrosshairH');
   var cv = document.getElementById('grmCrosshairV');
@@ -4213,11 +4061,6 @@ function grmLoupeToggleLock(e) {
 }
 
 function grmLoupeMove(e) {
-  if (PIPELINE_EYE_COMPARE) {
-    if (!_grmLoupeTargetDragging) return;
-    grmSetEyeTargetFromEvent(e);
-    return;
-  }
   if (_grmLoupeLocked) return;
 
   var rect = e.currentTarget.getBoundingClientRect();
@@ -4226,7 +4069,8 @@ function grmLoupeMove(e) {
   _grmLastHoverX = x;
   _grmLastHoverY = y;
 
-  grmPositionCrosshair(x, y);
+  document.getElementById('grmCrosshairH').style.top = y + '%';
+  document.getElementById('grmCrosshairV').style.left = x + '%';
 
   grmApplyCardTransforms();
 }
@@ -4248,10 +4092,6 @@ function grmLoupeZoom(e) {
 }
 
 function grmLoupeReset() {
-  if (PIPELINE_EYE_COMPARE) {
-    _grmLoupeTargetDragging = false;
-    return;
-  }
   if (_grmLoupeLocked) return;
   if (_grmDragging) return;
   _grmLastHoverX = null;
