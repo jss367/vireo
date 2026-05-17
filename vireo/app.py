@@ -4687,6 +4687,135 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         preds = db.get_group_predictions(group_id)
         return jsonify([dict(p) for p in preds])
 
+    @app.route("/api/photos/sharpness/regions", methods=["POST"])
+    def api_photo_region_sharpness():
+        """Score sharpness for explicit per-photo image regions.
+
+        The burst-review UI sends the visible crop inside each comparison
+        thumbnail, expressed in the coordinate space of the image currently
+        laid out in the browser. We map that crop onto the 1024px working
+        image used by the existing sharpness scorer.
+        """
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object", 400)
+        regions = body.get("regions")
+        if not isinstance(regions, list):
+            return json_error("regions must be a list")
+        max_regions = 200
+        if len(regions) > max_regions:
+            return json_error(f"too many regions (max {max_regions})", 400)
+
+        from image_loader import load_working_image
+        from sharpness import _score_from_pil
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        results = []
+
+        for raw in regions:
+            if not isinstance(raw, dict):
+                results.append({
+                    "photo_id": None,
+                    "sharpness": None,
+                    "error": "region must be an object",
+                })
+                continue
+            raw_photo_id = raw.get("photo_id")
+            if isinstance(raw_photo_id, bool):
+                results.append({
+                    "photo_id": None,
+                    "sharpness": None,
+                    "error": "invalid photo_id",
+                })
+                continue
+            try:
+                photo_id = int(raw_photo_id)
+            except (TypeError, ValueError):
+                results.append({
+                    "photo_id": None,
+                    "sharpness": None,
+                    "error": "invalid photo_id",
+                })
+                continue
+            photo = db.get_photo(photo_id, verify_workspace=True)
+            if not photo:
+                results.append({"photo_id": photo_id, "sharpness": None, "error": "not found"})
+                continue
+
+            folder = db.conn.execute(
+                "SELECT id, path FROM folders WHERE id = ?", (photo["folder_id"],)
+            ).fetchone()
+            if not folder:
+                results.append({"photo_id": photo_id, "sharpness": None, "error": "folder not found"})
+                continue
+
+            photo_dict = dict(photo)
+            folders = {folder["id"]: folder["path"]}
+            img = load_working_image(photo_dict, vireo_dir, max_size=1024, folders=folders)
+            if img is None:
+                results.append({"photo_id": photo_id, "sharpness": None, "error": "could not load image"})
+                continue
+
+            def _float(name, default, region=raw):
+                raw_value = region.get(name, default)
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError):
+                    raise ValueError(f"invalid {name}") from None
+                if not math.isfinite(value):
+                    raise ValueError(f"invalid {name}")
+                return value
+
+            try:
+                source_w = _float("source_w", photo["width"] or img.width)
+                source_h = _float("source_h", photo["height"] or img.height)
+                x = _float("x", 0)
+                y = _float("y", 0)
+                w = _float("w", source_w)
+                h = _float("h", source_h)
+            except ValueError as exc:
+                results.append({
+                    "photo_id": photo_id,
+                    "sharpness": None,
+                    "error": str(exc),
+                })
+                continue
+
+            if source_w <= 0 or source_h <= 0:
+                source_w, source_h = img.width, img.height
+
+            scale_x = img.width / source_w
+            scale_y = img.height / source_h
+            try:
+                ix = max(0, min(img.width - 1, int(round(x * scale_x))))
+                iy = max(0, min(img.height - 1, int(round(y * scale_y))))
+                iw = max(1, int(round(w * scale_x)))
+                ih = max(1, int(round(h * scale_y)))
+            except OverflowError:
+                results.append({
+                    "photo_id": photo_id,
+                    "sharpness": None,
+                    "error": "invalid region bounds",
+                })
+                continue
+            if ix + iw > img.width:
+                iw = img.width - ix
+            if iy + ih > img.height:
+                ih = img.height - iy
+
+            if iw < 2 or ih < 2:
+                score = None
+            else:
+                score = _score_from_pil(img, (ix, iy, iw, ih))
+            results.append({
+                "photo_id": photo_id,
+                "sharpness": score,
+                "region": {"x": ix, "y": iy, "w": iw, "h": ih},
+            })
+
+        return jsonify({"results": results})
+
     @app.route("/api/predictions/group/apply", methods=["POST"])
     def api_prediction_group_apply():
         """Apply pick/reject decisions and species to a burst group."""

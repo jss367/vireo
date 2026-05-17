@@ -90,6 +90,7 @@ def test_burst_card_right_click_opens_menu(live_server, page):
         "Move to Rejects",
         "Move to Candidates",
         "Open in Lightbox",
+        "Open in Browse Mode",
         "Reveal in",
         "Copy Path",
         "Remove from Group",
