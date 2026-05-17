@@ -4565,11 +4565,11 @@ function _lbScheduleSourceSwap(targetZoom) {
           _lbPhotoH = img.naturalHeight;
         }
         _lbRecomputeNativeZoom();
-        // If the user pressed z/toggle when nativeZoom was unknown, upgrade to true 1:1 now.
-        if (_lbPending1To1 && _lbNativeZoom) {
-          _lbPending1To1 = false;
-          _lbSetZoom(_lbNativeZoom, null, null);
-        }
+        // If the user pressed z/click when nativeZoom was unknown, upgrade to
+        // true 1:1 now. Route through the shared helper so the stored anchor is
+        // honored — completing with a recentered zoom would make a deferred 1:1
+        // jump away from the point the user clicked.
+        _lbApplyPendingOneToOneZoom();
         _lbApplyTransform();
       });
       img.src = url;
