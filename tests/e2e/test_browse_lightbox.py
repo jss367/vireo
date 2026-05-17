@@ -386,6 +386,109 @@ def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, 
     )
 
 
+def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page):
+    """A viewport resize while 'loading 1:1' must not drop the deferred snap."""
+    page.add_init_script(
+        "Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });"
+    )
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#3a7"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    held_original = {}
+
+    def hold_first_original(route):
+        if "released" in held_original:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
+        elif "route" not in held_original:
+            held_original["route"] = route
+        else:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", hold_first_original)
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 1920;
+        }"""
+    )
+    page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+        }"""
+    )
+    page.wait_for_function("window._lbNativeZoom > 1")
+
+    page.keyboard.press("z")
+    page.wait_for_function(
+        "window._lbPending1To1 === true && window._lbDesiredSrcKey === 'original'"
+    )
+    assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+    assert page.evaluate("window._lbCurrentSrcKey") == "full"
+
+    # Wait until the deferred swap has actually issued the held /original
+    # request — i.e. we are genuinely in the "loading 1:1" state Codex flagged.
+    deadline = time.time() + 2
+    while "route" not in held_original and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_original
+
+    native_zoom_before = page.evaluate("window._lbNativeZoom")
+
+    # Resize while the high-res source is still loading. The image is 4000px
+    # wide so _lbFitScale (hence _lbNativeZoom) is width-constrained; shrinking
+    # the viewport width forces a deterministic _lbNativeZoom change once the
+    # resize handler runs. The handler recomputes _lbNativeZoom unconditionally
+    # (before any pending-state logic), so the change below is a fix-independent
+    # signal that the debounced handler has actually executed — no fixed sleep.
+    page.set_viewport_size({"width": 640, "height": 800})
+    page.wait_for_function(
+        "Math.abs(window._lbNativeZoom - %r) > 0.1" % native_zoom_before
+    )
+
+    # The resize handler has now run while /original is still held. Pre-fix it
+    # cleared _lbPending1To1 and retargeted the swap back to /full, so releasing
+    # /original below no longer snaps to 1:1 — the deferred zoom request was
+    # silently dropped and the snap assertion times out (hard regression).
+    original_route = held_original.pop("route")
+    held_original["released"] = True
+    original_route.fulfill(body=original_svg, content_type="image/svg+xml")
+
+    # Post-fix the deferred intent survives the resize, so the lightbox still
+    # snaps to true 1:1 on /original. Pre-fix this never completes (the snap was
+    # dropped) and the wait times out — making the regression a hard failure.
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbCurrentSrcKey === 'original'
+                && window._lbPending1To1 === false
+                && img && img.complete && img.naturalWidth === 4000
+                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }""",
+        timeout=8000,
+    )
+
+
 def test_browse_lightbox_does_not_retry_original_after_unavailable(live_server, page):
     """After /original fails, source selection should stay on preview/full tiers."""
     full_svg = (

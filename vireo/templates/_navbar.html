@@ -3691,8 +3691,22 @@ function toggleLightboxZoom(e) {
     resizeTimer = setTimeout(function() {
       resizeTimer = null;
       _lbRecomputeNativeZoom();
+      // A deferred 1:1 keeps _lbZoom at fit while the high-res source loads.
+      // _lbSetZoom clears _lbPending1To1 (and its trailing reschedule retargets
+      // the source swap back to /full), so a resize during "loading 1:1" would
+      // silently drop the user's zoom request. Capture the deferred intent,
+      // re-clamp the actual zoom, then restore it and re-arm the source swap so
+      // the snap still completes once the high-res tier is current.
+      var pending = _lbPending1To1;
+      var pendingAnchor = _lbPending1To1Anchor;
       // Current zoom may now violate clamps; re-run through _lbSetZoom to re-clamp & re-apply.
       _lbSetZoom(_lbZoom, null, null);
+      if (pending) {
+        _lbPending1To1 = true;
+        _lbPending1To1Anchor = pendingAnchor;
+        _lbScheduleSourceSwap(_lbNativeZoom || 4);
+        _lbApplyPendingOneToOneZoom();
+      }
     }, 100);
   });
 })();
