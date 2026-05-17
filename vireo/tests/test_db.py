@@ -10082,7 +10082,7 @@ def test_all_nav_ids_covers_every_page():
         "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
         "misses", "highlights", "browse", "map", "variants",
         "dashboard", "audit", "compare",
-        "settings", "workspace", "lightroom", "shortcuts",
+        "zoom_test", "settings", "workspace", "lightroom", "shortcuts",
         "keywords", "duplicates", "logs",
     }
     assert expected == ALL_NAV_IDS
