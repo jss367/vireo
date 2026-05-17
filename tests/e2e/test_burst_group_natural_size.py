@@ -209,3 +209,53 @@ def test_burst_modal_thumb_slider_resizes_wrapped_grid(live_server, page, tmp_pa
     assert bbox is not None
     assert abs(bbox["width"] - 220) < 1, f"box width {bbox['width']} != 220"
     assert abs(bbox["height"] - 147) < 1, f"box height {bbox['height']} != 147"
+
+
+def test_burst_modal_resolution_and_right_zoom_controls(live_server, page, tmp_path):
+    db = live_server["db"]
+    n = _seed_burst_with_real_photos(db, tmp_path)
+    if n < 1:
+        pytest.skip("could not seed burst group")
+    _ensure_photo_files_on_disk(db, tmp_path)
+
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    page.wait_for_load_state("networkidle")
+    _open_burst_modal(page)
+
+    expect(page.locator("#grmResSlider")).to_be_visible()
+    expect(page.locator("#grmLoupeZoomSlider")).to_be_visible()
+
+    page.locator("#grmResSlider").evaluate(
+        """el => {
+          el.value = 3;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }"""
+    )
+    expect(page.locator("#grmResLabel")).to_contain_text("original")
+
+    page.locator("#grmLoupeZoomSlider").evaluate(
+        """el => {
+          el.value = 200;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }"""
+    )
+    transform = page.locator("#grmLoupePhoto").evaluate("el => el.style.transform")
+    assert "scale(2" in transform
+
+
+def test_burst_modal_scores_visible_box_sharpness(live_server, page, tmp_path):
+    db = live_server["db"]
+    n = _seed_burst_with_real_photos(db, tmp_path)
+    if n < 1:
+        pytest.skip("could not seed burst group")
+    _ensure_photo_files_on_disk(db, tmp_path)
+
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    page.wait_for_load_state("networkidle")
+    _open_burst_modal(page)
+
+    expect(page.locator("#grmBoxSharpnessBtn")).to_be_visible()
+    page.locator("#grmBoxSharpnessBtn").click()
+    expect(page.locator(".grm-card-scores", has_text="Box:")).to_have_count(n)

@@ -996,8 +996,23 @@ input[type="range"]::-moz-range-thumb {
   flex-shrink: 0;
 }
 .grm-footer .grm-hint { font-size: 11px; color: var(--text-ghost); flex: 1; }
-.grm-res-control { display: flex; align-items: center; gap: 8px; }
-.grm-res-control input[type="range"] { width: 100px; }
+.grm-res-control,
+.grm-loupe-zoom-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.grm-res-control input[type="range"],
+.grm-loupe-zoom-control input[type="range"] {
+  width: 100px;
+  accent-color: var(--accent);
+}
+.grm-loupe-zoom-control label,
+.grm-loupe-zoom-control span {
+  font-size: 12px;
+  color: var(--text-muted);
+}
 .grm-thumb-control {
   display: flex;
   align-items: center;
@@ -1049,6 +1064,7 @@ input[type="range"]::-moz-range-thumb {
   height: 100%;
   object-fit: contain;
   display: block;
+  transform-origin: 50% 50%;
 }
 .grm-loupe-info {
   padding: 8px 12px;
@@ -1056,6 +1072,22 @@ input[type="range"]::-moz-range-thumb {
   color: var(--text-dim);
   border-top: 1px solid var(--border-primary);
   text-align: center;
+}
+.grm-region-sharpness-btn {
+  margin: 6px 12px 0;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  align-self: center;
+}
+.grm-region-sharpness-btn:hover { color: var(--text-primary); }
+.grm-region-sharpness-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
 }
 .grm-loupe-crosshair-h {
   position: absolute;
@@ -1419,6 +1451,7 @@ input[type="range"]::-moz-range-thumb {
       </div>
       <div class="grm-loupe-info" id="grmLoupeInfo">Select a photo to preview. Hover to compare sharpness across all frames.</div>
       <button type="button" class="grm-reset-offsets-btn" id="grmResetAllOffsets" onclick="grmResetAllOffsets()">Reset pan offsets</button>
+      <button type="button" class="grm-region-sharpness-btn" id="grmBoxSharpnessBtn" onclick="grmCalculateBoxSharpness()">Score box sharpness</button>
       <div class="grm-loupe-detail" id="grmLoupeDetail"></div>
     </div>
   </div>
@@ -1436,7 +1469,12 @@ input[type="range"]::-moz-range-thumb {
       <input type="range" id="grmResSlider" min="0" max="3" step="1" value="3" oninput="grmSetResolution(this.value)">
       <span id="grmResLabel" style="font-size:11px;color:var(--text-dim);min-width:140px;">1920 · preview</span>
     </div>
-    <span class="grm-hint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
+    <div class="grm-loupe-zoom-control" title="Right preview zoom">
+      <label for="grmLoupeZoomSlider">Right:</label>
+      <input type="range" id="grmLoupeZoomSlider" min="100" max="500" step="25" value="100" oninput="grmSetLoupeZoom(this.value)">
+      <span id="grmLoupeZoomVal">1×</span>
+    </div>
+    <span class="grm-hint" id="grmHint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);" title="Apply pick/reject flag changes and species keywords, then close this burst.">Apply flags/species & Close</button>
   </div>
 </div>
@@ -1576,11 +1614,35 @@ function grmSetResolution(idx) {
   });
   if (grmState && grmState.selected) {
     var loupe = document.getElementById('grmLoupePhoto');
-    if (loupe) loupe.src = grmPhotoUrl(grmState.selected);
+    if (loupe) {
+      loupe.src = grmPhotoUrl(grmState.selected);
+      grmApplyLoupeZoom();
+    }
   }
   // Re-apply card transforms so cover-fit snaps to the new natural size.
   grmApplyCardTransforms();
   grmUpdateResLabel();
+}
+
+function grmSetLoupeZoom(value) {
+  var pct = parseInt(value, 10);
+  if (!pct) pct = 100;
+  pct = Math.max(100, Math.min(500, pct));
+  _grmLoupeZoomLevel = pct / 100;
+  var slider = document.getElementById('grmLoupeZoomSlider');
+  if (slider) slider.value = pct;
+  var label = document.getElementById('grmLoupeZoomVal');
+  if (label) label.textContent = _grmLoupeZoomLevel.toFixed(_grmLoupeZoomLevel >= 2 ? 1 : 2).replace(/\.0$/, '') + '×';
+  grmApplyLoupeZoom();
+}
+
+function grmApplyLoupeZoom() {
+  var img = document.getElementById('grmLoupePhoto');
+  if (!img) return;
+  var x = _grmLastHoverX == null ? 50 : _grmLastHoverX;
+  var y = _grmLastHoverY == null ? 50 : _grmLastHoverY;
+  img.style.transformOrigin = x + '% ' + y + '%';
+  img.style.transform = 'scale(' + _grmLoupeZoomLevel + ')';
 }
 
 function setSpeciesFilter(val) {
@@ -3330,6 +3392,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   };
   _grmLoupeLocked = false;
   _grmZoomMultiplier = 1;
+  _grmLoupeZoomLevel = 1;
   _grmLastHoverX = null;
   _grmLastHoverY = null;
   _grmOffsets = {};
@@ -3365,6 +3428,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   // Sync slider DOM with persisted resolution choice
   var slider = document.getElementById('grmResSlider');
   if (slider) slider.value = grmResolutionIdx;
+  grmSetLoupeZoom(100);
   grmUpdateResLabel();
 
   // Render an empty modal first so it appears responsive while we fetch DB
@@ -3470,6 +3534,7 @@ function renderGroupModal() {
     var cls = 'grm-card' + (isSelected ? ' selected' : '');
     var qScore = p.quality_composite != null ? Math.round(p.quality_composite * 100) : '-';
     var sharp = p.subject_tenengrad != null ? Math.round(p.subject_tenengrad) : '-';
+    var boxSharp = p.box_sharpness != null ? Math.round(p.box_sharpness) : null;
 
     // Read flag/keyword state from the live DB snapshot the modal opened
     // with, not the (potentially stale) cached p.flag — so a photo flagged
@@ -3489,6 +3554,8 @@ function renderGroupModal() {
 
     var nat = grmNaturalDims(p);
     var imgStyle = 'width:' + nat.w + 'px;height:' + nat.h + 'px;';
+    var scoresHtml = 'Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span>';
+    if (boxSharp != null) scoresHtml += ' Box: <span class="score-val">' + boxSharp + '</span>';
     return '<div class="' + cls + '" data-photo-id="' + p.id + '"' +
         ' data-nat-w="' + nat.w + '" data-nat-h="' + nat.h + '"' +
         ' onmousedown="grmCardMouseDown(event)"' +
@@ -3502,7 +3569,7 @@ function renderGroupModal() {
       '</div>' +
       '<div class="grm-card-info">' +
         '<div class="grm-card-species">' + escapeHtml(p.filename || '') + '</div>' +
-        '<div class="grm-card-scores">Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span></div>' +
+        '<div class="grm-card-scores">' + scoresHtml + '</div>' +
       '</div>' +
     '</div>';
   }
@@ -3709,6 +3776,11 @@ function grmSelect(photoId, mode) {
     if (!grmState.selectionAnchor) grmState.selectionAnchor = grmState.selected || photoId;
     _grmSelectRange(grmState.selectionAnchor, photoId);
     grmState.selected = photoId;
+  } else if (mode === 'force') {
+    selectedIds.clear();
+    selectedIds.add(photoId);
+    grmState.selected = photoId;
+    grmState.selectionAnchor = photoId;
   } else {
     if (grmState.selected === photoId && selectedIds.size === 1 && selectedIds.has(photoId)) {
       selectedIds.clear();
@@ -3730,10 +3802,12 @@ function grmSelect(photoId, mode) {
 
   if (grmState.selected) {
     loupeImg.src = grmPhotoUrl(grmState.selected);
+    grmApplyLoupeZoom();
     var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
     if (photo) {
       var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
-      loupeInfo.textContent = (photo.filename || '') + ' — sharpness: ' + sharp + ' — move cursor to compare';
+      var boxSharp = photo.box_sharpness != null ? ' - box sharpness: ' + Math.round(photo.box_sharpness) : '';
+      loupeInfo.textContent = (photo.filename || '') + ' - sharpness: ' + sharp + boxSharp + ' - move cursor to compare';
 
       // Render pipeline metadata in detail panel
       detailEl.innerHTML = buildPipelineMetadataHtml(photo);
@@ -3863,6 +3937,7 @@ var GRM_CARD_H = 120;
 var GRM_THUMB_STORAGE_KEY = 'vireo.burstReviewThumbSize';
 
 var _grmZoomMultiplier = 1;   // wheel fine-tune on top of the 1:1 base scale
+var _grmLoupeZoomLevel = 1;
 var _grmLoupeLocked = false;
 var _grmLastHoverX = null;    // last cursor x% on the loupe (null = no hover yet)
 var _grmLastHoverY = null;
@@ -3993,6 +4068,10 @@ function _grmComputeCardTransform(card) {
   return {
     transform: 'translate(' + tx + 'px, ' + ty + 'px) scale(' + s + ')',
     scale: s,
+    tx: tx,
+    ty: ty,
+    w: W,
+    h: H,
     zoomed: hovering,
   };
 }
@@ -4046,6 +4125,13 @@ function grmCardImgLoaded(img) {
   }
 }
 
+function grmPositionCrosshair(x, y) {
+  var ch = document.getElementById('grmCrosshairH');
+  var cv = document.getElementById('grmCrosshairV');
+  if (ch) ch.style.top = y + '%';
+  if (cv) cv.style.left = x + '%';
+}
+
 function grmLoupeToggleLock(e) {
   _grmLoupeLocked = !_grmLoupeLocked;
   var ch = document.getElementById('grmCrosshairH');
@@ -4069,8 +4155,8 @@ function grmLoupeMove(e) {
   _grmLastHoverX = x;
   _grmLastHoverY = y;
 
-  document.getElementById('grmCrosshairH').style.top = y + '%';
-  document.getElementById('grmCrosshairV').style.left = x + '%';
+  grmPositionCrosshair(x, y);
+  grmApplyLoupeZoom();
 
   grmApplyCardTransforms();
 }
@@ -4088,6 +4174,7 @@ function grmLoupeZoom(e) {
   } else {
     _grmZoomMultiplier = Math.max(min, _grmZoomMultiplier / 1.25);
   }
+  grmApplyLoupeZoom();
   grmApplyCardTransforms();
 }
 
@@ -4219,6 +4306,58 @@ function grmResetAllOffsets() {
   grmRefreshResetAllVisibility();
 }
 
+function grmVisibleRegionForCard(card) {
+  var t = _grmComputeCardTransform(card);
+  var scale = t.scale || 1;
+  var W = t.w || (parseFloat(card.dataset.natW) || GRM_CARD_W);
+  var H = t.h || (parseFloat(card.dataset.natH) || GRM_CARD_H);
+  var x = Math.max(0, -t.tx / scale);
+  var y = Math.max(0, -t.ty / scale);
+  var w = Math.min(W - x, GRM_CARD_W / scale);
+  var h = Math.min(H - y, GRM_CARD_H / scale);
+  return {
+    photo_id: parseInt(card.dataset.photoId, 10),
+    x: x,
+    y: y,
+    w: Math.max(1, w),
+    h: Math.max(1, h),
+    source_w: W,
+    source_h: H,
+  };
+}
+
+async function grmCalculateBoxSharpness() {
+  var cards = Array.from(document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]'));
+  if (!cards.length) return;
+  var btn = document.getElementById('grmBoxSharpnessBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Scoring...';
+  }
+  try {
+    var data = await safeFetch('/api/photos/sharpness/regions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ regions: cards.map(grmVisibleRegionForCard) }),
+    }, { toast: false });
+    var byPhoto = {};
+    (data.results || []).forEach(function(r) { byPhoto[r.photo_id] = r; });
+    grmState.items.forEach(function(photo) {
+      var r = byPhoto[photo.id];
+      if (r && r.sharpness != null) photo.box_sharpness = r.sharpness;
+    });
+    renderGroupModal();
+    if (grmState.selected) grmSelect(grmState.selected, 'force');
+  } catch(e) {
+    console.error('Box sharpness failed:', e);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Score box sharpness';
+    }
+  }
+}
+
 function _grmUpdateIndicator(card) {
   var off = _grmOffsets[card.dataset.photoId];
   if (off && (off.tx !== 0 || off.ty !== 0)) {
@@ -4328,17 +4467,30 @@ document.addEventListener('keydown', function(e) {
   if (pipelineReviewBareKey(e, 'x')) { grmMoveReject(); e.preventDefault(); return; }
 });
 
-/* --- Right-click → open in Browse view ---
+function buildPipelinePhotoContextMenu(photoId) {
+  return [
+    {
+      label: 'Open in Browse Mode',
+      onClick: function() { window.open('/browse?photo_id=' + photoId, '_blank', 'noopener'); },
+    },
+  ];
+}
+
+/* --- Right-click menu ---
  * Catches contextmenu on photo cards (main grid) and grm-cards (group review
- * modal). Opens /browse?photo_id=<id> in a new tab so the user keeps their
- * pipeline-review state intact. */
+ * modal). Browse opens in a new tab so the user keeps their pipeline-review
+ * state intact. */
 document.addEventListener('contextmenu', function(e) {
   var card = e.target.closest('.photo-card[data-photo-id], .grm-card[data-photo-id]');
   if (!card) return;
   var pid = parseInt(card.dataset.photoId, 10);
   if (!pid) return;
   e.preventDefault();
-  window.open('/browse?photo_id=' + pid, '_blank', 'noopener');
+  if (typeof openContextMenu === 'function') {
+    openContextMenu(e, buildPipelinePhotoContextMenu(pid));
+  } else {
+    window.open('/browse?photo_id=' + pid, '_blank', 'noopener');
+  }
 });
 
 /* --- Apply & Close --- */

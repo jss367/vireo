@@ -480,6 +480,25 @@
     flex-shrink: 0;
   }
   .grm-footer .grm-hint { font-size: 11px; color: var(--text-ghost, #555); flex: 1; }
+  .grm-res-control,
+  .grm-loupe-zoom-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .grm-res-control input[type="range"],
+  .grm-loupe-zoom-control input[type="range"] {
+    width: 100px;
+    accent-color: var(--accent, #24E5CA);
+  }
+  .grm-res-control label,
+  .grm-res-control span,
+  .grm-loupe-zoom-control label,
+  .grm-loupe-zoom-control span {
+    font-size: 12px;
+    color: var(--text-muted, #888);
+  }
   .grm-thumb-control {
     display: flex;
     align-items: center;
@@ -529,6 +548,7 @@
     height: 100%;
     object-fit: contain;
     display: block;
+    transform-origin: 50% 50%;
   }
   .grm-loupe-info {
     padding: 8px 12px;
@@ -565,6 +585,22 @@
   .grm-loupe-preds-empty {
     color: var(--text-ghost, #555);
     font-style: italic;
+  }
+  .grm-region-sharpness-btn {
+    margin: 6px 12px 0;
+    background: var(--bg-tertiary, #14374E);
+    color: var(--text-muted, #888);
+    border: none;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    align-self: center;
+  }
+  .grm-region-sharpness-btn:hover { color: var(--text-primary, #E0F0F0); }
+  .grm-region-sharpness-btn:disabled {
+    opacity: 0.55;
+    cursor: wait;
   }
   .grm-loupe-crosshair {
     position: absolute;
@@ -1412,8 +1448,8 @@ function buildBurstGroupContextMenu(photoId, filename) {
     { label: 'Copy Path',               onClick: function() { copyReviewPhotoPath(photoId); } },
     { separator: true },
     // Send-elsewhere actions: get the photo into another tool without losing
-    // burst-review state. "Show in Browse" opens in a new tab so the modal
-    // and current pick/reject decisions stay intact.
+    // burst-review state. Browse opens in a new tab so the modal and current
+    // pick/reject decisions stay intact.
     { label: 'Send to iNaturalist',
       onClick: function() {
         if (typeof window.submitToInat === 'function') window.submitToInat(photoId);
@@ -1427,7 +1463,7 @@ function buildBurstGroupContextMenu(photoId, filename) {
       onClick: function() {
         if (typeof window.developPhotos === 'function') window.developPhotos([photoId]);
       } },
-    { label: 'Show in Browse tab',
+    { label: 'Open in Browse Mode',
       onClick: function() { window.open('/browse?photo_id=' + photoId, '_blank'); } },
     { separator: true },
     { label: 'Remove from Group',       onClick: function() { grmRemoveFromGroup(); } },
@@ -1476,6 +1512,7 @@ function openGroupReview(groupId, model) {
   // the natural-size layout, _grmZoomLevel is now a multiplier above
   // cover-fit (1 = no zoom).
   _grmZoomLevel = 1;
+  _grmLoupeZoomLevel = 1;
   _grmOffsets = {};
   _grmDragging = null;
   _grmSuppressNextClick = false;
@@ -1486,6 +1523,10 @@ function openGroupReview(groupId, model) {
   grmRefreshResetAllVisibility();
   document.getElementById('grmOverlay').classList.add('open');
   grmSetThumbSize(GRM_CARD_W, false);
+  var resSlider = document.getElementById('grmResSlider');
+  if (resSlider) resSlider.value = grmResolutionIdx;
+  grmSetLoupeZoom(100, false);
+  grmUpdateResLabel();
   loadGroupData(groupId);
 }
 
@@ -1545,15 +1586,14 @@ function renderGroupModal() {
     var cls = 'grm-card' + (isSelected ? ' selected' : '') + (isBest ? ' ai-best' : '');
     var qScore = it.quality_score != null ? Math.round(it.quality_score * 100) : '-';
     var sharp = it.subject_sharpness != null ? Math.round(it.subject_sharpness) : (it.sharpness != null ? Math.round(it.sharpness) : '-');
+    var boxSharp = it.box_sharpness != null ? Math.round(it.box_sharpness) : null;
     var confPct = Math.round((it.confidence || 0) * 100);
 
-    // Once the user has zoomed, serve full-resolution originals so pixel-peeping
-    // and 1:1 inspection actually show sensor detail instead of an upscaled 400px thumbnail.
-    var src = grmState.upgraded
-      ? '/photos/' + it.photo_id + '/original'
-      : '/thumbnails/' + it.photo_id + '.jpg';
-    var nat = _grmReviewNaturalDims(it, grmState.upgraded);
+    var src = grmPhotoUrl(it.photo_id);
+    var nat = grmNaturalDims(it);
     var imgStyle = 'width:' + nat.w + 'px;height:' + nat.h + 'px;';
+    var scoresHtml = 'Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span>';
+    if (boxSharp != null) scoresHtml += ' Box: <span class="score-val">' + boxSharp + '</span>';
     return '<div class="' + cls + '" data-photo-id="' + it.photo_id + '" data-pred-id="' + it.id + '"' +
       ' data-nat-w="' + nat.w + '" data-nat-h="' + nat.h + '"' +
       ' onmousedown="grmCardMouseDown(event)"' +
@@ -1565,7 +1605,7 @@ function renderGroupModal() {
       '</div>' +
       '<div class="grm-card-info">' +
         '<div class="grm-card-species">' + escapeHtml(it.species || '') + ' <span style="font-weight:400;color:var(--text-dim,#888);">' + confPct + '%</span></div>' +
-        '<div class="grm-card-scores">Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span></div>' +
+        '<div class="grm-card-scores">' + scoresHtml + '</div>' +
         (isBest ? '<div class="grm-card-ai">AI BEST</div>' : '') +
       '</div>' +
     '</div>';
@@ -1661,6 +1701,11 @@ function grmSelect(photoId, mode) {
     if (!grmState.selectionAnchor) grmState.selectionAnchor = grmState.selected || photoId;
     _grmSelectRange(grmState.selectionAnchor, photoId);
     grmState.selected = photoId;
+  } else if (mode === 'force') {
+    selectedIds.clear();
+    selectedIds.add(photoId);
+    grmState.selected = photoId;
+    grmState.selectionAnchor = photoId;
   } else {
     if (grmState.selected === photoId && selectedIds.size === 1 && selectedIds.has(photoId)) {
       selectedIds.clear();
@@ -1680,13 +1725,16 @@ function grmSelect(photoId, mode) {
   var loupeInfo = document.getElementById('grmLoupeInfo');
   var loupePreds = document.getElementById('grmLoupePreds');
   if (grmState.selected) {
-    loupeImg.src = '/photos/' + grmState.selected + '/full';
+    loupeImg.src = grmLoupePhotoUrl(grmState.selected);
+    grmApplyLoupeZoom();
     var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
     if (item) {
       var sharp = item.subject_sharpness != null ? Math.round(item.subject_sharpness) : (item.sharpness != null ? Math.round(item.sharpness) : '?');
-      loupeInfo.textContent = (item.filename || '') + ' — sharpness: ' + sharp + ' — move cursor to compare';
+      var boxSharp = item.box_sharpness != null ? ' — box sharpness: ' + Math.round(item.box_sharpness) : '';
+      loupeInfo.textContent = (item.filename || '') + ' — sharpness: ' + sharp + boxSharp + ' — move cursor to compare';
       loupePreds.innerHTML = renderLoupePreds(item);
     }
+    grmUpdateResLabel();
   } else {
     loupeImg.src = '';
     loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
@@ -1748,6 +1796,14 @@ var _grmLoupeHovering = false;
 // actually paints.
 var _grmPendingSnap = false;
 var GRM_THUMB_STORAGE_KEY = 'vireo.burstReviewThumbSize';
+var GRM_RES_STOPS = [
+  { size: 400,  label: '400',      kind: 'thumb' },
+  { size: 1024, label: '1024',     kind: 'preview' },
+  { size: 1920, label: '1920',     kind: 'preview' },
+  { size: 0,    label: 'Original', kind: 'original' }
+];
+var grmResolutionIdx = 1;
+var _grmLoupeZoomLevel = 1;
 
 function _grmInitialThumbSize() {
   try {
@@ -1781,26 +1837,93 @@ function grmSetThumbSize(value, persist) {
 GRM_CARD_W = _grmInitialThumbSize();
 GRM_CARD_H = Math.round(GRM_CARD_W * 2 / 3);
 
-// Natural-size dims for one card. When the strip is still on the 400px
-// thumbnail, we use a 400px-fit; once upgraded to /original we use the
-// stored width/height.
-function _grmReviewNaturalDims(item, upgraded) {
-  if (upgraded) {
-    var W = (item && item.width) ? item.width : 1800;
-    var H = (item && item.height) ? item.height : 1200;
+function grmPhotoUrl(photoId) {
+  var stop = GRM_RES_STOPS[grmResolutionIdx] || GRM_RES_STOPS[1];
+  if (stop.kind === 'thumb') return '/thumbnails/' + photoId + '.jpg';
+  if (stop.kind === 'original') return '/photos/' + photoId + '/original';
+  return '/photos/' + photoId + '/preview?size=' + stop.size;
+}
+
+function grmLoupePhotoUrl(photoId) {
+  var stop = GRM_RES_STOPS[grmResolutionIdx] || GRM_RES_STOPS[1];
+  if (stop.kind === 'thumb') return '/photos/' + photoId + '/full';
+  return grmPhotoUrl(photoId);
+}
+
+function grmNaturalDims(item) {
+  var stop = GRM_RES_STOPS[grmResolutionIdx] || GRM_RES_STOPS[1];
+  var W = (item && item.width) ? item.width : 1800;
+  var H = (item && item.height) ? item.height : 1200;
+  if (stop.kind === 'original') {
     return { w: W, h: H };
   }
-  // 400px thumbnail: longest side fits to 400 while preserving aspect ratio.
-  // Falls back to a 3:2 box when dims are unknown so the card still looks right.
-  var W2 = (item && item.width) ? item.width : 600;
-  var H2 = (item && item.height) ? item.height : 400;
-  var longest = Math.max(W2, H2);
-  if (longest > 400) {
-    var r = 400 / longest;
-    W2 = Math.round(W2 * r);
-    H2 = Math.round(H2 * r);
+  var maxSide = stop.size || 400;
+  var longest = Math.max(W, H);
+  if (longest > maxSide) {
+    var r = maxSide / longest;
+    W = Math.round(W * r);
+    H = Math.round(H * r);
   }
-  return { w: W2, h: H2 };
+  return { w: W, h: H };
+}
+
+function grmUpdateResLabel() {
+  var el = document.getElementById('grmResLabel');
+  if (!el) return;
+  var stop = GRM_RES_STOPS[grmResolutionIdx] || GRM_RES_STOPS[1];
+  var item = grmState && grmState.selected
+    ? grmState.items.find(function(it) { return it.photo_id === grmState.selected; })
+    : (grmState && grmState.items[0]);
+  var label = stop.label;
+  if (item && item.width && item.height) {
+    var dims = grmNaturalDims(item);
+    label = dims.w + '×' + dims.h;
+  }
+  el.textContent = label + ' · ' + stop.kind;
+}
+
+function grmSetResolution(idx) {
+  grmResolutionIdx = parseInt(idx, 10) || 0;
+  grmState.upgraded = (GRM_RES_STOPS[grmResolutionIdx] || {}).kind === 'original';
+  var slider = document.getElementById('grmResSlider');
+  if (slider) slider.value = grmResolutionIdx;
+  document.querySelectorAll('.grm-card').forEach(function(card) {
+    var pid = parseInt(card.dataset.photoId, 10);
+    var img = card.querySelector('img');
+    if (!pid || !img) return;
+    var item = grmState.items.find(function(it) { return it.photo_id === pid; });
+    var nat = grmNaturalDims(item);
+    card.dataset.natW = nat.w;
+    card.dataset.natH = nat.h;
+    img.style.width = nat.w + 'px';
+    img.style.height = nat.h + 'px';
+    img.src = grmPhotoUrl(pid);
+  });
+  if (grmState && grmState.selected) {
+    var loupe = document.getElementById('grmLoupePhoto');
+    if (loupe) loupe.src = grmLoupePhotoUrl(grmState.selected);
+  }
+  _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
+  grmUpdateResLabel();
+}
+
+function grmSetLoupeZoom(value, persist) {
+  var pct = parseInt(value, 10);
+  if (!pct) pct = 100;
+  pct = Math.max(100, Math.min(500, pct));
+  _grmLoupeZoomLevel = pct / 100;
+  var slider = document.getElementById('grmLoupeZoomSlider');
+  if (slider) slider.value = pct;
+  var label = document.getElementById('grmLoupeZoomVal');
+  if (label) label.textContent = _grmLoupeZoomLevel.toFixed(_grmLoupeZoomLevel >= 2 ? 1 : 2).replace(/\.0$/, '') + '×';
+  grmApplyLoupeZoom();
+}
+
+function grmApplyLoupeZoom() {
+  var img = document.getElementById('grmLoupePhoto');
+  if (!img) return;
+  img.style.transformOrigin = _grmLoupeLastX + '% ' + _grmLoupeLastY + '%';
+  img.style.transform = 'scale(' + _grmLoupeZoomLevel + ')';
 }
 
 function _grmUpgradeStripToOriginal() {
@@ -1809,21 +1932,29 @@ function _grmUpgradeStripToOriginal() {
   // Also relayout each <img> at the original's natural pixel size so the
   // browser rasterizes the layer at full resolution instead of bilinearly
   // upsampling the 400px thumbnail bitmap (the WKWebView quality bug).
-  if (grmState.upgraded) return;
+  if ((GRM_RES_STOPS[grmResolutionIdx] || {}).kind === 'original') return;
+  grmResolutionIdx = GRM_RES_STOPS.length - 1;
   grmState.upgraded = true;
+  var slider = document.getElementById('grmResSlider');
+  if (slider) slider.value = grmResolutionIdx;
   document.querySelectorAll('.grm-card').forEach(function(card) {
     var pid = card.getAttribute('data-photo-id');
     var img = card.querySelector('img');
     if (!pid || !img) return;
     var item = grmState.items.find(function(it) { return String(it.photo_id) === String(pid); });
-    var nat = _grmReviewNaturalDims(item, true);
+    var nat = grmNaturalDims(item);
     card.dataset.natW = nat.w;
     card.dataset.natH = nat.h;
     img.style.width = nat.w + 'px';
     img.style.height = nat.h + 'px';
-    img.src = '/photos/' + pid + '/original';
+    img.src = grmPhotoUrl(pid);
   });
+  if (grmState && grmState.selected) {
+    var loupe = document.getElementById('grmLoupePhoto');
+    if (loupe) loupe.src = grmLoupePhotoUrl(grmState.selected);
+  }
   _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
+  grmUpdateResLabel();
 }
 
 function grmCardImgLoaded(img) {
@@ -1903,6 +2034,7 @@ function grmLoupeMove(e) {
   // Update crosshairs
   document.getElementById('grmCrosshairH').style.top = y + '%';
   document.getElementById('grmCrosshairV').style.left = x + '%';
+  grmApplyLoupeZoom();
 
   // No upgrade here: plain hover shouldn't trigger a burst of full-res fetches
   // for every strip card. Upgrade only when the user expresses zoom intent via
@@ -1936,6 +2068,10 @@ function _grmComputeCardTransform(card, hoverX, hoverY, hovering) {
   return {
     transform: 'translate(' + tx + 'px, ' + ty + 'px) scale(' + s + ')',
     scale: s,
+    tx: tx,
+    ty: ty,
+    w: W,
+    h: H,
     zoomed: hovering,
   };
 }
@@ -1980,6 +2116,7 @@ function grmLoupeZoom(e) {
   _grmLoupeLastY = ((e.clientY - rect.top) / rect.height) * 100;
   document.getElementById('grmCrosshairH').style.top = _grmLoupeLastY + '%';
   document.getElementById('grmCrosshairV').style.left = _grmLoupeLastX + '%';
+  grmApplyLoupeZoom();
   _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
 }
 
@@ -2134,6 +2271,61 @@ function grmResetAllOffsets() {
     _grmApplyCardTransform(card);
   });
   grmRefreshResetAllVisibility();
+}
+
+function grmVisibleRegionForCard(card) {
+  var t = _grmComputeCardTransform(card, _grmLoupeLastX, _grmLoupeLastY, _grmLoupeHovering || _grmLoupeLocked);
+  var scale = t.scale || 1;
+  var W = t.w || (parseFloat(card.dataset.natW) || GRM_CARD_W);
+  var H = t.h || (parseFloat(card.dataset.natH) || GRM_CARD_H);
+  var x = Math.max(0, -t.tx / scale);
+  var y = Math.max(0, -t.ty / scale);
+  var w = Math.min(W - x, GRM_CARD_W / scale);
+  var h = Math.min(H - y, GRM_CARD_H / scale);
+  return {
+    photo_id: parseInt(card.dataset.photoId, 10),
+    x: x,
+    y: y,
+    w: Math.max(1, w),
+    h: Math.max(1, h),
+    source_w: W,
+    source_h: H,
+  };
+}
+
+async function grmCalculateBoxSharpness() {
+  var cards = Array.from(document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]'));
+  if (!cards.length) return;
+  var btn = document.getElementById('grmBoxSharpnessBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Scoring...';
+  }
+  try {
+    var payload = { regions: cards.map(grmVisibleRegionForCard) };
+    var data = await safeFetch('/api/photos/sharpness/regions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }, { toast: false });
+    var byPhoto = {};
+    (data.results || []).forEach(function(r) { byPhoto[r.photo_id] = r; });
+    grmState.items.forEach(function(item) {
+      var r = byPhoto[item.photo_id];
+      if (r && r.sharpness != null) item.box_sharpness = r.sharpness;
+    });
+    renderGroupModal();
+    if (grmState.selected) {
+      grmSelect(grmState.selected, 'force');
+    }
+  } catch(e) {
+    console.error('Box sharpness failed:', e);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Score box sharpness';
+    }
+  }
 }
 
 function _grmUpdateIndicator(card) {
@@ -2329,6 +2521,7 @@ document.addEventListener('keydown', function(e) {
       </div>
       <div class="grm-loupe-info" id="grmLoupeInfo">Select a photo to preview. Hover to compare sharpness across all frames.</div>
       <button type="button" class="grm-reset-offsets-btn" id="grmResetAllOffsets" onclick="grmResetAllOffsets()">Reset pan offsets</button>
+      <button type="button" class="grm-region-sharpness-btn" id="grmBoxSharpnessBtn" onclick="grmCalculateBoxSharpness()">Score box sharpness</button>
       <div class="grm-loupe-preds" id="grmLoupePreds"></div>
     </div>
   </div>
@@ -2340,6 +2533,16 @@ document.addEventListener('keydown', function(e) {
       <label for="grmThumbSizeSlider">Thumbs</label>
       <input type="range" id="grmThumbSizeSlider" min="100" max="320" step="20" value="180" oninput="grmSetThumbSize(this.value)">
       <span id="grmThumbSizeVal">180px</span>
+    </div>
+    <div class="grm-res-control" title="Image source resolution">
+      <label for="grmResSlider">Res</label>
+      <input type="range" id="grmResSlider" min="0" max="3" step="1" value="1" oninput="grmSetResolution(this.value)">
+      <span id="grmResLabel">1024 · preview</span>
+    </div>
+    <div class="grm-loupe-zoom-control" title="Right preview zoom">
+      <label for="grmLoupeZoomSlider">Right</label>
+      <input type="range" id="grmLoupeZoomSlider" min="100" max="500" step="25" value="100" oninput="grmSetLoupeZoom(this.value)">
+      <span id="grmLoupeZoomVal">1×</span>
     </div>
     <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; 1 = 1:1 zoom &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;">Apply & Close</button>
