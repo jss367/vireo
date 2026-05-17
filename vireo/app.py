@@ -4698,9 +4698,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """
         db = _get_db()
         body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object", 400)
         regions = body.get("regions")
         if not isinstance(regions, list):
             return json_error("regions must be a list")
+        max_regions = 200
+        if len(regions) > max_regions:
+            return json_error(f"too many regions (max {max_regions})", 400)
 
         from image_loader import load_working_image
         from sharpness import _score_from_pil

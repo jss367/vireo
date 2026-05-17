@@ -11,6 +11,7 @@ rather than visual pixel quality, since the latter is hard to test
 deterministically across browser engines.
 """
 import os
+import re
 
 import pytest
 from PIL import Image
@@ -212,6 +213,7 @@ def test_burst_modal_thumb_slider_resizes_wrapped_grid(live_server, page, tmp_pa
 
 
 def test_burst_modal_resolution_and_right_zoom_controls(live_server, page, tmp_path):
+    """The burst modal exposes image resolution and right-side loupe zoom controls."""
     db = live_server["db"]
     n = _seed_burst_with_real_photos(db, tmp_path)
     if n < 1:
@@ -241,7 +243,9 @@ def test_burst_modal_resolution_and_right_zoom_controls(live_server, page, tmp_p
         }"""
     )
     transform = page.locator("#grmLoupePhoto").evaluate("el => el.style.transform")
-    assert "scale(2" in transform
+    match = re.search(r"scale\(([-0-9.]+)\)", transform)
+    assert match, f"scale transform missing from {transform!r}"
+    assert abs(float(match.group(1)) - 2.0) < 0.01
 
 
 def test_burst_modal_scores_visible_box_sharpness(live_server, page, tmp_path):
@@ -288,6 +292,7 @@ def test_burst_modal_scores_visible_box_sharpness(live_server, page, tmp_path):
 
 
 def test_region_sharpness_endpoint_accepts_large_batches(live_server, page, tmp_path):
+    """The region sharpness API accepts expected batch sizes and rejects bad payloads."""
     db = live_server["db"]
     n = _seed_burst_with_real_photos(db, tmp_path)
     if n < 1:
@@ -316,3 +321,15 @@ def test_region_sharpness_endpoint_accepts_large_batches(live_server, page, tmp_
     assert response.status == 200
     body = response.json()
     assert len(body["results"]) == 101
+
+    non_object_response = page.request.post(
+        f"{url}/api/photos/sharpness/regions",
+        data=[],
+    )
+    assert non_object_response.status == 400
+
+    oversized_response = page.request.post(
+        f"{url}/api/photos/sharpness/regions",
+        data={"regions": regions * 2},
+    )
+    assert oversized_response.status == 400
