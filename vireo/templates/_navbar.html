@@ -3447,6 +3447,11 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbCurrentSrcKey = preserveOneToOne ? 'original' : 'full';
   _lbFullLongEdge = null;
   _lbPending1To1 = preserveOneToOne;
+  // The deferred-1:1 anchor is a client-space click coordinate scoped to the
+  // PREVIOUS photo. Clear it on every open so a 1:1-preserving navigation (or a
+  // swap still in flight from the prior photo) snaps centered instead of reusing
+  // a stale edge anchor on the new image — consistent with the pan reset above.
+  _lbPending1To1Anchor = null;
   _lbOriginalUnavailable = false;
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
