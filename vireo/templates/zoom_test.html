@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Zoom Test</title>
+<style>
+body {
+  min-height: 100vh;
+  padding-bottom: 34px;
+}
+.zoom-test {
+  width: min(1800px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 16px 0 26px;
+}
+.zt-toolbar {
+  position: sticky;
+  top: 44px;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: minmax(120px, 0.7fr) minmax(150px, 0.9fr) minmax(150px, 0.9fr) minmax(220px, 1.4fr) auto;
+  gap: 10px;
+  align-items: end;
+  padding: 12px;
+  background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
+  border-bottom: 1px solid var(--border-primary);
+  backdrop-filter: blur(12px);
+}
+.zt-control label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.zt-control input,
+.zt-control select {
+  width: 100%;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  padding: 7px 9px;
+  font-size: 13px;
+}
+.zt-toolbar button,
+.zt-action {
+  background: var(--accent);
+  color: var(--accent-text);
+  border: 0;
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.zt-meta {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(130px, 1fr));
+  gap: 8px;
+  padding: 12px;
+}
+.zt-stat {
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  padding: 9px 10px;
+  min-width: 0;
+}
+.zt-stat span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.zt-stat b {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-primary);
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zt-pan {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 12px;
+  padding: 0 12px 12px;
+}
+.zt-pan label {
+  display: grid;
+  grid-template-columns: 70px 1fr 46px;
+  gap: 8px;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.zt-pan input { width: 100%; }
+.zt-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
+  gap: 12px;
+  padding: 0 12px;
+}
+.zt-pane {
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+.zt-pane-head {
+  min-height: 74px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.zt-pane-title {
+  margin: 0 0 4px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 700;
+}
+.zt-pane-sub {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.zt-viewer {
+  height: 520px;
+  position: relative;
+  overflow: hidden;
+  background: #050607;
+  cursor: crosshair;
+}
+.zt-viewer img {
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.zt-surface {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.zt-surface img {
+  position: static;
+  width: 100%;
+  height: 100%;
+}
+.zt-crosshair {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 17px;
+  height: 17px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.zt-crosshair:before,
+.zt-crosshair:after {
+  content: "";
+  position: absolute;
+  background: rgba(255, 255, 255, 0.72);
+}
+.zt-crosshair:before {
+  left: 8px;
+  top: 0;
+  width: 1px;
+  height: 17px;
+}
+.zt-crosshair:after {
+  top: 8px;
+  left: 0;
+  width: 17px;
+  height: 1px;
+}
+.zt-info {
+  min-height: 58px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-primary);
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+.zt-error {
+  margin: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  display: none;
+}
+@media (max-width: 900px) {
+  .zt-toolbar,
+  .zt-meta,
+  .zt-pan,
+  .zt-grid {
+    grid-template-columns: 1fr;
+  }
+  .zt-toolbar { top: 0; }
+}
+</style>
+</head>
+<body>
+
+{% include '_navbar.html' %}
+
+<div class="zoom-test">
+  <div class="zt-toolbar">
+    <div class="zt-control">
+      <label for="photoIdInput">Photo ID</label>
+      <input id="photoIdInput" inputmode="numeric" placeholder="first photo">
+    </div>
+    <div class="zt-control">
+      <label for="sourceSelect">Source</label>
+      <select id="sourceSelect">
+        <option value="original">Original</option>
+        <option value="3840">Preview 3840</option>
+        <option value="2560">Preview 2560</option>
+        <option value="full">Full Preview</option>
+      </select>
+    </div>
+    <div class="zt-control">
+      <label for="fitSelect">Initial Region</label>
+      <select id="fitSelect">
+        <option value="center">Center</option>
+        <option value="upper-left">Upper Left</option>
+        <option value="upper-right">Upper Right</option>
+        <option value="lower-left">Lower Left</option>
+        <option value="lower-right">Lower Right</option>
+      </select>
+    </div>
+    <div class="zt-control">
+      <label>Open Current Photo</label>
+      <button type="button" class="zt-action" onclick="loadFromControls()">Load Comparison</button>
+    </div>
+    <button type="button" onclick="window.location.href='/browse'">Browse</button>
+  </div>
+
+  <div class="zt-error" id="errorBox"></div>
+
+  <div class="zt-meta">
+    <div class="zt-stat"><span>Filename</span><b id="filenameMeta">-</b></div>
+    <div class="zt-stat"><span>Photo Dims</span><b id="photoDimsMeta">-</b></div>
+    <div class="zt-stat"><span>Decoded Dims</span><b id="decodedDimsMeta">-</b></div>
+    <div class="zt-stat"><span>Device Pixel Ratio</span><b id="dprMeta">-</b></div>
+    <div class="zt-stat"><span>Source URL</span><b id="sourceMeta">-</b></div>
+  </div>
+
+  <div class="zt-pan">
+    <label>
+      Region X
+      <input id="panX" type="range" min="0" max="100" value="50" oninput="onPanInput()">
+      <span id="panXVal">50%</span>
+    </label>
+    <label>
+      Region Y
+      <input id="panY" type="range" min="0" max="100" value="50" oninput="onPanInput()">
+      <span id="panYVal">50%</span>
+    </label>
+  </div>
+
+  <div class="zt-grid" id="paneGrid"></div>
+</div>
+
+<script>
+var currentPhoto = null;
+var sourceImage = null;
+var sourceUrl = '';
+var panX = 50;
+var panY = 50;
+
+var strategies = [
+  {
+    key: 'current-css',
+    title: 'Current Lightbox: CSS 1:1',
+    description: 'Fit-sized image layer scaled until one source pixel equals one CSS pixel. This is the current oversized Retina behavior.',
+    mode: 'current',
+    target: 'css'
+  },
+  {
+    key: 'current-device',
+    title: 'Current Lightbox: Device 1:1',
+    description: 'Same fit-sized layer, but DPR-corrected so one source pixel equals one physical display pixel.',
+    mode: 'current',
+    target: 'device'
+  },
+  {
+    key: 'natural-css',
+    title: 'Natural Layout: CSS 1:1',
+    description: 'Image laid out at decoded source-pixel dimensions, then shown with transform scale 1.',
+    mode: 'natural',
+    target: 'css'
+  },
+  {
+    key: 'natural-device',
+    title: 'Natural Layout: Device 1:1',
+    description: 'Image laid out at decoded source-pixel dimensions and scaled by 1 / DPR. This is the likely Lightroom-size target.',
+    mode: 'natural',
+    target: 'device'
+  },
+  {
+    key: 'direct-device',
+    title: 'Direct Image: Device 1:1',
+    description: 'No transform wrapper. The img element is sized directly to decoded pixels / DPR as a baseline.',
+    mode: 'direct',
+    target: 'device'
+  }
+];
+
+function qs(name) {
+  return new URLSearchParams(window.location.search).get(name);
+}
+
+function setError(message) {
+  var box = document.getElementById('errorBox');
+  if (!message) {
+    box.style.display = 'none';
+    box.textContent = '';
+    return;
+  }
+  box.style.display = 'block';
+  box.textContent = message;
+}
+
+function sourceFor(photoId, source) {
+  if (source === 'original') return '/photos/' + photoId + '/original';
+  if (source === 'full') return '/photos/' + photoId + '/full';
+  return '/photos/' + photoId + '/preview?size=' + encodeURIComponent(source);
+}
+
+function formatDims(w, h) {
+  if (!w || !h) return '-';
+  return Math.round(w) + ' x ' + Math.round(h);
+}
+
+function containSize(srcW, srcH, boxW, boxH) {
+  var scale = Math.min(boxW / srcW, boxH / srcH);
+  return {
+    w: srcW * scale,
+    h: srcH * scale,
+    scale: scale
+  };
+}
+
+function setPanForRegion(region) {
+  var x = 50;
+  var y = 50;
+  if (region.indexOf('left') !== -1) x = 20;
+  if (region.indexOf('right') !== -1) x = 80;
+  if (region.indexOf('upper') !== -1) y = 20;
+  if (region.indexOf('lower') !== -1) y = 80;
+  panX = x;
+  panY = y;
+  document.getElementById('panX').value = String(x);
+  document.getElementById('panY').value = String(y);
+  updatePanLabels();
+}
+
+function updatePanLabels() {
+  document.getElementById('panXVal').textContent = Math.round(panX) + '%';
+  document.getElementById('panYVal').textContent = Math.round(panY) + '%';
+}
+
+function onPanInput() {
+  panX = parseFloat(document.getElementById('panX').value) || 50;
+  panY = parseFloat(document.getElementById('panY').value) || 50;
+  updatePanLabels();
+  renderAll();
+}
+
+function viewerClick(e) {
+  var viewer = e.currentTarget;
+  var pane = viewer.closest('.zt-pane');
+  var data = pane && pane._ztRenderData;
+  if (!data || !data.renderedW || !data.renderedH) return;
+  var rect = viewer.getBoundingClientRect();
+  var vx = e.clientX - rect.left;
+  var vy = e.clientY - rect.top;
+  var imageLeft = data.tx;
+  var imageTop = data.ty;
+  var nextX = ((vx - imageLeft) / data.renderedW) * 100;
+  var nextY = ((vy - imageTop) / data.renderedH) * 100;
+  panX = Math.max(0, Math.min(100, nextX));
+  panY = Math.max(0, Math.min(100, nextY));
+  document.getElementById('panX').value = String(panX);
+  document.getElementById('panY').value = String(panY);
+  updatePanLabels();
+  renderAll();
+}
+
+function buildPanes() {
+  var grid = document.getElementById('paneGrid');
+  grid.textContent = '';
+  strategies.forEach(function(strategy) {
+    var pane = document.createElement('section');
+    pane.className = 'zt-pane';
+    pane.dataset.strategy = strategy.key;
+    pane.innerHTML =
+      '<div class="zt-pane-head">' +
+        '<h2 class="zt-pane-title"></h2>' +
+        '<div class="zt-pane-sub"></div>' +
+      '</div>' +
+      '<div class="zt-viewer"><div class="zt-crosshair"></div></div>' +
+      '<div class="zt-info"></div>';
+    pane.querySelector('.zt-pane-title').textContent = strategy.title;
+    pane.querySelector('.zt-pane-sub').textContent = strategy.description;
+    pane.querySelector('.zt-viewer').addEventListener('click', viewerClick);
+    grid.appendChild(pane);
+  });
+}
+
+function makeImage() {
+  var img = document.createElement('img');
+  img.decoding = 'sync';
+  img.loading = 'eager';
+  img.src = sourceUrl;
+  return img;
+}
+
+function renderCurrent(pane, strategy, natW, natH, dpr) {
+  var viewer = pane.querySelector('.zt-viewer');
+  var info = pane.querySelector('.zt-info');
+  var boxW = viewer.clientWidth;
+  var boxH = viewer.clientHeight;
+  var fit = containSize(natW, natH, boxW, boxH);
+  var zoom = strategy.target === 'device' ? natW / (fit.w * dpr) : natW / fit.w;
+  var renderedW = fit.w * zoom;
+  var renderedH = fit.h * zoom;
+  var sourceX = natW * (panX / 100);
+  var sourceY = natH * (panY / 100);
+  var baseX = sourceX * (fit.w / natW);
+  var baseY = sourceY * (fit.h / natH);
+  var tx = boxW / 2 - baseX * zoom;
+  var ty = boxH / 2 - baseY * zoom;
+
+  var surface = document.createElement('div');
+  surface.className = 'zt-surface';
+  surface.style.width = fit.w + 'px';
+  surface.style.height = fit.h + 'px';
+  surface.style.transform = 'translate(' + tx + 'px, ' + ty + 'px) scale(' + zoom + ')';
+  surface.appendChild(makeImage());
+  viewer.appendChild(surface);
+  pane._ztRenderData = { tx: tx, ty: ty, renderedW: renderedW, renderedH: renderedH };
+  info.textContent =
+    'layout: fit layer ' + formatDims(fit.w, fit.h) + '\n' +
+    'transform scale: ' + zoom.toFixed(4) + '\n' +
+    'rendered CSS size: ' + formatDims(renderedW, renderedH) + '\n' +
+    'rendered device size: ' + formatDims(renderedW * dpr, renderedH * dpr);
+}
+
+function renderNatural(pane, strategy, natW, natH, dpr) {
+  var viewer = pane.querySelector('.zt-viewer');
+  var info = pane.querySelector('.zt-info');
+  var boxW = viewer.clientWidth;
+  var boxH = viewer.clientHeight;
+  var scale = strategy.target === 'device' ? 1 / dpr : 1;
+  var renderedW = natW * scale;
+  var renderedH = natH * scale;
+  var sourceX = natW * (panX / 100);
+  var sourceY = natH * (panY / 100);
+  var tx = boxW / 2 - sourceX * scale;
+  var ty = boxH / 2 - sourceY * scale;
+
+  var surface = document.createElement('div');
+  surface.className = 'zt-surface';
+  surface.style.width = natW + 'px';
+  surface.style.height = natH + 'px';
+  surface.style.transform = 'translate(' + tx + 'px, ' + ty + 'px) scale(' + scale + ')';
+  surface.appendChild(makeImage());
+  viewer.appendChild(surface);
+  pane._ztRenderData = { tx: tx, ty: ty, renderedW: renderedW, renderedH: renderedH };
+  info.textContent =
+    'layout: natural source size ' + formatDims(natW, natH) + '\n' +
+    'transform scale: ' + scale.toFixed(4) + '\n' +
+    'rendered CSS size: ' + formatDims(renderedW, renderedH) + '\n' +
+    'rendered device size: ' + formatDims(renderedW * dpr, renderedH * dpr);
+}
+
+function renderDirect(pane, natW, natH, dpr) {
+  var viewer = pane.querySelector('.zt-viewer');
+  var info = pane.querySelector('.zt-info');
+  var boxW = viewer.clientWidth;
+  var boxH = viewer.clientHeight;
+  var renderedW = natW / dpr;
+  var renderedH = natH / dpr;
+  var tx = boxW / 2 - renderedW * (panX / 100);
+  var ty = boxH / 2 - renderedH * (panY / 100);
+  var img = makeImage();
+  img.style.width = renderedW + 'px';
+  img.style.height = renderedH + 'px';
+  img.style.transform = 'translate(' + tx + 'px, ' + ty + 'px)';
+  viewer.appendChild(img);
+  pane._ztRenderData = { tx: tx, ty: ty, renderedW: renderedW, renderedH: renderedH };
+  info.textContent =
+    'layout: img CSS width/height set directly\n' +
+    'transform scale: none\n' +
+    'rendered CSS size: ' + formatDims(renderedW, renderedH) + '\n' +
+    'rendered device size: ' + formatDims(renderedW * dpr, renderedH * dpr);
+}
+
+function renderAll() {
+  if (!sourceImage) return;
+  var natW = sourceImage.naturalWidth;
+  var natH = sourceImage.naturalHeight;
+  var dpr = window.devicePixelRatio || 1;
+
+  strategies.forEach(function(strategy) {
+    var pane = document.querySelector('.zt-pane[data-strategy="' + strategy.key + '"]');
+    var viewer = pane.querySelector('.zt-viewer');
+    Array.from(viewer.children).forEach(function(child) {
+      if (!child.classList.contains('zt-crosshair')) child.remove();
+    });
+    if (strategy.mode === 'current') renderCurrent(pane, strategy, natW, natH, dpr);
+    else if (strategy.mode === 'natural') renderNatural(pane, strategy, natW, natH, dpr);
+    else renderDirect(pane, natW, natH, dpr);
+  });
+}
+
+async function loadFirstPhotoId() {
+  var response = await fetch('/api/photos?per_page=1');
+  if (!response.ok) throw new Error('Could not load photo list');
+  var data = await response.json();
+  if (!data.photos || data.photos.length === 0) throw new Error('No photos found in this workspace');
+  return data.photos[0].id;
+}
+
+async function loadComparison(photoId, source) {
+  setError('');
+  try {
+    if (!photoId) photoId = await loadFirstPhotoId();
+    document.getElementById('photoIdInput').value = String(photoId);
+    var detailResp = await fetch('/api/photos/' + photoId);
+    if (!detailResp.ok) throw new Error('Photo ' + photoId + ' was not found');
+    currentPhoto = await detailResp.json();
+    sourceUrl = sourceFor(photoId, source);
+
+    sourceImage = new Image();
+    sourceImage.decoding = 'sync';
+    await new Promise(function(resolve, reject) {
+      sourceImage.onload = resolve;
+      sourceImage.onerror = function() { reject(new Error('Could not load ' + sourceUrl)); };
+      sourceImage.src = sourceUrl;
+    });
+
+    document.getElementById('filenameMeta').textContent = currentPhoto.filename || String(photoId);
+    document.getElementById('photoDimsMeta').textContent = formatDims(currentPhoto.width, currentPhoto.height);
+    document.getElementById('decodedDimsMeta').textContent = formatDims(sourceImage.naturalWidth, sourceImage.naturalHeight);
+    document.getElementById('dprMeta').textContent = String(window.devicePixelRatio || 1);
+    document.getElementById('sourceMeta').textContent = sourceUrl;
+    renderAll();
+  } catch (err) {
+    setError(err && err.message ? err.message : String(err));
+  }
+}
+
+function loadFromControls() {
+  var idRaw = document.getElementById('photoIdInput').value.trim();
+  var photoId = idRaw ? parseInt(idRaw, 10) : null;
+  if (idRaw && !photoId) {
+    setError('Photo ID must be a number');
+    return;
+  }
+  setPanForRegion(document.getElementById('fitSelect').value);
+  var source = document.getElementById('sourceSelect').value;
+  var params = new URLSearchParams();
+  if (photoId) params.set('photo_id', String(photoId));
+  params.set('source', source);
+  var nextUrl = '/zoom-test?' + params.toString();
+  history.replaceState(null, '', nextUrl);
+  loadComparison(photoId, source);
+}
+
+window.addEventListener('resize', function() {
+  window.clearTimeout(window._ztResizeTimer);
+  window._ztResizeTimer = window.setTimeout(renderAll, 80);
+});
+
+buildPanes();
+updatePanLabels();
+var initialSource = qs('source') || 'original';
+if (['original', '3840', '2560', 'full'].indexOf(initialSource) === -1) initialSource = 'original';
+document.getElementById('sourceSelect').value = initialSource;
+var initialPhoto = qs('photo_id') ? parseInt(qs('photo_id'), 10) : null;
+if (initialPhoto) document.getElementById('photoIdInput').value = String(initialPhoto);
+loadComparison(initialPhoto, initialSource);
+</script>
+</body>
+</html>

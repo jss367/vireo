@@ -1250,6 +1250,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def browse():
         return render_template("browse.html")
 
+    @app.route("/zoom-test")
+    def zoom_test_page():
+        return render_template("zoom_test.html")
+
     @app.route("/review")
     def review():
         return render_template("review.html")
