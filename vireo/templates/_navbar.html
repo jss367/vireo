@@ -4953,6 +4953,17 @@ async function nativeMenuSetWildlifeExcluded(excluded) {
       body: JSON.stringify({excluded: excluded}),
     }, {toast: false});
   }));
+  if (typeof photos !== 'undefined' && Array.isArray(photos)) {
+    ids.forEach(function(id) {
+      var p = photos.find(function(x) { return x.id === id; });
+      if (p) p.wildlife_excluded = excluded ? 1 : 0;
+    });
+    if (typeof refreshGridCards === 'function') refreshGridCards(ids);
+    else if (typeof renderGrid === 'function') renderGrid();
+    if (typeof selectedPhotoId !== 'undefined' && ids.indexOf(selectedPhotoId) !== -1 && typeof loadDetail === 'function') {
+      loadDetail(selectedPhotoId);
+    }
+  }
   if (typeof _lightboxCurrentId !== 'undefined' && ids.indexOf(_lightboxCurrentId) !== -1) {
     _lbCurrentWildlifeExcluded = excluded;
     if (typeof _lbApplyWildlifeExcludedButton === 'function') _lbApplyWildlifeExcludedButton();
