@@ -3706,6 +3706,7 @@ function closeLightbox(e) {
   document.getElementById('lightboxOverlay').classList.remove('active');
   document.getElementById('lightboxImg').src = '';
   document.getElementById('lightboxZoomBadge').style.display = 'none';
+  _lightboxCurrentId = null;
   _lbSetFlagStatus(undefined);
   var detContainer = document.getElementById('lightboxDetections');
   if (detContainer) detContainer.innerHTML = '';
@@ -3926,7 +3927,8 @@ async function lightboxToggleWildlifeExcluded() {
 }
 
 function lightboxDelete() {
-  if (!_lightboxCurrentId) return;
+  var overlay = document.getElementById('lightboxOverlay');
+  if (!_lightboxCurrentId || !overlay || !overlay.classList.contains('active')) return;
   var currentId = _lightboxCurrentId;
   var p = _lightboxPhotoList.find(function(x) { return x.id === currentId; });
   var companionCount = (p && p.companion_path) ? 1 : 0;
@@ -4918,6 +4920,7 @@ async function nativeMenuSetWildlifeExcluded(excluded) {
   }));
   if (typeof _lightboxCurrentId !== 'undefined' && ids.indexOf(_lightboxCurrentId) !== -1) {
     _lbCurrentWildlifeExcluded = excluded;
+    if (typeof _lbApplyWildlifeExcludedButton === 'function') _lbApplyWildlifeExcludedButton();
   }
   nativeMenuInfo(excluded ? 'Excluded from wildlife classification' : 'Marked as wildlife');
 }
@@ -5031,9 +5034,14 @@ window.handleNativeMenuCommand = async function(command) {
         else nativeMenuError('Add to Collection is available from Browse after selecting photos.');
         break;
       case 'photo_delete':
-        if (typeof batchDelete === 'function') batchDelete();
-        else if (typeof lightboxDelete === 'function') lightboxDelete();
-        else nativeMenuError('Delete is available from Browse or Lightbox.');
+        if (typeof batchDelete === 'function') {
+          batchDelete();
+        } else {
+          var lightboxOpen = document.getElementById('lightboxOverlay') &&
+            document.getElementById('lightboxOverlay').classList.contains('active');
+          if (lightboxOpen && typeof lightboxDelete === 'function') lightboxDelete();
+          else nativeMenuError('Delete is available from Browse or an open Lightbox.');
+        }
         break;
       case 'photo_rate_0': await nativeMenuSetRating(0); break;
       case 'photo_rate_1': await nativeMenuSetRating(1); break;

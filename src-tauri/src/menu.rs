@@ -352,6 +352,13 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
 
     let view_menu = view_builder.build()?;
 
+    #[cfg(target_os = "macos")]
+    let reveal_label = "Reveal in Finder";
+    #[cfg(target_os = "windows")]
+    let reveal_label = "Reveal in Explorer";
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let reveal_label = "Show in File Manager";
+
     // -- Photo menu --
     let photo_menu = SubmenuBuilder::new(app, "Photo")
         .item(
@@ -359,7 +366,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id(ids::PHOTO_REVEAL, "Reveal in Finder")
+            &MenuItemBuilder::with_id(ids::PHOTO_REVEAL, reveal_label)
                 .accelerator("CmdOrCtrl+R")
                 .build(app)?,
         )
