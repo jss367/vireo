@@ -4822,13 +4822,22 @@ function nativeMenuRoute(path) {
   window.location.href = path;
 }
 
+function nativeMenuLightboxOpen() {
+  var overlay = document.getElementById('lightboxOverlay');
+  return !!(overlay && overlay.classList.contains('active'));
+}
+
 function nativeMenuActivePhotoIds() {
+  if (
+    nativeMenuLightboxOpen() &&
+    typeof _lightboxCurrentId !== 'undefined' &&
+    _lightboxCurrentId != null
+  ) {
+    return [_lightboxCurrentId];
+  }
   if (typeof getActiveSelection === 'function') {
     var ids = getActiveSelection();
     if (ids && ids.length) return ids;
-  }
-  if (typeof _lightboxCurrentId !== 'undefined' && _lightboxCurrentId != null) {
-    return [_lightboxCurrentId];
   }
   if (typeof selectedPhotoId !== 'undefined' && selectedPhotoId != null) {
     return [selectedPhotoId];
@@ -5038,9 +5047,7 @@ window.handleNativeMenuCommand = async function(command) {
         if (typeof batchDelete === 'function') {
           batchDelete();
         } else {
-          var lightboxOpen = document.getElementById('lightboxOverlay') &&
-            document.getElementById('lightboxOverlay').classList.contains('active');
-          if (lightboxOpen && typeof lightboxDelete === 'function') lightboxDelete();
+          if (nativeMenuLightboxOpen() && typeof lightboxDelete === 'function') lightboxDelete();
           else nativeMenuError('Delete is available from Browse or an open Lightbox.');
         }
         break;
