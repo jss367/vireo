@@ -4360,6 +4360,13 @@ function _lbRecomputeNativeZoom() {
     _lbNativeZoom = null;
     return;
   }
+  if (!_lbPhotoW && !_lbPhotoH && !_lbOriginalUnavailable && _lbCurrentSrcKey !== 'original') {
+    // A preview/full tier can load before the metadata request returns. Do not
+    // treat that tier's decoded size as true 1:1; keep z/click in pending mode
+    // so the later original dimensions can upgrade the zoom accurately.
+    _lbNativeZoom = null;
+    return;
+  }
   var metrics = _lbUpdateLayoutMetrics();
   if (!metrics || !_lbFitScale) {
     _lbNativeZoom = null;
@@ -4471,7 +4478,7 @@ function _lbPickSourceKey() {
   // initial image load completes).
   var dims = _lbLayoutDims();
   if (!dims || !_lbNativeZoom) {
-    return _lbZoom > 1.001 ? 'original' : 'full';
+    return (_lbZoom > 1.001 && !_lbOriginalUnavailable) ? 'original' : 'full';
   }
   var longEdge = Math.max(dims.w, dims.h);
   var displayedLong = longEdge * _lbFitScale * _lbZoom;
@@ -4485,7 +4492,7 @@ function _lbPickSourceKey() {
   if (needed <= fullLongEdge) return 'full';
   if (needed <= 2560) return '2560';
   if (needed <= 3840) return '3840';
-  return 'original';
+  return _lbOriginalUnavailable ? '3840' : 'original';
 }
 
 function _lbSrcUrl(photoId, key) {
