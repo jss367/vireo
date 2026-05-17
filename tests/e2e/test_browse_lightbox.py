@@ -196,6 +196,12 @@ def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server
         "**/photos/*/full",
         lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
     )
+    held_original = {}
+
+    def hold_original(route):
+        held_original["route"] = route
+
+    page.route("**/photos/*/original", hold_original)
 
     url = live_server["url"]
     page.set_viewport_size({"width": 1000, "height": 800})
@@ -246,17 +252,31 @@ def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server
         }"""
     )
     assert upgraded is True
+    if "route" in held_original:
+        held_original.pop("route").abort()
 
 
 def test_browse_lightbox_does_not_retry_original_after_unavailable(live_server, page):
     """After /original fails, source selection should stay on preview/full tiers."""
-    svg = (
+    full_svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="8000" height="4000" '
         'viewBox="0 0 8000 4000"><rect width="8000" height="4000" fill="#246"/></svg>'
     )
+    fallback_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="1920" '
+        'viewBox="0 0 3840 1920"><rect width="3840" height="1920" fill="#642"/></svg>'
+    )
     page.route(
         "**/photos/*/full",
-        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/photos/*/original",
+        lambda route: route.abort(),
+    )
+    page.route(
+        "**/photos/*/preview?size=3840",
+        lambda route: route.fulfill(body=fallback_svg, content_type="image/svg+xml"),
     )
 
     url = live_server["url"]
@@ -292,6 +312,24 @@ def test_browse_lightbox_does_not_retry_original_after_unavailable(live_server, 
 
     assert choices["unknownDimsChoice"] == "full"
     assert choices["largeNeededChoice"] == "3840"
+
+    page.evaluate(
+        """() => {
+            window._lbOriginalUnavailable = false;
+            window._lbZoom = 100;
+            window._lbNativeZoom = 100;
+            window._lbFullLongEdge = 1000;
+            window._lbScheduleSourceSwap();
+        }"""
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbOriginalUnavailable &&
+                   window._lbCurrentSrcKey === '3840' &&
+                   img && img.complete && img.naturalWidth === 3840;
+        }"""
+    )
 
 
 def test_browse_e_f_g_keyboard_modes(live_server, page):

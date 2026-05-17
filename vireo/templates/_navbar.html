@@ -4375,6 +4375,7 @@ function _lbRecomputeNativeZoom() {
   var dpr = window.devicePixelRatio || 1;
   // Guard: very small images (nativeZoom < 1) clamp to 1.0 so fit == 1:1
   _lbNativeZoom = Math.max(1.0, (1 / dpr) / _lbFitScale);
+  _lbApplyTransform();
 }
 
 function _lbSetZoom(newZoom, anchorClientX, anchorClientY) {
@@ -4554,6 +4555,7 @@ function _lbScheduleSourceSwap() {
         _lbOriginalUnavailable = true;
         _lbRecomputeNativeZoom();
         _lbApplyTransform();
+        _lbScheduleSourceSwap();
       }
       // Keep current source on failure
     };
