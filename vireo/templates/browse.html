@@ -3291,6 +3291,9 @@ function selectPhoto(e, id, idx) {
 // cmd/shift-clicks, the single id for a normal click focus. Single-focused
 // photos count as selected for the purposes of batch actions.
 function getActiveSelection() {
+  if (window._vireoNativeMenuPhotoIdsOverride && window._vireoNativeMenuPhotoIdsOverride.length) {
+    return window._vireoNativeMenuPhotoIdsOverride.slice();
+  }
   if (selectedPhotos.size > 0) return Array.from(selectedPhotos);
   if (selectedPhotoId != null) return [selectedPhotoId];
   return [];
@@ -3638,14 +3641,15 @@ function batchAddKeyword() {
 function hideBatchKeywordModal() {
   document.getElementById('batchKeywordModal').classList.remove('open');
   hideKeywordSuggestions('batchKeywordInput');
+  window._vireoNativeMenuPhotoIdsOverride = null;
 }
 
 async function confirmBatchKeyword() {
   var input = document.getElementById('batchKeywordInput');
   var name = input.value.trim();
   if (!name) return;
-  hideBatchKeywordModal();
   var ids = getActiveSelection();
+  hideBatchKeywordModal();
   var state = getKeywordAutocompleteState('batchKeywordInput');
   var selectedKeyword = state.selectedKeyword && state.selectedKeyword.name === name
     ? state.selectedKeyword
@@ -3702,12 +3706,18 @@ var _batchCollectionSelectedId = null;
 
 async function addToCollection() {
   var activeIds = getActiveSelection();
-  if (activeIds.length === 0) return;
+  if (activeIds.length === 0) {
+    window._vireoNativeMenuPhotoIdsOverride = null;
+    return;
+  }
 
   var collections;
   try {
     collections = await safeFetch('/api/collections', {}, { toast: false });
-  } catch(e) { return; }
+  } catch(e) {
+    window._vireoNativeMenuPhotoIdsOverride = null;
+    return;
+  }
 
   _batchCollections = collections;
   _batchCollectionSelectedId = null;
@@ -3736,6 +3746,7 @@ function pickBatchCollection(id) {
 
 function hideBatchCollectionModal() {
   document.getElementById('batchCollectionModal').classList.remove('open');
+  window._vireoNativeMenuPhotoIdsOverride = null;
 }
 
 async function confirmBatchCollection() {

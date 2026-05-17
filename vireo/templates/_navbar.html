@@ -4884,6 +4884,10 @@ function nativeMenuPhotoIdsForWrite() {
   return null;
 }
 
+function nativeMenuSetPhotoIdsOverride(ids) {
+  window._vireoNativeMenuPhotoIdsOverride = ids ? ids.slice() : null;
+}
+
 async function nativeMenuSetRating(rating) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
@@ -4940,6 +4944,9 @@ async function nativeMenuSetWildlifeExcluded(excluded) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
   await Promise.all(ids.map(function(id) {
+    if (typeof window.setWildlifeExcludedFor === 'function') {
+      return window.setWildlifeExcludedFor(id, excluded);
+    }
     return safeFetch('/api/photos/' + id + '/wildlife_excluded', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -5054,12 +5061,24 @@ window.handleNativeMenuCommand = async function(command) {
         else nativeMenuRoute('/compare');
         break;
       case 'photo_add_keyword':
-        if (typeof batchAddKeyword === 'function') batchAddKeyword();
-        else nativeMenuError('Add Keyword is available from Browse after selecting photos.');
+        if (typeof batchAddKeyword === 'function') {
+          var keywordIds = nativeMenuRequirePhotos('Add Keyword');
+          if (!keywordIds) break;
+          nativeMenuSetPhotoIdsOverride(keywordIds);
+          batchAddKeyword();
+        } else {
+          nativeMenuError('Add Keyword is available from Browse after selecting photos.');
+        }
         break;
       case 'photo_add_collection':
-        if (typeof addToCollection === 'function') addToCollection();
-        else nativeMenuError('Add to Collection is available from Browse after selecting photos.');
+        if (typeof addToCollection === 'function') {
+          var collectionIds = nativeMenuRequirePhotos('Add to Collection');
+          if (!collectionIds) break;
+          nativeMenuSetPhotoIdsOverride(collectionIds);
+          addToCollection();
+        } else {
+          nativeMenuError('Add to Collection is available from Browse after selecting photos.');
+        }
         break;
       case 'photo_delete':
         if (nativeMenuLightboxOpen() && typeof lightboxDelete === 'function') {
