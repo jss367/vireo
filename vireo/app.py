@@ -54,7 +54,6 @@ ALL_PAGES = [
     {"id": "pipeline",        "label": "Pipeline",        "href": "/pipeline"},
     {"id": "jobs",            "label": "Jobs",            "href": "/jobs"},
     {"id": "pipeline_review", "label": "Pipeline Review", "href": "/pipeline/review"},
-    {"id": "pipeline_eye_review", "label": "Eye Compare", "href": "/pipeline/eye-review"},
     {"id": "pipeline_rapid_review", "label": "Rapid Review", "href": "/pipeline/rapid-review"},
     {"id": "review",          "label": "Review",          "href": "/review"},
     {"id": "cull",            "label": "Cull",            "href": "/cull"},
@@ -1273,11 +1272,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/pipeline/review")
     def pipeline_review_page():
-        return render_template("pipeline_review.html", pipeline_eye_review=False)
+        return render_template("pipeline_review.html")
 
     @app.route("/pipeline/eye-review")
     def pipeline_eye_review_page():
-        return render_template("pipeline_review.html", pipeline_eye_review=True)
+        return render_template("pipeline_review.html")
 
     @app.route("/pipeline/rapid-review")
     def pipeline_rapid_review_page():

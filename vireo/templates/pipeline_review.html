@@ -6,7 +6,7 @@
 <link rel="icon" type="image/png" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="stylesheet" href="/static/vireo-base.css">
-<title>Vireo - {% if pipeline_eye_review|default(false) %}Eye Compare{% else %}Pipeline Review{% endif %}</title>
+<title>Vireo - Pipeline Review</title>
 <style>
 /* Layout: sidebar + main */
 .pipeline-layout {
@@ -1305,12 +1305,10 @@ input[type="range"]::-moz-range-thumb {
       <a href="/pipeline" class="degraded-banner-link">Open Pipeline</a>
       <button class="degraded-banner-close" onclick="dismissDegradedBanner()" aria-label="Dismiss">&times;</button>
     </div>
-    {% if pipeline_eye_review|default(false) %}
-    <div class="eye-review-banner">
+    <div class="eye-review-banner" id="eyeReviewBanner" style="display:none;">
       Eye Compare experiment: click the large photo to place the eye target, then drag left frames to align each crop.
       <a href="/pipeline/review">Classic review</a>
     </div>
-    {% endif %}
 
     <!-- Summary bar (hidden until data loads) -->
     <div class="summary-bar" id="summaryBar" style="display:none">
@@ -1378,11 +1376,7 @@ input[type="range"]::-moz-range-thumb {
     <!-- Filter bar (hidden until data loads) -->
     <div class="filter-bar" id="filterBar" style="display:none">
       <a class="filter-btn" href="/pipeline/rapid-review" style="text-decoration:none;">Rapid Review</a>
-      {% if pipeline_eye_review|default(false) %}
-      <a class="filter-btn" href="/pipeline/review" style="text-decoration:none;">Classic Review</a>
-      {% else %}
-      <a class="filter-btn" href="/pipeline/eye-review" style="text-decoration:none;">Eye Compare</a>
-      {% endif %}
+      <a class="filter-btn" id="eyeModeFilterLink" href="/pipeline/eye-review" style="text-decoration:none;">Eye Compare</a>
       <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">All<span class="count" id="countAll"></span></button>
       <button class="filter-btn" data-filter="KEEP" onclick="setFilter('KEEP')">Keep<span class="count" id="countKeep"></span></button>
       <button class="filter-btn" data-filter="REVIEW" onclick="setFilter('REVIEW')">Review<span class="count" id="countReview"></span></button>
@@ -1431,9 +1425,9 @@ input[type="range"]::-moz-range-thumb {
 <!-- Group Review Modal -->
 <div class="grm-overlay" id="grmOverlay">
   <div class="grm-header">
-    <h3 id="grmTitle">{% if pipeline_eye_review|default(false) %}Eye Compare Burst Group{% else %}Review Burst Group{% endif %}</h3>
+    <h3 id="grmTitle">Review Burst Group</h3>
     <span id="grmCount" style="font-size:12px;color:var(--text-dim);"></span>
-    <a id="grmModeSwitch" class="grm-mode-switch" href="{% if pipeline_eye_review|default(false) %}/pipeline/review{% else %}/pipeline/eye-review{% endif %}">{% if pipeline_eye_review|default(false) %}Classic Review{% else %}Try Eye Compare{% endif %}</a>
+    <a id="grmModeSwitch" class="grm-mode-switch" href="/pipeline/eye-review">Try Eye Compare</a>
     <button class="grm-close" onclick="closeGroupReview()">&times;</button>
   </div>
   <div class="grm-body">
@@ -1457,7 +1451,7 @@ input[type="range"]::-moz-range-thumb {
         <div class="grm-loupe-crosshair-h" id="grmCrosshairH"></div>
         <div class="grm-loupe-crosshair-v" id="grmCrosshairV"></div>
       </div>
-      <div class="grm-loupe-info" id="grmLoupeInfo">{% if pipeline_eye_review|default(false) %}Select a reference photo. Click the large photo to place the eye target.{% else %}Select a photo to preview. Hover to compare sharpness across all frames.{% endif %}</div>
+      <div class="grm-loupe-info" id="grmLoupeInfo">Select a photo to preview. Hover to compare sharpness across all frames.</div>
       <button type="button" class="grm-reset-offsets-btn" id="grmResetAllOffsets" onclick="grmResetAllOffsets()">Reset pan offsets</button>
       <div class="grm-loupe-detail" id="grmLoupeDetail"></div>
     </div>
@@ -1476,13 +1470,13 @@ input[type="range"]::-moz-range-thumb {
       <input type="range" id="grmResSlider" min="0" max="3" step="1" value="3" oninput="grmSetResolution(this.value)">
       <span id="grmResLabel" style="font-size:11px;color:var(--text-dim);min-width:140px;">1920 · preview</span>
     </div>
-    <span class="grm-hint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; {% if pipeline_eye_review|default(false) %}Click/drag preview to set eye target &nbsp; Drag a thumbnail to align it; double-click to reset{% else %}Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset{% endif %}</span>
+    <span class="grm-hint" id="grmHint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);" title="Apply pick/reject flag changes and species keywords, then close this burst.">Apply flags/species & Close</button>
   </div>
 </div>
 
 <script>
-var PIPELINE_EYE_COMPARE = {{ (pipeline_eye_review|default(false))|tojson }};
+var PIPELINE_EYE_COMPARE = window.location.pathname.indexOf('/pipeline/eye-review') === 0;
 var pipelineResults = null;
 var activeFilter = 'all';
 var minConfidence = 40;
@@ -2716,12 +2710,38 @@ function computeReviewNow() {
 }
 
 function initPipelineReviewPage() {
+  applyPipelineReviewModeChrome();
   initPipelineSidebarState();
   if (isBrowseBurstReviewRequest()) {
     openBrowseBurstReviewFromStorage();
     return;
   }
   loadPipelinePageInit();
+}
+
+function applyPipelineReviewModeChrome() {
+  if (!PIPELINE_EYE_COMPARE) return;
+  document.title = 'Vireo - Eye Compare';
+  var banner = document.getElementById('eyeReviewBanner');
+  if (banner) banner.style.display = 'flex';
+  var filterLink = document.getElementById('eyeModeFilterLink');
+  if (filterLink) {
+    filterLink.href = '/pipeline/review';
+    filterLink.textContent = 'Classic Review';
+  }
+  var modeSwitch = document.getElementById('grmModeSwitch');
+  if (modeSwitch) {
+    modeSwitch.href = '/pipeline/review';
+    modeSwitch.textContent = 'Classic Review';
+  }
+  var loupeInfo = document.getElementById('grmLoupeInfo');
+  if (loupeInfo) {
+    loupeInfo.textContent = 'Select a reference photo. Click the large photo to place the eye target.';
+  }
+  var hint = document.getElementById('grmHint');
+  if (hint) {
+    hint.textContent = 'P = pick   X = reject   ↑↓ move zone   ←→ navigate   Space = unsort   Del = remove   Click/drag preview to set eye target   Drag a thumbnail to align it; double-click to reset';
+  }
 }
 
 function loadPipelinePageInit() {
