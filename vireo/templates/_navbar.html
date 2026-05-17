@@ -2925,12 +2925,121 @@ var _lbCurrentWildlifeExcluded = false;
 var _lbFlagEditSeq = 0;      // increments for local flag writes so stale metadata fetches cannot overwrite the chip
 var _lbOpenSeq = 0;          // increments for every lightbox open so old metadata fetches cannot reapply after reopen
 var _lbFlagPendingWrites = 0;
+var _lbViewportByPhotoId = {};  // per-session lightbox viewport cache keyed by photo id
+var _lbPendingViewportState = null;
 
 function _lbIsOneToOneZoom() {
   if (_lbPending1To1) return true;
   if (!_lbNativeZoom || _lbNativeZoom <= 1.001) return false;
   var tolerance = Math.max(0.01, _lbNativeZoom * 0.01);
   return Math.abs(_lbZoom - _lbNativeZoom) <= tolerance;
+}
+
+function _lbCloneViewportState(state) {
+  if (!state) return null;
+  return {
+    zoom: Number(state.zoom) || 1.0,
+    centerX: Number(state.centerX),
+    centerY: Number(state.centerY),
+    oneToOne: !!state.oneToOne,
+    pending1To1: !!state.pending1To1,
+  };
+}
+
+function _lbViewportStateFromCurrent() {
+  var metrics = _lbUpdateLayoutMetrics();
+  var state = {
+    zoom: _lbZoom || 1.0,
+    centerX: 0.5,
+    centerY: 0.5,
+    oneToOne: _lbIsOneToOneZoom(),
+    pending1To1: !!_lbPending1To1,
+  };
+  var wrap = document.getElementById('lightboxWrap');
+  var t = document.getElementById('lightboxTransform');
+  if (metrics && wrap && t) {
+    var wrapRect = wrap.getBoundingClientRect();
+    var rect = t.getBoundingClientRect();
+    var scale = metrics.scale || 1;
+    if (scale > 0 && metrics.w && metrics.h) {
+      var imgX = (wrapRect.left + wrapRect.width / 2 - rect.left) / scale;
+      var imgY = (wrapRect.top + wrapRect.height / 2 - rect.top) / scale;
+      state.centerX = Math.max(0, Math.min(1, imgX / metrics.w));
+      state.centerY = Math.max(0, Math.min(1, imgY / metrics.h));
+    }
+  }
+  return state;
+}
+
+function _lbSaveViewportState(photoId) {
+  if (photoId == null) return null;
+  var state = _lbViewportStateFromCurrent();
+  _lbViewportByPhotoId[String(photoId)] = state;
+  return _lbCloneViewportState(state);
+}
+
+function _lbViewportStateForOpen(photoId, fallbackState) {
+  var key = String(photoId);
+  if (Object.prototype.hasOwnProperty.call(_lbViewportByPhotoId, key)) {
+    return _lbCloneViewportState(_lbViewportByPhotoId[key]);
+  }
+  return _lbCloneViewportState(fallbackState);
+}
+
+function _lbApplyViewportState(state) {
+  state = _lbCloneViewportState(state);
+  if (!state) return false;
+  var metrics = _lbUpdateLayoutMetrics();
+  if (!metrics) return false;
+  var wrap = document.getElementById('lightboxWrap');
+  if (!wrap) return false;
+
+  var maxZoom = _lbNativeZoom ? _lbNativeZoom * 4 : 4;
+  var targetZoom = state.zoom || 1.0;
+  if (state.oneToOne) {
+    if (_lbNativeZoom) {
+      targetZoom = _lbNativeZoom;
+      _lbPending1To1 = false;
+    } else {
+      _lbPending1To1 = true;
+      targetZoom = Math.max(1.0, targetZoom);
+    }
+  } else {
+    _lbPending1To1 = false;
+  }
+  targetZoom = Math.max(1.0, Math.min(maxZoom, targetZoom));
+  _lbZoom = targetZoom;
+
+  if (_lbZoom <= 1.001) {
+    _lbPanX = 0;
+    _lbPanY = 0;
+  } else {
+    var scale = _lbFitScale * _lbZoom;
+    var centerX = Number.isFinite(state.centerX) ? state.centerX : 0.5;
+    var centerY = Number.isFinite(state.centerY) ? state.centerY : 0.5;
+    centerX = Math.max(0, Math.min(1, centerX));
+    centerY = Math.max(0, Math.min(1, centerY));
+    var baseLeft = (metrics.wrapW - metrics.w * scale) / 2;
+    var baseTop = (metrics.wrapH - metrics.h * scale) / 2;
+    _lbPanX = (metrics.wrapW / 2) - (centerX * metrics.w * scale) - baseLeft;
+    _lbPanY = (metrics.wrapH / 2) - (centerY * metrics.h * scale) - baseTop;
+    _lbClampPan();
+  }
+
+  wrap.classList.toggle('zoomed', _lbZoom > 1.001);
+  _lbApplyTransform();
+  _lbScheduleSourceSwap();
+  return true;
+}
+
+function _lbTryApplyPendingViewportState() {
+  if (!_lbPendingViewportState) return false;
+  var state = _lbPendingViewportState;
+  if (!_lbApplyViewportState(state)) return false;
+  if (!state.oneToOne || _lbNativeZoom) {
+    _lbPendingViewportState = null;
+  }
+  return true;
 }
 
 function _lbApplyPendingOneToOneZoom() {
@@ -3392,15 +3501,29 @@ function _lbLoadMaskVariants(photoId) {
 
 function openLightbox(photoId, filename, photoList, options) {
   var alreadyOpen = !!window._lbEscToken;
+  options = options || {};
+  var fallbackViewportState = options.fallbackViewportState || null;
+  if (alreadyOpen && _lightboxCurrentId != null) {
+    _lbSaveViewportState(_lightboxCurrentId);
+  }
   if (alreadyOpen) Keymap.popEsc(window._lbEscToken);
   window._lbEscToken = Keymap.pushEsc(function() { closeLightbox(); });
   if (!alreadyOpen) Keymap.lockBodyScroll();
   _lbOpenSeq += 1;
   var openSeq = _lbOpenSeq;
-  options = options || {};
   var preserveOneToOne = !!options.preserveOneToOne;
-  var transitionZoom = preserveOneToOne
-    ? Math.max(1.0, _lbZoom || _lbNativeZoom || 1.0)
+  var restoreViewportState = _lbViewportStateForOpen(photoId, fallbackViewportState);
+  if (!restoreViewportState && preserveOneToOne) {
+    restoreViewportState = {
+      zoom: Math.max(1.0, _lbZoom || _lbNativeZoom || 1.0),
+      centerX: 0.5,
+      centerY: 0.5,
+      oneToOne: true,
+      pending1To1: true,
+    };
+  }
+  var transitionZoom = restoreViewportState
+    ? Math.max(1.0, restoreViewportState.zoom || 1.0)
     : 1.0;
 
   _lightboxCurrentId = photoId;
@@ -3437,9 +3560,10 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbNativeZoom = null;
   _lbPhotoW = null;
   _lbPhotoH = null;
-  _lbCurrentSrcKey = preserveOneToOne ? 'original' : 'full';
+  _lbCurrentSrcKey = (restoreViewportState && restoreViewportState.zoom > 1.001) ? 'original' : 'full';
   _lbFullLongEdge = null;
-  _lbPending1To1 = preserveOneToOne;
+  _lbPending1To1 = !!(restoreViewportState && (restoreViewportState.oneToOne || restoreViewportState.pending1To1));
+  _lbPendingViewportState = restoreViewportState;
   _lbOriginalUnavailable = false;
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
@@ -3457,7 +3581,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbApplyWildlifeExcludedButton();
       _lbRecordFetchedFlag(photoId, data.flag, flagFetchSeq);
       _lbRecomputeNativeZoom();
-      _lbApplyPendingOneToOneZoom();
+      if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
       _lbRenderEyeCrosshair(data);
     })
     .catch(function() {});
@@ -3478,7 +3602,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbPhotoH = img.naturalHeight;
     }
     _lbRecomputeNativeZoom();
-    _lbApplyPendingOneToOneZoom();
+    if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
     _lbApplyTransform();
   }
   function handleInitialImageError() {
@@ -3544,8 +3668,10 @@ function lightboxNav(delta) {
   if (idx === -1) return;
   var newIdx = idx + delta;
   if (newIdx < 0 || newIdx >= _lightboxPhotoList.length) return;
+  var currentViewportState = _lbSaveViewportState(_lightboxCurrentId);
   var next = _lightboxPhotoList[newIdx];
   openLightbox(next.id, next.filename, _lightboxPhotoList, {
+    fallbackViewportState: currentViewportState,
     preserveOneToOne: _lbIsOneToOneZoom()
   });
 }
@@ -3694,12 +3820,15 @@ function toggleLightboxZoom(e) {
       // Single click without dragging = zoom out to fit
       _lbSetZoom(1.0, null, null);
       window._lightboxZoomHandled = true;
+    } else if (didDrag) {
+      _lbSaveViewportState(_lightboxCurrentId);
     }
   });
 })();
 
 function closeLightbox(e) {
   if (e && e.target && e.target.tagName === 'IMG') return;
+  if (_lightboxCurrentId != null) _lbSaveViewportState(_lightboxCurrentId);
   var wasOpen = !!window._lbEscToken;
   if (wasOpen) { Keymap.popEsc(window._lbEscToken); window._lbEscToken = null; }
   var wrap = document.getElementById('lightboxWrap');
@@ -3707,6 +3836,7 @@ function closeLightbox(e) {
   _lbZoom = 1.0;
   _lbPanX = 0;
   _lbPanY = 0;
+  _lbPendingViewportState = null;
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
   _lbApplyTransform();
@@ -4398,6 +4528,7 @@ function _lbSetZoom(newZoom, anchorClientX, anchorClientY) {
     wrap.classList.toggle('zoomed', _lbZoom > 1.001);
     _lbApplyTransform();
     _lbScheduleSourceSwap();
+    _lbSaveViewportState(_lightboxCurrentId);
     return;
   }
   // Cursor at clientX has image-local coord (clientX - rect.left) / scale.
@@ -4433,6 +4564,7 @@ function _lbSetZoom(newZoom, anchorClientX, anchorClientY) {
   wrap.classList.toggle('zoomed', _lbZoom > 1.001);
   _lbApplyTransform();
   _lbScheduleSourceSwap();
+  _lbSaveViewportState(_lightboxCurrentId);
 }
 
 function _lbClampPan() {

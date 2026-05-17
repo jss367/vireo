@@ -81,6 +81,79 @@ def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
     assert page.evaluate("window._lbZoom") > 1.001
 
 
+def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page):
+    """Arrow navigation preserves pan/zoom per photo and carries it to unseen photos."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/>'
+        '<circle cx="1000" cy="1400" r="180" fill="#fff"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/photos/*/original",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 4000;
+        }"""
+    )
+
+    first_view = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            window._lbApplyViewportState({zoom: 2.2, centerX: 0.24, centerY: 0.70});
+            window._lbSaveViewportState(window._lightboxCurrentId);
+            return window._lbViewportStateFromCurrent();
+        }"""
+    )
+
+    page.locator("[title='Next (→)']").click()
+    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    page.wait_for_function("window._lbPendingViewportState === null")
+    carried_view = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            window._lbTryApplyPendingViewportState();
+            return window._lbViewportStateFromCurrent();
+        }"""
+    )
+    assert abs(carried_view["zoom"] - first_view["zoom"]) < 0.05
+    assert abs(carried_view["centerX"] - first_view["centerX"]) < 0.03
+    assert abs(carried_view["centerY"] - first_view["centerY"]) < 0.03
+
+    page.evaluate(
+        """() => {
+            window._lbApplyViewportState({zoom: 2.2, centerX: 0.78, centerY: 0.30});
+            window._lbSaveViewportState(window._lightboxCurrentId);
+        }"""
+    )
+    page.locator("[title='Previous (←)']").click()
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
+    page.wait_for_function("window._lbPendingViewportState === null")
+    restored_view = page.evaluate("window._lbViewportStateFromCurrent()")
+    assert abs(restored_view["zoom"] - first_view["zoom"]) < 0.05
+    assert abs(restored_view["centerX"] - first_view["centerX"]) < 0.03
+    assert abs(restored_view["centerY"] - first_view["centerY"]) < 0.03
+
+
 def test_browse_lightbox_one_to_one_nav_falls_back_when_original_fails(live_server, page):
     """1:1 arrow navigation falls back to /full when the original is unavailable."""
     image_body = base64.b64decode(_PNG_1X1)
