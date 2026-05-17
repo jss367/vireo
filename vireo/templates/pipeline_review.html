@@ -3331,6 +3331,69 @@ function findBurstForPhoto(photoId) {
   return null;
 }
 
+function grmNormalizePhotoId(photoId) {
+  var id = parseInt(photoId, 10);
+  return Number.isInteger(id) ? id : null;
+}
+
+function grmSelectablePhotoId(items, photoId, removedSet) {
+  var id = grmNormalizePhotoId(photoId);
+  if (id == null) return null;
+  if (removedSet && removedSet.has(id)) return null;
+  return items.some(function(p) { return p.id === id; }) ? id : null;
+}
+
+function grmFirstSelectablePhotoId(items, removedSet) {
+  for (var i = 0; i < items.length; i++) {
+    if (!removedSet || !removedSet.has(items[i].id)) return items[i].id;
+  }
+  return null;
+}
+
+function grmFallbackSelectionId(items, preferredId) {
+  var removedSet = grmState && grmState.removed ? grmState.removed : null;
+  return grmSelectablePhotoId(items, preferredId, removedSet) || grmFirstSelectablePhotoId(items, removedSet);
+}
+
+function grmCurrentSelectionId(items) {
+  var removedSet = grmState && grmState.removed ? grmState.removed : null;
+  var selected = grmSelectablePhotoId(items, grmState && grmState.selected, removedSet);
+  if (selected != null) return selected;
+  if (grmState && grmState.selectedIds) {
+    var selectedIds = Array.from(grmState.selectedIds);
+    for (var i = 0; i < selectedIds.length; i++) {
+      var id = grmSelectablePhotoId(items, selectedIds[i], removedSet);
+      if (id != null) return id;
+    }
+  }
+  return null;
+}
+
+function grmRenderKeepingCurrentSelection(items, fallbackId) {
+  var currentId = grmCurrentSelectionId(items);
+  if (currentId != null) {
+    if (!grmState.selectedIds) grmState.selectedIds = new Set();
+    if (!grmState.selectedIds.has(currentId)) grmState.selectedIds.add(currentId);
+    grmState.selected = currentId;
+    if (!grmState.selectionAnchor) grmState.selectionAnchor = currentId;
+    renderGroupModal();
+    grmRefreshSelectedLoupe();
+    return;
+  }
+
+  var nextId = grmFallbackSelectionId(items, fallbackId);
+  if (nextId != null) {
+    grmSelect(nextId);
+    return;
+  }
+
+  grmState.selected = null;
+  if (grmState.selectedIds) grmState.selectedIds.clear();
+  grmState.selectionAnchor = null;
+  renderGroupModal();
+  grmRefreshSelectedLoupe();
+}
+
 function openRequestedGroupReviewFromUrl() {
   if (!pipelineResults) return;
   var params = new URLSearchParams(window.location.search || '');
@@ -3366,7 +3429,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   // Bump the session id so any in-flight /group/state fetch from a previous
   // openGroupReview call lands as stale and gets ignored when it resolves.
   var sessionId = (grmState.sessionId || 0) + 1;
-  var initialSelectedId = selectPhotoId || (items[0] && items[0].id) || null;
+  var initialSelectedId = grmSelectablePhotoId(items, selectPhotoId, null) || grmFirstSelectablePhotoId(items, null);
   var initialSelectedIds = new Set();
   if (initialSelectedId) initialSelectedIds.add(initialSelectedId);
 
@@ -3469,21 +3532,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
 // flags from a degraded snapshot.
 function grmShowSeedError(items, selectPhotoId) {
   grmState.dbState = {};
-  var initSelect = selectPhotoId || (items[0] && items[0].id);
-  if (
-    initSelect &&
-    grmState.selected === initSelect &&
-    grmState.selectedIds &&
-    grmState.selectedIds.size === 1 &&
-    grmState.selectedIds.has(initSelect)
-  ) {
-    renderGroupModal();
-    grmRefreshSelectedLoupe();
-  } else if (initSelect) {
-    grmSelect(initSelect);
-  } else {
-    renderGroupModal();
-  }
+  grmRenderKeepingCurrentSelection(items, selectPhotoId);
   var btn = document.getElementById('grmApplyBtn');
   if (btn) {
     btn.disabled = true;
@@ -3510,13 +3559,17 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
     }
   });
 
-  var initSelect = selectPhotoId;
-  if (!initSelect) {
+  var initSelect = grmSelectablePhotoId(items, selectPhotoId, grmState.removed);
+  if (initSelect == null) {
     var firstSelected = null;
     items.forEach(function(p) {
-      if (firstSelected == null && (grmState.picks.has(p.id) || grmState.rejects.has(p.id))) firstSelected = p.id;
+      if (
+        firstSelected == null &&
+        !grmState.removed.has(p.id) &&
+        (grmState.picks.has(p.id) || grmState.rejects.has(p.id))
+      ) firstSelected = p.id;
     });
-    initSelect = firstSelected || (items[0] && items[0].id);
+    initSelect = firstSelected || grmFirstSelectablePhotoId(items, grmState.removed);
   }
   // Mark the modal seeded *before* re-rendering so grmUpdateApplyLabel
   // (called from renderGroupModal) re-enables the button.
@@ -3528,20 +3581,7 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
     applyBtn.style.cursor = '';
   }
 
-  if (
-    initSelect &&
-    grmState.selected === initSelect &&
-    grmState.selectedIds &&
-    grmState.selectedIds.size === 1 &&
-    grmState.selectedIds.has(initSelect)
-  ) {
-    renderGroupModal();
-    grmRefreshSelectedLoupe();
-  } else if (initSelect) {
-    grmSelect(initSelect);
-  } else {
-    renderGroupModal();
-  }
+  grmRenderKeepingCurrentSelection(items, initSelect);
   grmUpdateApplyLabel();
 }
 
