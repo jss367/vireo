@@ -21,6 +21,26 @@ fn open_in_browser(app: &tauri::AppHandle, url: &str) {
     }
 }
 
+fn dispatch_menu_command(app: &tauri::AppHandle, command: &str) {
+    if tray::is_browser_mode(app) {
+        log::warn!(
+            "Native menu command '{}' ignored because Vireo is running in browser mode",
+            command
+        );
+        return;
+    }
+
+    if let Some(window) = app.get_webview_window("main") {
+        let js = format!(
+            "if (window.handleNativeMenuCommand) {{ window.handleNativeMenuCommand({:?}); }}",
+            command
+        );
+        if let Err(e) = window.eval(&js) {
+            log::error!("Failed to dispatch menu command {}: {}", command, e);
+        }
+    }
+}
+
 #[tauri::command]
 fn get_server_port(state: tauri::State<'_, SidecarState>) -> u16 {
     state.port
@@ -174,6 +194,11 @@ pub fn run() {
             // also route to the browser.
             if id == menu::ids::OPEN_IN_BROWSER {
                 tray::open_ui_in_browser(app);
+                return;
+            }
+
+            if let Some(command) = menu::command_for_id(id) {
+                dispatch_menu_command(app, command);
                 return;
             }
 
