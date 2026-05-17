@@ -4887,6 +4887,17 @@ function nativeMenuPhotoIdsForWrite() {
 async function nativeMenuSetRating(rating) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
+  if (ids.length === 1 && nativeMenuLightboxOpen()) {
+    if (typeof setRatingFor === 'function') {
+      await setRatingFor(ids[0], rating);
+      return;
+    }
+    if (typeof setReviewRating === 'function') {
+      setReviewRating(ids[0], rating);
+      nativeMenuInfo('Rating updated');
+      return;
+    }
+  }
   if (typeof batchSetRating === 'function') {
     await batchSetRating(rating);
     return;
@@ -4902,12 +4913,19 @@ async function nativeMenuSetRating(rating) {
 async function nativeMenuSetFlag(flag) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
+  if (ids.length === 1 && nativeMenuLightboxOpen()) {
+    if (typeof _lbApplyFlag === 'function' && ids[0] === _lightboxCurrentId) {
+      _lbApplyFlag(ids[0], flag);
+      return;
+    }
+    if (typeof setReviewFlag === 'function') {
+      await setReviewFlag(ids[0], flag);
+      nativeMenuInfo('Flag updated');
+      return;
+    }
+  }
   if (typeof batchSetFlag === 'function') {
     await batchSetFlag(flag);
-    return;
-  }
-  if (ids.length === 1 && typeof _lbApplyFlag === 'function' && ids[0] === _lightboxCurrentId) {
-    _lbApplyFlag(ids[0], flag);
     return;
   }
   if (ids.length === 1 && typeof setReviewFlag === 'function') {
@@ -5044,11 +5062,12 @@ window.handleNativeMenuCommand = async function(command) {
         else nativeMenuError('Add to Collection is available from Browse after selecting photos.');
         break;
       case 'photo_delete':
-        if (typeof batchDelete === 'function') {
+        if (nativeMenuLightboxOpen() && typeof lightboxDelete === 'function') {
+          lightboxDelete();
+        } else if (typeof batchDelete === 'function') {
           batchDelete();
         } else {
-          if (nativeMenuLightboxOpen() && typeof lightboxDelete === 'function') lightboxDelete();
-          else nativeMenuError('Delete is available from Browse or an open Lightbox.');
+          nativeMenuError('Delete is available from Browse or an open Lightbox.');
         }
         break;
       case 'photo_rate_0': await nativeMenuSetRating(0); break;
