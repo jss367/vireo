@@ -4710,10 +4710,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         for raw in regions:
             if not isinstance(raw, dict):
+                results.append({
+                    "photo_id": None,
+                    "sharpness": None,
+                    "error": "region must be an object",
+                })
+                continue
+            raw_photo_id = raw.get("photo_id")
+            if isinstance(raw_photo_id, bool):
+                results.append({
+                    "photo_id": None,
+                    "sharpness": None,
+                    "error": "invalid photo_id",
+                })
                 continue
             try:
-                photo_id = int(raw.get("photo_id"))
+                photo_id = int(raw_photo_id)
             except (TypeError, ValueError):
+                results.append({
+                    "photo_id": None,
+                    "sharpness": None,
+                    "error": "invalid photo_id",
+                })
                 continue
             photo = db.get_photo(photo_id, verify_workspace=True)
             if not photo:
@@ -4735,27 +4753,47 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 continue
 
             def _float(name, default, region=raw):
+                raw_value = region.get(name, default)
                 try:
-                    return float(region.get(name, default))
+                    value = float(raw_value)
                 except (TypeError, ValueError):
-                    return default
+                    raise ValueError(f"invalid {name}") from None
+                if not math.isfinite(value):
+                    raise ValueError(f"invalid {name}")
+                return value
 
-            source_w = _float("source_w", photo["width"] or img.width)
-            source_h = _float("source_h", photo["height"] or img.height)
+            try:
+                source_w = _float("source_w", photo["width"] or img.width)
+                source_h = _float("source_h", photo["height"] or img.height)
+                x = _float("x", 0)
+                y = _float("y", 0)
+                w = _float("w", source_w)
+                h = _float("h", source_h)
+            except ValueError as exc:
+                results.append({
+                    "photo_id": photo_id,
+                    "sharpness": None,
+                    "error": str(exc),
+                })
+                continue
+
             if source_w <= 0 or source_h <= 0:
                 source_w, source_h = img.width, img.height
 
-            x = _float("x", 0)
-            y = _float("y", 0)
-            w = _float("w", source_w)
-            h = _float("h", source_h)
-
             scale_x = img.width / source_w
             scale_y = img.height / source_h
-            ix = max(0, min(img.width - 1, int(round(x * scale_x))))
-            iy = max(0, min(img.height - 1, int(round(y * scale_y))))
-            iw = max(1, int(round(w * scale_x)))
-            ih = max(1, int(round(h * scale_y)))
+            try:
+                ix = max(0, min(img.width - 1, int(round(x * scale_x))))
+                iy = max(0, min(img.height - 1, int(round(y * scale_y))))
+                iw = max(1, int(round(w * scale_x)))
+                ih = max(1, int(round(h * scale_y)))
+            except OverflowError:
+                results.append({
+                    "photo_id": photo_id,
+                    "sharpness": None,
+                    "error": "invalid region bounds",
+                })
+                continue
             if ix + iw > img.width:
                 iw = img.width - ix
             if iy + ih > img.height:

@@ -3829,17 +3829,13 @@ function grmRefreshSelectedLoupe() {
     if (photo) {
       var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
       var boxSharp = photo.box_sharpness != null ? ' - box sharpness: ' + Math.round(photo.box_sharpness) : '';
-      loupeInfo.textContent = PIPELINE_EYE_COMPARE
-        ? (photo.filename || '') + ' - sharpness: ' + sharp + boxSharp + ' - click/drag to set eye target'
-        : (photo.filename || '') + ' - sharpness: ' + sharp + boxSharp + ' - move cursor to compare';
+      loupeInfo.textContent = (photo.filename || '') + ' - sharpness: ' + sharp + boxSharp + ' - move cursor to compare';
       detailEl.innerHTML = buildPipelineMetadataHtml(photo);
     }
     grmUpdateResLabel();
   } else {
     loupeImg.removeAttribute('src');
-    loupeInfo.textContent = PIPELINE_EYE_COMPARE
-      ? 'Select a reference photo. Click the large photo to place the eye target.'
-      : 'Select a photo to preview. Hover to compare sharpness across all frames.';
+    loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
     detailEl.innerHTML = '';
     grmLoupeReset();
   }
@@ -4335,10 +4331,16 @@ function grmVisibleRegionForCard(card) {
   var scale = t.scale || 1;
   var W = t.w || (parseFloat(card.dataset.natW) || GRM_CARD_W);
   var H = t.h || (parseFloat(card.dataset.natH) || GRM_CARD_H);
-  var x = Math.max(0, -t.tx / scale);
-  var y = Math.max(0, -t.ty / scale);
-  var w = Math.min(W - x, GRM_CARD_W / scale);
-  var h = Math.min(H - y, GRM_CARD_H / scale);
+  var left = -t.tx / scale;
+  var top = -t.ty / scale;
+  var right = left + (GRM_CARD_W / scale);
+  var bottom = top + (GRM_CARD_H / scale);
+  var x = Math.max(0, left);
+  var y = Math.max(0, top);
+  right = Math.min(W, right);
+  bottom = Math.min(H, bottom);
+  var w = right - x;
+  var h = bottom - y;
   return {
     photo_id: parseInt(card.dataset.photoId, 10),
     x: x,
@@ -4368,7 +4370,7 @@ async function grmCalculateBoxSharpness() {
     (data.results || []).forEach(function(r) { byPhoto[r.photo_id] = r; });
     grmState.items.forEach(function(photo) {
       var r = byPhoto[photo.id];
-      if (r && r.sharpness != null) photo.box_sharpness = r.sharpness;
+      photo.box_sharpness = (r && r.sharpness != null) ? r.sharpness : null;
     });
     renderGroupModal();
     grmRefreshSelectedLoupe();

@@ -245,6 +245,7 @@ def test_burst_modal_resolution_and_right_zoom_controls(live_server, page, tmp_p
 
 
 def test_burst_modal_scores_visible_box_sharpness(live_server, page, tmp_path):
+    """Box sharpness scoring should render results without changing selection."""
     db = live_server["db"]
     n = _seed_burst_with_real_photos(db, tmp_path)
     if n < 1:
@@ -276,6 +277,9 @@ def test_burst_modal_scores_visible_box_sharpness(live_server, page, tmp_path):
 
     expect(page.locator("#grmBoxSharpnessBtn")).to_be_visible()
     page.locator("#grmBoxSharpnessBtn").click()
+    page.locator(".grm-card-scores", has_text="Box:").first.wait_for(
+        state="visible", timeout=5000
+    )
     expect(page.locator(".grm-card-scores", has_text="Box:")).to_have_count(n)
 
     if cards.count() >= 2:

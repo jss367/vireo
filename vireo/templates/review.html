@@ -1864,8 +1864,6 @@ function grmPhotoUrl(photoId) {
 }
 
 function grmLoupePhotoUrl(photoId) {
-  var stop = GRM_RES_STOPS[grmResolutionIdx] || GRM_RES_STOPS[1];
-  if (stop.kind === 'thumb') return '/photos/' + photoId + '/full';
   return grmPhotoUrl(photoId);
 }
 
@@ -2297,10 +2295,16 @@ function grmVisibleRegionForCard(card) {
   var scale = t.scale || 1;
   var W = t.w || (parseFloat(card.dataset.natW) || GRM_CARD_W);
   var H = t.h || (parseFloat(card.dataset.natH) || GRM_CARD_H);
-  var x = Math.max(0, -t.tx / scale);
-  var y = Math.max(0, -t.ty / scale);
-  var w = Math.min(W - x, GRM_CARD_W / scale);
-  var h = Math.min(H - y, GRM_CARD_H / scale);
+  var left = -t.tx / scale;
+  var top = -t.ty / scale;
+  var right = left + (GRM_CARD_W / scale);
+  var bottom = top + (GRM_CARD_H / scale);
+  var x = Math.max(0, left);
+  var y = Math.max(0, top);
+  right = Math.min(W, right);
+  bottom = Math.min(H, bottom);
+  var w = right - x;
+  var h = bottom - y;
   return {
     photo_id: parseInt(card.dataset.photoId, 10),
     x: x,
@@ -2331,7 +2335,7 @@ async function grmCalculateBoxSharpness() {
     (data.results || []).forEach(function(r) { byPhoto[r.photo_id] = r; });
     grmState.items.forEach(function(item) {
       var r = byPhoto[item.photo_id];
-      if (r && r.sharpness != null) item.box_sharpness = r.sharpness;
+      item.box_sharpness = (r && r.sharpness != null) ? r.sharpness : null;
     });
     renderGroupModal();
     grmRefreshSelectedLoupe();
