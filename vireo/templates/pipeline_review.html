@@ -2720,18 +2720,37 @@ function initPipelineReviewPage() {
 }
 
 function applyPipelineReviewModeChrome() {
-  if (!PIPELINE_EYE_COMPARE) return;
-  document.title = 'Vireo - Eye Compare';
+  var preserveBrowseBurst = isBrowseBurstReviewRequest();
+  var classicPath = '/pipeline/review' + (preserveBrowseBurst ? '?browse_burst=1' : '');
+  var eyeComparePath = '/pipeline/eye-review' + (preserveBrowseBurst ? '?browse_burst=1' : '');
   var banner = document.getElementById('eyeReviewBanner');
-  if (banner) banner.style.display = 'flex';
   var filterLink = document.getElementById('eyeModeFilterLink');
+  var modeSwitch = document.getElementById('grmModeSwitch');
+
+  if (!PIPELINE_EYE_COMPARE) {
+    if (filterLink) {
+      filterLink.href = eyeComparePath;
+    }
+    if (modeSwitch) {
+      modeSwitch.href = eyeComparePath;
+    }
+    return;
+  }
+
+  document.title = 'Vireo - Eye Compare';
+  if (banner) {
+    banner.style.display = 'flex';
+    var bannerLink = banner.querySelector('a');
+    if (bannerLink) {
+      bannerLink.href = classicPath;
+    }
+  }
   if (filterLink) {
-    filterLink.href = '/pipeline/review';
+    filterLink.href = classicPath;
     filterLink.textContent = 'Classic Review';
   }
-  var modeSwitch = document.getElementById('grmModeSwitch');
   if (modeSwitch) {
-    modeSwitch.href = '/pipeline/review';
+    modeSwitch.href = classicPath;
     modeSwitch.textContent = 'Classic Review';
   }
   var loupeInfo = document.getElementById('grmLoupeInfo');
@@ -3291,7 +3310,10 @@ function openBrowseBurstReviewFromStorage() {
     // path must remain recoverable — both via the in-page Reopen button and
     // via a plain reload. clearBrowseBurstHandoff() runs only once the user
     // applies (workflow complete) or we fall back to normal review.
-    openGroupReview(0, 0, loadedIds[0]);
+    var params = new URLSearchParams(window.location.search || '');
+    var requestedPhotoId = params.has('photo') ? parseInt(params.get('photo'), 10) : null;
+    var initialPhotoId = loadedIds.indexOf(requestedPhotoId) !== -1 ? requestedPhotoId : loadedIds[0];
+    openGroupReview(0, 0, initialPhotoId);
   }).catch(function() {
     fallbackToNormalPipelineReview('Could not open burst review — showing the latest pipeline review instead.');
   });
@@ -3538,6 +3560,9 @@ function grmUpdateModeSwitchLink() {
   if (!link || !grmState) return;
   var path = PIPELINE_EYE_COMPARE ? '/pipeline/review' : '/pipeline/eye-review';
   var params = new URLSearchParams();
+  if (grmState.source === 'browse-selection' || isBrowseBurstReviewRequest()) {
+    params.set('browse_burst', '1');
+  }
   if (Number.isInteger(grmState.encIdx)) params.set('enc', String(grmState.encIdx));
   if (Number.isInteger(grmState.burstIdx)) params.set('burst', String(grmState.burstIdx));
   if (grmState.selected) params.set('photo', String(grmState.selected));
