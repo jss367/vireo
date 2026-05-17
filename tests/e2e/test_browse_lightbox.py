@@ -113,6 +113,68 @@ def test_browse_lightbox_one_to_one_nav_falls_back_when_original_fails(live_serv
     assert "/full" in page.locator("#lightboxImg").get_attribute("src")
 
 
+def test_browse_lightbox_one_to_one_uses_device_pixels_and_natural_layout(live_server, page):
+    """1:1 uses natural image coordinates and maps source pixels to device pixels."""
+    page.add_init_script(
+        "Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });"
+    )
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#3a7"/>'
+        '<path d="M0 0L4000 2000M4000 0L0 2000" stroke="#fff" stroke-width="12"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/photos/*/original",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 4000 && window._lbNativeZoom > 1;
+        }"""
+    )
+
+    page.keyboard.press("z")
+    metrics = page.evaluate(
+        """() => {
+            const t = document.getElementById('lightboxTransform');
+            const rect = t.getBoundingClientRect();
+            return {
+                dpr: window.devicePixelRatio,
+                zoom: window._lbZoom,
+                nativeZoom: window._lbNativeZoom,
+                fitScale: window._lbFitScale,
+                styleWidth: t.style.width,
+                styleHeight: t.style.height,
+                rectWidth: rect.width,
+                rectHeight: rect.height,
+            };
+        }"""
+    )
+
+    expected_native_zoom = (1 / metrics["dpr"]) / metrics["fitScale"]
+    assert abs(metrics["nativeZoom"] - expected_native_zoom) < 0.01
+    assert abs(metrics["zoom"] - metrics["nativeZoom"]) < 0.01
+    assert metrics["styleWidth"] == "4000px"
+    assert metrics["styleHeight"] == "2000px"
+    assert abs(metrics["rectWidth"] - 2000) < 2
+    assert abs(metrics["rectHeight"] - 1000) < 2
+
+
 def test_browse_e_f_g_keyboard_modes(live_server, page):
     """Browse grid shortcuts open the image, request fullscreen, and return to grid."""
     url = live_server["url"]
