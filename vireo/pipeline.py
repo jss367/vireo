@@ -78,7 +78,7 @@ def _resolve_collection_photo_ids(db, collection_id):
 
 
 def load_photo_features(db, collection_id=None, config=None,
-                        labels_fingerprint=None):
+                        labels_fingerprint=None, photo_ids=None):
     """Load all pipeline-relevant features for workspace photos from the database.
 
     Returns a list of photo dicts ready for the pipeline stages, with:
@@ -96,28 +96,45 @@ def load_photo_features(db, collection_id=None, config=None,
             recent fingerprint only — otherwise a photo with cached
             predictions from multiple label sets would leak stale species
             into the top-k.
+        photo_ids: optional iterable of photo IDs to scope results. When used
+            with collection_id, the returned rows are the intersection.
 
     Returns:
         list of photo dicts
     """
     ws_id = db._ws_id()
 
-    # Resolve collection to photo IDs if scoping is requested
-    collection_photo_ids = None
+    # Resolve optional scopes to a single ID set.
+    scoped_photo_ids = None
     if collection_id is not None:
-        collection_photo_ids = _resolve_collection_photo_ids(db, collection_id)
-        if not collection_photo_ids:
+        scoped_photo_ids = _resolve_collection_photo_ids(db, collection_id)
+        if not scoped_photo_ids:
+            return []
+    if photo_ids is not None:
+        requested_ids = {
+            int(pid)
+            for pid in photo_ids
+            if isinstance(pid, int) and not isinstance(pid, bool)
+        }
+        if not requested_ids:
+            return []
+        scoped_photo_ids = (
+            requested_ids if scoped_photo_ids is None
+            else scoped_photo_ids & requested_ids
+        )
+        if not scoped_photo_ids:
             return []
 
-    if collection_photo_ids is not None:
-        placeholders = ",".join("?" for _ in collection_photo_ids)
+    if scoped_photo_ids is not None:
+        scoped_photo_ids = sorted(scoped_photo_ids)
+        placeholders = ",".join("?" for _ in scoped_photo_ids)
         rows = db.conn.execute(
             f"""SELECT {_PIPELINE_PHOTO_COLS}
                 FROM photos p
                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                 WHERE wf.workspace_id = ? AND p.id IN ({placeholders})
                 ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
-            (ws_id, *collection_photo_ids),
+            (ws_id, *scoped_photo_ids),
         ).fetchall()
     else:
         rows = db.conn.execute(
@@ -128,6 +145,13 @@ def load_photo_features(db, collection_id=None, config=None,
                 ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
             (ws_id,),
         ).fetchall()
+
+    scope_sql = ""
+    scope_params = ()
+    if scoped_photo_ids is not None:
+        scope_placeholders = ",".join("?" for _ in scoped_photo_ids)
+        scope_sql = f" AND p.id IN ({scope_placeholders})"
+        scope_params = tuple(scoped_photo_ids)
 
     # Resolve the workspace-effective detector_confidence threshold once.
     # The detections table is global (no workspace_id); threshold filtering
@@ -153,7 +177,7 @@ def load_photo_features(db, collection_id=None, config=None,
     # old label set don't leak into the top-k.
     if labels_fingerprint is not None:
         pred_rows = db.conn.execute(
-            """SELECT d.photo_id, pr.species, pr.confidence,
+            f"""SELECT d.photo_id, pr.species, pr.confidence,
                       pr.classifier_model AS model
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
@@ -162,12 +186,13 @@ def load_photo_features(db, collection_id=None, config=None,
                WHERE wf.workspace_id = ?
                  AND d.detector_confidence >= ?
                  AND pr.labels_fingerprint = ?
+                 {scope_sql}
                ORDER BY d.photo_id, pr.confidence DESC""",
-            (ws_id, min_conf, labels_fingerprint),
+            (ws_id, min_conf, labels_fingerprint, *scope_params),
         ).fetchall()
     else:
         pred_rows = db.conn.execute(
-            """SELECT d.photo_id, pr.species, pr.confidence,
+            f"""SELECT d.photo_id, pr.species, pr.confidence,
                       pr.classifier_model AS model
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
@@ -175,6 +200,7 @@ def load_photo_features(db, collection_id=None, config=None,
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                WHERE wf.workspace_id = ?
                  AND d.detector_confidence >= ?
+                 {scope_sql}
                  AND pr.labels_fingerprint = (
                      SELECT pr2.labels_fingerprint FROM predictions pr2
                      WHERE pr2.detection_id = pr.detection_id
@@ -183,7 +209,7 @@ def load_photo_features(db, collection_id=None, config=None,
                      LIMIT 1
                  )
                ORDER BY d.photo_id, pr.confidence DESC""",
-            (ws_id, min_conf),
+            (ws_id, min_conf, *scope_params),
         ).fetchall()
 
     # Group predictions by photo_id, keep top K
@@ -240,11 +266,14 @@ def load_photo_features(db, collection_id=None, config=None,
     # Load user-confirmed species keywords (alphabetically first wins
     # for photos with multiple species tags — rare but deterministic)
     species_kw_rows = db.conn.execute(
-        """SELECT pk.photo_id, k.name
+        f"""SELECT pk.photo_id, k.name
            FROM photo_keywords pk
+           JOIN photos p ON p.id = pk.photo_id
            JOIN keywords k ON k.id = pk.keyword_id
            WHERE k.is_species = 1
-           ORDER BY k.name"""
+             {scope_sql}
+           ORDER BY k.name""",
+        scope_params,
     ).fetchall()
     confirmed_by_photo = {}
     for row in species_kw_rows:
@@ -429,6 +458,47 @@ def run_full_pipeline(photos, config=None, emit_trace=False):
         summary["reject_count"],
     )
 
+    return {
+        "encounters": encounters,
+        "photos": all_photos,
+        "summary": summary,
+    }
+
+
+def run_selected_batch_review(photos, config=None):
+    """Build normal pipeline-review results for one temporary photo batch.
+
+    Browse's "Review Burst" handoff uses this to keep selected-photo review on
+    the same serialized result contract as the regular Pipeline Review page,
+    without writing an ad-hoc cache or reimplementing review data in JavaScript.
+    """
+    from encounters import encounter_species_label
+    from scoring import score_encounter
+
+    photos = list(photos or [])
+    if photos:
+        timestamps = [p.get("timestamp") for p in photos if p.get("timestamp")]
+        time_range = [min(timestamps), max(timestamps)] if timestamps else [None, None]
+    else:
+        time_range = [None, None]
+
+    species = encounter_species_label(photos)
+    encounter = {
+        "photos": photos,
+        "bursts": [photos],
+        "photo_count": len(photos),
+        "burst_count": 1 if photos else 0,
+        "time_range": time_range,
+        "species": species,
+    }
+
+    if photos:
+        score_encounter(encounter, config=config)
+        encounters, all_photos = run_triage([encounter], config=config)
+    else:
+        encounters, all_photos = [], []
+
+    summary = _make_summary(encounters, all_photos)
     return {
         "encounters": encounters,
         "photos": all_photos,

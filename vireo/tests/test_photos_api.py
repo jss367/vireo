@@ -263,6 +263,59 @@ def test_api_photos_by_ids_validates_payload(app_and_db):
     assert resp.status_code == 400
 
 
+def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
+    """Browse-selected review should return the same rich result shape as Pipeline Review."""
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    by_name = {p["filename"]: p["id"] for p in photos}
+    ordered_ids = [by_name["bird3.jpg"], by_name["bird1.jpg"]]
+
+    for idx, pid in enumerate(ordered_ids):
+        db.update_photo_pipeline_features(
+            pid,
+            mask_path=f"/masks/{pid}.png",
+            subject_tenengrad=250 + idx * 25,
+            bg_tenengrad=30,
+            crop_complete=0.9,
+            bg_separation=40.0,
+            subject_clip_high=0.01,
+            subject_clip_low=0.01,
+            subject_y_median=120.0,
+            phash_crop=f"{pid:016x}",
+        )
+        db.update_photo_quality(pid, subject_size=0.1)
+        det_id = db.save_detections(
+            pid,
+            [{"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9}],
+            detector_model="megadetector-v6",
+        )[0]
+        db.add_prediction(
+            det_id,
+            "Cedar Waxwing" if idx == 0 else "American Robin",
+            0.92 - idx * 0.05,
+            "bioclip",
+        )
+
+    client = app.test_client()
+    resp = client.post("/api/pipeline/selection-results", json={"photo_ids": ordered_ids})
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["source"] == "browse-selection"
+    assert [p["id"] for p in data["photos"]] == ordered_ids
+    assert data["summary"]["total_photos"] == 2
+    assert len(data["encounters"]) == 1
+    enc = data["encounters"][0]
+    assert enc["photo_ids"] == ordered_ids
+    assert enc["bursts"][0]["photo_ids"] == ordered_ids
+    assert {p["species"] for p in enc["species_predictions"]} == {
+        "Cedar Waxwing",
+        "American Robin",
+    }
+    assert enc["bursts"][0]["species_predictions"] == enc["species_predictions"]
+    assert all("quality_composite" in p for p in data["photos"])
+
+
 def test_api_photos_calendar(app_and_db):
     """GET /api/photos/calendar returns daily photo counts for a year."""
     app, _ = app_and_db

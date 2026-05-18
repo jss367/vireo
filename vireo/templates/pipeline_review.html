@@ -1836,24 +1836,6 @@ function renderResults() {
   if (!pipelineResults) return;
   var container = document.getElementById('encountersContainer');
   if (!container) return;
-  if (pipelineResults.source === 'browse-selection') {
-    var summary = refreshLocalSummaryCounts() || pipelineResults.summary || {};
-    var total = Number(summary.total_photos || 0);
-    var ce = document.getElementById('countAll'); if (ce) ce.textContent = ' (' + total + ')';
-    ce = document.getElementById('countKeep'); if (ce) ce.textContent = ' (' + Number(summary.keep_count || 0) + ')';
-    ce = document.getElementById('countReview'); if (ce) ce.textContent = ' (' + Number(summary.review_count || 0) + ')';
-    ce = document.getElementById('countReject'); if (ce) ce.textContent = ' (' + Number(summary.reject_count || 0) + ')';
-    container.innerHTML = '<div class="empty-state" style="display:block;">'
-      + '<p>Temporary Browse selection. Use the burst review modal to pick, reject, or tag these photos.</p>'
-      + '<button type="button" onclick="reopenBrowseBurstReview()" '
-      + 'style="margin-top:12px;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);" '
-      + 'title="Reopen the burst review modal for this Browse selection.">Reopen burst review</button>'
-      + '</div>';
-    _focusedEncounterIdx = null;
-    renderAlgorithmTrace();
-    return;
-  }
-
   // Build photo lookup
   var photoMap = {};
   pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
@@ -3196,22 +3178,6 @@ function browseBurstStoredIds() {
   }
 }
 
-function browseBurstTimeRange(photos) {
-  var stamps = photos.map(function(p) { return p.timestamp; }).filter(Boolean).sort();
-  if (!stamps.length) return [null, null];
-  return [stamps[0], stamps[stamps.length - 1]];
-}
-
-function normalizeBrowseBurstPhoto(p) {
-  var copy = Object.assign({}, p);
-  copy.label = copy.flag === 'flagged' ? 'KEEP' : copy.flag === 'rejected' ? 'REJECT' : 'REVIEW';
-  copy.quality_composite = copy.quality_composite != null ? copy.quality_composite : copy.quality_score;
-  copy.subject_tenengrad = copy.subject_tenengrad != null
-    ? copy.subject_tenengrad
-    : (copy.subject_sharpness != null ? copy.subject_sharpness : copy.sharpness);
-  return copy;
-}
-
 function renderBrowseBurstReviewShell() {
   var empty = document.getElementById('emptyState');
   if (empty) empty.style.display = 'none';
@@ -3254,55 +3220,43 @@ function openBrowseBurstReviewFromStorage() {
     return;
   }
 
-  safeFetch('/api/photos/by-ids', {
+  safeFetch('/api/pipeline/selection-results', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({photo_ids: ids}),
   }).then(function(data) {
-    var byId = {};
-    (data.photos || []).forEach(function(p) { byId[p.id] = normalizeBrowseBurstPhoto(p); });
-    var photos = ids.map(function(id) { return byId[id]; }).filter(Boolean);
-    if (photos.length < 2) {
+    if (!data || !data.photos || data.photos.length < 2 || !data.encounters || data.encounters.length === 0) {
       fallbackToNormalPipelineReview('Could not load the selected photos for burst review — showing the latest pipeline review instead.');
       return;
     }
 
-    var loadedIds = photos.map(function(p) { return p.id; });
-    pipelineResults = {
-      source: 'browse-selection',
-      photos: photos,
-      encounters: [{
-        photo_ids: loadedIds,
-        photo_count: loadedIds.length,
-        burst_count: 1,
-        bursts: [{photo_ids: loadedIds, species_predictions: [], species_override: null}],
-        species: [],
-        species_predictions: [],
-        confirmed_species: '',
-        species_confirmed: false,
-        time_range: browseBurstTimeRange(photos),
-      }],
-      summary: {
-        total_photos: loadedIds.length,
-        keep_count: photos.filter(function(p) { return p.label === 'KEEP'; }).length,
-        review_count: photos.filter(function(p) { return p.label === 'REVIEW'; }).length,
-        reject_count: photos.filter(function(p) { return p.label === 'REJECT'; }).length,
-        encounter_count: 1,
-        burst_count: 1,
-      },
-    };
+    var target = null;
+    data.encounters.some(function(enc, encIdx) {
+      var bursts = Array.isArray(enc.bursts) ? enc.bursts : [];
+      return bursts.some(function(burst, burstIdx) {
+        var firstIds = burst && (burst.photo_ids || burst);
+        if (!firstIds || !firstIds.length) return false;
+        target = { encIdx: encIdx, burstIdx: burstIdx, photoId: firstIds[0] };
+        return true;
+      });
+    });
+    if (!target) {
+      fallbackToNormalPipelineReview('Could not find a burst to review — showing the latest pipeline review instead.');
+      return;
+    }
+
+    pipelineResults = data;
+    pipelineResults.source = 'browse-selection';
 
     collapsedEncounters = new Set();
     renderBrowseBurstReviewShell();
     updateSummaryBar(pipelineResults.summary);
     renderResults();
-    // Keep the handoff state (session storage + ?browse_burst=1) in place.
-    // The body is just a placeholder in browse-selection mode, so closing
-    // the modal via Esc/× or hitting the /group/state "reopen to retry"
-    // path must remain recoverable — both via the in-page Reopen button and
-    // via a plain reload. clearBrowseBurstHandoff() runs only once the user
-    // applies (workflow complete) or we fall back to normal review.
-    openGroupReview(0, 0, loadedIds[0]);
+    // Keep the handoff state (session storage + ?browse_burst=1) in place so
+    // closing the modal via Esc/× or hitting the /group/state retry path stays
+    // recoverable across a plain reload. clearBrowseBurstHandoff() runs only
+    // once the user applies (workflow complete) or we fall back to normal review.
+    openGroupReview(target.encIdx, target.burstIdx, target.photoId);
   }).catch(function() {
     fallbackToNormalPipelineReview('Could not open burst review — showing the latest pipeline review instead.');
   });
@@ -3931,23 +3885,6 @@ function grmRefreshSelectedLoupe() {
 }
 
 function buildPipelineMetadataHtml(photo) {
-  if (grmState && grmState.source === 'browse-selection') {
-    var flag = photo.flag || 'none';
-    var dims = (photo.width && photo.height) ? (photo.width + '×' + photo.height) : '—';
-    var rating = photo.rating != null ? photo.rating : 0;
-    var sharpBrowse = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '—';
-    var htmlBrowse = '<span class="triage-badge review">BROWSE SELECTION</span>';
-    htmlBrowse += '<table class="feature-table">';
-    htmlBrowse += '<tr><td>Filename</td><td>' + escapeHtml(photo.filename || '') + '</td></tr>';
-    htmlBrowse += '<tr><td>Flag</td><td>' + escapeHtml(flag) + '</td></tr>';
-    htmlBrowse += '<tr><td>Rating</td><td>' + rating + '</td></tr>';
-    htmlBrowse += '<tr><td>Dimensions</td><td>' + dims + '</td></tr>';
-    htmlBrowse += '<tr><td>Timestamp</td><td>' + escapeHtml(photo.timestamp || '—') + '</td></tr>';
-    htmlBrowse += '<tr><td>Sharpness</td><td>' + sharpBrowse + '</td></tr>';
-    htmlBrowse += '</table>';
-    return htmlBrowse;
-  }
-
   var enc = pipelineResults.encounters[grmState.encIdx];
   var label = (photo.label || '').toLowerCase();
   var q = photo.quality_composite || 0;
