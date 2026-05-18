@@ -11300,13 +11300,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if missing:
             return json_error(f"Unknown photo_ids: {missing}")
 
-        # Drop photos whose only detections are below the workspace's
-        # detector_confidence threshold — those are MegaDetector noise boxes,
-        # not real subjects, and tagging them with a species lets them slip
-        # into highlights / by-species views with the wrong label. Photos
-        # with NO detection rows at all stay eligible: this endpoint also
-        # serves manual species assertions on photos that were never run
-        # through the pipeline. See the "Mountain chickadee" highlights bug.
+        # Surface photos whose only detections are below the workspace's
+        # detector_confidence threshold, but do not drop them. This endpoint
+        # represents an explicit user confirmation, and that assertion should
+        # win over a weak detector box. Fully automatic labeling paths should
+        # do their own filtering before calling lower-level tag helpers.
         import config as cfg
         effective_cfg = db.get_effective_config(cfg.load())
         det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
@@ -11318,36 +11316,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 GROUP BY photo_id""",
             photo_ids,
         ).fetchall()
-        skipped_photo_ids = [
+        low_confidence_photo_ids = [
             r["photo_id"] for r in det_rows
             if r["n"] > 0 and (r["max_conf"] or 0) < det_conf_threshold
         ]
-        # Load the pipeline cache before the all-skipped early return: the
-        # client's confirmSpecies fallback (templates/pipeline_review.html
-        # ~L2620) treats a successful response without ``encounters`` as a
-        # local-confirmation and sets ``species_confirmed=true`` itself.
-        # Returning the unchanged cache here keeps the encounter's confirmed
-        # state consistent with what actually happened on the server (i.e.,
-        # nothing).
         from pipeline import load_results_raw, save_results_raw
 
         cache_dir = os.path.dirname(db_path)
         cached = load_results_raw(cache_dir, db._active_workspace_id)
-        if skipped_photo_ids:
-            skipped_set = set(skipped_photo_ids)
-            photo_ids = [pid for pid in photo_ids if pid not in skipped_set]
-            if not photo_ids:
-                resp_body = {
-                    "ok": True,
-                    "species": species,
-                    "photo_count": 0,
-                    "skipped_photo_ids": skipped_photo_ids,
-                    "previous_species": None,
-                }
-                if cached:
-                    resp_body["encounters"] = cached.get("encounters", [])
-                    resp_body["summary"] = cached.get("summary", {})
-                return jsonify(resp_body)
         previous_species = None
         target_enc = None
         target_enc_idx = None
@@ -11506,7 +11482,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "keyword_id": kid,
             "photo_count": len(photo_ids),
             "previous_species": replaced,
-            "skipped_photo_ids": skipped_photo_ids,
+            "low_confidence_photo_ids": low_confidence_photo_ids,
+            # Kept for older clients/tests that checked this field; explicit
+            # confirmations no longer skip submitted photos.
+            "skipped_photo_ids": [],
         }
         if cached:
             response["encounters"] = cached.get("encounters", [])

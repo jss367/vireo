@@ -3040,6 +3040,13 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
     enc.confirmed_species = speciesName;
     updateSummaryBar(refreshLocalSummaryCounts());
   }
+  if (resp.low_confidence_photo_ids && resp.low_confidence_photo_ids.length) {
+    showToast(
+      'Tagged ' + resp.low_confidence_photo_ids.length + ' low-confidence detector ' +
+      (resp.low_confidence_photo_ids.length === 1 ? 'photo' : 'photos'),
+      'info'
+    );
+  }
   renderResults();
   checkPendingSync();
 }
