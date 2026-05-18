@@ -1768,7 +1768,7 @@ function sendReport() {
       <label><input type="checkbox" id="missingPhotosSelectAll" onchange="toggleAllMissingPhotos(this.checked)"> Select all</label>
       <span id="missingPhotosSelectedCount">0 selected</span>
       <span class="spacer"></span>
-      <label title="Also delete the .xmp sidecar files left behind on disk."><input type="checkbox" id="missingPhotosDeleteSidecars"> Also delete leftover XMP sidecars</label>
+      <label title="Also delete the .xmp sidecar files left behind on disk."><input type="checkbox" id="missingPhotosDeleteSidecars" checked> Also delete leftover XMP sidecars</label>
     </div>
     <div id="missingPhotosList" style="flex:1;overflow-y:auto;"></div>
     <div class="modal-actions">
@@ -6888,6 +6888,7 @@ async function startRemoveFolder(folderId, path, photoCount) {
 let _missingPhotosSelected = new Set();
 
 function openMissingPhotosModal() {
+  document.getElementById('missingPhotosDeleteSidecars').checked = true;
   document.getElementById('missingPhotosModal').classList.add('open');
   loadMissingPhotos();
 }
