@@ -889,6 +889,65 @@ def test_has_subject_rule_matches_photos_without_subject_keywords(tmp_path, monk
     assert pids == {p2}
 
 
+def test_collection_wildlife_excluded_rule(tmp_path):
+    """Collections can filter photos marked Not Wildlife."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='wild.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='pet.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    db.update_photo_wildlife_excluded(p2, True)
+
+    cid = db.add_collection(
+        "Wildlife Only",
+        json.dumps([{"field": "wildlife_excluded", "op": "equals", "value": 0}]),
+    )
+    pids = {p["id"] for p in db.get_collection_photos(cid, per_page=999)}
+    assert pids == {p1}
+
+
+def test_default_needs_identification_excludes_not_wildlife(tmp_path, monkeypatch):
+    """The default Needs Identification collection omits photos explicitly
+    marked Not Wildlife, even when they have no subject keyword."""
+    import json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    needs_id = db.add_photo(folder_id=fid, filename='needs.jpg',
+                            extension='.jpg', file_size=100, file_mtime=1.0)
+    not_wildlife = db.add_photo(folder_id=fid, filename='pet.jpg',
+                                extension='.jpg', file_size=100, file_mtime=1.0)
+    identified = db.add_photo(folder_id=fid, filename='identified.jpg',
+                              extension='.jpg', file_size=100, file_mtime=1.0)
+    db.update_photo_wildlife_excluded(not_wildlife, True)
+    genre_kid = db.add_keyword("Wildlife", kw_type="genre")
+    db.tag_photo(identified, genre_kid)
+
+    db.create_default_collections()
+    cid = next(c["id"] for c in db.get_collections()
+               if c["name"] == "Needs Identification")
+    rules = json.loads(next(c["rules"] for c in db.get_collections()
+                            if c["id"] == cid))
+
+    pids = {p["id"] for p in db.get_collection_photos(cid, per_page=999)}
+    assert rules == [
+        {"field": "has_subject", "op": "equals", "value": 0},
+        {"field": "wildlife_excluded", "op": "equals", "value": 0},
+    ]
+    assert pids == {needs_id}
+
+
 def test_has_subject_rule_value_one_matches_identified_photos(tmp_path, monkeypatch):
     """has_subject==1 is the inverse — only identified photos match."""
     import json
@@ -1312,7 +1371,8 @@ def test_default_collection_uses_has_subject_for_new_workspaces(tmp_path):
     assert "Needs Identification" in cols
     assert "Needs Classification" not in cols
     assert cols["Needs Identification"] == [
-        {"field": "has_subject", "op": "equals", "value": 0}
+        {"field": "has_subject", "op": "equals", "value": 0},
+        {"field": "wildlife_excluded", "op": "equals", "value": 0},
     ]
 
 
@@ -1337,7 +1397,8 @@ def test_existing_needs_classification_collection_migrated_idempotently(tmp_path
     assert "Needs Identification" in cols
     assert "Needs Classification" not in cols
     assert cols["Needs Identification"] == [
-        {"field": "has_subject", "op": "equals", "value": 0}
+        {"field": "has_subject", "op": "equals", "value": 0},
+        {"field": "wildlife_excluded", "op": "equals", "value": 0},
     ]
 
 
@@ -1357,6 +1418,49 @@ def test_migration_skips_user_customized_collection(tmp_path):
     cols = {c["name"]: json.loads(c["rules"]) for c in db.get_collections()}
     assert "Needs Classification" in cols
     assert cols["Needs Classification"] == custom
+
+
+def test_existing_needs_identification_default_adds_not_wildlife_filter(tmp_path):
+    """Existing default Needs Identification collections skip Not Wildlife
+    photos after migration."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    db.add_collection(
+        "Needs Identification",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
+    )
+
+    updated = db.migrate_default_needs_identification_collection()
+
+    cols = {c["name"]: json.loads(c["rules"]) for c in db.get_collections()}
+    assert updated == 1
+    assert cols["Needs Identification"] == [
+        {"field": "has_subject", "op": "equals", "value": 0},
+        {"field": "wildlife_excluded", "op": "equals", "value": 0},
+    ]
+
+
+def test_needs_identification_not_wildlife_migration_skips_custom_rules(tmp_path):
+    """A user-customized Needs Identification collection should not be
+    overwritten by the default-rule migration."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    custom = [{"field": "rating", "op": ">=", "value": 3}]
+    db.add_collection("Needs Identification", json.dumps(custom))
+
+    updated = db.migrate_default_needs_identification_collection()
+
+    cols = {c["name"]: json.loads(c["rules"]) for c in db.get_collections()}
+    assert updated == 0
+    assert cols["Needs Identification"] == custom
 
 
 def test_upgrade_path_no_duplicate_collection(tmp_path):
@@ -1384,7 +1488,8 @@ def test_upgrade_path_no_duplicate_collection(tmp_path):
     assert "Needs Classification" not in cols
     assert "Needs Identification" in cols
     assert cols["Needs Identification"] == [
-        {"field": "has_subject", "op": "equals", "value": 0}
+        {"field": "has_subject", "op": "equals", "value": 0},
+        {"field": "wildlife_excluded", "op": "equals", "value": 0},
     ]
     # Sanity: total default-collection count is 5, not 6 (no duplicate).
     default_names = {"All Photos", "Needs Identification", "Untagged",
@@ -8608,7 +8713,8 @@ def test_migrate_default_subject_collection_covers_all_workspaces(tmp_path):
             f"workspace {ws} still has legacy 'Needs Classification' name"
         )
         assert json.loads(row["rules"]) == [
-            {"field": "has_subject", "op": "equals", "value": 0}
+            {"field": "has_subject", "op": "equals", "value": 0},
+            {"field": "wildlife_excluded", "op": "equals", "value": 0},
         ]
 
 

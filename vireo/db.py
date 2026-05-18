@@ -59,6 +59,11 @@ KEYWORD_TYPES = frozenset({"taxonomy", "individual", "location", "genre", "gener
 # membership / classifier skip purposes. Workspaces can override.
 SUBJECT_TYPES_DEFAULT = frozenset({"taxonomy", "individual", "genre"})
 
+NEEDS_IDENTIFICATION_RULES = [
+    {"field": "has_subject", "op": "equals", "value": 0},
+    {"field": "wildlife_excluded", "op": "equals", "value": 0},
+]
+
 ALL_NAV_IDS = frozenset({
     "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
     "misses", "highlights", "browse", "map", "variants",
@@ -9202,6 +9207,12 @@ class Database:
                     return _keyword_not_exists(type_clause, subject_types)
                 if op == "equals" and _truthy(value):
                     return _keyword_exists(type_clause, subject_types)
+            if field == "wildlife_excluded":
+                excluded = "p.wildlife_excluded = 1"
+                if op in ("equals", "is"):
+                    return (excluded if _truthy(value) else f"NOT ({excluded})"), []
+                if op == "is not":
+                    return (f"NOT ({excluded})" if _truthy(value) else excluded), []
             if field == "keyword_count":
                 expr = "(SELECT COUNT(*) FROM photo_keywords pk2 WHERE pk2.photo_id = p.id)"
                 return _numeric_condition(expr, op, value)
@@ -9486,7 +9497,7 @@ class Database:
             ("All Photos", [{"field": "all"}]),
             (
                 "Needs Identification",
-                [{"field": "has_subject", "op": "equals", "value": 0}],
+                NEEDS_IDENTIFICATION_RULES,
             ),
             ("Untagged", [{"field": "keyword_count", "op": "equals", "value": 0}]),
             ("Flagged", [{"field": "flag", "op": "equals", "value": "flagged"}]),
@@ -9531,13 +9542,39 @@ class Database:
                 "UPDATE collections SET name = ?, rules = ? WHERE id = ?",
                 (
                     "Needs Identification",
-                    json.dumps(
-                        [{"field": "has_subject", "op": "equals", "value": 0}]
-                    ),
+                    json.dumps(NEEDS_IDENTIFICATION_RULES),
                     row["id"],
                 ),
             )
         self.conn.commit()
+
+    def migrate_default_needs_identification_collection(self):
+        """Upgrade the default Needs Identification rule to skip Not Wildlife.
+
+        User-customized collections are left alone; only the exact previous
+        default ``has_subject == 0`` rule is rewritten.
+        """
+        old_rule = [{"field": "has_subject", "op": "equals", "value": 0}]
+        rows = self.conn.execute(
+            "SELECT id, rules FROM collections WHERE name = ?",
+            ("Needs Identification",),
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            try:
+                current = json.loads(row["rules"])
+            except (TypeError, ValueError):
+                continue
+            if current != old_rule:
+                continue
+            self.conn.execute(
+                "UPDATE collections SET rules = ? WHERE id = ?",
+                (json.dumps(NEEDS_IDENTIFICATION_RULES), row["id"]),
+            )
+            updated += 1
+        if updated:
+            self.conn.commit()
+        return updated
 
     # ------ iNaturalist submissions ------
 

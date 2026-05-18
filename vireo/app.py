@@ -936,6 +936,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # 'Needs Identification' first, then the migration skips renaming
     # because the target name already exists, leaving a duplicate.
     init_db.migrate_default_subject_collection()
+    init_db.migrate_default_needs_identification_collection()
     init_db.create_default_collections()
 
     # Wildlife backfill timing:
