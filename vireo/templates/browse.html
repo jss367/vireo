@@ -287,9 +287,6 @@ body {
 .summary-species-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 13px; }
 .summary-species-name { color: var(--text-primary); }
 .summary-species-count { color: var(--text-muted); font-size: 12px; }
-.summary-folder-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 12px; }
-.summary-folder-name { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; margin-right: 8px; }
-.summary-folder-count { color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
 .selection-panel { display: block; margin-bottom: 16px; }
 .selection-panel.hidden { display: none; }
 .selection-heading {
@@ -1040,10 +1037,6 @@ body {
       <div id="folderTree"></div>
     </div>
     <div class="sidebar-section">
-      <div class="sidebar-title">Keywords</div>
-      <div id="keywordTree"></div>
-    </div>
-    <div class="sidebar-section">
       <div class="sidebar-title">Collections</div>
       <div id="collectionList"></div>
       <div style="margin-top:6px;">
@@ -1235,9 +1228,9 @@ body {
         <div class="summary-section-title">Top Species</div>
         <div id="summarySpeciesList"></div>
       </div>
-      <div class="summary-section" id="summaryFoldersSection" style="display:none;">
-        <div class="summary-section-title">Folders</div>
-        <div id="summaryFolderList"></div>
+      <div class="summary-section" id="summaryKeywordsSection">
+        <div class="summary-section-title">Keywords</div>
+        <div id="keywordTree"></div>
       </div>
     </div>
 
@@ -1954,12 +1947,17 @@ function toggleTree(e, el) {
 }
 
 function filterByFolder(folderId) {
+  var previousKeyword = activeKeyword;
   if (activeFolderId === folderId) {
     activeFolderId = null;
   } else {
     activeFolderId = folderId;
   }
   activeKeyword = null;
+  var searchInput = document.getElementById('searchInput');
+  if (previousKeyword && searchInput && searchInput.value.trim() === previousKeyword) {
+    searchInput.value = '';
+  }
   activeCollectionId = null;
   if (timelineMode) loadCalendarData();
   resetAndLoad();
@@ -2009,7 +2007,7 @@ function renderKeywordTree(keywords) {
   }
 
   var tree = document.getElementById('keywordTree');
-  tree.innerHTML = buildTree('root', 0);
+  tree.innerHTML = buildTree('root', 0) || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No keywords</div>';
   // Delegate keyword clicks (XSS-safe: avoids inline onclick with user data)
   tree.onclick = function(e) {
     var item = e.target.closest('.tree-item[data-keyword]');
@@ -2028,6 +2026,9 @@ function filterByKeyword(name) {
   document.getElementById('searchInput').value = activeKeyword || '';
   if (timelineMode) loadCalendarData();
   resetAndLoad();
+  document.querySelectorAll('#keywordTree .tree-item').forEach(function(el) {
+    el.classList.toggle('active', el.dataset.keyword === activeKeyword);
+  });
 }
 
 /* ---------- Collections ---------- */
@@ -4171,20 +4172,6 @@ function renderSummary(data) {
   }
   document.getElementById('summarySpeciesList').innerHTML = speciesHtml;
 
-  // Folder breakdown
-  var foldersSection = document.getElementById('summaryFoldersSection');
-  var folderHtml = '';
-  if (data.folder_counts && data.folder_counts.length > 0) {
-    data.folder_counts.forEach(function(f) {
-      folderHtml += '<div class="summary-folder-row">' +
-        '<span class="summary-folder-name">' + escapeHtml(f.name) + '</span>' +
-        '<span class="summary-folder-count">' + f.count + '</span></div>';
-    });
-    foldersSection.style.display = '';
-  } else {
-    foldersSection.style.display = 'none';
-  }
-  document.getElementById('summaryFolderList').innerHTML = folderHtml;
 }
 
 /* ---------- Edit Actions ---------- */
@@ -4658,7 +4645,7 @@ async function setKeywordType(kwId, newType, el) {
     // Close dropdown
     var dropdown = el.closest('.keyword-type-dropdown');
     if (dropdown) dropdown.classList.remove('open');
-    // Refresh detail panel and keyword sidebar
+    // Refresh detail panel and keyword tree
     if (selectedPhotoId) loadDetail(selectedPhotoId);
     loadKeywords();
   } catch(e) {}
