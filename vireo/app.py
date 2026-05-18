@@ -2000,6 +2000,49 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         _attach_detections(db, photos)
         return jsonify({"photos": photos})
 
+    @app.route("/api/pipeline/selection-results", methods=["POST"])
+    def api_pipeline_selection_results():
+        """Return a temporary Pipeline Review result for selected photo IDs."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        raw_ids = body.get("photo_ids", [])
+        if not isinstance(raw_ids, list):
+            return json_error("photo_ids must be a list", 400)
+        if not raw_ids:
+            return json_error("photo_ids required", 400)
+        if len(raw_ids) > 500:
+            return json_error("too many photo_ids", 400)
+
+        photo_ids = []
+        seen = set()
+        for raw in raw_ids:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return json_error("photo_ids must be integers", 400)
+            if raw in seen:
+                continue
+            seen.add(raw)
+            photo_ids.append(raw)
+
+        import config as cfg
+        from pipeline import (
+            load_photo_features,
+            run_selected_batch_review,
+            serialize_results,
+        )
+
+        effective_cfg = db.get_effective_config(cfg.load())
+        loaded = load_photo_features(db, config=effective_cfg, photo_ids=photo_ids)
+        by_id = {p["id"]: p for p in loaded}
+        photos = [by_id[pid] for pid in photo_ids if pid in by_id]
+        if len(photos) < 2:
+            return json_error("at least two selected photos are required", 400)
+
+        results = serialize_results(
+            run_selected_batch_review(photos, config=effective_cfg)
+        )
+        results["source"] = "browse-selection"
+        return jsonify(results)
+
     @app.route("/api/photos/geo")
     def api_photos_geo():
         db = _get_db()
