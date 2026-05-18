@@ -146,6 +146,13 @@ def load_photo_features(db, collection_id=None, config=None,
             (ws_id,),
         ).fetchall()
 
+    scope_sql = ""
+    scope_params = ()
+    if scoped_photo_ids is not None:
+        scope_placeholders = ",".join("?" for _ in scoped_photo_ids)
+        scope_sql = f" AND p.id IN ({scope_placeholders})"
+        scope_params = tuple(scoped_photo_ids)
+
     # Resolve the workspace-effective detector_confidence threshold once.
     # The detections table is global (no workspace_id); threshold filtering
     # happens at read time against the active workspace's effective config.
@@ -170,7 +177,7 @@ def load_photo_features(db, collection_id=None, config=None,
     # old label set don't leak into the top-k.
     if labels_fingerprint is not None:
         pred_rows = db.conn.execute(
-            """SELECT d.photo_id, pr.species, pr.confidence,
+            f"""SELECT d.photo_id, pr.species, pr.confidence,
                       pr.classifier_model AS model
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
@@ -179,12 +186,13 @@ def load_photo_features(db, collection_id=None, config=None,
                WHERE wf.workspace_id = ?
                  AND d.detector_confidence >= ?
                  AND pr.labels_fingerprint = ?
+                 {scope_sql}
                ORDER BY d.photo_id, pr.confidence DESC""",
-            (ws_id, min_conf, labels_fingerprint),
+            (ws_id, min_conf, labels_fingerprint, *scope_params),
         ).fetchall()
     else:
         pred_rows = db.conn.execute(
-            """SELECT d.photo_id, pr.species, pr.confidence,
+            f"""SELECT d.photo_id, pr.species, pr.confidence,
                       pr.classifier_model AS model
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
@@ -192,6 +200,7 @@ def load_photo_features(db, collection_id=None, config=None,
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                WHERE wf.workspace_id = ?
                  AND d.detector_confidence >= ?
+                 {scope_sql}
                  AND pr.labels_fingerprint = (
                      SELECT pr2.labels_fingerprint FROM predictions pr2
                      WHERE pr2.detection_id = pr.detection_id
@@ -200,7 +209,7 @@ def load_photo_features(db, collection_id=None, config=None,
                      LIMIT 1
                  )
                ORDER BY d.photo_id, pr.confidence DESC""",
-            (ws_id, min_conf),
+            (ws_id, min_conf, *scope_params),
         ).fetchall()
 
     # Group predictions by photo_id, keep top K
@@ -257,11 +266,14 @@ def load_photo_features(db, collection_id=None, config=None,
     # Load user-confirmed species keywords (alphabetically first wins
     # for photos with multiple species tags — rare but deterministic)
     species_kw_rows = db.conn.execute(
-        """SELECT pk.photo_id, k.name
+        f"""SELECT pk.photo_id, k.name
            FROM photo_keywords pk
+           JOIN photos p ON p.id = pk.photo_id
            JOIN keywords k ON k.id = pk.keyword_id
            WHERE k.is_species = 1
-           ORDER BY k.name"""
+             {scope_sql}
+           ORDER BY k.name""",
+        scope_params,
     ).fetchall()
     confirmed_by_photo = {}
     for row in species_kw_rows:

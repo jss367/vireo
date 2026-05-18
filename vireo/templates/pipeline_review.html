@@ -3228,6 +3228,21 @@ function openBrowseBurstReviewFromStorage() {
       return;
     }
 
+    var target = null;
+    data.encounters.some(function(enc, encIdx) {
+      var bursts = Array.isArray(enc.bursts) ? enc.bursts : [];
+      return bursts.some(function(burst, burstIdx) {
+        var firstIds = burst && (burst.photo_ids || burst);
+        if (!firstIds || !firstIds.length) return false;
+        target = { encIdx: encIdx, burstIdx: burstIdx, photoId: firstIds[0] };
+        return true;
+      });
+    });
+    if (!target) {
+      fallbackToNormalPipelineReview('Could not find a burst to review — showing the latest pipeline review instead.');
+      return;
+    }
+
     pipelineResults = data;
     pipelineResults.source = 'browse-selection';
 
@@ -3239,10 +3254,7 @@ function openBrowseBurstReviewFromStorage() {
     // closing the modal via Esc/× or hitting the /group/state retry path stays
     // recoverable across a plain reload. clearBrowseBurstHandoff() runs only
     // once the user applies (workflow complete) or we fall back to normal review.
-    var firstEnc = pipelineResults.encounters[0];
-    var firstBurst = firstEnc && firstEnc.bursts && firstEnc.bursts[0];
-    var firstIds = firstBurst ? (firstBurst.photo_ids || firstBurst) : (firstEnc ? firstEnc.photo_ids : []);
-    openGroupReview(0, 0, firstIds && firstIds.length ? firstIds[0] : null);
+    openGroupReview(target.encIdx, target.burstIdx, target.photoId);
   }).catch(function() {
     fallbackToNormalPipelineReview('Could not open burst review — showing the latest pipeline review instead.');
   });
