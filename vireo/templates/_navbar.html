@@ -4633,6 +4633,14 @@ function _lbScheduleSourceSwap(targetZoom) {
           // is the current source (gated by the tier-rank guard).
           _lbApplyTransform();
           _lbScheduleSourceSwap(4);
+          // If no higher tier is actually available (small viewport, or the
+          // current source is already the best remaining tier) the reschedule
+          // is a no-op and onSwapLoad never fires — without this the badge
+          // would stay stuck on "loading 1:1" at fit zoom forever. The
+          // tier-rank guard inside _lbApplyPendingOneToOneZoom keeps the snap
+          // deferred when a real upgrade IS still queued, so this only resolves
+          // the genuine no-swap-needed case.
+          _lbApplyPendingOneToOneZoom();
         } else {
           _lbApplyPendingOneToOneZoom();
           _lbApplyTransform();
