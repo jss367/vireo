@@ -3441,6 +3441,8 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   var initialSelectedId = grmSelectablePhotoId(items, selectPhotoId, null) || grmFirstSelectablePhotoId(items, null);
   var initialSelectedIds = new Set();
   if (initialSelectedId) initialSelectedIds.add(initialSelectedId);
+  var isSinglePhotoReview = items.length === 1;
+  var allowRemove = !(isSinglePhotoReview && source !== 'browse-selection');
 
   grmState = {
     encIdx: encIdx,
@@ -3461,6 +3463,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     keywordStateSpecies: initialSpecies,
     initialSpecies: initialSpecies,
     source: source,
+    allowRemove: allowRemove,
     sessionId: sessionId,
     // False until /group/state resolves and grmSeedFromDbState runs. Apply &
     // Close is gated on this so a click during the seed window can't ship
@@ -3479,7 +3482,6 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   grmRefreshResetAllVisibility();
 
   document.getElementById('grmOverlay').classList.add('open');
-  var isSinglePhotoReview = items.length === 1;
   var title = document.getElementById('grmTitle');
   if (title) {
     title.textContent = source === 'browse-selection'
@@ -3488,7 +3490,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   }
   var removeBtn = document.getElementById('grmRemoveBtn');
   if (removeBtn) {
-    removeBtn.style.display = isSinglePhotoReview && source !== 'browse-selection' ? 'none' : '';
+    removeBtn.style.display = allowRemove ? '' : 'none';
     removeBtn.textContent = source === 'browse-selection' ? 'Remove from review' : 'Remove from group';
     removeBtn.title = source === 'browse-selection'
       ? 'Remove this photo from the temporary review set'
@@ -4552,6 +4554,7 @@ function grmMoveCandidate() {
 }
 
 function grmRemoveFromGroup() {
+  if (grmState && grmState.allowRemove === false) return;
   if (!grmState.selected) return;
   _grmMarkTouched(grmState.selected);
   grmState.removed.add(grmState.selected);
@@ -4585,7 +4588,10 @@ document.addEventListener('keydown', function(e) {
     if (idx < items.length - 1) grmSelect(items[idx + 1].id);
     e.preventDefault(); return;
   }
-  if (e.key === 'Delete' || e.key === 'Backspace') { grmRemoveFromGroup(); e.preventDefault(); return; }
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (grmState.allowRemove !== false) grmRemoveFromGroup();
+    e.preventDefault(); return;
+  }
   if (e.key === ' ') { grmMoveCandidate(); e.preventDefault(); return; }
   if (pipelineReviewBareKey(e, 'p')) { grmMovePick(); e.preventDefault(); return; }
   if (pipelineReviewBareKey(e, 'x')) { grmMoveReject(); e.preventDefault(); return; }

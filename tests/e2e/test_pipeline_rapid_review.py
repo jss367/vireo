@@ -754,6 +754,10 @@ def test_classic_pipeline_review_single_photo_opens_review_modal(live_server, pa
     expect(page.locator("#grmLoupeZoomSlider")).to_be_visible()
     expect(page.locator("#grmRemoveBtn")).to_be_hidden()
 
+    page.keyboard.press("Backspace")
+    expect(page.locator("#grmOverlay .grm-card[data-photo-id]")).to_have_count(1)
+    expect(page.locator("#grmCount")).to_have_text("0 picks, 0 rejects, 1 unsorted")
+
     page.keyboard.press("x")
     expect(page.locator("#grmCount")).to_have_text("0 picks, 1 rejects, 0 unsorted")
     expect(page.locator("#grmApplyBtn")).to_have_text("Reject 1 & Close")
