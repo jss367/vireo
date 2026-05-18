@@ -730,3 +730,117 @@ def test_browse_image_hotkeys_preserve_selection_and_shortcut_remaps(live_server
     page.keyboard.press("e")
     expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay")
     page.wait_for_function("photos[0].flag === 'flagged'")
+
+
+def test_browse_lightbox_deferred_one_to_one_survives_original_failure_to_fallback(
+    live_server, page
+):
+    """Codex P2: a deferred 1:1 must not snap on the upscaled /full when
+    /original fails while a higher preview tier is still being fetched.
+
+    When the user presses z before photo dimensions are known and /original
+    then fails, the error path reschedules to the sharpest remaining tier.
+    The inline resolve must stay deferred while that upgrade is queued —
+    otherwise it snaps on the upscaled /full (soft-1:1 flash) and its trailing
+    reschedule retargets the swap back to /full, canceling the upgrade and
+    stranding the user on /full forever.
+
+    Integer-only tier math (600 -> 2560, devicePixelRatio 1) makes
+    _lbPickSourceKey land deterministically so the regression is a hard
+    failure rather than a float-boundary coin flip.
+    """
+    page.add_init_script(
+        "Object.defineProperty(window, 'devicePixelRatio', { value: 1, configurable: true });"
+    )
+    # /full is a small upscaled preview (600px); 1:1 genuinely needs a higher
+    # tier. With dims unknown the lightbox can't tell the photo is large, so on
+    # /original failure _lbPickSourceKey(_lbNativeZoom) reads the 600px /full
+    # decode (== recorded _lbFullLongEdge) and returns 'full' — the boundary
+    # that defeats the tier-rank guard the pre-fix code relied on.
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" '
+        'viewBox="0 0 600 400"><rect width="600" height="400" fill="#274"/></svg>'
+    )
+    fallback_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2560" height="1600" '
+        'viewBox="0 0 2560 1600"><rect width="2560" height="1600" fill="#642"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    page.route("**/photos/*/original", lambda route: route.abort())
+    page.route(
+        "**/photos/*/preview?size=2560",
+        lambda route: route.fulfill(body=fallback_svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/photos/*/preview?size=3840",
+        lambda route: route.fulfill(body=fallback_svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 600;
+        }"""
+    )
+
+    # Simulate pressing z while photo dimensions are still unknown: bump
+    # _lbOpenSeq so the in-flight /api/photos dims callback bails (it cannot
+    # repopulate _lbPhotoW), then clear dims and toggle. With nativeZoom
+    # unknown the deferred path schedules a swap to /original.
+    page.evaluate(
+        """() => {
+            window._lbOpenSeq += 1;
+            window._lbPhotoW = null;
+            window._lbPhotoH = null;
+            window._lbNativeZoom = null;
+            window._lbOriginalUnavailable = false;
+            window._lbCurrentSrcKey = 'full';
+            window.toggleLightboxZoom();
+        }"""
+    )
+    page.wait_for_function(
+        "window._lbPending1To1 === true && window._lbDesiredSrcKey === 'original'"
+    )
+    assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+    assert page.evaluate("window._lbCurrentSrcKey") == "full"
+
+    # /original aborts. The fix must keep the deferral pending and retarget the
+    # swap at the sharpest remaining preview tier (a real upgrade vs. /full).
+    # Pre-fix the inline resolve snapped on /full (pickSourceKey == 'full', so
+    # the tier-rank guard 0 < 0 did not defer) and its trailing reschedule
+    # retargeted the swap back to 'full', so this state is never reached and
+    # the wait fails fast.
+    page.wait_for_function(
+        """() => window._lbOriginalUnavailable === true
+            && window._lbPending1To1 === true
+            && window._lbCurrentSrcKey === 'full'
+            && (window._lbDesiredSrcKey === '2560' || window._lbDesiredSrcKey === '3840')""",
+        timeout=6000,
+    )
+    assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+
+    # Once the fallback tier becomes the current source the deferred snap
+    # completes at true 1:1 on that tier — never stranded on the upscaled /full.
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return (window._lbCurrentSrcKey === '2560' || window._lbCurrentSrcKey === '3840')
+                && window._lbPending1To1 === false
+                && img && img.complete && img.naturalWidth === 2560
+                && window._lbNativeZoom
+                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }""",
+        timeout=8000,
+    )

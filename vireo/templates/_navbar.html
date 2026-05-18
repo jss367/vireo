@@ -4633,14 +4633,23 @@ function _lbScheduleSourceSwap(targetZoom) {
           // is the current source (gated by the tier-rank guard).
           _lbApplyTransform();
           _lbScheduleSourceSwap(4);
-          // If no higher tier is actually available (small viewport, or the
-          // current source is already the best remaining tier) the reschedule
-          // is a no-op and onSwapLoad never fires — without this the badge
-          // would stay stuck on "loading 1:1" at fit zoom forever. The
-          // tier-rank guard inside _lbApplyPendingOneToOneZoom keeps the snap
-          // deferred when a real upgrade IS still queued, so this only resolves
-          // the genuine no-swap-needed case.
-          _lbApplyPendingOneToOneZoom();
+          // Only resolve the deferred 1:1 inline when the reschedule did NOT
+          // queue a higher tier (small viewport, or the current source is
+          // already the best remaining tier). _lbScheduleSourceSwap sets
+          // _lbDesiredSrcKey and only arms a swap when it differs from
+          // _lbCurrentSrcKey, so equality here means no upgrade is coming and
+          // onSwapLoad would never fire — without this the badge would stay
+          // stuck on "loading 1:1" at fit zoom forever. When an upgrade IS
+          // queued we must NOT snap now: _lbNativeZoom was just recomputed from
+          // the /full decode, so _lbPickSourceKey(_lbNativeZoom) reads 'full'
+          // and the tier-rank guard inside _lbApplyPendingOneToOneZoom fails to
+          // defer — it would snap on the upscaled /full (soft-1:1 flash) and
+          // its trailing _lbScheduleSourceSwap() would retarget back to /full,
+          // canceling the 2560/3840 upgrade. In that case onSwapLoad applies
+          // the deferred snap once the higher tier becomes the current source.
+          if (_lbDesiredSrcKey === _lbCurrentSrcKey) {
+            _lbApplyPendingOneToOneZoom();
+          }
         } else {
           _lbApplyPendingOneToOneZoom();
           _lbApplyTransform();
