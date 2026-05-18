@@ -378,6 +378,117 @@ def test_browse_lightbox_one_to_one_nav_falls_back_when_original_fails(live_serv
     assert "/full" in page.locator("#lightboxImg").get_attribute("src")
 
 
+def test_browse_lightbox_restored_pending_one_to_one_waits_for_fallback_after_initial_original_fails(
+    live_server, page
+):
+    """A restored pending 1:1 must not snap on /full after initial /original fails."""
+    page.add_init_script(
+        "Object.defineProperty(window, 'devicePixelRatio', { value: 1, configurable: true });"
+    )
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" '
+        'viewBox="0 0 600 400"><rect width="600" height="400" fill="#274"/></svg>'
+    )
+    fallback_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2560" height="1600" '
+        'viewBox="0 0 2560 1600"><rect width="2560" height="1600" fill="#642"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/api/photos/1",
+        lambda route: route.fulfill(
+            json={
+                "id": 1,
+                "filename": "restored-pending.jpg",
+                "width": 4000,
+                "height": 2500,
+                "flag": "none",
+                "wildlife_excluded": False,
+            }
+        ),
+    )
+    page.route("**/photos/*/original", lambda route: route.abort())
+    held_fallback = {}
+
+    def hold_fallback(route):
+        if "released" in held_fallback:
+            route.fulfill(body=fallback_svg, content_type="image/svg+xml")
+        else:
+            held_fallback["route"] = route
+
+    page.route("**/photos/*/preview?size=2560", hold_fallback)
+    page.route("**/photos/*/preview?size=3840", hold_fallback)
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 900, "height": 700})
+    page.goto(f"{url}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    page.evaluate(
+        """() => {
+            const p = window.photos[0];
+            window._lbViewportByPhotoId[String(p.id)] = {
+                zoom: 1,
+                centerX: 0.5,
+                centerY: 0.5,
+                oneToOne: true,
+                pending1To1: true,
+            };
+            window.openLightbox(p.id, p.filename, window.photos);
+        }"""
+    )
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+
+    deadline = time.time() + 3
+    while "route" not in held_fallback and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_fallback, page.evaluate(
+        """() => ({
+            pending: window._lbPending1To1,
+            zoom: window._lbZoom,
+            nativeZoom: window._lbNativeZoom,
+            currentSource: window._lbCurrentSrcKey,
+            desiredSource: window._lbDesiredSrcKey,
+            originalUnavailable: window._lbOriginalUnavailable,
+            pendingViewport: window._lbPendingViewportState,
+            imgComplete: document.getElementById('lightboxImg')?.complete,
+            naturalWidth: document.getElementById('lightboxImg')?.naturalWidth,
+        })"""
+    )
+
+    waiting = page.evaluate(
+        """() => ({
+            pending: window._lbPending1To1,
+            zoom: window._lbZoom,
+            currentSource: window._lbCurrentSrcKey,
+            desiredSource: window._lbDesiredSrcKey,
+        })"""
+    )
+    assert waiting["pending"] is True
+    assert abs(waiting["zoom"] - 1) < 0.001
+    assert waiting["currentSource"] == "full"
+    assert waiting["desiredSource"] in ("2560", "3840")
+
+    held_fallback["released"] = True
+    held_fallback.pop("route").fulfill(
+        body=fallback_svg, content_type="image/svg+xml"
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return (window._lbCurrentSrcKey === '2560' || window._lbCurrentSrcKey === '3840')
+                && window._lbPending1To1 === false
+                && img && img.complete && img.naturalWidth === 2560
+                && window._lbNativeZoom
+                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }""",
+        timeout=8000,
+    )
+
+
 def test_browse_lightbox_one_to_one_uses_device_pixels_and_natural_layout(live_server, page):
     """1:1 uses natural image coordinates and maps source pixels to device pixels."""
     page.add_init_script(
@@ -449,22 +560,37 @@ def test_browse_lightbox_one_to_one_uses_device_pixels_and_natural_layout(live_s
 
 
 def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server, page):
-    """A loaded preview/full tier must not masquerade as true 1:1."""
+    """Metadata resolving before the held /original must not flash a soft 1:1.
+
+    Regression guard for the metadata-before-/original race: learning the true
+    dimensions (and therefore _lbNativeZoom) while /original is still loading
+    must NOT clear the pending 1:1 and snap on the upscaled /full tier. The
+    snap may only happen once the high-resolution source is actually current.
+    """
     page.add_init_script(
         "Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });"
     )
-    svg = (
+    full_svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
         'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
     )
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#3a7"/></svg>'
+    )
     page.route(
         "**/photos/*/full",
-        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     held_original = {}
 
     def hold_original(route):
-        held_original["route"] = route
+        if "released" in held_original:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
+        elif "route" not in held_original:
+            held_original["route"] = route
+        else:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
 
     page.route("**/photos/*/original", hold_original)
 
@@ -484,6 +610,8 @@ def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server
         }"""
     )
 
+    # Press 1:1 while the true size is still unknown: it must defer (stay at
+    # fit, pending) and request /original rather than enlarging /full.
     state = page.evaluate(
         """() => {
             window._lbPhotoW = null;
@@ -497,28 +625,335 @@ def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server
                 nativeZoom: window._lbNativeZoom,
                 pending: window._lbPending1To1,
                 zoom: window._lbZoom,
-                sourceKey: window._lbPickSourceKey(),
+                desiredSource: window._lbDesiredSrcKey,
             };
         }"""
     )
 
     assert state["nativeZoom"] is None
     assert state["pending"] is True
-    assert state["zoom"] > 1
-    assert state["sourceKey"] == "original"
+    assert state["zoom"] == 1
+    assert state["desiredSource"] == "original"
 
-    upgraded = page.evaluate(
+    # Wait until the deferred swap has actually issued the /original request
+    # and it is being held, so the metadata step below genuinely races a
+    # still-loading high-res source.
+    deadline = time.time() + 2
+    while "route" not in held_original and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_original
+
+    # Metadata resolves before the held /original finishes. Learning the true
+    # dimensions must NOT clear the pending state or snap on the upscaled /full.
+    still_deferred = page.evaluate(
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
             window._lbRecomputeNativeZoom();
             window._lbApplyPendingOneToOneZoom();
-            return Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+            return {
+                pending: window._lbPending1To1,
+                zoom: window._lbZoom,
+                currentSource: window._lbCurrentSrcKey,
+                nativeZoom: window._lbNativeZoom,
+            };
         }"""
     )
-    assert upgraded is True
-    if "route" in held_original:
-        held_original.pop("route").abort()
+    assert still_deferred["pending"] is True
+    assert abs(still_deferred["zoom"] - 1) < 0.001
+    assert still_deferred["currentSource"] == "full"
+    assert still_deferred["nativeZoom"] > 1
+
+    # Releasing /original lets the deferred 1:1 finally snap against the
+    # high-resolution source.
+    held_original["released"] = True
+    held_original.pop("route").fulfill(
+        body=original_svg, content_type="image/svg+xml"
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbCurrentSrcKey === 'original'
+                && window._lbPending1To1 === false
+                && img && img.complete && img.naturalWidth === 4000
+                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }"""
+    )
+
+
+def test_browse_lightbox_pending_one_to_one_guard_schedules_sharper_source(
+    live_server, page
+):
+    """If native 1:1 needs a sharper source, the guard must queue that source."""
+    page.add_init_script(
+        "Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });"
+    )
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#3a7"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    held_original = {}
+
+    def hold_original(route):
+        if "released" in held_original:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
+        elif "route" not in held_original:
+            held_original["route"] = route
+        else:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", hold_original)
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.locator(".grid-card").first.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 1920;
+        }"""
+    )
+
+    state = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbCurrentSrcKey = 'full';
+            window._lbDesiredSrcKey = 'full';
+            window._lbPending1To1 = true;
+            window._lbZoom = 1;
+            window._lbRecomputeNativeZoom();
+            window._lbApplyPendingOneToOneZoom();
+            return {
+                pending: window._lbPending1To1,
+                zoom: window._lbZoom,
+                nativeZoom: window._lbNativeZoom,
+                currentSource: window._lbCurrentSrcKey,
+                desiredSource: window._lbDesiredSrcKey,
+            };
+        }"""
+    )
+    assert state["pending"] is True
+    assert abs(state["zoom"] - 1) < 0.001
+    assert state["nativeZoom"] > 1
+    assert state["currentSource"] == "full"
+    assert state["desiredSource"] == "original"
+
+    deadline = time.time() + 2
+    while "route" not in held_original and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_original
+
+    held_original["released"] = True
+    held_original.pop("route").fulfill(
+        body=original_svg,
+        content_type="image/svg+xml",
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbCurrentSrcKey === 'original'
+                && window._lbPending1To1 === false
+                && img && img.complete && img.naturalWidth === 4000
+                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }"""
+    )
+
+
+def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, page):
+    """Known 1:1 zoom waits for the high-res source instead of enlarging /full."""
+    page.add_init_script(
+        "Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });"
+    )
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#3a7"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    held_original = {}
+
+    def hold_first_original(route):
+        if "released" in held_original:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
+        elif "route" not in held_original:
+            held_original["route"] = route
+        else:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", hold_first_original)
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 1920;
+        }"""
+    )
+    page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+        }"""
+    )
+    page.wait_for_function("window._lbNativeZoom > 1")
+
+    page.keyboard.press("z")
+    page.wait_for_function(
+        "window._lbPending1To1 === true && window._lbDesiredSrcKey === 'original'"
+    )
+    assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+    assert page.evaluate("window._lbCurrentSrcKey") == "full"
+    deadline = time.time() + 2
+    while "route" not in held_original and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_original
+
+    original_route = held_original.pop("route")
+    held_original["released"] = True
+    original_route.fulfill(
+        body=original_svg,
+        content_type="image/svg+xml",
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbCurrentSrcKey === 'original'
+                && img && img.complete && img.naturalWidth === 4000
+                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }"""
+    )
+
+
+def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page):
+    """A viewport resize while 'loading 1:1' must not drop the deferred snap."""
+    page.add_init_script(
+        "Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });"
+    )
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#3a7"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    held_original = {}
+
+    def hold_first_original(route):
+        if "released" in held_original:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
+        elif "route" not in held_original:
+            held_original["route"] = route
+        else:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", hold_first_original)
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 1920;
+        }"""
+    )
+    page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+        }"""
+    )
+    page.wait_for_function("window._lbNativeZoom > 1")
+
+    page.keyboard.press("z")
+    page.wait_for_function(
+        "window._lbPending1To1 === true && window._lbDesiredSrcKey === 'original'"
+    )
+    assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+    assert page.evaluate("window._lbCurrentSrcKey") == "full"
+
+    # Wait until the deferred swap has actually issued the held /original
+    # request — i.e. we are genuinely in the "loading 1:1" state Codex flagged.
+    deadline = time.time() + 2
+    while "route" not in held_original and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_original
+
+    native_zoom_before = page.evaluate("window._lbNativeZoom")
+
+    # Resize while the high-res source is still loading. The image is 4000px
+    # wide so _lbFitScale (hence _lbNativeZoom) is width-constrained; shrinking
+    # the viewport width forces a deterministic _lbNativeZoom change once the
+    # resize handler runs. The handler recomputes _lbNativeZoom unconditionally
+    # (before any pending-state logic), so the change below is a fix-independent
+    # signal that the debounced handler has actually executed — no fixed sleep.
+    page.set_viewport_size({"width": 640, "height": 800})
+    page.wait_for_function(
+        "Math.abs(window._lbNativeZoom - %r) > 0.1" % native_zoom_before
+    )
+
+    # The resize handler has now run while /original is still held. Pre-fix it
+    # cleared _lbPending1To1 and retargeted the swap back to /full, so releasing
+    # /original below no longer snaps to 1:1 — the deferred zoom request was
+    # silently dropped and the snap assertion times out (hard regression).
+    original_route = held_original.pop("route")
+    held_original["released"] = True
+    original_route.fulfill(body=original_svg, content_type="image/svg+xml")
+
+    # Post-fix the deferred intent survives the resize, so the lightbox still
+    # snaps to true 1:1 on /original. Pre-fix this never completes (the snap was
+    # dropped) and the wait times out — making the regression a hard failure.
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbCurrentSrcKey === 'original'
+                && window._lbPending1To1 === false
+                && img && img.complete && img.naturalWidth === 4000
+                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }""",
+        timeout=8000,
+    )
 
 
 def test_browse_lightbox_does_not_retry_original_after_unavailable(live_server, page):
@@ -593,6 +1028,120 @@ def test_browse_lightbox_does_not_retry_original_after_unavailable(live_server, 
             return window._lbOriginalUnavailable &&
                    window._lbCurrentSrcKey === '3840' &&
                    img && img.complete && img.naturalWidth === 3840;
+        }"""
+    )
+
+
+def test_browse_lightbox_waits_for_fallback_tier_after_original_fails(live_server, page):
+    """If /original fails, deferred 1:1 waits for the best preview fallback."""
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#246"/></svg>'
+    )
+    fallback_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="1920" '
+        'viewBox="0 0 3840 1920"><rect width="3840" height="1920" fill="#642"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    page.route("**/photos/*/original", lambda route: route.abort())
+    held_fallback = {}
+
+    def hold_3840(route):
+        if "released" in held_fallback:
+            route.fulfill(body=fallback_svg, content_type="image/svg+xml")
+        elif "route" not in held_fallback:
+            held_fallback["route"] = route
+        else:
+            route.fulfill(body=fallback_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/preview?size=3840", hold_3840)
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 1920;
+        }"""
+    )
+
+    page.evaluate(
+        """() => {
+            window._lbPhotoW = null;
+            window._lbPhotoH = null;
+            window._lbOriginalUnavailable = false;
+            window._lbCurrentSrcKey = 'full';
+            window._lbNativeZoom = null;
+            window._lbZoom = 1;
+            window.toggleLightboxZoom();
+        }"""
+    )
+
+    deadline = time.time() + 2
+    while "route" not in held_fallback and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_fallback
+    waiting = page.evaluate(
+        """() => ({
+            pending: window._lbPending1To1,
+            zoom: window._lbZoom,
+            currentSource: window._lbCurrentSrcKey,
+            desiredSource: window._lbDesiredSrcKey,
+        })"""
+    )
+    assert waiting["pending"] is True
+    assert abs(waiting["zoom"] - 1) < 0.001
+    assert waiting["currentSource"] == "full"
+    assert waiting["desiredSource"] == "3840"
+
+    before_resize_transforms = page.evaluate(
+        """() => {
+            window.__lbResizeTransformCount = 0;
+            const originalApplyTransform = window._lbApplyTransform;
+            window._lbApplyTransform = function() {
+                window.__lbResizeTransformCount += 1;
+                return originalApplyTransform.apply(this, arguments);
+            };
+            return window.__lbResizeTransformCount;
+        }"""
+    )
+    page.set_viewport_size({"width": 760, "height": 800})
+    page.wait_for_function(
+        "window.__lbResizeTransformCount > %d" % before_resize_transforms
+    )
+    after_resize = page.evaluate(
+        """() => ({
+            pending: window._lbPending1To1,
+            zoom: window._lbZoom,
+            currentSource: window._lbCurrentSrcKey,
+            desiredSource: window._lbDesiredSrcKey,
+        })"""
+    )
+    assert after_resize["pending"] is True
+    assert abs(after_resize["zoom"] - 1) < 0.001
+    assert after_resize["currentSource"] == "full"
+    assert after_resize["desiredSource"] == "3840"
+
+    fallback_route = held_fallback.pop("route")
+    held_fallback["released"] = True
+    fallback_route.fulfill(body=fallback_svg, content_type="image/svg+xml")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbCurrentSrcKey === '3840'
+                && window._lbPending1To1 === false
+                && img && img.complete && img.naturalWidth === 3840
+                && window._lbZoom > 1;
         }"""
     )
 
@@ -709,7 +1258,7 @@ def test_browse_e_f_g_keyboard_modes(live_server, page):
     )
     page.keyboard.press("f")
     assert page.evaluate("window.__fullscreenRequested") is False
-    assert page.evaluate("window._lbZoom") > 1
+    assert page.evaluate("window._lbZoom > 1 || window._lbPending1To1") is True
 
     page.evaluate(
         """() => {
@@ -762,3 +1311,252 @@ def test_browse_image_hotkeys_preserve_selection_and_shortcut_remaps(live_server
     page.keyboard.press("e")
     expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay")
     page.wait_for_function("photos[0].flag === 'flagged'")
+
+
+def test_browse_lightbox_deferred_one_to_one_survives_original_failure_to_fallback(
+    live_server, page
+):
+    """Codex P2: a deferred 1:1 must not snap on the upscaled /full when
+    /original fails while a higher preview tier is still being fetched.
+
+    When the user presses z before photo dimensions are known and /original
+    then fails, the error path reschedules to the sharpest remaining tier.
+    The inline resolve must stay deferred while that upgrade is queued —
+    otherwise it snaps on the upscaled /full (soft-1:1 flash) and its trailing
+    reschedule retargets the swap back to /full, canceling the upgrade and
+    stranding the user on /full forever.
+
+    Integer-only tier math (600 -> 2560, devicePixelRatio 1) makes
+    _lbPickSourceKey land deterministically so the regression is a hard
+    failure rather than a float-boundary coin flip.
+    """
+    page.add_init_script(
+        "Object.defineProperty(window, 'devicePixelRatio', { value: 1, configurable: true });"
+    )
+    # /full is a small upscaled preview (600px); 1:1 genuinely needs a higher
+    # tier. With dims unknown the lightbox can't tell the photo is large, so on
+    # /original failure _lbPickSourceKey(_lbNativeZoom) reads the 600px /full
+    # decode (== recorded _lbFullLongEdge) and returns 'full' — the boundary
+    # that defeats the tier-rank guard the pre-fix code relied on.
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" '
+        'viewBox="0 0 600 400"><rect width="600" height="400" fill="#274"/></svg>'
+    )
+    fallback_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2560" height="1600" '
+        'viewBox="0 0 2560 1600"><rect width="2560" height="1600" fill="#642"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    page.route("**/photos/*/original", lambda route: route.abort())
+    page.route(
+        "**/photos/*/preview?size=2560",
+        lambda route: route.fulfill(body=fallback_svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/photos/*/preview?size=3840",
+        lambda route: route.fulfill(body=fallback_svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 600;
+        }"""
+    )
+
+    # Simulate pressing z while photo dimensions are still unknown: bump
+    # _lbOpenSeq so the in-flight /api/photos dims callback bails (it cannot
+    # repopulate _lbPhotoW), then clear dims and toggle. With nativeZoom
+    # unknown the deferred path schedules a swap to /original.
+    page.evaluate(
+        """() => {
+            window._lbOpenSeq += 1;
+            window._lbPhotoW = null;
+            window._lbPhotoH = null;
+            window._lbNativeZoom = null;
+            window._lbOriginalUnavailable = false;
+            window._lbCurrentSrcKey = 'full';
+            window.toggleLightboxZoom();
+        }"""
+    )
+    page.wait_for_function(
+        "window._lbPending1To1 === true && window._lbDesiredSrcKey === 'original'"
+    )
+    assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+    assert page.evaluate("window._lbCurrentSrcKey") == "full"
+
+    # /original aborts. The fix must keep the deferral pending and retarget the
+    # swap at the sharpest remaining preview tier (a real upgrade vs. /full).
+    # Pre-fix the inline resolve snapped on /full (pickSourceKey == 'full', so
+    # the tier-rank guard 0 < 0 did not defer) and its trailing reschedule
+    # retargeted the swap back to 'full', so this state is never reached and
+    # the wait fails fast.
+    page.wait_for_function(
+        """() => window._lbOriginalUnavailable === true
+            && window._lbPending1To1 === true
+            && window._lbCurrentSrcKey === 'full'
+            && (window._lbDesiredSrcKey === '2560' || window._lbDesiredSrcKey === '3840')""",
+        timeout=6000,
+    )
+    assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+
+    # Once the fallback tier becomes the current source the deferred snap
+    # completes at true 1:1 on that tier — never stranded on the upscaled /full.
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return (window._lbCurrentSrcKey === '2560' || window._lbCurrentSrcKey === '3840')
+                && window._lbPending1To1 === false
+                && img && img.complete && img.naturalWidth === 2560
+                && window._lbNativeZoom
+                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }""",
+        timeout=8000,
+    )
+
+
+def test_browse_lightbox_resize_preserves_post_original_failure_fallback(
+    live_server, page
+):
+    """Codex P2 (Thread 11): a viewport resize while the post-/original-failure
+    fallback tier is still loading must not cancel that upgrade.
+
+    Repro: press z with dims unknown -> /original aborts -> the error path
+    keeps the deferral pending and queues the sharpest remaining preview tier
+    (2560/3840). While that tier is still loading the user resizes. The resize
+    recovery path used to re-derive the swap target from _lbNativeZoom, which —
+    because /original is unavailable and the current source is the upscaled
+    /full — reflects the /full decode, so it re-picked 'full', canceled the
+    in-flight fallback upgrade, and snapped a soft 1:1 on /full. Post-fix the
+    deferred intent (and the higher-tier target) survives the resize.
+    """
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#246"/></svg>'
+    )
+    fallback_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2560" height="1600" '
+        'viewBox="0 0 2560 1600"><rect width="2560" height="1600" fill="#642"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    page.route("**/photos/*/original", lambda route: route.abort())
+    held_fallback = {}
+
+    def hold_fallback(route):
+        # Hold the most recent fallback-tier request (2560 or 3840) until the
+        # test explicitly releases it. The resize re-arms the swap, so a later
+        # request supersedes the earlier held one — keep only the live route.
+        if "released" in held_fallback:
+            route.fulfill(body=fallback_svg, content_type="image/svg+xml")
+        else:
+            held_fallback["route"] = route
+
+    page.route("**/photos/*/preview?size=2560", hold_fallback)
+    page.route("**/photos/*/preview?size=3840", hold_fallback)
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 1920;
+        }"""
+    )
+
+    page.evaluate(
+        """() => {
+            window._lbPhotoW = null;
+            window._lbPhotoH = null;
+            window._lbOriginalUnavailable = false;
+            window._lbCurrentSrcKey = 'full';
+            window._lbNativeZoom = null;
+            window._lbZoom = 1;
+            window.toggleLightboxZoom();
+        }"""
+    )
+
+    # /original aborts; the deferred 1:1 must now be pending against the
+    # sharpest remaining preview tier (a real upgrade vs. the /full it is on).
+    deadline = time.time() + 3
+    while "route" not in held_fallback and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_fallback
+    waiting = page.evaluate(
+        """() => ({
+            pending: window._lbPending1To1,
+            zoom: window._lbZoom,
+            currentSource: window._lbCurrentSrcKey,
+            desiredSource: window._lbDesiredSrcKey,
+        })"""
+    )
+    assert waiting["pending"] is True
+    assert abs(waiting["zoom"] - 1) < 0.001
+    assert waiting["currentSource"] == "full"
+    assert waiting["desiredSource"] in ("2560", "3840")
+
+    native_zoom_before = page.evaluate("window._lbNativeZoom")
+
+    # Resize while the fallback tier is still held. _lbRecomputeNativeZoom runs
+    # unconditionally at the top of the resize handler (before any pending-state
+    # logic), so a deterministic change in _lbNativeZoom is a fix-independent
+    # signal that the debounced handler actually executed — no fixed sleep.
+    page.set_viewport_size({"width": 640, "height": 800})
+    page.wait_for_function(
+        "Math.abs(window._lbNativeZoom - %r) > 0.1" % native_zoom_before
+    )
+
+    # The resize handler has now run while the fallback tier is still loading.
+    # Pre-fix it canceled the upgrade and snapped a soft 1:1 on /full; post-fix
+    # the deferred intent and the higher-tier target both survive.
+    survived = page.evaluate(
+        """() => ({
+            pending: window._lbPending1To1,
+            zoom: window._lbZoom,
+            currentSource: window._lbCurrentSrcKey,
+            desiredSource: window._lbDesiredSrcKey,
+        })"""
+    )
+    assert survived["pending"] is True
+    assert abs(survived["zoom"] - 1) < 0.001
+    assert survived["currentSource"] == "full"
+    assert survived["desiredSource"] in ("2560", "3840")
+
+    # Releasing the fallback tier lets the deferred 1:1 finally snap against it
+    # — never stranded on the upscaled /full.
+    held_fallback["released"] = True
+    held_fallback.pop("route").fulfill(
+        body=fallback_svg, content_type="image/svg+xml"
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return (window._lbCurrentSrcKey === '2560' || window._lbCurrentSrcKey === '3840')
+                && window._lbPending1To1 === false
+                && img && img.complete && img.naturalWidth === 2560
+                && window._lbNativeZoom
+                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }""",
+        timeout=8000,
+    )
