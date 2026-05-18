@@ -378,6 +378,117 @@ def test_browse_lightbox_one_to_one_nav_falls_back_when_original_fails(live_serv
     assert "/full" in page.locator("#lightboxImg").get_attribute("src")
 
 
+def test_browse_lightbox_restored_pending_one_to_one_waits_for_fallback_after_initial_original_fails(
+    live_server, page
+):
+    """A restored pending 1:1 must not snap on /full after initial /original fails."""
+    page.add_init_script(
+        "Object.defineProperty(window, 'devicePixelRatio', { value: 1, configurable: true });"
+    )
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" '
+        'viewBox="0 0 600 400"><rect width="600" height="400" fill="#274"/></svg>'
+    )
+    fallback_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2560" height="1600" '
+        'viewBox="0 0 2560 1600"><rect width="2560" height="1600" fill="#642"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/api/photos/1",
+        lambda route: route.fulfill(
+            json={
+                "id": 1,
+                "filename": "restored-pending.jpg",
+                "width": 4000,
+                "height": 2500,
+                "flag": "none",
+                "wildlife_excluded": False,
+            }
+        ),
+    )
+    page.route("**/photos/*/original", lambda route: route.abort())
+    held_fallback = {}
+
+    def hold_fallback(route):
+        if "released" in held_fallback:
+            route.fulfill(body=fallback_svg, content_type="image/svg+xml")
+        else:
+            held_fallback["route"] = route
+
+    page.route("**/photos/*/preview?size=2560", hold_fallback)
+    page.route("**/photos/*/preview?size=3840", hold_fallback)
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 900, "height": 700})
+    page.goto(f"{url}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    page.evaluate(
+        """() => {
+            const p = window.photos[0];
+            window._lbViewportByPhotoId[String(p.id)] = {
+                zoom: 1,
+                centerX: 0.5,
+                centerY: 0.5,
+                oneToOne: true,
+                pending1To1: true,
+            };
+            window.openLightbox(p.id, p.filename, window.photos);
+        }"""
+    )
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+
+    deadline = time.time() + 3
+    while "route" not in held_fallback and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_fallback, page.evaluate(
+        """() => ({
+            pending: window._lbPending1To1,
+            zoom: window._lbZoom,
+            nativeZoom: window._lbNativeZoom,
+            currentSource: window._lbCurrentSrcKey,
+            desiredSource: window._lbDesiredSrcKey,
+            originalUnavailable: window._lbOriginalUnavailable,
+            pendingViewport: window._lbPendingViewportState,
+            imgComplete: document.getElementById('lightboxImg')?.complete,
+            naturalWidth: document.getElementById('lightboxImg')?.naturalWidth,
+        })"""
+    )
+
+    waiting = page.evaluate(
+        """() => ({
+            pending: window._lbPending1To1,
+            zoom: window._lbZoom,
+            currentSource: window._lbCurrentSrcKey,
+            desiredSource: window._lbDesiredSrcKey,
+        })"""
+    )
+    assert waiting["pending"] is True
+    assert abs(waiting["zoom"] - 1) < 0.001
+    assert waiting["currentSource"] == "full"
+    assert waiting["desiredSource"] in ("2560", "3840")
+
+    held_fallback["released"] = True
+    held_fallback.pop("route").fulfill(
+        body=fallback_svg, content_type="image/svg+xml"
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return (window._lbCurrentSrcKey === '2560' || window._lbCurrentSrcKey === '3840')
+                && window._lbPending1To1 === false
+                && img && img.complete && img.naturalWidth === 2560
+                && window._lbNativeZoom
+                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }""",
+        timeout=8000,
+    )
+
+
 def test_browse_lightbox_one_to_one_uses_device_pixels_and_natural_layout(live_server, page):
     """1:1 uses natural image coordinates and maps source pixels to device pixels."""
     page.add_init_script(

@@ -3086,6 +3086,24 @@ function _lbApplyPendingOneToOneZoom() {
   );
 }
 
+function _lbDeferPendingOneToOneUntilSourceReady(targetZoom) {
+  if (!_lbPending1To1) return false;
+  _lbPendingViewportState = null;
+  _lbApplyTransform();
+  _lbScheduleSourceSwap(targetZoom);
+  if (_lbDesiredSrcKey === _lbCurrentSrcKey) {
+    _lbApplyPendingOneToOneZoom();
+  }
+  return true;
+}
+
+function _lbDeferPendingOneToOneToPreviewFallback() {
+  // /original is unavailable but the user still wants true 1:1. Keep the
+  // deferral pending and aim at the sharpest remaining preview tier instead of
+  // snapping on an upscaled /full.
+  return _lbDeferPendingOneToOneUntilSourceReady(4);
+}
+
 function _lbNormalizeFlag(flag) {
   if (flag === 'flagged' || flag === 'rejected' || flag === 'none') return flag;
   if (flag == null || flag === '') return 'none';
@@ -3604,7 +3622,7 @@ function openLightbox(photoId, filename, photoList, options) {
   );
   _lbCurrentSrcKey = (
     restoreViewportState &&
-    (restoreViewportState.zoom > 1.001 || restoreWantsOneToOne)
+    restoreViewportState.zoom > 1.001
   ) ? 'original' : 'full';
   _lbFullLongEdge = null;
   _lbPending1To1 = restoreWantsOneToOne;
@@ -3652,7 +3670,19 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbPhotoH = img.naturalHeight;
     }
     _lbRecomputeNativeZoom();
-    if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
+    if (
+      _lbCurrentSrcKey === 'full' &&
+      _lbPending1To1 &&
+      (
+        _lbOriginalUnavailable
+          ? _lbDeferPendingOneToOneToPreviewFallback()
+          : _lbDeferPendingOneToOneUntilSourceReady(_lbNativeZoom || 4)
+      )
+    ) {
+      // The helper keeps 1:1 pending until the required source tier is current.
+    } else if (!_lbTryApplyPendingViewportState()) {
+      _lbApplyPendingOneToOneZoom();
+    }
     _lbApplyTransform();
   }
   function handleInitialImageError() {
@@ -4796,34 +4826,7 @@ function _lbScheduleSourceSwap(targetZoom) {
         _lbOriginalUnavailable = true;
         _lbRecomputeNativeZoom();
         if (had1To1Pending) {
-          // /original is gone but the user still wants true 1:1. Keep the
-          // deferral pending and aim the reschedule at the sharpest remaining
-          // preview tier instead of snapping now on an upscaled /full (the
-          // soft-1:1 flash). A large target zoom forces _lbPickSourceKey past
-          // the /full threshold even when true dimensions — and therefore
-          // _lbNativeZoom — are still unknown at failure time; rescheduling
-          // with the post-clear state would otherwise keep us pinned to /full.
-          // The pending snap then completes in onSwapLoad once the higher tier
-          // is the current source (gated by the tier-rank guard).
-          _lbApplyTransform();
-          _lbScheduleSourceSwap(4);
-          // Only resolve the deferred 1:1 inline when the reschedule did NOT
-          // queue a higher tier (small viewport, or the current source is
-          // already the best remaining tier). _lbScheduleSourceSwap sets
-          // _lbDesiredSrcKey and only arms a swap when it differs from
-          // _lbCurrentSrcKey, so equality here means no upgrade is coming and
-          // onSwapLoad would never fire — without this the badge would stay
-          // stuck on "loading 1:1" at fit zoom forever. When an upgrade IS
-          // queued we must NOT snap now: _lbNativeZoom was just recomputed from
-          // the /full decode, so _lbPickSourceKey(_lbNativeZoom) reads 'full'
-          // and the tier-rank guard inside _lbApplyPendingOneToOneZoom fails to
-          // defer — it would snap on the upscaled /full (soft-1:1 flash) and
-          // its trailing _lbScheduleSourceSwap() would retarget back to /full,
-          // canceling the 2560/3840 upgrade. In that case onSwapLoad applies
-          // the deferred snap once the higher tier becomes the current source.
-          if (_lbDesiredSrcKey === _lbCurrentSrcKey) {
-            _lbApplyPendingOneToOneZoom();
-          }
+          _lbDeferPendingOneToOneToPreviewFallback();
         } else {
           _lbApplyPendingOneToOneZoom();
           _lbApplyTransform();
