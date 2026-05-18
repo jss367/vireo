@@ -326,21 +326,13 @@ def test_encounter_species_rejects_invalid_photo_ids(app_and_db):
     assert not any(c["value"] == "Robin" for c in pending)
 
 
-def test_encounter_species_skips_sub_threshold_photos(app_and_db):
-    """POST /api/encounters/species must skip photos whose only detections
-    are below the workspace's detector_confidence threshold.
+def test_encounter_species_tags_sub_threshold_photos_with_warning(app_and_db):
+    """Explicit species confirmation must tag every submitted photo.
 
-    Regression for the "Mountain chickadee" highlights bug: when an
-    encounter is bulk-confirmed, photos with only noise-level detections
-    (e.g. confidence ~0.02 from MegaDetector emitting a whole-frame box on
-    a frame with no real subject) were tagged with the species too. Those
-    bad tags then made the photos eligible for highlights and they floated
-    to the top by quality_score because the noise box happened to span the
-    whole frame.
-
-    Photos with NO detections at all stay eligible (this endpoint is also
-    used to label photos that were never run through the pipeline — the
-    user is asserting the species manually).
+    A weak detector row is useful warning context, but it must not silently
+    override a user-confirmed species label. Regression for DSC_3682.NEF:
+    a correct Allen's hummingbird prediction was skipped because its only
+    detector row was below the threshold.
     """
     app, db = app_and_db
     client = app.test_client()
@@ -377,10 +369,9 @@ def test_encounter_species_skips_sub_threshold_photos(app_and_db):
     assert "Mountain Chickadee" in real_tags, (
         "photo with high-confidence detection must still be tagged"
     )
-    assert "Mountain Chickadee" not in noise_tags, (
-        "photo whose only detection is below threshold must NOT be tagged — "
-        "those are noise photos and the tag is what makes them appear in "
-        "highlights with the wrong species"
+    assert "Mountain Chickadee" in noise_tags, (
+        "explicit user confirmation must tag the submitted photo even when "
+        "the detector confidence is below threshold"
     )
     assert "Mountain Chickadee" in undetected_tags, (
         "photo with no detections at all is a manual-tagging case (user "
@@ -388,27 +379,19 @@ def test_encounter_species_skips_sub_threshold_photos(app_and_db):
         "this must continue to work"
     )
 
-    # Response should reflect what actually happened so the UI can warn
-    # about skipped photos (otherwise the user thinks all 48 were tagged
-    # but really only 47 were).
-    assert data["photo_count"] == 2, (
-        f"photo_count should reflect actually-tagged photos (2), got {data['photo_count']}"
+    assert data["photo_count"] == 3, (
+        f"photo_count should reflect all explicitly-tagged photos, got {data['photo_count']}"
     )
-    skipped = data.get("skipped_photo_ids") or []
-    assert p_noise in skipped, (
-        f"skipped_photo_ids should list the noise photo so the UI can warn; "
-        f"got {skipped!r}"
+    assert data.get("skipped_photo_ids") == []
+    low_conf = data.get("low_confidence_photo_ids") or []
+    assert p_noise in low_conf, (
+        f"low_confidence_photo_ids should list the weak detector photo so "
+        f"the UI can warn; got {low_conf!r}"
     )
 
 
-def test_encounter_species_all_skipped_returns_cached_encounters(app_and_db):
-    """When every submitted photo is sub-threshold, the response must still
-    include ``encounters`` from the cached pipeline results. Without that,
-    the client's confirmSpecies fallback (templates/pipeline_review.html)
-    interprets the successful response as a local-confirmation and sets
-    ``species_confirmed=true`` on the encounter — even though the server
-    did nothing.
-    """
+def test_encounter_species_all_sub_threshold_still_confirms_cache(app_and_db):
+    """Even all-low-confidence submissions are explicit confirmations."""
     import json as _json
     app, db = app_and_db
     client = app.test_client()
@@ -450,19 +433,18 @@ def test_encounter_species_all_skipped_returns_cached_encounters(app_and_db):
     )
     assert resp.status_code == 200
     data = resp.get_json()
-    assert data["photo_count"] == 0
-    assert data["skipped_photo_ids"] == [p_noise]
-    # The cached encounters/summary must be echoed so the client doesn't
-    # locally mark the encounter confirmed.
+    assert data["photo_count"] == 1
+    assert data["skipped_photo_ids"] == []
+    assert data["low_confidence_photo_ids"] == [p_noise]
+    assert "Mountain Chickadee" in {k["name"] for k in db.get_photo_keywords(p_noise)}
+
     assert "encounters" in data, (
-        "all-skipped response must include encounters so the client doesn't "
-        "fall through to the local-confirm branch"
+        "response should include server-updated encounters when a cache exists"
     )
-    assert data["encounters"][0]["species_confirmed"] is False, (
-        "encounter must remain unconfirmed in the response — nothing was "
-        "actually tagged"
-    )
-    assert data["summary"] == sentinel_summary
+    assert data["encounters"][0]["species_confirmed"] is True
+    assert data["encounters"][0]["confirmed_species"] == "Mountain Chickadee"
+    assert data["summary"]["confirmed_count"] == 1
+    assert data["summary"]["unconfirmed_count"] == 0
 
 
 def test_encounter_species_updates_pipeline_cache(app_and_db):
