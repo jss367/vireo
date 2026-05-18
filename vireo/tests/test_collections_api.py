@@ -63,6 +63,61 @@ def test_create_and_list_collection(app_and_db):
     assert created_id in ids
 
 
+def test_list_collections_marks_manual_photo_targets(app_and_db):
+    """GET /api/collections reports which collections can accept manual adds."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    client.post(
+        "/api/collections",
+        json={"name": "Manual", "rules": [{"field": "photo_ids", "value": []}]},
+    )
+    client.post(
+        "/api/collections",
+        json={
+            "name": "Smart",
+            "rules": [{"field": "rating", "op": ">=", "value": 4}],
+        },
+    )
+    client.post(
+        "/api/collections",
+        json={"name": "All Photos", "rules": [{"field": "all"}]},
+    )
+
+    resp = client.get("/api/collections")
+    assert resp.status_code == 200
+    by_name = {c["name"]: c for c in resp.get_json()}
+    assert by_name["Manual"]["can_add_photos"] is True
+    assert by_name["Smart"]["can_add_photos"] is False
+    assert by_name["All Photos"]["can_add_photos"] is False
+
+
+def test_browse_init_marks_manual_photo_targets(app_and_db):
+    """Initial Browse payload includes collection type metadata for the sidebar."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    client.post(
+        "/api/collections",
+        json={"name": "Manual", "rules": [{"field": "photo_ids", "value": []}]},
+    )
+    client.post(
+        "/api/collections",
+        json={
+            "name": "Smart",
+            "rules": [{"field": "rating", "op": ">=", "value": 4}],
+        },
+    )
+
+    resp = client.get("/api/browse/init")
+    assert resp.status_code == 200
+    by_name = {c["name"]: c for c in resp.get_json()["collections"]}
+    assert by_name["Manual"]["can_add_photos"] is True
+    assert by_name["Smart"]["can_add_photos"] is False
+
+
 def test_delete_collection(app_and_db):
     """DELETE /api/collections/<id> removes it."""
     app, db = app_and_db
@@ -258,6 +313,32 @@ def test_cannot_add_photos_to_all_photos_default(app_and_db):
         "SELECT rules FROM collections WHERE id = ?", (all_photos["id"],)
     ).fetchone()
     assert json.loads(row["rules"]) == [{"field": "all"}]
+
+
+def test_cannot_add_photos_to_smart_collection(app_and_db):
+    """Manual adds to a smart collection should not convert it into a subset."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    rules = [{"field": "rating", "op": ">=", "value": 4}]
+    resp = client.post(
+        "/api/collections",
+        json={"name": "High Rated", "rules": rules},
+    )
+    cid = resp.get_json()["id"]
+    pid = db.get_photos()[0]["id"]
+
+    resp = client.post(
+        f"/api/collections/{cid}/add-photos",
+        json={"photo_ids": [pid]},
+    )
+    assert resp.status_code == 400
+
+    row = db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,)
+    ).fetchone()
+    assert json.loads(row["rules"]) == rules
 
 
 def test_cannot_add_photos_to_none_grouped_collection(app_and_db):

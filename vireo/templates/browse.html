@@ -62,6 +62,32 @@ body {
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
+.tree-item .collection-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-item .collection-kind-badge {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  color: var(--text-faint);
+  font-size: 9px;
+  line-height: 1.3;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.tree-item .collection-kind-badge.smart {
+  border-color: color-mix(in srgb, var(--info) 50%, var(--border-secondary));
+  color: var(--info);
+}
+.tree-item .collection-kind-badge.manual {
+  border-color: var(--border-primary);
+  color: var(--text-ghost);
+}
 .tree-item .folder-status-partial {
   margin-left: 6px;
   font-size: 10px;
@@ -1875,8 +1901,12 @@ function renderCollectionList(collections) {
   collections.forEach(function(c) {
     collectionsById[c.id] = c;
     var count = c.photo_count != null ? c.photo_count : '';
-    html += '<div class="tree-item" data-collection-id="' + c.id + '" onclick="filterByCollection(' + c.id + ')">' +
-      '<span>' + escapeHtml(c.name) + '</span>' +
+    var canAddPhotos = collectionAcceptsManualPhotos(c);
+    var kind = canAddPhotos ? 'manual' : 'smart';
+    var kindLabel = canAddPhotos ? 'Manual' : 'Smart';
+    html += '<div class="tree-item" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '" onclick="filterByCollection(' + c.id + ')">' +
+      '<span class="collection-name">' + escapeHtml(c.name) + '</span>' +
+      '<span class="collection-kind-badge ' + kind + '">' + kindLabel + '</span>' +
       '<span class="count">' + count + '</span></div>';
   });
   document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
@@ -3708,6 +3738,35 @@ function batchDelete() {
 var _batchCollections = [];
 var _batchCollectionSelectedId = null;
 
+function collectionAcceptsManualPhotos(collection) {
+  if (typeof collection.can_add_photos === 'boolean') {
+    return collection.can_add_photos;
+  }
+
+  function rulesAcceptManualPhotos(node) {
+    if (Array.isArray(node)) {
+      return node.every(rulesAcceptManualPhotos);
+    }
+    if (!node || typeof node !== 'object') return false;
+    if (node.field === 'photo_ids') {
+      return Array.isArray(node.value || []);
+    }
+    if (!node.field && Array.isArray(node.rules)) {
+      return (node.mode || 'all') === 'all' && node.rules.every(rulesAcceptManualPhotos);
+    }
+    return false;
+  }
+
+  try {
+    var rules = typeof collection.rules === 'string'
+      ? JSON.parse(collection.rules)
+      : collection.rules;
+    return rulesAcceptManualPhotos(rules);
+  } catch(e) {
+    return false;
+  }
+}
+
 async function addToCollection() {
   var activeIds = getActiveSelection();
   if (activeIds.length === 0) {
@@ -3723,6 +3782,7 @@ async function addToCollection() {
     return;
   }
 
+  collections = collections.filter(collectionAcceptsManualPhotos);
   _batchCollections = collections;
   _batchCollectionSelectedId = null;
   document.getElementById('batchCollectionTitle').textContent = 'Add ' + activeIds.length + ' photo(s) to collection';
@@ -3732,7 +3792,7 @@ async function addToCollection() {
     listHtml += '<div class="batch-coll-item" data-id="' + c.id + '" onclick="pickBatchCollection(' + c.id + ')" style="padding:6px 10px;cursor:pointer;border-radius:4px;font-size:13px;color:var(--text-primary);">' + escapeHtml(c.name) + '</div>';
   });
   if (collections.length === 0) {
-    listHtml = '<div style="font-size:12px;color:var(--text-dim);padding:4px 10px;">No collections yet</div>';
+    listHtml = '<div style="font-size:12px;color:var(--text-dim);padding:4px 10px;">No manual collections yet</div>';
   }
   document.getElementById('batchCollectionList').innerHTML = listHtml;
   document.getElementById('batchCollectionNewName').value = '';
@@ -5138,7 +5198,7 @@ document.addEventListener('contextmenu', function(e) {
   e.preventDefault();
   var cid = parseInt(ti.dataset.collectionId, 10);
   if (isNaN(cid)) return;
-  var nameEl = ti.querySelector('span');
+  var nameEl = ti.querySelector('.collection-name');
   var name = nameEl ? nameEl.textContent : '';
   openContextMenu(e, [
     { label: 'Filter by this Collection',
