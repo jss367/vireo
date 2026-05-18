@@ -3598,9 +3598,16 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbNativeZoom = null;
   _lbPhotoW = null;
   _lbPhotoH = null;
-  _lbCurrentSrcKey = (restoreViewportState && restoreViewportState.zoom > 1.001) ? 'original' : 'full';
+  var restoreWantsOneToOne = !!(
+    restoreViewportState &&
+    (restoreViewportState.oneToOne || restoreViewportState.pending1To1)
+  );
+  _lbCurrentSrcKey = (
+    restoreViewportState &&
+    (restoreViewportState.zoom > 1.001 || restoreWantsOneToOne)
+  ) ? 'original' : 'full';
   _lbFullLongEdge = null;
-  _lbPending1To1 = !!(restoreViewportState && (restoreViewportState.oneToOne || restoreViewportState.pending1To1));
+  _lbPending1To1 = restoreWantsOneToOne;
   // The deferred-1:1 anchor is a client-space click coordinate scoped to the
   // PREVIOUS photo. Clear it on every open so a 1:1-preserving navigation (or a
   // swap still in flight from the prior photo) snaps centered instead of reusing
