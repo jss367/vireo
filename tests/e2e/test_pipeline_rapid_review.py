@@ -697,7 +697,7 @@ def test_classic_pipeline_review_opens_requested_burst_from_url(live_server, pag
     )
 
 
-def test_classic_pipeline_review_inspector_pick_reject_hotkeys(live_server, page):
+def test_classic_pipeline_review_single_photo_opens_review_modal(live_server, page):
     image_body = base64.b64decode(_PNG_1X1)
     results = {
         "photos": [
@@ -721,12 +721,6 @@ def test_classic_pipeline_review_inspector_pick_reject_hotkeys(live_server, page
             "reject_count": 0,
         },
     }
-    flag_payloads = []
-
-    def flag_route(route):
-        flag_payloads.append(route.request.post_data_json)
-        route.fulfill(json={"ok": True})
-
     page.route(
         "**/api/pipeline/page-init",
         lambda route: route.fulfill(
@@ -737,28 +731,43 @@ def test_classic_pipeline_review_inspector_pick_reject_hotkeys(live_server, page
             }
         ),
     )
-    page.route("**/api/photos/1/flag", flag_route)
+    page.route(
+        "**/api/pipeline/group/state",
+        lambda route: route.fulfill(
+            json={
+                "photos": {"1": {"flag": "none", "has_species_keyword": False}},
+                "species_kid": None,
+            }
+        ),
+    )
     page.route("**/thumbnails/*.jpg", lambda route: route.fulfill(body=image_body, content_type="image/png"))
-    page.route("**/masks/*.png", lambda route: route.fulfill(status=404))
+    page.route("**/photos/*/preview?*", lambda route: route.fulfill(body=image_body, content_type="image/png"))
+    page.route("**/photos/*/original", lambda route: route.fulfill(body=image_body, content_type="image/png"))
 
     page.goto(f"{live_server['url']}/pipeline/review")
     page.locator(".photo-card img").click()
-    expect(page.locator("#inspectOverlay")).to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#inspectOverlay")).not_to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#grmOverlay")).to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#grmTitle")).to_have_text("Review Photo")
+    expect(page.locator("#grmOverlay .grm-card[data-photo-id]")).to_have_count(1)
+    expect(page.locator("#grmResSlider")).to_be_visible()
+    expect(page.locator("#grmLoupeZoomSlider")).to_be_visible()
+    expect(page.locator("#grmRemoveBtn")).to_be_hidden()
 
-    with page.expect_response("**/api/photos/1/flag"):
-        page.keyboard.press("x")
-    expect(page.locator("#inspectPanel")).to_contain_text("Rejected (X)")
-    expect(page.locator(".photo-card .flag-rejected")).to_be_visible()
-    assert flag_payloads[-1] == {"flag": "rejected"}
+    page.keyboard.press("Backspace")
+    expect(page.locator("#grmOverlay .grm-card[data-photo-id]")).to_have_count(1)
+    expect(page.locator("#grmCount")).to_have_text("0 picks, 0 rejects, 1 unsorted")
 
-    with page.expect_response("**/api/photos/1/flag"):
-        page.keyboard.press("p")
-    expect(page.locator("#inspectPanel")).to_contain_text("Flagged (P)")
-    expect(page.locator(".photo-card .flag-flagged")).to_be_visible()
-    assert flag_payloads[-1] == {"flag": "flagged"}
+    page.keyboard.press("x")
+    expect(page.locator("#grmCount")).to_have_text("0 picks, 1 rejects, 0 unsorted")
+    expect(page.locator("#grmApplyBtn")).to_have_text("Reject 1 & Close")
+
+    page.keyboard.press("p")
+    expect(page.locator("#grmCount")).to_have_text("1 picks, 0 rejects, 0 unsorted")
+    expect(page.locator("#grmApplyBtn")).to_have_text("Flag 1 · Tag 1 as Test bird & Close")
 
 
-def test_classic_pipeline_review_group_shortcuts_do_not_flag_stale_inspector_photo(live_server, page):
+def test_classic_pipeline_review_group_shortcuts_do_not_flag_prior_single_photo(live_server, page):
     image_body = base64.b64decode(_PNG_1X1)
     results = {
         "photos": [
@@ -805,6 +814,7 @@ def test_classic_pipeline_review_group_shortcuts_do_not_flag_stale_inspector_pho
         lambda route: route.fulfill(
             json={
                 "photos": {
+                    "1": {"flag": "none", "has_species_keyword": False},
                     "2": {"flag": "none", "has_species_keyword": False},
                     "3": {"flag": "none", "has_species_keyword": False},
                 },
@@ -814,15 +824,22 @@ def test_classic_pipeline_review_group_shortcuts_do_not_flag_stale_inspector_pho
     )
     page.route("**/api/photos/1/flag", stale_flag_route)
     page.route("**/thumbnails/*.jpg", lambda route: route.fulfill(body=image_body, content_type="image/png"))
-    page.route("**/masks/*.png", lambda route: route.fulfill(status=404))
+    page.route("**/photos/*/preview?*", lambda route: route.fulfill(body=image_body, content_type="image/png"))
+    page.route("**/photos/*/original", lambda route: route.fulfill(body=image_body, content_type="image/png"))
 
     page.goto(f"{live_server['url']}/pipeline/review")
     page.locator(".photo-card[data-photo-id='1'] img").click()
-    expect(page.locator("#inspectOverlay")).to_have_class(re.compile(r"\bopen\b"))
-
-    page.locator("#inspectPanel .context-filmstrip img").nth(1).click()
     expect(page.locator("#inspectOverlay")).not_to_have_class(re.compile(r"\bopen\b"))
     expect(page.locator("#grmOverlay")).to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#grmTitle")).to_have_text("Review Photo")
+    expect(page.locator("#grmOverlay .grm-card[data-photo-id]")).to_have_count(1)
+
+    page.locator("#grmOverlay .grm-close").click()
+    expect(page.locator("#grmOverlay")).not_to_have_class(re.compile(r"\bopen\b"))
+    page.locator(".photo-card[data-photo-id='2'] img").click()
+    expect(page.locator("#grmOverlay")).to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#grmTitle")).to_have_text("Review Burst Group")
+    expect(page.locator("#grmOverlay .grm-card[data-photo-id]")).to_have_count(2)
 
     page.keyboard.press("x")
     expect(page.locator("#grmCount")).to_have_text("0 picks, 1 rejects, 1 unsorted")
