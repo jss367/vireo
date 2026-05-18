@@ -81,6 +81,270 @@ def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
     assert page.evaluate("window._lbZoom") > 1.001
 
 
+def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page):
+    """Arrow navigation preserves pan/zoom per photo and carries it to unseen photos."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/>'
+        '<circle cx="1000" cy="1400" r="180" fill="#fff"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/photos/*/original",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 4000;
+        }"""
+    )
+
+    first_view = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            window._lbApplyViewportState({zoom: 2.2, centerX: 0.24, centerY: 0.70});
+            window._lbSaveViewportState(window._lightboxCurrentId);
+            return window._lbViewportStateFromCurrent();
+        }"""
+    )
+
+    page.locator("[title='Next (→)']").click()
+    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    page.wait_for_function("window._lbPendingViewportState === null")
+    carried_view = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            window._lbTryApplyPendingViewportState();
+            return window._lbViewportStateFromCurrent();
+        }"""
+    )
+    assert abs(carried_view["zoom"] - first_view["zoom"]) < 0.05
+    assert abs(carried_view["centerX"] - first_view["centerX"]) < 0.03
+    assert abs(carried_view["centerY"] - first_view["centerY"]) < 0.03
+
+    page.evaluate(
+        """() => {
+            window._lbApplyViewportState({zoom: 2.2, centerX: 0.78, centerY: 0.30});
+            window._lbSaveViewportState(window._lightboxCurrentId);
+        }"""
+    )
+    page.locator("[title='Previous (←)']").click()
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
+    page.wait_for_function("window._lbPendingViewportState === null")
+    restored_view = page.evaluate("window._lbViewportStateFromCurrent()")
+    assert abs(restored_view["zoom"] - first_view["zoom"]) < 0.05
+    assert abs(restored_view["centerX"] - first_view["centerX"]) < 0.03
+    assert abs(restored_view["centerY"] - first_view["centerY"]) < 0.03
+
+
+def test_browse_lightbox_pending_high_zoom_survives_native_zoom_race(live_server, page):
+    """A saved zoom > 4 is not lost when native zoom is unknown at first apply.
+
+    Race: if /api/photos/<id> resolves before the image load event,
+    _lbTryApplyPendingViewportState runs while _lbNativeZoom is null. The
+    fallback max clamps zoom to 4, so the pending state must be kept (not
+    cleared) so a later apply, once native zoom is known, can restore the
+    original high zoom.
+    """
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/>'
+        '<circle cx="1000" cy="1400" r="180" fill="#fff"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/photos/*/original",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 4000;
+        }"""
+    )
+
+    # Establish native zoom and pick a target zoom > 4 that is within the
+    # real max (nativeZoom * 4) so it would survive an accurate apply.
+    setup = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            const native = window._lbNativeZoom;
+            const target = Math.min(native * 2, native * 4 - 0.5);
+            return {native: native, target: target};
+        }"""
+    )
+    assert setup["native"] is not None and setup["native"] > 2.0
+    assert setup["target"] > 4.0
+
+    # Simulate the race: native zoom unknown when the pending high-zoom
+    # state is applied (e.g. API fetch resolved before image load).
+    degraded = page.evaluate(
+        """(target) => {
+            window._lbNativeZoom = null;
+            window._lbPendingViewportState = {
+                zoom: target, centerX: 0.3, centerY: 0.6,
+                oneToOne: false, pending1To1: false,
+            };
+            const applied = window._lbTryApplyPendingViewportState();
+            return {
+                applied: applied,
+                zoom: window._lbZoom,
+                stillPending: window._lbPendingViewportState !== null,
+            };
+        }""",
+        setup["target"],
+    )
+    assert degraded["applied"] is True
+    # Clamped to the fallback max while native zoom was unknown...
+    assert abs(degraded["zoom"] - 4.0) < 0.01
+    # ...but the pending state must survive so it can be retried.
+    assert degraded["stillPending"] is True
+
+    # Native zoom becomes known (image load path): the high zoom is
+    # restored accurately and the pending state is finally cleared.
+    restored = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            window._lbTryApplyPendingViewportState();
+            return {
+                zoom: window._lbZoom,
+                stillPending: window._lbPendingViewportState !== null,
+            };
+        }"""
+    )
+    assert abs(restored["zoom"] - setup["target"]) < 0.1
+    assert restored["stillPending"] is False
+
+
+def test_browse_lightbox_manual_zoom_cancels_pending_restore(live_server, page):
+    """A manual wheel zoom cancels a still-armed pending viewport restore.
+
+    Regression: _lbPendingViewportState is intentionally kept until native
+    zoom is known so a high-zoom restore survives the metadata/image-load
+    race (see test above). But that same window let a later
+    _lbTryApplyPendingViewportState() (image-load callback) snap the
+    viewport back after the user had already zoomed the new photo. A
+    user-driven viewport mutation must cancel the pending restore.
+    """
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/>'
+        '<circle cx="1000" cy="1400" r="180" fill="#fff"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/photos/*/original",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 4000;
+        }"""
+    )
+
+    # Arm a high-zoom restore while native zoom is unknown — this is the
+    # carried-navigation race where the pending state survives an async
+    # retry (the precondition for the snap-back bug).
+    setup = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            const native = window._lbNativeZoom;
+            const target = Math.min(native * 2, native * 4 - 0.5);
+            window._lbNativeZoom = null;
+            window._lbPendingViewportState = {
+                zoom: target, centerX: 0.3, centerY: 0.6,
+                oneToOne: false, pending1To1: false,
+            };
+            window._lbTryApplyPendingViewportState();
+            return {
+                native: native,
+                target: target,
+                stillPending: window._lbPendingViewportState !== null,
+            };
+        }"""
+    )
+    assert setup["native"] is not None and setup["native"] > 2.0
+    # Sanity: pending must survive the native-zoom race, else there is no bug.
+    assert setup["stillPending"] is True
+
+    # The user manually zooms out with the wheel over the image.
+    page.locator("#lightboxWrap").hover()
+    page.mouse.wheel(0, 600)
+
+    after_wheel = page.evaluate(
+        """() => ({
+            zoom: window._lbZoom,
+            stillPending: window._lbPendingViewportState !== null,
+        })"""
+    )
+    # The manual wheel zoom must have cancelled the pending restore...
+    assert after_wheel["stillPending"] is False
+    # ...and produced a zoom clearly distinct from the stale pending target.
+    assert abs(after_wheel["zoom"] - setup["target"]) > 0.5
+
+    # A later image-load retry (native zoom now known) must NOT snap the
+    # viewport back to the stale pending state.
+    retried = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            const applied = window._lbTryApplyPendingViewportState();
+            return {applied: applied, zoom: window._lbZoom};
+        }"""
+    )
+    assert retried["applied"] is False
+    assert abs(retried["zoom"] - after_wheel["zoom"]) < 0.01
+
+
 def test_browse_lightbox_one_to_one_nav_falls_back_when_original_fails(live_server, page):
     """1:1 arrow navigation falls back to /full when the original is unavailable."""
     image_body = base64.b64decode(_PNG_1X1)
@@ -561,6 +825,92 @@ def test_browse_lightbox_does_not_retry_original_after_unavailable(live_server, 
             return window._lbOriginalUnavailable &&
                    window._lbCurrentSrcKey === '3840' &&
                    img && img.complete && img.naturalWidth === 3840;
+        }"""
+    )
+
+
+def test_browse_lightbox_waits_for_fallback_tier_after_original_fails(live_server, page):
+    """If /original fails, deferred 1:1 waits for the best preview fallback."""
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#246"/></svg>'
+    )
+    fallback_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="1920" '
+        'viewBox="0 0 3840 1920"><rect width="3840" height="1920" fill="#642"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    page.route("**/photos/*/original", lambda route: route.abort())
+    held_fallback = {}
+
+    def hold_3840(route):
+        if "released" in held_fallback:
+            route.fulfill(body=fallback_svg, content_type="image/svg+xml")
+        elif "route" not in held_fallback:
+            held_fallback["route"] = route
+        else:
+            route.fulfill(body=fallback_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/preview?size=3840", hold_3840)
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 1920;
+        }"""
+    )
+
+    page.evaluate(
+        """() => {
+            window._lbPhotoW = null;
+            window._lbPhotoH = null;
+            window._lbOriginalUnavailable = false;
+            window._lbCurrentSrcKey = 'full';
+            window._lbNativeZoom = null;
+            window._lbZoom = 1;
+            window.toggleLightboxZoom();
+        }"""
+    )
+
+    deadline = time.time() + 2
+    while "route" not in held_fallback and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_fallback
+    waiting = page.evaluate(
+        """() => ({
+            pending: window._lbPending1To1,
+            zoom: window._lbZoom,
+            currentSource: window._lbCurrentSrcKey,
+            desiredSource: window._lbDesiredSrcKey,
+        })"""
+    )
+    assert waiting["pending"] is True
+    assert abs(waiting["zoom"] - 1) < 0.001
+    assert waiting["currentSource"] == "full"
+    assert waiting["desiredSource"] == "3840"
+
+    fallback_route = held_fallback.pop("route")
+    held_fallback["released"] = True
+    fallback_route.fulfill(body=fallback_svg, content_type="image/svg+xml")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbCurrentSrcKey === '3840'
+                && window._lbPending1To1 === false
+                && img && img.complete && img.naturalWidth === 3840
+                && window._lbZoom > 1;
         }"""
     )
 
