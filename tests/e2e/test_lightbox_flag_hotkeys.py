@@ -71,15 +71,43 @@ def test_lightbox_x_not_overwritten_by_slow_initial_metadata(live_server, page):
     first.wait_for(state="visible")
     pid = int(first.get_attribute("data-id"))
 
-    held = {}
+    page.evaluate(
+        """pid => {
+          const originalFetch = window.fetch.bind(window);
+          window.__heldPhotoFetch = { captured: false, released: false };
+          window.fetch = function(input, init) {
+            const rawUrl = typeof input === 'string' ? input : (input && input.url) || '';
+            let path = rawUrl;
+            try { path = new URL(rawUrl, window.location.href).pathname; } catch (e) {}
+            if (!window.__heldPhotoFetch.captured && path === '/api/photos/' + pid) {
+              return originalFetch(input, init).then(response => {
+                const status = response.status;
+                const statusText = response.statusText;
+                const headers = {};
+                response.headers.forEach((value, key) => { headers[key] = value; });
+                return response.text().then(body => {
+                  window.__heldPhotoFetch.captured = true;
+                  return new Promise(resolve => {
+                    window.__releaseHeldPhotoFetch = function() {
+                      window.__heldPhotoFetch.released = true;
+                      window.fetch = originalFetch;
+                      resolve(new Response(body, { status, statusText, headers }));
+                    };
+                  });
+                });
+              });
+            }
+            return originalFetch(input, init);
+          };
+        }""",
+        pid,
+    )
 
-    def hold_initial_photo_fetch(route):
-        held["response"] = route.fetch()
-        held["route"] = route
-
-    page.route(f"**/api/photos/{pid}", hold_initial_photo_fetch)
-
-    first.dblclick()
+    page.evaluate(
+        "pid => { const p = photos.find(x => x.id === pid);"
+        " openLightbox(pid, p ? p.filename : '', photos); }",
+        pid,
+    )
     page.wait_for_function(
         "document.getElementById('lightboxOverlay').classList.contains('active')",
         timeout=3000,
@@ -88,10 +116,7 @@ def test_lightbox_x_not_overwritten_by_slow_initial_metadata(live_server, page):
         "typeof _lightboxCurrentId !== 'undefined' && _lightboxCurrentId !== null",
         timeout=3000,
     )
-    deadline = time.time() + 3
-    while "route" not in held and time.time() < deadline:
-        time.sleep(0.05)
-    assert "route" in held, "expected lightbox metadata fetch to be held"
+    page.wait_for_function("window.__heldPhotoFetch && window.__heldPhotoFetch.captured")
 
     page.keyboard.press("x")
     flag = _wait_for_flag(db, pid, "rejected")
@@ -101,7 +126,7 @@ def test_lightbox_x_not_overwritten_by_slow_initial_metadata(live_server, page):
         timeout=3000,
     )
 
-    held["route"].fulfill(response=held["response"])
+    page.evaluate("window.__releaseHeldPhotoFetch()")
     page.wait_for_timeout(100)
     assert page.locator("#lightboxFlagStatus").inner_text().strip() == "Rejected"
 
