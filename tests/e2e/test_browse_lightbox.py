@@ -901,6 +901,34 @@ def test_browse_lightbox_waits_for_fallback_tier_after_original_fails(live_serve
     assert waiting["currentSource"] == "full"
     assert waiting["desiredSource"] == "3840"
 
+    before_resize_transforms = page.evaluate(
+        """() => {
+            window.__lbResizeTransformCount = 0;
+            const originalApplyTransform = window._lbApplyTransform;
+            window._lbApplyTransform = function() {
+                window.__lbResizeTransformCount += 1;
+                return originalApplyTransform.apply(this, arguments);
+            };
+            return window.__lbResizeTransformCount;
+        }"""
+    )
+    page.set_viewport_size({"width": 760, "height": 800})
+    page.wait_for_function(
+        "window.__lbResizeTransformCount > %d" % before_resize_transforms
+    )
+    after_resize = page.evaluate(
+        """() => ({
+            pending: window._lbPending1To1,
+            zoom: window._lbZoom,
+            currentSource: window._lbCurrentSrcKey,
+            desiredSource: window._lbDesiredSrcKey,
+        })"""
+    )
+    assert after_resize["pending"] is True
+    assert abs(after_resize["zoom"] - 1) < 0.001
+    assert after_resize["currentSource"] == "full"
+    assert after_resize["desiredSource"] == "3840"
+
     fallback_route = held_fallback.pop("route")
     held_fallback["released"] = True
     fallback_route.fulfill(body=fallback_svg, content_type="image/svg+xml")

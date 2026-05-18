@@ -3850,14 +3850,24 @@ function toggleLightboxZoom(e) {
       // the snap still completes once the high-res tier is current.
       var pending = _lbPending1To1;
       var pendingAnchor = _lbPending1To1Anchor;
-      // Current zoom may now violate clamps; re-run through _lbSetZoom to re-clamp & re-apply.
-      _lbSetZoom(_lbZoom, null, null);
+      var pendingDesiredSource = _lbDesiredSrcKey;
       if (pending) {
         _lbPending1To1 = true;
         _lbPending1To1Anchor = pendingAnchor;
-        _lbScheduleSourceSwap(_lbNativeZoom || 4);
-        _lbApplyPendingOneToOneZoom();
+        _lbClampPan();
+        _lbApplyTransform();
+        if (!pendingDesiredSource || pendingDesiredSource === _lbCurrentSrcKey) {
+          _lbScheduleSourceSwap(_lbNativeZoom || 4);
+        } else {
+          _lbDesiredSrcKey = pendingDesiredSource;
+        }
+        if (_lbDesiredSrcKey === _lbCurrentSrcKey) {
+          _lbApplyPendingOneToOneZoom();
+        }
+        return;
       }
+      // Current zoom may now violate clamps; re-run through _lbSetZoom to re-clamp & re-apply.
+      _lbSetZoom(_lbZoom, null, null);
     }, 100);
   });
 })();
