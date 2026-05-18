@@ -1222,3 +1222,138 @@ def test_browse_lightbox_deferred_one_to_one_survives_original_failure_to_fallba
         }""",
         timeout=8000,
     )
+
+
+def test_browse_lightbox_resize_preserves_post_original_failure_fallback(
+    live_server, page
+):
+    """Codex P2 (Thread 11): a viewport resize while the post-/original-failure
+    fallback tier is still loading must not cancel that upgrade.
+
+    Repro: press z with dims unknown -> /original aborts -> the error path
+    keeps the deferral pending and queues the sharpest remaining preview tier
+    (2560/3840). While that tier is still loading the user resizes. The resize
+    recovery path used to re-derive the swap target from _lbNativeZoom, which —
+    because /original is unavailable and the current source is the upscaled
+    /full — reflects the /full decode, so it re-picked 'full', canceled the
+    in-flight fallback upgrade, and snapped a soft 1:1 on /full. Post-fix the
+    deferred intent (and the higher-tier target) survives the resize.
+    """
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#246"/></svg>'
+    )
+    fallback_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2560" height="1600" '
+        'viewBox="0 0 2560 1600"><rect width="2560" height="1600" fill="#642"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    page.route("**/photos/*/original", lambda route: route.abort())
+    held_fallback = {}
+
+    def hold_fallback(route):
+        # Hold the most recent fallback-tier request (2560 or 3840) until the
+        # test explicitly releases it. The resize re-arms the swap, so a later
+        # request supersedes the earlier held one — keep only the live route.
+        if "released" in held_fallback:
+            route.fulfill(body=fallback_svg, content_type="image/svg+xml")
+        else:
+            held_fallback["route"] = route
+
+    page.route("**/photos/*/preview?size=2560", hold_fallback)
+    page.route("**/photos/*/preview?size=3840", hold_fallback)
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 1920;
+        }"""
+    )
+
+    page.evaluate(
+        """() => {
+            window._lbPhotoW = null;
+            window._lbPhotoH = null;
+            window._lbOriginalUnavailable = false;
+            window._lbCurrentSrcKey = 'full';
+            window._lbNativeZoom = null;
+            window._lbZoom = 1;
+            window.toggleLightboxZoom();
+        }"""
+    )
+
+    # /original aborts; the deferred 1:1 must now be pending against the
+    # sharpest remaining preview tier (a real upgrade vs. the /full it is on).
+    deadline = time.time() + 3
+    while "route" not in held_fallback and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_fallback
+    waiting = page.evaluate(
+        """() => ({
+            pending: window._lbPending1To1,
+            zoom: window._lbZoom,
+            currentSource: window._lbCurrentSrcKey,
+            desiredSource: window._lbDesiredSrcKey,
+        })"""
+    )
+    assert waiting["pending"] is True
+    assert abs(waiting["zoom"] - 1) < 0.001
+    assert waiting["currentSource"] == "full"
+    assert waiting["desiredSource"] in ("2560", "3840")
+
+    native_zoom_before = page.evaluate("window._lbNativeZoom")
+
+    # Resize while the fallback tier is still held. _lbRecomputeNativeZoom runs
+    # unconditionally at the top of the resize handler (before any pending-state
+    # logic), so a deterministic change in _lbNativeZoom is a fix-independent
+    # signal that the debounced handler actually executed — no fixed sleep.
+    page.set_viewport_size({"width": 640, "height": 800})
+    page.wait_for_function(
+        "Math.abs(window._lbNativeZoom - %r) > 0.1" % native_zoom_before
+    )
+
+    # The resize handler has now run while the fallback tier is still loading.
+    # Pre-fix it canceled the upgrade and snapped a soft 1:1 on /full; post-fix
+    # the deferred intent and the higher-tier target both survive.
+    survived = page.evaluate(
+        """() => ({
+            pending: window._lbPending1To1,
+            zoom: window._lbZoom,
+            currentSource: window._lbCurrentSrcKey,
+            desiredSource: window._lbDesiredSrcKey,
+        })"""
+    )
+    assert survived["pending"] is True
+    assert abs(survived["zoom"] - 1) < 0.001
+    assert survived["currentSource"] == "full"
+    assert survived["desiredSource"] in ("2560", "3840")
+
+    # Releasing the fallback tier lets the deferred 1:1 finally snap against it
+    # — never stranded on the upscaled /full.
+    held_fallback["released"] = True
+    held_fallback.pop("route").fulfill(
+        body=fallback_svg, content_type="image/svg+xml"
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return (window._lbCurrentSrcKey === '2560' || window._lbCurrentSrcKey === '3840')
+                && window._lbPending1To1 === false
+                && img && img.complete && img.naturalWidth === 2560
+                && window._lbNativeZoom
+                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }""",
+        timeout=8000,
+    )
