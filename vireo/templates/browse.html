@@ -2163,6 +2163,7 @@ var FIELD_OPS = {
   has_mask: ['equals'],
   active_mask_variant: ['is', 'is not', 'contains'],
   has_gps: ['equals'],
+  wildlife_excluded: ['equals'],
   location_keyword_missing: ['equals'],
   inat_submitted: ['equals'],
   is_duplicate: ['equals'],
@@ -2188,6 +2189,7 @@ var FIELD_LABELS = {
   has_mask: 'Has Mask',
   active_mask_variant: 'Mask Variant',
   has_gps: 'Has GPS',
+  wildlife_excluded: 'Not Wildlife',
   location_keyword_missing: 'GPS Without Location Keyword',
   inat_submitted: 'iNaturalist Submitted',
   is_duplicate: 'Duplicate',
@@ -2225,6 +2227,7 @@ function defaultValueForRule(field, op) {
   }
   if (field === 'active_mask_variant') return 'sam2-large';
   if (field === 'prediction_status') return 'pending';
+  if (field === 'wildlife_excluded') return 0;
   if (['has_mask', 'has_gps', 'location_keyword_missing', 'inat_submitted',
        'is_duplicate', 'needs_review'].indexOf(field) !== -1) return 1;
   return '';
@@ -2457,8 +2460,8 @@ function renderRuleValueInput(r, i) {
   if (r.field === 'all') {
     return '<span style="flex:1;color:var(--text-ghost);font-size:12px;">Matches every photo in this workspace</span>';
   }
-  if (['has_mask', 'has_gps', 'location_keyword_missing', 'inat_submitted',
-       'is_duplicate', 'needs_review'].indexOf(r.field) !== -1) {
+  if (['has_mask', 'has_gps', 'wildlife_excluded', 'location_keyword_missing',
+       'inat_submitted', 'is_duplicate', 'needs_review'].indexOf(r.field) !== -1) {
     var boolVal = (r.value === true || r.value === 1 || r.value === '1' || r.value === 'true') ? '1' : '0';
     return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
         '<option value="1"' + (boolVal==='1'?' selected':'') + '>Yes</option>' +
