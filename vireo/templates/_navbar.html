@@ -3075,7 +3075,11 @@ function _lbApplyPendingOneToOneZoom() {
   // source that is already sharper than required — e.g. /original kept during
   // 1:1-preserving navigation — still applies immediately instead of waiting
   // forever for a downgrade that never comes.
-  if (_lbSrcRank(_lbCurrentSrcKey) < _lbSrcRank(_lbPickSourceKey(_lbNativeZoom))) return;
+  var requiredSource = _lbPickSourceKey(_lbNativeZoom);
+  if (_lbSrcRank(_lbCurrentSrcKey) < _lbSrcRank(requiredSource)) {
+    _lbScheduleSourceSwap(_lbNativeZoom);
+    return;
+  }
   _lbPending1To1 = false;
   var anchor = _lbPending1To1Anchor;
   _lbPending1To1Anchor = null;

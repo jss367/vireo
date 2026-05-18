@@ -681,6 +681,98 @@ def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server
     )
 
 
+def test_browse_lightbox_pending_one_to_one_guard_schedules_sharper_source(
+    live_server, page
+):
+    """If native 1:1 needs a sharper source, the guard must queue that source."""
+    page.add_init_script(
+        "Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });"
+    )
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#3a7"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    held_original = {}
+
+    def hold_original(route):
+        if "released" in held_original:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
+        elif "route" not in held_original:
+            held_original["route"] = route
+        else:
+            route.fulfill(body=original_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", hold_original)
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.locator(".grid-card").first.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 1920;
+        }"""
+    )
+
+    state = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbCurrentSrcKey = 'full';
+            window._lbDesiredSrcKey = 'full';
+            window._lbPending1To1 = true;
+            window._lbZoom = 1;
+            window._lbRecomputeNativeZoom();
+            window._lbApplyPendingOneToOneZoom();
+            return {
+                pending: window._lbPending1To1,
+                zoom: window._lbZoom,
+                nativeZoom: window._lbNativeZoom,
+                currentSource: window._lbCurrentSrcKey,
+                desiredSource: window._lbDesiredSrcKey,
+            };
+        }"""
+    )
+    assert state["pending"] is True
+    assert abs(state["zoom"] - 1) < 0.001
+    assert state["nativeZoom"] > 1
+    assert state["currentSource"] == "full"
+    assert state["desiredSource"] == "original"
+
+    deadline = time.time() + 2
+    while "route" not in held_original and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_original
+
+    held_original["released"] = True
+    held_original.pop("route").fulfill(
+        body=original_svg,
+        content_type="image/svg+xml",
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbCurrentSrcKey === 'original'
+                && window._lbPending1To1 === false
+                && img && img.complete && img.naturalWidth === 4000
+                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+        }"""
+    )
+
+
 def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, page):
     """Known 1:1 zoom waits for the high-res source instead of enlarging /full."""
     page.add_init_script(
