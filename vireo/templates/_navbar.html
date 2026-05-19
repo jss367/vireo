@@ -3167,6 +3167,11 @@ function _lbRememberConfirmedFlag(photoId, flag) {
   _lbConfirmedFlags[String(photoId)] = normalized;
 }
 
+function _lbForgetConfirmedFlag(photoId) {
+  if (photoId == null) return;
+  delete _lbConfirmedFlags[String(photoId)];
+}
+
 function _lbConfirmedFlagFor(photoId) {
   var key = String(photoId);
   if (Object.prototype.hasOwnProperty.call(_lbConfirmedFlags, key)) {
@@ -3608,6 +3613,11 @@ function openLightbox(photoId, filename, photoList, options) {
   var currentFromList = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
   if (currentFromList && Object.prototype.hasOwnProperty.call(currentFromList, 'flag')) {
     _lbRememberConfirmedFlag(photoId, currentFromList.flag);
+  } else {
+    // Flagless opens (e.g. review/misses/cull push only {id, filename}) must
+    // not reuse a flag remembered from an earlier open; rely on the
+    // /api/photos/:id fetch to repopulate the confirmed flag instead.
+    _lbForgetConfirmedFlag(photoId);
   }
   _lbCurrentWildlifeExcluded = !!(currentFromList && currentFromList.wildlife_excluded);
   _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
