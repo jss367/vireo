@@ -584,7 +584,10 @@ function addChangedSliderValue(body, key, id, scale) {
 }
 
 function collectMissThresholds() {
-  var body = { miss_enabled: true };
+  // No miss_enabled toggle on this page: omit it so preview/recompute (and
+  // save_defaults) preserve a workspace's effective value instead of silently
+  // re-enabling miss detection for workspaces that disabled it.
+  var body = {};
   addChangedSliderValue(body, 'detector_confidence', 'missCfgDetectorFloor', 100);
   addChangedSliderValue(body, 'miss_det_confidence', 'missCfgNoSubject', 100);
   addChangedSliderValue(body, 'miss_classifier_override_conf', 'missCfgClassifierRescue', 100);
