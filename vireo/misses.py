@@ -13,6 +13,7 @@ no_subject is exclusive — when it's true, clipped/oof can't be evaluated
 and both return False.
 """
 
+import json
 import logging
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -21,6 +22,16 @@ import config as _cfg
 from db import commit_with_retry
 
 log = logging.getLogger(__name__)
+
+MISS_CONFIG_KEYS = {
+    "miss_enabled",
+    "miss_det_confidence",
+    "miss_det_confidence_burst",
+    "miss_bbox_area_min",
+    "miss_bbox_area_min_singleton",
+    "miss_oof_ratio",
+    "miss_classifier_override_conf",
+}
 
 
 def _miss_threshold(config, key):
@@ -111,8 +122,233 @@ def classify_miss(row, siblings, config):
     return {"no_subject": False, "clipped": clipped, "oof": oof}
 
 
+def miss_config_from_effective(effective_config):
+    """Return the miss-related config values from an effective config dict."""
+    pipeline = effective_config.get("pipeline", {})
+    if not isinstance(pipeline, dict):
+        pipeline = {}
+    values = {
+        key: _miss_threshold(pipeline, key)
+        for key in MISS_CONFIG_KEYS
+        if key != "miss_enabled"
+    }
+    values["miss_enabled"] = pipeline.get(
+        "miss_enabled", _cfg.DEFAULTS["pipeline"]["miss_enabled"]
+    )
+    values["detector_confidence"] = effective_config.get(
+        "detector_confidence", _cfg.DEFAULTS["detector_confidence"]
+    )
+    return values
+
+
+def _fetch_workspace_miss_rows(db, detector_confidence=None):
+    """Fetch all active-workspace photo rows needed to derive miss flags."""
+    import config as cfg
+
+    if detector_confidence is None:
+        detector_confidence = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
+    ws_id = db._ws_id()
+    rows = db.conn.execute(
+        "SELECT p.id, p.folder_id, p.filename, p.companion_path, "
+        "       p.timestamp, p.burst_id, "
+        "       p.subject_size, p.crop_complete, "
+        "       p.subject_tenengrad, p.bg_tenengrad, "
+        "       p.miss_no_subject, p.miss_clipped, p.miss_oof, "
+        "       p.miss_computed_at, p.flag, "
+        "       (SELECT MAX(d.detector_confidence) FROM detections d "
+        "        WHERE d.photo_id = p.id "
+        "          AND d.detector_confidence >= ?) "
+        "         AS detection_conf, "
+        "       (SELECT MAX(pr.confidence) FROM predictions pr "
+        "        JOIN detections d2 ON d2.id = pr.detection_id "
+        "        WHERE d2.photo_id = p.id) "
+        "         AS max_prediction_conf "
+        "FROM photos p "
+        "JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
+        "WHERE wf.workspace_id = ?",
+        (detector_confidence, ws_id),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _target_ids_from_scope(rows, collection_id=None, db=None, since=None):
+    target_ids = None
+    if collection_id is not None:
+        target_ids = db.collection_photo_ids(collection_id)
+    if since is not None:
+        since_ids = {
+            r["id"] for r in rows
+            if r.get("miss_computed_at") is not None
+            and r.get("miss_computed_at") >= since
+        }
+        target_ids = since_ids if target_ids is None else target_ids & since_ids
+    return target_ids
+
+
+def _derive_miss_updates(rows, pipeline_config, target_ids=None,
+                         exclude_photo_ids=None, now=None):
+    """Classify rows and return update tuples plus flags by photo id."""
+    excluded = set(exclude_photo_ids) if exclude_photo_ids else set()
+    override_conf = _miss_threshold(
+        pipeline_config, "miss_classifier_override_conf"
+    )
+
+    by_burst = defaultdict(list)
+    singletons = []
+    for row in rows:
+        if row["burst_id"]:
+            by_burst[row["burst_id"]].append(row)
+        else:
+            singletons.append(row)
+
+    if now is None:
+        now = datetime.now(UTC).isoformat(timespec="microseconds")
+    updates = []
+    flags_by_id = {}
+
+    def _apply_classifier_override(row, flags):
+        if not flags["no_subject"]:
+            return flags
+        max_pred = row.get("max_prediction_conf")
+        if max_pred is not None and max_pred >= override_conf:
+            return {**flags, "no_subject": False}
+        return flags
+
+    def _should_update(row):
+        if target_ids is not None and row["id"] not in target_ids:
+            return False
+        return row["id"] not in excluded
+
+    def _classify(row, siblings):
+        flags = classify_miss(row, siblings, pipeline_config)
+        return _apply_classifier_override(row, flags)
+
+    for burst_rows in by_burst.values():
+        for row in burst_rows:
+            if not _should_update(row):
+                continue
+            siblings = [s for s in burst_rows if s["id"] != row["id"]]
+            flags = _classify(row, siblings)
+            flags_by_id[row["id"]] = flags
+            updates.append((
+                int(flags["no_subject"]),
+                int(flags["clipped"]),
+                int(flags["oof"]),
+                now,
+                row["id"],
+            ))
+
+    for row in singletons:
+        if not _should_update(row):
+            continue
+        flags = _classify(row, siblings=[])
+        flags_by_id[row["id"]] = flags
+        updates.append((
+            int(flags["no_subject"]),
+            int(flags["clipped"]),
+            int(flags["oof"]),
+            now,
+            row["id"],
+        ))
+
+    return updates, flags_by_id
+
+
+def _attach_primary_detections(db, photos, detector_confidence):
+    if not photos:
+        return
+    photo_ids = [p["id"] for p in photos]
+    primary = {}
+    CHUNK = 500
+    for i in range(0, len(photo_ids), CHUNK):
+        chunk = photo_ids[i:i + CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        det_rows = db.conn.execute(
+            f"SELECT photo_id, box_x, box_y, box_w, box_h, "
+            f"       detector_confidence "
+            f"FROM detections "
+            f"WHERE detector_confidence >= ? AND photo_id IN ({placeholders}) "
+            f"ORDER BY photo_id, detector_confidence DESC",
+            [detector_confidence, *chunk],
+        ).fetchall()
+        for d in det_rows:
+            primary.setdefault(d["photo_id"], d)
+    for p in photos:
+        d = primary.get(p["id"])
+        if d is None:
+            p["detection_box"] = None
+            p["detection_conf"] = None
+        else:
+            p["detection_box"] = json.dumps({
+                "x": d["box_x"], "y": d["box_y"],
+                "w": d["box_w"], "h": d["box_h"],
+            })
+            p["detection_conf"] = d["detector_confidence"]
+
+
+def preview_misses_for_workspace(db, pipeline_config, detector_confidence=None,
+                                 since=None):
+    """Return dynamically derived misses without writing DB flags."""
+    if not pipeline_config.get("miss_enabled", True):
+        return {"no_subject": [], "clipped": [], "oof": []}
+    if detector_confidence is None:
+        import config as cfg
+        detector_confidence = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
+    rows = _fetch_workspace_miss_rows(
+        db, detector_confidence=detector_confidence
+    )
+    target_ids = _target_ids_from_scope(rows, since=since)
+    _, flags_by_id = _derive_miss_updates(
+        rows, pipeline_config, target_ids=target_ids
+    )
+    grouped = {"no_subject": [], "clipped": [], "oof": []}
+    for row in rows:
+        if row["id"] not in flags_by_id:
+            continue
+        if row.get("flag") == "rejected":
+            continue
+        flags = flags_by_id[row["id"]]
+        photo = {
+            key: row.get(key)
+            for key in (
+                "id", "folder_id", "filename", "companion_path",
+                "timestamp", "burst_id", "subject_size", "crop_complete",
+                "subject_tenengrad", "bg_tenengrad", "miss_computed_at",
+                "flag",
+            )
+        }
+        photo["miss_no_subject"] = int(flags["no_subject"])
+        photo["miss_clipped"] = int(flags["clipped"])
+        photo["miss_oof"] = int(flags["oof"])
+        if flags["no_subject"]:
+            grouped["no_subject"].append(dict(photo))
+        if flags["clipped"]:
+            grouped["clipped"].append(dict(photo))
+        if flags["oof"]:
+            grouped["oof"].append(dict(photo))
+
+    for photos in grouped.values():
+        photos.sort(
+            key=lambda p: (
+                p.get("timestamp") or "",
+                p.get("filename") or "",
+                p.get("id") or 0,
+            ),
+            reverse=True,
+        )
+        _attach_primary_detections(
+            db, photos, detector_confidence,
+        )
+    return grouped
+
+
 def compute_misses_for_workspace(
     db, pipeline_config, collection_id=None, exclude_photo_ids=None, now=None,
+    detector_confidence=None, since=None,
 ):
     """Compute and persist miss flags for photos in the active workspace.
 
@@ -146,18 +382,16 @@ def compute_misses_for_workspace(
         log.info("Miss detection disabled via miss_enabled=false")
         return 0
 
-    excluded = set(exclude_photo_ids) if exclude_photo_ids else set()
-
-    ws_id = db._ws_id()
     # Detections are global now; scope *photos* to the workspace via
     # workspace_folders and filter detections at read time by the
     # workspace-effective detector_confidence threshold. Photos whose
     # highest-confidence box is below threshold are legitimate no_subject
     # candidates.
     import config as cfg
-    min_conf = db.get_effective_config(cfg.load()).get(
-        "detector_confidence", 0.2
-    )
+    if detector_confidence is None:
+        detector_confidence = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
     # max_prediction_conf is the highest classifier confidence across all
     # detections of the photo, ignoring the workspace detector_confidence
     # cutoff. A classifier prediction at or above
@@ -165,39 +399,12 @@ def compute_misses_for_workspace(
     # canonical case is a hummingbird where megadetector returned a
     # below-threshold box but BioCLIP identified the species with high
     # confidence on that same box.
-    rows = db.conn.execute(
-        "SELECT p.id, p.burst_id, "
-        "       (SELECT MAX(d.detector_confidence) FROM detections d "
-        "        WHERE d.photo_id = p.id "
-        "          AND d.detector_confidence >= ?) "
-        "         AS detection_conf, "
-        "       (SELECT MAX(pr.confidence) FROM predictions pr "
-        "        JOIN detections d2 ON d2.id = pr.detection_id "
-        "        WHERE d2.photo_id = p.id) "
-        "         AS max_prediction_conf, "
-        "       p.subject_size, p.crop_complete, "
-        "       p.subject_tenengrad, p.bg_tenengrad "
-        "FROM photos p "
-        "JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
-        "WHERE wf.workspace_id = ?",
-        (min_conf, ws_id),
-    ).fetchall()
-    override_conf = _miss_threshold(
-        pipeline_config, "miss_classifier_override_conf"
+    rows = _fetch_workspace_miss_rows(
+        db, detector_confidence=detector_confidence
     )
-
-    target_ids = None
-    if collection_id is not None:
-        target_ids = db.collection_photo_ids(collection_id)
-
-    by_burst = defaultdict(list)
-    singletons = []
-    for r in rows:
-        d = dict(r)
-        if d["burst_id"]:
-            by_burst[d["burst_id"]].append(d)
-        else:
-            singletons.append(d)
+    target_ids = _target_ids_from_scope(
+        rows, collection_id=collection_id, db=db, since=since
+    )
 
     # Microsecond precision: the /misses?since=... review window uses
     # the earliest miss_computed_at from a run as a lower bound, and
@@ -209,47 +416,10 @@ def compute_misses_for_workspace(
     # at seconds precision.
     if now is None:
         now = datetime.now(UTC).isoformat(timespec="microseconds")
-    updates = []
-
-    def _apply_classifier_override(row, flags):
-        if not flags["no_subject"]:
-            return flags
-        max_pred = row.get("max_prediction_conf")
-        if max_pred is not None and max_pred >= override_conf:
-            return {**flags, "no_subject": False}
-        return flags
-
-    for burst_rows in by_burst.values():
-        for row in burst_rows:
-            if target_ids is not None and row["id"] not in target_ids:
-                continue
-            if row["id"] in excluded:
-                continue
-            siblings = [s for s in burst_rows if s["id"] != row["id"]]
-            flags = classify_miss(row, siblings, pipeline_config)
-            flags = _apply_classifier_override(row, flags)
-            updates.append((
-                int(flags["no_subject"]),
-                int(flags["clipped"]),
-                int(flags["oof"]),
-                now,
-                row["id"],
-            ))
-
-    for row in singletons:
-        if target_ids is not None and row["id"] not in target_ids:
-            continue
-        if row["id"] in excluded:
-            continue
-        flags = classify_miss(row, siblings=[], config=pipeline_config)
-        flags = _apply_classifier_override(row, flags)
-        updates.append((
-            int(flags["no_subject"]),
-            int(flags["clipped"]),
-            int(flags["oof"]),
-            now,
-            row["id"],
-        ))
+    updates, _ = _derive_miss_updates(
+        rows, pipeline_config, target_ids=target_ids,
+        exclude_photo_ids=exclude_photo_ids, now=now,
+    )
 
     db.conn.executemany(
         "UPDATE photos SET miss_no_subject=?, miss_clipped=?, miss_oof=?, "

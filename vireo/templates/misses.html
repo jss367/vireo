@@ -289,6 +289,89 @@
     font-size: 10px;
     color: var(--text-secondary);
   }
+
+  .misses-tuning {
+    margin: 0 0 12px;
+    padding: 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+  }
+  .misses-tuning-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .misses-tuning-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .misses-tuning-status {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+  .misses-tuning-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 10px 14px;
+  }
+  .misses-tuning-control {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+  }
+  .misses-tuning-control label {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .misses-tuning-control output {
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+  .misses-tuning-control input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+  .misses-tuning-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+  }
+  .misses-tuning-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .misses-tuning-check input { accent-color: var(--accent); }
+  .misses-tuning-btn {
+    border: 1px solid var(--border-secondary);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .misses-tuning-btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .misses-tuning-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 </style>
 </head>
 <body>
@@ -323,6 +406,62 @@
     <a href="/misses" style="color:var(--accent);margin-left:8px;">Show all</a>
   </div>
 
+  <div class="misses-tuning" id="missesTuning">
+    <div class="misses-tuning-head">
+      <span class="misses-tuning-title">Miss thresholds</span>
+      <span class="misses-tuning-status" id="missTuningStatus">Loading thresholds...</span>
+    </div>
+    <div class="misses-tuning-grid">
+      <div class="misses-tuning-control">
+        <label for="missCfgDetectorFloor">
+          <span>Detection floor</span>
+          <output id="missCfgDetectorFloorVal">--</output>
+        </label>
+        <input id="missCfgDetectorFloor" type="range" min="0" max="100" step="1" value="20">
+      </div>
+      <div class="misses-tuning-control">
+        <label for="missCfgNoSubject">
+          <span>No-subject threshold</span>
+          <output id="missCfgNoSubjectVal">--</output>
+        </label>
+        <input id="missCfgNoSubject" type="range" min="0" max="100" step="1" value="25">
+      </div>
+      <div class="misses-tuning-control">
+        <label for="missCfgClassifierRescue">
+          <span>Classifier rescue</span>
+          <output id="missCfgClassifierRescueVal">--</output>
+        </label>
+        <input id="missCfgClassifierRescue" type="range" min="0" max="101" step="1" value="80">
+      </div>
+      <div class="misses-tuning-control">
+        <label for="missCfgBboxMin">
+          <span>Minimum bbox size</span>
+          <output id="missCfgBboxMinVal">--</output>
+        </label>
+        <input id="missCfgBboxMin" type="range" min="0" max="20" step="1" value="5">
+      </div>
+      <div class="misses-tuning-control">
+        <label for="missCfgOofRatio">
+          <span>OOF ratio</span>
+          <output id="missCfgOofRatioVal">--</output>
+        </label>
+        <input id="missCfgOofRatio" type="range" min="0" max="100" step="1" value="50">
+      </div>
+    </div>
+    <div class="misses-tuning-actions">
+      <button class="misses-tuning-btn primary" id="missRecomputeBtn" type="button" onclick="recomputeMisses()">
+        Recompute misses
+      </button>
+      <button class="misses-tuning-btn" type="button" onclick="resetMissThresholds()">
+        Reset preview
+      </button>
+      <label class="misses-tuning-check">
+        <input id="missSaveDefaults" type="checkbox" checked>
+        <span>Save as workspace defaults</span>
+      </label>
+    </div>
+  </div>
+
   <div id="missesRoot">
     <!-- Sections rendered here -->
     <div class="misses-empty-page" id="loadingState">Loading...</div>
@@ -338,6 +477,10 @@ var CATEGORY_LABELS = {
   oof:        'Out of focus',
 };
 var missesData = { no_subject: [], clipped: [], oof: [] };
+var missConfig = null;
+var originalMissConfig = null;
+var previewTimer = null;
+var previewActive = false;
 var focusedCategory = null;
 var focusedIndex = -1;
 // Multi-select state. Spans categories — ctrl-click on cards in different
@@ -392,6 +535,160 @@ function getSinceParam() {
   } catch (e) { return null; }
 }
 
+function setMissTuningStatus(text) {
+  var el = document.getElementById('missTuningStatus');
+  if (el) el.textContent = text || '';
+}
+
+function percentValue(id) {
+  return parseInt(document.getElementById(id).value, 10) / 100;
+}
+
+function collectMissThresholds() {
+  return {
+    detector_confidence: percentValue('missCfgDetectorFloor'),
+    miss_det_confidence: percentValue('missCfgNoSubject'),
+    miss_classifier_override_conf: percentValue('missCfgClassifierRescue'),
+    miss_bbox_area_min: parseInt(document.getElementById('missCfgBboxMin').value, 10) / 1000,
+    miss_oof_ratio: percentValue('missCfgOofRatio'),
+    miss_enabled: true,
+  };
+}
+
+function updateMissSliderLabels() {
+  var det = parseInt(document.getElementById('missCfgDetectorFloor').value, 10);
+  var ns = parseInt(document.getElementById('missCfgNoSubject').value, 10);
+  var rescue = parseInt(document.getElementById('missCfgClassifierRescue').value, 10);
+  var bbox = parseInt(document.getElementById('missCfgBboxMin').value, 10);
+  var oof = parseInt(document.getElementById('missCfgOofRatio').value, 10);
+  document.getElementById('missCfgDetectorFloorVal').textContent = det + '%';
+  document.getElementById('missCfgNoSubjectVal').textContent = ns + '%';
+  document.getElementById('missCfgClassifierRescueVal').textContent = rescue > 100 ? 'off' : rescue + '%';
+  document.getElementById('missCfgBboxMinVal').textContent = (bbox / 1000).toFixed(3);
+  document.getElementById('missCfgOofRatioVal').textContent = (oof / 100).toFixed(2);
+}
+
+function setMissSliders(config) {
+  document.getElementById('missCfgDetectorFloor').value = Math.round((config.detector_confidence || 0) * 100);
+  document.getElementById('missCfgNoSubject').value = Math.round((config.miss_det_confidence || 0) * 100);
+  document.getElementById('missCfgClassifierRescue').value = Math.round((config.miss_classifier_override_conf || 0) * 100);
+  document.getElementById('missCfgBboxMin').value = Math.round((config.miss_bbox_area_min || 0) * 1000);
+  document.getElementById('missCfgOofRatio').value = Math.round((config.miss_oof_ratio || 0) * 100);
+  updateMissSliderLabels();
+}
+
+function installMissSliderHandlers() {
+  [
+    'missCfgDetectorFloor',
+    'missCfgNoSubject',
+    'missCfgClassifierRescue',
+    'missCfgBboxMin',
+    'missCfgOofRatio',
+  ].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', function() {
+      updateMissSliderLabels();
+      scheduleMissPreview();
+    });
+  });
+}
+
+async function loadMissConfig() {
+  try {
+    var r = await fetch('/api/misses/config');
+    if (!r.ok) throw new Error('http ' + r.status);
+    missConfig = await r.json();
+    originalMissConfig = Object.assign({}, missConfig);
+    setMissSliders(missConfig);
+    setMissTuningStatus('Preview uses current sliders');
+  } catch (e) {
+    setMissTuningStatus('Thresholds unavailable');
+  }
+}
+
+function scheduleMissPreview() {
+  if (previewTimer) clearTimeout(previewTimer);
+  previewTimer = setTimeout(previewMisses, 250);
+}
+
+async function previewMisses() {
+  var body = collectMissThresholds();
+  var since = getSinceParam();
+  if (since) body.since = since;
+  setMissTuningStatus('Previewing...');
+  try {
+    var r = await fetch('/api/misses/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error('http ' + r.status);
+    var data = await r.json();
+    previewActive = true;
+    applyMissesPayload(data);
+    setMissTuningStatus('Preview only');
+  } catch (e) {
+    setMissTuningStatus('Preview failed');
+  }
+}
+
+async function recomputeMisses() {
+  var btn = document.getElementById('missRecomputeBtn');
+  var body = collectMissThresholds();
+  var since = getSinceParam();
+  if (since) body.since = since;
+  body.save_defaults = !!document.getElementById('missSaveDefaults').checked;
+  if (btn) btn.disabled = true;
+  setMissTuningStatus('Recomputing...');
+  try {
+    var r = await fetch('/api/misses/recompute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error('http ' + r.status);
+    var data = await r.json();
+    previewActive = false;
+    applyMissesPayload(data);
+    if (data.config) {
+      missConfig = data.config;
+      if (data.saved_defaults) originalMissConfig = Object.assign({}, data.config);
+    }
+    setMissTuningStatus('Updated ' + (data.updated || 0) + ' photos');
+    if (typeof showToast === 'function') showToast('Recomputed misses', 'success');
+  } catch (e) {
+    setMissTuningStatus('Recompute failed');
+    if (typeof showToast === 'function') showToast('Recompute failed', 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function resetMissThresholds() {
+  if (!originalMissConfig) return;
+  setMissSliders(originalMissConfig);
+  previewActive = false;
+  setMissTuningStatus('Preview reset');
+  loadMisses();
+}
+
+function applyMissesPayload(data) {
+  missesData = {
+    no_subject: sortPhotos(data.no_subject || []),
+    clipped:    sortPhotos(data.clipped || []),
+    oof:        sortPhotos(data.oof || []),
+  };
+  var present = new Set();
+  CATEGORY_ORDER.forEach(function(cat) {
+    (missesData[cat] || []).forEach(function(p) { present.add(p.id); });
+  });
+  selection.forEach(function(id) {
+    if (!present.has(id)) selection.delete(id);
+  });
+  render();
+}
+
 /* ---------- Fetch + render ---------- */
 async function loadMisses() {
   var since = getSinceParam();
@@ -407,22 +704,7 @@ async function loadMisses() {
     return;
   }
   var data = await r.json();
-  missesData = {
-    no_subject: sortPhotos(data.no_subject || []),
-    clipped:    sortPhotos(data.clipped || []),
-    oof:        sortPhotos(data.oof || []),
-  };
-  // Drop any selected ids that no longer appear (rejected photos disappear
-  // from /api/misses on the next refetch). Without this, a stale id could
-  // sit in the set and be acted on by Esc-only-clear logic.
-  var present = new Set();
-  CATEGORY_ORDER.forEach(function(cat) {
-    (missesData[cat] || []).forEach(function(p) { present.add(p.id); });
-  });
-  selection.forEach(function(id) {
-    if (!present.has(id)) selection.delete(id);
-  });
-  render();
+  applyMissesPayload(data);
 }
 
 function render() {
@@ -498,13 +780,12 @@ function renderSection(cat, photos) {
 function renderCard(cat, p, idx) {
   var bbox = parseDetectionBox(p.detection_box);
   var bboxHtml = '';
-  if (cat === 'no_subject') {
-    // No bbox available — show dashed placeholder frame.
-    bboxHtml = '<div class="no-subject-frame">No subject detected</div>';
-  } else if (bbox) {
+  if (bbox) {
     bboxHtml =
       '<div class="miss-bbox" style="left:' + (bbox.x * 100) + '%;top:' + (bbox.y * 100) + '%;' +
       'width:' + (bbox.w * 100) + '%;height:' + (bbox.h * 100) + '%;"></div>';
+  } else if (cat === 'no_subject') {
+    bboxHtml = '<div class="no-subject-frame">No subject detected</div>';
   }
 
   var meta = '';
@@ -980,7 +1261,8 @@ function extendSelectionByFocus(delta) {
 }
 
 /* ---------- Boot ---------- */
-loadMisses();
+installMissSliderHandlers();
+loadMissConfig().then(loadMisses);
 </script>
 
 </body>

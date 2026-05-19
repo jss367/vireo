@@ -4947,6 +4947,100 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         dets = db.get_detections(photo_id)
         return jsonify([dict(d) for d in dets])
 
+    def _miss_threshold_config_from_body(db, body):
+        """Merge Misses-page threshold overrides into effective config."""
+        import config as cfg
+        from misses import miss_config_from_effective
+
+        effective = db.get_effective_config(cfg.load())
+        base_pipeline = effective.get("pipeline", {})
+        if not isinstance(base_pipeline, dict):
+            base_pipeline = {}
+        pipeline = dict(base_pipeline)
+        values = miss_config_from_effective(effective)
+
+        specs = {
+            "detector_confidence": (0.0, 1.0),
+            "miss_det_confidence": (0.0, 1.0),
+            "miss_classifier_override_conf": (0.0, 1.01),
+            "miss_bbox_area_min": (0.0, 0.2),
+            "miss_oof_ratio": (0.0, 2.0),
+        }
+        for key, (lo, hi) in specs.items():
+            if key not in body:
+                continue
+            try:
+                value = float(body[key])
+            except (TypeError, ValueError) as err:
+                raise ValueError(f"{key} must be numeric") from err
+            if not math.isfinite(value) or value < lo or value > hi:
+                raise ValueError(f"{key} must be between {lo:g} and {hi:g}")
+            values[key] = value
+
+        if "miss_enabled" in body:
+            if not isinstance(body["miss_enabled"], bool):
+                raise ValueError("miss_enabled must be boolean")
+            values["miss_enabled"] = body["miss_enabled"]
+
+        pipeline["miss_enabled"] = values["miss_enabled"]
+        pipeline["miss_det_confidence"] = values["miss_det_confidence"]
+        pipeline["miss_det_confidence_burst"] = round(
+            values["miss_det_confidence"] * 0.60, 4
+        )
+        pipeline["miss_classifier_override_conf"] = values[
+            "miss_classifier_override_conf"
+        ]
+        pipeline["miss_bbox_area_min"] = values["miss_bbox_area_min"]
+        pipeline["miss_bbox_area_min_singleton"] = round(
+            values["miss_bbox_area_min"] * 0.40, 5
+        )
+        pipeline["miss_oof_ratio"] = values["miss_oof_ratio"]
+        values["miss_det_confidence_burst"] = pipeline["miss_det_confidence_burst"]
+        values["miss_bbox_area_min_singleton"] = pipeline[
+            "miss_bbox_area_min_singleton"
+        ]
+        return values, pipeline, values["detector_confidence"]
+
+    def _save_miss_threshold_overrides(db, values, pipeline):
+        with _settings_write_lock:
+            ws = db.get_workspace(db._active_workspace_id)
+            overrides = {}
+            if ws and ws["config_overrides"]:
+                try:
+                    overrides = (
+                        json.loads(ws["config_overrides"])
+                        if isinstance(ws["config_overrides"], str)
+                        else ws["config_overrides"]
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    overrides = {}
+            if not isinstance(overrides, dict):
+                overrides = {}
+            existing_pipeline = overrides.get("pipeline", {})
+            if not isinstance(existing_pipeline, dict):
+                existing_pipeline = {}
+            for key in (
+                "miss_enabled",
+                "miss_det_confidence",
+                "miss_det_confidence_burst",
+                "miss_classifier_override_conf",
+                "miss_bbox_area_min",
+                "miss_bbox_area_min_singleton",
+                "miss_oof_ratio",
+            ):
+                existing_pipeline[key] = pipeline[key]
+            overrides["pipeline"] = existing_pipeline
+            overrides["detector_confidence"] = values["detector_confidence"]
+            db.update_workspace(db._active_workspace_id, config_overrides=overrides)
+
+    @app.route("/api/misses/config")
+    def api_misses_config():
+        import config as cfg
+        from misses import miss_config_from_effective
+
+        db = _get_db()
+        return jsonify(miss_config_from_effective(db.get_effective_config(cfg.load())))
+
     @app.route("/api/misses")
     def api_misses():
         """Return photos flagged as misses.
@@ -4969,6 +5063,56 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "clipped":    db.list_misses(category="clipped", since=since),
             "oof":        db.list_misses(category="oof", since=since),
         })
+
+    @app.route("/api/misses/preview", methods=["POST"])
+    def api_misses_preview():
+        """Return Misses-page categories using unsaved threshold overrides."""
+        from misses import preview_misses_for_workspace
+
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        try:
+            values, pipeline, detector_confidence = (
+                _miss_threshold_config_from_body(db, body)
+            )
+        except ValueError as e:
+            return json_error(str(e))
+        grouped = preview_misses_for_workspace(
+            db, pipeline, detector_confidence=detector_confidence,
+            since=body.get("since") or None,
+        )
+        grouped["config"] = values
+        grouped["preview"] = True
+        return jsonify(grouped)
+
+    @app.route("/api/misses/recompute", methods=["POST"])
+    def api_misses_recompute():
+        """Recompute persisted miss flags with Misses-page thresholds."""
+        from misses import compute_misses_for_workspace, preview_misses_for_workspace
+
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        try:
+            values, pipeline, detector_confidence = (
+                _miss_threshold_config_from_body(db, body)
+            )
+        except ValueError as e:
+            return json_error(str(e))
+
+        if body.get("save_defaults") is True:
+            _save_miss_threshold_overrides(db, values, pipeline)
+
+        since = body.get("since") or None
+        updated = compute_misses_for_workspace(
+            db, pipeline, detector_confidence=detector_confidence, since=since,
+        )
+        grouped = preview_misses_for_workspace(
+            db, pipeline, detector_confidence=detector_confidence, since=since,
+        )
+        grouped["config"] = values
+        grouped["updated"] = updated
+        grouped["saved_defaults"] = body.get("save_defaults") is True
+        return jsonify(grouped)
 
     @app.route("/api/misses/reject", methods=["POST"])
     def api_misses_reject():
