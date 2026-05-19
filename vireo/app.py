@@ -523,6 +523,30 @@ def _enforce_preview_cache_quota_at_startup(app):
             pass
 
 
+def _collection_accepts_manual_photos(rules):
+    """Return True when collection rules are static photo-id membership only."""
+    if isinstance(rules, list):
+        return all(_collection_accepts_manual_photos(child) for child in rules)
+
+    if not isinstance(rules, dict):
+        return False
+
+    if rules.get("field") == "photo_ids":
+        return isinstance(rules.get("value", []), list)
+
+    if "rules" in rules and "field" not in rules:
+        return (
+            rules.get("mode", "all") == "all"
+            and isinstance(rules.get("rules"), list)
+            and all(
+                _collection_accepts_manual_photos(child)
+                for child in rules.get("rules")
+            )
+        )
+
+    return False
+
+
 def create_app(db_path, thumb_cache_dir=None, api_token=None):
     """Create the Flask app for the Vireo photo browser.
 
@@ -1382,6 +1406,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
         _attach_detections(db, photo_dicts)
+        collection_dicts = []
+        for c in collections:
+            d = dict(c)
+            try:
+                d["can_add_photos"] = _collection_accepts_manual_photos(
+                    json.loads(c["rules"])
+                )
+            except (TypeError, ValueError):
+                d["can_add_photos"] = False
+            collection_dicts.append(d)
 
         return jsonify(
             {
@@ -1391,7 +1425,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "per_page": per_page,
                 "folders": [dict(f) for f in folders],
                 "keywords": [dict(k) for k in keywords],
-                "collections": [dict(c) for c in collections],
+                "collections": collection_dicts,
             }
         )
 
@@ -3556,6 +3590,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         for c in collections:
             d = dict(c)
             d["photo_count"] = db.count_collection_photos(c["id"])
+            try:
+                d["can_add_photos"] = _collection_accepts_manual_photos(
+                    json.loads(c["rules"])
+                )
+            except (TypeError, ValueError):
+                d["can_add_photos"] = False
             result.append(d)
         return jsonify(result)
 
@@ -3668,62 +3708,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("photo_ids required")
 
         row = db.conn.execute(
-            "SELECT rules FROM collections WHERE id = ?", (collection_id,)
+            "SELECT rules FROM collections WHERE id = ? AND workspace_id = ?",
+            (collection_id, db._ws_id()),
         ).fetchone()
         if not row:
             return json_error("Collection not found", 404)
 
         rules = json.loads(row["rules"])
-        # Refuse to mutate smart/system collections like "All Photos" — adding
-        # a photo_ids rule would AND-combine with the sentinel and silently
-        # convert the dynamic default into a static subset.
-        def _has_all_rule(node):
-            if isinstance(node, list):
-                return any(_has_all_rule(child) for child in node)
-            if not isinstance(node, dict):
-                return False
-            if node.get("field") == "all":
-                return True
-            return _has_all_rule(node.get("rules"))
-
-        if _has_all_rule(rules):
+        if not _collection_accepts_manual_photos(rules):
             return json_error("Cannot add photos to this collection", 400)
-        def _find_photo_ids_rule(node, group_modes=()):
+
+        def _find_photo_ids_rule(node):
             if isinstance(node, list):
                 for child in node:
-                    found = _find_photo_ids_rule(child, group_modes)
+                    found = _find_photo_ids_rule(child)
                     if found is not None:
                         return found
             elif isinstance(node, dict):
                 if node.get("field") == "photo_ids":
-                    return node, group_modes
+                    return node
                 if "rules" in node:
-                    mode = node.get("mode", "all")
-                    return _find_photo_ids_rule(
-                        node.get("rules"), group_modes + (mode,)
-                    )
+                    return _find_photo_ids_rule(node.get("rules"))
             return None
 
-        def _has_non_all_group(node):
-            if isinstance(node, list):
-                return any(_has_non_all_group(child) for child in node)
-            if not isinstance(node, dict):
-                return False
-            if "rules" in node and node.get("field") is None:
-                if node.get("mode", "all") != "all":
-                    return True
-                return _has_non_all_group(node.get("rules"))
-            return False
-
-        found_ids_rule = _find_photo_ids_rule(rules)
-        if found_ids_rule is not None:
-            ids_rule, group_modes = found_ids_rule
-            if any(mode != "all" for mode in group_modes):
-                return json_error("Cannot add photos to this collection", 400)
-        else:
-            ids_rule = None
-            if _has_non_all_group(rules):
-                return json_error("Cannot add photos to this collection", 400)
+        ids_rule = _find_photo_ids_rule(rules)
 
         if ids_rule is None:
             ids_rule = {"field": "photo_ids", "value": []}
@@ -3741,8 +3749,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ids_rule["value"] = sorted(existing)
 
         db.conn.execute(
-            "UPDATE collections SET rules = ? WHERE id = ?",
-            (json.dumps(rules), collection_id),
+            "UPDATE collections SET rules = ? WHERE id = ? AND workspace_id = ?",
+            (json.dumps(rules), collection_id, db._ws_id()),
         )
         db.conn.commit()
         return jsonify({"ok": True, "total": len(ids_rule["value"])})
