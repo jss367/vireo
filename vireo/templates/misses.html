@@ -388,7 +388,7 @@
 
   <div class="misses-selection-bar" id="missesSelectionBar">
     <span class="misses-selection-count" id="missesSelectionCount">0 selected</span>
-    <button class="misses-selection-btn" type="button" onclick="bulkUnflagSelection()">
+    <button class="misses-selection-btn" id="missesSelectionUnflagBtn" type="button" onclick="bulkUnflagSelection()">
       Unmark missed
     </button>
     <button class="misses-selection-btn danger" type="button" onclick="deleteSelectedMisses()">
@@ -417,46 +417,46 @@
           <span>Detection floor</span>
           <output id="missCfgDetectorFloorVal">--</output>
         </label>
-        <input id="missCfgDetectorFloor" type="range" min="0" max="100" step="1" value="20">
+        <input id="missCfgDetectorFloor" type="range" min="0" max="100" step="1" value="20" disabled>
       </div>
       <div class="misses-tuning-control">
         <label for="missCfgNoSubject">
           <span>No-subject threshold</span>
           <output id="missCfgNoSubjectVal">--</output>
         </label>
-        <input id="missCfgNoSubject" type="range" min="0" max="100" step="1" value="25">
+        <input id="missCfgNoSubject" type="range" min="0" max="100" step="1" value="25" disabled>
       </div>
       <div class="misses-tuning-control">
         <label for="missCfgClassifierRescue">
           <span>Classifier rescue</span>
           <output id="missCfgClassifierRescueVal">--</output>
         </label>
-        <input id="missCfgClassifierRescue" type="range" min="0" max="101" step="1" value="80">
+        <input id="missCfgClassifierRescue" type="range" min="0" max="101" step="1" value="80" disabled>
       </div>
       <div class="misses-tuning-control">
         <label for="missCfgBboxMin">
           <span>Minimum bbox size</span>
           <output id="missCfgBboxMinVal">--</output>
         </label>
-        <input id="missCfgBboxMin" type="range" min="0" max="20" step="1" value="5">
+        <input id="missCfgBboxMin" type="range" min="0" max="20" step="1" value="5" disabled>
       </div>
       <div class="misses-tuning-control">
         <label for="missCfgOofRatio">
           <span>OOF ratio</span>
           <output id="missCfgOofRatioVal">--</output>
         </label>
-        <input id="missCfgOofRatio" type="range" min="0" max="100" step="1" value="50">
+        <input id="missCfgOofRatio" type="range" min="0" max="100" step="1" value="50" disabled>
       </div>
     </div>
     <div class="misses-tuning-actions">
-      <button class="misses-tuning-btn primary" id="missRecomputeBtn" type="button" onclick="recomputeMisses()">
+      <button class="misses-tuning-btn primary" id="missRecomputeBtn" type="button" onclick="recomputeMisses()" disabled>
         Recompute misses
       </button>
-      <button class="misses-tuning-btn" type="button" onclick="resetMissThresholds()">
+      <button class="misses-tuning-btn" id="missResetPreviewBtn" type="button" onclick="resetMissThresholds()" disabled>
         Reset preview
       </button>
       <label class="misses-tuning-check">
-        <input id="missSaveDefaults" type="checkbox" checked>
+        <input id="missSaveDefaults" type="checkbox" checked disabled>
         <span>Save as workspace defaults</span>
       </label>
     </div>
@@ -481,12 +481,25 @@ var missConfig = null;
 var originalMissConfig = null;
 var previewTimer = null;
 var previewActive = false;
+var previewPayload = null;
+var previewRequestId = 0;
+var missConfigLoaded = false;
 var focusedCategory = null;
 var focusedIndex = -1;
 // Multi-select state. Spans categories — ctrl-click on cards in different
 // sections accumulates them all. The focused card doubles as the anchor for
 // shift-click range selection (range stays within the clicked category).
 var selection = new Set();
+var MISS_TUNING_CONTROL_IDS = [
+  'missCfgDetectorFloor',
+  'missCfgNoSubject',
+  'missCfgClassifierRescue',
+  'missCfgBboxMin',
+  'missCfgOofRatio',
+  'missSaveDefaults',
+  'missRecomputeBtn',
+  'missResetPreviewBtn',
+];
 
 function escapeHtml(s) {
   if (s == null) return '';
@@ -540,19 +553,44 @@ function setMissTuningStatus(text) {
   if (el) el.textContent = text || '';
 }
 
+function setMissTuningDisabled(disabled) {
+  MISS_TUNING_CONTROL_IDS.forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.disabled = !!disabled;
+  });
+}
+
+function invalidateMissPreview() {
+  previewRequestId++;
+  if (previewTimer) {
+    clearTimeout(previewTimer);
+    previewTimer = null;
+  }
+}
+
 function percentValue(id) {
   return parseInt(document.getElementById(id).value, 10) / 100;
 }
 
+function addChangedSliderValue(body, key, id, scale) {
+  var raw = parseInt(document.getElementById(id).value, 10);
+  var baseline = null;
+  if (missConfig && missConfig[key] != null) {
+    baseline = Math.round(Number(missConfig[key]) * scale);
+  }
+  if (baseline == null || raw !== baseline) {
+    body[key] = raw / scale;
+  }
+}
+
 function collectMissThresholds() {
-  return {
-    detector_confidence: percentValue('missCfgDetectorFloor'),
-    miss_det_confidence: percentValue('missCfgNoSubject'),
-    miss_classifier_override_conf: percentValue('missCfgClassifierRescue'),
-    miss_bbox_area_min: parseInt(document.getElementById('missCfgBboxMin').value, 10) / 1000,
-    miss_oof_ratio: percentValue('missCfgOofRatio'),
-    miss_enabled: true,
-  };
+  var body = { miss_enabled: true };
+  addChangedSliderValue(body, 'detector_confidence', 'missCfgDetectorFloor', 100);
+  addChangedSliderValue(body, 'miss_det_confidence', 'missCfgNoSubject', 100);
+  addChangedSliderValue(body, 'miss_classifier_override_conf', 'missCfgClassifierRescue', 100);
+  addChangedSliderValue(body, 'miss_bbox_area_min', 'missCfgBboxMin', 1000);
+  addChangedSliderValue(body, 'miss_oof_ratio', 'missCfgOofRatio', 100);
+  return body;
 }
 
 function updateMissSliderLabels() {
@@ -595,12 +633,16 @@ function installMissSliderHandlers() {
 }
 
 async function loadMissConfig() {
+  missConfigLoaded = false;
+  setMissTuningDisabled(true);
   try {
     var r = await fetch('/api/misses/config');
     if (!r.ok) throw new Error('http ' + r.status);
     missConfig = await r.json();
     originalMissConfig = Object.assign({}, missConfig);
     setMissSliders(missConfig);
+    missConfigLoaded = true;
+    setMissTuningDisabled(false);
     setMissTuningStatus('Preview uses current sliders');
   } catch (e) {
     setMissTuningStatus('Thresholds unavailable');
@@ -608,11 +650,18 @@ async function loadMissConfig() {
 }
 
 function scheduleMissPreview() {
+  if (!missConfigLoaded) return;
   if (previewTimer) clearTimeout(previewTimer);
   previewTimer = setTimeout(previewMisses, 250);
 }
 
 async function previewMisses() {
+  if (!missConfigLoaded) return;
+  if (previewTimer) {
+    clearTimeout(previewTimer);
+    previewTimer = null;
+  }
+  var requestId = ++previewRequestId;
   var body = collectMissThresholds();
   var since = getSinceParam();
   if (since) body.since = since;
@@ -625,21 +674,28 @@ async function previewMisses() {
     });
     if (!r.ok) throw new Error('http ' + r.status);
     var data = await r.json();
+    if (requestId !== previewRequestId) return;
     previewActive = true;
+    previewPayload = data;
     applyMissesPayload(data);
     setMissTuningStatus('Preview only');
   } catch (e) {
+    if (requestId !== previewRequestId) return;
     setMissTuningStatus('Preview failed');
   }
 }
 
 async function recomputeMisses() {
+  if (!missConfigLoaded) return;
+  invalidateMissPreview();
   var btn = document.getElementById('missRecomputeBtn');
   var body = collectMissThresholds();
   var since = getSinceParam();
   if (since) body.since = since;
   body.save_defaults = !!document.getElementById('missSaveDefaults').checked;
   if (btn) btn.disabled = true;
+  previewActive = false;
+  previewPayload = null;
   setMissTuningStatus('Recomputing...');
   try {
     var r = await fetch('/api/misses/recompute', {
@@ -650,10 +706,11 @@ async function recomputeMisses() {
     if (!r.ok) throw new Error('http ' + r.status);
     var data = await r.json();
     previewActive = false;
+    previewPayload = null;
     applyMissesPayload(data);
-    if (data.config) {
+    if (data.config && data.saved_defaults) {
       missConfig = data.config;
-      if (data.saved_defaults) originalMissConfig = Object.assign({}, data.config);
+      originalMissConfig = Object.assign({}, data.config);
     }
     setMissTuningStatus('Updated ' + (data.updated || 0) + ' photos');
     if (typeof showToast === 'function') showToast('Recomputed misses', 'success');
@@ -661,14 +718,16 @@ async function recomputeMisses() {
     setMissTuningStatus('Recompute failed');
     if (typeof showToast === 'function') showToast('Recompute failed', 'error');
   } finally {
-    if (btn) btn.disabled = false;
+    if (btn && missConfigLoaded) btn.disabled = false;
   }
 }
 
 function resetMissThresholds() {
-  if (!originalMissConfig) return;
+  if (!missConfigLoaded || !originalMissConfig) return;
+  invalidateMissPreview();
   setMissSliders(originalMissConfig);
   previewActive = false;
+  previewPayload = null;
   setMissTuningStatus('Preview reset');
   loadMisses();
 }
@@ -695,6 +754,10 @@ async function loadMisses() {
   if (since) {
     var b = document.getElementById('scopeBanner');
     if (b) b.style.display = '';
+  }
+  if (previewActive && previewPayload) {
+    applyMissesPayload(previewPayload);
+    return;
   }
   var url = '/api/misses' + (since ? '?since=' + encodeURIComponent(since) : '');
   var r = await fetch(url);
@@ -765,7 +828,7 @@ function renderSection(cat, photos) {
           '<button class="misses-reject-btn" ' +
             'data-testid="miss-reject-' + cat + '" ' +
             'onclick="bulkReject(\'' + cat + '\', event)" ' +
-            (count === 0 ? 'disabled' : '') + '>' +
+            ((count === 0 || previewActive) ? 'disabled' : '') + '>' +
             'Reject all in ' + escapeHtml(label) +
           '</button>' +
         '</div>' +
@@ -822,6 +885,7 @@ function renderCard(cat, p, idx) {
         '<button class="miss-card-unflag" ' +
           'title="Unflag as miss (U)" ' +
           'data-testid="miss-unflag-' + cat + '-' + p.id + '" ' +
+          (previewActive ? 'disabled ' : '') +
           'onclick="unflagMiss(\'' + cat + '\', ' + p.id + ', event)">&times;</button>' +
       '</div>' +
       '<div class="miss-card-info">' +
@@ -874,6 +938,12 @@ function pruneSelectionToVisible() {
 /* ---------- Bulk reject ---------- */
 async function bulkReject(cat, e) {
   if (e) e.stopPropagation();
+  if (previewActive) {
+    if (typeof showToast === 'function') {
+      showToast('Save or reset the preview before bulk rejecting', 'error');
+    }
+    return;
+  }
   var label = CATEGORY_LABELS[cat];
   var n = (missesData[cat] || []).length;
   if (n === 0) return;
@@ -962,6 +1032,12 @@ async function bulkFlagSelection(flag) {
  * linger if loadMisses takes a moment. */
 async function bulkUnflagSelection() {
   if (selection.size === 0) return;
+  if (previewActive) {
+    if (typeof showToast === 'function') {
+      showToast('Save or reset the preview before unmarking misses', 'error');
+    }
+    return;
+  }
   var ids = Array.from(selection);
   // Build the (id, category) work list from the current in-memory data so
   // we don't need an extra round-trip to discover which categories each
@@ -991,6 +1067,12 @@ async function bulkUnflagSelection() {
 /* ---------- Per-card unflag ---------- */
 async function unflagMiss(cat, photoId, e) {
   if (e) e.stopPropagation();
+  if (previewActive) {
+    if (typeof showToast === 'function') {
+      showToast('Save or reset the preview before unmarking misses', 'error');
+    }
+    return;
+  }
   var r = await fetch('/api/misses/' + photoId + '/unflag', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1047,6 +1129,8 @@ function updateSelectionBar() {
   var n = selection.size;
   bar.classList.toggle('active', n > 0);
   countEl.textContent = n + ' selected';
+  var unflagBtn = document.getElementById('missesSelectionUnflagBtn');
+  if (unflagBtn) unflagBtn.disabled = previewActive;
 }
 
 function selectRangeWithinCategory(cat, fromIdx, toIdx) {

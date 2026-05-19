@@ -141,14 +141,19 @@ def miss_config_from_effective(effective_config):
     return values
 
 
-def _fetch_workspace_miss_rows(db, detector_confidence=None):
-    """Fetch all active-workspace photo rows needed to derive miss flags."""
+def _effective_detector_confidence(db):
+    """Read the active workspace detector floor via the shared miss config."""
     import config as cfg
 
+    return miss_config_from_effective(
+        db.get_effective_config(cfg.load())
+    )["detector_confidence"]
+
+
+def _fetch_workspace_miss_rows(db, detector_confidence=None):
+    """Fetch all active-workspace photo rows needed to derive miss flags."""
     if detector_confidence is None:
-        detector_confidence = db.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+        detector_confidence = _effective_detector_confidence(db)
     ws_id = db._ws_id()
     rows = db.conn.execute(
         "SELECT p.id, p.folder_id, p.filename, p.companion_path, "
@@ -256,7 +261,7 @@ def _derive_miss_updates(rows, pipeline_config, target_ids=None,
     return updates, flags_by_id
 
 
-def _attach_primary_detections(db, photos, detector_confidence):
+def _attach_primary_detections(db, photos):
     if not photos:
         return
     photo_ids = [p["id"] for p in photos]
@@ -269,9 +274,9 @@ def _attach_primary_detections(db, photos, detector_confidence):
             f"SELECT photo_id, box_x, box_y, box_w, box_h, "
             f"       detector_confidence "
             f"FROM detections "
-            f"WHERE detector_confidence >= ? AND photo_id IN ({placeholders}) "
+            f"WHERE photo_id IN ({placeholders}) "
             f"ORDER BY photo_id, detector_confidence DESC",
-            [detector_confidence, *chunk],
+            chunk,
         ).fetchall()
         for d in det_rows:
             primary.setdefault(d["photo_id"], d)
@@ -294,10 +299,7 @@ def preview_misses_for_workspace(db, pipeline_config, detector_confidence=None,
     if not pipeline_config.get("miss_enabled", True):
         return {"no_subject": [], "clipped": [], "oof": []}
     if detector_confidence is None:
-        import config as cfg
-        detector_confidence = db.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+        detector_confidence = _effective_detector_confidence(db)
     rows = _fetch_workspace_miss_rows(
         db, detector_confidence=detector_confidence
     )
@@ -340,9 +342,7 @@ def preview_misses_for_workspace(db, pipeline_config, detector_confidence=None,
             ),
             reverse=True,
         )
-        _attach_primary_detections(
-            db, photos, detector_confidence,
-        )
+        _attach_primary_detections(db, photos)
     return grouped
 
 
@@ -387,11 +387,8 @@ def compute_misses_for_workspace(
     # workspace-effective detector_confidence threshold. Photos whose
     # highest-confidence box is below threshold are legitimate no_subject
     # candidates.
-    import config as cfg
     if detector_confidence is None:
-        detector_confidence = db.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+        detector_confidence = _effective_detector_confidence(db)
     # max_prediction_conf is the highest classifier confidence across all
     # detections of the photo, ignoring the workspace detector_confidence
     # cutoff. A classifier prediction at or above

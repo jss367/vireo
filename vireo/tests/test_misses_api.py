@@ -153,6 +153,14 @@ def test_api_misses_config_returns_thresholds(client, db_with_misses):
     assert data["miss_classifier_override_conf"] == pytest.approx(0.8)
 
 
+@pytest.mark.parametrize("path", ["/api/misses/preview", "/api/misses/recompute"])
+def test_api_misses_threshold_endpoints_reject_non_object_json(client, path):
+    r = client.post(path, data=json.dumps(["not", "an", "object"]),
+                    content_type="application/json")
+    assert r.status_code == 400
+    assert "JSON object" in r.get_json()["error"]
+
+
 def test_api_misses_preview_uses_classifier_rescue_override(tmp_path, monkeypatch):
     """Preview should recalculate categories without persisting DB flags."""
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -193,7 +201,12 @@ def test_api_misses_preview_uses_classifier_rescue_override(tmp_path, monkeypatc
         content_type="application/json",
     )
     assert default_r.status_code == 200
-    assert [p["id"] for p in default_r.get_json()["no_subject"]] == [pid]
+    default_payload = default_r.get_json()
+    assert [p["id"] for p in default_payload["no_subject"]] == [pid]
+    assert default_payload["no_subject"][0]["detection_conf"] == pytest.approx(0.04)
+    assert json.loads(default_payload["no_subject"][0]["detection_box"]) == {
+        "x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4,
+    }
 
     rescued_r = client.post(
         "/api/misses/preview",
@@ -264,6 +277,40 @@ def test_api_misses_recompute_can_save_workspace_defaults(tmp_path, monkeypatch)
     effective = db.get_effective_config(cfg.load())
     assert effective["detector_confidence"] == pytest.approx(0.05)
     assert effective["pipeline"]["miss_classifier_override_conf"] == pytest.approx(0.65)
+
+
+def test_api_misses_recompute_preserves_custom_derived_thresholds(
+    client, db_with_misses,
+):
+    """Derived burst/singleton thresholds should change only with their slider."""
+    import config as cfg
+
+    _, db, _ = db_with_misses
+    db.update_workspace(db._active_workspace_id, config_overrides={
+        "pipeline": {
+            "miss_det_confidence": 0.4,
+            "miss_det_confidence_burst": 0.05,
+            "miss_bbox_area_min": 0.01,
+            "miss_bbox_area_min_singleton": 0.001,
+        }
+    })
+
+    r = client.post(
+        "/api/misses/recompute",
+        data=json.dumps({"miss_oof_ratio": 0.42, "save_defaults": True}),
+        content_type="application/json",
+    )
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["config"]["miss_det_confidence_burst"] == pytest.approx(0.05)
+    assert data["config"]["miss_bbox_area_min_singleton"] == pytest.approx(0.001)
+
+    effective = db.get_effective_config(cfg.load())
+    assert effective["pipeline"]["miss_det_confidence_burst"] == pytest.approx(0.05)
+    assert effective["pipeline"]["miss_bbox_area_min_singleton"] == pytest.approx(
+        0.001
+    )
+    assert effective["pipeline"]["miss_oof_ratio"] == pytest.approx(0.42)
 
 
 def test_api_bulk_reject_records_edit_history(client, db_with_misses):

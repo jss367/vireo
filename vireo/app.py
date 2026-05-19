@@ -4952,6 +4952,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
         from misses import miss_config_from_effective
 
+        if not isinstance(body, dict):
+            raise ValueError("request body must be a JSON object")
+
         effective = db.get_effective_config(cfg.load())
         base_pipeline = effective.get("pipeline", {})
         if not isinstance(base_pipeline, dict):
@@ -4984,21 +4987,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         pipeline["miss_enabled"] = values["miss_enabled"]
         pipeline["miss_det_confidence"] = values["miss_det_confidence"]
-        pipeline["miss_det_confidence_burst"] = round(
-            values["miss_det_confidence"] * 0.60, 4
-        )
+        if "miss_det_confidence" in body:
+            values["miss_det_confidence_burst"] = round(
+                values["miss_det_confidence"] * 0.60, 4
+            )
+        pipeline["miss_det_confidence_burst"] = values["miss_det_confidence_burst"]
         pipeline["miss_classifier_override_conf"] = values[
             "miss_classifier_override_conf"
         ]
         pipeline["miss_bbox_area_min"] = values["miss_bbox_area_min"]
-        pipeline["miss_bbox_area_min_singleton"] = round(
-            values["miss_bbox_area_min"] * 0.40, 5
-        )
-        pipeline["miss_oof_ratio"] = values["miss_oof_ratio"]
-        values["miss_det_confidence_burst"] = pipeline["miss_det_confidence_burst"]
-        values["miss_bbox_area_min_singleton"] = pipeline[
+        if "miss_bbox_area_min" in body:
+            values["miss_bbox_area_min_singleton"] = round(
+                values["miss_bbox_area_min"] * 0.40, 5
+            )
+        pipeline["miss_bbox_area_min_singleton"] = values[
             "miss_bbox_area_min_singleton"
         ]
+        pipeline["miss_oof_ratio"] = values["miss_oof_ratio"]
         return values, pipeline, values["detector_confidence"]
 
     def _save_miss_threshold_overrides(db, values, pipeline):
