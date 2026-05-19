@@ -50,9 +50,19 @@ def test_live_log_burst_does_not_refilter_per_line(live_server, page):
     n = 300
     _drive_log_burst(page, live_server, n)
 
-    # Wait for the coalesced render to settle (DOM/array capped at 200).
+    # Wait for the coalesced render to settle. Checking the cap alone is
+    # racy: the navbar backfills startup logs via the bulk path on load,
+    # so lpCount can already read '200' before the injected burst's rAF
+    # flush runs. Also require the newest injected line to be present —
+    # that can only be true after the burst flushed.
     page.wait_for_function(
-        "document.getElementById('lpCount').textContent === '200'"
+        """() => {
+            const countOk =
+                document.getElementById('lpCount').textContent === '200';
+            const els = document.querySelectorAll('#lpContent .lp-line');
+            const last = els.length ? els[els.length - 1].textContent : '';
+            return countOk && last.includes('burst line 299');
+        }"""
     )
 
     filter_calls = page.evaluate("window.__filterCalls")
