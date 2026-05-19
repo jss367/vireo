@@ -6453,6 +6453,16 @@ function formatDuration(seconds) {
       return;
     }
     _lpPending.push(record);
+    // Bound the queue independent of rAF. A hidden/minimized tab pauses
+    // requestAnimationFrame while the EventSource keeps delivering, so
+    // without this the pending array would grow unbounded for the entire
+    // life of a long job and then process one giant batch on resume.
+    // Only the last lpMaxLines can ever be shown (the DOM cap in
+    // _lpFlush), so dropping older pending records here is lossless and
+    // mirrors the lpLines cap.
+    if (_lpPending.length > lpMaxLines) {
+      _lpPending.splice(0, _lpPending.length - lpMaxLines);
+    }
     if (!_lpFlushScheduled) {
       _lpFlushScheduled = true;
       requestAnimationFrame(_lpFlush);

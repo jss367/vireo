@@ -84,3 +84,69 @@ def test_live_log_burst_does_not_refilter_per_line(live_server, page):
         f"lpApplyFilter ran {filter_calls} times for {n} streamed lines "
         f"— per-line O(n) re-render (renderer-freeze bug) is present"
     )
+
+
+def test_backgrounded_tab_burst_stays_bounded(live_server, page):
+    """A long job logging into a hidden tab must not blow up.
+
+    requestAnimationFrame is paused while a tab is hidden/minimized, but
+    the EventSource keeps delivering, so addLpLine keeps enqueuing. The
+    pending queue must stay bounded (capped on enqueue) and must schedule
+    exactly one flush no matter how many lines arrive while paused — then
+    resume correctly (DOM capped, newest kept, oldest dropped) when the
+    tab becomes visible again.
+    """
+    page.goto(f"{live_server['url']}/browse")
+    page.wait_for_function("typeof window.addLpLine === 'function'")
+
+    result = page.evaluate(
+        """() => {
+            // Simulate a hidden tab: rAF never auto-fires; capture the
+            // single scheduled callback and count how many were scheduled.
+            const cbs = [];
+            window.__rafScheduled = 0;
+            window.requestAnimationFrame = function (cb) {
+                window.__rafScheduled++;
+                cbs.push(cb);
+                return cbs.length;
+            };
+            const now = Date.now() / 1000;
+            // Far more than the 200 retention cap.
+            for (let i = 0; i < 1000; i++) {
+                window.addLpLine({
+                    time: now + i * 0.001,
+                    level: 'INFO',
+                    message: 'bg line ' + i,
+                });
+            }
+            const scheduledWhilePaused = window.__rafScheduled;
+            // Tab visible again: drain the one captured flush.
+            cbs.forEach((cb) => cb());
+            const els = document.querySelectorAll('#lpContent .lp-line');
+            return {
+                scheduledWhilePaused,
+                lineCount: els.length,
+                countText: document.getElementById('lpCount').textContent,
+                newest: els.length ? els[els.length - 1].textContent : '',
+                oldest: els.length ? els[0].textContent : '',
+            };
+        }"""
+    )
+
+    # One flush scheduled for the whole 1000-line paused burst — not a
+    # per-line rAF storm waiting to stampede on resume.
+    assert result["scheduledWhilePaused"] == 1, (
+        f"expected 1 scheduled flush for the paused burst, got "
+        f"{result['scheduledWhilePaused']}"
+    )
+    # Resume is bounded and correct.
+    assert result["lineCount"] == 200, (
+        f"DOM not capped after resume: {result['lineCount']}"
+    )
+    assert result["countText"] == "200", f"lpCount wrong: {result['countText']!r}"
+    assert "bg line 999" in result["newest"], (
+        f"newest line missing after resume: {result['newest']!r}"
+    )
+    assert "bg line 0" not in result["oldest"], (
+        f"oldest line should have been dropped: {result['oldest']!r}"
+    )
