@@ -2488,6 +2488,15 @@ window.NAV_ALL_PAGES = [
 /* ---------- Shortcuts Cheat Sheet (?) ---------- */
 (function() {
   var SC_LABELS = {
+    global: {
+      _title: 'Global',
+      open_shortcuts: 'Open keyboard shortcuts',
+      command_palette: 'Open command palette',
+      next_tab: 'Next tab',
+      previous_tab: 'Previous tab',
+      close_tab: 'Close current tab',
+      help: 'Open help',
+    },
     navigation: {
       _title: 'Navigation',
       import: 'Import', pipeline: 'Pipeline', pipeline_review: 'Pipeline Review',
@@ -2515,9 +2524,44 @@ window.NAV_ALL_PAGES = [
       zoom: 'Toggle zoom',
       toggle_boxes: 'Toggle detection boxes',
     },
+    misses: {
+      _title: 'Misses',
+      next: 'Next miss',
+      previous: 'Previous miss',
+      extend_next: 'Extend selection to next miss',
+      extend_previous: 'Extend selection to previous miss',
+      flag: 'Flag focused or selected photo',
+      reject: 'Reject focused or selected photo',
+      unmark_missed: 'Unmark as missed',
+      open: 'Open focused photo',
+      clear_selection: 'Clear selection',
+    },
+    lightbox: {
+      _title: 'Lightbox',
+      next: 'Next photo',
+      previous: 'Previous photo',
+      flag: 'Flag current photo',
+      reject: 'Reject current photo',
+      unflag: 'Clear pick/reject flag',
+      zoom: 'Toggle 1:1 zoom',
+      zoom_in: 'Zoom in',
+      zoom_out: 'Zoom out',
+      fit: 'Fit to screen',
+      toggle_boxes: 'Toggle detection boxes',
+      fullscreen: 'Enter fullscreen',
+      close_return: 'Close and return',
+    },
   };
 
   var SC_DEFAULTS = {
+    global: {
+      open_shortcuts: '?',
+      command_palette: 'ctrl+k',
+      next_tab: 'ctrl+tab',
+      previous_tab: 'ctrl+shift+tab',
+      close_tab: 'ctrl+w',
+      help: 'f1',
+    },
     navigation: {
       import: '', pipeline: '', pipeline_review: '', review: '',
       cull: '', browse: '', map: '', variants: '',
@@ -2536,19 +2580,67 @@ window.NAV_ALL_PAGES = [
       undo: 'ctrl+z', redo: 'ctrl+shift+z', select_all: 'ctrl+a', compare: 'c', zoom: 'z',
       toggle_boxes: 'b',
     },
+    misses: {
+      next: 'j',
+      previous: 'k',
+      extend_next: 'shift+j',
+      extend_previous: 'shift+k',
+      flag: 'p',
+      reject: 'x',
+      unmark_missed: 'u',
+      open: 'enter',
+      clear_selection: 'escape',
+    },
+    lightbox: {
+      next: 'arrowright',
+      previous: 'arrowleft',
+      flag: 'p',
+      reject: 'x',
+      unflag: 'u',
+      zoom: 'z',
+      zoom_in: '+',
+      zoom_out: '-',
+      fit: '0',
+      toggle_boxes: 'b',
+      fullscreen: 'f',
+      close_return: 'g',
+    },
   };
+
+  function sheetShortcutValue(shortcuts, ctx, action) {
+    // Misses and Lightbox intentionally reuse configurable Browse bindings
+    // for photo flag actions. Show the effective key and contextual label
+    // here without making those fixed page behaviors editable separately.
+    if (ctx === 'misses') {
+      var browse = (shortcuts && shortcuts.browse) || {};
+      var browseDefaults = SC_DEFAULTS.browse || {};
+      if (action === 'flag') return browse.flag || browseDefaults.flag || SC_DEFAULTS.misses.flag;
+      if (action === 'reject') return browse.reject || browseDefaults.reject || SC_DEFAULTS.misses.reject;
+      if (action === 'unmark_missed') return browse.unflag || browseDefaults.unflag || SC_DEFAULTS.misses.unmark_missed;
+    }
+    if (ctx === 'lightbox') {
+      var browse2 = (shortcuts && shortcuts.browse) || {};
+      var browseDefaults2 = SC_DEFAULTS.browse || {};
+      if (action === 'flag') return browse2.flag || browseDefaults2.flag || SC_DEFAULTS.lightbox.flag;
+      if (action === 'reject') return browse2.reject || browseDefaults2.reject || SC_DEFAULTS.lightbox.reject;
+      if (action === 'unflag') return browse2.unflag || browseDefaults2.unflag || SC_DEFAULTS.lightbox.unflag;
+      if (action === 'zoom') return browse2.zoom || browseDefaults2.zoom || SC_DEFAULTS.lightbox.zoom;
+      if (action === 'toggle_boxes') return browse2.toggle_boxes || browseDefaults2.toggle_boxes || SC_DEFAULTS.lightbox.toggle_boxes;
+    }
+    var values = (shortcuts && shortcuts[ctx]) || {};
+    var defaults = SC_DEFAULTS[ctx] || {};
+    return values[action] || defaults[action] || '';
+  }
 
   function renderSheet() {
     var shortcuts = window._vireoShortcuts || {};
     var html = '';
     for (var ctx in SC_LABELS) {
       var labels = SC_LABELS[ctx];
-      var values = shortcuts[ctx] || SC_DEFAULTS[ctx] || {};
-      var defaults = SC_DEFAULTS[ctx] || {};
       html += '<div class="sc-group-title">' + labels._title + '</div>';
       for (var action in labels) {
         if (action === '_title') continue;
-        var key = values[action] || defaults[action] || '';
+        var key = sheetShortcutValue(shortcuts, ctx, action);
         html += '<div class="sc-row">' +
           '<span class="sc-key">' + formatShortcut(key) + '</span>' +
           '<span class="sc-label">' + labels[action] + '</span>' +
