@@ -6460,14 +6460,25 @@ function formatDuration(seconds) {
   }
 
   /* ---------- Log lines ---------- */
-  window.addLpLine = function(record, bulk) {
-    if (lpLines.length >= lpMaxLines) {
-      lpLines.shift();
-      var first = document.getElementById('lpContent').firstChild;
-      if (first) first.remove();
-    }
-    lpLines.push(record);
-    var container = document.getElementById('lpContent');
+  // Live log lines arrive over SSE at the job's log rate (can be many per
+  // second for hours). Doing per-line DOM work — appending, a forced
+  // auto-scroll reflow, and a full lpApplyFilter() re-scan over every
+  // retained node — saturates the renderer main thread and freezes the UI
+  // even while the backend stays responsive. So the live (non-bulk) path
+  // only enqueues; a single requestAnimationFrame flush coalesces a whole
+  // frame's worth of lines into one append + one scroll + one count write,
+  // with the level filter read once and applied inline per new node (no
+  // O(n) re-scan). lpApplyFilter() stays for the filter <select> onchange,
+  // where a full re-scan of existing lines is genuinely required.
+  var _lpPending = [];
+  var _lpFlushScheduled = false;
+
+  function _lpMinOrder() {
+    var sel = document.getElementById('lpLevelFilter');
+    return LEVEL_ORDER[sel ? sel.value : 'DEBUG'] || 0;
+  }
+
+  function _lpMakeLineEl(record, minOrder) {
     var time = new Date(record.time * 1000);
     var timeStr = time.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
     var div = document.createElement('div');
@@ -6476,16 +6487,78 @@ function formatDuration(seconds) {
     div.innerHTML = '<span class="lp-time">' + timeStr + '</span>' +
       '<span class="lp-level">' + record.level + '</span>' +
       bpEscape(record.message || '');
-    container.appendChild(div);
-    if (!bulk) {
-      var autoScroll = document.getElementById('lpAutoScroll');
-      if (autoScroll && autoScroll.checked) {
-        container.scrollTop = container.scrollHeight;
-      }
-      lpApplyFilter();
+    // Apply the active level filter to just this node — cheap, and avoids
+    // re-scanning every existing line on each new line.
+    if ((LEVEL_ORDER[record.level] || 0) < minOrder) div.style.display = 'none';
+    return div;
+  }
+
+  function _lpFlush() {
+    _lpFlushScheduled = false;
+    if (_lpPending.length === 0) return;
+    var batch = _lpPending;
+    _lpPending = [];
+    var container = document.getElementById('lpContent');
+    if (!container) return;
+    var minOrder = _lpMinOrder();
+
+    for (var i = 0; i < batch.length; i++) lpLines.push(batch[i]);
+    var overflow = lpLines.length - lpMaxLines;
+    if (overflow > 0) lpLines.splice(0, overflow);
+
+    // Only build nodes we'll actually keep — a single burst larger than
+    // the cap would otherwise create (and immediately discard) thousands.
+    var keepFrom = Math.max(0, batch.length - lpMaxLines);
+    var frag = document.createDocumentFragment();
+    for (var j = keepFrom; j < batch.length; j++) {
+      frag.appendChild(_lpMakeLineEl(batch[j], minOrder));
+    }
+    container.appendChild(frag);
+    while (container.childNodes.length > lpMaxLines && container.firstChild) {
+      container.firstChild.remove();
+    }
+
+    var autoScroll = document.getElementById('lpAutoScroll');
+    if (autoScroll && autoScroll.checked) {
+      container.scrollTop = container.scrollHeight;
     }
     document.getElementById('lpCount').textContent = lpLines.length;
     document.getElementById('logsBadge').textContent = lpLines.length;
+  }
+
+  window.addLpLine = function(record, bulk) {
+    if (bulk) {
+      // Restore/backfill path: synchronous so callers that immediately
+      // run lpApplyFilter() afterwards see the final DOM. Still bounded,
+      // still no per-line scroll.
+      if (lpLines.length >= lpMaxLines) {
+        lpLines.shift();
+        var firstB = document.getElementById('lpContent').firstChild;
+        if (firstB) firstB.remove();
+      }
+      lpLines.push(record);
+      document.getElementById('lpContent').appendChild(
+        _lpMakeLineEl(record, _lpMinOrder())
+      );
+      document.getElementById('lpCount').textContent = lpLines.length;
+      document.getElementById('logsBadge').textContent = lpLines.length;
+      return;
+    }
+    _lpPending.push(record);
+    // Bound the queue independent of rAF. A hidden/minimized tab pauses
+    // requestAnimationFrame while the EventSource keeps delivering, so
+    // without this the pending array would grow unbounded for the entire
+    // life of a long job and then process one giant batch on resume.
+    // Only the last lpMaxLines can ever be shown (the DOM cap in
+    // _lpFlush), so dropping older pending records here is lossless and
+    // mirrors the lpLines cap.
+    if (_lpPending.length > lpMaxLines) {
+      _lpPending.splice(0, _lpPending.length - lpMaxLines);
+    }
+    if (!_lpFlushScheduled) {
+      _lpFlushScheduled = true;
+      requestAnimationFrame(_lpFlush);
+    }
   };
 
   window.lpApplyFilter = function() {
