@@ -250,6 +250,57 @@ def test_esc_closes_shortcuts_cheat_sheet(live_server, page):
     assert expect_closed is False
 
 
+def test_shortcuts_sheet_lists_misses_and_shared_hotkeys(live_server, page):
+    """The ? sheet should include /misses-only keys plus contextual shared keys."""
+    url = live_server["url"]
+    page.goto(f"{url}/misses", timeout=15000)
+    page.wait_for_load_state("networkidle")
+    page.wait_for_function("window._vireoShortcuts && window._vireoShortcuts.browse")
+
+    page.evaluate("""
+        window._vireoShortcuts.browse.flag = 'alt+p';
+        window._vireoShortcuts.browse.reject = 'alt+x';
+        window._vireoShortcuts.browse.unflag = 'alt+u';
+    """)
+    page.keyboard.press("?")
+    page.wait_for_function(
+        "document.getElementById('shortcutsCheatSheet').classList.contains('open')",
+        timeout=2000,
+    )
+
+    groups = page.evaluate("""
+        () => {
+          const out = {};
+          let title = null;
+          document.querySelectorAll('#shortcutsSheetContent > div').forEach((el) => {
+            if (el.classList.contains('sc-group-title')) {
+              title = el.textContent.trim();
+              out[title] = [];
+            } else if (title && el.classList.contains('sc-row')) {
+              out[title].push({
+                key: el.querySelector('.sc-key').textContent.trim(),
+                label: el.querySelector('.sc-label').textContent.trim(),
+              });
+            }
+          });
+          return out;
+        }
+    """)
+
+    assert {"Global", "Misses", "Lightbox"}.issubset(groups.keys())
+    assert {"key": "J", "label": "Next miss"} in groups["Misses"]
+    assert {"key": "K", "label": "Previous miss"} in groups["Misses"]
+    assert {"key": "Shift+J", "label": "Extend selection to next miss"} in groups["Misses"]
+    assert {"key": "Shift+K", "label": "Extend selection to previous miss"} in groups["Misses"]
+    assert {"key": "Alt+P", "label": "Flag focused or selected photo"} in groups["Misses"]
+    assert {"key": "Alt+X", "label": "Reject focused or selected photo"} in groups["Misses"]
+    assert {"key": "Alt+U", "label": "Unmark as missed"} in groups["Misses"]
+    assert {"key": "Enter", "label": "Open focused photo"} in groups["Misses"]
+    assert {"key": "Escape", "label": "Clear selection"} in groups["Misses"]
+    assert {"key": "?", "label": "Open keyboard shortcuts"} in groups["Global"]
+    assert {"key": "Alt+U", "label": "Clear pick/reject flag"} in groups["Lightbox"]
+
+
 def test_two_overlays_unwind_one_esc_each(live_server, page):
     """With lightbox open and cheat sheet stacked on top, each Esc closes one
     overlay (top-of-stack first). Locks in the new one-Esc-per-overlay model
