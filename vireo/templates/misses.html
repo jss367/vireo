@@ -438,14 +438,14 @@
           <span>Minimum bbox size</span>
           <output id="missCfgBboxMinVal">--</output>
         </label>
-        <input id="missCfgBboxMin" type="range" min="0" max="20" step="1" value="5" disabled>
+        <input id="missCfgBboxMin" type="range" min="0" max="200" step="1" value="5" disabled>
       </div>
       <div class="misses-tuning-control">
         <label for="missCfgOofRatio">
           <span>OOF ratio</span>
           <output id="missCfgOofRatioVal">--</output>
         </label>
-        <input id="missCfgOofRatio" type="range" min="0" max="100" step="1" value="50" disabled>
+        <input id="missCfgOofRatio" type="range" min="0" max="200" step="1" value="50" disabled>
       </div>
     </div>
     <div class="misses-tuning-actions">
@@ -758,8 +758,11 @@ async function loadMisses() {
     var b = document.getElementById('scopeBanner');
     if (b) b.style.display = '';
   }
-  if (previewActive && previewPayload) {
-    applyMissesPayload(previewPayload);
+  if (previewActive) {
+    // Re-derive from the preview endpoint with the live slider values
+    // instead of replaying a cached payload that a mutating action may
+    // have made stale.
+    await previewMisses();
     return;
   }
   var url = '/api/misses' + (since ? '?since=' + encodeURIComponent(since) : '');
