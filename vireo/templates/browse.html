@@ -4755,6 +4755,8 @@ document.addEventListener('keydown', function(e) {
     return;
   }
 
+  if (document.getElementById('lightboxOverlay').classList.contains('active')) return;
+
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
   if (e.key === 'Escape') {

@@ -3018,6 +3018,7 @@ var _lbCurrentWildlifeExcluded = false;
 var _lbFlagEditSeq = 0;      // increments for local flag writes so stale metadata fetches cannot overwrite the chip
 var _lbOpenSeq = 0;          // increments for every lightbox open so old metadata fetches cannot reapply after reopen
 var _lbFlagPendingWrites = 0;
+var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated from optimistic page helpers
 var _lbViewportByPhotoId = {};  // per-session lightbox viewport cache keyed by photo id
 var _lbPendingViewportState = null;
 
@@ -3252,11 +3253,31 @@ function _lbFlagFromPhotoList(photoId) {
   return p.flag;
 }
 
+function _lbRememberConfirmedFlag(photoId, flag) {
+  var normalized = _lbNormalizeFlag(flag);
+  if (!normalized || photoId == null) return;
+  _lbConfirmedFlags[String(photoId)] = normalized;
+}
+
+function _lbForgetConfirmedFlag(photoId) {
+  if (photoId == null) return;
+  delete _lbConfirmedFlags[String(photoId)];
+}
+
+function _lbConfirmedFlagFor(photoId) {
+  var key = String(photoId);
+  if (Object.prototype.hasOwnProperty.call(_lbConfirmedFlags, key)) {
+    return _lbConfirmedFlags[key];
+  }
+  return _lbFlagFromPhotoList(photoId);
+}
+
 function _lbRecordFlag(photoId, flag) {
   var normalized = _lbNormalizeFlag(flag);
   if (!normalized) return;
   var p = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
   if (p) p.flag = normalized;
+  _lbRememberConfirmedFlag(photoId, normalized);
   if (_lightboxCurrentId === photoId) _lbSetFlagStatus(normalized);
 }
 
@@ -3265,6 +3286,7 @@ function _lbCacheFlag(photoId, flag) {
   if (!normalized) return;
   var p = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
   if (p) p.flag = normalized;
+  _lbRememberConfirmedFlag(photoId, normalized);
 }
 
 function _lbRecordFetchedFlag(photoId, flag, flagFetchSeq) {
@@ -3291,7 +3313,7 @@ function _lbApplyFlag(photoId, flag) {
       body: JSON.stringify({flag: normalized}),
     }, { toast: false }).then(function() { return true; }).catch(function() { return false; });
   } else {
-    _lbSetFlagStatus(_lbFlagFromPhotoList(photoId));
+    _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
     return false;
   }
 
@@ -3299,7 +3321,7 @@ function _lbApplyFlag(photoId, flag) {
     _lbFlagPendingWrites = Math.max(0, _lbFlagPendingWrites - 1);
     if (_lightboxCurrentId !== photoId) return;
     if (ok === false) {
-      if (_lbFlagEditSeq === seq) _lbSetFlagStatus(_lbFlagFromPhotoList(photoId));
+      if (_lbFlagEditSeq === seq) _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
       return;
     }
     if (_lbFlagEditSeq === seq || _lbFlagPendingWrites === 0) {
@@ -3310,7 +3332,7 @@ function _lbApplyFlag(photoId, flag) {
   }).catch(function() {
     _lbFlagPendingWrites = Math.max(0, _lbFlagPendingWrites - 1);
     if (_lbFlagEditSeq === seq && _lightboxCurrentId === photoId) {
-      _lbSetFlagStatus(_lbFlagFromPhotoList(photoId));
+      _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
     }
   });
 
@@ -3681,8 +3703,16 @@ function openLightbox(photoId, filename, photoList, options) {
   _lightboxCurrentId = photoId;
   if (photoList) _lightboxPhotoList = photoList;
   var currentFromList = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
+  if (currentFromList && Object.prototype.hasOwnProperty.call(currentFromList, 'flag')) {
+    _lbRememberConfirmedFlag(photoId, currentFromList.flag);
+  } else {
+    // Flagless opens (e.g. review/misses/cull push only {id, filename}) must
+    // not reuse a flag remembered from an earlier open; rely on the
+    // /api/photos/:id fetch to repopulate the confirmed flag instead.
+    _lbForgetConfirmedFlag(photoId);
+  }
   _lbCurrentWildlifeExcluded = !!(currentFromList && currentFromList.wildlife_excluded);
-  _lbSetFlagStatus(_lbFlagFromPhotoList(photoId));
+  _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
 
   var overlay = document.getElementById('lightboxOverlay');
   var img = document.getElementById('lightboxImg');
