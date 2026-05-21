@@ -90,8 +90,26 @@ def cache_photo_original(db, photo, vireo_dir, folders):
     """Copy one photo's original and sidecar metadata into the offline cache."""
     folder_id = photo["folder_id"]
     now = time.time()
+    existing = db.offline_original_get(photo["id"])
+    existing_path = offline_original_abs(vireo_dir, existing)
+    # If a prior run cached this photo and the cached file is still on disk,
+    # treat it as the source-of-record for offline access when the live source
+    # is unavailable — don't clobber the DB record (which would also disable
+    # `resolve_original_path`'s fallback to the cached copy).
+    cache_intact = bool(
+        existing
+        and existing["status"] == "cached"
+        and existing_path
+        and os.path.isfile(existing_path)
+    )
 
     if folder_id not in folders:
+        if cache_intact:
+            return {
+                "status": "skipped",
+                "bytes": existing["bytes"],
+                "path": existing_path,
+            }
         db.offline_original_upsert(
             photo["id"],
             original_path=None,
@@ -110,6 +128,12 @@ def cache_photo_original(db, photo, vireo_dir, folders):
     source_path = os.path.join(folder_path, photo["filename"])
 
     if not os.path.isfile(source_path):
+        if cache_intact:
+            return {
+                "status": "skipped",
+                "bytes": existing["bytes"],
+                "path": existing_path,
+            }
         db.offline_original_upsert(
             photo["id"],
             original_path=None,
@@ -125,8 +149,6 @@ def cache_photo_original(db, photo, vireo_dir, folders):
         return {"status": "missing_source", "bytes": 0, "path": source_path}
 
     st = os.stat(source_path)
-    existing = db.offline_original_get(photo["id"])
-    existing_path = offline_original_abs(vireo_dir, existing)
     xmp_src = _xmp_source_for(folder_path, photo["filename"])
     xmp_src_exists = os.path.isfile(xmp_src)
     companion_src = None

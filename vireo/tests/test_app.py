@@ -245,6 +245,49 @@ def test_original_route_uses_offline_cache_when_source_missing(client_with_photo
     assert offline_resp.data == source_bytes
 
 
+def test_offline_cache_rerun_preserves_cache_when_source_missing(client_with_photo):
+    """Re-running Make Offline with the source unavailable keeps the cached copy."""
+    app, db, pid = client_with_photo
+    client = app.test_client()
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+
+    row = db.offline_original_get(pid)
+    assert row is not None and row["status"] == "cached"
+    cached_original_path = row["original_path"]
+    cached_bytes = row["bytes"]
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    assert os.path.isfile(os.path.join(vireo_dir, cached_original_path))
+
+    photo = db.get_photo(pid)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+    ).fetchone()
+    source = os.path.join(folder["path"], photo["filename"])
+    os.remove(source)
+    assert not os.path.isfile(source)
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+    assert job["result"]["skipped"] == 1
+    assert job["result"]["failed"] == 0
+
+    row = db.offline_original_get(pid)
+    assert row["status"] == "cached"
+    assert row["original_path"] == cached_original_path
+    assert row["bytes"] == cached_bytes
+    assert os.path.isfile(os.path.join(vireo_dir, cached_original_path))
+
+    offline_resp = client.get(f"/photos/{pid}/original")
+    assert offline_resp.status_code == 200
+    assert len(offline_resp.data) == cached_bytes
+
+
 def test_api_coverage(app_and_db):
     """GET /api/coverage returns workspace-level and per-folder coverage."""
     app, db = app_and_db
