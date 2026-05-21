@@ -34,6 +34,24 @@ def _xmp_source_for(folder_path, filename):
     return os.path.join(folder_path, stem + ".xmp")
 
 
+def _same_file_stat(src, dst):
+    if not src or not dst:
+        return False
+    try:
+        src_st = os.stat(src)
+        dst_st = os.stat(dst)
+    except OSError:
+        return False
+    return src_st.st_size == dst_st.st_size and src_st.st_mtime == dst_st.st_mtime
+
+
+def _unlink_cached_rel(vireo_dir, rel_path):
+    if not rel_path:
+        return
+    with contextlib.suppress(OSError):
+        os.unlink(os.path.join(vireo_dir, rel_path))
+
+
 def offline_original_abs(vireo_dir, row):
     if not row or not row["original_path"]:
         return None
@@ -117,6 +135,16 @@ def cache_photo_original(db, photo, vireo_dir, folders):
         companion_src = os.path.join(folder_path, companion)
     companion_src_exists = bool(companion_src) and os.path.isfile(companion_src)
 
+    xmp_rel_expected = (
+        _offline_rel_path("xmp", photo["id"], ".xmp") if xmp_src_exists else None
+    )
+    companion_rel_expected = None
+    if companion_src_exists:
+        companion_ext = os.path.splitext(companion)[1] or ".jpg"
+        companion_rel_expected = _offline_rel_path(
+            "companions", photo["id"], companion_ext.lower()
+        )
+
     existing_xmp_abs = (
         os.path.join(vireo_dir, existing["xmp_path"])
         if existing and existing["xmp_path"]
@@ -128,13 +156,21 @@ def cache_photo_original(db, photo, vireo_dir, folders):
         else None
     )
     xmp_fresh = (
-        (existing_xmp_abs is not None) == xmp_src_exists
-        and (existing_xmp_abs is None or os.path.isfile(existing_xmp_abs))
+        (not xmp_src_exists and existing_xmp_abs is None)
+        or (
+            xmp_src_exists
+            and existing
+            and existing["xmp_path"] == xmp_rel_expected
+            and _same_file_stat(xmp_src, existing_xmp_abs)
+        )
     )
     companion_fresh = (
-        (existing_companion_abs is not None) == companion_src_exists
-        and (
-            existing_companion_abs is None or os.path.isfile(existing_companion_abs)
+        (not companion_src_exists and existing_companion_abs is None)
+        or (
+            companion_src_exists
+            and existing
+            and existing["companion_path"] == companion_rel_expected
+            and _same_file_stat(companion_src, existing_companion_abs)
         )
     )
 
@@ -148,7 +184,11 @@ def cache_photo_original(db, photo, vireo_dir, folders):
         and xmp_fresh
         and companion_fresh
     ):
-        return {"status": "skipped", "bytes": existing["bytes"], "path": existing_path}
+        return {
+            "status": "skipped",
+            "bytes": existing["bytes"],
+            "path": existing_path,
+        }
 
     ext = os.path.splitext(photo["filename"])[1] or photo["extension"] or ".jpg"
     original_rel = _offline_rel_path("originals", photo["id"], ext.lower())
@@ -158,20 +198,25 @@ def cache_photo_original(db, photo, vireo_dir, folders):
     copied_bytes = os.path.getsize(original_abs)
     xmp_rel = None
     if xmp_src_exists:
-        xmp_rel = _offline_rel_path("xmp", photo["id"], ".xmp")
+        xmp_rel = xmp_rel_expected
         xmp_abs = os.path.join(vireo_dir, xmp_rel)
         _copy_atomic(xmp_src, xmp_abs)
         copied_bytes += os.path.getsize(xmp_abs)
+    if existing and existing["xmp_path"] and existing["xmp_path"] != xmp_rel:
+        _unlink_cached_rel(vireo_dir, existing["xmp_path"])
 
     companion_rel = None
     if companion_src_exists:
-        companion_ext = os.path.splitext(companion)[1] or ".jpg"
-        companion_rel = _offline_rel_path(
-            "companions", photo["id"], companion_ext.lower()
-        )
+        companion_rel = companion_rel_expected
         companion_abs = os.path.join(vireo_dir, companion_rel)
         _copy_atomic(companion_src, companion_abs)
         copied_bytes += os.path.getsize(companion_abs)
+    if (
+        existing
+        and existing["companion_path"]
+        and existing["companion_path"] != companion_rel
+    ):
+        _unlink_cached_rel(vireo_dir, existing["companion_path"])
 
     db.offline_original_upsert(
         photo["id"],

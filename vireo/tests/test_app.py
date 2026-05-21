@@ -136,7 +136,8 @@ def test_offline_cache_job_copies_original_and_xmp(client_with_photo):
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
     ).fetchone()
-    xmp_path = os.path.join(folder["path"], "test.xmp")
+    stem, _ = os.path.splitext(photo["filename"])
+    xmp_path = os.path.join(folder["path"], f"{stem}.xmp")
     with open(xmp_path, "w", encoding="utf-8") as fh:
         fh.write("<x:xmpmeta></x:xmpmeta>")
 
@@ -151,6 +152,72 @@ def test_offline_cache_job_copies_original_and_xmp(client_with_photo):
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     assert os.path.isfile(os.path.join(vireo_dir, row["original_path"]))
     assert os.path.isfile(os.path.join(vireo_dir, row["xmp_path"]))
+
+
+def test_offline_cache_refreshes_and_removes_xmp_sidecar(client_with_photo):
+    """Re-caching refreshes changed sidecars and removes stale cached ones."""
+    app, db, pid = client_with_photo
+    client = app.test_client()
+
+    photo = db.get_photo(pid)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+    ).fetchone()
+    companion_name = "test-companion.jpg"
+    companion_path = os.path.join(folder["path"], companion_name)
+    with open(companion_path, "w", encoding="utf-8") as fh:
+        fh.write("companion 1")
+    db.conn.execute(
+        "UPDATE photos SET companion_path=? WHERE id=?", (companion_name, pid)
+    )
+    db.conn.commit()
+
+    stem, _ = os.path.splitext(photo["filename"])
+    xmp_path = os.path.join(folder["path"], f"{stem}.xmp")
+    with open(xmp_path, "w", encoding="utf-8") as fh:
+        fh.write("version 1")
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+
+    row = db.offline_original_get(pid)
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    cached_xmp = os.path.join(vireo_dir, row["xmp_path"])
+    cached_companion = os.path.join(vireo_dir, row["companion_path"])
+    assert open(cached_xmp, encoding="utf-8").read() == "version 1"
+    assert open(cached_companion, encoding="utf-8").read() == "companion 1"
+
+    with open(xmp_path, "w", encoding="utf-8") as fh:
+        fh.write("version 2")
+    with open(companion_path, "w", encoding="utf-8") as fh:
+        fh.write("companion 2")
+    newer = os.path.getmtime(xmp_path) + 10
+    os.utime(xmp_path, (newer, newer))
+    os.utime(companion_path, (newer, newer))
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+    row = db.offline_original_get(pid)
+    cached_xmp = os.path.join(vireo_dir, row["xmp_path"])
+    cached_companion = os.path.join(vireo_dir, row["companion_path"])
+    assert open(cached_xmp, encoding="utf-8").read() == "version 2"
+    assert open(cached_companion, encoding="utf-8").read() == "companion 2"
+
+    os.remove(xmp_path)
+    os.remove(companion_path)
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+    row = db.offline_original_get(pid)
+    assert row["xmp_path"] is None
+    assert row["companion_path"] is None
+    assert not os.path.exists(cached_xmp)
+    assert not os.path.exists(cached_companion)
 
 
 def test_original_route_uses_offline_cache_when_source_missing(client_with_photo):
