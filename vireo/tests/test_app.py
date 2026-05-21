@@ -154,6 +154,33 @@ def test_offline_cache_job_copies_original_and_xmp(client_with_photo):
     assert os.path.isfile(os.path.join(vireo_dir, row["xmp_path"]))
 
 
+def test_offline_cache_picks_up_uppercase_xmp_sidecar(client_with_photo):
+    """Offline cache copies sidecars whose extension is `.XMP` (not just `.xmp`)."""
+    app, db, pid = client_with_photo
+    client = app.test_client()
+
+    photo = db.get_photo(pid)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+    ).fetchone()
+    stem, _ = os.path.splitext(photo["filename"])
+    xmp_path = os.path.join(folder["path"], f"{stem}.XMP")
+    with open(xmp_path, "w", encoding="utf-8") as fh:
+        fh.write("<x:xmpmeta></x:xmpmeta>")
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+
+    row = db.offline_original_get(pid)
+    assert row is not None
+    assert row["status"] == "cached"
+    assert row["xmp_path"], "expected uppercase .XMP sidecar to be cached"
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    assert os.path.isfile(os.path.join(vireo_dir, row["xmp_path"]))
+
+
 def test_offline_cache_refreshes_and_removes_xmp_sidecar(client_with_photo):
     """Re-caching refreshes changed sidecars and removes stale cached ones."""
     app, db, pid = client_with_photo

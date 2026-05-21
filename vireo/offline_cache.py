@@ -30,8 +30,15 @@ def _offline_rel_path(kind, photo_id, suffix):
 
 
 def _xmp_source_for(folder_path, filename):
+    # Match both cases — other code paths (see app.py sidecar cleanup)
+    # treat `.XMP` as a valid sidecar, so case-sensitive filesystems would
+    # otherwise drop uppercase sidecars from the offline cache.
     stem = os.path.splitext(filename)[0]
-    return os.path.join(folder_path, stem + ".xmp")
+    lower = os.path.join(folder_path, stem + ".xmp")
+    upper = os.path.join(folder_path, stem + ".XMP")
+    if os.path.isfile(upper) and not os.path.isfile(lower):
+        return upper
+    return lower
 
 
 def _same_file_stat(src, dst):
