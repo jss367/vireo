@@ -168,12 +168,14 @@ def test_original_route_uses_offline_cache_when_source_missing(client_with_photo
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
     ).fetchone()
     source = os.path.join(folder["path"], photo["filename"])
-    cached_bytes = client.get(f"/photos/{pid}/original").data
+    with open(source, "rb") as fh:
+        source_bytes = fh.read()
     os.remove(source)
+    assert not os.path.isfile(source)
 
     offline_resp = client.get(f"/photos/{pid}/original")
     assert offline_resp.status_code == 200
-    assert offline_resp.data == cached_bytes
+    assert offline_resp.data == source_bytes
 
 
 def test_api_coverage(app_and_db):

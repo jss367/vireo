@@ -4999,7 +4999,8 @@ class Database:
         status,
         error=None,
     ):
-        self.conn.execute(
+        execute_with_retry(
+            self.conn,
             """INSERT OR REPLACE INTO offline_originals
                (photo_id, original_path, xmp_path, companion_path, bytes,
                 source_size, source_mtime, cached_at, status, error)
@@ -5017,7 +5018,7 @@ class Database:
                 error,
             ),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     def offline_original_get(self, photo_id):
         return self.conn.execute(
@@ -5028,8 +5029,12 @@ class Database:
         ).fetchone()
 
     def offline_original_delete(self, photo_id):
-        self.conn.execute("DELETE FROM offline_originals WHERE photo_id=?", (photo_id,))
-        self.conn.commit()
+        execute_with_retry(
+            self.conn,
+            "DELETE FROM offline_originals WHERE photo_id=?",
+            (photo_id,),
+        )
+        commit_with_retry(self.conn)
 
     def offline_original_total_bytes(self):
         row = self.conn.execute(

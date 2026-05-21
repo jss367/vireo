@@ -5409,7 +5409,7 @@ async function makeAvailableOffline() {
       showToast('Offline cache error: ' + data.error, 'error');
       return;
     }
-    showToast('Caching ' + activeIds.length + ' photo' + (activeIds.length === 1 ? '' : 's') + ' for offline use');
+    showToast('Offline caching started (' + activeIds.length + ' photo' + (activeIds.length === 1 ? '' : 's') + ')');
   } catch(err) {
     showToast('Offline cache failed: ' + err.message, 'error');
   }

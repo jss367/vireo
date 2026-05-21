@@ -9455,14 +9455,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         runner = app._job_runner
         active_ws = db._active_workspace_id
 
-        placeholders = ",".join("?" for _ in photo_ids)
-        visible = db.conn.execute(
-            f"""SELECT p.id FROM photos p
-                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
-            [active_ws] + list(photo_ids),
-        ).fetchall()
-        visible_set = {r["id"] for r in visible}
+        visible_set = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT p.id FROM photos p
+                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
+                [active_ws, *chunk],
+            ).fetchall()
+            visible_set.update(r["id"] for r in rows)
         photo_ids = [pid for pid in photo_ids if pid in visible_set]
         if not photo_ids:
             return json_error("no cacheable photos in current workspace")
