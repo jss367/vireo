@@ -1,6 +1,8 @@
 import json
 import os
 
+from wait import wait_for_job_via_client
+
 
 def test_index_redirects_to_browse(app_and_db, monkeypatch):
     """GET / redirects to /browse when a model is available."""
@@ -123,6 +125,55 @@ def test_api_photos_extensions_scoped_to_active_workspace(app_and_db):
     # .cr2 belongs to "Other" workspace and must not appear here.
     assert '.cr2' not in resp.get_json()
     assert '.jpg' in resp.get_json()
+
+
+def test_offline_cache_job_copies_original_and_xmp(client_with_photo):
+    """Selected photos can be copied into the managed offline cache."""
+    app, db, pid = client_with_photo
+    client = app.test_client()
+
+    photo = db.get_photo(pid)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+    ).fetchone()
+    xmp_path = os.path.join(folder["path"], "test.xmp")
+    with open(xmp_path, "w", encoding="utf-8") as fh:
+        fh.write("<x:xmpmeta></x:xmpmeta>")
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+
+    row = db.offline_original_get(pid)
+    assert row is not None
+    assert row["status"] == "cached"
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    assert os.path.isfile(os.path.join(vireo_dir, row["original_path"]))
+    assert os.path.isfile(os.path.join(vireo_dir, row["xmp_path"]))
+
+
+def test_original_route_uses_offline_cache_when_source_missing(client_with_photo):
+    """Full-res viewing falls back to the cached original when the source is gone."""
+    app, db, pid = client_with_photo
+    client = app.test_client()
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+
+    photo = db.get_photo(pid)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+    ).fetchone()
+    source = os.path.join(folder["path"], photo["filename"])
+    cached_bytes = client.get(f"/photos/{pid}/original").data
+    os.remove(source)
+
+    offline_resp = client.get(f"/photos/{pid}/original")
+    assert offline_resp.status_code == 200
+    assert offline_resp.data == cached_bytes
 
 
 def test_api_coverage(app_and_db):

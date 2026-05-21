@@ -553,6 +553,20 @@ class Database:
                 FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS offline_originals (
+                photo_id INTEGER NOT NULL PRIMARY KEY,
+                original_path TEXT,
+                xmp_path TEXT,
+                companion_path TEXT,
+                bytes INTEGER NOT NULL DEFAULT 0,
+                source_size INTEGER,
+                source_mtime REAL,
+                cached_at REAL NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT,
+                FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS new_image_snapshots (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -598,6 +612,8 @@ class Database:
                 ON photo_color_labels(workspace_id);
             CREATE INDEX IF NOT EXISTS preview_cache_last_access
                 ON preview_cache(last_access_at);
+            CREATE INDEX IF NOT EXISTS idx_offline_originals_status
+                ON offline_originals(status);
             CREATE INDEX IF NOT EXISTS idx_new_image_snapshots_ws
                 ON new_image_snapshots(workspace_id);
 
@@ -4966,6 +4982,61 @@ class Database:
             "WHERE photo_id=? AND size=?",
             (photo_id, size),
         ).fetchone()
+
+    # ------------------------------------------------------------------
+    # offline original cache
+    # ------------------------------------------------------------------
+    def offline_original_upsert(
+        self,
+        photo_id,
+        original_path,
+        xmp_path,
+        companion_path,
+        bytes_,
+        source_size,
+        source_mtime,
+        cached_at,
+        status,
+        error=None,
+    ):
+        self.conn.execute(
+            """INSERT OR REPLACE INTO offline_originals
+               (photo_id, original_path, xmp_path, companion_path, bytes,
+                source_size, source_mtime, cached_at, status, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                photo_id,
+                original_path,
+                xmp_path,
+                companion_path,
+                bytes_,
+                source_size,
+                source_mtime,
+                cached_at,
+                status,
+                error,
+            ),
+        )
+        self.conn.commit()
+
+    def offline_original_get(self, photo_id):
+        return self.conn.execute(
+            """SELECT photo_id, original_path, xmp_path, companion_path, bytes,
+                      source_size, source_mtime, cached_at, status, error
+               FROM offline_originals WHERE photo_id=?""",
+            (photo_id,),
+        ).fetchone()
+
+    def offline_original_delete(self, photo_id):
+        self.conn.execute("DELETE FROM offline_originals WHERE photo_id=?", (photo_id,))
+        self.conn.commit()
+
+    def offline_original_total_bytes(self):
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(bytes), 0) AS total FROM offline_originals "
+            "WHERE status='cached'"
+        ).fetchone()
+        return row["total"]
 
     def update_photo_sharpness(self, photo_id, sharpness):
         """Set photo sharpness score."""

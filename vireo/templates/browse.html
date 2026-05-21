@@ -1169,6 +1169,7 @@ body {
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
       <button onclick="openInEditorBatch(event)" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Open in Editor</button>
       <button onclick="batchSubmitInat()" style="background:var(--bg-tertiary);color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
+      <button onclick="makeAvailableOffline()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Make Offline</button>
       <button onclick="openExportModal()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Export</button>
       <button onclick="batchDelete()" style="background:var(--danger);color:white;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;" title="Delete selected photos">Delete</button>
       <button onclick="clearSelection()" style="background:none;color:var(--text-faint);border:none;padding:4px 8px;font-size:12px;cursor:pointer;margin-left:auto;">Clear</button>
@@ -5392,6 +5393,25 @@ async function startExport() {
   } catch(err) {
     alert('Export failed: ' + err.message);
     btn.disabled = false;
+  }
+}
+
+async function makeAvailableOffline() {
+  var activeIds = getActiveSelection();
+  if (activeIds.length === 0) return;
+  try {
+    var data = await safeFetch('/api/jobs/offline-cache', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: activeIds}),
+    });
+    if (data.error) {
+      showToast('Offline cache error: ' + data.error, 'error');
+      return;
+    }
+    showToast('Caching ' + activeIds.length + ' photo' + (activeIds.length === 1 ? '' : 's') + ' for offline use');
+  } catch(err) {
+    showToast('Offline cache failed: ' + err.message, 'error');
   }
 }
 

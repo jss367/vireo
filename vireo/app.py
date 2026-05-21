@@ -9426,6 +9426,129 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"job_id": job_id})
 
+    @app.route("/api/jobs/offline-cache", methods=["POST"])
+    def api_job_offline_cache():
+        """Copy selected originals into Vireo's managed offline cache."""
+        body = request.get_json(silent=True) or {}
+        raw_ids = body.get("photo_ids", [])
+        collection_id = _coerce_collection_id(body.get("collection_id"))
+        if collection_id is False:
+            return json_error("collection_id must be an integer")
+        if raw_ids and not isinstance(raw_ids, list):
+            return json_error("photo_ids must be a list of integers")
+
+        db = _get_db()
+        if not raw_ids and collection_id is not None:
+            raw_ids = [
+                p["id"]
+                for p in db.get_collection_photos(collection_id, per_page=999999)
+            ]
+        if not raw_ids:
+            return json_error("photo_ids or collection_id required")
+        try:
+            photo_ids = [int(pid) for pid in raw_ids]
+        except (ValueError, TypeError):
+            return json_error("photo_ids must be integers")
+        if any(isinstance(pid, bool) for pid in raw_ids):
+            return json_error("photo_ids must be integers")
+
+        runner = app._job_runner
+        active_ws = db._active_workspace_id
+
+        placeholders = ",".join("?" for _ in photo_ids)
+        visible = db.conn.execute(
+            f"""SELECT p.id FROM photos p
+                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
+            [active_ws] + list(photo_ids),
+        ).fetchall()
+        visible_set = {r["id"] for r in visible}
+        photo_ids = [pid for pid in photo_ids if pid in visible_set]
+        if not photo_ids:
+            return json_error("no cacheable photos in current workspace")
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        def work(job):
+            from offline_cache import cache_photo_original
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+            photos_map = thread_db.get_photos_by_ids(photo_ids)
+            folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+
+            cached = 0
+            skipped = 0
+            failed = 0
+            copied_bytes = 0
+            total = len(photo_ids)
+            job["_start_time"] = time.time()
+            job["progress"]["total"] = total
+
+            for i, pid in enumerate(photo_ids):
+                photo = photos_map.get(pid)
+                filename = photo["filename"] if photo else ""
+                if not photo:
+                    failed += 1
+                    job["errors"].append(f"Photo {pid}: not found")
+                else:
+                    try:
+                        result = cache_photo_original(
+                            thread_db, photo, vireo_dir, folders
+                        )
+                        if result["status"] == "cached":
+                            cached += 1
+                            copied_bytes += int(result.get("bytes") or 0)
+                        elif result["status"] == "skipped":
+                            skipped += 1
+                        else:
+                            failed += 1
+                            job["errors"].append(
+                                f'{photo["filename"]}: {result["status"]}'
+                            )
+                    except Exception as exc:
+                        failed += 1
+                        job["errors"].append(f'{photo["filename"]}: {exc}')
+                        log.warning("Offline cache failed for %s: %s", filename, exc)
+
+                runner.push_event(
+                    job["id"],
+                    "progress",
+                    {
+                        "current": i + 1,
+                        "total": total,
+                        "current_file": filename,
+                        "rate": round(
+                            (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
+                        ),
+                        "phase": "Caching originals for offline use",
+                    },
+                )
+
+            result = {
+                "cached": cached,
+                "skipped": skipped,
+                "failed": failed,
+                "total": total,
+                "bytes": copied_bytes,
+            }
+            if failed:
+                job["result"] = result
+                first_err = job["errors"][0] if job["errors"] else "offline cache failed"
+                job["_fatal_error"] = (
+                    f"{failed}/{total} photos could not be cached: {first_err}"
+                )
+                raise RuntimeError(first_err)
+            return result
+
+        job_id = runner.start(
+            "offline-cache",
+            work,
+            config={"photo_ids": photo_ids},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
     @app.route("/api/jobs/move-folder", methods=["POST"])
     def api_job_move_folder():
         """Move an entire folder to a destination."""
@@ -13125,7 +13248,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ).fetchone()
         if not folder:
             return "Not found", 404
-        image_path = os.path.join(folder["path"], photo["filename"])
+        from offline_cache import resolve_original_path
+        image_path, using_offline_cache = resolve_original_path(
+            db,
+            photo,
+            vireo_dir,
+            {photo["folder_id"]: folder["path"]},
+        )
 
         # For browser-native formats without a working copy, serve directly
         ext = os.path.splitext(photo["filename"])[1].lower()
@@ -13146,6 +13275,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         source_for_extraction = image_path
         if photo["companion_path"]:
             companion_abs = os.path.join(folder["path"], photo["companion_path"])
+            if using_offline_cache:
+                offline_row = db.offline_original_get(photo_id)
+                if offline_row and offline_row["companion_path"]:
+                    offline_companion = os.path.join(
+                        vireo_dir, offline_row["companion_path"]
+                    )
+                    if os.path.exists(offline_companion):
+                        companion_abs = offline_companion
             if os.path.exists(companion_abs):
                 orig_w = photo["width"]
                 orig_h = photo["height"]
