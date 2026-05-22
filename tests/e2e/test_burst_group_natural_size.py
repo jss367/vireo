@@ -248,6 +248,59 @@ def test_burst_modal_resolution_and_right_zoom_controls(live_server, page, tmp_p
     assert abs(float(match.group(1)) - 2.0) < 0.01
 
 
+def test_burst_modal_z_toggles_right_preview_one_to_one(live_server, page, tmp_path):
+    """Z should put the right-hand burst preview into device-pixel 1:1."""
+    db = live_server["db"]
+    n = _seed_burst_with_real_photos(db, tmp_path)
+    if n < 1:
+        pytest.skip("could not seed burst group")
+    _ensure_photo_files_on_disk(db, tmp_path)
+
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    page.wait_for_load_state("networkidle")
+    _open_burst_modal(page)
+
+    page.keyboard.press("z")
+    page.wait_for_function(
+        """() => {
+          const img = document.getElementById('grmLoupePhoto');
+          return document.getElementById('grmLoupeZoomVal').textContent === '1:1'
+            && img && img.complete && img.naturalWidth > 0;
+        }""",
+        timeout=5000,
+    )
+
+    metrics = page.evaluate(
+        """() => {
+          const img = document.getElementById('grmLoupePhoto');
+          const box = document.getElementById('grmLoupeImg').getBoundingClientRect();
+          const fitScale = Math.min(box.width / img.naturalWidth, box.height / img.naturalHeight);
+          const expected = Math.max(1, 1 / (fitScale * window.devicePixelRatio));
+          const match = /scale\\(([-0-9.]+)\\)/.exec(img.style.transform || '');
+          return {
+            expected,
+            actual: match ? parseFloat(match[1]) : null,
+            src: img.currentSrc || img.src,
+            label: document.getElementById('grmLoupeZoomVal').textContent,
+          };
+        }"""
+    )
+    assert metrics["actual"] is not None
+    assert metrics["label"] == "1:1"
+    assert "/original" in metrics["src"]
+    assert abs(metrics["actual"] - metrics["expected"]) < 0.02
+
+    page.keyboard.press("z")
+    page.wait_for_function(
+        """() => document.getElementById('grmLoupeZoomVal').textContent !== '1:1'"""
+    )
+    reset = page.locator("#grmLoupePhoto").evaluate("el => el.style.transform")
+    match = re.search(r"scale\(([-0-9.]+)\)", reset)
+    assert match, f"scale transform missing from {reset!r}"
+    assert abs(float(match.group(1)) - 1.0) < 0.01
+
+
 def test_burst_modal_scores_visible_box_sharpness(live_server, page, tmp_path):
     """Box sharpness scoring should render results without changing selection."""
     db = live_server["db"]

@@ -1520,6 +1520,8 @@ function openGroupReview(groupId, model) {
   _grmLoupeLastY = 50;
   _grmLoupeHovering = false;
   _grmPendingSnap = false;
+  _grmLoupeOneToOne = false;
+  _grmLoupePendingOneToOne = false;
   grmRefreshResetAllVisibility();
   document.getElementById('grmOverlay').classList.add('open');
   grmSetThumbSize(GRM_CARD_W, false);
@@ -1721,7 +1723,7 @@ function grmSelect(photoId, mode) {
   var loupePreds = document.getElementById('grmLoupePreds');
   if (grmState.selected) {
     loupeImg.src = grmLoupePhotoUrl(grmState.selected);
-    grmApplyLoupeZoom();
+    _grmAfterLoupeSourceChange();
     var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
     if (item) {
       var sharp = item.subject_sharpness != null ? Math.round(item.subject_sharpness) : (item.sharpness != null ? Math.round(item.sharpness) : '?');
@@ -1745,7 +1747,7 @@ function grmRefreshSelectedLoupe() {
   if (!loupeImg || !loupeInfo || !loupePreds) return;
   if (grmState.selected) {
     loupeImg.src = grmLoupePhotoUrl(grmState.selected);
-    grmApplyLoupeZoom();
+    _grmAfterLoupeSourceChange();
     var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
     if (item) {
       var sharp = item.subject_sharpness != null ? Math.round(item.subject_sharpness) : (item.sharpness != null ? Math.round(item.sharpness) : '?');
@@ -1823,6 +1825,8 @@ var GRM_RES_STOPS = [
 ];
 var grmResolutionIdx = 1;
 var _grmLoupeZoomLevel = 1;
+var _grmLoupeOneToOne = false;
+var _grmLoupePendingOneToOne = false;
 
 function _grmInitialThumbSize() {
   try {
@@ -1902,6 +1906,8 @@ function grmUpdateResLabel() {
 function grmSetResolution(idx) {
   grmResolutionIdx = parseInt(idx, 10) || 0;
   grmState.upgraded = (GRM_RES_STOPS[grmResolutionIdx] || {}).kind === 'original';
+  _grmLoupePendingOneToOne = false;
+  _grmLoupeOneToOne = false;
   var slider = document.getElementById('grmResSlider');
   if (slider) slider.value = grmResolutionIdx;
   document.querySelectorAll('.grm-card').forEach(function(card) {
@@ -1927,7 +1933,9 @@ function grmSetResolution(idx) {
 function grmSetLoupeZoom(value, persist) {
   var pct = parseInt(value, 10);
   if (!pct) pct = 100;
-  pct = Math.max(100, Math.min(500, pct));
+  pct = Math.max(100, Math.min(_grmLoupeSliderMax(), pct));
+  _grmLoupePendingOneToOne = false;
+  _grmLoupeOneToOne = false;
   _grmLoupeZoomLevel = pct / 100;
   var slider = document.getElementById('grmLoupeZoomSlider');
   if (slider) slider.value = pct;
@@ -1941,6 +1949,79 @@ function grmApplyLoupeZoom() {
   if (!img) return;
   img.style.transformOrigin = _grmLoupeLastX + '% ' + _grmLoupeLastY + '%';
   img.style.transform = 'scale(' + _grmLoupeZoomLevel + ')';
+}
+
+function _grmAfterLoupeSourceChange() {
+  if (_grmLoupeOneToOne || _grmLoupePendingOneToOne) {
+    _grmLoupeOneToOne = false;
+    _grmLoupePendingOneToOne = true;
+    _grmFinishLoupeOneToOne();
+  } else {
+    grmApplyLoupeZoom();
+  }
+}
+
+function _grmLoupeSliderMax() {
+  var slider = document.getElementById('grmLoupeZoomSlider');
+  var fromDom = slider ? parseInt(slider.max, 10) : 500;
+  return Math.max(500, fromDom || 500);
+}
+
+function _grmLoupeFitScale(img) {
+  var box = document.getElementById('grmLoupeImg');
+  if (!box || !img || !img.naturalWidth || !img.naturalHeight) return null;
+  var rect = box.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  return Math.min(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+}
+
+function _grmLoupeNativeZoom(img) {
+  var fitScale = _grmLoupeFitScale(img);
+  if (!fitScale) return null;
+  return Math.max(1, 1 / (fitScale * (window.devicePixelRatio || 1)));
+}
+
+function _grmSetLoupeZoomLevel(zoom, labelText) {
+  _grmLoupeZoomLevel = Math.max(1, zoom || 1);
+  var pct = Math.round(_grmLoupeZoomLevel * 100);
+  var slider = document.getElementById('grmLoupeZoomSlider');
+  if (slider) {
+    slider.max = String(Math.max(500, pct));
+    slider.value = String(pct);
+  }
+  var label = document.getElementById('grmLoupeZoomVal');
+  if (label) {
+    label.textContent = labelText || _grmLoupeZoomLevel.toFixed(_grmLoupeZoomLevel >= 2 ? 1 : 2).replace(/\.0$/, '') + '×';
+  }
+  grmApplyLoupeZoom();
+}
+
+function grmLoupeImgLoaded(img) {
+  if (_grmLoupePendingOneToOne) {
+    _grmFinishLoupeOneToOne();
+  }
+}
+
+function grmToggleLoupeOneToOne() {
+  if (_grmLoupeOneToOne || _grmLoupePendingOneToOne) {
+    _grmLoupePendingOneToOne = false;
+    _grmLoupeOneToOne = false;
+    _grmSetLoupeZoomLevel(1);
+    return;
+  }
+  _grmLoupePendingOneToOne = true;
+  _grmUpgradeStripToOriginal();
+  _grmFinishLoupeOneToOne();
+}
+
+function _grmFinishLoupeOneToOne() {
+  var img = document.getElementById('grmLoupePhoto');
+  if (!img || !img.complete || !img.naturalWidth || !img.naturalHeight) return;
+  var zoom = _grmLoupeNativeZoom(img);
+  if (zoom == null) return;
+  _grmLoupePendingOneToOne = false;
+  _grmLoupeOneToOne = true;
+  _grmSetLoupeZoomLevel(zoom, '1:1');
 }
 
 function _grmUpgradeStripToOriginal() {
@@ -2508,6 +2589,7 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'Delete' || e.key === 'Backspace') { grmRemoveFromGroup(); e.preventDefault(); return; }
   if (e.key === ' ') { grmMoveCandidate(); e.preventDefault(); return; }
   if (e.key === '1') { grmSnapOneToOne(); e.preventDefault(); return; }
+  if (e.key && e.key.toLowerCase() === 'z') { grmToggleLoupeOneToOne(); e.preventDefault(); return; }
 });
 
 </script>
@@ -2536,7 +2618,7 @@ document.addEventListener('keydown', function(e) {
     </div>
     <div class="grm-loupe" id="grmLoupe">
       <div class="grm-loupe-img" id="grmLoupeImg" onmousemove="grmLoupeMove(event)" onmouseleave="grmLoupeReset()" onclick="grmLoupeToggleLock(event)" onwheel="grmLoupeZoom(event)">
-        <img id="grmLoupePhoto" src="" alt="">
+        <img id="grmLoupePhoto" src="" alt="" onload="grmLoupeImgLoaded(this)">
         <div class="grm-loupe-crosshair-h" id="grmCrosshairH"></div>
         <div class="grm-loupe-crosshair-v" id="grmCrosshairV"></div>
       </div>
@@ -2565,7 +2647,7 @@ document.addEventListener('keydown', function(e) {
       <input type="range" id="grmLoupeZoomSlider" min="100" max="500" step="25" value="100" oninput="grmSetLoupeZoom(this.value)">
       <span id="grmLoupeZoomVal">1×</span>
     </div>
-    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; 1 = 1:1 zoom &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
+    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Z = right 1:1 &nbsp; 1 = strip 1:1 &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;">Apply & Close</button>
   </div>
 </div>

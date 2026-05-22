@@ -1445,7 +1445,7 @@ input[type="range"]::-moz-range-thumb {
     </div>
     <div class="grm-loupe" id="grmLoupe">
       <div class="grm-loupe-img" id="grmLoupeImg" onmousemove="grmLoupeMove(event)" onmouseleave="grmLoupeReset()" onclick="grmLoupeToggleLock(event)" onwheel="grmLoupeZoom(event)">
-        <img id="grmLoupePhoto" alt="">
+        <img id="grmLoupePhoto" alt="" onload="grmLoupeImgLoaded(this)">
         <div class="grm-loupe-crosshair-h" id="grmCrosshairH"></div>
         <div class="grm-loupe-crosshair-v" id="grmCrosshairV"></div>
       </div>
@@ -1474,7 +1474,7 @@ input[type="range"]::-moz-range-thumb {
       <input type="range" id="grmLoupeZoomSlider" min="100" max="500" step="25" value="100" oninput="grmSetLoupeZoom(this.value)">
       <span id="grmLoupeZoomVal">1×</span>
     </div>
-    <span class="grm-hint" id="grmHint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
+    <span class="grm-hint" id="grmHint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Z = right 1:1 &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);" title="Apply pick/reject flag changes and species keywords, then close this burst.">Apply flags/species & Close</button>
   </div>
 </div>
@@ -1593,6 +1593,8 @@ function grmUpdateResLabel() {
 
 function grmSetResolution(idx) {
   grmResolutionIdx = parseInt(idx, 10) || 0;
+  _grmLoupePendingOneToOne = false;
+  _grmLoupeOneToOne = false;
   // Update card image sources AND natural-size layout in place. Preserving
   // the zoom transforms keeps the loupe locked on the current region while
   // the slider drags. Each card's <img> is laid out at the new served
@@ -1627,7 +1629,9 @@ function grmSetResolution(idx) {
 function grmSetLoupeZoom(value) {
   var pct = parseInt(value, 10);
   if (!pct) pct = 100;
-  pct = Math.max(100, Math.min(500, pct));
+  pct = Math.max(100, Math.min(_grmLoupeSliderMax(), pct));
+  _grmLoupePendingOneToOne = false;
+  _grmLoupeOneToOne = false;
   _grmLoupeZoomLevel = pct / 100;
   var slider = document.getElementById('grmLoupeZoomSlider');
   if (slider) slider.value = pct;
@@ -1643,6 +1647,108 @@ function grmApplyLoupeZoom() {
   var y = _grmLastHoverY == null ? 50 : _grmLastHoverY;
   img.style.transformOrigin = x + '% ' + y + '%';
   img.style.transform = 'scale(' + _grmLoupeZoomLevel + ')';
+}
+
+function _grmAfterLoupeSourceChange() {
+  if (_grmLoupeOneToOne || _grmLoupePendingOneToOne) {
+    _grmLoupeOneToOne = false;
+    _grmLoupePendingOneToOne = true;
+    _grmFinishLoupeOneToOne();
+  } else {
+    grmApplyLoupeZoom();
+  }
+}
+
+function _grmLoupeSliderMax() {
+  var slider = document.getElementById('grmLoupeZoomSlider');
+  var fromDom = slider ? parseInt(slider.max, 10) : 500;
+  return Math.max(500, fromDom || 500);
+}
+
+function _grmLoupeFitScale(img) {
+  var box = document.getElementById('grmLoupeImg');
+  if (!box || !img || !img.naturalWidth || !img.naturalHeight) return null;
+  var rect = box.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  return Math.min(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+}
+
+function _grmLoupeNativeZoom(img) {
+  var fitScale = _grmLoupeFitScale(img);
+  if (!fitScale) return null;
+  return Math.max(1, 1 / (fitScale * (window.devicePixelRatio || 1)));
+}
+
+function _grmSetLoupeZoomLevel(zoom, labelText) {
+  _grmLoupeZoomLevel = Math.max(1, zoom || 1);
+  var pct = Math.round(_grmLoupeZoomLevel * 100);
+  var slider = document.getElementById('grmLoupeZoomSlider');
+  if (slider) {
+    slider.max = String(Math.max(500, pct));
+    slider.value = String(pct);
+  }
+  var label = document.getElementById('grmLoupeZoomVal');
+  if (label) {
+    label.textContent = labelText || _grmLoupeZoomLevel.toFixed(_grmLoupeZoomLevel >= 2 ? 1 : 2).replace(/\.0$/, '') + '×';
+  }
+  grmApplyLoupeZoom();
+}
+
+function _grmSetOriginalResolutionForLoupe() {
+  var lastIdx = GRM_RES_STOPS.length - 1;
+  if ((GRM_RES_STOPS[grmResolutionIdx] || {}).kind === 'original') return;
+  grmResolutionIdx = lastIdx;
+  var slider = document.getElementById('grmResSlider');
+  if (slider) slider.value = grmResolutionIdx;
+  document.querySelectorAll('#grmOverlay .grm-card').forEach(function(card) {
+    var pid = parseInt(card.getAttribute('data-photo-id'), 10);
+    if (!pid) return;
+    var img = card.querySelector('img');
+    if (!img) return;
+    var photo = grmState && grmState.items
+      ? grmState.items.find(function(p) { return p.id === pid; })
+      : null;
+    var nat = grmNaturalDims(photo);
+    card.dataset.natW = nat.w;
+    card.dataset.natH = nat.h;
+    img.style.width = nat.w + 'px';
+    img.style.height = nat.h + 'px';
+    img.src = grmPhotoUrl(pid);
+  });
+  if (grmState && grmState.selected) {
+    var loupe = document.getElementById('grmLoupePhoto');
+    if (loupe) loupe.src = grmPhotoUrl(grmState.selected);
+  }
+  grmApplyCardTransforms();
+  grmUpdateResLabel();
+}
+
+function grmLoupeImgLoaded(img) {
+  if (_grmLoupePendingOneToOne) {
+    _grmFinishLoupeOneToOne();
+  }
+}
+
+function grmToggleLoupeOneToOne() {
+  if (_grmLoupeOneToOne || _grmLoupePendingOneToOne) {
+    _grmLoupePendingOneToOne = false;
+    _grmLoupeOneToOne = false;
+    _grmSetLoupeZoomLevel(1);
+    return;
+  }
+  _grmLoupePendingOneToOne = true;
+  _grmSetOriginalResolutionForLoupe();
+  _grmFinishLoupeOneToOne();
+}
+
+function _grmFinishLoupeOneToOne() {
+  var img = document.getElementById('grmLoupePhoto');
+  if (!img || !img.complete || !img.naturalWidth || !img.naturalHeight) return;
+  var zoom = _grmLoupeNativeZoom(img);
+  if (zoom == null) return;
+  _grmLoupePendingOneToOne = false;
+  _grmLoupeOneToOne = true;
+  _grmSetLoupeZoomLevel(zoom, '1:1');
 }
 
 function setSpeciesFilter(val) {
@@ -3469,6 +3575,8 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   _grmLoupeLocked = false;
   _grmZoomMultiplier = 1;
   _grmLoupeZoomLevel = 1;
+  _grmLoupeOneToOne = false;
+  _grmLoupePendingOneToOne = false;
   _grmLastHoverX = null;
   _grmLastHoverY = null;
   _grmOffsets = {};
@@ -3870,7 +3978,7 @@ function grmSelect(photoId, mode) {
 
   if (grmState.selected) {
     loupeImg.src = grmPhotoUrl(grmState.selected);
-    grmApplyLoupeZoom();
+    _grmAfterLoupeSourceChange();
     var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
     if (photo) {
       var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
@@ -3897,7 +4005,7 @@ function grmRefreshSelectedLoupe() {
 
   if (grmState.selected) {
     loupeImg.src = grmPhotoUrl(grmState.selected);
-    grmApplyLoupeZoom();
+    _grmAfterLoupeSourceChange();
     var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
     if (photo) {
       var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
@@ -4031,6 +4139,8 @@ var GRM_THUMB_STORAGE_KEY = 'vireo.burstReviewThumbSize';
 
 var _grmZoomMultiplier = 1;   // wheel fine-tune on top of the 1:1 base scale
 var _grmLoupeZoomLevel = 1;
+var _grmLoupeOneToOne = false;
+var _grmLoupePendingOneToOne = false;
 var _grmLoupeLocked = false;
 var _grmLastHoverX = null;    // last cursor x% on the loupe (null = no hover yet)
 var _grmLastHoverY = null;
@@ -4573,6 +4683,7 @@ document.addEventListener('keydown', function(e) {
   }
   if (e.key === 'Delete' || e.key === 'Backspace') { grmRemoveFromGroup(); e.preventDefault(); return; }
   if (e.key === ' ') { grmMoveCandidate(); e.preventDefault(); return; }
+  if (e.key && e.key.toLowerCase() === 'z') { grmToggleLoupeOneToOne(); e.preventDefault(); return; }
   if (pipelineReviewBareKey(e, 'p')) { grmMovePick(); e.preventDefault(); return; }
   if (pipelineReviewBareKey(e, 'x')) { grmMoveReject(); e.preventDefault(); return; }
 });
