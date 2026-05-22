@@ -9471,12 +9471,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ]
         if not raw_ids:
             return json_error("photo_ids or collection_id required")
-        try:
-            photo_ids = [int(pid) for pid in raw_ids]
-        except (ValueError, TypeError):
-            return json_error("photo_ids must be integers")
-        if any(isinstance(pid, bool) for pid in raw_ids):
-            return json_error("photo_ids must be integers")
+        photo_ids = []
+        for pid in raw_ids:
+            # `bool` is a subclass of `int`, and `int(1.9)` silently
+            # truncates to `1` — reject both so the wrong photo can't be
+            # cached without any client-visible error.
+            if isinstance(pid, bool) or isinstance(pid, float):
+                return json_error("photo_ids must be integers")
+            try:
+                photo_ids.append(int(pid))
+            except (ValueError, TypeError):
+                return json_error("photo_ids must be integers")
 
         runner = app._job_runner
         active_ws = db._active_workspace_id

@@ -332,6 +332,23 @@ def test_offline_cache_rejects_non_object_body(client_with_photo):
     assert resp.get_json()["error"] == "request body must be a JSON object"
 
 
+def test_offline_cache_rejects_non_integer_photo_ids(client_with_photo):
+    """Float and bool photo_ids are rejected instead of silently coerced."""
+    app, _, _ = client_with_photo
+    client = app.test_client()
+    # Floats would otherwise truncate via int() and cache the wrong photo.
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [1.9]})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "photo_ids must be integers"
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [2.0]})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "photo_ids must be integers"
+    # bool is an int subclass; reject it too.
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [True]})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "photo_ids must be integers"
+
+
 def test_offline_cache_files_removed_when_photo_deleted(client_with_photo):
     """Deleting a photo removes its offline cache files from disk."""
     app, db, pid = client_with_photo
