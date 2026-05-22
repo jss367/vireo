@@ -9476,7 +9476,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # `bool` is a subclass of `int`, and `int(1.9)` silently
             # truncates to `1` — reject both so the wrong photo can't be
             # cached without any client-visible error.
-            if isinstance(pid, bool) or isinstance(pid, float):
+            if isinstance(pid, (bool, float)):
                 return json_error("photo_ids must be integers")
             try:
                 photo_ids.append(int(pid))
