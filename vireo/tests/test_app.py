@@ -178,7 +178,12 @@ def test_offline_cache_picks_up_uppercase_xmp_sidecar(client_with_photo):
     assert row["status"] == "cached"
     assert row["xmp_path"], "expected uppercase .XMP sidecar to be cached"
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-    assert os.path.isfile(os.path.join(vireo_dir, row["xmp_path"]))
+    cached_xmp_abs = os.path.join(vireo_dir, row["xmp_path"])
+    assert os.path.isfile(cached_xmp_abs)
+    # Verify the .XMP source content actually made it into the cache so
+    # this can't accidentally pass by caching an empty or wrong file.
+    with open(cached_xmp_abs, encoding="utf-8") as fh:
+        assert fh.read() == "<x:xmpmeta></x:xmpmeta>"
 
 
 def test_offline_cache_refreshes_and_removes_xmp_sidecar(client_with_photo):
