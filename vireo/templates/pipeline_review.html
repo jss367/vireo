@@ -1593,8 +1593,14 @@ function grmUpdateResLabel() {
 
 function grmSetResolution(idx) {
   grmResolutionIdx = parseInt(idx, 10) || 0;
+  var wasOneToOne = _grmLoupeOneToOne || _grmLoupePendingOneToOne;
   _grmLoupePendingOneToOne = false;
   _grmLoupeOneToOne = false;
+  if (wasOneToOne) {
+    // Resolution change invalidates the prior 1:1 calculation; mirror the
+    // toggle-off path so the zoom label stops showing "1:1".
+    _grmSetLoupeZoomLevel(1);
+  }
   // Update card image sources AND natural-size layout in place. Preserving
   // the zoom transforms keeps the loupe locked on the current region while
   // the slider drags. Each card's <img> is laid out at the new served

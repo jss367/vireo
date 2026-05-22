@@ -1906,8 +1906,14 @@ function grmUpdateResLabel() {
 function grmSetResolution(idx) {
   grmResolutionIdx = parseInt(idx, 10) || 0;
   grmState.upgraded = (GRM_RES_STOPS[grmResolutionIdx] || {}).kind === 'original';
+  var wasOneToOne = _grmLoupeOneToOne || _grmLoupePendingOneToOne;
   _grmLoupePendingOneToOne = false;
   _grmLoupeOneToOne = false;
+  if (wasOneToOne) {
+    // Resolution change invalidates the prior 1:1 calculation; mirror the
+    // toggle-off path so the zoom label stops showing "1:1".
+    _grmSetLoupeZoomLevel(1);
+  }
   var slider = document.getElementById('grmResSlider');
   if (slider) slider.value = grmResolutionIdx;
   document.querySelectorAll('.grm-card').forEach(function(card) {
