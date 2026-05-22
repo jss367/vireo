@@ -320,6 +320,52 @@ def test_offline_cache_rerun_preserves_cache_when_source_missing(client_with_pho
     assert len(offline_resp.data) == cached_bytes
 
 
+def test_offline_cache_rejects_non_object_body(client_with_photo):
+    """POST with a top-level non-object JSON body returns 400, not 500."""
+    app, _, _ = client_with_photo
+    client = app.test_client()
+    resp = client.post("/api/jobs/offline-cache", json=[1, 2, 3])
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "request body must be a JSON object"
+    resp = client.post("/api/jobs/offline-cache", json="oops")
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "request body must be a JSON object"
+
+
+def test_offline_cache_files_removed_when_photo_deleted(client_with_photo):
+    """Deleting a photo removes its offline cache files from disk."""
+    app, db, pid = client_with_photo
+    client = app.test_client()
+
+    photo = db.get_photo(pid)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+    ).fetchone()
+    stem, _ = os.path.splitext(photo["filename"])
+    xmp_path = os.path.join(folder["path"], f"{stem}.xmp")
+    with open(xmp_path, "w", encoding="utf-8") as fh:
+        fh.write("<x:xmpmeta></x:xmpmeta>")
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+
+    row = db.offline_original_get(pid)
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    cached_original = os.path.join(vireo_dir, row["original_path"])
+    cached_xmp = os.path.join(vireo_dir, row["xmp_path"])
+    assert os.path.isfile(cached_original)
+    assert os.path.isfile(cached_xmp)
+
+    resp = client.post("/api/audit/remove-orphans", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+
+    assert db.offline_original_get(pid) is None
+    assert not os.path.exists(cached_original)
+    assert not os.path.exists(cached_xmp)
+
+
 def test_api_coverage(app_and_db):
     """GET /api/coverage returns workspace-level and per-folder coverage."""
     app, db = app_and_db

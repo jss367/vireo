@@ -829,6 +829,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         vireo_dir = os.path.dirname(thumb_dir)
         preview_dir = os.path.join(vireo_dir, "previews")
         working_dir = os.path.join(vireo_dir, "working")
+        # Offline-cache layout: offline/{originals,xmp,companions}/{pid}{ext}.
+        # The FK cascade drops the offline_originals row when the photo is
+        # deleted, so we lose the exact stored paths — glob by photo id to
+        # cover any source extension and any sidecar/companion that was
+        # copied alongside it.
+        offline_dirs = [
+            os.path.join(vireo_dir, "offline", "originals"),
+            os.path.join(vireo_dir, "offline", "xmp"),
+            os.path.join(vireo_dir, "offline", "companions"),
+        ]
         for f in files:
             pid = f["photo_id"]
             # {id}.jpg lives in all three dirs (legacy full preview, thumb,
@@ -853,6 +863,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "delete — will be reclaimed by Clear Cache: %s",
                         variant, e,
                     )
+            for d in offline_dirs:
+                for orphan in _glob.glob(os.path.join(d, f"{pid}.*")):
+                    try:
+                        os.remove(orphan)
+                    except OSError as e:
+                        log.warning(
+                            "Failed to remove offline cache file %s after "
+                            "photo delete — will be reclaimed by Clear "
+                            "Cache: %s",
+                            orphan, e,
+                        )
 
     @app.before_request
     def _enforce_api_v1_token():
@@ -9430,6 +9451,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_job_offline_cache():
         """Copy selected originals into Vireo's managed offline cache."""
         body = request.get_json(silent=True) or {}
+        # Flask returns top-level JSON lists/numbers/strings as-is, so guard
+        # against `body.get(...)` raising AttributeError on non-object payloads
+        # (e.g. a client posting `[]` directly).
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
         raw_ids = body.get("photo_ids", [])
         collection_id = _coerce_collection_id(body.get("collection_id"))
         if collection_id is False:
