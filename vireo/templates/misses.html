@@ -388,6 +388,9 @@
 
   <div class="misses-selection-bar" id="missesSelectionBar">
     <span class="misses-selection-count" id="missesSelectionCount">0 selected</span>
+    <button class="misses-selection-btn" id="missesSelectionBrowseBtn" type="button" onclick="openSelectionInBrowse()">
+      Open in Browse
+    </button>
     <button class="misses-selection-btn" id="missesSelectionUnflagBtn" type="button" onclick="bulkUnflagSelection()">
       Unmark missed
     </button>
@@ -802,6 +805,7 @@ function render() {
       '<kbd>J</kbd>/<kbd>K</kbd> next/prev &middot; ' +
       '<kbd>Shift+J/K</kbd> extend selection &middot; ' +
       '<kbd>U</kbd>/<kbd>P</kbd>/<kbd>X</kbd> unflag/flag/reject (focused or selection) &middot; ' +
+      '<kbd>B</kbd> open focused in Browse &middot; ' +
       '<kbd>Esc</kbd> clear selection &middot; ' +
       'Click to select; Shift-click range; double-click to open lightbox' +
     '</div>';
@@ -924,6 +928,45 @@ function openMiss(cat, idx, e) {
   // true from a prior session would swallow the first click-to-zoom.
   window._lightboxZoomHandled = false;
   openLightbox(p.id, p.filename || '', photoList);
+}
+
+function getFocusedMiss() {
+  if (focusedCategory == null || focusedIndex < 0) return null;
+  return (missesData[focusedCategory] || [])[focusedIndex] || null;
+}
+
+function getActiveSelection() {
+  if (selection.size > 0) return Array.from(selection);
+  var focused = getFocusedMiss();
+  return focused ? [focused.id] : [];
+}
+
+function openPhotoInBrowse(photoId) {
+  photoId = parseInt(photoId, 10);
+  if (isNaN(photoId)) return;
+  window.location.href = '/browse?photo_id=' + encodeURIComponent(photoId);
+}
+
+function openSelectionInBrowse() {
+  var ids = getActiveSelection();
+  if (ids.length !== 1) return;
+  openPhotoInBrowse(ids[0]);
+}
+
+function openFocusedMissInBrowse() {
+  var focused = getFocusedMiss();
+  if (!focused) return;
+  openPhotoInBrowse(focused.id);
+}
+
+function openBrowseShortcutPhoto(fullscreen) {
+  var focused = getFocusedMiss();
+  if (!focused) return false;
+  openMiss(focusedCategory, focusedIndex);
+  if (fullscreen && typeof requestLightboxFullscreen === 'function') {
+    requestLightboxFullscreen();
+  }
+  return true;
 }
 
 /* Drop any selected ids that are no longer rendered in any category. Call
@@ -1137,6 +1180,8 @@ function updateSelectionBar() {
   countEl.textContent = n + ' selected';
   var unflagBtn = document.getElementById('missesSelectionUnflagBtn');
   if (unflagBtn) unflagBtn.disabled = previewActive;
+  var browseBtn = document.getElementById('missesSelectionBrowseBtn');
+  if (browseBtn) browseBtn.disabled = n !== 1;
 }
 
 function selectRangeWithinCategory(cat, fromIdx, toIdx) {
@@ -1186,6 +1231,42 @@ function onCardDoubleClick(cat, idx, e) {
   }
   openMiss(cat, idx, e);
 }
+
+function buildMissContextMenu(photoId, cat, idx) {
+  return [
+    { label: 'Open in Browse',
+      onClick: function() { openPhotoInBrowse(photoId); } },
+    { label: 'Open in Lightbox',
+      onClick: function() { openMiss(cat, idx); } },
+    { separator: true },
+    { label: 'Flag as Pick',
+      onClick: function() { flagFocusedMiss(photoId, 'flagged'); } },
+    { label: 'Reject Photo',
+      onClick: function() { flagFocusedMiss(photoId, 'rejected'); } },
+    { label: 'Unmark Missed', disabled: previewActive,
+      onClick: function() { unflagMiss(cat, photoId); } },
+  ];
+}
+
+document.addEventListener('contextmenu', function(e) {
+  var card = e.target.closest('.miss-card');
+  if (!card || !card.dataset.photoId) return;
+  if (e.target.closest('.vireo-ctx-menu')) return;
+  e.preventDefault();
+  e.stopPropagation();
+  var photoId = parseInt(card.dataset.photoId, 10);
+  var cat = card.dataset.cat;
+  var idx = parseInt(card.dataset.idx, 10);
+  if (isNaN(photoId) || !cat || isNaN(idx)) return;
+  setFocused(cat, idx);
+  if (!selection.has(photoId)) {
+    clearSelection();
+    setSelected(photoId, true);
+  }
+  if (typeof openContextMenu === 'function') {
+    openContextMenu(e, buildMissContextMenu(photoId, cat, idx));
+  }
+});
 
 function removePhotosFromMissesData(ids) {
   var deleted = new Set(ids);
@@ -1324,6 +1405,11 @@ document.addEventListener('keydown', function(e) {
     if (selection.size > 0) {
       e.preventDefault();
       clearSelection();
+    }
+  } else if (k === 'b' || k === 'B') {
+    if (!e.shiftKey && focusedCategory != null && focusedIndex >= 0) {
+      e.preventDefault();
+      openFocusedMissInBrowse();
     }
   } else if (k === 'Enter') {
     if (focusedCategory != null && focusedIndex >= 0) {

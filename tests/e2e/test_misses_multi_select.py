@@ -6,6 +6,8 @@ selection. Double-click opens the shared lightbox.
 """
 import time
 
+from playwright.sync_api import expect
+
 
 def _seed_misses(db, photo_ids, category="no_subject"):
     """Mark each given photo as a miss in the named category."""
@@ -444,3 +446,65 @@ def test_selection_bar_deletes_selected_misses_from_vireo(live_server, page):
     )
     assert db.get_photo(a) is None
     assert db.get_photo(b) is None
+
+
+def test_selection_bar_opens_selected_miss_in_browse(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    _seed_misses(db, [pid], "no_subject")
+
+    page.goto(f"{url}/misses")
+    card = page.locator(f"[data-testid='miss-card-no_subject-{pid}']")
+    card.wait_for(state="visible", timeout=3000)
+    card.click()
+
+    btn = page.locator("#missesSelectionBrowseBtn")
+    expect(btn).to_be_enabled()
+    btn.click()
+
+    page.wait_for_function(
+        f"location.pathname === '/browse' && new URLSearchParams(location.search).get('photo_id') === '{pid}'",
+        timeout=5000,
+    )
+
+
+def test_misses_b_opens_focused_card_in_browse(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    _seed_misses(db, [pid], "clipped")
+
+    page.goto(f"{url}/misses")
+    page.locator(f"[data-testid='miss-card-clipped-{pid}']").wait_for(
+        state="visible", timeout=3000,
+    )
+
+    page.keyboard.press("j")
+    page.keyboard.press("b")
+
+    page.wait_for_function(
+        f"location.pathname === '/browse' && new URLSearchParams(location.search).get('photo_id') === '{pid}'",
+        timeout=5000,
+    )
+
+
+def test_misses_context_menu_opens_card_in_browse(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    _seed_misses(db, [pid], "oof")
+
+    page.goto(f"{url}/misses")
+    card = page.locator(f"[data-testid='miss-card-oof-{pid}']")
+    card.wait_for(state="visible", timeout=3000)
+    card.click(button="right")
+
+    menu = page.locator(".vireo-ctx-menu")
+    expect(menu).to_be_visible()
+    menu.locator(".vireo-ctx-item", has_text="Open in Browse").click()
+
+    page.wait_for_function(
+        f"location.pathname === '/browse' && new URLSearchParams(location.search).get('photo_id') === '{pid}'",
+        timeout=5000,
+    )

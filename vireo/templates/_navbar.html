@@ -4177,6 +4177,10 @@ function buildLightboxContextMenu(pid) {
   items.push(toggleItem('Lightbox controls', _lbChromeVisible, toggleLightboxChrome));
   items.push(toggleItem('Wildlife classification', !_lbCurrentWildlifeExcluded, lightboxToggleWildlifeExcluded));
   items.push({ separator: true });
+  items.push({ label: 'Open in Browse',
+    onClick: function() {
+      window.location.href = '/browse?photo_id=' + encodeURIComponent(pid);
+    } });
 
   if (has('findSimilar')) {
     items.push({ label: 'Find Similar',
@@ -5345,6 +5349,16 @@ function nativeMenuOpenLightbox() {
   nativeMenuError('Open in Lightbox is available from photo grids.');
 }
 
+function nativeMenuOpenBrowse() {
+  var ids = nativeMenuRequirePhotos('Open in Browse');
+  if (!ids) return;
+  if (ids.length !== 1) {
+    nativeMenuError('Open in Browse needs one selected photo.');
+    return;
+  }
+  nativeMenuRoute('/browse?photo_id=' + encodeURIComponent(ids[0]));
+}
+
 function nativeMenuPhotoIdsForWrite() {
   var ids = nativeMenuActivePhotoIds();
   if (ids.length) return ids;
@@ -5515,6 +5529,9 @@ window.handleNativeMenuCommand = async function(command) {
         break;
       case 'photo_open_lightbox':
         nativeMenuOpenLightbox();
+        break;
+      case 'photo_open_browse':
+        nativeMenuOpenBrowse();
         break;
       case 'photo_reveal': {
         var revealIds = nativeMenuRequirePhotos('Reveal in Finder');
