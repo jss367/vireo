@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from db import Database, commit_with_retry
+from model_cache import get_default_cache
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +84,25 @@ def _looks_like_missing_external_data(err):
 
 
 _RAW_EXTENSIONS = (".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf")
+
+
+def _release_classifier_cache_handle(loaded_models):
+    """Decrement the cache refcount for the currently-held classifier bundle.
+
+    Pulled out of ``classify_stage`` so the spec-swap path and the stage's
+    finally block share one place that knows about the ``_cache_handle``
+    key. Idempotent: if no handle is present (e.g. classify was skipped
+    before any model loaded) this is a no-op.
+    """
+    handle = loaded_models.pop("_cache_handle", None)
+    if handle is None:
+        return
+    try:
+        handle.release()
+    except Exception:
+        # Releasing a cache handle must never break pipeline cleanup.
+        # The cache's idle timer will reclaim leaked entries eventually.
+        log.exception("ModelCache: handle release raised; leak will be reclaimed by idle timer")
 
 
 def _find_broken_metadata_folders(db, photo_ids):
@@ -1427,17 +1447,36 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     active_model["id"], verify_err,
                 )
 
-        try:
+        def _construct_classifier():
             if model_type == "timm":
                 from timm_classifier import TimmClassifier
-                clf = TimmClassifier(model_str, taxonomy=tax)
-            else:
-                from classifier import Classifier
-                clf = Classifier(
-                    labels=None if use_tol else labels,
-                    model_str=model_str,
-                    pretrained_str=weights_path,
-                )
+                return TimmClassifier(model_str, taxonomy=tax)
+            from classifier import Classifier
+            return Classifier(
+                labels=None if use_tol else labels,
+                model_str=model_str,
+                pretrained_str=weights_path,
+            )
+
+        # Cache key includes the labels fingerprint when use_tol=False because
+        # the Classifier pre-computes text embeddings for the provided labels
+        # at construction time. Two pipelines with the same model but
+        # different labels must NOT share a session. Tree-of-Life mode
+        # (use_tol=True) reads precomputed embeddings from disk and is
+        # label-independent, so the key collapses to a constant.
+        cache_key = (
+            "timm" if model_type == "timm" else "bioclip",
+            active_model["id"],
+            model_str,
+            weights_path,
+            "__tol__" if use_tol else fp,
+        )
+        cache_handle = None
+        try:
+            cache_handle = get_default_cache().acquire(
+                cache_key, _construct_classifier
+            )
+            clf = cache_handle.__enter__()
         except Exception as load_err:
             # ONNXRuntime signals missing external-data with a
             # "model_path must not be empty" / "Initializer" error. Treat
@@ -1502,6 +1541,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         return {
             "clf": clf,
+            "_cache_handle": cache_handle,
             "model_type": model_type,
             "model_name": model_name,
             "model_str": model_str,
@@ -1865,6 +1905,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         status=row_status, summary=row_summary,
                         error=loader_err if loader_failed else None,
                     )
+            # model_loader may have already loaded the first classifier
+            # before this early-return path was hit (e.g. abort.is_set()).
+            # Release its cache handle so a same-key reload can be a hit
+            # and idle eviction can reclaim VRAM.
+            _release_classifier_cache_handle(loaded_models)
             _update_stages(runner, job["id"], stages)
             return
 
@@ -1965,6 +2010,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # large collections can hit transient OOMs.
                     with contextlib.suppress(NameError, UnboundLocalError):
                         raw_results.clear()  # noqa: F821 — bound in prior iter
+                    # Release the previous spec's cache handle so its
+                    # refcount drops and a same-cache-key reload below (or
+                    # in another pipeline) can be a hit. Must happen
+                    # BEFORE popping ``clf`` so we don't lose the only
+                    # reference to the bundle that owns the handle.
+                    _release_classifier_cache_handle(loaded_models)
                     for k in ("clf", "model_type", "model_name", "model_str",
                               "labels", "use_tol", "active_model"):
                         loaded_models.pop(k, None)
@@ -2464,6 +2515,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     job["id"], sid,
                     status="failed", error=str(e),
                 )
+        finally:
+            # Release the held classifier so subsequent pipelines can reuse
+            # the cached session (or the idle timer can reclaim VRAM). Runs
+            # whether classify completed cleanly, errored mid-loop, or hit
+            # the fatal-exception path above.
+            _release_classifier_cache_handle(loaded_models)
 
         _update_stages(runner, job["id"], stages)
 
