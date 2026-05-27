@@ -322,6 +322,11 @@ def test_embed_batch_releases_gpu_lock_outside_inference():
 
     mock_session = MagicMock()
     mock_session.get_inputs.return_value = [MagicMock(name="input")]
+    # Report a GPU provider so the conditional lock engages and the
+    # original "lock is held during inference" coverage still holds.
+    mock_session.get_providers.return_value = [
+        "CUDAExecutionProvider", "CPUExecutionProvider",
+    ]
     mock_session.run.side_effect = record_inside_run
 
     dino_embed._session = mock_session
@@ -346,6 +351,52 @@ def test_embed_batch_releases_gpu_lock_outside_inference():
     assert snapshots["during"] == baseline - 1, (
         "GPU lock must be held during session.run"
     )
+
+
+def test_embed_batch_skips_gpu_lock_for_cpu_only_session():
+    """When the DINO session falls back to CPU (Apple Silicon with
+    external-data models, or CPU-only installs), ``embed_batch`` must NOT
+    take the process-wide GPU semaphore — taking it would block unrelated
+    detector/classifier/SAM batches for work that never touches the GPU.
+
+    Regression for the Codex P2 on PR #899
+    (https://github.com/jss367/vireo/pull/899#discussion_r3308852536).
+    """
+    import dino_embed
+    import pipeline_locks
+
+    snapshots = {"during": None}
+
+    def record_inside_run(_outputs, _inputs):
+        snapshots["during"] = pipeline_locks._GPU_SEMAPHORE._value
+        return [np.zeros((1, 768), dtype=np.float32)]
+
+    mock_session = MagicMock()
+    mock_session.get_inputs.return_value = [MagicMock(name="input")]
+    # CPU-only execution — no GPU provider in the list.
+    mock_session.get_providers.return_value = ["CPUExecutionProvider"]
+    mock_session.run.side_effect = record_inside_run
+
+    dino_embed._session = mock_session
+    dino_embed._variant_loaded = "vit-b14"
+
+    from PIL import Image
+
+    img = Image.new("RGB", (100, 100))
+
+    baseline = pipeline_locks._GPU_SEMAPHORE._value
+    try:
+        dino_embed.embed_batch([img], variant="vit-b14")
+    finally:
+        dino_embed._session = None
+        dino_embed._variant_loaded = None
+
+    # Semaphore must remain free across the run — CPU-only sessions
+    # don't take the GPU lock.
+    assert snapshots["during"] == baseline, (
+        "GPU lock must NOT be held during CPU-only session.run"
+    )
+    assert pipeline_locks._GPU_SEMAPHORE._value == baseline
 
 
 def test_embed_subject_delegates_to_embed():
