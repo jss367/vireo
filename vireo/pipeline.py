@@ -1159,6 +1159,8 @@ def compute_review_readiness(db, mask_threshold=0.25, dinov2_variant=None):
             "enhancing_missing": list[str],  # stages that would improve quality
         }
     """
+    import config as cfg
+
     cov = db.get_coverage_stats()
     total = cov["total"]
     targets = _count_stage_targets(db) if total else {
@@ -1174,7 +1176,20 @@ def compute_review_readiness(db, mask_threshold=0.25, dinov2_variant=None):
     usable_embeddings = _count_usable_embeddings(
         db, dinov2_variant, detected_only=embedding_detected_only,
     )
-    eye_target = db.count_eye_keypoint_eligible() if total else 0
+    # Use the *attemptable* count, not the loose mask+detection+prediction
+    # eligible count: photos the stage skips at a pre-model gate
+    # (out-of-scope taxonomy, classifier confidence below
+    # eye_classifier_conf_gate) intentionally don't get an
+    # eye_kp_fingerprint stamped, so they would otherwise sit in the gap
+    # between target and attempts forever and trip the "computed without
+    # eye keypoints" banner after every run. Mirrors the variant-aware
+    # treatment of usable_embeddings above.
+    eye_conf_gate = db.get_effective_config(cfg.load()).get(
+        "eye_classifier_conf_gate", 0.5,
+    )
+    eye_target = (
+        db.count_eye_keypoint_attemptable(eye_conf_gate) if total else 0
+    )
     eye_attempts = _count_eye_keypoint_attempts(db) if eye_target else 0
     out = {
         "state": "empty",
