@@ -339,8 +339,12 @@ def detect_animals(image_path):
         # Hold the GPU semaphore for the inference call only, not for image
         # I/O, decoding, or postprocessing. Holding it wider would block
         # other pipelines' GPU stages on this pipeline's CPU/disk work.
-        from pipeline_locks import acquire_gpu
-        with acquire_gpu():
+        # Skipped entirely for CPU-only sessions — on Apple Silicon the
+        # MegaDetector external-data ONNX excludes CoreML and runs on the
+        # CPU; SAM2/DINO may still be on CoreML in the same process, and
+        # blocking them on detector CPU work would defeat concurrency.
+        from pipeline_locks import acquire_gpu_if_session_uses_it
+        with acquire_gpu_if_session_uses_it(session):
             outputs = session.run(None, {input_name: input_tensor})
 
         return _postprocess(outputs, preprocess_info, RAW_CONF_FLOOR)
