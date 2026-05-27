@@ -337,8 +337,14 @@ def embed_batch(images, variant="vit-b14"):
     ]
     batch = np.concatenate(tensors, axis=0)
 
+    # GPU serialisation across concurrent pipelines, scoped tightly to
+    # the forward pass. Preprocessing above (resize/normalize per image)
+    # runs without the lock so concurrent pipelines aren't blocked on
+    # CPU work.
+    from pipeline_locks import acquire_gpu
     input_name = session.get_inputs()[0].name
-    outputs = session.run(None, {input_name: batch})
+    with acquire_gpu():
+        outputs = session.run(None, {input_name: batch})
 
     return outputs[0].astype(np.float32)
 

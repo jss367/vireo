@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 from db import Database, commit_with_retry
 from model_cache import get_default_cache
-from pipeline_locks import acquire_gpu, acquire_workspace_regroup
+from pipeline_locks import acquire_workspace_regroup
 
 log = logging.getLogger(__name__)
 
@@ -2981,8 +2981,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     if _should_abort(abort):
                         break
 
-                    with acquire_gpu():
-                        mask = generate_mask(proxy, det_box, variant=sam2_variant)
+                    # GPU serialisation lives inside masking.generate_mask
+                    # (around the encoder/decoder session.run calls). The
+                    # wider wrap previously here held the semaphore through
+                    # SAM weight load + image preprocessing + prompt-coord
+                    # math, blocking other pipelines' GPU work for CPU-only
+                    # phases.
+                    mask = generate_mask(proxy, det_box, variant=sam2_variant)
                     if mask is None:
                         skipped += 1
                         processed = i + 1
@@ -3016,20 +3021,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     else:
                         mask_subject_size = None
 
+                    # GPU serialisation lives inside dino_embed.embed /
+                    # embed_batch (around the session.run call). The wider
+                    # wrap previously here held the semaphore through
+                    # per-image resize/normalize preprocessing.
                     subject_crop = crop_subject(proxy, mask, margin=0.15)
                     if subject_crop is not None:
-                        with acquire_gpu():
-                            embs = embed_batch(
-                                [subject_crop, proxy], variant=dinov2_variant,
-                            )
+                        embs = embed_batch(
+                            [subject_crop, proxy], variant=dinov2_variant,
+                        )
                         subj_emb_blob = embedding_to_blob(embs[0])
                         global_emb_blob = embedding_to_blob(embs[1])
                     else:
                         subj_emb_blob = None
-                        with acquire_gpu():
-                            global_emb_blob = embedding_to_blob(
-                                embed(proxy, variant=dinov2_variant),
-                            )
+                        global_emb_blob = embedding_to_blob(
+                            embed(proxy, variant=dinov2_variant),
+                        )
 
                     thread_db.upsert_photo_mask(
                         photo_id=photo_id,
