@@ -43,9 +43,10 @@ class _Handle:
     decrements the refcount exactly once, even if called multiple times.
     """
 
-    def __init__(self, cache, key, value):
+    def __init__(self, cache, key, entry, value):
         self._cache = cache
         self._key = key
+        self._entry = entry
         self._value = value
         self._released = False
 
@@ -59,7 +60,7 @@ class _Handle:
         if self._released:
             return
         self._released = True
-        self._cache._release(self._key)
+        self._cache._release(self._key, self._entry)
 
 
 class ModelCache:
@@ -106,16 +107,30 @@ class ModelCache:
                 entry.value = value
             elif entry.load_error is not None:
                 # A prior acquirer's factory raised; this acquirer should
-                # also see the failure and not get a phantom value.
-                self._release(key)
+                # also see the failure and not get a phantom value. Release
+                # the original entry by identity — between abandon and now,
+                # another acquirer may have created a fresh entry under the
+                # same key, and decrementing it here would corrupt its
+                # refcount and cause spurious eviction of a model still in
+                # use.
+                self._release(key, entry)
                 raise entry.load_error
-            return _Handle(self, key, entry.value)
+            return _Handle(self, key, entry, entry.value)
 
-    def _release(self, key):
+    def _release(self, key, entry):
+        """Decrement refcount on the specific entry the caller acquired.
+
+        Identity-checked: if the entry under ``key`` has been replaced
+        (e.g. the original was abandoned after a failed load, and a later
+        acquirer installed a fresh entry), this is a no-op. The orphan
+        entry's refcount is meaningless because nothing can find it
+        anymore, and the new entry must not be touched by a caller that
+        never incremented it.
+        """
         timer = None
         with self._global_lock:
-            entry = self._entries.get(key)
-            if entry is None:
+            current = self._entries.get(key)
+            if current is not entry:
                 return
             if entry.refcount > 0:
                 entry.refcount -= 1

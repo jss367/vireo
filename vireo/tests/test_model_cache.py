@@ -171,6 +171,104 @@ def test_concurrent_acquire_from_multiple_threads_only_loads_once():
     assert values == ["loaded", "loaded"]
 
 
+def test_failed_load_waiter_does_not_evict_recreated_entry():
+    """Regression: when factory fails while another thread is queued on the
+    same key, the waiter must not decrement the refcount of a fresh entry
+    created later by a third acquirer. Without identity-checked release,
+    the waiter's _release decrements the wrong entry and arms a spurious
+    idle timer on a model still in use."""
+    cache = ModelCache(idle_secs=60)
+
+    # Gate B's _release until thread C has installed a fresh entry under
+    # the same key, so the race is deterministic rather than timing-luck.
+    c_installed = threading.Event()
+    original_release = cache._release
+    release_count = [0]
+
+    def gated_release(*args, **kwargs):
+        release_count[0] += 1
+        if release_count[0] == 1:
+            # First _release is B's failed-load release. Wait for C.
+            assert c_installed.wait(timeout=2.0), "C never installed entry"
+        return original_release(*args, **kwargs)
+
+    cache._release = gated_release
+
+    bad_started = threading.Event()
+    release_bad = threading.Event()
+
+    def bad_factory():
+        bad_started.set()
+        release_bad.wait(timeout=2.0)
+        raise RuntimeError("boom")
+
+    a_exc = []
+
+    def thread_a():
+        try:
+            with cache.acquire("k", bad_factory):
+                pass
+        except RuntimeError as e:
+            a_exc.append(e)
+
+    b_exc = []
+    b_started = threading.Event()
+
+    def b_factory():
+        b_started.set()
+        return "should-not-be-called"
+
+    def thread_b():
+        try:
+            with cache.acquire("k", b_factory):
+                pass
+        except RuntimeError as e:
+            b_exc.append(e)
+
+    ta = threading.Thread(target=thread_a)
+    ta.start()
+    assert bad_started.wait(timeout=1.0)
+
+    tb = threading.Thread(target=thread_b)
+    tb.start()
+    # Give B time to enter the global lock, increment refcount on the
+    # original entry, and queue on load_lock.
+    time.sleep(0.05)
+
+    # Let A's factory raise and abandon the entry.
+    release_bad.set()
+    ta.join(timeout=2.0)
+    assert not ta.is_alive()
+    assert len(a_exc) == 1
+
+    # B has now woken from load_lock and is parked inside gated_release.
+    # Install C's fresh entry under the same key.
+    good_handle = cache.acquire("k", lambda: "good")
+    good_handle.__enter__()
+    new_entry = cache._entries["k"]
+    assert new_entry.refcount == 1
+
+    # Release B; with the bug it decrements new_entry.refcount; with the
+    # fix it's a no-op because new_entry is not the entry B acquired.
+    c_installed.set()
+    tb.join(timeout=2.0)
+    assert not tb.is_alive()
+    assert len(b_exc) == 1
+    assert not b_started.is_set()
+
+    # Critical assertion: C's entry must be untouched.
+    assert cache._entries["k"] is new_entry
+    assert new_entry.refcount == 1, (
+        f"waiter's release corrupted recreated entry's refcount "
+        f"(got {new_entry.refcount}, want 1)"
+    )
+    assert new_entry.idle_timer is None, (
+        "waiter's release armed idle eviction on a model still in use"
+    )
+
+    good_handle.__exit__(None, None, None)
+
+
 def test_handle_release_is_idempotent():
     cache = ModelCache(idle_secs=60)
     h = cache.acquire("k", lambda: "v")
