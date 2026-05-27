@@ -539,6 +539,10 @@
         updateList();
         updateRunningBadge();
         if (currentView === 'active') renderActiveOverview();
+        else if (selectedSource === 'active' && selectedJobId) {
+          var selected = activeJobs.find(function(j) { return j.id === selectedJobId; });
+          if (selected) renderDetail(selected);
+        }
       })
       .catch(function() {});
   }
