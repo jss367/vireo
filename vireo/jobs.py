@@ -173,11 +173,10 @@ class JobRunner:
     def _try_promote_queued(self):
         """Promote the oldest queued pipeline if a slot is open.
 
-        Single-pass: under ``self._lock`` count active pipelines, and if
-        below ``SLOT_CAP`` find the oldest in-memory queued context and
-        attempt to promote it. The conditional UPDATE ensures a Cancel
-        landing between SELECT and UPDATE wins (rowcount==0 → quietly
-        skip and try the next one).
+        Single-pass: count active and in-flight promotions under
+        ``self._lock`` and mark the oldest queued context as promoting, then
+        release the lock before the conditional SQLite UPDATE. If a Cancel
+        lands first, rowcount==0 and promotion quietly gives up.
         """
         with self._lock:
             active = sum(
@@ -186,17 +185,28 @@ class JobRunner:
             )
             if active >= SLOT_CAP:
                 return
+            promoting = sum(
+                1 for ctx in self._queued_pipelines.values()
+                if ctx.get("_promoting")
+            )
+            if active + promoting >= SLOT_CAP:
+                return
             candidates = sorted(
-                self._queued_pipelines.items(),
+                (
+                    item for item in self._queued_pipelines.items()
+                    if not item[1].get("_promoting")
+                ),
                 key=lambda kv: kv[1]["started_at"],
             )
             if not candidates:
                 return
             job_id, ctx = candidates[0]
-            # Atomic queued→running flip. If a concurrent cancel beat us
-            # to it, rowcount is 0 and the row stays in its final
-            # state — we leave self._queued_pipelines untouched so the
-            # caller cleaning up the cancel can remove it.
+            ctx["_promoting"] = True
+
+        promoted = True
+        try:
+            # Atomic queued->running flip. If a concurrent cancel beat us
+            # to it, rowcount is 0 and the row stays in its final state.
             if self._db_path:
                 import sqlite3
                 conn = sqlite3.connect(self._db_path, timeout=30)
@@ -210,36 +220,53 @@ class JobRunner:
                     conn.commit()
                 finally:
                     conn.close()
+        except Exception:
+            with self._lock:
+                if self._queued_pipelines.get(job_id) is ctx:
+                    ctx.pop("_promoting", None)
+            raise
+
+        retry_promotion = False
+        with self._lock:
+            if self._queued_pipelines.get(job_id) is not ctx:
+                retry_promotion = True
+            else:
+                ctx.pop("_promoting", None)
                 if not promoted:
                     # The row was modified elsewhere (cancelled).
                     self._queued_pipelines.pop(job_id, None)
-                    return
-            # Move from queue context into the live jobs dict.
-            del self._queued_pipelines[job_id]
-            job = {
-                "id": job_id,
-                "type": "pipeline",
-                "status": "running",
-                "started_at": ctx["started_at"],
-                "finished_at": None,
-                "progress": {"current": 0, "total": 0, "current_file": ""},
-                "result": None,
-                "errors": [],
-                "config": ctx["config"],
-                "workspace_id": ctx["workspace_id"],
-                "steps": [],
-                "ephemeral": False,
-                "runtime_warning": ctx["runtime_warning"],
-            }
-            self._prune_finished_jobs()
-            self._jobs[job_id] = job
-            self._events[job_id] = deque(maxlen=1000)
-            # setdefault, NOT assignment: clients can subscribe to the
-            # SSE stream while the pipeline is still queued. Replacing
-            # the list at promotion time would silently drop those
-            # waiters' queues.
-            self._subscribers.setdefault(job_id, [])
-            work_fn = ctx["work_fn"]
+                    retry_promotion = True
+                else:
+                    # Move from queue context into the live jobs dict.
+                    del self._queued_pipelines[job_id]
+                    job = {
+                        "id": job_id,
+                        "type": "pipeline",
+                        "status": "running",
+                        "started_at": ctx["started_at"],
+                        "finished_at": None,
+                        "progress": {"current": 0, "total": 0, "current_file": ""},
+                        "result": None,
+                        "errors": [],
+                        "config": ctx["config"],
+                        "workspace_id": ctx["workspace_id"],
+                        "steps": [],
+                        "ephemeral": False,
+                        "runtime_warning": ctx["runtime_warning"],
+                    }
+                    self._prune_finished_jobs()
+                    self._jobs[job_id] = job
+                    self._events[job_id] = deque(maxlen=1000)
+                    # setdefault, NOT assignment: clients can subscribe to the
+                    # SSE stream while the pipeline is still queued. Replacing
+                    # the list at promotion time would silently drop those
+                    # waiters' queues.
+                    self._subscribers.setdefault(job_id, [])
+                    work_fn = ctx["work_fn"]
+
+        if retry_promotion:
+            self._try_promote_queued()
+            return
 
         thread = threading.Thread(
             target=self._run_job, args=(job, work_fn), daemon=True,
@@ -729,6 +756,7 @@ class JobRunner:
         cancellation (running) or transitioned to cancelled (queued).
         """
         emit_complete = False
+        queued_cancel = None
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None and job["status"] == "running":
@@ -737,29 +765,35 @@ class JobRunner:
             # Queued case: still in _queued_pipelines, not _jobs yet.
             if job_id in self._queued_pipelines:
                 cancelled_at = datetime.now().isoformat()
-                if self._db_path:
-                    import sqlite3
-                    conn = sqlite3.connect(self._db_path, timeout=30)
-                    try:
-                        cur = conn.execute(
-                            "UPDATE job_history "
-                            "SET status='cancelled', finished_at=? "
-                            "WHERE id = ? AND status = 'queued'",
-                            (cancelled_at, job_id),
-                        )
-                        conn.commit()
-                        # rowcount==0 means a concurrent promotion beat
-                        # us — the row is now 'running' and the worker
-                        # will see the cancellation flag below.
-                        if cur.rowcount == 0:
-                            self._cancelled.add(job_id)
-                            return True
-                    finally:
-                        conn.close()
-                self._queued_pipelines.pop(job_id, None)
-                emit_complete = True
+                queued_cancel = self._queued_pipelines[job_id]
             else:
                 return False
+
+        cancelled = True
+        if self._db_path:
+            import sqlite3
+            conn = sqlite3.connect(self._db_path, timeout=30)
+            try:
+                cur = conn.execute(
+                    "UPDATE job_history "
+                    "SET status='cancelled', finished_at=? "
+                    "WHERE id = ? AND status = 'queued'",
+                    (cancelled_at, job_id),
+                )
+                conn.commit()
+                cancelled = cur.rowcount == 1
+            finally:
+                conn.close()
+
+        with self._lock:
+            # rowcount==0 means a concurrent promotion beat us — the row is
+            # now 'running' and the worker will see the cancellation flag.
+            if not cancelled:
+                self._cancelled.add(job_id)
+                return True
+            if self._queued_pipelines.get(job_id) is queued_cancel:
+                self._queued_pipelines.pop(job_id, None)
+            emit_complete = True
         # Emit the terminal SSE event AFTER releasing the lock — clients
         # subscribed to /api/jobs/<id>/stream while the job was queued
         # need a ``complete`` event with status='cancelled' so they

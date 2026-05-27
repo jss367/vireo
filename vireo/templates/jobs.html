@@ -530,12 +530,27 @@
         });
         updateList();
         updateRunningBadge();
-        if (currentView === 'active') renderActiveOverview();
+        if (selectedSource === 'active' && selectedJobId) {
+          var selected = activeJobs.find(function(j) { return j.id === selectedJobId; });
+          if (selected) {
+            renderDetail(selected);
+          } else {
+            var historical = historyJobs.find(function(j) { return j.id === selectedJobId; });
+            if (historical) {
+              selectedSource = 'history';
+              renderHistoryDetail(historical);
+            } else {
+              fetchHistory(true);
+            }
+          }
+        } else if (currentView === 'active') {
+          renderActiveOverview();
+        }
       })
       .catch(function() {});
   }
 
-  function fetchHistory() {
+  function fetchHistory(refreshMissingSelection) {
     fetch('/api/jobs/history?limit=100')
       .then(function(r) { return r.json(); })
       .then(function(data) {
@@ -550,6 +565,20 @@
         });
         updateList();
         populateTypeFilter();
+        if (refreshMissingSelection && selectedSource === 'active' && selectedJobId) {
+          var historical = historyJobs.find(function(j) { return j.id === selectedJobId; });
+          if (historical) {
+            selectedSource = 'history';
+            renderHistoryDetail(historical);
+          } else {
+            currentView = 'active';
+            selectedJobId = null;
+            selectedSource = null;
+            renderActiveOverview();
+            updateList();
+          }
+          return;
+        }
         if (currentView === 'history') renderHistoryOverview();
       })
       .catch(function() {});
