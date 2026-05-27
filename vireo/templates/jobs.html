@@ -570,13 +570,22 @@
 
   function mergeHistoryJobs(rows) {
     if (!rows || !rows.length) return;
+    var incomingById = {};
+    rows.forEach(function(j) {
+      incomingById[j.id] = j;
+    });
     var seen = {};
     var merged = [];
-    rows.forEach(function(j) {
-      seen[j.id] = true;
-      merged.push(j);
-    });
     historyJobs.forEach(function(j) {
+      var incoming = incomingById[j.id];
+      if (incoming) {
+        merged.push(Object.assign({}, j, incoming));
+      } else {
+        merged.push(j);
+      }
+      seen[j.id] = true;
+    });
+    rows.forEach(function(j) {
       if (!seen[j.id]) merged.push(j);
     });
     setHistoryJobs(merged);
