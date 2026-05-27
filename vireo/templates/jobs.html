@@ -526,7 +526,7 @@
       .then(function(r) { return r.json(); })
       .then(function(data) {
         activeJobs = data.active || [];
-        setHistoryJobs(data.history || historyJobs);
+        mergeHistoryJobs(data.history || []);
         activeWsId = data.active_workspace_id || null;
         workspaceNames = data.workspace_names || {};
         // Drop optimistic-cancel state for jobs that have left the active
@@ -566,6 +566,20 @@
         try { j.result = JSON.parse(j.result); } catch(e) { j.result = null; }
       }
     });
+  }
+
+  function mergeHistoryJobs(rows) {
+    if (!rows || !rows.length) return;
+    var seen = {};
+    var merged = [];
+    rows.forEach(function(j) {
+      seen[j.id] = true;
+      merged.push(j);
+    });
+    historyJobs.forEach(function(j) {
+      if (!seen[j.id]) merged.push(j);
+    });
+    setHistoryJobs(merged);
   }
 
   function fetchHistory() {

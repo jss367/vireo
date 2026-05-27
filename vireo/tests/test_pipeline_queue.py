@@ -423,6 +423,60 @@ def test_promoting_pipeline_remains_visible_and_cancellable(tmp_path):
     assert final["status"] == "cancelled"
 
 
+def test_cancel_promoting_pipeline_after_db_running_preserves_request(tmp_path):
+    """Cancelling during the DB-running promotion window must still win."""
+    runner, db = _make_runner_with_db(tmp_path)
+    job_id = "pipeline-1700000000001"
+    db.conn.execute(
+        "INSERT INTO job_history (id, type, status, started_at, error_count) "
+        "VALUES (?, 'pipeline', 'running', '2026-05-26T00:00:00', 0)",
+        (job_id,),
+    )
+    db.conn.commit()
+    with runner._lock:
+        runner._queued_pipelines[job_id] = {
+            "work_fn": lambda job: pytest_fail("should not have run"),
+            "config": {"x": 1},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:00",
+        }
+        runner._promoting_pipelines.add(job_id)
+
+    assert runner.cancel_job(job_id, expected_status="queued") is True
+    assert runner.is_cancelled(job_id)
+    with runner._lock:
+        assert job_id in runner._queued_pipelines
+        assert job_id in runner._promoting_pipelines
+
+
+def test_promoted_pipeline_with_pending_cancel_skips_work_fn(tmp_path):
+    """A queued cancel recorded during promotion suppresses pipeline work."""
+    runner, db = _make_runner_with_db(tmp_path)
+    job_id = "pipeline-1700000000001"
+    work_called = threading.Event()
+    db.conn.execute(
+        "INSERT INTO job_history (id, type, status, started_at, error_count) "
+        "VALUES (?, 'pipeline', 'queued', '2026-05-26T00:00:00', 0)",
+        (job_id,),
+    )
+    db.conn.commit()
+    with runner._lock:
+        runner._queued_pipelines[job_id] = {
+            "work_fn": lambda job: work_called.set(),
+            "config": {"x": 1},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:00",
+        }
+        runner._cancelled.add(job_id)
+
+    runner._try_promote_queued()
+    final = wait_for_job_via_runner(runner, job_id)
+    assert final["status"] == "cancelled"
+    assert not work_called.is_set()
+
+
 def pytest_fail(msg):
     raise AssertionError(msg)
 

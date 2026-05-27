@@ -260,6 +260,9 @@ class JobRunner:
             # waiters' queues.
             self._subscribers.setdefault(job_id, [])
             work_fn = ctx["work_fn"]
+            if job_id in self._cancelled:
+                def work_fn(job):
+                    return None
 
         thread = threading.Thread(
             target=self._run_job, args=(job, work_fn), daemon=True,
@@ -767,9 +770,9 @@ class JobRunner:
 
         For queued pipelines: atomically transition the persisted row
         to ``status='cancelled'`` and remove the in-memory context.
-        The conditional UPDATE in ``_try_promote_queued`` ensures a
-        cancel landing between SELECT and UPDATE wins (its rowcount==0
-        path leaves the row in the cancelled state and gives up).
+        If promotion already flipped the row to ``running`` but has not
+        installed the job in ``_jobs`` yet, preserve the cancellation
+        request so the promoted worker exits as cancelled.
 
         Args:
             job_id: id to cancel.
@@ -815,6 +818,13 @@ class JobRunner:
                 conn.close()
 
         if not cancelled:
+            with self._lock:
+                if (
+                    job_id in self._promoting_pipelines
+                    and job_id in self._queued_pipelines
+                ):
+                    self._cancelled.add(job_id)
+                    return True
             return False
 
         with self._lock:
