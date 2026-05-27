@@ -393,17 +393,26 @@ def test_retention_does_not_prune_queued_row_under_load(tmp_path):
         # Simulate 105 unrelated jobs completing in this workspace by
         # writing terminal rows directly. They share the workspace_id
         # so they're candidates for the retention DELETE.
+        #
+        # Timestamps MUST be newer than the queued row's runtime
+        # started_at (set by enqueue_pipeline via datetime.now()).
+        # Otherwise the OLD buggy retention DELETE — which orders by
+        # started_at DESC and keeps the top 100 — would naturally keep
+        # the queued row (newer timestamp wins) and the test would
+        # pass even against the broken code, defeating its purpose.
+        # Use a far-future date so the order is unambiguous regardless
+        # of when the test runs.
         import sqlite3
         conn = sqlite3.connect(str(tmp_path / "test.db"))
         try:
-            now = "2026-05-27T00:00:00"
+            future_ts = "2099-01-01T00:00:00"
             for i in range(105):
                 conn.execute(
                     "INSERT OR REPLACE INTO job_history "
                     "(id, type, status, started_at, finished_at, "
                     " duration, error_count, workspace_id) "
                     "VALUES (?, 'scan', 'completed', ?, ?, 0.1, 0, ?)",
-                    (f"scan-fill-{i:03d}", now, now, ws),
+                    (f"scan-fill-{i:03d}", future_ts, future_ts, ws),
                 )
             conn.commit()
         finally:
