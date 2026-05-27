@@ -10185,21 +10185,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """
         runner = app._job_runner
         db = _get_db()
-        body = request.get_json(silent=True) or {}
-        ws_id = body.get("workspace_id")
-        if ws_id is None:
-            ws_id = db._active_workspace_id
+        body = request.get_json(silent=True)
+        if body is None:
+            body = {}
+        if not isinstance(body, dict):
+            return json_error("JSON body must be an object", 400)
 
-        cancelled = []
-        # Snapshot list first; ``cancel_job`` mutates the runner's
-        # internal state, and ``list_jobs`` would race against it.
-        for job in runner.list_jobs():
-            if job.get("status") != "queued":
-                continue
-            if ws_id is not None and job.get("workspace_id") != ws_id:
-                continue
-            if runner.cancel_job(job["id"]):
-                cancelled.append(job["id"])
+        if "workspace_id" in body:
+            ws_id = body["workspace_id"]
+            if isinstance(ws_id, bool) or not isinstance(ws_id, int):
+                return json_error("workspace_id must be an integer", 400)
+        else:
+            ws_id = db._active_workspace_id
+            if ws_id is None:
+                return json_error("workspace_id is required", 400)
+
+        cancelled = runner.cancel_queued_jobs(workspace_id=ws_id)
         return jsonify({"cancelled": cancelled})
 
     @app.route("/api/jobs/<job_id>/stream")

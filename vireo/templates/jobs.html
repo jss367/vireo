@@ -594,13 +594,12 @@
     });
     html += '<div class="jobs-list-divider clickable' + (currentView === 'active' ? ' selected' : '') + '" data-view="active">Active' +
       (running.length > 0 ? ' (' + running.length + ')' : '') + '</div>';
-    // "Cancel all queued" — only show when at least one queued job
-    // exists. Defaults to the active workspace on the server; the user
-    // doesn't have to think about scope here.
-    var anyQueued = running.some(function(j) { return j.status === 'queued'; });
-    if (anyQueued) {
+    var queuedInActiveWs = running.filter(function(j) {
+      return j.status === 'queued' && j.workspace_id === activeWsId;
+    });
+    if (queuedInActiveWs.length > 0) {
       html += '<div class="jobs-bulk-actions">';
-      html += '<button class="btn-cancel" id="btnCancelAllQueued">Cancel all queued</button>';
+      html += '<button class="btn-cancel" id="btnCancelAllQueued">Cancel queued in active workspace</button>';
       html += '</div>';
     }
     running.forEach(function(j) { html += renderListItem(j, 'active'); });
@@ -676,7 +675,7 @@
       fetch('/api/jobs/cancel-queued', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: '{}',
+        body: JSON.stringify({ workspace_id: activeWsId }),
       })
         .then(function(r) {
           if (r.ok) {
@@ -704,14 +703,14 @@
             if (typeof showToast === 'function') showToast(msg, 'error');
             // Restore the button — caller may want to retry.
             bulkBtn.disabled = false;
-            bulkBtn.textContent = 'Cancel all queued';
+            bulkBtn.textContent = 'Cancel queued in active workspace';
             bulkBtn.classList.remove('cancelling');
           });
         })
         .catch(function() {
           if (typeof showToast === 'function') showToast('Unable to cancel queued jobs', 'error');
           bulkBtn.disabled = false;
-          bulkBtn.textContent = 'Cancel all queued';
+          bulkBtn.textContent = 'Cancel queued in active workspace';
           bulkBtn.classList.remove('cancelling');
         });
       return;

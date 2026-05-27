@@ -1731,6 +1731,28 @@ def test_cancel_queued_endpoint_cancels_all_queued_in_active_workspace(app_and_d
         wait_for_job_via_runner(runner, running_id)
 
 
+def test_cancel_queued_endpoint_rejects_invalid_body(app_and_db):
+    """Bulk queued cancel requires an object body when JSON is supplied."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    for payload in (True, [], "workspace"):
+        resp = client.post("/api/jobs/cancel-queued", json=payload)
+        assert resp.status_code == 400
+
+
+def test_cancel_queued_endpoint_rejects_invalid_workspace_id(app_and_db):
+    """``workspace_id`` must be an integer id, not bool or another type."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    for workspace_id in (True, False, "1", 1.5):
+        resp = client.post(
+            "/api/jobs/cancel-queued", json={"workspace_id": workspace_id},
+        )
+        assert resp.status_code == 400
+
+
 def test_cancel_queued_endpoint_leaves_other_workspaces_alone(app_and_db):
     """When ``workspace_id`` is given in the body, only queued
     pipelines in that workspace are cancelled. Queued pipelines in

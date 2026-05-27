@@ -19,6 +19,10 @@ from db import Database
 from wait import wait_for_job_via_runner
 
 
+def _wait_for_event(event, label, timeout=2.0):
+    assert event.wait(timeout=timeout), f"{label} did not happen"
+
+
 def _make_runner_with_db(tmp_path):
     """Build a JobRunner + Database pair for a single test.
 
@@ -64,11 +68,19 @@ def test_enqueue_pipeline_persists_queued_row(tmp_path):
     # Block the first pipeline so the read below sees a non-terminal
     # state; without it the trivial lambda runs to completion before
     # the assertion fires and the status would be 'completed'.
+    first_started = threading.Event()
     blocker = threading.Event()
+
+    def first_work(job):
+        first_started.set()
+        blocker.wait(timeout=3.0)
+        return {}
+
     first_id = runner.enqueue_pipeline(
-        work_fn=lambda job: blocker.wait(timeout=3.0),
+        work_fn=first_work,
         config={}, workspace_id=1,
     )
+    _wait_for_event(first_started, "first pipeline start")
     job_id = runner.enqueue_pipeline(
         work_fn=lambda job: None,
         config={"sources": ["/a"]},
@@ -245,15 +257,18 @@ def test_queued_pipeline_is_visible_via_get(tmp_path):
     endpoint to render queue state.
     """
     runner, _ = _make_runner_with_db(tmp_path)
+    first_started = threading.Event()
     blocker = threading.Event()
 
     def blocking_work(job):
+        first_started.set()
         blocker.wait(timeout=3.0)
         return {}
 
     first_id = runner.enqueue_pipeline(
         work_fn=blocking_work, config={}, workspace_id=1,
     )
+    _wait_for_event(first_started, "first pipeline start")
     second_id = runner.enqueue_pipeline(
         work_fn=lambda job: {"ok": True}, config={"x": 1}, workspace_id=2,
     )
@@ -277,9 +292,11 @@ def test_cancel_queued_pipeline_transitions_row_to_cancelled(tmp_path):
     """
     runner, db = _make_runner_with_db(tmp_path)
     blocker = threading.Event()
+    first_started = threading.Event()
     second_started = threading.Event()
 
     def first_work(job):
+        first_started.set()
         blocker.wait(timeout=3.0)
         return {}
 
@@ -288,12 +305,20 @@ def test_cancel_queued_pipeline_transitions_row_to_cancelled(tmp_path):
         return {"should-not-run": True}
 
     first_id = runner.enqueue_pipeline(work_fn=first_work, config={}, workspace_id=1)
+    _wait_for_event(first_started, "first pipeline start")
     second_id = runner.enqueue_pipeline(work_fn=second_work, config={}, workspace_id=1)
     assert runner.get(second_id)["status"] == "queued"
 
     # Cancel while still queued.
     ok = runner.cancel_job(second_id)
     assert ok is True
+    cancelled_view = runner.get(second_id)
+    assert cancelled_view is not None
+    assert cancelled_view["status"] == "cancelled"
+    events = runner.get_events(second_id)
+    assert events
+    assert events[-1]["type"] == "complete"
+    assert events[-1]["data"]["status"] == "cancelled"
     row = db.conn.execute(
         "SELECT status FROM job_history WHERE id = ?", (second_id,),
     ).fetchone()
@@ -358,6 +383,13 @@ def test_promotion_loses_race_to_cancel_leaves_row_cancelled(tmp_path):
     )
     # And the in-memory context is cleaned up.
     assert job_id not in runner._queued_pipelines
+    view = runner.get(job_id)
+    assert view is not None
+    assert view["status"] == "cancelled"
+    events = runner.get_events(job_id)
+    assert events
+    assert events[-1]["type"] == "complete"
+    assert events[-1]["data"]["status"] == "cancelled"
 
 
 def pytest_fail(msg):
@@ -378,13 +410,20 @@ def test_retention_does_not_prune_queued_row_under_load(tmp_path):
     runner, db = _make_runner_with_db(tmp_path)
     try:
         ws = db._active_workspace_id
+        first_started = threading.Event()
         blocker = threading.Event()
+
+        def first_work(job):
+            first_started.set()
+            blocker.wait(timeout=10.0)
+            return {}
 
         # Long-running first pipeline holds the slot.
         first_id = runner.enqueue_pipeline(
-            work_fn=lambda job: blocker.wait(timeout=10.0),
+            work_fn=first_work,
             config={}, workspace_id=ws,
         )
+        _wait_for_event(first_started, "first pipeline start")
         # Queued pipeline.
         queued_id = runner.enqueue_pipeline(
             work_fn=lambda job: {"ran": True},
@@ -458,11 +497,19 @@ def test_get_history_excludes_queued_rows(tmp_path):
     try:
         ws = db._active_workspace_id
 
+        first_started = threading.Event()
         blocker = threading.Event()
+
+        def first_work(job):
+            first_started.set()
+            blocker.wait(timeout=3.0)
+            return {}
+
         first_id = runner.enqueue_pipeline(
-            work_fn=lambda job: blocker.wait(timeout=3.0),
+            work_fn=first_work,
             config={}, workspace_id=ws,
         )
+        _wait_for_event(first_started, "first pipeline start")
         queued_id = runner.enqueue_pipeline(
             work_fn=lambda job: None, config={}, workspace_id=ws,
         )
@@ -499,13 +546,16 @@ def test_list_jobs_includes_queued_pipelines(tmp_path):
     and can't be cancelled from /jobs.
     """
     runner, _ = _make_runner_with_db(tmp_path)
+    first_started = threading.Event()
     blocker = threading.Event()
 
     def first_work(job):
+        first_started.set()
         blocker.wait(timeout=3.0)
         return {}
 
     first_id = runner.enqueue_pipeline(first_work, config={}, workspace_id=1)
+    _wait_for_event(first_started, "first pipeline start")
     second_id = runner.enqueue_pipeline(
         lambda job: None, config={"x": 7}, workspace_id=2,
     )
@@ -535,13 +585,16 @@ def test_cancelling_queued_pipeline_emits_complete_event_to_sse(tmp_path):
     and the SSE loop reports the job as 'expired'.
     """
     runner, _ = _make_runner_with_db(tmp_path)
+    first_started = threading.Event()
     blocker = threading.Event()
 
     def first_work(job):
+        first_started.set()
         blocker.wait(timeout=3.0)
         return {}
 
     first_id = runner.enqueue_pipeline(first_work, config={}, workspace_id=1)
+    _wait_for_event(first_started, "first pipeline start")
     second_id = runner.enqueue_pipeline(
         lambda job: pytest_fail("cancelled queued must not run"),
         config={}, workspace_id=1,
@@ -569,10 +622,12 @@ def test_sse_subscribers_attached_while_queued_receive_post_promotion_events(tmp
     after the pipeline actually starts.
     """
     runner, _ = _make_runner_with_db(tmp_path)
+    first_started = threading.Event()
     blocker = threading.Event()
     let_second_finish = threading.Event()
 
     def first_work(job):
+        first_started.set()
         blocker.wait(timeout=3.0)
         return {}
 
@@ -582,6 +637,7 @@ def test_sse_subscribers_attached_while_queued_receive_post_promotion_events(tmp
         return {"ok": True}
 
     first_id = runner.enqueue_pipeline(first_work, config={}, workspace_id=1)
+    _wait_for_event(first_started, "first pipeline start")
     second_id = runner.enqueue_pipeline(second_work, config={}, workspace_id=1)
     assert runner.get(second_id)["status"] == "queued"
 
