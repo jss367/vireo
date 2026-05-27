@@ -609,6 +609,7 @@ class Classifier:
             numpy float32 array of shape (1, embedding_dim) -- normalized
         """
         from PIL import Image as PILImage
+        from pipeline_locks import acquire_gpu
 
         if isinstance(image, (str, os.PathLike)):
             with PILImage.open(image) as img:
@@ -616,9 +617,14 @@ class Classifier:
         else:
             input_arr = self._preprocess(image)
 
-        features = self._image_session.run(
-            None, {self._image_input_name: input_arr}
-        )[0]
+        # GPU serialisation across concurrent pipelines, scoped tightly to
+        # the forward pass. Preprocessing above (load/decode/resize) and the
+        # normalisation below run without the lock so concurrent pipelines
+        # can use the GPU while this one does CPU work.
+        with acquire_gpu():
+            features = self._image_session.run(
+                None, {self._image_input_name: input_arr}
+            )[0]
         features = features.astype(np.float32)
         return _normalize(features)
 
