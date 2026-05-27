@@ -173,10 +173,10 @@ class JobRunner:
     def _try_promote_queued(self):
         """Promote the oldest queued pipeline if a slot is open.
 
-        Single-pass: count active pipelines under ``self._lock`` and mark the
-        oldest queued context as promoting, then release the lock before the
-        conditional SQLite UPDATE. If a Cancel lands first, rowcount==0 and
-        promotion quietly gives up.
+        Single-pass: count active and in-flight promotions under
+        ``self._lock`` and mark the oldest queued context as promoting, then
+        release the lock before the conditional SQLite UPDATE. If a Cancel
+        lands first, rowcount==0 and promotion quietly gives up.
         """
         with self._lock:
             active = sum(
@@ -185,7 +185,11 @@ class JobRunner:
             )
             if active >= SLOT_CAP:
                 return
-            if any(ctx.get("_promoting") for ctx in self._queued_pipelines.values()):
+            promoting = sum(
+                1 for ctx in self._queued_pipelines.values()
+                if ctx.get("_promoting")
+            )
+            if active + promoting >= SLOT_CAP:
                 return
             candidates = sorted(
                 (

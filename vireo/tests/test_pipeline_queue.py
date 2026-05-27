@@ -353,6 +353,62 @@ def test_promotion_loses_race_to_cancel_leaves_row_cancelled(tmp_path):
     assert job_id not in runner._queued_pipelines
 
 
+def test_in_flight_promotion_counts_against_slot_cap_not_global_guard(tmp_path, monkeypatch):
+    """A promotion in progress should consume one slot, not block all slots.
+
+    This protects the planned ``SLOT_CAP > 1`` case: if one queued context is
+    already between the in-memory pick and SQLite UPDATE, another queued
+    context should still promote when capacity remains.
+    """
+    import sqlite3
+
+    import jobs as jobs_module
+
+    monkeypatch.setattr(jobs_module, "SLOT_CAP", 2)
+    runner, db = _make_runner_with_db(tmp_path)
+    first_id = "pipeline-1700000000001"
+    second_id = "pipeline-1700000000002"
+    conn = sqlite3.connect(str(tmp_path / "test.db"))
+    conn.executemany(
+        "INSERT INTO job_history (id, type, status, started_at, error_count) "
+        "VALUES (?, 'pipeline', 'queued', ?, 0)",
+        [
+            (first_id, "2026-05-26T00:00:00"),
+            (second_id, "2026-05-26T00:00:01"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    with runner._lock:
+        runner._queued_pipelines[first_id] = {
+            "work_fn": lambda job: None,
+            "config": {},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:00",
+            "_promoting": True,
+        }
+        runner._queued_pipelines[second_id] = {
+            "work_fn": lambda job: None,
+            "config": {},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:01",
+        }
+
+    runner._try_promote_queued()
+    promoted = wait_for_job_via_runner(runner, second_id, wait_for_history=True)
+
+    assert promoted["status"] == "completed"
+    row = db.conn.execute(
+        "SELECT status FROM job_history WHERE id = ?", (second_id,),
+    ).fetchone()
+    assert row["status"] == "completed"
+    with runner._lock:
+        assert runner._queued_pipelines[first_id]["_promoting"] is True
+
+
 def pytest_fail(msg):
     raise AssertionError(msg)
 
