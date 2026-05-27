@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 from db import Database, commit_with_retry
 from model_cache import get_default_cache
+from pipeline_locks import acquire_gpu, acquire_workspace_regroup
 
 log = logging.getLogger(__name__)
 
@@ -1808,12 +1809,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     progress={"current": batch_idx, "total": total},
                 )
 
-                det_map, det_count, det_processed = _detect_batch(
-                    batch, folders, runner, job,
-                    params.reclassify, thread_db,
-                    already_detected_ids=already_detected,
-                    cached_detections=None,
-                )
+                # Serialise the GPU op for this detection batch. Released
+                # between batches so a concurrent pipeline can interleave
+                # its own GPU work without waiting for the entire detect
+                # stage to finish.
+                with acquire_gpu():
+                    det_map, det_count, det_processed = _detect_batch(
+                        batch, folders, runner, job,
+                        params.reclassify, thread_db,
+                        already_detected_ids=already_detected,
+                        cached_detections=None,
+                    )
                 total_detected += det_count
                 already_detected.update(det_processed)
                 for pid, dets in det_map.items():
@@ -2141,10 +2147,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     inference_batch.clear()
                     has_flushed_in_spec = True
                     pre_len = len(raw_results)
-                    n_batch_failed = _flush_batch(
-                        pending, clf, model_type, model_name,
-                        thread_db, raw_results,
-                    )
+                    # Serialise the GPU op across all concurrent pipelines.
+                    # Acquired per batch, not for the whole spec, so another
+                    # pipeline waiting on GPU can interleave between our
+                    # batches instead of starving for the full classify run.
+                    with acquire_gpu():
+                        n_batch_failed = _flush_batch(
+                            pending, clf, model_type, model_name,
+                            thread_db, raw_results,
+                        )
                     failed += n_batch_failed
 
                     successful_det_ids = {
@@ -2854,7 +2865,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     if _should_abort(abort):
                         break
 
-                    mask = generate_mask(proxy, det_box, variant=sam2_variant)
+                    with acquire_gpu():
+                        mask = generate_mask(proxy, det_box, variant=sam2_variant)
                     if mask is None:
                         skipped += 1
                         processed = i + 1
@@ -2890,16 +2902,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                     subject_crop = crop_subject(proxy, mask, margin=0.15)
                     if subject_crop is not None:
-                        embs = embed_batch(
-                            [subject_crop, proxy], variant=dinov2_variant,
-                        )
+                        with acquire_gpu():
+                            embs = embed_batch(
+                                [subject_crop, proxy], variant=dinov2_variant,
+                            )
                         subj_emb_blob = embedding_to_blob(embs[0])
                         global_emb_blob = embedding_to_blob(embs[1])
                     else:
                         subj_emb_blob = None
-                        global_emb_blob = embedding_to_blob(
-                            embed(proxy, variant=dinov2_variant),
-                        )
+                        with acquire_gpu():
+                            global_emb_blob = embedding_to_blob(
+                                embed(proxy, variant=dinov2_variant),
+                            )
 
                     thread_db.upsert_photo_mask(
                         photo_id=photo_id,
@@ -3243,90 +3257,96 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         runner.update_step(job["id"], "regroup", status="running")
         _update_stages(runner, job["id"], stages)
 
-        try:
-            import config as cfg
-            from pipeline import load_photo_features, run_full_pipeline, save_results
+        # Two pipelines targeting the same workspace must not regroup
+        # concurrently — save_results + set_workspace_group_state would
+        # race and leave inconsistent grouping state. Per-workspace lock
+        # serialises only this stage; pipelines on different workspaces
+        # don't interact.
+        with acquire_workspace_regroup(workspace_id):
+            try:
+                import config as cfg
+                from pipeline import load_photo_features, run_full_pipeline, save_results
 
-            thread_db = Database(db_path)
-            thread_db.set_active_workspace(workspace_id)
+                thread_db = Database(db_path)
+                thread_db.set_active_workspace(workspace_id)
 
-            effective_cfg = thread_db.get_effective_config(cfg.load())
-            pipeline_cfg = effective_cfg.get("pipeline", {})
+                effective_cfg = thread_db.get_effective_config(cfg.load())
+                pipeline_cfg = effective_cfg.get("pipeline", {})
 
-            photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
-            if params.exclude_photo_ids:
-                photos = [p for p in photos if p["id"] not in params.exclude_photo_ids]
-            if not photos:
-                result["stages"]["regroup"] = {"error": "No photos with pipeline features found."}
+                photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
+                if params.exclude_photo_ids:
+                    photos = [p for p in photos if p["id"] not in params.exclude_photo_ids]
+                if not photos:
+                    result["stages"]["regroup"] = {"error": "No photos with pipeline features found."}
+                    stages["regroup"]["status"] = "completed"
+                    runner.update_step(job["id"], "regroup", status="completed",
+                                       summary="No photos to group")
+                    return
+
+                results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
+                cache_dir = os.path.dirname(db_path)
+                save_results(results, cache_dir, workspace_id)
+
+                # Stamp the grouping fingerprint + timestamp BEFORE marking the
+                # step completed, so a partial regroup that crashes between here
+                # and update_step doesn't end up labeled "fresh" with a stale fp.
+                #
+                # Only stamp when the regroup actually covered the whole
+                # workspace — if it ran on a filtered subset (a sub-collection,
+                # or with exclude_photo_ids set) some workspace photos were
+                # intentionally not regrouped, so claiming workspace-level
+                # freshness would let the pipeline page hide a real stale state.
+                from pipeline import (
+                    _resolve_collection_photo_ids,
+                    compute_group_fingerprint,
+                )
+                collection_photo_ids = _resolve_collection_photo_ids(
+                    thread_db, collection_id,
+                )
+                ws_photo_ids = {
+                    r["id"] for r in thread_db.conn.execute(
+                        """SELECT p.id
+                             FROM photos p
+                             JOIN workspace_folders wf
+                               ON wf.folder_id = p.folder_id
+                            WHERE wf.workspace_id = ?""",
+                        (workspace_id,),
+                    ).fetchall()
+                }
+                covered_full_workspace = (
+                    not params.exclude_photo_ids
+                    and ws_photo_ids.issubset(collection_photo_ids)
+                )
+                if covered_full_workspace:
+                    thread_db.set_workspace_group_state(
+                        workspace_id=workspace_id,
+                        fingerprint=compute_group_fingerprint(effective_cfg),
+                        when_ts=int(time.time()),
+                    )
+                else:
+                    # Partial run — save_results just clobbered
+                    # pipeline_results_ws*.json with subset output, so any
+                    # pre-existing fingerprint now points at a cache that no
+                    # longer reflects the full workspace. Invalidate so the
+                    # pipeline page surfaces the staleness as will-run instead
+                    # of falsely reporting done-prior.
+                    thread_db.set_workspace_group_state(
+                        workspace_id=workspace_id,
+                        fingerprint=None,
+                        when_ts=None,
+                    )
+
                 stages["regroup"]["status"] = "completed"
+                summary_info = results.get("summary", {})
+                groups = summary_info.get("groups", "")
                 runner.update_step(job["id"], "regroup", status="completed",
-                                   summary="No photos to group")
-                return
-
-            results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
-            cache_dir = os.path.dirname(db_path)
-            save_results(results, cache_dir, workspace_id)
-
-            # Stamp the grouping fingerprint + timestamp BEFORE marking the
-            # step completed, so a partial regroup that crashes between here
-            # and update_step doesn't end up labeled "fresh" with a stale fp.
-            #
-            # Only stamp when the regroup actually covered the whole
-            # workspace — if it ran on a filtered subset (a sub-collection,
-            # or with exclude_photo_ids set) some workspace photos were
-            # intentionally not regrouped, so claiming workspace-level
-            # freshness would let the pipeline page hide a real stale state.
-            from pipeline import (
-                _resolve_collection_photo_ids,
-                compute_group_fingerprint,
-            )
-            collection_photo_ids = _resolve_collection_photo_ids(
-                thread_db, collection_id,
-            )
-            ws_photo_ids = {
-                r["id"] for r in thread_db.conn.execute(
-                    """SELECT p.id
-                         FROM photos p
-                         JOIN workspace_folders wf
-                           ON wf.folder_id = p.folder_id
-                        WHERE wf.workspace_id = ?""",
-                    (workspace_id,),
-                ).fetchall()
-            }
-            covered_full_workspace = (
-                not params.exclude_photo_ids
-                and ws_photo_ids.issubset(collection_photo_ids)
-            )
-            if covered_full_workspace:
-                thread_db.set_workspace_group_state(
-                    workspace_id=workspace_id,
-                    fingerprint=compute_group_fingerprint(effective_cfg),
-                    when_ts=int(time.time()),
-                )
-            else:
-                # Partial run — save_results just clobbered
-                # pipeline_results_ws*.json with subset output, so any
-                # pre-existing fingerprint now points at a cache that no
-                # longer reflects the full workspace. Invalidate so the
-                # pipeline page surfaces the staleness as will-run instead
-                # of falsely reporting done-prior.
-                thread_db.set_workspace_group_state(
-                    workspace_id=workspace_id,
-                    fingerprint=None,
-                    when_ts=None,
-                )
-
-            stages["regroup"]["status"] = "completed"
-            summary_info = results.get("summary", {})
-            groups = summary_info.get("groups", "")
-            runner.update_step(job["id"], "regroup", status="completed",
-                               summary=f"{groups} groups" if groups else "Done")
-            result["stages"]["regroup"] = summary_info
-        except Exception as e:
-            errors.append(f"[regroup] Fatal: {e}")
-            log.exception("Pipeline regroup stage failed")
-            stages["regroup"]["status"] = "failed"
-            runner.update_step(job["id"], "regroup", status="failed", error=str(e))
+                                   summary=f"{groups} groups" if groups else "Done")
+                result["stages"]["regroup"] = summary_info
+            except Exception as e:
+                errors.append(f"[regroup] Fatal: {e}")
+                log.exception("Pipeline regroup stage failed")
+                stages["regroup"]["status"] = "failed"
+                runner.update_step(job["id"], "regroup", status="failed", error=str(e))
 
         _update_stages(runner, job["id"], stages)
 
