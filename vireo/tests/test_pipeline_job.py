@@ -8494,3 +8494,77 @@ def test_release_classifier_cache_handle_idempotent_when_no_bundle():
     _release_classifier_cache_handle(loaded_models)
     assert "tax" in loaded_models
     assert "resolved_specs" in loaded_models
+
+
+def test_weights_fingerprint_changes_on_in_place_replacement(tmp_path):
+    """A Repair / re-register that overwrites weights at the same path must
+    produce a different cache-key component.
+
+    Regression for the Codex P2 on PR #899: the classifier cache key
+    only contained ``weights_path`` (a stable directory string), so a
+    pipeline reusing the in-process cache after a Repair would silently
+    classify with stale or corrupt session bytes until the 5-minute idle
+    timer fired.
+    """
+    import os
+    import time
+
+    from pipeline_job import _weights_fingerprint
+
+    files = ["image_encoder.onnx", "config.json"]
+    for rel in files:
+        (tmp_path / rel).write_bytes(b"v1")
+
+    fp1 = _weights_fingerprint(str(tmp_path), files)
+    assert fp1 is not None
+
+    # Identical disk state — fingerprint must be byte-identical so cache
+    # hits across pipeline runs work.
+    assert _weights_fingerprint(str(tmp_path), files) == fp1
+
+    # Bump mtime in a way the OS can resolve (st_mtime_ns is OS-dependent;
+    # 10 ms covers every filesystem we care about). The size also changes
+    # here, but mtime alone would be enough — in-place overwrites bump it.
+    time.sleep(0.01)
+    (tmp_path / "image_encoder.onnx").write_bytes(b"v2-longer")
+    # Force mtime forward in case the filesystem coalesces same-second writes.
+    new_mtime = os.stat(tmp_path / "image_encoder.onnx").st_mtime + 1
+    os.utime(tmp_path / "image_encoder.onnx", (new_mtime, new_mtime))
+
+    fp2 = _weights_fingerprint(str(tmp_path), files)
+    assert fp2 != fp1, (
+        "weights fingerprint must change after in-place file replacement "
+        "so the classifier cache misses on the new bytes"
+    )
+
+
+def test_weights_fingerprint_handles_missing_path_and_files():
+    """``None``/empty inputs must collapse to ``None`` so the cache key
+    stays well-formed when ``files`` isn't listed on the model spec.
+    """
+    from pipeline_job import _weights_fingerprint
+
+    assert _weights_fingerprint(None, ["a.onnx"]) is None
+    assert _weights_fingerprint("/nonexistent", None) is None
+    assert _weights_fingerprint("/nonexistent", []) is None
+
+
+def test_weights_fingerprint_missing_file_distinguishes_from_present(tmp_path):
+    """A partial-Repair state (file deleted but path still listed) must
+    fingerprint differently from the complete state, so the cache misses
+    and the load attempt either succeeds with fresh files or raises a
+    clear "incomplete" error instead of reusing a stale session.
+    """
+    from pipeline_job import _weights_fingerprint
+
+    files = ["a.onnx", "b.onnx"]
+    (tmp_path / "a.onnx").write_bytes(b"x")
+    (tmp_path / "b.onnx").write_bytes(b"y")
+    full_fp = _weights_fingerprint(str(tmp_path), files)
+
+    (tmp_path / "b.onnx").unlink()
+    partial_fp = _weights_fingerprint(str(tmp_path), files)
+
+    assert partial_fp != full_fp
+    # Missing entries collapse to a sentinel so the key still hashes.
+    assert any(part[1] is None for part in partial_fp)

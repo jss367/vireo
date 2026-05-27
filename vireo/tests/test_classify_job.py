@@ -2064,6 +2064,80 @@ def test_flush_batch_default_top_k_is_one():
     assert raw_results[0]["alternatives"] == []
 
 
+# ── GPU lock scope ────────────────────────────────────────────────────────
+
+
+def test_flush_batch_releases_gpu_lock_before_db_writes():
+    """``_flush_batch`` must release the GPU semaphore before the DB
+    upserts and result-building loop.
+
+    Regression for the Codex P2 on PR #899: holding the process-wide GPU
+    lock through ``db.upsert_photo_embedding()`` blocked concurrent
+    pipelines' detector/SAM/DINO GPU batches while the GPU itself was
+    idle. We assert by snapshotting the semaphore's slot count at two
+    points — inside ``clf.classify_batch_with_embedding`` (lock held)
+    and inside ``db.upsert_photo_embedding`` (must be released).
+    """
+    from unittest.mock import MagicMock
+
+    import pipeline_locks
+    from classify_job import _flush_batch
+
+    snapshots = {}
+
+    def record_inside_inference(images, threshold=0):
+        snapshots["during_inference"] = pipeline_locks._GPU_SEMAPHORE._value
+        return [
+            (
+                [{"species": "Robin", "score": 0.7, "taxonomy": None}],
+                _FakeEmbedding(),
+            )
+            for _ in images
+        ]
+
+    def record_inside_db(photo_id, model_name, embedding_bytes):
+        snapshots["during_db_write"] = pipeline_locks._GPU_SEMAPHORE._value
+
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.side_effect = record_inside_inference
+
+    db = MagicMock()
+    db.upsert_photo_embedding.side_effect = record_inside_db
+
+    raw_results = []
+    batch = [{
+        "photo": {"id": 1, "filename": "bird.jpg", "timestamp": None},
+        "detection_id": 10,
+        "folder_path": "/photos",
+        "image_path": "/photos/bird.jpg",
+        "img": MagicMock(),
+    }]
+
+    baseline = pipeline_locks._GPU_SEMAPHORE._value
+    _flush_batch(batch, clf, "bioclip", "test-model", db, raw_results)
+    assert pipeline_locks._GPU_SEMAPHORE._value == baseline, (
+        "semaphore must be released on the way out"
+    )
+
+    # _value is decremented while the lock is held. With a 1-slot
+    # semaphore, baseline=1 → 0 during inference, back to 1 by the time
+    # the DB write runs.
+    assert snapshots["during_inference"] == baseline - 1, (
+        "GPU lock must be held during clf.classify_batch_with_embedding"
+    )
+    assert snapshots["during_db_write"] == baseline, (
+        "GPU lock must be released before db.upsert_photo_embedding so "
+        "concurrent pipelines can do GPU work while this one persists"
+    )
+
+
+class _FakeEmbedding:
+    """Stand-in for a numpy array that implements only ``.tobytes()``."""
+
+    def tobytes(self):
+        return b"\x00" * 16
+
+
 # ── Top-N: _store_grouped_predictions alternatives tests ─────────────────────
 
 

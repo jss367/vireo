@@ -740,31 +740,38 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
     """
     from datetime import datetime as dt
 
+    from pipeline_locks import acquire_gpu
+
     images = [entry["img"] for entry in batch]
     failed = 0
 
     try:
-        try:
-            if model_type == "timm":
-                batch_preds = clf.classify_batch(images, threshold=0)
-                batch_results = [(preds, None) for preds in batch_preds]
-            else:
-                batch_results = clf.classify_batch_with_embedding(images, threshold=0)
-        except Exception:
-            log.warning("Batch classification failed, falling back to single-image", exc_info=True)
-            batch_results = []
-            for entry in batch:
-                try:
-                    if model_type == "timm":
-                        preds = clf.classify(entry["img"], threshold=0)
-                        batch_results.append((preds, None))
-                    else:
-                        preds, emb = clf.classify_with_embedding(entry["img"], threshold=0)
-                        batch_results.append((preds, emb))
-                except Exception:
-                    log.warning("Classification failed for %s", entry["photo"]["filename"], exc_info=True)
-                    batch_results.append(None)
-                    failed += 1
+        # Serialise GPU inference across concurrent pipelines. Scoped to the
+        # forward passes only — the DB upserts and result-building below run
+        # without the lock so another pipeline can use the GPU while this
+        # one persists predictions/embeddings.
+        with acquire_gpu():
+            try:
+                if model_type == "timm":
+                    batch_preds = clf.classify_batch(images, threshold=0)
+                    batch_results = [(preds, None) for preds in batch_preds]
+                else:
+                    batch_results = clf.classify_batch_with_embedding(images, threshold=0)
+            except Exception:
+                log.warning("Batch classification failed, falling back to single-image", exc_info=True)
+                batch_results = []
+                for entry in batch:
+                    try:
+                        if model_type == "timm":
+                            preds = clf.classify(entry["img"], threshold=0)
+                            batch_results.append((preds, None))
+                        else:
+                            preds, emb = clf.classify_with_embedding(entry["img"], threshold=0)
+                            batch_results.append((preds, emb))
+                    except Exception:
+                        log.warning("Classification failed for %s", entry["photo"]["filename"], exc_info=True)
+                        batch_results.append(None)
+                        failed += 1
 
         for entry, result in zip(batch, batch_results, strict=True):
             if result is None:

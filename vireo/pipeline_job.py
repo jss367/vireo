@@ -114,6 +114,31 @@ def _taxonomy_fingerprint(tax):
         return (path, None, None)
 
 
+def _weights_fingerprint(weights_path, files):
+    """Stable key component reflecting the on-disk state of the weights.
+
+    A cached ONNX session is keyed by ``weights_path`` plus this
+    fingerprint. Without it, a Repair (download in place) or a custom-
+    model re-registration overwrites the file at the same path but the
+    classifier cache reuses the previously-loaded session built from the
+    old bytes — silently classifying with stale or corrupt weights.
+    Stat-only (size + mtime_ns) so the lookup stays cheap; in-place
+    replacement reliably bumps mtime even for byte-identical files.
+    Missing files map to a sentinel so a partial repair still misses.
+    """
+    if not weights_path or not files:
+        return None
+    parts = []
+    for rel in files:
+        path = os.path.join(weights_path, rel)
+        try:
+            st = os.stat(path)
+            parts.append((rel, st.st_size, int(st.st_mtime_ns)))
+        except OSError:
+            parts.append((rel, None, None))
+    return tuple(parts)
+
+
 def _release_classifier_cache_handle(loaded_models):
     """Release the cache handle AND drop the bundle's strong refs.
 
@@ -1508,7 +1533,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # downloads or refreshes one would silently emit predictions
         # missing the enrichment, so a change in taxonomy must miss the
         # cache and rebuild.
+        #
+        # The weights fingerprint catches in-place model replacement
+        # (Repair, custom re-register). Without it, a pipeline started
+        # before the old session's idle timer fires would reuse the
+        # stale ONNX session on the new bytes.
         tax_fp = _taxonomy_fingerprint(tax) if model_type == "timm" else None
+        weights_fp = _weights_fingerprint(weights_path, active_model.get("files"))
         cache_key = (
             "timm" if model_type == "timm" else "bioclip",
             active_model["id"],
@@ -1516,6 +1547,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             weights_path,
             "__tol__" if use_tol else fp,
             tax_fp,
+            weights_fp,
         )
         cache_handle = None
         try:
@@ -2192,15 +2224,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     inference_batch.clear()
                     has_flushed_in_spec = True
                     pre_len = len(raw_results)
-                    # Serialise the GPU op across all concurrent pipelines.
-                    # Acquired per batch, not for the whole spec, so another
-                    # pipeline waiting on GPU can interleave between our
-                    # batches instead of starving for the full classify run.
-                    with acquire_gpu():
-                        n_batch_failed = _flush_batch(
-                            pending, clf, model_type, model_name,
-                            thread_db, raw_results,
-                        )
+                    # GPU serialisation lives inside _flush_batch around the
+                    # inference call so the DB upserts/result-building afterward
+                    # don't hold the semaphore while the GPU is idle.
+                    n_batch_failed = _flush_batch(
+                        pending, clf, model_type, model_name,
+                        thread_db, raw_results,
+                    )
                     failed += n_batch_failed
 
                     successful_det_ids = {
