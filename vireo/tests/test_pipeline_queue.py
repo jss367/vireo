@@ -52,6 +52,7 @@ def test_enqueue_pipeline_returns_pipeline_prefixed_job_id(tmp_path):
         workspace_id=1,
     )
     assert job_id.startswith("pipeline-"), job_id
+    wait_for_job_via_runner(runner, job_id)
 
 
 def test_enqueue_pipeline_persists_queued_row(tmp_path):
