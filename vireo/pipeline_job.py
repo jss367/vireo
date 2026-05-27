@@ -87,15 +87,29 @@ def _looks_like_missing_external_data(err):
 _RAW_EXTENSIONS = (".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf")
 
 
-def _release_classifier_cache_handle(loaded_models):
-    """Decrement the cache refcount for the currently-held classifier bundle.
+_CLASSIFIER_BUNDLE_FIELDS = (
+    "clf", "model_type", "model_name", "model_str",
+    "labels", "use_tol", "active_model", "labels_fingerprint",
+)
 
-    Pulled out of ``classify_stage`` so the spec-swap path and the stage's
-    finally block share one place that knows about the ``_cache_handle``
-    key. Idempotent: if no handle is present (e.g. classify was skipped
-    before any model loaded) this is a no-op.
+
+def _release_classifier_cache_handle(loaded_models):
+    """Release the cache handle AND drop the bundle's strong refs.
+
+    Releasing the handle alone isn't enough: ``loaded_models`` still
+    holds ``clf`` (the live Classifier/ONNX session) so the GC can't
+    reclaim it. After idle eviction removes the cache entry, a second
+    pipeline that loads the same model gets a fresh session — doubling
+    VRAM — while this pipeline's stale ``clf`` is still pinned. Dropping
+    the bundle fields here lets idle eviction actually free VRAM and
+    lets same-model reloads hit the cache.
+
+    Idempotent: no-op if no handle present (classify skipped before any
+    model loaded).
     """
     handle = loaded_models.pop("_cache_handle", None)
+    for k in _CLASSIFIER_BUNDLE_FIELDS:
+        loaded_models.pop(k, None)
     if handle is None:
         return
     try:
