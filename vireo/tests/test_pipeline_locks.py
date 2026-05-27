@@ -13,6 +13,20 @@ from pipeline_locks import (
 )
 
 
+def _wait_until(predicate, timeout=1.0, interval=0.005):
+    """Poll ``predicate`` until true or timeout; assert on timeout.
+
+    Replaces unbounded ``while not <cond>: time.sleep(...)`` loops that
+    would otherwise hang the suite if a thread stalls.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return
+        time.sleep(interval)
+    raise AssertionError(f"condition not met within {timeout}s")
+
+
 def test_gpu_lock_serialises_two_threads():
     """Only one thread holds the GPU lock at a time."""
     held = []
@@ -36,12 +50,12 @@ def test_gpu_lock_serialises_two_threads():
     t1 = threading.Thread(target=first)
     t2 = threading.Thread(target=second)
     t1.start()
-    # wait for first to actually grab the lock
-    while "first-in" not in held:
-        time.sleep(0.005)
+    _wait_until(lambda: "first-in" in held)
     t2.start()
     t1.join(timeout=3.0)
     t2.join(timeout=3.0)
+    assert not t1.is_alive(), "first thread did not finish"
+    assert not t2.is_alive(), "second thread did not finish"
 
     assert held == ["first-in", "first-out", "second-in"], (
         f"second must wait for first to release; got {held}"
@@ -77,11 +91,12 @@ def test_workspace_regroup_lock_serialises_same_workspace():
     t1 = threading.Thread(target=first)
     t2 = threading.Thread(target=second)
     t1.start()
-    while "first-in" not in held:
-        time.sleep(0.005)
+    _wait_until(lambda: "first-in" in held)
     t2.start()
     t1.join(timeout=3.0)
     t2.join(timeout=3.0)
+    assert not t1.is_alive(), "first thread did not finish"
+    assert not t2.is_alive(), "second thread did not finish"
 
     assert held == ["first-in", "first-out", "second-in"], (
         f"second on same workspace must wait; got {held}"
@@ -111,9 +126,11 @@ def test_workspace_regroup_lock_does_not_block_other_workspaces():
     assert first_holding.wait(timeout=1.0)
     t2.start()
     t2.join(timeout=1.0)
+    assert not t2.is_alive(), "second thread should not be blocked by a different workspace"
     assert "second-in" in held, "different workspace must not be blocked"
     let_first_go.set()
     t1.join(timeout=2.0)
+    assert not t1.is_alive(), "first thread did not finish"
 
 
 def test_workspace_regroup_lock_reentrant_keys_share_one_lock():

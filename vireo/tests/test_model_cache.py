@@ -165,6 +165,8 @@ def test_concurrent_acquire_from_multiple_threads_only_loads_once():
     release_load.set()
     t1.join(timeout=2.0)
     t2.join(timeout=2.0)
+    assert not t1.is_alive(), "t1 did not terminate after join"
+    assert not t2.is_alive(), "t2 did not terminate after join"
     assert load_calls == [1], "factory must run exactly once across threads"
     assert values == ["loaded", "loaded"]
 

@@ -268,13 +268,11 @@ def detect_keypoints(image, bbox, model_name):
     arr = arr[np.newaxis, :, :, :]
 
     session = _load_session(model_name)
-    # Serialise GPU access across concurrent pipelines. Per-photo
-    # granularity (one inference call per detect_keypoints invocation) is
-    # the right size — release between calls lets another pipeline
-    # interleave its own GPU work.
-    from pipeline_locks import acquire_gpu
-    with acquire_gpu():
-        outputs = session.run(None, {"pixel_values": arr})
+    # NOTE: no acquire_gpu() here. The keypoints session is hardcoded
+    # to CPUExecutionProvider (see _load_session). Wrapping the call in
+    # the GPU semaphore would needlessly block real GPU stages in
+    # concurrent pipelines for work that doesn't touch the GPU.
+    outputs = session.run(None, {"pixel_values": arr})
 
     output_type = cfg.get("output_type", "heatmap")
     if output_type == "simcc":

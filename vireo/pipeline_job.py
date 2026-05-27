@@ -3276,8 +3276,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # race and leave inconsistent grouping state. Per-workspace lock
         # serialises only this stage; pipelines on different workspaces
         # don't interact.
-        with acquire_workspace_regroup(workspace_id):
-            try:
+        #
+        # runner.update_step takes JobRunner._lock; per the documented
+        # lock order in pipeline_locks.py, JobRunner._lock is outer to
+        # workspace_regroup. So we capture the intended update inside the
+        # `with` block and apply it after releasing the lock.
+        deferred_step_update = None  # dict of kwargs for runner.update_step
+        try:
+            with acquire_workspace_regroup(workspace_id):
                 import config as cfg
                 from pipeline import load_photo_features, run_full_pipeline, save_results
 
@@ -3293,75 +3299,81 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 if not photos:
                     result["stages"]["regroup"] = {"error": "No photos with pipeline features found."}
                     stages["regroup"]["status"] = "completed"
-                    runner.update_step(job["id"], "regroup", status="completed",
-                                       summary="No photos to group")
-                    return
-
-                results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
-                cache_dir = os.path.dirname(db_path)
-                save_results(results, cache_dir, workspace_id)
-
-                # Stamp the grouping fingerprint + timestamp BEFORE marking the
-                # step completed, so a partial regroup that crashes between here
-                # and update_step doesn't end up labeled "fresh" with a stale fp.
-                #
-                # Only stamp when the regroup actually covered the whole
-                # workspace — if it ran on a filtered subset (a sub-collection,
-                # or with exclude_photo_ids set) some workspace photos were
-                # intentionally not regrouped, so claiming workspace-level
-                # freshness would let the pipeline page hide a real stale state.
-                from pipeline import (
-                    _resolve_collection_photo_ids,
-                    compute_group_fingerprint,
-                )
-                collection_photo_ids = _resolve_collection_photo_ids(
-                    thread_db, collection_id,
-                )
-                ws_photo_ids = {
-                    r["id"] for r in thread_db.conn.execute(
-                        """SELECT p.id
-                             FROM photos p
-                             JOIN workspace_folders wf
-                               ON wf.folder_id = p.folder_id
-                            WHERE wf.workspace_id = ?""",
-                        (workspace_id,),
-                    ).fetchall()
-                }
-                covered_full_workspace = (
-                    not params.exclude_photo_ids
-                    and ws_photo_ids.issubset(collection_photo_ids)
-                )
-                if covered_full_workspace:
-                    thread_db.set_workspace_group_state(
-                        workspace_id=workspace_id,
-                        fingerprint=compute_group_fingerprint(effective_cfg),
-                        when_ts=int(time.time()),
-                    )
+                    deferred_step_update = {
+                        "status": "completed", "summary": "No photos to group",
+                    }
                 else:
-                    # Partial run — save_results just clobbered
-                    # pipeline_results_ws*.json with subset output, so any
-                    # pre-existing fingerprint now points at a cache that no
-                    # longer reflects the full workspace. Invalidate so the
-                    # pipeline page surfaces the staleness as will-run instead
-                    # of falsely reporting done-prior.
-                    thread_db.set_workspace_group_state(
-                        workspace_id=workspace_id,
-                        fingerprint=None,
-                        when_ts=None,
+                    results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
+                    cache_dir = os.path.dirname(db_path)
+                    save_results(results, cache_dir, workspace_id)
+
+                    # Stamp the grouping fingerprint + timestamp BEFORE marking
+                    # the step completed, so a partial regroup that crashes
+                    # between here and update_step doesn't end up labeled "fresh"
+                    # with a stale fp.
+                    #
+                    # Only stamp when the regroup actually covered the whole
+                    # workspace — if it ran on a filtered subset (a
+                    # sub-collection, or with exclude_photo_ids set) some
+                    # workspace photos were intentionally not regrouped, so
+                    # claiming workspace-level freshness would let the pipeline
+                    # page hide a real stale state.
+                    from pipeline import (
+                        _resolve_collection_photo_ids,
+                        compute_group_fingerprint,
                     )
+                    collection_photo_ids = _resolve_collection_photo_ids(
+                        thread_db, collection_id,
+                    )
+                    ws_photo_ids = {
+                        r["id"] for r in thread_db.conn.execute(
+                            """SELECT p.id
+                                 FROM photos p
+                                 JOIN workspace_folders wf
+                                   ON wf.folder_id = p.folder_id
+                                WHERE wf.workspace_id = ?""",
+                            (workspace_id,),
+                        ).fetchall()
+                    }
+                    covered_full_workspace = (
+                        not params.exclude_photo_ids
+                        and ws_photo_ids.issubset(collection_photo_ids)
+                    )
+                    if covered_full_workspace:
+                        thread_db.set_workspace_group_state(
+                            workspace_id=workspace_id,
+                            fingerprint=compute_group_fingerprint(effective_cfg),
+                            when_ts=int(time.time()),
+                        )
+                    else:
+                        # Partial run — save_results just clobbered
+                        # pipeline_results_ws*.json with subset output, so any
+                        # pre-existing fingerprint now points at a cache that
+                        # no longer reflects the full workspace. Invalidate so
+                        # the pipeline page surfaces the staleness as will-run
+                        # instead of falsely reporting done-prior.
+                        thread_db.set_workspace_group_state(
+                            workspace_id=workspace_id,
+                            fingerprint=None,
+                            when_ts=None,
+                        )
 
-                stages["regroup"]["status"] = "completed"
-                summary_info = results.get("summary", {})
-                groups = summary_info.get("groups", "")
-                runner.update_step(job["id"], "regroup", status="completed",
-                                   summary=f"{groups} groups" if groups else "Done")
-                result["stages"]["regroup"] = summary_info
-            except Exception as e:
-                errors.append(f"[regroup] Fatal: {e}")
-                log.exception("Pipeline regroup stage failed")
-                stages["regroup"]["status"] = "failed"
-                runner.update_step(job["id"], "regroup", status="failed", error=str(e))
+                    stages["regroup"]["status"] = "completed"
+                    summary_info = results.get("summary", {})
+                    groups = summary_info.get("groups", "")
+                    deferred_step_update = {
+                        "status": "completed",
+                        "summary": f"{groups} groups" if groups else "Done",
+                    }
+                    result["stages"]["regroup"] = summary_info
+        except Exception as e:
+            errors.append(f"[regroup] Fatal: {e}")
+            log.exception("Pipeline regroup stage failed")
+            stages["regroup"]["status"] = "failed"
+            deferred_step_update = {"status": "failed", "error": str(e)}
 
+        if deferred_step_update is not None:
+            runner.update_step(job["id"], "regroup", **deferred_step_update)
         _update_stages(runner, job["id"], stages)
 
     def miss_stage():
