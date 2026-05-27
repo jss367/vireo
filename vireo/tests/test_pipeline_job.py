@@ -8408,3 +8408,89 @@ def test_pipeline_scan_surfaces_permission_denied(tmp_path, monkeypatch):
         assert isinstance(result, dict)
     finally:
         os.chmod(str(locked_dir), 0o755)
+
+
+def test_release_classifier_cache_handle_clears_bundle_fields():
+    """After release, ``loaded_models`` must not keep the classifier alive.
+
+    Regression for the Codex P2 on PR #899: a late-stage release that
+    only popped ``_cache_handle`` left ``clf``/``labels``/``active_model``
+    in ``loaded_models``. The cache refcount could then drop to 0 and the
+    5-minute idle timer fire while the bundle was still strongly
+    referenced — evicting the cache entry without freeing VRAM, and
+    forcing a duplicate session on the next same-key acquire.
+    """
+    import gc
+    import time
+    import weakref
+
+    from model_cache import ModelCache
+    from pipeline_job import _release_classifier_cache_handle
+
+    # Short idle window so the test exercises the actual eviction path
+    # the bug occurs on (timer fires, entry drops, VRAM frees) rather
+    # than just inspecting dict keys.
+    cache = ModelCache(idle_secs=0.05)
+
+    class FakeClassifier:
+        pass
+
+    box = [FakeClassifier()]
+    clf_ref = weakref.ref(box[0])
+    key = ("bioclip", "m1", "model_str", "/path", "fp")
+
+    handle = cache.acquire(key, lambda: box[0])
+    handle.__enter__()
+    loaded_models = {
+        "_cache_handle": handle,
+        "clf": box[0],
+        "model_type": "bioclip",
+        "model_name": "M1",
+        "model_str": "model_str",
+        "labels": ["a", "b"],
+        "use_tol": False,
+        "active_model": {"id": "m1"},
+        "labels_fingerprint": "fp",
+        # Non-bundle keys must be preserved: pipeline-scoped, not per-model.
+        "tax": object(),
+        "resolved_specs": [{"id": "m1"}],
+    }
+    box[0] = None  # drop the test's own strong ref to the classifier
+
+    _release_classifier_cache_handle(loaded_models)
+
+    for k in ("_cache_handle", "clf", "model_type", "model_name",
+              "model_str", "labels", "use_tol", "active_model",
+              "labels_fingerprint"):
+        assert k not in loaded_models, (
+            f"{k!r} must be cleared so idle eviction can reclaim VRAM"
+        )
+    for k in ("tax", "resolved_specs"):
+        assert k in loaded_models, (
+            f"{k!r} is pipeline-scoped and must survive release"
+        )
+
+    # Drop the local handle ref so only the cache could plausibly pin the
+    # classifier. Wait for the idle timer to evict the entry, then GC. With
+    # bundle fields cleared (the fix) the weakref must collapse — meaning
+    # VRAM would actually be freed. Without the fix, ``loaded_models["clf"]``
+    # would survive and the weakref stays alive.
+    del handle
+    deadline = time.time() + 2.0
+    while time.time() < deadline and cache._has_entry(key):
+        time.sleep(0.01)
+    gc.collect()
+    assert clf_ref() is None, (
+        "classifier must be collectable after release+eviction; "
+        "if this fails, something in loaded_models is still pinning it"
+    )
+
+
+def test_release_classifier_cache_handle_idempotent_when_no_bundle():
+    """Calling release on an empty dict (classify skipped pre-load) is a no-op."""
+    from pipeline_job import _release_classifier_cache_handle
+
+    loaded_models = {"tax": object(), "resolved_specs": []}
+    _release_classifier_cache_handle(loaded_models)
+    assert "tax" in loaded_models
+    assert "resolved_specs" in loaded_models
