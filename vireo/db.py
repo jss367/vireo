@@ -3871,6 +3871,84 @@ class Database:
         ).fetchone()
         return row["n"] or 0
 
+    def count_eye_keypoint_attemptable(self, min_species_conf, photo_ids=None):
+        """Count photos whose top-routable prediction would actually be
+        attempted by the eye-keypoint stage under the current config.
+
+        Tighter than ``count_eye_keypoint_eligible``: that one matches the
+        loose mask+detection+prediction join, which includes photos whose
+        top prediction will be skipped at Gate 1 (classifier confidence
+        below ``min_species_conf``) or fail taxonomy routing (anything
+        outside the keys of ``pipeline._EYE_KEYPOINT_MODEL_FOR_CLASS``).
+        Those photos never get an ``eye_kp_fingerprint`` stamped — by
+        design, so a future config change can retry them — so they would
+        permanently inflate ``eye_target`` and trip the "computed without
+        eye keypoints" banner on every run.
+
+        Match ``list_photos_for_eye_keypoint_stage``'s "best routable row
+        per photo" selection so a taxonomy-bearing prediction wins over a
+        taxonomy-less one. Predictions that route only via the scientific
+        name → taxa-table fallback are *not* counted here (the SQL filter
+        is taxonomy_class-only); those photos will still be attempted by
+        the stage but will be undercounted in the target, which keeps
+        ``attempts >= target`` and means the banner won't lie — at worst
+        it stays quiet when it could have surfaced.
+        """
+        import config as cfg
+        ws = self._ws_id()
+        min_conf = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2,
+        )
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        # Window function pins the same per-photo prediction the stage
+        # would pick (taxonomy-present first, then detector_conf desc,
+        # then species_conf desc) so the attemptable filter is applied to
+        # the *winner*, not to any prediction the photo happens to carry.
+        # The labels_fingerprint subquery mirrors
+        # list_photos_for_eye_keypoint_stage so re-classified detections
+        # only contribute their latest prediction set.
+        row = self.conn.execute(
+            f"""WITH ranked AS (
+                    SELECT p.id AS photo_id,
+                           pr.confidence AS species_conf,
+                           pr.taxonomy_class,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY p.id
+                               ORDER BY
+                                 CASE
+                                     WHEN pr.taxonomy_class IS NOT NULL
+                                       OR pr.scientific_name IS NOT NULL
+                                     THEN 0 ELSE 1
+                                 END,
+                                 d.detector_confidence DESC,
+                                 pr.confidence DESC
+                           ) AS rn
+                    FROM photos p
+                    JOIN workspace_folders wf
+                      ON wf.folder_id = p.folder_id
+                     AND wf.workspace_id = ?
+                    JOIN detections d
+                      ON d.photo_id = p.id
+                     AND d.detector_model != 'full-image'
+                     AND d.detector_confidence >= ?
+                    JOIN predictions pr ON pr.detection_id = d.id
+                    WHERE p.mask_path IS NOT NULL
+                      AND pr.labels_fingerprint = (
+                          SELECT pr2.labels_fingerprint FROM predictions pr2
+                          WHERE pr2.detection_id = pr.detection_id
+                            AND pr2.classifier_model = pr.classifier_model
+                          ORDER BY pr2.created_at DESC, pr2.id DESC
+                          LIMIT 1
+                      ){scope_sql}
+                )
+                SELECT COUNT(*) AS n FROM ranked
+                WHERE rn = 1
+                  AND taxonomy_class IN ('Aves', 'Mammalia')
+                  AND species_conf >= ?""",
+            (ws, min_conf, *scope_params, min_species_conf),
+        ).fetchone()
+        return row["n"] or 0
+
     def get_dashboard_stats(self):
         """Return aggregate statistics for the dashboard."""
         ws = self._ws_id()

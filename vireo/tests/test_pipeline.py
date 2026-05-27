@@ -83,11 +83,16 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")
 
-            # Add a species prediction (references detection, not photo)
+            # Add a species prediction (references detection, not photo).
+            # Stamp taxonomy_class so the prediction routes through the
+            # eye-keypoint stage's primary path — without it, attemptable
+            # photo counts collapse to zero and readiness assertions about
+            # the eye_keypoints enhancing gap stop firing.
             species = "robin" if enc_idx == 0 else "eagle"
             db.add_prediction(
                 det_ids[0], species, 0.9 - i * 0.05, "bioclip",
                 category="match",
+                taxonomy={"class": "Aves"},
             )
 
             enc_ids.append(pid)
@@ -1044,7 +1049,10 @@ def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
     det_ids = db.write_detection_batch(pid, "megadetector-v6", [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
     ])
-    db.add_prediction(det_ids[0], "robin", 0.9, "bioclip", category="match")
+    db.add_prediction(
+        det_ids[0], "robin", 0.9, "bioclip", category="match",
+        taxonomy={"class": "Aves"},
+    )
     emb = np.ones(768, dtype=np.float32)
     emb = emb / np.linalg.norm(emb)
     db.update_photo_pipeline_features(
@@ -1066,6 +1074,159 @@ def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
     assert out["with_eye_keypoint_attempts"] == 1
     assert out["eye_keypoint_target_photos"] == 1
     assert "eye_keypoints" not in out["enhancing_missing"]
+
+
+def _add_eligible_photo(db, fid, filename, species_conf, *, taxonomy_class):
+    """Insert one photo+detection+prediction that the eye stage would route
+    on if ``taxonomy_class`` is Aves/Mammalia and ``species_conf`` clears
+    the classifier confidence gate. Returns the photo id."""
+    pid = db.add_photo(
+        fid, filename, ".jpg", 1000, 1.0,
+        timestamp=datetime(2026, 3, 20, 10, 0, 0).isoformat(),
+        width=4000, height=3000,
+    )
+    det_ids = db.write_detection_batch(pid, "megadetector-v6", [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
+    ])
+    db.add_prediction(
+        det_ids[0], "subject", species_conf, "bioclip", category="match",
+        taxonomy={"class": taxonomy_class} if taxonomy_class else None,
+    )
+    db.update_photo_pipeline_features(pid, mask_path=f"/masks/{pid}.png")
+    return pid
+
+
+def test_compute_review_readiness_eye_target_excludes_out_of_scope_taxonomy(tmp_path):
+    """A photo whose top prediction routes to no keypoint model (taxonomy
+    outside Aves/Mammalia) must not inflate ``eye_keypoint_target_photos``.
+
+    Pre-fix: the loose mask+detection+prediction eligibility join counted
+    these photos, so ``eye_attempts < eye_target`` stayed true forever and
+    the "results were computed without eye keypoints" banner showed after
+    every full run for any workspace that contained, say, an insect.
+    """
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    # Out-of-scope species: dragonflies aren't birds or mammals, so the
+    # stage's _resolve_keypoint_model returns None and the photo is skipped
+    # without stamping a fingerprint. It must not appear in the target.
+    _add_eligible_photo(db, fid, "bug.jpg", 0.9, taxonomy_class="Insecta")
+
+    out = compute_review_readiness(db)
+    assert out["eye_keypoint_target_photos"] == 0
+    assert "eye_keypoints" not in out["enhancing_missing"]
+
+
+def test_compute_review_readiness_eye_target_excludes_low_confidence(tmp_path):
+    """A routable photo whose top prediction sits below the eye-stage
+    classifier confidence gate must not inflate the target.
+
+    Pre-fix: the loose count included this photo, so the banner appeared
+    after every run even though the stage will keep skipping it at Gate 1.
+    """
+    import config as cfg
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    # The stage gate defaults to 0.5; pin the test to a known threshold
+    # so a future default tweak doesn't quietly break the assertion.
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    _add_eligible_photo(db, fid, "shy.jpg", 0.3, taxonomy_class="Aves")
+
+    out = compute_review_readiness(db)
+    assert out["eye_keypoint_target_photos"] == 0
+    assert "eye_keypoints" not in out["enhancing_missing"]
+
+
+def test_compute_review_readiness_eye_target_includes_routable_above_gate(tmp_path):
+    """A routable photo above the confidence gate must still appear in the
+    target so a missing eye-keypoint attempt continues to surface."""
+    import config as cfg
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    _add_eligible_photo(db, fid, "bird.jpg", 0.9, taxonomy_class="Aves")
+
+    out = compute_review_readiness(db)
+    assert out["eye_keypoint_target_photos"] == 1
+    assert "eye_keypoints" in out["enhancing_missing"]
+
+
+def test_compute_review_readiness_eye_target_follows_gate_changes(tmp_path):
+    """Lowering ``eye_classifier_conf_gate`` must expand the target, the
+    same way switching DINOv2 variants reshapes ``with_embeddings``.
+
+    This pins the principle that the readiness counter reflects the
+    *current* config — re-running the stage with a lower gate would now
+    legitimately produce new attempts, and the banner should reappear.
+    """
+    import config as cfg
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    _add_eligible_photo(db, fid, "shy.jpg", 0.3, taxonomy_class="Aves")
+
+    out_strict = compute_review_readiness(db)
+    assert out_strict["eye_keypoint_target_photos"] == 0
+
+    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.2}})
+    out_loose = compute_review_readiness(db)
+    assert out_loose["eye_keypoint_target_photos"] == 1
+    assert "eye_keypoints" in out_loose["enhancing_missing"]
+
+
+def test_compute_review_readiness_eye_target_honors_workspace_pipeline_override(tmp_path):
+    """A workspace-level ``pipeline.eye_classifier_conf_gate`` override
+    must reshape the eye-keypoint target.
+
+    Codex's PR #900 review called out *workspace* settings alongside
+    global ones. The earlier commit verified the nested read against
+    global config; this pins the workspace-overrides path explicitly so
+    a future refactor of ``get_effective_config`` (e.g. forgetting to
+    deep-merge nested dicts) can't silently sever the gate at the
+    workspace level while leaving the global path working.
+    """
+    import config as cfg
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    # Global default gate stays at 0.5; only the active workspace lowers
+    # it, mirroring a user with a per-workspace looser threshold.
+    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace(
+        "loose-gate",
+        config_overrides={"pipeline": {"eye_classifier_conf_gate": 0.2}},
+    )
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(tmp_path), name="photos")
+    # Species confidence 0.3 sits between the global gate (0.5) and the
+    # workspace override (0.2): excluded if the workspace override is
+    # ignored, included if it's honored.
+    _add_eligible_photo(db, fid, "shy.jpg", 0.3, taxonomy_class="Aves")
+
+    out = compute_review_readiness(db)
+    assert out["eye_keypoint_target_photos"] == 1
+    assert "eye_keypoints" in out["enhancing_missing"]
 
 
 def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
