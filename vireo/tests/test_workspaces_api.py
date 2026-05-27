@@ -82,6 +82,29 @@ def test_create_workspace_with_folders(app_and_db):
     assert linked_ids == set(folder_ids)
 
 
+def test_create_workspace_seeds_default_collections(app_and_db):
+    """POST /api/workspaces seeds the standard smart collections into the new workspace.
+
+    Regression guard: without this, a workspace created via the API has no
+    'All Photos' (or other defaults) until it's the active workspace during
+    a future Vireo restart — which broke the pipeline collection picker for
+    workspaces created mid-session.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    resp = client.post("/api/workspaces", json={"name": "Defaults WS"})
+    assert resp.status_code == 200
+    ws_id = resp.get_json()["id"]
+
+    rows = db.conn.execute(
+        "SELECT name FROM collections WHERE workspace_id = ?", (ws_id,),
+    ).fetchall()
+    names = {r["name"] for r in rows}
+    assert {"All Photos", "Needs Identification", "Untagged",
+            "Flagged", "Recent Import"} <= names
+
+
 def test_update_workspace(app_and_db):
     """PUT /api/workspaces/<id> updates the workspace name."""
     app, _db = app_and_db
