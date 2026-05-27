@@ -744,6 +744,11 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
     failed = 0
 
     try:
+        # GPU serialisation across concurrent pipelines lives inside the
+        # classifier helpers (around the ``session.run`` calls), so this
+        # path holds no process-wide lock around preprocessing, DB upserts,
+        # or result-building. See ``Classifier._get_image_embedding`` and
+        # ``TimmClassifier.classify[_batch]``.
         try:
             if model_type == "timm":
                 batch_preds = clf.classify_batch(images, threshold=0)

@@ -20,6 +20,8 @@ from dataclasses import dataclass
 
 import numpy as np
 from db import Database, commit_with_retry
+from model_cache import get_default_cache
+from pipeline_locks import acquire_workspace_regroup
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +85,109 @@ def _looks_like_missing_external_data(err):
 
 
 _RAW_EXTENSIONS = (".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf")
+
+
+_CLASSIFIER_BUNDLE_FIELDS = (
+    "clf", "model_type", "model_name", "model_str",
+    "labels", "use_tol", "active_model", "labels_fingerprint",
+)
+
+
+def _taxonomy_fingerprint(tax):
+    """Stable key component representing the taxonomy backing a classifier.
+
+    Used in the timm classifier cache key so a pipeline that loads the
+    classifier with no taxonomy (or a stale one) does not get reused after
+    a taxonomy download or refresh updates the on-disk file. ``None`` is
+    a valid input — pipelines run without taxonomy still hit the cache
+    consistently among themselves.
+    """
+    if tax is None:
+        return ("no-tax",)
+    path = getattr(tax, "_path", None)
+    if not path:
+        return ("inline", id(tax))
+    try:
+        st = os.stat(path)
+        return (path, int(st.st_mtime_ns), st.st_size)
+    except OSError:
+        return (path, None, None)
+
+
+def _weights_fingerprint(weights_path, files):
+    """Stable key component reflecting the on-disk state of the weights.
+
+    A cached ONNX session is keyed by ``weights_path`` plus this
+    fingerprint. Without it, a Repair (download in place) or a custom-
+    model re-registration overwrites the file at the same path but the
+    classifier cache reuses the previously-loaded session built from the
+    old bytes — silently classifying with stale or corrupt weights.
+    Stat-only (size + mtime_ns) so the lookup stays cheap; in-place
+    replacement reliably bumps mtime even for byte-identical files.
+    Missing files map to a sentinel so a partial repair still misses.
+
+    Custom models have no declared ``files`` list, so fall back to
+    listing the directory (or stat'ing the single file if
+    ``weights_path`` points at one). Without this fallback a user who
+    re-registers a custom model at the same path would reuse the stale
+    session until the idle window expires.
+    """
+    if not weights_path:
+        return None
+    if files:
+        parts = []
+        for rel in files:
+            path = os.path.join(weights_path, rel)
+            try:
+                st = os.stat(path)
+                parts.append((rel, st.st_size, int(st.st_mtime_ns)))
+            except OSError:
+                parts.append((rel, None, None))
+        return tuple(parts)
+    try:
+        if os.path.isdir(weights_path):
+            parts = []
+            for name in sorted(os.listdir(weights_path)):
+                path = os.path.join(weights_path, name)
+                try:
+                    st = os.stat(path)
+                    parts.append((name, st.st_size, int(st.st_mtime_ns)))
+                except OSError:
+                    parts.append((name, None, None))
+            return tuple(parts)
+        if os.path.isfile(weights_path):
+            st = os.stat(weights_path)
+            return (("__file__", st.st_size, int(st.st_mtime_ns)),)
+    except OSError:
+        pass
+    return None
+
+
+def _release_classifier_cache_handle(loaded_models):
+    """Release the cache handle AND drop the bundle's strong refs.
+
+    Releasing the handle alone isn't enough: ``loaded_models`` still
+    holds ``clf`` (the live Classifier/ONNX session) so the GC can't
+    reclaim it. After idle eviction removes the cache entry, a second
+    pipeline that loads the same model gets a fresh session — doubling
+    VRAM — while this pipeline's stale ``clf`` is still pinned. Dropping
+    the bundle fields here lets idle eviction actually free VRAM and
+    lets same-model reloads hit the cache.
+
+    Idempotent: no-op if no handle present (classify skipped before any
+    model loaded).
+    """
+    handle = loaded_models.pop("_cache_handle", None)
+    for k in _CLASSIFIER_BUNDLE_FIELDS:
+        loaded_models.pop(k, None)
+    if handle is None:
+        return
+    try:
+        handle.release()
+    except Exception:
+        # Releasing a cache handle must never break pipeline cleanup.
+        # The cache's idle timer will reclaim leaked entries eventually.
+        log.exception("ModelCache: handle release raised; leak will be reclaimed by idle timer")
 
 
 def _find_broken_metadata_folders(db, photo_ids):
@@ -1427,17 +1532,70 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     active_model["id"], verify_err,
                 )
 
-        try:
+        def _construct_classifier():
             if model_type == "timm":
                 from timm_classifier import TimmClassifier
-                clf = TimmClassifier(model_str, taxonomy=tax)
-            else:
-                from classifier import Classifier
-                clf = Classifier(
-                    labels=None if use_tol else labels,
-                    model_str=model_str,
-                    pretrained_str=weights_path,
-                )
+                return TimmClassifier(model_str, taxonomy=tax)
+            from classifier import Classifier
+            return Classifier(
+                labels=None if use_tol else labels,
+                model_str=model_str,
+                pretrained_str=weights_path,
+            )
+
+        # Cache key includes the labels fingerprint when use_tol=False because
+        # the Classifier pre-computes text embeddings for the provided labels
+        # at construction time. Two pipelines with the same model but
+        # different labels must NOT share a session. Tree-of-Life mode
+        # (use_tol=True) reads precomputed embeddings from disk and is
+        # label-independent, so the key collapses to a constant.
+        #
+        # The timm key also varies by taxonomy fingerprint: TimmClassifier
+        # captures the taxonomy at construction and resolves common names /
+        # hierarchy from it on every prediction. Reusing a classifier loaded
+        # against a stale taxonomy (or no taxonomy) after a later run
+        # downloads or refreshes one would silently emit predictions
+        # missing the enrichment, so a change in taxonomy must miss the
+        # cache and rebuild.
+        #
+        # The weights fingerprint catches in-place model replacement
+        # (Repair, custom re-register). Without it, a pipeline started
+        # before the old session's idle timer fires would reuse the
+        # stale ONNX session on the new bytes.
+        tax_fp = _taxonomy_fingerprint(tax) if model_type == "timm" else None
+        files = active_model.get("files")
+
+        def _build_cache_key(weights_fp):
+            return (
+                "timm" if model_type == "timm" else "bioclip",
+                active_model["id"],
+                model_str,
+                weights_path,
+                "__tol__" if use_tol else fp,
+                tax_fp,
+                weights_fp,
+            )
+
+        cache_key = _build_cache_key(_weights_fingerprint(weights_path, files))
+
+        # _construct_classifier may trigger the ONNX self-heal path
+        # (create_session_with_self_heal) which deletes corrupt weights
+        # and redownloads them inside the factory. That bumps the file
+        # mtime/size, so the pre-load fingerprint baked into ``cache_key``
+        # no longer matches what the *next* pipeline will compute. Rekey
+        # to the post-load fingerprint so the second pipeline hits this
+        # entry instead of loading a duplicate session against the freshly
+        # written bytes.
+        def _post_load_key(_value):
+            return _build_cache_key(_weights_fingerprint(weights_path, files))
+
+        cache_handle = None
+        try:
+            cache_handle = get_default_cache().acquire(
+                cache_key, _construct_classifier,
+                post_load_key=_post_load_key,
+            )
+            clf = cache_handle.__enter__()
         except Exception as load_err:
             # ONNXRuntime signals missing external-data with a
             # "model_path must not be empty" / "Initializer" error. Treat
@@ -1502,6 +1660,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         return {
             "clf": clf,
+            "_cache_handle": cache_handle,
             "model_type": model_type,
             "model_name": model_name,
             "model_str": model_str,
@@ -1768,6 +1927,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     progress={"current": batch_idx, "total": total},
                 )
 
+                # GPU serialisation lives inside detector.detect_animals()
+                # — wrapping the whole batch here would hold the semaphore
+                # across DB writes and CPU sharpness/quality work, blocking
+                # a concurrent pipeline's GPU stages on this pipeline's
+                # non-GPU work.
                 det_map, det_count, det_processed = _detect_batch(
                     batch, folders, runner, job,
                     params.reclassify, thread_db,
@@ -1865,6 +2029,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         status=row_status, summary=row_summary,
                         error=loader_err if loader_failed else None,
                     )
+            # model_loader may have already loaded the first classifier
+            # before this early-return path was hit (e.g. abort.is_set()).
+            # Release its cache handle so a same-key reload can be a hit
+            # and idle eviction can reclaim VRAM.
+            _release_classifier_cache_handle(loaded_models)
             _update_stages(runner, job["id"], stages)
             return
 
@@ -1965,6 +2134,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # large collections can hit transient OOMs.
                     with contextlib.suppress(NameError, UnboundLocalError):
                         raw_results.clear()  # noqa: F821 — bound in prior iter
+                    # Release the previous spec's cache handle so its
+                    # refcount drops and a same-cache-key reload below (or
+                    # in another pipeline) can be a hit. Must happen
+                    # BEFORE popping ``clf`` so we don't lose the only
+                    # reference to the bundle that owns the handle.
+                    _release_classifier_cache_handle(loaded_models)
                     for k in ("clf", "model_type", "model_name", "model_str",
                               "labels", "use_tol", "active_model"):
                         loaded_models.pop(k, None)
@@ -2090,6 +2265,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     inference_batch.clear()
                     has_flushed_in_spec = True
                     pre_len = len(raw_results)
+                    # GPU serialisation lives inside _flush_batch around the
+                    # inference call so the DB upserts/result-building afterward
+                    # don't hold the semaphore while the GPU is idle.
                     n_batch_failed = _flush_batch(
                         pending, clf, model_type, model_name,
                         thread_db, raw_results,
@@ -2464,6 +2642,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     job["id"], sid,
                     status="failed", error=str(e),
                 )
+        finally:
+            # Release the held classifier so subsequent pipelines can reuse
+            # the cached session (or the idle timer can reclaim VRAM). Runs
+            # whether classify completed cleanly, errored mid-loop, or hit
+            # the fatal-exception path above.
+            _release_classifier_cache_handle(loaded_models)
 
         _update_stages(runner, job["id"], stages)
 
@@ -2797,6 +2981,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     if _should_abort(abort):
                         break
 
+                    # GPU serialisation lives inside masking.generate_mask
+                    # (around the encoder/decoder session.run calls). The
+                    # wider wrap previously here held the semaphore through
+                    # SAM weight load + image preprocessing + prompt-coord
+                    # math, blocking other pipelines' GPU work for CPU-only
+                    # phases.
                     mask = generate_mask(proxy, det_box, variant=sam2_variant)
                     if mask is None:
                         skipped += 1
@@ -2831,6 +3021,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     else:
                         mask_subject_size = None
 
+                    # GPU serialisation lives inside dino_embed.embed /
+                    # embed_batch (around the session.run call). The wider
+                    # wrap previously here held the semaphore through
+                    # per-image resize/normalize preprocessing.
                     subject_crop = crop_subject(proxy, mask, margin=0.15)
                     if subject_crop is not None:
                         embs = embed_batch(
@@ -3186,91 +3380,109 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         runner.update_step(job["id"], "regroup", status="running")
         _update_stages(runner, job["id"], stages)
 
+        # Two pipelines targeting the same workspace must not regroup
+        # concurrently — save_results + set_workspace_group_state would
+        # race and leave inconsistent grouping state. Per-workspace lock
+        # serialises only this stage; pipelines on different workspaces
+        # don't interact.
+        #
+        # runner.update_step takes JobRunner._lock; per the documented
+        # lock order in pipeline_locks.py, JobRunner._lock is outer to
+        # workspace_regroup. So we capture the intended update inside the
+        # `with` block and apply it after releasing the lock.
+        deferred_step_update = None  # dict of kwargs for runner.update_step
         try:
-            import config as cfg
-            from pipeline import load_photo_features, run_full_pipeline, save_results
+            with acquire_workspace_regroup(workspace_id):
+                import config as cfg
+                from pipeline import load_photo_features, run_full_pipeline, save_results
 
-            thread_db = Database(db_path)
-            thread_db.set_active_workspace(workspace_id)
+                thread_db = Database(db_path)
+                thread_db.set_active_workspace(workspace_id)
 
-            effective_cfg = thread_db.get_effective_config(cfg.load())
-            pipeline_cfg = effective_cfg.get("pipeline", {})
+                effective_cfg = thread_db.get_effective_config(cfg.load())
+                pipeline_cfg = effective_cfg.get("pipeline", {})
 
-            photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
-            if params.exclude_photo_ids:
-                photos = [p for p in photos if p["id"] not in params.exclude_photo_ids]
-            if not photos:
-                result["stages"]["regroup"] = {"error": "No photos with pipeline features found."}
-                stages["regroup"]["status"] = "completed"
-                runner.update_step(job["id"], "regroup", status="completed",
-                                   summary="No photos to group")
-                return
+                photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
+                if params.exclude_photo_ids:
+                    photos = [p for p in photos if p["id"] not in params.exclude_photo_ids]
+                if not photos:
+                    result["stages"]["regroup"] = {"error": "No photos with pipeline features found."}
+                    stages["regroup"]["status"] = "completed"
+                    deferred_step_update = {
+                        "status": "completed", "summary": "No photos to group",
+                    }
+                else:
+                    results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
+                    cache_dir = os.path.dirname(db_path)
+                    save_results(results, cache_dir, workspace_id)
 
-            results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
-            cache_dir = os.path.dirname(db_path)
-            save_results(results, cache_dir, workspace_id)
+                    # Stamp the grouping fingerprint + timestamp BEFORE marking
+                    # the step completed, so a partial regroup that crashes
+                    # between here and update_step doesn't end up labeled "fresh"
+                    # with a stale fp.
+                    #
+                    # Only stamp when the regroup actually covered the whole
+                    # workspace — if it ran on a filtered subset (a
+                    # sub-collection, or with exclude_photo_ids set) some
+                    # workspace photos were intentionally not regrouped, so
+                    # claiming workspace-level freshness would let the pipeline
+                    # page hide a real stale state.
+                    from pipeline import (
+                        _resolve_collection_photo_ids,
+                        compute_group_fingerprint,
+                    )
+                    collection_photo_ids = _resolve_collection_photo_ids(
+                        thread_db, collection_id,
+                    )
+                    ws_photo_ids = {
+                        r["id"] for r in thread_db.conn.execute(
+                            """SELECT p.id
+                                 FROM photos p
+                                 JOIN workspace_folders wf
+                                   ON wf.folder_id = p.folder_id
+                                WHERE wf.workspace_id = ?""",
+                            (workspace_id,),
+                        ).fetchall()
+                    }
+                    covered_full_workspace = (
+                        not params.exclude_photo_ids
+                        and ws_photo_ids.issubset(collection_photo_ids)
+                    )
+                    if covered_full_workspace:
+                        thread_db.set_workspace_group_state(
+                            workspace_id=workspace_id,
+                            fingerprint=compute_group_fingerprint(effective_cfg),
+                            when_ts=int(time.time()),
+                        )
+                    else:
+                        # Partial run — save_results just clobbered
+                        # pipeline_results_ws*.json with subset output, so any
+                        # pre-existing fingerprint now points at a cache that
+                        # no longer reflects the full workspace. Invalidate so
+                        # the pipeline page surfaces the staleness as will-run
+                        # instead of falsely reporting done-prior.
+                        thread_db.set_workspace_group_state(
+                            workspace_id=workspace_id,
+                            fingerprint=None,
+                            when_ts=None,
+                        )
 
-            # Stamp the grouping fingerprint + timestamp BEFORE marking the
-            # step completed, so a partial regroup that crashes between here
-            # and update_step doesn't end up labeled "fresh" with a stale fp.
-            #
-            # Only stamp when the regroup actually covered the whole
-            # workspace — if it ran on a filtered subset (a sub-collection,
-            # or with exclude_photo_ids set) some workspace photos were
-            # intentionally not regrouped, so claiming workspace-level
-            # freshness would let the pipeline page hide a real stale state.
-            from pipeline import (
-                _resolve_collection_photo_ids,
-                compute_group_fingerprint,
-            )
-            collection_photo_ids = _resolve_collection_photo_ids(
-                thread_db, collection_id,
-            )
-            ws_photo_ids = {
-                r["id"] for r in thread_db.conn.execute(
-                    """SELECT p.id
-                         FROM photos p
-                         JOIN workspace_folders wf
-                           ON wf.folder_id = p.folder_id
-                        WHERE wf.workspace_id = ?""",
-                    (workspace_id,),
-                ).fetchall()
-            }
-            covered_full_workspace = (
-                not params.exclude_photo_ids
-                and ws_photo_ids.issubset(collection_photo_ids)
-            )
-            if covered_full_workspace:
-                thread_db.set_workspace_group_state(
-                    workspace_id=workspace_id,
-                    fingerprint=compute_group_fingerprint(effective_cfg),
-                    when_ts=int(time.time()),
-                )
-            else:
-                # Partial run — save_results just clobbered
-                # pipeline_results_ws*.json with subset output, so any
-                # pre-existing fingerprint now points at a cache that no
-                # longer reflects the full workspace. Invalidate so the
-                # pipeline page surfaces the staleness as will-run instead
-                # of falsely reporting done-prior.
-                thread_db.set_workspace_group_state(
-                    workspace_id=workspace_id,
-                    fingerprint=None,
-                    when_ts=None,
-                )
-
-            stages["regroup"]["status"] = "completed"
-            summary_info = results.get("summary", {})
-            groups = summary_info.get("groups", "")
-            runner.update_step(job["id"], "regroup", status="completed",
-                               summary=f"{groups} groups" if groups else "Done")
-            result["stages"]["regroup"] = summary_info
+                    stages["regroup"]["status"] = "completed"
+                    summary_info = results.get("summary", {})
+                    groups = summary_info.get("groups", "")
+                    deferred_step_update = {
+                        "status": "completed",
+                        "summary": f"{groups} groups" if groups else "Done",
+                    }
+                    result["stages"]["regroup"] = summary_info
         except Exception as e:
             errors.append(f"[regroup] Fatal: {e}")
             log.exception("Pipeline regroup stage failed")
             stages["regroup"]["status"] = "failed"
-            runner.update_step(job["id"], "regroup", status="failed", error=str(e))
+            deferred_step_update = {"status": "failed", "error": str(e)}
 
+        if deferred_step_update is not None:
+            runner.update_step(job["id"], "regroup", **deferred_step_update)
         _update_stages(runner, job["id"], stages)
 
     def miss_stage():

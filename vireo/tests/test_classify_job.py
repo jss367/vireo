@@ -2064,6 +2064,81 @@ def test_flush_batch_default_top_k_is_one():
     assert raw_results[0]["alternatives"] == []
 
 
+# ── GPU lock scope ────────────────────────────────────────────────────────
+
+
+def test_flush_batch_does_not_hold_gpu_lock_around_helper_or_db():
+    """``_flush_batch`` must not hold the GPU semaphore around the
+    classifier helper call or the DB writes.
+
+    Regression for the Codex P2 on PR #899: the process-wide GPU lock
+    has been pushed down into the classifier implementations (around
+    ``session.run`` only). At the ``_flush_batch`` level, neither the
+    classifier helper invocation nor ``db.upsert_photo_embedding`` should
+    see the lock held, so concurrent pipelines' detector/SAM/DINO GPU
+    batches aren't blocked while this one does CPU preprocessing or DB
+    work. The lock-held-during-``session.run`` half of this guarantee is
+    asserted in ``test_classifier.py`` /
+    ``test_timm_classifier.py``.
+    """
+    from unittest.mock import MagicMock
+
+    import pipeline_locks
+    from classify_job import _flush_batch
+
+    snapshots = {}
+
+    def record_inside_helper(images, threshold=0):
+        snapshots["during_helper"] = pipeline_locks._GPU_SEMAPHORE._value
+        return [
+            (
+                [{"species": "Robin", "score": 0.7, "taxonomy": None}],
+                _FakeEmbedding(),
+            )
+            for _ in images
+        ]
+
+    def record_inside_db(photo_id, model_name, embedding_bytes):
+        snapshots["during_db_write"] = pipeline_locks._GPU_SEMAPHORE._value
+
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.side_effect = record_inside_helper
+
+    db = MagicMock()
+    db.upsert_photo_embedding.side_effect = record_inside_db
+
+    raw_results = []
+    batch = [{
+        "photo": {"id": 1, "filename": "bird.jpg", "timestamp": None},
+        "detection_id": 10,
+        "folder_path": "/photos",
+        "image_path": "/photos/bird.jpg",
+        "img": MagicMock(),
+    }]
+
+    baseline = pipeline_locks._GPU_SEMAPHORE._value
+    _flush_batch(batch, clf, "bioclip", "test-model", db, raw_results)
+    assert pipeline_locks._GPU_SEMAPHORE._value == baseline, (
+        "semaphore must be released on the way out"
+    )
+    assert snapshots["during_helper"] == baseline, (
+        "GPU lock must NOT be held around clf.classify_batch_with_embedding "
+        "at the _flush_batch level — the lock now lives inside the classifier "
+        "helpers, wrapping only ``session.run``"
+    )
+    assert snapshots["during_db_write"] == baseline, (
+        "GPU lock must NOT be held during db.upsert_photo_embedding so "
+        "concurrent pipelines can do GPU work while this one persists"
+    )
+
+
+class _FakeEmbedding:
+    """Stand-in for a numpy array that implements only ``.tobytes()``."""
+
+    def tobytes(self):
+        return b"\x00" * 16
+
+
 # ── Top-N: _store_grouped_predictions alternatives tests ─────────────────────
 
 

@@ -8408,3 +8408,211 @@ def test_pipeline_scan_surfaces_permission_denied(tmp_path, monkeypatch):
         assert isinstance(result, dict)
     finally:
         os.chmod(str(locked_dir), 0o755)
+
+
+def test_release_classifier_cache_handle_clears_bundle_fields():
+    """After release, ``loaded_models`` must not keep the classifier alive.
+
+    Regression for the Codex P2 on PR #899: a late-stage release that
+    only popped ``_cache_handle`` left ``clf``/``labels``/``active_model``
+    in ``loaded_models``. The cache refcount could then drop to 0 and the
+    5-minute idle timer fire while the bundle was still strongly
+    referenced — evicting the cache entry without freeing VRAM, and
+    forcing a duplicate session on the next same-key acquire.
+    """
+    import gc
+    import time
+    import weakref
+
+    from model_cache import ModelCache
+    from pipeline_job import _release_classifier_cache_handle
+
+    # Short idle window so the test exercises the actual eviction path
+    # the bug occurs on (timer fires, entry drops, VRAM frees) rather
+    # than just inspecting dict keys.
+    cache = ModelCache(idle_secs=0.05)
+
+    class FakeClassifier:
+        pass
+
+    box = [FakeClassifier()]
+    clf_ref = weakref.ref(box[0])
+    key = ("bioclip", "m1", "model_str", "/path", "fp")
+
+    handle = cache.acquire(key, lambda: box[0])
+    handle.__enter__()
+    loaded_models = {
+        "_cache_handle": handle,
+        "clf": box[0],
+        "model_type": "bioclip",
+        "model_name": "M1",
+        "model_str": "model_str",
+        "labels": ["a", "b"],
+        "use_tol": False,
+        "active_model": {"id": "m1"},
+        "labels_fingerprint": "fp",
+        # Non-bundle keys must be preserved: pipeline-scoped, not per-model.
+        "tax": object(),
+        "resolved_specs": [{"id": "m1"}],
+    }
+    box[0] = None  # drop the test's own strong ref to the classifier
+
+    _release_classifier_cache_handle(loaded_models)
+
+    for k in ("_cache_handle", "clf", "model_type", "model_name",
+              "model_str", "labels", "use_tol", "active_model",
+              "labels_fingerprint"):
+        assert k not in loaded_models, (
+            f"{k!r} must be cleared so idle eviction can reclaim VRAM"
+        )
+    for k in ("tax", "resolved_specs"):
+        assert k in loaded_models, (
+            f"{k!r} is pipeline-scoped and must survive release"
+        )
+
+    # Drop the local handle ref so only the cache could plausibly pin the
+    # classifier. Wait for the idle timer to evict the entry, then GC. With
+    # bundle fields cleared (the fix) the weakref must collapse — meaning
+    # VRAM would actually be freed. Without the fix, ``loaded_models["clf"]``
+    # would survive and the weakref stays alive.
+    del handle
+    deadline = time.time() + 2.0
+    while time.time() < deadline and cache._has_entry(key):
+        time.sleep(0.01)
+    gc.collect()
+    assert clf_ref() is None, (
+        "classifier must be collectable after release+eviction; "
+        "if this fails, something in loaded_models is still pinning it"
+    )
+
+
+def test_release_classifier_cache_handle_idempotent_when_no_bundle():
+    """Calling release on an empty dict (classify skipped pre-load) is a no-op."""
+    from pipeline_job import _release_classifier_cache_handle
+
+    loaded_models = {"tax": object(), "resolved_specs": []}
+    _release_classifier_cache_handle(loaded_models)
+    assert "tax" in loaded_models
+    assert "resolved_specs" in loaded_models
+
+
+def test_weights_fingerprint_changes_on_in_place_replacement(tmp_path):
+    """A Repair / re-register that overwrites weights at the same path must
+    produce a different cache-key component.
+
+    Regression for the Codex P2 on PR #899: the classifier cache key
+    only contained ``weights_path`` (a stable directory string), so a
+    pipeline reusing the in-process cache after a Repair would silently
+    classify with stale or corrupt session bytes until the 5-minute idle
+    timer fired.
+    """
+    import os
+    import time
+
+    from pipeline_job import _weights_fingerprint
+
+    files = ["image_encoder.onnx", "config.json"]
+    for rel in files:
+        (tmp_path / rel).write_bytes(b"v1")
+
+    fp1 = _weights_fingerprint(str(tmp_path), files)
+    assert fp1 is not None
+
+    # Identical disk state — fingerprint must be byte-identical so cache
+    # hits across pipeline runs work.
+    assert _weights_fingerprint(str(tmp_path), files) == fp1
+
+    # Bump mtime in a way the OS can resolve (st_mtime_ns is OS-dependent;
+    # 10 ms covers every filesystem we care about). The size also changes
+    # here, but mtime alone would be enough — in-place overwrites bump it.
+    time.sleep(0.01)
+    (tmp_path / "image_encoder.onnx").write_bytes(b"v2-longer")
+    # Force mtime forward in case the filesystem coalesces same-second writes.
+    new_mtime = os.stat(tmp_path / "image_encoder.onnx").st_mtime + 1
+    os.utime(tmp_path / "image_encoder.onnx", (new_mtime, new_mtime))
+
+    fp2 = _weights_fingerprint(str(tmp_path), files)
+    assert fp2 != fp1, (
+        "weights fingerprint must change after in-place file replacement "
+        "so the classifier cache misses on the new bytes"
+    )
+
+
+def test_weights_fingerprint_handles_missing_path_and_files():
+    """``None``/missing inputs must collapse to ``None`` so the cache key
+    stays well-formed when nothing can be stat'd.
+    """
+    from pipeline_job import _weights_fingerprint
+
+    assert _weights_fingerprint(None, ["a.onnx"]) is None
+    assert _weights_fingerprint(None, None) is None
+    assert _weights_fingerprint("/nonexistent/path/that/does/not/exist", None) is None
+    assert _weights_fingerprint("/nonexistent/path/that/does/not/exist", []) is None
+
+
+def test_weights_fingerprint_custom_model_directory(tmp_path):
+    """Custom models have no declared ``files`` list, so the fingerprint
+    must fall back to listing the directory. Without this, a user who
+    re-registers a custom model at the same path within the idle window
+    keeps hitting the cached session built from the old weights.
+    """
+    from pipeline_job import _weights_fingerprint
+
+    (tmp_path / "model.onnx").write_bytes(b"v1")
+    (tmp_path / "config.json").write_bytes(b"{}")
+    fp1 = _weights_fingerprint(str(tmp_path), None)
+    assert fp1 is not None
+    assert any(part[0] == "model.onnx" for part in fp1)
+
+    # Re-register: overwrite the .onnx with new bytes.
+    import os
+    import time
+
+    time.sleep(0.01)
+    (tmp_path / "model.onnx").write_bytes(b"v2-much-larger-payload")
+    os.utime(tmp_path / "model.onnx", None)
+    fp2 = _weights_fingerprint(str(tmp_path), None)
+    assert fp2 != fp1
+
+
+def test_weights_fingerprint_custom_model_single_file(tmp_path):
+    """Custom models can be registered as a path to a single .onnx file
+    rather than a directory; that case must still produce a fingerprint
+    so in-place replacement is detected.
+    """
+    from pipeline_job import _weights_fingerprint
+
+    onnx = tmp_path / "model.onnx"
+    onnx.write_bytes(b"v1")
+    fp1 = _weights_fingerprint(str(onnx), None)
+    assert fp1 is not None
+
+    import os
+    import time
+
+    time.sleep(0.01)
+    onnx.write_bytes(b"v2-much-larger-payload")
+    os.utime(onnx, None)
+    fp2 = _weights_fingerprint(str(onnx), None)
+    assert fp2 != fp1
+
+
+def test_weights_fingerprint_missing_file_distinguishes_from_present(tmp_path):
+    """A partial-Repair state (file deleted but path still listed) must
+    fingerprint differently from the complete state, so the cache misses
+    and the load attempt either succeeds with fresh files or raises a
+    clear "incomplete" error instead of reusing a stale session.
+    """
+    from pipeline_job import _weights_fingerprint
+
+    files = ["a.onnx", "b.onnx"]
+    (tmp_path / "a.onnx").write_bytes(b"x")
+    (tmp_path / "b.onnx").write_bytes(b"y")
+    full_fp = _weights_fingerprint(str(tmp_path), files)
+
+    (tmp_path / "b.onnx").unlink()
+    partial_fp = _weights_fingerprint(str(tmp_path), files)
+
+    assert partial_fp != full_fp
+    # Missing entries collapse to a sentinel so the key still hashes.
+    assert any(part[1] is None for part in partial_fp)

@@ -12,6 +12,21 @@ from PIL import Image
 
 
 @pytest.fixture(autouse=True)
+def _reset_model_cache():
+    """Drop the process-wide ModelCache between tests.
+
+    The cache is keyed by (model_id, fingerprint, ...) so a monkeypatched
+    ``Classifier`` stub from one test would otherwise be served to the
+    next test that reuses the same model id. Reset is cheap and only
+    affects tests; production keeps the singleton for the process lifetime.
+    """
+    from model_cache import reset_default_cache_for_tests
+    reset_default_cache_for_tests()
+    yield
+    reset_default_cache_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _restore_global_config_paths():
     """Snapshot/restore ``config.CONFIG_PATH`` (and ``models``' equivalents)
     around every test so a leak from a fixture that direct-assigns these

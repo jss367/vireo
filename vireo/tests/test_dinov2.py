@@ -125,6 +125,78 @@ def test_singleton_reloads_for_different_variant(tmp_path):
     dino_embed._variant_loaded = None
 
 
+def test_concurrent_first_load_creates_only_one_session(tmp_path):
+    """Regression: two threads racing into _get_dinov2_session on first
+    load must share a single ONNX session, not each create their own and
+    overwrite the module global. Without the load lock, both threads pass
+    the ``_session is None`` check and ``onnx_runtime.create_session`` is
+    called twice — leaking the loser into VRAM and defeating the
+    shared-session guarantee that the rest of the concurrency design
+    relies on.
+    """
+    import threading
+    import time
+
+    import dino_embed
+
+    dino_embed._session = None
+    dino_embed._variant_loaded = None
+
+    model_dir = tmp_path / ".vireo" / "models" / "dinov2-vit-b14"
+    model_dir.mkdir(parents=True)
+    model_path = model_dir / "model.onnx"
+    model_path.write_bytes(b"fake")
+
+    create_calls = []
+    start_gate = threading.Event()
+
+    def slow_create(*_args, **_kwargs):
+        create_calls.append(1)
+        # Hold the lock long enough that, without the load lock, the
+        # second thread would also pass the ``_session is None`` check
+        # and call create_session. With the lock, the second thread
+        # blocks here and observes the cached session on re-check.
+        time.sleep(0.05)
+        return MagicMock()
+
+    results = []
+
+    def worker():
+        start_gate.wait(timeout=2.0)
+        results.append(dino_embed._get_dinov2_session("vit-b14"))
+
+    # Apply patches once on the main thread, not from inside each worker.
+    # ``mock.patch`` mutates a module global; two threads independently
+    # entering/exiting a patch on the same target can race the restore
+    # and leak the patched function past the test boundary — flaking
+    # unrelated tests on the same xdist worker that call
+    # ``os.path.expanduser`` (e.g. ``test_runtime.py``).
+    with patch("os.path.expanduser", return_value=str(tmp_path)), patch(
+        "dino_embed.onnx_runtime.create_session",
+        side_effect=slow_create,
+    ):
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        start_gate.set()
+        t1.join(timeout=3.0)
+        t2.join(timeout=3.0)
+
+    assert not t1.is_alive(), "first thread did not finish"
+    assert not t2.is_alive(), "second thread did not finish"
+    assert len(create_calls) == 1, (
+        "onnx_runtime.create_session must be called exactly once across "
+        f"concurrent first-load attempts; got {len(create_calls)} calls"
+    )
+    assert len(results) == 2
+    assert results[0] is results[1], "both threads must observe the same session"
+    assert dino_embed._session is results[0]
+
+    dino_embed._session = None
+    dino_embed._variant_loaded = None
+
+
 # -- Preprocessing --
 
 
@@ -228,6 +300,103 @@ def test_embed_batch_rejects_empty_input():
 
     with pytest.raises(ValueError, match="at least one image"):
         dino_embed.embed_batch([], variant="vit-b14")
+
+
+def test_embed_batch_releases_gpu_lock_outside_inference():
+    """``embed_batch`` must hold the GPU semaphore only across the
+    ``session.run`` call — not across session loading or image
+    preprocessing.
+
+    Regression for the Codex P2 on PR #899: holding the process-wide GPU
+    lock across DINO's resize/normalize loop blocked concurrent pipelines'
+    GPU stages on CPU preprocessing.
+    """
+    import dino_embed
+    import pipeline_locks
+
+    snapshots = {"during": None}
+
+    def record_inside_run(_outputs, _inputs):
+        snapshots["during"] = pipeline_locks._GPU_SEMAPHORE._value
+        return [np.zeros((1, 768), dtype=np.float32)]
+
+    mock_session = MagicMock()
+    mock_session.get_inputs.return_value = [MagicMock(name="input")]
+    # Report a GPU provider so the conditional lock engages and the
+    # original "lock is held during inference" coverage still holds.
+    mock_session.get_providers.return_value = [
+        "CUDAExecutionProvider", "CPUExecutionProvider",
+    ]
+    mock_session.run.side_effect = record_inside_run
+
+    dino_embed._session = mock_session
+    dino_embed._variant_loaded = "vit-b14"
+
+    from PIL import Image
+
+    img = Image.new("RGB", (100, 100))
+
+    baseline = pipeline_locks._GPU_SEMAPHORE._value
+    try:
+        dino_embed.embed_batch([img], variant="vit-b14")
+    finally:
+        dino_embed._session = None
+        dino_embed._variant_loaded = None
+
+    # Semaphore's _value is decremented while held. With a 1-slot
+    # semaphore, baseline=1 → 0 during session.run, back to 1 after.
+    assert pipeline_locks._GPU_SEMAPHORE._value == baseline, (
+        "semaphore must be released on the way out"
+    )
+    assert snapshots["during"] == baseline - 1, (
+        "GPU lock must be held during session.run"
+    )
+
+
+def test_embed_batch_skips_gpu_lock_for_cpu_only_session():
+    """When the DINO session falls back to CPU (Apple Silicon with
+    external-data models, or CPU-only installs), ``embed_batch`` must NOT
+    take the process-wide GPU semaphore — taking it would block unrelated
+    detector/classifier/SAM batches for work that never touches the GPU.
+
+    Regression for the Codex P2 on PR #899
+    (https://github.com/jss367/vireo/pull/899#discussion_r3308852536).
+    """
+    import dino_embed
+    import pipeline_locks
+
+    snapshots = {"during": None}
+
+    def record_inside_run(_outputs, _inputs):
+        snapshots["during"] = pipeline_locks._GPU_SEMAPHORE._value
+        return [np.zeros((1, 768), dtype=np.float32)]
+
+    mock_session = MagicMock()
+    mock_session.get_inputs.return_value = [MagicMock(name="input")]
+    # CPU-only execution — no GPU provider in the list.
+    mock_session.get_providers.return_value = ["CPUExecutionProvider"]
+    mock_session.run.side_effect = record_inside_run
+
+    dino_embed._session = mock_session
+    dino_embed._variant_loaded = "vit-b14"
+
+    from PIL import Image
+
+    img = Image.new("RGB", (100, 100))
+
+    baseline = pipeline_locks._GPU_SEMAPHORE._value
+    try:
+        dino_embed.embed_batch([img], variant="vit-b14")
+    finally:
+        dino_embed._session = None
+        dino_embed._variant_loaded = None
+
+    # Semaphore must remain free across the run — CPU-only sessions
+    # don't take the GPU lock.
+    assert snapshots["during"] == baseline, (
+        "GPU lock must NOT be held during CPU-only session.run"
+    )
+    assert pipeline_locks._GPU_SEMAPHORE._value == baseline
 
 
 def test_embed_subject_delegates_to_embed():

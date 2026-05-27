@@ -41,6 +41,14 @@ _session = None
 _variant_loaded = None
 
 _dinov2_download_lock = threading.Lock()
+# Serialises first-load and variant-swap in _get_dinov2_session. Without
+# this, two concurrent pipelines reaching their first DINO inference at
+# the same time can both pass the `_session is None` check, both call
+# onnx_runtime.create_session(), and overwrite each other in the module
+# globals — leaving a duplicate ONNX session pinning VRAM and defeating
+# the shared-session guarantee that ModelCache + acquire_gpu provide for
+# the inference path itself.
+_dinov2_session_lock = threading.Lock()
 
 
 def _dinov2_model_path(variant):
@@ -266,26 +274,34 @@ def _get_dinov2_session(variant="vit-b14"):
             f"Choose from: {list(DINOV2_VARIANTS.keys())}"
         )
 
-    model_dir = os.path.join(
-        os.path.expanduser("~"), ".vireo", "models", f"dinov2-{variant}"
-    )
-    model_path = os.path.join(model_dir, "model.onnx")
+    # Double-checked locking: the fast path above avoids taking the lock
+    # on the steady-state cache hit. The slow path here serialises first
+    # load and variant-swap so two concurrent acquirers don't both create
+    # an ONNX session and leak the loser into VRAM.
+    with _dinov2_session_lock:
+        if _session is not None and _variant_loaded == variant:
+            return _session
 
-    if not os.path.isfile(model_path):
-        raise FileNotFoundError(
-            f"DINOv2 ONNX model not found at {model_path}. "
-            f"Download it first via the models page."
+        model_dir = os.path.join(
+            os.path.expanduser("~"), ".vireo", "models", f"dinov2-{variant}"
         )
+        model_path = os.path.join(model_dir, "model.onnx")
 
-    log.info("Loading DINOv2 ONNX (%s)...", variant)
-    sess = onnx_runtime.create_session(model_path)
+        if not os.path.isfile(model_path):
+            raise FileNotFoundError(
+                f"DINOv2 ONNX model not found at {model_path}. "
+                f"Download it first via the models page."
+            )
 
-    _session = sess
-    _variant_loaded = variant
-    log.info(
-        "DINOv2 ONNX loaded (%s, %d-dim)", variant, DINOV2_VARIANTS[variant]
-    )
-    return sess
+        log.info("Loading DINOv2 ONNX (%s)...", variant)
+        sess = onnx_runtime.create_session(model_path)
+
+        _session = sess
+        _variant_loaded = variant
+        log.info(
+            "DINOv2 ONNX loaded (%s, %d-dim)", variant, DINOV2_VARIANTS[variant]
+        )
+        return sess
 
 
 def embed(image, variant="vit-b14"):
@@ -337,10 +353,46 @@ def embed_batch(images, variant="vit-b14"):
     ]
     batch = np.concatenate(tensors, axis=0)
 
+    # GPU serialisation across concurrent pipelines, scoped tightly to
+    # the forward pass. Preprocessing above (resize/normalize per image)
+    # runs without the lock so concurrent pipelines aren't blocked on
+    # CPU work.
+    #
+    # Skip the GPU semaphore when the session is CPU-only — on Apple
+    # Silicon with external-data models (CoreML excluded — see
+    # ``onnx_runtime.create_session``) and on CPU-only installs, DINO
+    # runs on the CPU. Taking the process-wide GPU lock there would
+    # needlessly block concurrent detector/classifier/SAM batches that
+    # *do* use the GPU, defeating the concurrency this design enables.
     input_name = session.get_inputs()[0].name
-    outputs = session.run(None, {input_name: batch})
+    if _session_uses_gpu(session):
+        from pipeline_locks import acquire_gpu
+        with acquire_gpu():
+            outputs = session.run(None, {input_name: batch})
+    else:
+        outputs = session.run(None, {input_name: batch})
 
     return outputs[0].astype(np.float32)
+
+
+_GPU_PROVIDERS = ("CUDAExecutionProvider", "CoreMLExecutionProvider")
+
+
+def _session_uses_gpu(session):
+    """Return True if ``session`` is actually executing on a GPU provider.
+
+    ``InferenceSession.get_providers()`` returns the providers ONNX
+    Runtime decided to use after construction, so this reflects reality
+    even when CoreML was requested but excluded (e.g. for external-data
+    models). Falls back to ``True`` if the session doesn't expose
+    ``get_providers`` — the conservative default that matches prior
+    behavior.
+    """
+    try:
+        providers = session.get_providers()
+    except Exception:
+        return True
+    return any(p in _GPU_PROVIDERS for p in providers)
 
 
 def embed_subject(crop_image, variant="vit-b14"):

@@ -482,6 +482,94 @@ def test_generate_mask_with_mock():
     masking._sam2_variant_loaded = None
 
 
+def test_generate_mask_releases_gpu_lock_outside_inference():
+    """``generate_mask`` must hold the GPU semaphore only across the
+    encoder and decoder ``session.run`` calls — not across preprocessing,
+    prompt encoding, or mask postprocessing.
+
+    Regression for the Codex P2 on PR #899: holding the process-wide GPU
+    lock through SAM preprocessing/session-loading blocked concurrent
+    pipelines' classify/detect/DINO GPU stages even though the GPU was
+    idle. We assert by snapshotting the semaphore's slot count inside the
+    mocked session.run vs after generate_mask returns.
+    """
+    from unittest.mock import MagicMock
+
+    import masking
+    import pipeline_locks
+
+    snapshots = {"enc_during": None, "dec_during": None}
+
+    mock_enc = MagicMock()
+    mock_dec = MagicMock()
+
+    mock_enc.get_inputs.return_value = [MagicMock(name="image")]
+
+    def enc_run(_outputs, _inputs):
+        snapshots["enc_during"] = pipeline_locks._GPU_SEMAPHORE._value
+        return [np.zeros((1, 256, 64, 64), dtype=np.float32)]
+
+    mock_enc.run.side_effect = enc_run
+
+    mock_dec_input_1 = MagicMock()
+    mock_dec_input_1.name = "image_embeddings"
+    mock_dec_input_2 = MagicMock()
+    mock_dec_input_2.name = "point_coords"
+    mock_dec_input_3 = MagicMock()
+    mock_dec_input_3.name = "point_labels"
+    mock_dec_input_4 = MagicMock()
+    mock_dec_input_4.name = "mask_input"
+    mock_dec_input_5 = MagicMock()
+    mock_dec_input_5.name = "has_mask_input"
+    mock_dec_input_6 = MagicMock()
+    mock_dec_input_6.name = "orig_im_size"
+    mock_dec.get_inputs.return_value = [
+        mock_dec_input_1, mock_dec_input_2, mock_dec_input_3,
+        mock_dec_input_4, mock_dec_input_5, mock_dec_input_6,
+    ]
+
+    masks = np.zeros((1, 1, 100, 150), dtype=np.float32)
+    masks[0, 0, 20:60, 30:90] = 1.0
+    scores = np.array([[0.9]], dtype=np.float32)
+
+    def dec_run(_outputs, _inputs):
+        snapshots["dec_during"] = pipeline_locks._GPU_SEMAPHORE._value
+        return [masks, scores]
+
+    mock_dec.run.side_effect = dec_run
+
+    masking._encoder_session = mock_enc
+    masking._decoder_session = mock_dec
+    masking._sam2_variant_loaded = "sam2-small"
+
+    img = Image.new("RGB", (150, 100))
+    detection_box = {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}
+
+    baseline = pipeline_locks._GPU_SEMAPHORE._value
+    try:
+        result = masking.generate_mask(
+            img, detection_box, variant="sam2-small",
+        )
+    finally:
+        masking._encoder_session = None
+        masking._decoder_session = None
+        masking._sam2_variant_loaded = None
+
+    assert result is not None
+    # Semaphore's _value is decremented while the lock is held. With a
+    # 1-slot semaphore, baseline=1 → 0 during each session.run, back to 1
+    # after generate_mask returns.
+    assert pipeline_locks._GPU_SEMAPHORE._value == baseline, (
+        "semaphore must be released on the way out"
+    )
+    assert snapshots["enc_during"] == baseline - 1, (
+        "GPU lock must be held during encoder session.run"
+    )
+    assert snapshots["dec_during"] == baseline - 1, (
+        "GPU lock must be held during decoder session.run"
+    )
+
+
 # -- ensure_sam2_weights (auto-download on first pipeline run) --
 
 
