@@ -539,21 +539,34 @@ class JobRunner:
     def get_history(self, db, limit=10):
         """Get recent job history from the database.
 
+        Only TERMINAL rows (completed/failed/cancelled) are returned —
+        ``queued`` and ``running`` rows represent live state and surface
+        through ``list_jobs()`` / ``get()`` so the UI can render and
+        cancel them. Including them in history would make queued runs
+        show up under "last run" / Jobs-page history with no cancel
+        affordance, which is exactly the wrong UX.
+
         Args:
             db: Database instance (must be from the calling thread)
             limit: max number of rows
         """
         try:
             ws_id = db._active_workspace_id
+            terminal = ("completed", "failed", "cancelled")
+            placeholders = ",".join(["?"] * len(terminal))
             if ws_id is not None:
                 rows = db.conn.execute(
-                    "SELECT * FROM job_history WHERE workspace_id = ? ORDER BY started_at DESC LIMIT ?",
-                    (ws_id, limit),
+                    f"SELECT * FROM job_history "
+                    f"WHERE workspace_id = ? AND status IN ({placeholders}) "
+                    f"ORDER BY started_at DESC LIMIT ?",
+                    (ws_id, *terminal, limit),
                 ).fetchall()
             else:
                 rows = db.conn.execute(
-                    "SELECT * FROM job_history ORDER BY started_at DESC LIMIT ?",
-                    (limit,),
+                    f"SELECT * FROM job_history "
+                    f"WHERE status IN ({placeholders}) "
+                    f"ORDER BY started_at DESC LIMIT ?",
+                    (*terminal, limit),
                 ).fetchall()
             result = []
             for r in rows:

@@ -363,6 +363,50 @@ def pytest_fail(msg):
     raise AssertionError(msg)
 
 
+def test_get_history_excludes_queued_rows(tmp_path):
+    """Codex P2 regression: queued pipeline rows live in job_history
+    immediately on enqueue, but they're LIVE state, not history. The
+    /jobs page and bottom-panel render history as completed runs with
+    no cancel affordance — a queued row showing up there is confusing
+    UX. ``get_history`` must filter to terminal statuses.
+    """
+    runner, db = _make_runner_with_db(tmp_path)
+    try:
+        ws = db._active_workspace_id
+
+        blocker = threading.Event()
+        first_id = runner.enqueue_pipeline(
+            work_fn=lambda job: blocker.wait(timeout=3.0),
+            config={}, workspace_id=ws,
+        )
+        queued_id = runner.enqueue_pipeline(
+            work_fn=lambda job: None, config={}, workspace_id=ws,
+        )
+
+        # Sanity: both rows exist with non-terminal status.
+        assert runner.get(queued_id)["status"] == "queued"
+
+        # History must NOT include either live row.
+        history_ids = [j["id"] for j in runner.get_history(db, limit=50)]
+        assert first_id not in history_ids, (
+            "running rows belong to live state, not history"
+        )
+        assert queued_id not in history_ids, (
+            "queued rows belong to live state, not history"
+        )
+
+        blocker.set()
+        wait_for_job_via_runner(runner, first_id)
+        wait_for_job_via_runner(runner, queued_id)
+
+        # After completion both DO appear in history.
+        history_ids = [j["id"] for j in runner.get_history(db, limit=50)]
+        assert first_id in history_ids
+        assert queued_id in history_ids
+    finally:
+        db.close()
+
+
 def test_list_jobs_includes_queued_pipelines(tmp_path):
     """Codex P2 regression: the navbar and /jobs page build their
     active-jobs list from ``runner.list_jobs()``. Queued pipelines live
