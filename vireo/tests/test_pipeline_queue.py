@@ -22,6 +22,12 @@ from wait import wait_for_job_via_runner
 def _make_runner_with_db(tmp_path):
     """Build a JobRunner + Database pair for a single test.
 
+    Also redirects ``config.CONFIG_PATH`` to ``tmp_path / "config.json"``
+    so tests can't write through to ``~/.vireo/config.json`` even if a
+    code path we exercise calls ``config.save()``. The conftest's
+    ``_restore_global_config_paths`` autouse fixture restores it after
+    the test.
+
     The caller doesn't have to close the Database explicitly: pytest's
     tmp_path teardown removes the file, and Python's GC eventually
     finalises the Database object. For tests that open a second
@@ -29,6 +35,8 @@ def _make_runner_with_db(tmp_path):
     explicitly inside the test to avoid SQLite holding shared file
     locks across handles when GC order is non-deterministic.
     """
+    import config as cfg
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     db = Database(str(tmp_path / "test.db"))
     from jobs import JobRunner
     return JobRunner(db=db), db
@@ -47,26 +55,47 @@ def test_enqueue_pipeline_returns_pipeline_prefixed_job_id(tmp_path):
 
 
 def test_enqueue_pipeline_persists_queued_row(tmp_path):
-    """A row with status='queued' must be inserted into job_history."""
-    runner, db = _make_runner_with_db(tmp_path)
-
+    """A row with status='queued' must be inserted into job_history
+    BEFORE the worker thread runs to completion, and must be visible
+    cross-connection (different sqlite handle).
+    """
+    runner, _ = _make_runner_with_db(tmp_path)
+    # Block the first pipeline so the read below sees a non-terminal
+    # state; without it the trivial lambda runs to completion before
+    # the assertion fires and the status would be 'completed'.
+    blocker = threading.Event()
+    first_id = runner.enqueue_pipeline(
+        work_fn=lambda job: blocker.wait(timeout=3.0),
+        config={}, workspace_id=1,
+    )
     job_id = runner.enqueue_pipeline(
         work_fn=lambda job: None,
         config={"sources": ["/a"]},
         workspace_id=42,
     )
 
-    # New connection so we don't see the runner's write through any
-    # transactional cache; this confirms the row is committed.
-    row = db.conn.execute(
-        "SELECT id, type, status, workspace_id, config "
-        "FROM job_history WHERE id = ?",
-        (job_id,),
-    ).fetchone()
+    # Open a fresh Database against the same file to verify the row is
+    # actually committed and visible cross-connection — the test fixture's
+    # Database isn't the same connection the runner used for the INSERT
+    # (enqueue_pipeline opens its own sqlite3 connection), but using a
+    # genuinely separate Database removes any ambiguity.
+    verify_db = Database(str(tmp_path / "test.db"))
+    try:
+        row = verify_db.conn.execute(
+            "SELECT id, type, status, workspace_id, config "
+            "FROM job_history WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+    finally:
+        verify_db.close()
     assert row is not None, "enqueue did not persist a job_history row"
     assert row["type"] == "pipeline"
-    assert row["status"] in ("queued", "running")  # may have promoted already
+    assert row["status"] == "queued"
     assert row["workspace_id"] == 42
+
+    blocker.set()
+    wait_for_job_via_runner(runner, first_id)
+    wait_for_job_via_runner(runner, job_id)
 
 
 def test_enqueue_pipeline_promotes_immediately_when_slot_free(tmp_path):
@@ -332,6 +361,41 @@ def test_promotion_loses_race_to_cancel_leaves_row_cancelled(tmp_path):
 
 def pytest_fail(msg):
     raise AssertionError(msg)
+
+
+def test_cancelling_queued_pipeline_emits_complete_event_to_sse(tmp_path):
+    """Codex P2 regression: when a queued pipeline is cancelled while a
+    client is subscribed to its SSE stream, the client must receive a
+    terminal 'complete' event with status='cancelled' so it closes the
+    stream cleanly. Without this the runner.get() lookup turns None
+    and the SSE loop reports the job as 'expired'.
+    """
+    runner, _ = _make_runner_with_db(tmp_path)
+    blocker = threading.Event()
+
+    def first_work(job):
+        blocker.wait(timeout=3.0)
+        return {}
+
+    first_id = runner.enqueue_pipeline(first_work, config={}, workspace_id=1)
+    second_id = runner.enqueue_pipeline(
+        lambda job: pytest_fail("cancelled queued must not run"),
+        config={}, workspace_id=1,
+    )
+    assert runner.get(second_id)["status"] == "queued"
+
+    # Subscribe BEFORE cancel — mirrors a UI tab that hit /api/jobs/<id>/stream
+    # while the run was still waiting in the queue.
+    q = runner.subscribe(second_id)
+
+    assert runner.cancel_job(second_id) is True
+
+    evt = q.get(timeout=1.0)
+    assert evt["type"] == "complete"
+    assert evt["data"]["status"] == "cancelled"
+
+    blocker.set()
+    wait_for_job_via_runner(runner, first_id)
 
 
 def test_sse_subscribers_attached_while_queued_receive_post_promotion_events(tmp_path):

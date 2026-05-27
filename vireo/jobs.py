@@ -689,6 +689,7 @@ class JobRunner:
         Returns True if the job was found and either marked for
         cancellation (running) or transitioned to cancelled (queued).
         """
+        emit_complete = False
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None and job["status"] == "running":
@@ -717,8 +718,26 @@ class JobRunner:
                     finally:
                         conn.close()
                 self._queued_pipelines.pop(job_id, None)
-                return True
-            return False
+                emit_complete = True
+            else:
+                return False
+        # Emit the terminal SSE event AFTER releasing the lock — clients
+        # subscribed to /api/jobs/<id>/stream while the job was queued
+        # need a ``complete`` event with status='cancelled' so they
+        # close cleanly. Without this they'd see ``get(job_id) is None``
+        # on the next keepalive and report the job as ``expired``.
+        if emit_complete:
+            self.push_event(
+                job_id,
+                "complete",
+                {
+                    "status": "cancelled",
+                    "result": None,
+                    "duration": 0.0,
+                    "errors": [],
+                },
+            )
+        return True
 
     def is_cancelled(self, job_id):
         """Check whether a job has been marked for cancellation."""
