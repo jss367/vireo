@@ -209,10 +209,14 @@ def test_pipeline_slots_counts_only_pipeline_jobs(app_and_db):
         runner._jobs["pipe-done-1"] = finished_pipeline
         runner._jobs["scan-running-1"] = running_scan
 
-    data = client.get('/api/pipeline/slots').get_json()
+    from jobs import SLOT_CAP
+    resp = client.get('/api/pipeline/slots')
+    assert resp.status_code == 200
+    data = resp.get_json()
     assert data["active"] == 1, \
         "only running pipelines count toward active slots"
     assert data["queued"] == 0
+    assert data["slot_cap"] == SLOT_CAP
 
 
 def test_pipeline_slots_counts_queued(app_and_db):
@@ -246,9 +250,13 @@ def test_pipeline_slots_counts_queued(app_and_db):
             "result": None,
         }
 
-    data = client.get('/api/pipeline/slots').get_json()
+    from jobs import SLOT_CAP
+    resp = client.get('/api/pipeline/slots')
+    assert resp.status_code == 200
+    data = resp.get_json()
     assert data["active"] == 1
     assert data["queued"] == 1
+    assert data["slot_cap"] == SLOT_CAP
 
 
 def test_scan_status_includes_extended_stats(app_and_db):

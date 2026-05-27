@@ -7,13 +7,7 @@ capacity opens. ``SLOT_CAP`` is 1 in this PR — the second queued run
 waits for the first to reach a terminal state before promotion.
 """
 
-import os
-import sys
 import threading
-import time
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, os.path.dirname(__file__))
 
 from db import Database
 from wait import wait_for_job_via_runner
@@ -302,9 +296,8 @@ def test_cancel_queued_pipeline_transitions_row_to_cancelled(tmp_path):
     # Releasing the first must NOT promote the cancelled one.
     blocker.set()
     wait_for_job_via_runner(runner, first_id)
-    # Give the scheduler a beat — the cancelled row must stay cancelled.
-    time.sleep(0.05)
-    assert not second_started.is_set(), (
+    # Wait briefly; the cancelled row must never be promoted.
+    assert not second_started.wait(timeout=0.3), (
         "cancelled queued job must not be promoted"
     )
     final_row = db.conn.execute(

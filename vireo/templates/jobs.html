@@ -530,7 +530,14 @@
         });
         updateList();
         updateRunningBadge();
-        if (currentView === 'active') renderActiveOverview();
+        if (selectedSource === 'active' && selectedJobId) {
+          var selected = activeJobs.find(function(j) { return j.id === selectedJobId; });
+          if (selected) {
+            renderDetail(selected);
+          }
+        } else if (currentView === 'active') {
+          renderActiveOverview();
+        }
       })
       .catch(function() {});
   }

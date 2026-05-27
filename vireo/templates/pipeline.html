@@ -2402,9 +2402,10 @@ document.addEventListener('visibilitychange', function() {
   }
 });
 
-// Kick off polling once the DOM is ready (this script lives at the
-// bottom of pipeline.html, so the DOM is already parsed by now).
-_startSlotPolling();
+// Kick off polling only when visible; hidden tabs should stay paused.
+if (!document.hidden) {
+  _startSlotPolling();
+}
 
 // -- Pipeline orchestration --
 var _pipelineRunning = false;
