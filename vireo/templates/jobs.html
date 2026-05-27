@@ -127,6 +127,13 @@
 .btn-cancel:disabled {
   background: var(--text-muted); cursor: progress; opacity: 0.7;
 }
+.jobs-bulk-actions {
+  padding: 8px 16px; border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-tertiary);
+}
+.jobs-bulk-actions .btn-cancel {
+  font-size: 11px; padding: 3px 10px;
+}
 .btn-retry {
   font-size: 11px; padding: 2px 8px; border-radius: 3px; cursor: pointer;
   background: var(--accent); color: var(--accent-text); border: none;
@@ -244,6 +251,7 @@
       </select>
       <select id="filterStatus" onchange="applyFilters()">
         <option value="">All status</option>
+        <option value="queued">Queued</option>
         <option value="completed">Completed</option>
         <option value="failed">Failed</option>
       </select>
@@ -586,6 +594,15 @@
     });
     html += '<div class="jobs-list-divider clickable' + (currentView === 'active' ? ' selected' : '') + '" data-view="active">Active' +
       (running.length > 0 ? ' (' + running.length + ')' : '') + '</div>';
+    // "Cancel all queued" — only show when at least one queued job
+    // exists. Defaults to the active workspace on the server; the user
+    // doesn't have to think about scope here.
+    var anyQueued = running.some(function(j) { return j.status === 'queued'; });
+    if (anyQueued) {
+      html += '<div class="jobs-bulk-actions">';
+      html += '<button class="btn-cancel" id="btnCancelAllQueued">Cancel all queued</button>';
+      html += '</div>';
+    }
     running.forEach(function(j) { html += renderListItem(j, 'active'); });
 
     var filtered = historyJobs;
@@ -648,6 +665,57 @@
 
   // Event delegation for job list clicks
   document.getElementById('jobListContent').addEventListener('click', function(e) {
+    var bulkBtn = e.target.closest('#btnCancelAllQueued');
+    if (bulkBtn) {
+      // Optimistic UI: disable the button immediately. The next
+      // fetchJobs poll will re-render the list without queued rows
+      // (and without this button) once the server-side cancels land.
+      bulkBtn.disabled = true;
+      bulkBtn.textContent = 'Cancelling…';
+      bulkBtn.classList.add('cancelling');
+      fetch('/api/jobs/cancel-queued', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+        .then(function(r) {
+          if (r.ok) {
+            return r.json().then(function(data) {
+              var n = (data && data.cancelled && data.cancelled.length) || 0;
+              if (typeof showToast === 'function') {
+                showToast(
+                  n === 0
+                    ? 'No queued jobs to cancel'
+                    : 'Cancelled ' + n + ' queued job' + (n === 1 ? '' : 's'),
+                  'info',
+                );
+              }
+              // Mark each cancelled id as cancelling so any per-row
+              // Cancel button that renders before the next poll lands
+              // also shows the optimistic state.
+              if (data && data.cancelled) {
+                data.cancelled.forEach(function(id) { cancellingJobIds[id] = true; });
+              }
+              fetchJobs();
+            });
+          }
+          return r.json().then(function(data) {
+            var msg = (data && data.error) || 'Unable to cancel queued jobs';
+            if (typeof showToast === 'function') showToast(msg, 'error');
+            // Restore the button — caller may want to retry.
+            bulkBtn.disabled = false;
+            bulkBtn.textContent = 'Cancel all queued';
+            bulkBtn.classList.remove('cancelling');
+          });
+        })
+        .catch(function() {
+          if (typeof showToast === 'function') showToast('Unable to cancel queued jobs', 'error');
+          bulkBtn.disabled = false;
+          bulkBtn.textContent = 'Cancel all queued';
+          bulkBtn.classList.remove('cancelling');
+        });
+      return;
+    }
     var viewItem = e.target.closest('[data-view]');
     if (viewItem) {
       currentView = viewItem.getAttribute('data-view');
