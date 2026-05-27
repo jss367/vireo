@@ -163,20 +163,25 @@ def test_concurrent_first_load_creates_only_one_session(tmp_path):
 
     def worker():
         start_gate.wait(timeout=2.0)
-        with patch("os.path.expanduser", return_value=str(tmp_path)):
-            with patch(
-                "dino_embed.onnx_runtime.create_session",
-                side_effect=slow_create,
-            ):
-                results.append(dino_embed._get_dinov2_session("vit-b14"))
+        results.append(dino_embed._get_dinov2_session("vit-b14"))
 
-    t1 = threading.Thread(target=worker)
-    t2 = threading.Thread(target=worker)
-    t1.start()
-    t2.start()
-    start_gate.set()
-    t1.join(timeout=3.0)
-    t2.join(timeout=3.0)
+    # Apply patches once on the main thread, not from inside each worker.
+    # ``mock.patch`` mutates a module global; two threads independently
+    # entering/exiting a patch on the same target can race the restore
+    # and leak the patched function past the test boundary — flaking
+    # unrelated tests on the same xdist worker that call
+    # ``os.path.expanduser`` (e.g. ``test_runtime.py``).
+    with patch("os.path.expanduser", return_value=str(tmp_path)), patch(
+        "dino_embed.onnx_runtime.create_session",
+        side_effect=slow_create,
+    ):
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        start_gate.set()
+        t1.join(timeout=3.0)
+        t2.join(timeout=3.0)
 
     assert not t1.is_alive(), "first thread did not finish"
     assert not t2.is_alive(), "second thread did not finish"
