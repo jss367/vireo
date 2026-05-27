@@ -5479,12 +5479,28 @@ async function nativeMenuJob(endpoint, body, label) {
   nativeMenuInfo(label + suffix);
 }
 
+function isLiveJob(job) {
+  return !!job && (
+    job.status === 'running' ||
+    job.status === 'queued' ||
+    job.status === 'pending'
+  );
+}
+
+function isWaitingJob(job) {
+  return !!job && (job.status === 'queued' || job.status === 'pending');
+}
+
 async function nativeMenuCancelCurrentJob() {
   var jobs = await safeFetch('/api/jobs', {}, {toast: false});
   var list = Array.isArray(jobs) ? jobs : (jobs.active || jobs.jobs || []);
-  var running = list.find(function(j) { return j.status === 'running' || j.status === 'pending'; });
+  // Queued pipelines are cancellable too (runner.cancel_job handles
+  // the queued path atomically), so the native menu's "cancel current
+  // job" should be able to reach them — otherwise a waiting pipeline
+  // is stuck if the user closes the pipeline page.
+  var running = list.find(isLiveJob);
   if (!running) {
-    nativeMenuInfo('No running job to cancel');
+    nativeMenuInfo('No active job to cancel');
     return;
   }
   await safeFetch('/api/jobs/' + running.id + '/cancel', {method: 'POST'});
@@ -6065,7 +6081,10 @@ function formatDuration(seconds) {
       if (lpSource) { lpSource.close(); lpSource = null; }
       // Only warn on actual tab close, not internal navigation
       if (isInternalNav) { isInternalNav = false; return; }
-      var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+      // Warn on tab close when ANY live job exists — including queued
+      // or pending jobs. Closing the tab leaves them sitting in the
+      // server-side queue with no UI to manage them from this session.
+      var running = activeJobs.filter(isLiveJob);
       if (running.length > 0) {
         e.preventDefault();
         e.returnValue = '';
@@ -6393,17 +6412,25 @@ function formatDuration(seconds) {
 
   function renderJobs() {
     var container = document.getElementById('bpJobsList');
-    var allRunning = activeJobs.filter(function(j) { return j.status === 'running'; });
+    // "Active" includes queued/pending work waiting behind a busy slot,
+    // not just running ones. Otherwise the bottom panel shows nothing
+    // when the user has queued work and the slot is held by a sibling
+    // pipeline — there'd be no way to find or cancel the queued run
+    // from this surface.
+    var allRunning = activeJobs.filter(isLiveJob);
     var thisWs = allRunning.filter(function(j) { return j.workspace_id === _activeWsId; });
     var otherWs = allRunning.filter(function(j) { return j.workspace_id !== _activeWsId; });
 
-    // Badges count all running jobs across workspaces
+    // Badges count all active jobs across workspaces
     document.getElementById('jobsBadge').textContent = allRunning.length;
     var navBadge = document.getElementById('navJobBadge');
     if (navBadge) navBadge.textContent = allRunning.length > 0 ? ' (' + allRunning.length + ')' : '';
 
     if (allRunning.length === 0) {
-      var lastDone = activeJobs.filter(function(j) { return j.status !== 'running'; })[0];
+      // "Last run" fallback must exclude live state — running,
+      // queued, and pending. A queued job that hasn't started is not a "last
+      // run" any more than a running one is.
+      var lastDone = activeJobs.filter(function(j) { return !isLiveJob(j); })[0];
       if (lastDone) {
         container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. Last run: ' +
           bpEscape(window.formatJobType(lastDone.type)) + ' ' + (lastDone.status === 'completed' ? '\u2713' : '\u2717') +
@@ -6446,9 +6473,15 @@ function formatDuration(seconds) {
         detail = j.progress.current.toLocaleString() + '/' + j.progress.total.toLocaleString();
         if (pct > 0) detail += ' (' + pct + '%)';
       }
+      // Queued/pending work gets a muted dot so the user can tell it apart
+      // from jobs actually consuming the GPU.
+      var isWaiting = isWaitingJob(j);
+      var waitingLabel = 'queued';
+      var dotBg = isWaiting ? 'var(--text-muted)' : 'var(--accent)';
       html += '<div class="bp-compact-job" style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;">';
-      html += '<span style="width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;"></span>';
+      html += '<span style="width:6px;height:6px;border-radius:50%;background:' + dotBg + ';flex-shrink:0;"></span>';
       html += '<span style="font-weight:600;">' + bpEscape(window.formatJobType(j.type)) + '</span>';
+      if (isWaiting) html += '<span style="color:var(--text-muted);">(' + waitingLabel + ')</span>';
       if (phase) html += '<span style="color:var(--text-muted);">\u2014 ' + bpEscape(phase) + '</span>';
       if (detail) html += '<span style="color:var(--text-muted);font-variant-numeric:tabular-nums;">' + detail + '</span>';
       html += '<a href="/jobs" style="margin-left:auto;color:var(--accent);text-decoration:none;font-size:11px;white-space:nowrap;">View \u2192</a>';
@@ -6460,8 +6493,9 @@ function formatDuration(seconds) {
   function updateSummary() {
     var summary = document.getElementById('jobSummary');
     var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var waiting = activeJobs.filter(isWaitingJob);
 
-    if (running.length === 0) {
+    if (running.length === 0 && waiting.length === 0) {
       summary.textContent = 'No active jobs';
       summary.classList.add('idle');
       summary.classList.remove('active');
@@ -6469,6 +6503,19 @@ function formatDuration(seconds) {
     }
 
     summary.classList.remove('idle');
+
+    // When the slot is empty and only waiting jobs exist (shouldn't
+    // happen with the current scheduler — promotion is immediate on
+    // enqueue when a slot is free — but cheap to handle), render a
+    // short waiting-state line. Waiting jobs have no progress to drive
+    // the running-job render path below.
+    if (running.length === 0) {
+      summary.textContent = waiting.length === 1
+        ? 'Pipeline queued'
+        : waiting.length + ' pipelines queued';
+      return;
+    }
+
     var j = running[0];
     var text = window.formatJobType(j.type);
     if (j.progress && j.progress.phase) {
@@ -6488,14 +6535,19 @@ function formatDuration(seconds) {
     } else if (j.progress && j.progress.current_file) {
       text += ' ' + j.progress.current_file;
     }
-    if (running.length > 1) {
-      text += ' + ' + (running.length - 1) + ' more';
+    // The "+ N more" suffix counts running siblings AND any waiting jobs
+    // so the user sees their total backlog at a glance.
+    var extras = (running.length - 1) + waiting.length;
+    if (extras > 0) {
+      text += ' + ' + extras + ' more';
     }
     summary.textContent = text;
   }
 
   function updateActivityDot() {
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    // The dot signals "something live is happening" — waiting work counts
+    // because the user has work the system is on the hook to run.
+    var running = activeJobs.filter(isLiveJob);
     var dot = document.getElementById('navActivityDot');
     if (dot) dot.classList.toggle('active', running.length > 0);
   }

@@ -65,6 +65,7 @@
   width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
 }
 .job-list-item-dot.running { background: var(--accent); animation: pulse-dot 1.5s ease-in-out infinite; }
+.job-list-item-dot.queued { background: var(--text-muted, #888); border: 1px solid var(--accent); }
 .job-list-item-dot.completed { background: var(--success, #4caf50); }
 .job-list-item-dot.failed { background: var(--danger); }
 .job-list-item-dot.cancelled { background: var(--text-ghost); }
@@ -110,6 +111,7 @@
   font-size: 12px; padding: 3px 10px; border-radius: 4px; font-weight: 500;
 }
 .job-detail-status.running { background: var(--accent); color: var(--accent-text); }
+.job-detail-status.queued { background: var(--bg-tertiary); color: var(--text-muted, #888); border: 1px solid var(--border-secondary); }
 .job-detail-status.completed { background: color-mix(in srgb, var(--success, #4caf50) 20%, transparent); color: var(--success, #4caf50); }
 .job-detail-status.failed { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
 .job-detail-meta {
@@ -313,7 +315,12 @@
 
   function renderJobCard(job, options) {
     options = options || {};
-    var isLive = job.status === 'running';
+    // Queued pipelines are "live" for UI purposes: they have a real
+    // backend identity, they're cancellable (runner.cancel_job handles
+    // the queued case), and dropping them out of the active section
+    // strands them — the user has no way to find or cancel a queued
+    // pipeline until the slot opens.
+    var isLive = job.status === 'running' || job.status === 'queued';
     var elapsed = '';
     if (isLive && job.started_at) {
       elapsed = formatElapsed((Date.now() - new Date(job.started_at).getTime()) / 1000);
@@ -571,7 +578,12 @@
     var statusFilter = document.getElementById('filterStatus').value;
     var html = '';
 
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    // Active = running OR queued. Queued pipelines waiting behind a busy
+    // slot are findable + cancellable here; without this, opening /jobs
+    // after queuing from another tab would show the queued run nowhere.
+    var running = activeJobs.filter(function(j) {
+      return j.status === 'running' || j.status === 'queued';
+    });
     html += '<div class="jobs-list-divider clickable' + (currentView === 'active' ? ' selected' : '') + '" data-view="active">Active' +
       (running.length > 0 ? ' (' + running.length + ')' : '') + '</div>';
     running.forEach(function(j) { html += renderListItem(j, 'active'); });
@@ -626,7 +638,9 @@
   }
 
   function updateRunningBadge() {
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var running = activeJobs.filter(function(j) {
+      return j.status === 'running' || j.status === 'queued';
+    });
     var badge = document.getElementById('runningBadge');
     if (running.length > 0) { badge.textContent = running.length; badge.style.display = ''; }
     else { badge.style.display = 'none'; }
@@ -657,7 +671,7 @@
     if (sseSource) { sseSource.close(); sseSource = null; }
     if (source === 'active') {
       var job = activeJobs.find(function(j) { return j.id === jobId; });
-      if (job) { renderDetail(job); if (job.status === 'running') connectSSE(jobId); }
+      if (job) { renderDetail(job); if (job.status === 'running' || job.status === 'queued') connectSSE(jobId); }
     } else {
       var job = historyJobs.find(function(j) { return j.id === jobId; });
       if (job) renderHistoryDetail(job);
@@ -679,6 +693,16 @@
       }
     });
     sseSource.addEventListener('complete', function(e) {
+      var data = {};
+      try { data = JSON.parse(e.data); } catch(ex) {}
+      var job = activeJobs.find(function(j) { return j.id === jobId; });
+      if (job) {
+        job.status = data.status || job.status;
+        if (data.result !== undefined) job.result = data.result;
+        if (data.duration !== undefined) job.duration = data.duration;
+        if (data.errors !== undefined) job.errors = data.errors;
+        if (selectedJobId === jobId) renderDetail(job);
+      }
       if (sseSource) { sseSource.close(); sseSource = null; }
       fetchJobs();
       fetchHistory();
@@ -767,7 +791,9 @@
 
   function renderActiveOverview() {
     var pane = document.getElementById('jobDetailPane');
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var running = activeJobs.filter(function(j) {
+      return j.status === 'running' || j.status === 'queued';
+    });
 
     if (running.length === 0) {
       pane.innerHTML = '<div class="jobs-overview-empty">No active jobs.<br><span style="font-size:12px;margin-top:8px;display:inline-block;">Start a pipeline from the Pipeline page, or run individual jobs from Browse.</span></div>';
