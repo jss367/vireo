@@ -1192,6 +1192,43 @@ def test_compute_review_readiness_eye_target_follows_gate_changes(tmp_path):
     assert "eye_keypoints" in out_loose["enhancing_missing"]
 
 
+def test_compute_review_readiness_eye_target_honors_workspace_pipeline_override(tmp_path):
+    """A workspace-level ``pipeline.eye_classifier_conf_gate`` override
+    must reshape the eye-keypoint target.
+
+    Codex's PR #900 review called out *workspace* settings alongside
+    global ones. The earlier commit verified the nested read against
+    global config; this pins the workspace-overrides path explicitly so
+    a future refactor of ``get_effective_config`` (e.g. forgetting to
+    deep-merge nested dicts) can't silently sever the gate at the
+    workspace level while leaving the global path working.
+    """
+    import config as cfg
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    # Global default gate stays at 0.5; only the active workspace lowers
+    # it, mirroring a user with a per-workspace looser threshold.
+    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace(
+        "loose-gate",
+        config_overrides={"pipeline": {"eye_classifier_conf_gate": 0.2}},
+    )
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(tmp_path), name="photos")
+    # Species confidence 0.3 sits between the global gate (0.5) and the
+    # workspace override (0.2): excluded if the workspace override is
+    # ignored, included if it's honored.
+    _add_eligible_photo(db, fid, "shy.jpg", 0.3, taxonomy_class="Aves")
+
+    out = compute_review_readiness(db)
+    assert out["eye_keypoint_target_photos"] == 1
+    assert "eye_keypoints" in out["enhancing_missing"]
+
+
 def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
     """save_results must preserve an existing miss_computed_at marker
     when the caller's results dict doesn't carry one. reflow and
