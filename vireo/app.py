@@ -11605,8 +11605,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
             )
 
-        job_id = runner.start(
-            "pipeline", work,
+        # Enqueue rather than start directly: when SLOT_CAP is 1 and
+        # nothing else is active, ``enqueue_pipeline`` promotes inline
+        # before returning, so this looks identical to the old ``start``
+        # call. When a pipeline is already running, the new run waits in
+        # ``status='queued'`` until the slot opens. Callers receive the
+        # same {"job_id": ...} response either way; clients learn about
+        # the queued state via /api/jobs/<id> polling or the SSE stream.
+        job_id = runner.enqueue_pipeline(
+            work,
             config={
                 "source": source,
                 "sources": sources,
