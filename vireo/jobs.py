@@ -226,40 +226,47 @@ class JobRunner:
                     ctx.pop("_promoting", None)
             raise
 
+        retry_promotion = False
         with self._lock:
             if self._queued_pipelines.get(job_id) is not ctx:
-                return
-            ctx.pop("_promoting", None)
-            if not promoted:
-                # The row was modified elsewhere (cancelled).
-                self._queued_pipelines.pop(job_id, None)
-                return
-            # Move from queue context into the live jobs dict.
-            del self._queued_pipelines[job_id]
-            job = {
-                "id": job_id,
-                "type": "pipeline",
-                "status": "running",
-                "started_at": ctx["started_at"],
-                "finished_at": None,
-                "progress": {"current": 0, "total": 0, "current_file": ""},
-                "result": None,
-                "errors": [],
-                "config": ctx["config"],
-                "workspace_id": ctx["workspace_id"],
-                "steps": [],
-                "ephemeral": False,
-                "runtime_warning": ctx["runtime_warning"],
-            }
-            self._prune_finished_jobs()
-            self._jobs[job_id] = job
-            self._events[job_id] = deque(maxlen=1000)
-            # setdefault, NOT assignment: clients can subscribe to the
-            # SSE stream while the pipeline is still queued. Replacing
-            # the list at promotion time would silently drop those
-            # waiters' queues.
-            self._subscribers.setdefault(job_id, [])
-            work_fn = ctx["work_fn"]
+                retry_promotion = True
+            else:
+                ctx.pop("_promoting", None)
+                if not promoted:
+                    # The row was modified elsewhere (cancelled).
+                    self._queued_pipelines.pop(job_id, None)
+                    retry_promotion = True
+                else:
+                    # Move from queue context into the live jobs dict.
+                    del self._queued_pipelines[job_id]
+                    job = {
+                        "id": job_id,
+                        "type": "pipeline",
+                        "status": "running",
+                        "started_at": ctx["started_at"],
+                        "finished_at": None,
+                        "progress": {"current": 0, "total": 0, "current_file": ""},
+                        "result": None,
+                        "errors": [],
+                        "config": ctx["config"],
+                        "workspace_id": ctx["workspace_id"],
+                        "steps": [],
+                        "ephemeral": False,
+                        "runtime_warning": ctx["runtime_warning"],
+                    }
+                    self._prune_finished_jobs()
+                    self._jobs[job_id] = job
+                    self._events[job_id] = deque(maxlen=1000)
+                    # setdefault, NOT assignment: clients can subscribe to the
+                    # SSE stream while the pipeline is still queued. Replacing
+                    # the list at promotion time would silently drop those
+                    # waiters' queues.
+                    self._subscribers.setdefault(job_id, [])
+                    work_fn = ctx["work_fn"]
+
+        if retry_promotion:
+            self._try_promote_queued()
+            return
 
         thread = threading.Thread(
             target=self._run_job, args=(job, work_fn), daemon=True,

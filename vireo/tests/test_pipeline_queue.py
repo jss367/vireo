@@ -409,6 +409,53 @@ def test_in_flight_promotion_counts_against_slot_cap_not_global_guard(tmp_path, 
         assert runner._queued_pipelines[first_id]["_promoting"] is True
 
 
+def test_cancelled_promotion_candidate_retries_next_queued_pipeline(tmp_path):
+    """A cancelled front-of-queue row should not stall later queued work."""
+    import sqlite3
+
+    runner, db = _make_runner_with_db(tmp_path)
+    cancelled_id = "pipeline-1700000000003"
+    next_id = "pipeline-1700000000004"
+    conn = sqlite3.connect(str(tmp_path / "test.db"))
+    conn.executemany(
+        "INSERT INTO job_history (id, type, status, started_at, error_count) "
+        "VALUES (?, 'pipeline', ?, ?, 0)",
+        [
+            (cancelled_id, "cancelled", "2026-05-26T00:00:00"),
+            (next_id, "queued", "2026-05-26T00:00:01"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    with runner._lock:
+        runner._queued_pipelines[cancelled_id] = {
+            "work_fn": lambda job: pytest_fail("cancelled job must not run"),
+            "config": {},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:00",
+        }
+        runner._queued_pipelines[next_id] = {
+            "work_fn": lambda job: None,
+            "config": {},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:01",
+        }
+
+    runner._try_promote_queued()
+    promoted = wait_for_job_via_runner(runner, next_id, wait_for_history=True)
+
+    assert promoted["status"] == "completed"
+    with runner._lock:
+        assert cancelled_id not in runner._queued_pipelines
+    row = db.conn.execute(
+        "SELECT status FROM job_history WHERE id = ?", (next_id,),
+    ).fetchone()
+    assert row["status"] == "completed"
+
+
 def pytest_fail(msg):
     raise AssertionError(msg)
 
