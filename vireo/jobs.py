@@ -487,39 +487,54 @@ class JobRunner:
         )
         return f"{pretty_type} {job['status']}"
 
+    def _synthesize_queued_view(self, job_id, ctx):
+        """Render a queued pipeline's in-memory context as a job-shaped dict.
+
+        Queued pipelines aren't in ``self._jobs`` yet — they live in
+        ``self._queued_pipelines`` until the scheduler promotes them.
+        ``get()`` and ``list_jobs()`` both need to surface them in the
+        same shape as a live job so callers (UI, SSE, the navbar's
+        active-jobs polling) can render and cancel them uniformly.
+        """
+        return {
+            "id": job_id,
+            "type": "pipeline",
+            "status": "queued",
+            "started_at": ctx["started_at"],
+            "finished_at": None,
+            "progress": {"current": 0, "total": 0, "current_file": ""},
+            "result": None,
+            "errors": [],
+            "config": dict(ctx["config"]),
+            "workspace_id": ctx["workspace_id"],
+            "steps": [],
+            "ephemeral": False,
+            "runtime_warning": ctx.get("runtime_warning"),
+        }
+
     def get(self, job_id):
         """Get a job by id. Returns a shallow copy so callers don't mutate shared state."""
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
                 return dict(job)
-            # Queued pipelines aren't in self._jobs yet — they live in
-            # self._queued_pipelines until the scheduler promotes them.
-            # Surface them with a minimal job-shaped dict so callers
-            # polling for status (UI, SSE) see ``queued`` instead of 404.
             ctx = self._queued_pipelines.get(job_id)
             if ctx is None:
                 return None
-            return {
-                "id": job_id,
-                "type": "pipeline",
-                "status": "queued",
-                "started_at": ctx["started_at"],
-                "finished_at": None,
-                "progress": {"current": 0, "total": 0, "current_file": ""},
-                "result": None,
-                "errors": [],
-                "config": dict(ctx["config"]),
-                "workspace_id": ctx["workspace_id"],
-                "steps": [],
-                "ephemeral": False,
-                "runtime_warning": ctx.get("runtime_warning"),
-            }
+            return self._synthesize_queued_view(job_id, ctx)
 
     def list_jobs(self):
-        """List all tracked jobs (active and recently completed)."""
+        """List all tracked jobs (active, queued, and recently completed).
+
+        Includes synthetic queued-pipeline entries so the navbar and
+        /jobs page can render and cancel them; otherwise a queued run
+        disappears from the UI between enqueue and promotion.
+        """
         with self._lock:
-            return list(self._jobs.values())
+            jobs = list(self._jobs.values())
+            for job_id, ctx in self._queued_pipelines.items():
+                jobs.append(self._synthesize_queued_view(job_id, ctx))
+            return jobs
 
     def get_history(self, db, limit=10):
         """Get recent job history from the database.

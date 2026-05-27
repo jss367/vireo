@@ -363,6 +363,42 @@ def pytest_fail(msg):
     raise AssertionError(msg)
 
 
+def test_list_jobs_includes_queued_pipelines(tmp_path):
+    """Codex P2 regression: the navbar and /jobs page build their
+    active-jobs list from ``runner.list_jobs()``. Queued pipelines live
+    only in ``_queued_pipelines`` until promotion — if they're not
+    surfaced through ``list_jobs`` they disappear from the app-wide UI
+    and can't be cancelled from /jobs.
+    """
+    runner, _ = _make_runner_with_db(tmp_path)
+    blocker = threading.Event()
+
+    def first_work(job):
+        blocker.wait(timeout=3.0)
+        return {}
+
+    first_id = runner.enqueue_pipeline(first_work, config={}, workspace_id=1)
+    second_id = runner.enqueue_pipeline(
+        lambda job: None, config={"x": 7}, workspace_id=2,
+    )
+
+    all_jobs = runner.list_jobs()
+    ids = {j["id"]: j for j in all_jobs}
+    assert first_id in ids
+    assert second_id in ids, (
+        "queued pipeline must be visible through list_jobs() so the "
+        "navbar/jobs page can render and cancel it"
+    )
+    assert ids[second_id]["status"] == "queued"
+    assert ids[second_id]["type"] == "pipeline"
+    assert ids[second_id]["config"] == {"x": 7}
+    assert ids[second_id]["workspace_id"] == 2
+
+    blocker.set()
+    wait_for_job_via_runner(runner, first_id)
+    wait_for_job_via_runner(runner, second_id)
+
+
 def test_cancelling_queued_pipeline_emits_complete_event_to_sse(tmp_path):
     """Codex P2 regression: when a queued pipeline is cancelled while a
     client is subscribed to its SSE stream, the client must receive a
