@@ -10,6 +10,8 @@ use tauri::{
 };
 use tauri_plugin_opener::OpenerExt;
 
+const INDETERMINATE_PROGRESS_FALLBACK: u64 = 10;
+
 #[derive(Deserialize)]
 struct JobsResponse {
     active: Vec<JobInfo>,
@@ -249,7 +251,11 @@ pub fn is_browser_mode(app: &AppHandle) -> bool {
 /// Query the Flask backend for jobs known to the in-memory runner.
 fn fetch_jobs(port: u16) -> Vec<JobInfo> {
     let url = format!("http://127.0.0.1:{}/api/jobs", port);
-    match ureq::get(&url).call() {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(2))
+        .timeout_read(Duration::from_secs(5))
+        .build();
+    match agent.get(&url).call() {
         Ok(resp) => match resp.into_string() {
             Ok(body) => match serde_json::from_str::<JobsResponse>(&body) {
                 Ok(data) => data.active,
@@ -307,7 +313,10 @@ fn update_dock_job_indicator(app: &AppHandle, count: usize, progress: DockProgre
             DockProgress::Normal(pct) => (ProgressBarStatus::Normal, Some(pct.min(100))),
             // Tauri treats indeterminate as a normal bar on macOS/Linux, so
             // use a small visible value instead of 0 while totals are unknown.
-            DockProgress::Indeterminate => (ProgressBarStatus::Indeterminate, Some(10)),
+            DockProgress::Indeterminate => (
+                ProgressBarStatus::Indeterminate,
+                Some(INDETERMINATE_PROGRESS_FALLBACK),
+            ),
         };
         if let Err(e) = window.set_progress_bar(ProgressBarState {
             status: Some(status),

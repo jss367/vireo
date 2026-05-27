@@ -8,6 +8,8 @@ use tauri::{Manager, RunEvent};
 use tauri::window::{ProgressBarState, ProgressBarStatus};
 use tauri_plugin_opener::OpenerExt;
 
+const INDETERMINATE_PROGRESS_FALLBACK: u64 = 10;
+
 /// Open the given URL in the user's default web browser.
 ///
 /// Logs failures rather than propagating them — failing to open a browser
@@ -56,7 +58,14 @@ fn set_job_progress(
     indeterminate: bool,
 ) -> Result<(), String> {
     let (status, progress) = if indeterminate {
-        (ProgressBarStatus::Indeterminate, Some(10))
+        // On Windows this requests the native indeterminate taskbar state.
+        // On macOS/Linux Tauri treats Indeterminate as Normal, where progress
+        // is a 0-100 percentage. Use 10% so unknown-total work is visible;
+        // ProgressBarStatus::None remains the explicit hidden state.
+        (
+            ProgressBarStatus::Indeterminate,
+            Some(INDETERMINATE_PROGRESS_FALLBACK),
+        )
     } else if let Some(p) = progress {
         (ProgressBarStatus::Normal, Some(p.min(100)))
     } else {

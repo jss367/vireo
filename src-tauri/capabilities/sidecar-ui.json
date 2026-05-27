@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "sidecar-ui",
+  "description": "enables limited native APIs for the localhost sidecar UI",
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*",
+      "http://localhost:8080"
+    ]
+  },
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "process:allow-restart"
+  ]
+}
