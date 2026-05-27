@@ -1134,7 +1134,7 @@ def test_compute_review_readiness_eye_target_excludes_low_confidence(tmp_path):
     # The stage gate defaults to 0.5; pin the test to a known threshold
     # so a future default tweak doesn't quietly break the assertion.
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
-    cfg.save({"eye_classifier_conf_gate": 0.5})
+    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
@@ -1153,7 +1153,7 @@ def test_compute_review_readiness_eye_target_includes_routable_above_gate(tmp_pa
     from pipeline import compute_review_readiness
 
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
-    cfg.save({"eye_classifier_conf_gate": 0.5})
+    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
@@ -1177,7 +1177,7 @@ def test_compute_review_readiness_eye_target_follows_gate_changes(tmp_path):
     from pipeline import compute_review_readiness
 
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
-    cfg.save({"eye_classifier_conf_gate": 0.5})
+    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
@@ -1186,7 +1186,7 @@ def test_compute_review_readiness_eye_target_follows_gate_changes(tmp_path):
     out_strict = compute_review_readiness(db)
     assert out_strict["eye_keypoint_target_photos"] == 0
 
-    cfg.save({"eye_classifier_conf_gate": 0.2})
+    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.2}})
     out_loose = compute_review_readiness(db)
     assert out_loose["eye_keypoint_target_photos"] == 1
     assert "eye_keypoints" in out_loose["enhancing_missing"]
