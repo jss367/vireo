@@ -1563,20 +1563,37 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # before the old session's idle timer fires would reuse the
         # stale ONNX session on the new bytes.
         tax_fp = _taxonomy_fingerprint(tax) if model_type == "timm" else None
-        weights_fp = _weights_fingerprint(weights_path, active_model.get("files"))
-        cache_key = (
-            "timm" if model_type == "timm" else "bioclip",
-            active_model["id"],
-            model_str,
-            weights_path,
-            "__tol__" if use_tol else fp,
-            tax_fp,
-            weights_fp,
-        )
+        files = active_model.get("files")
+
+        def _build_cache_key(weights_fp):
+            return (
+                "timm" if model_type == "timm" else "bioclip",
+                active_model["id"],
+                model_str,
+                weights_path,
+                "__tol__" if use_tol else fp,
+                tax_fp,
+                weights_fp,
+            )
+
+        cache_key = _build_cache_key(_weights_fingerprint(weights_path, files))
+
+        # _construct_classifier may trigger the ONNX self-heal path
+        # (create_session_with_self_heal) which deletes corrupt weights
+        # and redownloads them inside the factory. That bumps the file
+        # mtime/size, so the pre-load fingerprint baked into ``cache_key``
+        # no longer matches what the *next* pipeline will compute. Rekey
+        # to the post-load fingerprint so the second pipeline hits this
+        # entry instead of loading a duplicate session against the freshly
+        # written bytes.
+        def _post_load_key(_value):
+            return _build_cache_key(_weights_fingerprint(weights_path, files))
+
         cache_handle = None
         try:
             cache_handle = get_default_cache().acquire(
-                cache_key, _construct_classifier
+                cache_key, _construct_classifier,
+                post_load_key=_post_load_key,
             )
             clf = cache_handle.__enter__()
         except Exception as load_err:

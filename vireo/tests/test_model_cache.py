@@ -1,4 +1,5 @@
 # vireo/tests/test_model_cache.py
+import logging
 import os
 import sys
 import threading
@@ -179,20 +180,21 @@ def test_failed_load_waiter_does_not_evict_recreated_entry():
     idle timer on a model still in use."""
     cache = ModelCache(idle_secs=60)
 
-    # Gate B's _release until thread C has installed a fresh entry under
-    # the same key, so the race is deterministic rather than timing-luck.
+    # Gate B's _release_entry until thread C has installed a fresh entry
+    # under the same key, so the race is deterministic rather than
+    # timing-luck.
     c_installed = threading.Event()
-    original_release = cache._release
+    original_release = cache._release_entry
     release_count = [0]
 
     def gated_release(*args, **kwargs):
         release_count[0] += 1
         if release_count[0] == 1:
-            # First _release is B's failed-load release. Wait for C.
+            # First release is B's failed-load release. Wait for C.
             assert c_installed.wait(timeout=2.0), "C never installed entry"
         return original_release(*args, **kwargs)
 
-    cache._release = gated_release
+    cache._release_entry = gated_release
 
     bad_started = threading.Event()
     release_bad = threading.Event()
@@ -291,7 +293,7 @@ def test_stale_idle_timer_does_not_evict_renewed_entry():
 
     # Simulate a timer callback that has already started running (so cancel
     # below cannot stop it): grab the args the real callback would receive.
-    stale_args = ("k", entry, first_token)
+    stale_args = (entry, first_token)
 
     # An acquire happens after the stale callback fired but before it took
     # the lock. This cancels the (already-firing) timer, bumps refcount,
@@ -336,3 +338,109 @@ def test_handle_release_is_idempotent():
     with cache.acquire("k", lambda: "v2") as v:
         assert v in ("v", "v2")  # cached or re-loaded — either is fine,
         # what matters is no exception
+
+
+def test_post_load_key_rekeys_when_factory_mutates_fingerprint():
+    """Regression for the self-heal redownload case: the factory replaces
+    on-disk weights, so the fingerprint baked into the original cache key
+    is stale by the time the value is stored. A second pipeline computing
+    the post-load fingerprint must hit the existing entry instead of
+    loading a duplicate model."""
+    cache = ModelCache(idle_secs=60)
+
+    # The factory bumps the fingerprint (simulating self-heal rewriting
+    # the on-disk weights, which changes mtime/size).
+    fp = ["pre"]
+
+    def healing_factory():
+        # The on-disk state mutates here.
+        fp[0] = "post"
+        return "session"
+
+    def post_load_key(_value):
+        return ("model", fp[0])
+
+    h1 = cache.acquire(("model", "pre"), healing_factory,
+                       post_load_key=post_load_key)
+    v1 = h1.__enter__()
+    assert v1 == "session"
+    # Entry must now live under the post-load key, not the pre-load one.
+    assert cache._has_entry(("model", "post"))
+    assert not cache._has_entry(("model", "pre"))
+
+    # A second pipeline computes its key from the post-self-heal files
+    # and looks up directly — must hit the existing entry, not reload.
+    factory_calls = [0]
+
+    def fresh_factory():
+        factory_calls[0] += 1
+        return "another-session"
+
+    h2 = cache.acquire(("model", "post"), fresh_factory,
+                       post_load_key=lambda _v: ("model", "post"))
+    v2 = h2.__enter__()
+    assert v2 == "session", "second acquire must reuse the healed session"
+    assert factory_calls == [0], "factory must not run a second time"
+
+    # Release both — the entry should still be the single one we created.
+    h1.__exit__(None, None, None)
+    h2.__exit__(None, None, None)
+
+
+def test_post_load_key_unchanged_does_not_rekey():
+    """When the factory does not mutate on-disk state, the post-load key
+    matches the pre-load key and the entry stays under its original key."""
+    cache = ModelCache(idle_secs=60)
+
+    h = cache.acquire("k", lambda: "v", post_load_key=lambda _v: "k")
+    h.__enter__()
+    assert cache._has_entry("k")
+    h.__exit__(None, None, None)
+    assert cache._has_entry("k")
+
+
+def test_post_load_key_collision_leaves_entry_under_original_key(caplog):
+    """If a concurrent acquirer has already installed an entry under the
+    post-load key, rekey is a no-op rather than overwriting the sibling
+    entry. The freshly loaded session lives out its life under the
+    pre-load key and idles out (brief duplicate VRAM, no corruption)."""
+    cache = ModelCache(idle_secs=60)
+
+    # Pre-populate "post" with an unrelated entry.
+    h_existing = cache.acquire("post", lambda: "other-session")
+    h_existing.__enter__()
+
+    with caplog.at_level(logging.WARNING, logger="model_cache"):
+        h = cache.acquire("pre", lambda: "healed",
+                          post_load_key=lambda _v: "post")
+        h.__enter__()
+
+    # Rekey was refused; original entry stays at "pre", and the sibling
+    # at "post" is untouched.
+    assert cache._has_entry("pre")
+    assert cache._has_entry("post")
+    assert cache._entries["pre"].value == "healed"
+    assert cache._entries["post"].value == "other-session"
+    assert any("cannot rekey" in r.message for r in caplog.records)
+
+    h.__exit__(None, None, None)
+    h_existing.__exit__(None, None, None)
+
+
+def test_post_load_key_exception_keeps_entry_under_original_key(caplog):
+    """If the post_load_key callback itself raises, the entry stays under
+    its original key and the load result is still returned. The exception
+    is logged rather than propagated — a rekey failure is a degraded
+    cache-hit rate, not a load failure."""
+    cache = ModelCache(idle_secs=60)
+
+    def bad_post_load(_v):
+        raise RuntimeError("fingerprint failed")
+
+    with caplog.at_level(logging.ERROR, logger="model_cache"):
+        with cache.acquire("k", lambda: "v",
+                           post_load_key=bad_post_load) as v:
+            assert v == "v"
+    assert cache._has_entry("k")
+    assert any("post_load_key callback raised" in r.message
+               for r in caplog.records)
