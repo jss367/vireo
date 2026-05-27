@@ -125,18 +125,42 @@ def _weights_fingerprint(weights_path, files):
     Stat-only (size + mtime_ns) so the lookup stays cheap; in-place
     replacement reliably bumps mtime even for byte-identical files.
     Missing files map to a sentinel so a partial repair still misses.
+
+    Custom models have no declared ``files`` list, so fall back to
+    listing the directory (or stat'ing the single file if
+    ``weights_path`` points at one). Without this fallback a user who
+    re-registers a custom model at the same path would reuse the stale
+    session until the idle window expires.
     """
-    if not weights_path or not files:
+    if not weights_path:
         return None
-    parts = []
-    for rel in files:
-        path = os.path.join(weights_path, rel)
-        try:
-            st = os.stat(path)
-            parts.append((rel, st.st_size, int(st.st_mtime_ns)))
-        except OSError:
-            parts.append((rel, None, None))
-    return tuple(parts)
+    if files:
+        parts = []
+        for rel in files:
+            path = os.path.join(weights_path, rel)
+            try:
+                st = os.stat(path)
+                parts.append((rel, st.st_size, int(st.st_mtime_ns)))
+            except OSError:
+                parts.append((rel, None, None))
+        return tuple(parts)
+    try:
+        if os.path.isdir(weights_path):
+            parts = []
+            for name in sorted(os.listdir(weights_path)):
+                path = os.path.join(weights_path, name)
+                try:
+                    st = os.stat(path)
+                    parts.append((name, st.st_size, int(st.st_mtime_ns)))
+                except OSError:
+                    parts.append((name, None, None))
+            return tuple(parts)
+        if os.path.isfile(weights_path):
+            st = os.stat(weights_path)
+            return (("__file__", st.st_size, int(st.st_mtime_ns)),)
+    except OSError:
+        pass
+    return None
 
 
 def _release_classifier_cache_handle(loaded_models):

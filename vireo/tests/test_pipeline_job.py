@@ -8539,14 +8539,62 @@ def test_weights_fingerprint_changes_on_in_place_replacement(tmp_path):
 
 
 def test_weights_fingerprint_handles_missing_path_and_files():
-    """``None``/empty inputs must collapse to ``None`` so the cache key
-    stays well-formed when ``files`` isn't listed on the model spec.
+    """``None``/missing inputs must collapse to ``None`` so the cache key
+    stays well-formed when nothing can be stat'd.
     """
     from pipeline_job import _weights_fingerprint
 
     assert _weights_fingerprint(None, ["a.onnx"]) is None
-    assert _weights_fingerprint("/nonexistent", None) is None
-    assert _weights_fingerprint("/nonexistent", []) is None
+    assert _weights_fingerprint(None, None) is None
+    assert _weights_fingerprint("/nonexistent/path/that/does/not/exist", None) is None
+    assert _weights_fingerprint("/nonexistent/path/that/does/not/exist", []) is None
+
+
+def test_weights_fingerprint_custom_model_directory(tmp_path):
+    """Custom models have no declared ``files`` list, so the fingerprint
+    must fall back to listing the directory. Without this, a user who
+    re-registers a custom model at the same path within the idle window
+    keeps hitting the cached session built from the old weights.
+    """
+    from pipeline_job import _weights_fingerprint
+
+    (tmp_path / "model.onnx").write_bytes(b"v1")
+    (tmp_path / "config.json").write_bytes(b"{}")
+    fp1 = _weights_fingerprint(str(tmp_path), None)
+    assert fp1 is not None
+    assert any(part[0] == "model.onnx" for part in fp1)
+
+    # Re-register: overwrite the .onnx with new bytes.
+    import os
+    import time
+
+    time.sleep(0.01)
+    (tmp_path / "model.onnx").write_bytes(b"v2-much-larger-payload")
+    os.utime(tmp_path / "model.onnx", None)
+    fp2 = _weights_fingerprint(str(tmp_path), None)
+    assert fp2 != fp1
+
+
+def test_weights_fingerprint_custom_model_single_file(tmp_path):
+    """Custom models can be registered as a path to a single .onnx file
+    rather than a directory; that case must still produce a fingerprint
+    so in-place replacement is detected.
+    """
+    from pipeline_job import _weights_fingerprint
+
+    onnx = tmp_path / "model.onnx"
+    onnx.write_bytes(b"v1")
+    fp1 = _weights_fingerprint(str(onnx), None)
+    assert fp1 is not None
+
+    import os
+    import time
+
+    time.sleep(0.01)
+    onnx.write_bytes(b"v2-much-larger-payload")
+    os.utime(onnx, None)
+    fp2 = _weights_fingerprint(str(onnx), None)
+    assert fp2 != fp1
 
 
 def test_weights_fingerprint_missing_file_distinguishes_from_present(tmp_path):
