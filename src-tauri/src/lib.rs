@@ -47,8 +47,8 @@ fn get_server_port(state: tauri::State<'_, SidecarState>) -> u16 {
 }
 
 // Update the OS-level progress indicator on the dock/taskbar icon.
-// `progress` is 0-100 (None = clear). When `indeterminate` is true the bar
-// pulses instead of filling — used for phases without a known total.
+// `progress` is 0-100 (None = clear). Tauri treats indeterminate as a normal
+// bar on macOS/Linux, so use a small visible value for unknown-total phases.
 #[tauri::command]
 fn set_job_progress(
     window: tauri::WebviewWindow,
@@ -56,7 +56,7 @@ fn set_job_progress(
     indeterminate: bool,
 ) -> Result<(), String> {
     let (status, progress) = if indeterminate {
-        (ProgressBarStatus::Indeterminate, Some(0))
+        (ProgressBarStatus::Indeterminate, Some(10))
     } else if let Some(p) = progress {
         (ProgressBarStatus::Normal, Some(p.min(100)))
     } else {
