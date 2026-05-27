@@ -269,6 +269,62 @@ def test_failed_load_waiter_does_not_evict_recreated_entry():
     good_handle.__exit__(None, None, None)
 
 
+def test_stale_idle_timer_does_not_evict_renewed_entry():
+    """Regression: when an idle timer's callback races past cancel() and an
+    acquire+release cycle arms a fresh timer before the stale callback gets
+    the lock, the stale callback must not evict the entry that the fresh
+    timer is supposed to own. Without the evict_token guard, the stale
+    callback sees refcount==0 and deletes immediately, throwing away a
+    model whose true idle window has barely started."""
+    cache = ModelCache(idle_secs=60)
+
+    # Load and release so an entry + idle timer exist.
+    h1 = cache.acquire("k", lambda: "loaded-once")
+    h1.__enter__()
+    h1.__exit__(None, None, None)
+    entry = cache._entries["k"]
+    assert entry.refcount == 0
+    first_token = entry.evict_token
+    first_timer = entry.idle_timer
+    assert first_token is not None
+    assert first_timer is not None
+
+    # Simulate a timer callback that has already started running (so cancel
+    # below cannot stop it): grab the args the real callback would receive.
+    stale_args = ("k", entry, first_token)
+
+    # An acquire happens after the stale callback fired but before it took
+    # the lock. This cancels the (already-firing) timer, bumps refcount,
+    # and invalidates the token.
+    h2 = cache.acquire("k", lambda: "must-not-rerun")
+    h2.__enter__()
+    assert cache._entries["k"] is entry, "acquire must reuse the existing entry"
+    assert entry.refcount == 1
+    assert entry.evict_token is None, "acquire must invalidate the in-flight token"
+
+    # Release. This arms a fresh timer with a NEW token.
+    h2.__exit__(None, None, None)
+    fresh_token = entry.evict_token
+    fresh_timer = entry.idle_timer
+    assert fresh_token is not None and fresh_token is not first_token
+    assert fresh_timer is not None and fresh_timer is not first_timer
+
+    # Now the stale callback finally grabs the lock and runs. With the
+    # guard it sees its old token mismatched against entry.evict_token and
+    # bails. Without the guard it deletes the entry — wiping out a model
+    # whose real idle window has hardly begun.
+    cache._evict(*stale_args)
+
+    assert cache._has_entry("k"), (
+        "stale timer evicted entry that a fresh release re-armed"
+    )
+    assert cache._entries["k"] is entry
+    assert entry.evict_token is fresh_token
+
+    # Cancel the fresh timer so it doesn't outlive the test.
+    fresh_timer.cancel()
+
+
 def test_handle_release_is_idempotent():
     cache = ModelCache(idle_secs=60)
     h = cache.acquire("k", lambda: "v")

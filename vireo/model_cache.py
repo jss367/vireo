@@ -24,7 +24,10 @@ log = logging.getLogger(__name__)
 
 
 class _Entry:
-    __slots__ = ("load_lock", "value", "refcount", "idle_timer", "load_error")
+    __slots__ = (
+        "load_lock", "value", "refcount", "idle_timer", "evict_token",
+        "load_error",
+    )
 
     def __init__(self):
         # Held while a factory is running so concurrent acquirers wait for the
@@ -33,6 +36,11 @@ class _Entry:
         self.value = None
         self.refcount = 0
         self.idle_timer = None
+        # Fresh sentinel installed each time _release arms an idle timer.
+        # _evict compares the token it was scheduled with against the
+        # entry's current token; a stale timer whose callback fires after
+        # acquire+release cycled a new timer in finds a mismatch and bails.
+        self.evict_token = None
         self.load_error = None
 
 
@@ -93,6 +101,9 @@ class ModelCache:
             if entry.idle_timer is not None:
                 entry.idle_timer.cancel()
                 entry.idle_timer = None
+            # Invalidate any in-flight stale callback whose cancel() lost
+            # the race with the timer thread firing.
+            entry.evict_token = None
 
         with entry.load_lock:
             if entry.value is None and entry.load_error is None:
@@ -136,20 +147,33 @@ class ModelCache:
                 entry.refcount -= 1
             if entry.refcount == 0 and entry.value is not None:
                 # Arm idle eviction. Use a daemon Timer so process exit isn't
-                # blocked by a pending eviction window.
-                timer = threading.Timer(self._idle_secs, self._evict, args=(key,))
+                # blocked by a pending eviction window. The fresh token lets
+                # _evict tell a stale timer (whose callback raced past
+                # cancel()) apart from a live one — only the live timer's
+                # token will still match entry.evict_token when _evict runs.
+                token = object()
+                entry.evict_token = token
+                timer = threading.Timer(
+                    self._idle_secs, self._evict, args=(key, entry, token),
+                )
                 timer.daemon = True
                 entry.idle_timer = timer
         if timer is not None:
             timer.start()
 
-    def _evict(self, key):
+    def _evict(self, key, entry, token):
         with self._global_lock:
-            entry = self._entries.get(key)
-            if entry is None:
+            current = self._entries.get(key)
+            if current is not entry:
                 return
             if entry.refcount > 0:
                 # Re-acquired in the gap between timer fire and lock; abort.
+                return
+            if entry.evict_token is not token:
+                # Stale timer: an acquire+release cycle replaced our token
+                # with a fresh one while our callback was queued. The new
+                # timer (or none, if still acquired) owns the eviction
+                # decision now.
                 return
             # Drop the entry; entry.value will be garbage-collected (and any
             # __del__ on the model object — ONNX session close — runs then).

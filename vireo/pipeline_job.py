@@ -93,6 +93,27 @@ _CLASSIFIER_BUNDLE_FIELDS = (
 )
 
 
+def _taxonomy_fingerprint(tax):
+    """Stable key component representing the taxonomy backing a classifier.
+
+    Used in the timm classifier cache key so a pipeline that loads the
+    classifier with no taxonomy (or a stale one) does not get reused after
+    a taxonomy download or refresh updates the on-disk file. ``None`` is
+    a valid input — pipelines run without taxonomy still hit the cache
+    consistently among themselves.
+    """
+    if tax is None:
+        return ("no-tax",)
+    path = getattr(tax, "_path", None)
+    if not path:
+        return ("inline", id(tax))
+    try:
+        st = os.stat(path)
+        return (path, int(st.st_mtime_ns), st.st_size)
+    except OSError:
+        return (path, None, None)
+
+
 def _release_classifier_cache_handle(loaded_models):
     """Release the cache handle AND drop the bundle's strong refs.
 
@@ -1479,12 +1500,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # different labels must NOT share a session. Tree-of-Life mode
         # (use_tol=True) reads precomputed embeddings from disk and is
         # label-independent, so the key collapses to a constant.
+        #
+        # The timm key also varies by taxonomy fingerprint: TimmClassifier
+        # captures the taxonomy at construction and resolves common names /
+        # hierarchy from it on every prediction. Reusing a classifier loaded
+        # against a stale taxonomy (or no taxonomy) after a later run
+        # downloads or refreshes one would silently emit predictions
+        # missing the enrichment, so a change in taxonomy must miss the
+        # cache and rebuild.
+        tax_fp = _taxonomy_fingerprint(tax) if model_type == "timm" else None
         cache_key = (
             "timm" if model_type == "timm" else "bioclip",
             active_model["id"],
             model_str,
             weights_path,
             "__tol__" if use_tol else fp,
+            tax_fp,
         )
         cache_handle = None
         try:
@@ -1823,17 +1854,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     progress={"current": batch_idx, "total": total},
                 )
 
-                # Serialise the GPU op for this detection batch. Released
-                # between batches so a concurrent pipeline can interleave
-                # its own GPU work without waiting for the entire detect
-                # stage to finish.
-                with acquire_gpu():
-                    det_map, det_count, det_processed = _detect_batch(
-                        batch, folders, runner, job,
-                        params.reclassify, thread_db,
-                        already_detected_ids=already_detected,
-                        cached_detections=None,
-                    )
+                # GPU serialisation lives inside detector.detect_animals()
+                # — wrapping the whole batch here would hold the semaphore
+                # across DB writes and CPU sharpness/quality work, blocking
+                # a concurrent pipeline's GPU stages on this pipeline's
+                # non-GPU work.
+                det_map, det_count, det_processed = _detect_batch(
+                    batch, folders, runner, job,
+                    params.reclassify, thread_db,
+                    already_detected_ids=already_detected,
+                    cached_detections=None,
+                )
                 total_detected += det_count
                 already_detected.update(det_processed)
                 for pid, dets in det_map.items():
