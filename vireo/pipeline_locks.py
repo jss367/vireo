@@ -48,6 +48,55 @@ class _GpuLockContext:
         _GPU_SEMAPHORE.release()
 
 
+# Providers that actually run on a GPU device. ONNXRuntime's other
+# providers (CPUExecutionProvider, and anything not listed) execute on
+# the CPU, so taking the GPU semaphore for them would needlessly block
+# other pipelines' real GPU work.
+_GPU_PROVIDERS = ("CUDAExecutionProvider", "CoreMLExecutionProvider")
+
+
+def _session_uses_gpu(session):
+    """Return True if ``session`` is actually executing on a GPU provider.
+
+    ``InferenceSession.get_providers()`` returns the providers ONNX
+    Runtime decided to use after construction, so this reflects reality
+    even when CoreML was requested but excluded (e.g. for external-data
+    models). Falls back to ``True`` if the session doesn't expose
+    ``get_providers`` — conservative default that matches the unconditional-
+    lock behavior we had before this check existed.
+    """
+    try:
+        providers = session.get_providers()
+    except Exception:
+        return True
+    return any(p in _GPU_PROVIDERS for p in providers)
+
+
+def acquire_gpu_if_session_uses_it(session):
+    """Context manager: take the GPU semaphore only for GPU-running sessions.
+
+    CPU-only ONNX sessions (Apple Silicon with external-data models,
+    CPU-only installs) skip the lock so they don't block concurrent
+    pipelines' real GPU work. GPU-running sessions still serialise.
+
+    Usage::
+
+        with acquire_gpu_if_session_uses_it(session):
+            outputs = session.run(None, feeds)
+    """
+    if _session_uses_gpu(session):
+        return _GpuLockContext()
+    return _NoOpContext()
+
+
+class _NoOpContext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
 # Per-workspace regroup locks. Created lazily on first request. Entries
 # are never removed — workspace IDs are stable integers and the lock
 # objects are tiny, so accumulating one per workspace the user has ever

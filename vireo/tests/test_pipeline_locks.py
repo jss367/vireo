@@ -8,9 +8,58 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.dirname(__file__))
 
 from pipeline_locks import (
+    _GPU_SEMAPHORE,
     acquire_gpu,
+    acquire_gpu_if_session_uses_it,
     acquire_workspace_regroup,
 )
+
+
+class _FakeSession:
+    def __init__(self, providers):
+        self._providers = list(providers)
+
+    def get_providers(self):
+        return list(self._providers)
+
+
+def test_acquire_gpu_if_session_uses_it_takes_lock_for_cuda_session():
+    sess = _FakeSession(["CUDAExecutionProvider", "CPUExecutionProvider"])
+    before = _GPU_SEMAPHORE._value
+    with acquire_gpu_if_session_uses_it(sess):
+        held = _GPU_SEMAPHORE._value
+    after = _GPU_SEMAPHORE._value
+    assert before == 1
+    assert held == 0, "semaphore should be acquired for GPU sessions"
+    assert after == 1
+
+
+def test_acquire_gpu_if_session_uses_it_takes_lock_for_coreml_session():
+    sess = _FakeSession(["CoreMLExecutionProvider", "CPUExecutionProvider"])
+    with acquire_gpu_if_session_uses_it(sess):
+        assert _GPU_SEMAPHORE._value == 0
+
+
+def test_acquire_gpu_if_session_uses_it_skips_lock_for_cpu_only_session():
+    sess = _FakeSession(["CPUExecutionProvider"])
+    before = _GPU_SEMAPHORE._value
+    with acquire_gpu_if_session_uses_it(sess):
+        held = _GPU_SEMAPHORE._value
+    after = _GPU_SEMAPHORE._value
+    assert before == 1
+    assert held == 1, "CPU-only session must not take the GPU semaphore"
+    assert after == 1
+
+
+def test_acquire_gpu_if_session_uses_it_defaults_to_lock_when_providers_missing():
+    """A session that doesn't expose get_providers (or raises) must
+    conservatively take the lock — same behavior as before this check existed.
+    """
+    class _NoProviders:
+        pass
+
+    with acquire_gpu_if_session_uses_it(_NoProviders()):
+        assert _GPU_SEMAPHORE._value == 0
 
 
 def _wait_until(predicate, timeout=1.0, interval=0.005):

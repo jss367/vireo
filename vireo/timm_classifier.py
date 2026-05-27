@@ -186,7 +186,7 @@ class TimmClassifier:
             list of dicts with species, score, auto_tag, confidence_tag, taxonomy
         """
         from PIL import Image as PILImage
-        from pipeline_locks import acquire_gpu
+        from pipeline_locks import acquire_gpu_if_session_uses_it
 
         if isinstance(image, (str, os.PathLike)):
             with PILImage.open(image) as img:
@@ -196,8 +196,11 @@ class TimmClassifier:
 
         # GPU serialisation across concurrent pipelines, scoped tightly to
         # the forward pass. Preprocessing above runs without the lock so
-        # concurrent pipelines aren't blocked on CPU work.
-        with acquire_gpu():
+        # concurrent pipelines aren't blocked on CPU work. Skipped for
+        # CPU-only sessions — Apple Silicon's external-data timm export
+        # excludes CoreML and runs on the CPU; taking the GPU semaphore
+        # there would block real GPU work in other pipelines for nothing.
+        with acquire_gpu_if_session_uses_it(self._session):
             output = self._session.run(None, {self._input_name: input_arr})
         logits = output[0]  # shape: (1, num_classes)
         probs = onnx_runtime.softmax(logits, axis=-1).flatten()
@@ -217,7 +220,7 @@ class TimmClassifier:
         if not images:
             return []
 
-        from pipeline_locks import acquire_gpu
+        from pipeline_locks import acquire_gpu_if_session_uses_it
 
         input_arr = np.concatenate(
             [self._preprocess(img) for img in images],
@@ -227,7 +230,8 @@ class TimmClassifier:
         # the forward pass. Preprocessing above (per-image resize/normalise)
         # and the softmax/result-building below run without the lock so
         # concurrent pipelines can use the GPU while this one does CPU work.
-        with acquire_gpu():
+        # Skipped for CPU-only sessions (same rationale as classify()).
+        with acquire_gpu_if_session_uses_it(self._session):
             output = self._session.run(None, {self._input_name: input_arr})
         logits = output[0]
         probs_batch = onnx_runtime.softmax(logits, axis=-1)

@@ -646,6 +646,12 @@ class TestGpuLockScope:
         import pipeline_locks
 
         clf = _make_custom_classifier(tmp_path)
+        # Declare a GPU provider so the conditional lock engages — this
+        # is the on-GPU path; the CPU-only skip is covered in its own
+        # test below.
+        clf._image_session.get_providers.return_value = [
+            "CUDAExecutionProvider", "CPUExecutionProvider",
+        ]
 
         snapshots = {}
         original_run = clf._image_session.run
@@ -675,6 +681,9 @@ class TestGpuLockScope:
         import pipeline_locks
 
         clf = _make_custom_classifier(tmp_path)
+        clf._image_session.get_providers.return_value = [
+            "CUDAExecutionProvider", "CPUExecutionProvider",
+        ]
 
         snapshots = {"in_run": [], "post_run_in_loop": []}
         original_run = clf._image_session.run
@@ -695,4 +704,32 @@ class TestGpuLockScope:
         )
         assert snapshots["in_run"] == [baseline - 1] * 3, (
             "GPU lock must be held during every per-image session.run call"
+        )
+
+    def test_get_image_embedding_skips_gpu_lock_for_cpu_only_session(self, tmp_path):
+        """When BioCLIP runs on a CPU-only provider (Apple Silicon
+        excludes CoreML for external-data ONNX models; CPU-only installs
+        likewise), the image encoder must not take the process-wide GPU
+        semaphore. Codex P2 on PR #899.
+        """
+        import pipeline_locks
+
+        clf = _make_custom_classifier(tmp_path)
+        clf._image_session.get_providers.return_value = ["CPUExecutionProvider"]
+
+        snapshots = {}
+        original_run = clf._image_session.run
+
+        def record_during_run(output_names, input_dict):
+            snapshots["during_run"] = pipeline_locks._GPU_SEMAPHORE._value
+            return original_run(output_names, input_dict)
+
+        clf._image_session.run = record_during_run
+
+        baseline = pipeline_locks._GPU_SEMAPHORE._value
+        img = Image.new("RGB", (224, 224), color="red")
+        clf._get_image_embedding(img)
+
+        assert snapshots["during_run"] == baseline, (
+            "CPU-only image session must not take the GPU semaphore"
         )
