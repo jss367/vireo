@@ -35,7 +35,7 @@ from flask import (
     send_from_directory,
 )
 from highlights import select_highlights
-from jobs import JobRunner, LogBroadcaster
+from jobs import SLOT_CAP, JobRunner, LogBroadcaster
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
 )
@@ -1449,6 +1449,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "collections": collection_dicts,
             }
         )
+
+    @app.route("/api/pipeline/slots")
+    def api_pipeline_slots():
+        """Pipeline-slot occupancy for the Start/Queue button.
+
+        The pipeline page polls this to decide whether the next click
+        will start immediately (``active < slot_cap``) or land on the
+        queue (``active >= slot_cap``), and to render the small
+        "N running . M queued" status line near the Start button.
+
+        Counts only ``type == 'pipeline'`` jobs — standalone scan,
+        classify, ingest, etc. don't consume pipeline slots.
+        """
+        runner = app._job_runner
+        active = 0
+        queued = 0
+        for j in runner.list_jobs():
+            if j.get("type") != "pipeline":
+                continue
+            status = j.get("status")
+            if status == "running":
+                active += 1
+            elif status == "queued":
+                queued += 1
+        return jsonify({
+            "active": active,
+            "queued": queued,
+            "slot_cap": SLOT_CAP,
+        })
 
     @app.route("/api/pipeline/page-init")
     def api_pipeline_page_init():

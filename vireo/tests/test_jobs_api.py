@@ -148,6 +148,109 @@ def test_job_detail_endpoint_returns_full_result(app_and_db):
     assert detail["result"] == big_result
 
 
+def test_pipeline_slots_empty(app_and_db):
+    """GET /api/pipeline/slots reports zero active and zero queued when
+    the runner has no pipeline jobs, and surfaces the module's slot cap."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    from jobs import SLOT_CAP
+
+    resp = client.get('/api/pipeline/slots')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data == {"active": 0, "queued": 0, "slot_cap": SLOT_CAP}
+
+
+def test_pipeline_slots_counts_only_pipeline_jobs(app_and_db):
+    """``active`` and ``queued`` must count only pipeline-type jobs.
+    A running scan or duplicate-scan job must not be counted as a
+    pipeline slot occupant."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    runner = app._job_runner
+
+    running_pipeline = {
+        "id": "pipe-running-1",
+        "type": "pipeline",
+        "status": "running",
+        "started_at": "2026-05-27T10:00:00",
+        "finished_at": None,
+        "progress": {"current": 1, "total": 10},
+        "errors": [],
+        "config": {},
+        "result": None,
+    }
+    finished_pipeline = {
+        "id": "pipe-done-1",
+        "type": "pipeline",
+        "status": "completed",
+        "started_at": "2026-05-27T09:00:00",
+        "finished_at": "2026-05-27T09:30:00",
+        "progress": {"current": 10, "total": 10},
+        "errors": [],
+        "config": {},
+        "result": {"ok": True},
+    }
+    running_scan = {
+        "id": "scan-running-1",
+        "type": "scan",
+        "status": "running",
+        "started_at": "2026-05-27T10:05:00",
+        "finished_at": None,
+        "progress": {"current": 0, "total": 0},
+        "errors": [],
+        "config": {},
+        "result": None,
+    }
+    with runner._lock:
+        runner._jobs["pipe-running-1"] = running_pipeline
+        runner._jobs["pipe-done-1"] = finished_pipeline
+        runner._jobs["scan-running-1"] = running_scan
+
+    data = client.get('/api/pipeline/slots').get_json()
+    assert data["active"] == 1, \
+        "only running pipelines count toward active slots"
+    assert data["queued"] == 0
+
+
+def test_pipeline_slots_counts_queued(app_and_db):
+    """Queued pipelines (surfaced via ``list_jobs()`` from
+    ``_queued_pipelines``) must appear in ``queued`` but not in
+    ``active``."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    runner = app._job_runner
+
+    # Synthesize a queued pipeline the same way ``enqueue_pipeline``
+    # would — by registering an entry in ``_queued_pipelines``. We do
+    # this directly so the test doesn't need the full pipeline plumbing.
+    with runner._lock:
+        runner._queued_pipelines["pipe-queued-1"] = {
+            "started_at": "2026-05-27T10:10:00",
+            "config": {"sources": []},
+            "workspace_id": None,
+            "work_fn": lambda *a, **kw: None,
+        }
+        runner._jobs["pipe-running-2"] = {
+            "id": "pipe-running-2",
+            "type": "pipeline",
+            "status": "running",
+            "started_at": "2026-05-27T10:00:00",
+            "finished_at": None,
+            "progress": {"current": 1, "total": 10},
+            "errors": [],
+            "config": {},
+            "result": None,
+        }
+
+    data = client.get('/api/pipeline/slots').get_json()
+    assert data["active"] == 1
+    assert data["queued"] == 1
+
+
 def test_scan_status_includes_extended_stats(app_and_db):
     """GET /api/scan/status includes keyword count, db_size, etc."""
     app, _ = app_and_db
