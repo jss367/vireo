@@ -125,6 +125,73 @@ def test_singleton_reloads_for_different_variant(tmp_path):
     dino_embed._variant_loaded = None
 
 
+def test_concurrent_first_load_creates_only_one_session(tmp_path):
+    """Regression: two threads racing into _get_dinov2_session on first
+    load must share a single ONNX session, not each create their own and
+    overwrite the module global. Without the load lock, both threads pass
+    the ``_session is None`` check and ``onnx_runtime.create_session`` is
+    called twice — leaking the loser into VRAM and defeating the
+    shared-session guarantee that the rest of the concurrency design
+    relies on.
+    """
+    import threading
+    import time
+
+    import dino_embed
+
+    dino_embed._session = None
+    dino_embed._variant_loaded = None
+
+    model_dir = tmp_path / ".vireo" / "models" / "dinov2-vit-b14"
+    model_dir.mkdir(parents=True)
+    model_path = model_dir / "model.onnx"
+    model_path.write_bytes(b"fake")
+
+    create_calls = []
+    start_gate = threading.Event()
+
+    def slow_create(*_args, **_kwargs):
+        create_calls.append(1)
+        # Hold the lock long enough that, without the load lock, the
+        # second thread would also pass the ``_session is None`` check
+        # and call create_session. With the lock, the second thread
+        # blocks here and observes the cached session on re-check.
+        time.sleep(0.05)
+        return MagicMock()
+
+    results = []
+
+    def worker():
+        start_gate.wait(timeout=2.0)
+        with patch("os.path.expanduser", return_value=str(tmp_path)):
+            with patch(
+                "dino_embed.onnx_runtime.create_session",
+                side_effect=slow_create,
+            ):
+                results.append(dino_embed._get_dinov2_session("vit-b14"))
+
+    t1 = threading.Thread(target=worker)
+    t2 = threading.Thread(target=worker)
+    t1.start()
+    t2.start()
+    start_gate.set()
+    t1.join(timeout=3.0)
+    t2.join(timeout=3.0)
+
+    assert not t1.is_alive(), "first thread did not finish"
+    assert not t2.is_alive(), "second thread did not finish"
+    assert len(create_calls) == 1, (
+        "onnx_runtime.create_session must be called exactly once across "
+        f"concurrent first-load attempts; got {len(create_calls)} calls"
+    )
+    assert len(results) == 2
+    assert results[0] is results[1], "both threads must observe the same session"
+    assert dino_embed._session is results[0]
+
+    dino_embed._session = None
+    dino_embed._variant_loaded = None
+
+
 # -- Preprocessing --
 
 
