@@ -363,6 +363,80 @@ def pytest_fail(msg):
     raise AssertionError(msg)
 
 
+def test_retention_does_not_prune_queued_row_under_load(tmp_path):
+    """Codex P2 regression: ``_persist_job`` retains the 100 most-recent
+    rows per workspace. If a queued pipeline sits behind a busy slot
+    while >100 other jobs complete in the same workspace, the old
+    retention DELETE (which keyed only on started_at) would prune the
+    queued row. The subsequent promotion conditional UPDATE then sees
+    rowcount==0 and silently drops the queued context.
+
+    The fixed retention DELETE filters to terminal statuses so
+    non-terminal rows survive regardless of count.
+    """
+    runner, db = _make_runner_with_db(tmp_path)
+    try:
+        ws = db._active_workspace_id
+        blocker = threading.Event()
+
+        # Long-running first pipeline holds the slot.
+        first_id = runner.enqueue_pipeline(
+            work_fn=lambda job: blocker.wait(timeout=10.0),
+            config={}, workspace_id=ws,
+        )
+        # Queued pipeline.
+        queued_id = runner.enqueue_pipeline(
+            work_fn=lambda job: {"ran": True},
+            config={}, workspace_id=ws,
+        )
+
+        # Simulate 105 unrelated jobs completing in this workspace by
+        # writing terminal rows directly. They share the workspace_id
+        # so they're candidates for the retention DELETE.
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "test.db"))
+        try:
+            now = "2026-05-27T00:00:00"
+            for i in range(105):
+                conn.execute(
+                    "INSERT OR REPLACE INTO job_history "
+                    "(id, type, status, started_at, finished_at, "
+                    " duration, error_count, workspace_id) "
+                    "VALUES (?, 'scan', 'completed', ?, ?, 0.1, 0, ?)",
+                    (f"scan-fill-{i:03d}", now, now, ws),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Trigger _persist_job's retention by completing one more job
+        # via the runner. Use a non-pipeline type so it goes through
+        # runner.start (which persists immediately on finish).
+        fill_id = runner.start(
+            "scan", lambda job: None, workspace_id=ws,
+        )
+        wait_for_job_via_runner(runner, fill_id)
+
+        # The queued row MUST still exist after retention ran.
+        row = db.conn.execute(
+            "SELECT id, status FROM job_history WHERE id = ?", (queued_id,),
+        ).fetchone()
+        assert row is not None, (
+            "queued row was pruned by retention DELETE — promotion would "
+            "now see rowcount==0 and silently drop the run"
+        )
+        assert row["status"] == "queued"
+
+        # And promotion still works when the slot opens.
+        blocker.set()
+        wait_for_job_via_runner(runner, first_id)
+        second_final = wait_for_job_via_runner(runner, queued_id)
+        assert second_final["status"] == "completed"
+        assert second_final["result"] == {"ran": True}
+    finally:
+        db.close()
+
+
 def test_get_history_excludes_queued_rows(tmp_path):
     """Codex P2 regression: queued pipeline rows live in job_history
     immediately on enqueue, but they're LIVE state, not history. The

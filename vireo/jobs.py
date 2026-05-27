@@ -436,11 +436,22 @@ class JobRunner:
                 )
                 ws_id = job.get("workspace_id")
                 if ws_id is not None:
+                    # Retention: keep the 100 most-recent TERMINAL rows
+                    # per workspace. Excluding non-terminal rows is
+                    # load-bearing: a queued pipeline waiting behind a
+                    # busy slot can sit in the table for a long time;
+                    # if its row got pruned by an unrelated job
+                    # completing, the next promotion attempt would see
+                    # rowcount==0 on its conditional UPDATE and treat
+                    # that as a cancel, silently dropping the run.
                     conn.execute(
                         """DELETE FROM job_history
-                           WHERE workspace_id = ? AND id NOT IN (
+                           WHERE workspace_id = ?
+                             AND status IN ('completed', 'failed', 'cancelled')
+                             AND id NOT IN (
                                SELECT id FROM job_history
                                WHERE workspace_id = ?
+                                 AND status IN ('completed', 'failed', 'cancelled')
                                ORDER BY started_at DESC LIMIT 100
                            )""",
                         (ws_id, ws_id),
