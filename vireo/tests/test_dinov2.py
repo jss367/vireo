@@ -230,6 +230,52 @@ def test_embed_batch_rejects_empty_input():
         dino_embed.embed_batch([], variant="vit-b14")
 
 
+def test_embed_batch_releases_gpu_lock_outside_inference():
+    """``embed_batch`` must hold the GPU semaphore only across the
+    ``session.run`` call — not across session loading or image
+    preprocessing.
+
+    Regression for the Codex P2 on PR #899: holding the process-wide GPU
+    lock across DINO's resize/normalize loop blocked concurrent pipelines'
+    GPU stages on CPU preprocessing.
+    """
+    import dino_embed
+    import pipeline_locks
+
+    snapshots = {"during": None}
+
+    def record_inside_run(_outputs, _inputs):
+        snapshots["during"] = pipeline_locks._GPU_SEMAPHORE._value
+        return [np.zeros((1, 768), dtype=np.float32)]
+
+    mock_session = MagicMock()
+    mock_session.get_inputs.return_value = [MagicMock(name="input")]
+    mock_session.run.side_effect = record_inside_run
+
+    dino_embed._session = mock_session
+    dino_embed._variant_loaded = "vit-b14"
+
+    from PIL import Image
+
+    img = Image.new("RGB", (100, 100))
+
+    baseline = pipeline_locks._GPU_SEMAPHORE._value
+    try:
+        dino_embed.embed_batch([img], variant="vit-b14")
+    finally:
+        dino_embed._session = None
+        dino_embed._variant_loaded = None
+
+    # Semaphore's _value is decremented while held. With a 1-slot
+    # semaphore, baseline=1 → 0 during session.run, back to 1 after.
+    assert pipeline_locks._GPU_SEMAPHORE._value == baseline, (
+        "semaphore must be released on the way out"
+    )
+    assert snapshots["during"] == baseline - 1, (
+        "GPU lock must be held during session.run"
+    )
+
+
 def test_embed_subject_delegates_to_embed():
     """embed_subject calls embed with the same arguments."""
     import dino_embed
