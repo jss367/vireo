@@ -195,7 +195,6 @@ class JobRunner:
             if not candidates:
                 return
             job_id, ctx = candidates[0]
-            self._queued_pipelines.pop(job_id, None)
             self._promoting_pipelines.add(job_id)
 
         promoted = True
@@ -214,19 +213,24 @@ class JobRunner:
                 conn.close()
 
         if not promoted:
+            record_terminal = False
             with self._lock:
                 self._promoting_pipelines.discard(job_id)
-            self._record_terminal_queued_pipeline(job_id, ctx, status="cancelled")
-            self.push_event(
-                job_id,
-                "complete",
-                {
-                    "status": "cancelled",
-                    "result": None,
-                    "duration": 0.0,
-                    "errors": [],
-                },
-            )
+                if job_id not in self._jobs:
+                    ctx = self._queued_pipelines.pop(job_id, ctx)
+                    record_terminal = True
+            if record_terminal:
+                self._record_terminal_queued_pipeline(job_id, ctx, status="cancelled")
+                self.push_event(
+                    job_id,
+                    "complete",
+                    {
+                        "status": "cancelled",
+                        "result": None,
+                        "duration": 0.0,
+                        "errors": [],
+                    },
+                )
             return
 
         job = {
@@ -246,6 +250,7 @@ class JobRunner:
         }
         with self._lock:
             self._promoting_pipelines.discard(job_id)
+            self._queued_pipelines.pop(job_id, None)
             self._prune_finished_jobs()
             self._jobs[job_id] = job
             self._events[job_id] = deque(maxlen=1000)
@@ -788,7 +793,7 @@ class JobRunner:
             if job_id in self._queued_pipelines:
                 if expected_status and expected_status != "queued":
                     return False
-                ctx = self._queued_pipelines.pop(job_id)
+                ctx = self._queued_pipelines[job_id]
             else:
                 return False
 
@@ -812,6 +817,9 @@ class JobRunner:
         if not cancelled:
             return False
 
+        with self._lock:
+            ctx = self._queued_pipelines.pop(job_id, ctx)
+            self._promoting_pipelines.discard(job_id)
         self._record_terminal_queued_pipeline(job_id, ctx, status="cancelled")
         # Emit the terminal SSE event AFTER releasing the lock — clients
         # subscribed to /api/jobs/<id>/stream while the job was queued

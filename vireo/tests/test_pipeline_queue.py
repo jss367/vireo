@@ -392,6 +392,37 @@ def test_promotion_loses_race_to_cancel_leaves_row_cancelled(tmp_path):
     assert events[-1]["data"]["status"] == "cancelled"
 
 
+def test_promoting_pipeline_remains_visible_and_cancellable(tmp_path):
+    """A queued job in the promotion DB window must not disappear from APIs."""
+    runner, db = _make_runner_with_db(tmp_path)
+    job_id = "pipeline-1700000000001"
+    db.conn.execute(
+        "INSERT INTO job_history (id, type, status, started_at, error_count) "
+        "VALUES (?, 'pipeline', 'queued', '2026-05-26T00:00:00', 0)",
+        (job_id,),
+    )
+    db.conn.commit()
+    with runner._lock:
+        runner._queued_pipelines[job_id] = {
+            "work_fn": lambda job: pytest_fail("should not have run"),
+            "config": {"x": 1},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:00",
+        }
+        runner._promoting_pipelines.add(job_id)
+
+    view = runner.get(job_id)
+    assert view is not None
+    assert view["status"] == "queued"
+    assert any(j["id"] == job_id for j in runner.list_jobs())
+
+    assert runner.cancel_job(job_id, expected_status="queued") is True
+    final = runner.get(job_id)
+    assert final is not None
+    assert final["status"] == "cancelled"
+
+
 def pytest_fail(msg):
     raise AssertionError(msg)
 

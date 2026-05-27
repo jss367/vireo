@@ -526,6 +526,7 @@
       .then(function(r) { return r.json(); })
       .then(function(data) {
         activeJobs = data.active || [];
+        setHistoryJobs(data.history || historyJobs);
         activeWsId = data.active_workspace_id || null;
         workspaceNames = data.workspace_names || {};
         // Drop optimistic-cancel state for jobs that have left the active
@@ -541,28 +542,44 @@
         if (currentView === 'active') renderActiveOverview();
         else if (selectedSource === 'active' && selectedJobId) {
           var selected = activeJobs.find(function(j) { return j.id === selectedJobId; });
-          if (selected) renderDetail(selected);
+          if (selected) {
+            renderDetail(selected);
+          } else {
+            var histSelected = historyJobs.find(function(j) { return j.id === selectedJobId; });
+            if (histSelected) {
+              selectedSource = 'history';
+              renderHistoryDetail(histSelected);
+            }
+          }
         }
       })
       .catch(function() {});
+  }
+
+  function setHistoryJobs(rows) {
+    historyJobs = rows || [];
+    historyJobs.forEach(function(j) {
+      if (typeof j.tree === 'string') {
+        try { j.tree = JSON.parse(j.tree); } catch(e) { j.tree = []; }
+      }
+      if (typeof j.result === 'string') {
+        try { j.result = JSON.parse(j.result); } catch(e) { j.result = null; }
+      }
+    });
   }
 
   function fetchHistory() {
     fetch('/api/jobs/history?limit=100')
       .then(function(r) { return r.json(); })
       .then(function(data) {
-        historyJobs = data || [];
-        historyJobs.forEach(function(j) {
-          if (typeof j.tree === 'string') {
-            try { j.tree = JSON.parse(j.tree); } catch(e) { j.tree = []; }
-          }
-          if (typeof j.result === 'string') {
-            try { j.result = JSON.parse(j.result); } catch(e) { j.result = null; }
-          }
-        });
+        setHistoryJobs(data);
         updateList();
         populateTypeFilter();
         if (currentView === 'history') renderHistoryOverview();
+        else if (selectedSource === 'history' && selectedJobId) {
+          var selected = historyJobs.find(function(j) { return j.id === selectedJobId; });
+          if (selected) renderHistoryDetail(selected);
+        }
       })
       .catch(function() {});
   }
