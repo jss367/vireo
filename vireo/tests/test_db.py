@@ -6226,6 +6226,98 @@ def test_get_highlights_candidates_workspace_wide_respects_min_quality_and_rejec
     assert filenames == ["keep.jpg"]
 
 
+def test_get_highlights_candidates_returns_predicted_species(tmp_path):
+    """Photos with no accepted species but a classifier prediction
+    expose ``predicted_species`` and ``predicted_confidence`` columns."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/p', name='p')
+    pid = db.add_photo(folder_id=fid, filename='bird.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.6 WHERE id = ?", (pid,))
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'test', 'ʻApapane', 0.82)",
+        (did,),
+    )
+    db.conn.commit()
+
+    rows = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    assert len(rows) == 1
+    assert rows[0]["predicted_species"] == "ʻApapane"
+    assert abs(rows[0]["predicted_confidence"] - 0.82) < 1e-6
+    # No accepted keyword → species is None
+    assert rows[0]["species"] is None
+
+
+def test_get_highlights_candidates_predicted_picks_highest_confidence(tmp_path):
+    """When a photo has multiple detections with different predictions,
+    the highest-confidence one is returned."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/p', name='p')
+    pid = db.add_photo(folder_id=fid, filename='two.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.5 WHERE id = ?", (pid,))
+    d1 = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    d2 = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'Boring Bird', 0.40)",
+        (d1,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'Cool Bird', 0.90)",
+        (d2,),
+    )
+    db.conn.commit()
+
+    rows = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    assert rows[0]["predicted_species"] == "Cool Bird"
+    assert abs(rows[0]["predicted_confidence"] - 0.90) < 1e-6
+
+
+def test_get_highlights_candidates_predicted_excludes_rejected(tmp_path):
+    """Predictions the user rejected in the active workspace do not
+    appear as the fallback species."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/p', name='p')
+    pid = db.add_photo(folder_id=fid, filename='r.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.5 WHERE id = ?", (pid,))
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    pred_id = db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'Wrong Bird', 0.95)",
+        (did,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO prediction_review (prediction_id, workspace_id, status) "
+        "VALUES (?, ?, 'rejected')",
+        (pred_id, db._ws_id()),
+    )
+    db.conn.commit()
+
+    rows = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    assert rows[0]["predicted_species"] is None
+    assert rows[0]["predicted_confidence"] is None
+
+
 # --- Folders with quality data ---
 
 
