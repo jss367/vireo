@@ -3,8 +3,9 @@
 
 The queue persists pending pipeline runs in ``job_history`` with
 ``status='queued'`` and promotes them to ``status='running'`` as slot
-capacity opens. ``SLOT_CAP`` is 1 in this PR — the second queued run
-waits for the first to reach a terminal state before promotion.
+capacity opens. Tests that need a "queued" precondition use
+``_fill_slots()`` to occupy every slot with blocking pipelines first,
+so they stay meaningful regardless of the current ``SLOT_CAP`` value.
 """
 
 import threading
@@ -15,6 +16,30 @@ from wait import wait_for_job_via_runner
 
 def _wait_for_event(event, label, timeout=2.0):
     assert event.wait(timeout=timeout), f"{label} did not happen"
+
+
+def _fill_slots(runner, workspace_id=1):
+    """Enqueue ``SLOT_CAP`` blocking pipelines and wait for them all to
+    start. Returns ``(ids, release_event)``; call ``release_event.set()``
+    to let them finish. Used by tests that need the next enqueue to
+    land in the ``queued`` state.
+    """
+    from jobs import SLOT_CAP
+    release = threading.Event()
+    started_events = [threading.Event() for _ in range(SLOT_CAP)]
+    ids = []
+    for i in range(SLOT_CAP):
+        evt = started_events[i]
+        def work(job, _evt=evt, _release=release):
+            _evt.set()
+            _release.wait(timeout=5.0)
+            return {}
+        ids.append(runner.enqueue_pipeline(
+            work_fn=work, config={}, workspace_id=workspace_id,
+        ))
+    for i, evt in enumerate(started_events):
+        assert evt.wait(timeout=2.0), f"slot-filler {i} never started"
+    return ids, release
 
 
 def _make_runner_with_db(tmp_path):
@@ -59,22 +84,11 @@ def test_enqueue_pipeline_persists_queued_row(tmp_path):
     cross-connection (different sqlite handle).
     """
     runner, _ = _make_runner_with_db(tmp_path)
-    # Block the first pipeline so the read below sees a non-terminal
-    # state; without it the trivial lambda runs to completion before
-    # the assertion fires and the status would be 'completed'.
-    first_started = threading.Event()
-    blocker = threading.Event()
-
-    def first_work(job):
-        first_started.set()
-        blocker.wait(timeout=3.0)
-        return {}
-
-    first_id = runner.enqueue_pipeline(
-        work_fn=first_work,
-        config={}, workspace_id=1,
-    )
-    _wait_for_event(first_started, "first pipeline start")
+    # Fill every slot with blocking pipelines so the next enqueue
+    # lands in 'queued'. Without this the trivial lambda would run
+    # to completion before the assertion fires and the status would
+    # be 'completed'.
+    filler_ids, blocker = _fill_slots(runner)
     job_id = runner.enqueue_pipeline(
         work_fn=lambda job: None,
         config={"sources": ["/a"]},
@@ -101,7 +115,8 @@ def test_enqueue_pipeline_persists_queued_row(tmp_path):
     assert row["workspace_id"] == 42
 
     blocker.set()
-    wait_for_job_via_runner(runner, first_id)
+    for fid in filler_ids:
+        wait_for_job_via_runner(runner, fid)
     wait_for_job_via_runner(runner, job_id)
 
 
@@ -125,50 +140,107 @@ def test_enqueue_pipeline_promotes_immediately_when_slot_free(tmp_path):
     assert job["result"] == {"ok": True}
 
 
-def test_second_enqueue_while_first_running_stays_queued(tmp_path):
-    """A second enqueue while the slot is occupied must NOT start
-    running. SLOT_CAP is 1 in this PR; the second waits.
+def test_enqueue_beyond_slot_cap_stays_queued(tmp_path):
+    """Enqueueing one more than ``SLOT_CAP`` pipelines while the slots
+    are full must leave the extra one ``queued``. The cap is the
+    concurrency contract — phrased against the module constant so this
+    test stays meaningful regardless of whether the cap is 1, 2, or
+    bumped later.
     """
+    from jobs import SLOT_CAP
+    runner, _ = _make_runner_with_db(tmp_path)
+    blocker = threading.Event()
+    started_events = [threading.Event() for _ in range(SLOT_CAP)]
+    extra_started = threading.Event()
+
+    def make_blocking_work(started_event):
+        def work(job):
+            started_event.set()
+            blocker.wait(timeout=3.0)
+            return {}
+        return work
+
+    # Fill every slot with a blocking pipeline.
+    occupant_ids = []
+    for i in range(SLOT_CAP):
+        jid = runner.enqueue_pipeline(
+            work_fn=make_blocking_work(started_events[i]),
+            config={}, workspace_id=1,
+        )
+        occupant_ids.append(jid)
+    for i, evt in enumerate(started_events):
+        assert evt.wait(timeout=2.0), f"occupant {i} never started"
+
+    # One more — must stay queued, NOT run.
+    def extra_work(job):
+        extra_started.set()
+        return {"extra": True}
+
+    extra_id = runner.enqueue_pipeline(
+        work_fn=extra_work, config={}, workspace_id=1,
+    )
+    assert not extra_started.wait(timeout=0.2), (
+        f"extra pipeline started while all {SLOT_CAP} slots occupied"
+    )
+    extra_view = runner.get(extra_id)
+    assert extra_view is not None
+    assert extra_view["status"] == "queued"
+
+    # Release the occupants; the extra must now promote.
+    blocker.set()
+    for jid in occupant_ids:
+        wait_for_job_via_runner(runner, jid)
+    assert extra_started.wait(timeout=2.0), (
+        "extra pipeline did not promote after slots cleared"
+    )
+    wait_for_job_via_runner(runner, extra_id)
+
+
+def test_two_pipelines_run_concurrently_when_slot_cap_at_least_two(tmp_path):
+    """Two enqueued pipelines must both reach the running state at the
+    same time when ``SLOT_CAP >= 2``. This is the real concurrency
+    contract Step 6 enables; the test is skipped on installs that
+    deliberately keep ``SLOT_CAP=1`` so reviewers can flip the cap
+    back temporarily without false test failures.
+    """
+    from jobs import SLOT_CAP
+    if SLOT_CAP < 2:
+        import pytest
+        pytest.skip(f"SLOT_CAP={SLOT_CAP}; concurrency test requires >=2")
+
     runner, _ = _make_runner_with_db(tmp_path)
     first_started = threading.Event()
-    let_first_finish = threading.Event()
     second_started = threading.Event()
+    blocker = threading.Event()
 
     def first_work(job):
         first_started.set()
-        let_first_finish.wait(timeout=3.0)
+        blocker.wait(timeout=3.0)
         return {"first": True}
 
     def second_work(job):
         second_started.set()
+        blocker.wait(timeout=3.0)
         return {"second": True}
 
     first_id = runner.enqueue_pipeline(
         work_fn=first_work, config={}, workspace_id=1,
     )
-    assert first_started.wait(timeout=2.0), "first work_fn never started"
-
     second_id = runner.enqueue_pipeline(
         work_fn=second_work, config={}, workspace_id=1,
     )
-    # Second must NOT have started yet — slot is occupied.
-    assert not second_started.wait(timeout=0.2), (
-        "second pipeline started while slot was occupied"
-    )
-    # Verify status via the runner's accessor.
-    second_view = runner.get(second_id)
-    assert second_view is not None
-    assert second_view["status"] == "queued"
 
-    # Release the first; second must now promote and run.
-    let_first_finish.set()
-    wait_for_job_via_runner(runner, first_id)
+    # Both work_fns must be invoked WITHOUT either one finishing —
+    # the second must NOT have waited for the first to terminate.
+    assert first_started.wait(timeout=2.0), "first pipeline did not start"
     assert second_started.wait(timeout=2.0), (
-        "second pipeline did not promote after first completed"
+        "second pipeline did not start concurrently with first — "
+        "SLOT_CAP appears to still be 1 or the scheduler is serialising"
     )
-    second_final = wait_for_job_via_runner(runner, second_id)
-    assert second_final["status"] == "completed"
-    assert second_final["result"] == {"second": True}
+
+    blocker.set()
+    wait_for_job_via_runner(runner, first_id)
+    wait_for_job_via_runner(runner, second_id)
 
 
 def test_startup_sweep_marks_orphan_running_rows_as_failed(tmp_path):
@@ -251,18 +323,7 @@ def test_queued_pipeline_is_visible_via_get(tmp_path):
     endpoint to render queue state.
     """
     runner, _ = _make_runner_with_db(tmp_path)
-    first_started = threading.Event()
-    blocker = threading.Event()
-
-    def blocking_work(job):
-        first_started.set()
-        blocker.wait(timeout=3.0)
-        return {}
-
-    first_id = runner.enqueue_pipeline(
-        work_fn=blocking_work, config={}, workspace_id=1,
-    )
-    _wait_for_event(first_started, "first pipeline start")
+    filler_ids, blocker = _fill_slots(runner)
     second_id = runner.enqueue_pipeline(
         work_fn=lambda job: {"ok": True}, config={"x": 1}, workspace_id=2,
     )
@@ -275,7 +336,8 @@ def test_queued_pipeline_is_visible_via_get(tmp_path):
     assert view["workspace_id"] == 2
 
     blocker.set()
-    wait_for_job_via_runner(runner, first_id)
+    for fid in filler_ids:
+        wait_for_job_via_runner(runner, fid)
     wait_for_job_via_runner(runner, second_id)
 
 
@@ -285,21 +347,13 @@ def test_cancel_queued_pipeline_transitions_row_to_cancelled(tmp_path):
     in-memory context so promotion never picks it up.
     """
     runner, db = _make_runner_with_db(tmp_path)
-    blocker = threading.Event()
-    first_started = threading.Event()
     second_started = threading.Event()
-
-    def first_work(job):
-        first_started.set()
-        blocker.wait(timeout=3.0)
-        return {}
 
     def second_work(job):
         second_started.set()
         return {"should-not-run": True}
 
-    first_id = runner.enqueue_pipeline(work_fn=first_work, config={}, workspace_id=1)
-    _wait_for_event(first_started, "first pipeline start")
+    filler_ids, blocker = _fill_slots(runner)
     second_id = runner.enqueue_pipeline(work_fn=second_work, config={}, workspace_id=1)
     assert runner.get(second_id)["status"] == "queued"
 
@@ -318,9 +372,10 @@ def test_cancel_queued_pipeline_transitions_row_to_cancelled(tmp_path):
     ).fetchone()
     assert row["status"] == "cancelled"
 
-    # Releasing the first must NOT promote the cancelled one.
+    # Releasing the slot-fillers must NOT promote the cancelled one.
     blocker.set()
-    wait_for_job_via_runner(runner, first_id)
+    for fid in filler_ids:
+        wait_for_job_via_runner(runner, fid)
     # Wait briefly; the cancelled row must never be promoted.
     assert not second_started.wait(timeout=0.3), (
         "cancelled queued job must not be promoted"
@@ -849,20 +904,10 @@ def test_retention_does_not_prune_queued_row_under_load(tmp_path):
     runner, db = _make_runner_with_db(tmp_path)
     try:
         ws = db._active_workspace_id
-        first_started = threading.Event()
-        blocker = threading.Event()
 
-        def first_work(job):
-            first_started.set()
-            blocker.wait(timeout=10.0)
-            return {}
-
-        # Long-running first pipeline holds the slot.
-        first_id = runner.enqueue_pipeline(
-            work_fn=first_work,
-            config={}, workspace_id=ws,
-        )
-        _wait_for_event(first_started, "first pipeline start")
+        # Long-running pipelines fill every slot so the next enqueue
+        # lands in 'queued'.
+        filler_ids, blocker = _fill_slots(runner, workspace_id=ws)
         # Queued pipeline.
         queued_id = runner.enqueue_pipeline(
             work_fn=lambda job: {"ran": True},
@@ -915,9 +960,10 @@ def test_retention_does_not_prune_queued_row_under_load(tmp_path):
         )
         assert row["status"] == "queued"
 
-        # And promotion still works when the slot opens.
+        # And promotion still works when the slots open.
         blocker.set()
-        wait_for_job_via_runner(runner, first_id)
+        for fid in filler_ids:
+            wait_for_job_via_runner(runner, fid)
         second_final = wait_for_job_via_runner(runner, queued_id)
         assert second_final["status"] == "completed"
         assert second_final["result"] == {"ran": True}
@@ -936,42 +982,33 @@ def test_get_history_excludes_queued_rows(tmp_path):
     try:
         ws = db._active_workspace_id
 
-        first_started = threading.Event()
-        blocker = threading.Event()
-
-        def first_work(job):
-            first_started.set()
-            blocker.wait(timeout=3.0)
-            return {}
-
-        first_id = runner.enqueue_pipeline(
-            work_fn=first_work,
-            config={}, workspace_id=ws,
-        )
-        _wait_for_event(first_started, "first pipeline start")
+        filler_ids, blocker = _fill_slots(runner, workspace_id=ws)
         queued_id = runner.enqueue_pipeline(
             work_fn=lambda job: None, config={}, workspace_id=ws,
         )
 
-        # Sanity: both rows exist with non-terminal status.
+        # Sanity: queued row is non-terminal.
         assert runner.get(queued_id)["status"] == "queued"
 
-        # History must NOT include either live row.
+        # History must NOT include any live row.
         history_ids = [j["id"] for j in runner.get_history(db, limit=50)]
-        assert first_id not in history_ids, (
-            "running rows belong to live state, not history"
-        )
+        for fid in filler_ids:
+            assert fid not in history_ids, (
+                "running rows belong to live state, not history"
+            )
         assert queued_id not in history_ids, (
             "queued rows belong to live state, not history"
         )
 
         blocker.set()
-        wait_for_job_via_runner(runner, first_id)
+        for fid in filler_ids:
+            wait_for_job_via_runner(runner, fid)
         wait_for_job_via_runner(runner, queued_id)
 
-        # After completion both DO appear in history.
+        # After completion the live rows DO appear in history.
         history_ids = [j["id"] for j in runner.get_history(db, limit=50)]
-        assert first_id in history_ids
+        for fid in filler_ids:
+            assert fid in history_ids
         assert queued_id in history_ids
     finally:
         db.close()
@@ -985,23 +1022,15 @@ def test_list_jobs_includes_queued_pipelines(tmp_path):
     and can't be cancelled from /jobs.
     """
     runner, _ = _make_runner_with_db(tmp_path)
-    first_started = threading.Event()
-    blocker = threading.Event()
-
-    def first_work(job):
-        first_started.set()
-        blocker.wait(timeout=3.0)
-        return {}
-
-    first_id = runner.enqueue_pipeline(first_work, config={}, workspace_id=1)
-    _wait_for_event(first_started, "first pipeline start")
+    filler_ids, blocker = _fill_slots(runner)
     second_id = runner.enqueue_pipeline(
         lambda job: None, config={"x": 7}, workspace_id=2,
     )
 
     all_jobs = runner.list_jobs()
     ids = {j["id"]: j for j in all_jobs}
-    assert first_id in ids
+    for fid in filler_ids:
+        assert fid in ids
     assert second_id in ids, (
         "queued pipeline must be visible through list_jobs() so the "
         "navbar/jobs page can render and cancel it"
@@ -1012,7 +1041,8 @@ def test_list_jobs_includes_queued_pipelines(tmp_path):
     assert ids[second_id]["workspace_id"] == 2
 
     blocker.set()
-    wait_for_job_via_runner(runner, first_id)
+    for fid in filler_ids:
+        wait_for_job_via_runner(runner, fid)
     wait_for_job_via_runner(runner, second_id)
 
 
@@ -1024,16 +1054,7 @@ def test_cancelling_queued_pipeline_emits_complete_event_to_sse(tmp_path):
     and the SSE loop reports the job as 'expired'.
     """
     runner, _ = _make_runner_with_db(tmp_path)
-    first_started = threading.Event()
-    blocker = threading.Event()
-
-    def first_work(job):
-        first_started.set()
-        blocker.wait(timeout=3.0)
-        return {}
-
-    first_id = runner.enqueue_pipeline(first_work, config={}, workspace_id=1)
-    _wait_for_event(first_started, "first pipeline start")
+    filler_ids, blocker = _fill_slots(runner)
     second_id = runner.enqueue_pipeline(
         lambda job: pytest_fail("cancelled queued must not run"),
         config={}, workspace_id=1,
@@ -1051,7 +1072,8 @@ def test_cancelling_queued_pipeline_emits_complete_event_to_sse(tmp_path):
     assert evt["data"]["status"] == "cancelled"
 
     blocker.set()
-    wait_for_job_via_runner(runner, first_id)
+    for fid in filler_ids:
+        wait_for_job_via_runner(runner, fid)
 
 
 def test_sse_subscribers_attached_while_queued_receive_post_promotion_events(tmp_path):
@@ -1061,31 +1083,24 @@ def test_sse_subscribers_attached_while_queued_receive_post_promotion_events(tmp
     after the pipeline actually starts.
     """
     runner, _ = _make_runner_with_db(tmp_path)
-    first_started = threading.Event()
-    blocker = threading.Event()
     let_second_finish = threading.Event()
-
-    def first_work(job):
-        first_started.set()
-        blocker.wait(timeout=3.0)
-        return {}
 
     def second_work(job):
         runner.push_event(job["id"], "progress", {"phase": "started"})
         let_second_finish.wait(timeout=3.0)
         return {"ok": True}
 
-    first_id = runner.enqueue_pipeline(first_work, config={}, workspace_id=1)
-    _wait_for_event(first_started, "first pipeline start")
+    filler_ids, blocker = _fill_slots(runner)
     second_id = runner.enqueue_pipeline(second_work, config={}, workspace_id=1)
     assert runner.get(second_id)["status"] == "queued"
 
     # Subscribe BEFORE promotion.
     q = runner.subscribe(second_id)
 
-    # Release the first; second is now promoted and emits a progress event.
+    # Release the slot-fillers; second is now promoted and emits a progress event.
     blocker.set()
-    wait_for_job_via_runner(runner, first_id)
+    for fid in filler_ids:
+        wait_for_job_via_runner(runner, fid)
 
     # The event the second's work_fn pushed must reach this subscriber.
     evt = q.get(timeout=2.0)
