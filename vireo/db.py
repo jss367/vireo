@@ -2766,7 +2766,9 @@ class Database:
     # Columns for single-photo detail queries (includes exif_data JSON +
     # eye-focus fields consumed by the review lightbox's crosshair overlay)
     PHOTO_DETAIL_COLS = (
-        PHOTO_COLS + ", exif_data, eye_x, eye_y, eye_conf, eye_tenengrad"
+        PHOTO_COLS
+        + ", exif_data, eye_x, eye_y, eye_conf, eye_tenengrad,"
+        + " working_copy_failed_at, working_copy_failed_mtime"
     )
 
     def get_photo(self, photo_id, verify_workspace=False):

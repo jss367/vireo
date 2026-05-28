@@ -1161,6 +1161,80 @@ def test_full_is_alias_for_preview_at_configured_size(client_with_photo, monkeyp
     assert len(full) > 0
 
 
+def test_preview_skips_recent_failed_raw_working_copy(
+    client_with_photo, monkeypatch,
+):
+    """A RAW whose working-copy extraction already failed at the current mtime
+    should fail fast instead of retrying RAW decode in /preview."""
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"load": False}
+
+    def fail_if_called(*_args, **_kwargs):
+        called["load"] = True
+        raise AssertionError("preview retried failed RAW decode")
+
+    monkeypatch.setattr(image_loader, "load_image", fail_if_called)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 500
+    assert called["load"] is False
+
+
+def test_original_skips_recent_failed_raw_working_copy(
+    client_with_photo, monkeypatch,
+):
+    """The 1:1 original route should also fail fast for a current RAW
+    extraction failure."""
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"extract": False}
+
+    def fail_if_called(*_args, **_kwargs):
+        called["extract"] = True
+        raise AssertionError("original route retried failed RAW extraction")
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", fail_if_called)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 500
+    assert called["extract"] is False
+
+
 def test_eviction_removes_oldest_files_when_over_quota(tmp_path, monkeypatch):
     """When writes push cache over quota, oldest-accessed entries are evicted."""
     import os

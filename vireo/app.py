@@ -136,6 +136,45 @@ def _chunked(seq, size=_SQL_PARAM_CHUNK):
         yield seq[i:i + size]
 
 
+def _has_current_working_copy_failure(photo):
+    """Return True when this RAW already failed working-copy extraction.
+
+    Missing thumbnail/preview requests normally self-heal by decoding the
+    source. For RAW rows whose working-copy extraction already failed at the
+    same source mtime, retrying that decode in a request thread can block the
+    UI for minutes and then fail the same way. A file replacement changes
+    ``file_mtime`` and naturally clears this gate.
+    """
+    def _get(key):
+        try:
+            return photo[key]
+        except (KeyError, IndexError, TypeError):
+            return None
+
+    if _get("working_copy_path"):
+        return False
+
+    filename = _get("filename") or ""
+    try:
+        from image_loader import RAW_EXTENSIONS
+    except Exception:
+        RAW_EXTENSIONS = {
+            ".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf",
+        }
+    if os.path.splitext(filename)[1].lower() not in RAW_EXTENSIONS:
+        return False
+
+    failed_at = _get("working_copy_failed_at")
+    failed_mtime = _get("working_copy_failed_mtime")
+    file_mtime = _get("file_mtime")
+    if not failed_at or failed_mtime is None or file_mtime is None:
+        return False
+    try:
+        return float(failed_mtime) == float(file_mtime)
+    except (TypeError, ValueError):
+        return False
+
+
 def _ensure_volume_trashes_dir(filepath, ensured_volumes):
     """Make sure ``/Volumes/<X>/.Trashes/<uid>/`` exists when ``filepath`` is on
     an external/network mount. macOS ``send2trash`` legacy mode raises
@@ -10594,6 +10633,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Self-heal path: regenerate on miss (or stale) when the photo
         # still exists.
+        if _has_current_working_copy_failure(photo):
+            log.info(
+                "Skipping thumbnail self-heal for photo %s; RAW working-copy "
+                "extraction already failed for current source mtime",
+                photo_id,
+            )
+            return "", 404
 
         # Resolve source via the canonical-path helper so we prefer the
         # JPEG working copy over the original RAW. This makes the
@@ -13222,6 +13268,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "Not found", 404
         folders = {folder_row["id"]: folder_row["path"]}
 
+        if _has_current_working_copy_failure(photo):
+            log.info(
+                "Skipping preview generation for photo %s; RAW working-copy "
+                "extraction already failed for current source mtime",
+                photo_id,
+            )
+            return "Could not load image", 500
+
         canonical = get_canonical_image_path(photo, vireo_dir, folders)
         img = load_image(canonical, max_size=size)
         if img is None:
@@ -13370,6 +13424,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             vireo_dir,
             {photo["folder_id"]: folder["path"]},
         )
+
+        if _has_current_working_copy_failure(photo):
+            log.info(
+                "Skipping original-image extraction for photo %s; RAW working-copy "
+                "extraction already failed for current source mtime",
+                photo_id,
+            )
+            return "Could not load image", 500
 
         # For browser-native formats without a working copy, serve directly
         ext = os.path.splitext(photo["filename"])[1].lower()

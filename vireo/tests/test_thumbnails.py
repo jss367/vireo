@@ -702,6 +702,44 @@ def test_serve_thumbnail_404s_when_source_is_unreadable(tmp_path, monkeypatch):
     assert resp.status_code == 404
 
 
+def test_serve_thumbnail_skips_recent_failed_raw_working_copy(
+    tmp_path, monkeypatch,
+):
+    """A RAW row that already failed working-copy extraction at the current
+    mtime must not retry RAW decode in the thumbnail request thread.
+    """
+    import thumbnails
+
+    app, db, pid, _thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, pid),
+    )
+    db.conn.commit()
+
+    called = {"generate": False}
+
+    def fail_if_called(*_args, **_kwargs):
+        called["generate"] = True
+        raise AssertionError("thumbnail request retried failed RAW decode")
+
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fail_if_called)
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 404
+    assert called["generate"] is False
+
+
 def test_serve_thumbnail_resolves_when_folder_status_is_missing(tmp_path, monkeypatch):
     """The self-heal must use the photo's actual folder path even when
     the folder's status is ``'missing'``. ``get_folder_tree()`` filters
