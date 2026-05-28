@@ -9643,9 +9643,20 @@ class Database:
             self.conn.commit()
         return updated
 
-    def create_default_collections(self):
-        """Create default smart collections, skipping any that already exist by name."""
-        existing_names = {c["name"] for c in self.get_collections()}
+    def create_default_collections(self, workspace_id=None):
+        """Create default smart collections, skipping any that already exist by name.
+
+        Workspace defaults to the active one. Pass ``workspace_id`` to seed a
+        specific workspace without needing it to be active — used by
+        ``api_create_workspace`` so brand-new workspaces get the defaults at
+        creation time instead of relying on a future startup pass.
+        """
+        ws_id = workspace_id if workspace_id is not None else self._ws_id()
+        existing_names = {
+            row["name"] for row in self.conn.execute(
+                "SELECT name FROM collections WHERE workspace_id = ?", (ws_id,),
+            ).fetchall()
+        }
 
         defaults = [
             ("All Photos", [{"field": "all"}]),
@@ -9662,7 +9673,11 @@ class Database:
         ]
         for name, rules in defaults:
             if name not in existing_names:
-                self.add_collection(name, json.dumps(rules))
+                self.conn.execute(
+                    "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+                    (name, json.dumps(rules), ws_id),
+                )
+        self.conn.commit()
 
     def migrate_default_subject_collection(self):
         """Rename legacy 'Needs Classification' (with rule has_species==0)

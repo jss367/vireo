@@ -3948,6 +3948,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("Name is required")
         try:
             ws_id = db.create_workspace(name, config_overrides=body.get("config_overrides"))
+            # Seed the standard smart collections (All Photos, Flagged, etc.).
+            # Startup only seeds the active workspace, so without this a
+            # workspace created via the API never gets defaults until it's
+            # active during a future Vireo restart — which is how a
+            # workspace in the wild ended up with zero defaults and broke
+            # "All Photos" in the pipeline collection picker.
+            db.create_default_collections(workspace_id=ws_id)
             # Link selected folders if provided
             folder_ids = body.get("folder_ids", [])
             for folder_id in folder_ids:
