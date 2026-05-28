@@ -8,14 +8,20 @@ Two primitives:
   classify doesn't completely starve a second pipeline that just wants
   one quick GPU op.
 
-* ``acquire_workspace_regroup(workspace_id)`` — a per-workspace lock so
-  two pipelines targeting the same workspace serialise on regroup but
-  not on earlier stages.
+* ``acquire_workspace_regroup(workspace_id)`` — a per-workspace lock
+  held across BOTH ``regroup_stage`` and ``miss_stage`` so two pipelines
+  targeting the same workspace can't interleave on the workspace-scoped
+  grouping state (``burst_id`` writes, ``pipeline_results_ws*.json``,
+  and the ``miss_computed_at`` timestamp paired with that grouping).
+  Pipelines on different workspaces never contend.
 
 Lock order (acquire outermost first): ``_progress_lock`` →
-``JobRunner._lock`` → ``acquire_workspace_regroup`` → ``acquire_gpu``.
-Never invert. The GPU lock is the innermost; nothing else may be acquired
-while it is held.
+``acquire_workspace_regroup`` → ``JobRunner._lock`` → ``acquire_gpu``.
+``JobRunner._lock`` is a brief leaf lock taken by ``runner.update_step``
+inside the workspace critical section; this is safe because no code
+path under ``JobRunner._lock`` acquires ``acquire_workspace_regroup``,
+so there is no cycle. ``acquire_gpu`` is the innermost: nothing else
+may be acquired while it is held.
 """
 
 import threading
