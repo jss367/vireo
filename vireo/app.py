@@ -10216,7 +10216,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         runner = app._job_runner
         db = _get_db()
         raw_body = request.get_data(cache=True)
-        if request.is_json and raw_body.strip():
+        if request.is_json and raw_body:
             try:
                 body = request.get_json()
             except BadRequest:

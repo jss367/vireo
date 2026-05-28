@@ -1873,13 +1873,14 @@ def test_cancel_queued_endpoint_rejects_malformed_json_without_cancel(app_and_db
     assert runner.get(queued_id)["status"] == "queued"
 
     try:
-        resp = client.post(
-            "/api/jobs/cancel-queued",
-            data='{"workspace_id":',
-            content_type="application/json",
-        )
-        assert resp.status_code == 400
-        assert runner.get(queued_id)["status"] == "queued"
+        for body in ('{"workspace_id":', "   \n\t"):
+            resp = client.post(
+                "/api/jobs/cancel-queued",
+                data=body,
+                content_type="application/json",
+            )
+            assert resp.status_code == 400
+            assert runner.get(queued_id)["status"] == "queued"
     finally:
         release.set()
         from wait import wait_for_job_via_runner
