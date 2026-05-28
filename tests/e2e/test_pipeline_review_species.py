@@ -72,8 +72,12 @@ def _write_confirmation_pipeline_cache(live_server, photo_ids):
         photo_ids,
     ).fetchall()
     species = ["Red-tailed Hawk", "American Robin"]
-    photos = [
-        {
+    photos = []
+    photo_species = []
+    for idx, row in enumerate(rows):
+        species_name = species[idx % len(species)]
+        photo_species.append(species_name)
+        photos.append({
             "id": row["id"],
             "filename": row["filename"],
             "timestamp": row["timestamp"],
@@ -81,12 +85,11 @@ def _write_confirmation_pipeline_cache(live_server, photo_ids):
             "quality_composite": 0.5,
             "flag": "none",
             "rating": 0,
-            "confirmed_species": species[idx] if idx == 0 else None,
-        }
-        for idx, row in enumerate(rows)
-    ]
+            "confirmed_species": species_name if idx == 0 else None,
+        })
     encounters = []
     for idx, photo in enumerate(photos):
+        species_name = photo_species[idx]
         confirmed = idx == 0
         encounters.append(
             {
@@ -94,20 +97,20 @@ def _write_confirmation_pipeline_cache(live_server, photo_ids):
                 "photo_count": 1,
                 "burst_count": 1,
                 "time_range": [photo["timestamp"], photo["timestamp"]],
-                "species": [species[idx]],
+                "species": [species_name],
                 "species_predictions": [
-                    {"species": species[idx], "models": [{"confidence": 0.92}]},
+                    {"species": species_name, "models": [{"confidence": 0.92}]},
                 ],
                 "species_confirmed": confirmed,
-                "confirmed_species": species[idx] if confirmed else None,
+                "confirmed_species": species_name if confirmed else None,
                 "bursts": [
                     {
                         "photo_ids": [photo["id"]],
                         "species_predictions": [
-                            {"species": species[idx], "models": [{"confidence": 0.92}]},
+                            {"species": species_name, "models": [{"confidence": 0.92}]},
                         ],
                         "species_override": (
-                            {"species": species[idx], "confirmed": True}
+                            {"species": species_name, "confirmed": True}
                             if confirmed
                             else None
                         ),
@@ -234,4 +237,12 @@ def test_pipeline_review_view_settings_persist(live_server, page):
     expect(page.locator('[data-filter="REVIEW"]')).to_have_class(re.compile(r"\bactive\b"))
     expect(page.locator("#speciesFilterInput")).to_have_value("Robin")
     expect(page.locator("#thumbSizeSlider")).to_have_value("220")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+    page.reload()
+    expect(page.locator("#speciesFilterInput")).to_have_value("Robin")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+    page.locator("#speciesFilterClear").click()
+    expect(page.locator("#speciesFilterInput")).to_have_value("")
     expect(page.locator(".encounter-card")).to_have_count(1)

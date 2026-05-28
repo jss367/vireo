@@ -1583,7 +1583,7 @@ function restorePipelineReviewViewState() {
     thumbSize = Math.max(100, Math.min(320, thumbSize));
     var slider = document.getElementById('thumbSizeSlider');
     if (slider) slider.value = String(thumbSize);
-    updateThumbSize(thumbSize);
+    updateThumbSize(thumbSize, false);
   }
 
   applyPipelineReviewToolbarState();
@@ -2231,9 +2231,9 @@ function toggleHideConfirmed() {
 
 var _confTimer = null;
 
-function updateThumbSize(val) {
+function updateThumbSize(val, persist) {
   document.getElementById('encountersContainer').style.setProperty('--photo-card-size', val + 'px');
-  persistPipelineReviewViewState();
+  if (persist !== false) persistPipelineReviewViewState();
 }
 
 function setMinConfidence(val) {
