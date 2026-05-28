@@ -827,6 +827,7 @@ class JobRunner:
         cancellation (running) or transitioned to cancelled (queued).
         """
         emit_complete = False
+        retry_promotion = False
         queued_cancel = None
         with self._lock:
             job = self._jobs.get(job_id)
@@ -880,6 +881,7 @@ class JobRunner:
                 return False
             if self._queued_pipelines.get(job_id) is queued_cancel:
                 self._queued_pipelines.pop(job_id, None)
+                retry_promotion = True
             emit_complete = True
         if emit_complete:
             self._record_terminal_queued_pipeline(
@@ -901,6 +903,8 @@ class JobRunner:
                     "errors": [],
                 },
             )
+        if retry_promotion:
+            self._try_promote_queued()
         return True
 
     def cancel_queued_jobs(self, workspace_id=None):

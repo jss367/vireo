@@ -416,6 +416,55 @@ def test_promoting_pipeline_remains_visible_and_cancellable(tmp_path):
     assert final["status"] == "cancelled"
 
 
+def test_cancel_promoting_queued_pipeline_retries_next_candidate(tmp_path):
+    """Cancelling a promoting queued job must not strand later queued work."""
+    runner, db = _make_runner_with_db(tmp_path)
+    cancelled_id = "pipeline-1700000000001"
+    next_id = "pipeline-1700000000002"
+    next_started = threading.Event()
+    db.conn.executemany(
+        "INSERT INTO job_history (id, type, status, started_at, workspace_id, "
+        "error_count) VALUES (?, 'pipeline', 'queued', ?, ?, 0)",
+        [
+            (cancelled_id, "2026-05-26T00:00:00", 1),
+            (next_id, "2026-05-26T00:00:01", 2),
+        ],
+    )
+    db.conn.commit()
+    with runner._lock:
+        runner._queued_pipelines[cancelled_id] = {
+            "work_fn": lambda job: pytest_fail("cancelled job must not run"),
+            "config": {},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:00",
+            "_promoting": True,
+        }
+        runner._queued_pipelines[next_id] = {
+            "work_fn": lambda job: next_started.set(),
+            "config": {},
+            "workspace_id": 2,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:01",
+        }
+
+    assert runner.cancel_queued_jobs(workspace_id=1) == [cancelled_id]
+
+    _wait_for_event(next_started, "next queued promotion")
+    next_final = wait_for_job_via_runner(
+        runner, next_id, wait_for_history=True,
+    )
+    assert next_final["status"] == "completed"
+    rows = {
+        r["id"]: r["status"]
+        for r in db.conn.execute(
+            "SELECT id, status FROM job_history WHERE id IN (?, ?)",
+            (cancelled_id, next_id),
+        )
+    }
+    assert rows == {cancelled_id: "cancelled", next_id: "completed"}
+
+
 def test_cancel_promoting_pipeline_after_db_running_preserves_request(tmp_path):
     """Cancelling during the DB-running promotion window must still win."""
     runner, db = _make_runner_with_db(tmp_path)
