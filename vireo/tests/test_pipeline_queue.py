@@ -510,6 +510,63 @@ def test_cancel_queued_jobs_defers_promotion_until_snapshot_cancelled(tmp_path):
     assert rows == {first_id: "cancelled", second_id: "cancelled"}
 
 
+def test_cancel_queued_jobs_preserves_snapshot_cancel_after_promotion(
+    tmp_path, monkeypatch,
+):
+    """Bulk cancel should still cancel a snapshot member promoted mid-loop."""
+    runner, db = _make_runner_with_db(tmp_path)
+    job_id = "pipeline-1700000000001"
+    db.conn.execute(
+        "INSERT INTO job_history (id, type, status, started_at, workspace_id, "
+        "error_count) VALUES (?, 'pipeline', 'queued', ?, 1, 0)",
+        (job_id, "2026-05-26T00:00:00"),
+    )
+    db.conn.commit()
+    with runner._lock:
+        runner._queued_pipelines[job_id] = {
+            "work_fn": lambda job: pytest_fail("job must not run"),
+            "config": {},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:00",
+            "_promoting": True,
+        }
+
+    original_cancel_job = runner.cancel_job
+
+    def promote_before_cancel(cancel_id, *args, **kwargs):
+        if cancel_id == job_id:
+            with runner._lock:
+                ctx = runner._queued_pipelines.pop(job_id)
+                ctx.pop("_promoting", None)
+                runner._jobs[job_id] = {
+                    "id": job_id,
+                    "type": "pipeline",
+                    "status": "running",
+                    "started_at": ctx["started_at"],
+                    "finished_at": None,
+                    "progress": {"current": 0, "total": 0, "current_file": ""},
+                    "result": None,
+                    "errors": [],
+                    "config": ctx["config"],
+                    "workspace_id": ctx["workspace_id"],
+                    "steps": [],
+                    "ephemeral": False,
+                    "runtime_warning": ctx["runtime_warning"],
+                }
+            db.conn.execute(
+                "UPDATE job_history SET status='running' WHERE id = ?",
+                (job_id,),
+            )
+            db.conn.commit()
+        return original_cancel_job(cancel_id, *args, **kwargs)
+
+    monkeypatch.setattr(runner, "cancel_job", promote_before_cancel)
+
+    assert runner.cancel_queued_jobs(workspace_id=1) == [job_id]
+    assert runner.is_cancelled(job_id)
+
+
 def test_cancel_promoting_pipeline_after_db_running_preserves_request(tmp_path):
     """Cancelling during the DB-running promotion window must still win."""
     runner, db = _make_runner_with_db(tmp_path)

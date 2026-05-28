@@ -923,7 +923,6 @@ class JobRunner:
         for job_id in job_ids:
             if self.cancel_job(
                 job_id,
-                expected_status="queued",
                 promote_after_cancel=False,
             ):
                 cancelled.append(job_id)
