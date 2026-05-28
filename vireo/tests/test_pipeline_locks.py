@@ -11,6 +11,7 @@ from pipeline_locks import (
     _GPU_SEMAPHORE,
     acquire_gpu,
     acquire_gpu_if_session_uses_it,
+    acquire_photo_mask,
     acquire_workspace_regroup,
 )
 
@@ -188,3 +189,96 @@ def test_workspace_regroup_lock_reentrant_keys_share_one_lock():
     lock1 = _workspace_regroup_lock_for_tests(7)
     lock2 = _workspace_regroup_lock_for_tests(7)
     assert lock1 is lock2
+
+
+def test_photo_mask_lock_serialises_same_photo_and_variant():
+    """Two threads writing the same (photo, variant) take turns."""
+    held = []
+
+    def first():
+        with acquire_photo_mask(42, "sam2-small"):
+            held.append("first-in")
+            time.sleep(0.05)
+            held.append("first-out")
+
+    def second():
+        with acquire_photo_mask(42, "sam2-small"):
+            held.append("second-in")
+
+    t1 = threading.Thread(target=first)
+    t2 = threading.Thread(target=second)
+    t1.start()
+    _wait_until(lambda: "first-in" in held)
+    t2.start()
+    t1.join(timeout=3.0)
+    t2.join(timeout=3.0)
+    assert not t1.is_alive() and not t2.is_alive()
+    assert held == ["first-in", "first-out", "second-in"], held
+
+
+def test_photo_mask_lock_does_not_block_different_photo():
+    """Same variant, different photo IDs don't contend."""
+    held = []
+    first_holding = threading.Event()
+    let_first_go = threading.Event()
+
+    def first():
+        with acquire_photo_mask(1, "sam2-small"):
+            held.append("first-in")
+            first_holding.set()
+            let_first_go.wait(timeout=2.0)
+
+    def second():
+        with acquire_photo_mask(2, "sam2-small"):
+            held.append("second-in")
+
+    t1 = threading.Thread(target=first)
+    t2 = threading.Thread(target=second)
+    t1.start()
+    assert first_holding.wait(timeout=1.0)
+    t2.start()
+    t2.join(timeout=1.0)
+    assert not t2.is_alive(), "different photo must not be blocked"
+    assert "second-in" in held
+    let_first_go.set()
+    t1.join(timeout=2.0)
+
+
+def test_photo_mask_lock_does_not_block_different_variant():
+    """Same photo, different variants don't contend — each variant has
+    its own deterministic mask path, so they don't conflict.
+    """
+    held = []
+    first_holding = threading.Event()
+    let_first_go = threading.Event()
+
+    def first():
+        with acquire_photo_mask(42, "sam2-small"):
+            held.append("first-in")
+            first_holding.set()
+            let_first_go.wait(timeout=2.0)
+
+    def second():
+        with acquire_photo_mask(42, "sam2-large"):
+            held.append("second-in")
+
+    t1 = threading.Thread(target=first)
+    t2 = threading.Thread(target=second)
+    t1.start()
+    assert first_holding.wait(timeout=1.0)
+    t2.start()
+    t2.join(timeout=1.0)
+    assert not t2.is_alive(), "different variant must not be blocked"
+    assert "second-in" in held
+    let_first_go.set()
+    t1.join(timeout=2.0)
+
+
+def test_photo_mask_lock_reentrant_keys_share_one_lock():
+    """The lock object for a given (photo_id, variant) is stable."""
+    from pipeline_locks import _photo_mask_lock_for_tests
+    lock1 = _photo_mask_lock_for_tests(7, "sam2-small")
+    lock2 = _photo_mask_lock_for_tests(7, "sam2-small")
+    lock3 = _photo_mask_lock_for_tests(7, "sam2-large")
+    assert lock1 is lock2
+    assert lock1 is not lock3

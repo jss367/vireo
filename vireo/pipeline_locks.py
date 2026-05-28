@@ -134,3 +134,37 @@ def acquire_workspace_regroup(workspace_id):
 # the module-private dict directly.
 def _workspace_regroup_lock_for_tests(workspace_id):
     return acquire_workspace_regroup(workspace_id)
+
+
+# Per-(photo_id, variant) locks for mask extraction. Two concurrent
+# pipelines whose collections overlap can both reach extract_masks_stage
+# with the same photo and the same sam2_variant; without serialization
+# they'd both pass the get_photo_mask cache miss, both call generate_mask,
+# both write the deterministic ``masks/{photo_id}.{variant}.png`` path,
+# and the file on disk could end up describing a different mask than the
+# photo_masks row points at. The key includes variant so two pipelines
+# touching the same photo with DIFFERENT mask variants don't contend.
+_PHOTO_MASK_LOCKS: dict = {}
+_PHOTO_MASK_LOCKS_GUARD = threading.Lock()
+
+
+def acquire_photo_mask(photo_id, variant):
+    """Context manager for the per-(photo_id, variant) mask-write lock.
+
+    Held across the get_photo_mask → generate_mask → save_mask →
+    upsert_photo_mask sequence in ``extract_masks_stage`` so two
+    pipelines hitting the same photo+variant serialise on that
+    sequence. Pipelines on different photos (or different variants of
+    the same photo) don't contend.
+    """
+    key = (photo_id, variant)
+    with _PHOTO_MASK_LOCKS_GUARD:
+        lock = _PHOTO_MASK_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _PHOTO_MASK_LOCKS[key] = lock
+    return lock
+
+
+def _photo_mask_lock_for_tests(photo_id, variant):
+    return acquire_photo_mask(photo_id, variant)

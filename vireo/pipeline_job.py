@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 from db import Database, commit_with_retry
 from model_cache import get_default_cache
-from pipeline_locks import acquire_workspace_regroup
+from pipeline_locks import acquire_photo_mask, acquire_workspace_regroup
 
 log = logging.getLogger(__name__)
 
@@ -2964,135 +2964,151 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 image_path = os.path.join(folder_path, photo["filename"])
 
                 try:
-                    # Cache hit: a row already exists for (photo, variant)
-                    # AND its stored prompt + detector still match the
-                    # current primary detection AND the file is on disk.
-                    # In that case the SAM result is unchanged, so we
-                    # only re-activate the mask (cheap denormalize) and
-                    # skip the heavy SAM + DINOv2 work.
-                    existing = thread_db.get_photo_mask(
-                        photo_id, sam2_variant,
-                    )
-                    if existing is not None:
-                        cached_prompt = (
-                            existing["prompt_x"], existing["prompt_y"],
-                            existing["prompt_w"], existing["prompt_h"],
+                    # Per-(photo, variant) serialisation: two pipelines
+                    # whose collections overlap can both reach this
+                    # photo+variant. Without this lock, both pass the
+                    # get_photo_mask cache miss, both call generate_mask,
+                    # both write the deterministic
+                    # masks/{photo_id}.{variant}.png path, and the file
+                    # on disk can end up describing a different mask than
+                    # the photo_masks row points at (or identical runs
+                    # can truncate each other's PNG mid-write).
+                    #
+                    # Locking by (photo_id, variant) — not (workspace,
+                    # photo) — because the same photo can legitimately
+                    # appear in multiple workspaces (photos are global
+                    # in Vireo); the conflict is keyed on the shared
+                    # filesystem path, not the workspace.
+                    with acquire_photo_mask(photo_id, sam2_variant):
+                        # Cache hit: a row already exists for (photo, variant)
+                        # AND its stored prompt + detector still match the
+                        # current primary detection AND the file is on disk.
+                        # In that case the SAM result is unchanged, so we
+                        # only re-activate the mask (cheap denormalize) and
+                        # skip the heavy SAM + DINOv2 work.
+                        existing = thread_db.get_photo_mask(
+                            photo_id, sam2_variant,
                         )
-                        if (existing["detector_model"]
-                                == entry["detector_model"]
-                                and cached_prompt == entry["prompt"]
-                                and existing["path"]
-                                and os.path.isfile(existing["path"])):
-                            thread_db.set_active_mask_variant(
-                                photo_id, sam2_variant,
+                        if existing is not None:
+                            cached_prompt = (
+                                existing["prompt_x"], existing["prompt_y"],
+                                existing["prompt_w"], existing["prompt_h"],
                             )
-                            masked += 1
+                            if (existing["detector_model"]
+                                    == entry["detector_model"]
+                                    and cached_prompt == entry["prompt"]
+                                    and existing["path"]
+                                    and os.path.isfile(existing["path"])):
+                                thread_db.set_active_mask_variant(
+                                    photo_id, sam2_variant,
+                                )
+                                masked += 1
+                                processed = i + 1
+                                continue
+
+                        # First true cache miss: ensure SAM2 + DINOv2 weights
+                        # are present before render_proxy/generate_mask runs.
+                        # No-op on subsequent iterations.
+                        _ensure_weights()
+
+                        proxy = render_proxy(image_path, longest_edge=proxy_longest_edge)
+                        if proxy is None:
+                            skipped += 1
                             processed = i + 1
                             continue
+                        if _should_abort(abort):
+                            break
 
-                    # First true cache miss: ensure SAM2 + DINOv2 weights
-                    # are present before render_proxy/generate_mask runs.
-                    # No-op on subsequent iterations.
-                    _ensure_weights()
+                        # GPU serialisation lives inside masking.generate_mask
+                        # (around the encoder/decoder session.run calls). The
+                        # wider wrap previously here held the semaphore through
+                        # SAM weight load + image preprocessing + prompt-coord
+                        # math, blocking other pipelines' GPU work for CPU-only
+                        # phases.
+                        mask = generate_mask(proxy, det_box, variant=sam2_variant)
+                        if mask is None:
+                            skipped += 1
+                            processed = i + 1
+                            continue
+                        if _should_abort(abort):
+                            break
 
-                    proxy = render_proxy(image_path, longest_edge=proxy_longest_edge)
-                    if proxy is None:
-                        skipped += 1
-                        processed = i + 1
-                        continue
-                    if _should_abort(abort):
-                        break
-
-                    # GPU serialisation lives inside masking.generate_mask
-                    # (around the encoder/decoder session.run calls). The
-                    # wider wrap previously here held the semaphore through
-                    # SAM weight load + image preprocessing + prompt-coord
-                    # math, blocking other pipelines' GPU work for CPU-only
-                    # phases.
-                    mask = generate_mask(proxy, det_box, variant=sam2_variant)
-                    if mask is None:
-                        skipped += 1
-                        processed = i + 1
-                        continue
-                    if _should_abort(abort):
-                        break
-
-                    mask_path = save_mask(
-                        mask, masks_dir, photo_id, sam2_variant,
-                    )
-                    completeness = crop_completeness(mask)
-                    features = compute_all_quality_features(proxy, mask)
-                    if _should_abort(abort):
-                        break
-
-                    # Per-mask features (move from photos row into
-                    # photo_masks; set_active_mask_variant denormalizes
-                    # them back into photos for downstream readers).
-                    mask_subject_tenengrad = features.pop(
-                        "subject_tenengrad", None,
-                    )
-                    mask_bg_tenengrad = features.pop("bg_tenengrad", None)
-                    # Mask-derived subject_size: fraction of frame
-                    # covered by the boolean mask. Replaces the
-                    # detection-bbox approximation classify uses.
-                    total_pixels = float(mask.size)
-                    if total_pixels > 0:
-                        mask_subject_size = float(
-                            np.count_nonzero(mask) / total_pixels
+                        mask_path = save_mask(
+                            mask, masks_dir, photo_id, sam2_variant,
                         )
-                    else:
-                        mask_subject_size = None
+                        completeness = crop_completeness(mask)
+                        features = compute_all_quality_features(proxy, mask)
+                        if _should_abort(abort):
+                            break
 
-                    # GPU serialisation lives inside dino_embed.embed /
-                    # embed_batch (around the session.run call). The wider
-                    # wrap previously here held the semaphore through
-                    # per-image resize/normalize preprocessing.
-                    subject_crop = crop_subject(proxy, mask, margin=0.15)
-                    if subject_crop is not None:
-                        embs = embed_batch(
-                            [subject_crop, proxy], variant=dinov2_variant,
+                        # Per-mask features (move from photos row into
+                        # photo_masks; set_active_mask_variant denormalizes
+                        # them back into photos for downstream readers).
+                        mask_subject_tenengrad = features.pop(
+                            "subject_tenengrad", None,
                         )
-                        subj_emb_blob = embedding_to_blob(embs[0])
-                        global_emb_blob = embedding_to_blob(embs[1])
-                    else:
-                        subj_emb_blob = None
-                        global_emb_blob = embedding_to_blob(
-                            embed(proxy, variant=dinov2_variant),
-                        )
+                        mask_bg_tenengrad = features.pop("bg_tenengrad", None)
+                        # Mask-derived subject_size: fraction of frame
+                        # covered by the boolean mask. Replaces the
+                        # detection-bbox approximation classify uses.
+                        total_pixels = float(mask.size)
+                        if total_pixels > 0:
+                            mask_subject_size = float(
+                                np.count_nonzero(mask) / total_pixels
+                            )
+                        else:
+                            mask_subject_size = None
 
-                    thread_db.upsert_photo_mask(
-                        photo_id=photo_id,
-                        variant=sam2_variant,
-                        path=mask_path,
-                        detector_model=entry["detector_model"],
-                        prompt_x=entry["prompt"][0],
-                        prompt_y=entry["prompt"][1],
-                        prompt_w=entry["prompt"][2],
-                        prompt_h=entry["prompt"][3],
-                        subject_size=mask_subject_size,
-                        subject_tenengrad=mask_subject_tenengrad,
-                        bg_tenengrad=mask_bg_tenengrad,
-                        crop_complete=completeness,
-                    )
-                    thread_db.set_active_mask_variant(
-                        photo_id, sam2_variant,
-                    )
-                    # Remaining (non-mask) per-photo features still land
-                    # on the photos row.  mask_path / crop_complete /
-                    # subject_tenengrad / bg_tenengrad now flow via
-                    # set_active_mask_variant above, so they are
-                    # intentionally NOT passed here.
-                    if features:
-                        thread_db.update_photo_pipeline_features(
-                            photo_id, **features,
+                        # GPU serialisation lives inside dino_embed.embed /
+                        # embed_batch (around the session.run call). The wider
+                        # wrap previously here held the semaphore through
+                        # per-image resize/normalize preprocessing.
+                        subject_crop = crop_subject(proxy, mask, margin=0.15)
+                        if subject_crop is not None:
+                            embs = embed_batch(
+                                [subject_crop, proxy], variant=dinov2_variant,
+                            )
+                            subj_emb_blob = embedding_to_blob(embs[0])
+                            global_emb_blob = embedding_to_blob(embs[1])
+                        else:
+                            subj_emb_blob = None
+                            global_emb_blob = embedding_to_blob(
+                                embed(proxy, variant=dinov2_variant),
+                            )
+
+                        thread_db.upsert_photo_mask(
+                            photo_id=photo_id,
+                            variant=sam2_variant,
+                            path=mask_path,
+                            detector_model=entry["detector_model"],
+                            prompt_x=entry["prompt"][0],
+                            prompt_y=entry["prompt"][1],
+                            prompt_w=entry["prompt"][2],
+                            prompt_h=entry["prompt"][3],
+                            subject_size=mask_subject_size,
+                            subject_tenengrad=mask_subject_tenengrad,
+                            bg_tenengrad=mask_bg_tenengrad,
+                            crop_complete=completeness,
                         )
-                    thread_db.update_photo_embeddings(
-                        photo_id,
-                        dino_subject_embedding=subj_emb_blob,
-                        dino_global_embedding=global_emb_blob,
-                        variant=dinov2_variant,
-                    )
-                    masked += 1
+                        thread_db.set_active_mask_variant(
+                            photo_id, sam2_variant,
+                        )
+                        # Remaining (non-mask) per-photo features still land
+                        # on the photos row.  mask_path / crop_complete /
+                        # subject_tenengrad / bg_tenengrad now flow via
+                        # set_active_mask_variant above, so they are
+                        # intentionally NOT passed here.
+                        if features:
+                            thread_db.update_photo_pipeline_features(
+                                photo_id, **features,
+                            )
+                        thread_db.update_photo_embeddings(
+                            photo_id,
+                            dino_subject_embedding=subj_emb_blob,
+                            dino_global_embedding=global_emb_blob,
+                            variant=dinov2_variant,
+                        )
+                        masked += 1
                 except Exception:
                     em_failed += 1
                     log.warning("Mask extraction failed for photo %s", photo_id, exc_info=True)
