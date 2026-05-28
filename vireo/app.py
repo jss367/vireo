@@ -34,7 +34,6 @@ from flask import (
     request,
     send_from_directory,
 )
-from highlights import select_highlights
 from jobs import SLOT_CAP, JobRunner, LogBroadcaster
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
@@ -3844,64 +3843,88 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
 
         folders = db.get_folders_with_quality_data()
-        if not folders:
-            return jsonify({
-                "photos": [],
-                "meta": {"total_in_folder": 0, "eligible": 0, "species_breakdown": {}},
-                "folders": [],
-                "scope": "folder",
-            })
 
-        # scope=workspace blends candidates from every folder in the active
-        # workspace. This matches how photoshoots land in Vireo: a single
-        # shoot often spans multiple dated folders (YYYY-MM-DD subfolders),
-        # so one folder != one shoot.
         scope = request.args.get("scope", "folder")
         folder_id = request.args.get("folder_id", type=int)
         if scope == "workspace":
             folder_id = None
-        elif folder_id is None:
+        elif folder_id is None and folders:
             folder_id = folders[0]["id"]  # Most recent
 
-        count = request.args.get("count", type=int)
-        max_per_species = request.args.get("max_per_species", 5, type=int)
         min_quality = request.args.get("min_quality", 0.0, type=float)
-
-        candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
-        total_in_folder = db.count_filtered_photos(folder_id=folder_id)
-
-        # Adaptive default: 5% clamped to [10, 50]
-        if count is None:
-            count = max(10, min(50, int(len(candidates) * 0.05))) if candidates else 0
-
-        selected = select_highlights(
-            [dict(r) for r in candidates],
-            count=count,
-            max_per_species=max_per_species,
+        confidence_threshold = request.args.get(
+            "confidence_threshold", 0.70, type=float
         )
 
-        # Build species breakdown
-        species_counts = {}
-        for p in selected:
-            sp = p.get("species") or "Unidentified"
-            species_counts[sp] = species_counts.get(sp, 0) + 1
+        candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
+        total_in_workspace = db.count_filtered_photos(folder_id=folder_id)
 
-        # Strip binary fields before JSON response
-        photo_list = []
-        for p in selected:
-            out = {k: v for k, v in p.items()
-                   if k not in ("dino_subject_embedding", "dino_global_embedding")}
-            photo_list.append(out)
+        # Resolve effective species: accepted wins, then prediction above
+        # threshold, otherwise Unidentified.
+        bucket_map = {}  # species name -> {is_accepted: bool, photos: list}
+        unidentified_photos = []
+
+        for row in candidates:
+            r = dict(row)
+            accepted = r.get("species")
+            if accepted:
+                species = accepted
+                is_accepted = True
+            elif (r.get("predicted_species")
+                  and r.get("predicted_confidence") is not None
+                  and r["predicted_confidence"] >= confidence_threshold):
+                species = r["predicted_species"]
+                is_accepted = False
+            else:
+                species = None
+                is_accepted = False
+
+            photo = {
+                "id": r["id"],
+                "filename": r["filename"],
+                "quality_score": r["quality_score"],
+                "has_accepted_species": accepted is not None,
+            }
+
+            if species is None:
+                unidentified_photos.append(photo)
+            else:
+                entry = bucket_map.setdefault(
+                    species, {"is_accepted": False, "photos": []}
+                )
+                # is_accepted is True if ANY photo in this bucket is accepted.
+                # (Used by UI to render an "accepted" badge on the row.)
+                entry["is_accepted"] = entry["is_accepted"] or is_accepted
+                entry["photos"].append(photo)
+
+        # candidates is already ordered by quality_score desc, so per-bucket
+        # photos inherit that order without resorting.
+
+        buckets = []
+        for species, entry in bucket_map.items():
+            photos = entry["photos"]
+            buckets.append({
+                "species": species,
+                "is_accepted": entry["is_accepted"],
+                "photo_count": len(photos),
+                "best_quality": photos[0]["quality_score"] if photos else None,
+                "photos": photos,
+            })
 
         return jsonify({
-            "photos": photo_list,
-            "meta": {
-                "total_in_folder": total_in_folder,
-                "eligible": len(candidates),
-                "species_breakdown": species_counts,
-                "avg_quality": round(sum(p.get("quality_score", 0) for p in selected) / max(len(selected), 1), 2),
+            "buckets": buckets,
+            "unidentified": {
+                "photo_count": len(unidentified_photos),
+                "photos": unidentified_photos,
             },
-            "folders": [{"id": f["id"], "name": f["name"], "photo_count": f["photo_count"]} for f in folders],
+            "folders": [
+                {"id": f["id"], "name": f["name"], "photo_count": f["photo_count"]}
+                for f in folders
+            ],
+            "meta": {
+                "total_in_workspace": total_in_workspace,
+                "eligible": len(candidates),
+            },
             "scope": "workspace" if folder_id is None else "folder",
         })
 
