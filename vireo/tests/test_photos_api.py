@@ -1183,19 +1183,61 @@ def test_preview_skips_recent_failed_raw_working_copy(
     )
     db.conn.commit()
 
-    called = {"load": False}
+    called = {"load": False, "extract": False}
 
-    def fail_if_called(*_args, **_kwargs):
+    def fail_load_if_called(*_args, **_kwargs):
         called["load"] = True
         raise AssertionError("preview retried failed RAW decode")
 
-    monkeypatch.setattr(image_loader, "load_image", fail_if_called)
+    def fail_extract_if_called(*_args, **_kwargs):
+        called["extract"] = True
+        raise AssertionError("preview retried failed RAW extraction")
+
+    monkeypatch.setattr(image_loader, "load_image", fail_load_if_called)
+    monkeypatch.setattr(image_loader, "extract_working_copy", fail_extract_if_called)
 
     client = app.test_client()
     resp = client.get(f"/photos/{photo_id}/preview?size=1920")
 
     assert resp.status_code == 500
     assert called["load"] is False
+    assert called["extract"] is False
+
+
+def test_preview_retries_stale_failed_raw_working_copy(
+    client_with_photo, monkeypatch,
+):
+    """A RAW failure older than the retry window should be allowed to retry."""
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now', '-48 hours'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"load": False}
+
+    def record_retry(*_args, **_kwargs):
+        called["load"] = True
+        return None
+
+    monkeypatch.setattr(image_loader, "load_image", record_retry)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 500
+    assert called["load"] is True
 
 
 def test_original_skips_recent_failed_raw_working_copy(

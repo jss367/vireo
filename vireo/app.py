@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 import webbrowser
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -128,6 +128,7 @@ logging.getLogger("werkzeug").addFilter(_QuietRequestFilter())
 # SQLite versions. Sized below 999 to leave headroom for additional bound
 # parameters in joined statements.
 _SQL_PARAM_CHUNK = 900
+_WORKING_COPY_FAILURE_RETRY_SECONDS = 24 * 60 * 60
 
 
 def _chunked(seq, size=_SQL_PARAM_CHUNK):
@@ -142,8 +143,9 @@ def _has_current_working_copy_failure(photo):
     Missing thumbnail/preview requests normally self-heal by decoding the
     source. For RAW rows whose working-copy extraction already failed at the
     same source mtime, retrying that decode in a request thread can block the
-    UI for minutes and then fail the same way. A file replacement changes
-    ``file_mtime`` and naturally clears this gate.
+    UI for minutes and then fail the same way. Match scanner.py's stale-failure
+    contract: a file replacement changes ``file_mtime`` and failures older than
+    24 hours are allowed to retry.
     """
     def _get(key):
         try:
@@ -170,9 +172,21 @@ def _has_current_working_copy_failure(photo):
     if not failed_at or failed_mtime is None or file_mtime is None:
         return False
     try:
-        return float(failed_mtime) == float(file_mtime)
+        if float(failed_mtime) != float(file_mtime):
+            return False
     except (TypeError, ValueError):
         return False
+    try:
+        failed_s = str(failed_at).strip()
+        if failed_s.endswith("Z"):
+            failed_s = failed_s[:-1] + "+00:00"
+        failed_dt = datetime.fromisoformat(failed_s)
+        if failed_dt.tzinfo is None:
+            failed_dt = failed_dt.replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return False
+    age = (datetime.now(UTC) - failed_dt.astimezone(UTC)).total_seconds()
+    return age < _WORKING_COPY_FAILURE_RETRY_SECONDS
 
 
 def _ensure_volume_trashes_dir(filepath, ensured_volumes):
