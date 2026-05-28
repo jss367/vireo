@@ -127,13 +127,6 @@
 .btn-cancel:disabled {
   background: var(--text-muted); cursor: progress; opacity: 0.7;
 }
-.jobs-bulk-actions {
-  padding: 8px 16px; border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-tertiary);
-}
-.jobs-bulk-actions .btn-cancel {
-  font-size: 11px; padding: 3px 10px;
-}
 .btn-retry {
   font-size: 11px; padding: 2px 8px; border-radius: 3px; cursor: pointer;
   background: var(--accent); color: var(--accent-text); border: none;
@@ -251,7 +244,6 @@
       </select>
       <select id="filterStatus" onchange="applyFilters()">
         <option value="">All status</option>
-        <option value="queued">Queued</option>
         <option value="completed">Completed</option>
         <option value="failed">Failed</option>
       </select>
@@ -526,7 +518,6 @@
       .then(function(r) { return r.json(); })
       .then(function(data) {
         activeJobs = data.active || [];
-        mergeHistoryJobs(data.history || []);
         activeWsId = data.active_workspace_id || null;
         workspaceNames = data.workspace_names || {};
         // Drop optimistic-cancel state for jobs that have left the active
@@ -539,70 +530,56 @@
         });
         updateList();
         updateRunningBadge();
-        if (currentView === 'active') renderActiveOverview();
-        else if (selectedSource === 'active' && selectedJobId) {
+        if (selectedSource === 'active' && selectedJobId) {
           var selected = activeJobs.find(function(j) { return j.id === selectedJobId; });
           if (selected) {
             renderDetail(selected);
           } else {
-            var histSelected = historyJobs.find(function(j) { return j.id === selectedJobId; });
-            if (histSelected) {
+            var historical = historyJobs.find(function(j) { return j.id === selectedJobId; });
+            if (historical) {
               selectedSource = 'history';
-              renderHistoryDetail(histSelected);
+              renderHistoryDetail(historical);
+            } else {
+              fetchHistory(true);
             }
           }
+        } else if (currentView === 'active') {
+          renderActiveOverview();
         }
       })
       .catch(function() {});
   }
 
-  function setHistoryJobs(rows) {
-    historyJobs = rows || [];
-    historyJobs.forEach(function(j) {
-      if (typeof j.tree === 'string') {
-        try { j.tree = JSON.parse(j.tree); } catch(e) { j.tree = []; }
-      }
-      if (typeof j.result === 'string') {
-        try { j.result = JSON.parse(j.result); } catch(e) { j.result = null; }
-      }
-    });
-  }
-
-  function mergeHistoryJobs(rows) {
-    if (!rows || !rows.length) return;
-    var incomingById = {};
-    rows.forEach(function(j) {
-      incomingById[j.id] = j;
-    });
-    var seen = {};
-    var merged = [];
-    historyJobs.forEach(function(j) {
-      var incoming = incomingById[j.id];
-      if (incoming) {
-        merged.push(Object.assign({}, j, incoming));
-      } else {
-        merged.push(j);
-      }
-      seen[j.id] = true;
-    });
-    rows.forEach(function(j) {
-      if (!seen[j.id]) merged.push(j);
-    });
-    setHistoryJobs(merged);
-  }
-
-  function fetchHistory() {
+  function fetchHistory(refreshMissingSelection) {
     fetch('/api/jobs/history?limit=100')
       .then(function(r) { return r.json(); })
       .then(function(data) {
-        setHistoryJobs(data);
+        historyJobs = data || [];
+        historyJobs.forEach(function(j) {
+          if (typeof j.tree === 'string') {
+            try { j.tree = JSON.parse(j.tree); } catch(e) { j.tree = []; }
+          }
+          if (typeof j.result === 'string') {
+            try { j.result = JSON.parse(j.result); } catch(e) { j.result = null; }
+          }
+        });
         updateList();
         populateTypeFilter();
-        if (currentView === 'history') renderHistoryOverview();
-        else if (selectedSource === 'history' && selectedJobId) {
-          var selected = historyJobs.find(function(j) { return j.id === selectedJobId; });
-          if (selected) renderHistoryDetail(selected);
+        if (refreshMissingSelection && selectedSource === 'active' && selectedJobId) {
+          var historical = historyJobs.find(function(j) { return j.id === selectedJobId; });
+          if (historical) {
+            selectedSource = 'history';
+            renderHistoryDetail(historical);
+          } else {
+            currentView = 'active';
+            selectedJobId = null;
+            selectedSource = null;
+            renderActiveOverview();
+            updateList();
+          }
+          return;
         }
+        if (currentView === 'history') renderHistoryOverview();
       })
       .catch(function() {});
   }
@@ -638,14 +615,6 @@
     });
     html += '<div class="jobs-list-divider clickable' + (currentView === 'active' ? ' selected' : '') + '" data-view="active">Active' +
       (running.length > 0 ? ' (' + running.length + ')' : '') + '</div>';
-    var queuedInActiveWs = running.filter(function(j) {
-      return j.status === 'queued' && j.workspace_id === activeWsId;
-    });
-    if (queuedInActiveWs.length > 0) {
-      html += '<div class="jobs-bulk-actions">';
-      html += '<button class="btn-cancel" id="btnCancelAllQueued">Cancel queued in active workspace</button>';
-      html += '</div>';
-    }
     running.forEach(function(j) { html += renderListItem(j, 'active'); });
 
     var filtered = historyJobs;
@@ -708,57 +677,6 @@
 
   // Event delegation for job list clicks
   document.getElementById('jobListContent').addEventListener('click', function(e) {
-    var bulkBtn = e.target.closest('#btnCancelAllQueued');
-    if (bulkBtn) {
-      // Optimistic UI: disable the button immediately. The next
-      // fetchJobs poll will re-render the list without queued rows
-      // (and without this button) once the server-side cancels land.
-      bulkBtn.disabled = true;
-      bulkBtn.textContent = 'Cancelling…';
-      bulkBtn.classList.add('cancelling');
-      fetch('/api/jobs/cancel-queued', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspace_id: activeWsId }),
-      })
-        .then(function(r) {
-          if (r.ok) {
-            return r.json().then(function(data) {
-              var n = (data && data.cancelled && data.cancelled.length) || 0;
-              if (typeof showToast === 'function') {
-                showToast(
-                  n === 0
-                    ? 'No queued jobs to cancel'
-                    : 'Cancelled ' + n + ' queued job' + (n === 1 ? '' : 's'),
-                  'info',
-                );
-              }
-              // Mark each cancelled id as cancelling so any per-row
-              // Cancel button that renders before the next poll lands
-              // also shows the optimistic state.
-              if (data && data.cancelled) {
-                data.cancelled.forEach(function(id) { cancellingJobIds[id] = true; });
-              }
-              fetchJobs();
-            });
-          }
-          return r.json().then(function(data) {
-            var msg = (data && data.error) || 'Unable to cancel queued jobs';
-            if (typeof showToast === 'function') showToast(msg, 'error');
-            // Restore the button — caller may want to retry.
-            bulkBtn.disabled = false;
-            bulkBtn.textContent = 'Cancel queued in active workspace';
-            bulkBtn.classList.remove('cancelling');
-          });
-        })
-        .catch(function() {
-          if (typeof showToast === 'function') showToast('Unable to cancel queued jobs', 'error');
-          bulkBtn.disabled = false;
-          bulkBtn.textContent = 'Cancel queued in active workspace';
-          bulkBtn.classList.remove('cancelling');
-        });
-      return;
-    }
     var viewItem = e.target.closest('[data-view]');
     if (viewItem) {
       currentView = viewItem.getAttribute('data-view');

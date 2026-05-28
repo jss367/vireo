@@ -7,13 +7,7 @@ capacity opens. ``SLOT_CAP`` is 1 in this PR — the second queued run
 waits for the first to reach a terminal state before promotion.
 """
 
-import os
-import sys
 import threading
-import time
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, os.path.dirname(__file__))
 
 from db import Database
 from wait import wait_for_job_via_runner
@@ -327,9 +321,8 @@ def test_cancel_queued_pipeline_transitions_row_to_cancelled(tmp_path):
     # Releasing the first must NOT promote the cancelled one.
     blocker.set()
     wait_for_job_via_runner(runner, first_id)
-    # Give the scheduler a beat — the cancelled row must stay cancelled.
-    time.sleep(0.05)
-    assert not second_started.is_set(), (
+    # Wait briefly; the cancelled row must never be promoted.
+    assert not second_started.wait(timeout=0.3), (
         "cancelled queued job must not be promoted"
     )
     final_row = db.conn.execute(
@@ -409,8 +402,8 @@ def test_promoting_pipeline_remains_visible_and_cancellable(tmp_path):
             "workspace_id": 1,
             "runtime_warning": None,
             "started_at": "2026-05-26T00:00:00",
+            "_promoting": True,
         }
-        runner._promoting_pipelines.add(job_id)
 
     view = runner.get(job_id)
     assert view is not None
@@ -440,14 +433,14 @@ def test_cancel_promoting_pipeline_after_db_running_preserves_request(tmp_path):
             "workspace_id": 1,
             "runtime_warning": None,
             "started_at": "2026-05-26T00:00:00",
+            "_promoting": True,
         }
-        runner._promoting_pipelines.add(job_id)
 
     assert runner.cancel_job(job_id, expected_status="queued") is True
     assert runner.is_cancelled(job_id)
     with runner._lock:
         assert job_id in runner._queued_pipelines
-        assert job_id in runner._promoting_pipelines
+        assert runner._queued_pipelines[job_id]["_promoting"] is True
 
 
 def test_promoted_pipeline_with_pending_cancel_skips_work_fn(tmp_path):
@@ -505,8 +498,111 @@ def test_promotion_db_error_clears_promoting_marker(tmp_path, monkeypatch):
     runner._try_promote_queued()
 
     with runner._lock:
-        assert job_id not in runner._promoting_pipelines
+        assert not runner._queued_pipelines[job_id].get("_promoting")
         assert job_id in runner._queued_pipelines
+
+
+def test_in_flight_promotion_counts_against_slot_cap_not_global_guard(tmp_path, monkeypatch):
+    """A promotion in progress should consume one slot, not block all slots.
+
+    This protects the planned ``SLOT_CAP > 1`` case: if one queued context is
+    already between the in-memory pick and SQLite UPDATE, another queued
+    context should still promote when capacity remains.
+    """
+    import sqlite3
+
+    import jobs as jobs_module
+
+    monkeypatch.setattr(jobs_module, "SLOT_CAP", 2)
+    runner, db = _make_runner_with_db(tmp_path)
+    first_id = "pipeline-1700000000001"
+    second_id = "pipeline-1700000000002"
+    conn = sqlite3.connect(str(tmp_path / "test.db"))
+    conn.executemany(
+        "INSERT INTO job_history (id, type, status, started_at, error_count) "
+        "VALUES (?, 'pipeline', 'queued', ?, 0)",
+        [
+            (first_id, "2026-05-26T00:00:00"),
+            (second_id, "2026-05-26T00:00:01"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    with runner._lock:
+        runner._queued_pipelines[first_id] = {
+            "work_fn": lambda job: None,
+            "config": {},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:00",
+            "_promoting": True,
+        }
+        runner._queued_pipelines[second_id] = {
+            "work_fn": lambda job: None,
+            "config": {},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:01",
+        }
+
+    runner._try_promote_queued()
+    promoted = wait_for_job_via_runner(runner, second_id, wait_for_history=True)
+
+    assert promoted["status"] == "completed"
+    row = db.conn.execute(
+        "SELECT status FROM job_history WHERE id = ?", (second_id,),
+    ).fetchone()
+    assert row["status"] == "completed"
+    with runner._lock:
+        assert runner._queued_pipelines[first_id]["_promoting"] is True
+
+
+def test_cancelled_promotion_candidate_retries_next_queued_pipeline(tmp_path):
+    """A cancelled front-of-queue row should not stall later queued work."""
+    import sqlite3
+
+    runner, db = _make_runner_with_db(tmp_path)
+    cancelled_id = "pipeline-1700000000003"
+    next_id = "pipeline-1700000000004"
+    conn = sqlite3.connect(str(tmp_path / "test.db"))
+    conn.executemany(
+        "INSERT INTO job_history (id, type, status, started_at, error_count) "
+        "VALUES (?, 'pipeline', ?, ?, 0)",
+        [
+            (cancelled_id, "cancelled", "2026-05-26T00:00:00"),
+            (next_id, "queued", "2026-05-26T00:00:01"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    with runner._lock:
+        runner._queued_pipelines[cancelled_id] = {
+            "work_fn": lambda job: pytest_fail("cancelled job must not run"),
+            "config": {},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:00",
+        }
+        runner._queued_pipelines[next_id] = {
+            "work_fn": lambda job: None,
+            "config": {},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:01",
+        }
+
+    runner._try_promote_queued()
+    promoted = wait_for_job_via_runner(runner, next_id, wait_for_history=True)
+
+    assert promoted["status"] == "completed"
+    with runner._lock:
+        assert cancelled_id not in runner._queued_pipelines
+    row = db.conn.execute(
+        "SELECT status FROM job_history WHERE id = ?", (next_id,),
+    ).fetchone()
+    assert row["status"] == "completed"
 
 
 def pytest_fail(msg):
