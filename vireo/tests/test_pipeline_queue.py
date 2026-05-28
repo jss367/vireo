@@ -465,6 +465,51 @@ def test_cancel_promoting_queued_pipeline_retries_next_candidate(tmp_path):
     assert rows == {cancelled_id: "cancelled", next_id: "completed"}
 
 
+def test_cancel_queued_jobs_defers_promotion_until_snapshot_cancelled(tmp_path):
+    """Bulk cancel must cancel all queued snapshot entries before promotion."""
+    runner, db = _make_runner_with_db(tmp_path)
+    first_id = "pipeline-1700000000001"
+    second_id = "pipeline-1700000000002"
+    second_started = threading.Event()
+    db.conn.executemany(
+        "INSERT INTO job_history (id, type, status, started_at, workspace_id, "
+        "error_count) VALUES (?, 'pipeline', 'queued', ?, 1, 0)",
+        [
+            (first_id, "2026-05-26T00:00:00"),
+            (second_id, "2026-05-26T00:00:01"),
+        ],
+    )
+    db.conn.commit()
+    with runner._lock:
+        runner._queued_pipelines[first_id] = {
+            "work_fn": lambda job: pytest_fail("first job must not run"),
+            "config": {},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:00",
+            "_promoting": True,
+        }
+        runner._queued_pipelines[second_id] = {
+            "work_fn": lambda job: second_started.set(),
+            "config": {},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:01",
+        }
+
+    assert runner.cancel_queued_jobs(workspace_id=1) == [first_id, second_id]
+
+    assert not second_started.wait(timeout=0.3)
+    rows = {
+        r["id"]: r["status"]
+        for r in db.conn.execute(
+            "SELECT id, status FROM job_history WHERE id IN (?, ?)",
+            (first_id, second_id),
+        )
+    }
+    assert rows == {first_id: "cancelled", second_id: "cancelled"}
+
+
 def test_cancel_promoting_pipeline_after_db_running_preserves_request(tmp_path):
     """Cancelling during the DB-running promotion window must still win."""
     runner, db = _make_runner_with_db(tmp_path)

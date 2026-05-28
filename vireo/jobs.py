@@ -805,7 +805,7 @@ class JobRunner:
                             step[key] = kwargs[key]
                     break
 
-    def cancel_job(self, job_id, expected_status=None):
+    def cancel_job(self, job_id, expected_status=None, promote_after_cancel=True):
         """Request cancellation of a running OR queued job.
 
         For running jobs: the work function should periodically check
@@ -822,6 +822,10 @@ class JobRunner:
             job_id: id to cancel.
             expected_status: optional status guard. When set, cancellation only
                 proceeds if the latest in-memory state still has this status.
+            promote_after_cancel: if True, immediately re-check the queue after
+                removing a queued job. Bulk queued cancellation sets this False
+                so the whole snapshot can be cancelled before another queued job
+                is promoted.
 
         Returns True if the job was found and either marked for
         cancellation (running) or transitioned to cancelled (queued).
@@ -903,7 +907,7 @@ class JobRunner:
                     "errors": [],
                 },
             )
-        if retry_promotion:
+        if retry_promotion and promote_after_cancel:
             self._try_promote_queued()
         return True
 
@@ -917,8 +921,14 @@ class JobRunner:
             ]
         cancelled = []
         for job_id in job_ids:
-            if self.cancel_job(job_id, expected_status="queued"):
+            if self.cancel_job(
+                job_id,
+                expected_status="queued",
+                promote_after_cancel=False,
+            ):
                 cancelled.append(job_id)
+        if cancelled:
+            self._try_promote_queued()
         return cancelled
 
     def is_cancelled(self, job_id):
