@@ -1320,6 +1320,46 @@ def test_original_skips_recent_failed_raw_working_copy(
     assert called["extract"] is False
 
 
+def test_original_refreshes_failure_marker_when_stale_retry_fails(
+    client_with_photo, monkeypatch,
+):
+    """A stale RAW failure may retry once; if original extraction and fallback
+    loading still fail, the route should refresh the failure marker."""
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now', '-48 hours'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", lambda *a, **k: False)
+    monkeypatch.setattr(image_loader, "load_image", lambda *a, **k: None)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 500
+    row = db.conn.execute(
+        """SELECT working_copy_failed_mtime,
+                  (julianday('now') - julianday(working_copy_failed_at))
+                  * 24 * 60 * 60 AS age_seconds
+           FROM photos WHERE id=?""",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_mtime"] == file_mtime
+    assert row["age_seconds"] is not None and row["age_seconds"] < 60
+
+
 def test_eviction_removes_oldest_files_when_over_quota(tmp_path, monkeypatch):
     """When writes push cache over quota, oldest-accessed entries are evicted."""
     import os

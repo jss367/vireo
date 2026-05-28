@@ -740,6 +740,47 @@ def test_serve_thumbnail_skips_recent_failed_raw_working_copy(
     assert called["generate"] is False
 
 
+def test_serve_thumbnail_refreshes_failure_marker_when_stale_retry_fails(
+    tmp_path, monkeypatch,
+):
+    """A stale RAW failure may retry once; if thumbnail regeneration still
+    fails, the route should refresh the marker so later requests fail fast."""
+    import thumbnails
+
+    app, db, pid, _thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now', '-48 hours'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, pid),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(
+        thumbnails, "generate_thumbnail", lambda *args, **kwargs: None,
+    )
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 404
+    row = db.conn.execute(
+        """SELECT working_copy_failed_mtime,
+                  (julianday('now') - julianday(working_copy_failed_at))
+                  * 24 * 60 * 60 AS age_seconds
+           FROM photos WHERE id=?""",
+        (pid,),
+    ).fetchone()
+    assert row["working_copy_failed_mtime"] == file_mtime
+    assert row["age_seconds"] is not None and row["age_seconds"] < 60
+
+
 def test_serve_thumbnail_resolves_when_folder_status_is_missing(tmp_path, monkeypatch):
     """The self-heal must use the photo's actual folder path even when
     the folder's status is ``'missing'``. ``get_folder_tree()`` filters
