@@ -13515,8 +13515,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             {photo["folder_id"]: folder["path"]},
         )
 
-        if _has_current_working_copy_failure(
-            photo, vireo_dir, trust_existing_working_copy=False,
+        if (
+            not using_offline_cache
+            and _has_current_working_copy_failure(
+                photo, vireo_dir, trust_existing_working_copy=False,
+            )
         ):
             log.info(
                 "Skipping original-image extraction for photo %s; RAW working-copy "
