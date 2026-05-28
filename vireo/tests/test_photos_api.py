@@ -1240,6 +1240,49 @@ def test_preview_retries_stale_failed_raw_working_copy(
     assert called["load"] is True
 
 
+def test_preview_refreshes_failure_marker_when_stale_retry_fails(
+    client_with_photo, monkeypatch,
+):
+    """When the retry window has expired and the request-time decode still
+    fails, /preview must refresh ``working_copy_failed_at`` so the next
+    request fails fast again instead of repeating the slow decode."""
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now', '-48 hours'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(image_loader, "load_image", lambda *a, **k: None)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert resp.status_code == 500
+
+    # Marker should now be fresh (within a few seconds of "now") and the
+    # mtime should match the file's current mtime so the gate fires again
+    # on the next request.
+    row = db.conn.execute(
+        """SELECT working_copy_failed_mtime,
+                  (julianday('now') - julianday(working_copy_failed_at))
+                  * 24 * 60 * 60 AS age_seconds
+           FROM photos WHERE id=?""",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_mtime"] == file_mtime
+    assert row["age_seconds"] is not None and row["age_seconds"] < 60
+
+
 def test_original_skips_recent_failed_raw_working_copy(
     client_with_photo, monkeypatch,
 ):

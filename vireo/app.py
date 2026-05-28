@@ -189,6 +189,54 @@ def _has_current_working_copy_failure(photo):
     return age < _WORKING_COPY_FAILURE_RETRY_SECONDS
 
 
+def _record_working_copy_failure(db, photo):
+    """Persist a RAW extraction failure marker after a request-time retry.
+
+    When ``_has_current_working_copy_failure`` returns False because the stored
+    marker is older than ``_WORKING_COPY_FAILURE_RETRY_SECONDS``, the request
+    paths are allowed to retry the slow RAW decode. If that retry still fails,
+    we refresh ``working_copy_failed_at``/``working_copy_failed_mtime`` so the
+    next thumbnail/preview/original request fails fast again instead of
+    repeating the expensive decode until the scanner runs. Mirrors the SQL the
+    scanner writes on failure (scanner.py around the working-copy backfill).
+    No-op for non-RAW rows or rows without a recorded ``file_mtime``/``id``.
+    """
+    def _get(key):
+        try:
+            return photo[key]
+        except (KeyError, IndexError, TypeError):
+            return None
+
+    filename = _get("filename") or ""
+    try:
+        from image_loader import RAW_EXTENSIONS
+    except Exception:
+        RAW_EXTENSIONS = {
+            ".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf",
+        }
+    if os.path.splitext(filename)[1].lower() not in RAW_EXTENSIONS:
+        return
+
+    file_mtime = _get("file_mtime")
+    photo_id = _get("id")
+    if file_mtime is None or photo_id is None:
+        return
+
+    try:
+        db.conn.execute(
+            "UPDATE photos SET working_copy_failed_at=datetime('now'),"
+            " working_copy_failed_mtime=?"
+            " WHERE id=?",
+            (file_mtime, photo_id),
+        )
+        db.conn.commit()
+    except Exception:
+        log.debug(
+            "Could not refresh working_copy_failed marker for photo %s",
+            photo_id, exc_info=True,
+        )
+
+
 def _ensure_volume_trashes_dir(filepath, ensured_volumes):
     """Make sure ``/Volumes/<X>/.Trashes/<uid>/`` exists when ``filepath`` is on
     an external/network mount. macOS ``send2trash`` legacy mode raises
@@ -10685,11 +10733,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "Thumbnail self-heal failed for photo %s (source=%s)",
                 photo_id, photo["filename"],
             )
+            _record_working_copy_failure(db, photo)
             return "", 404
 
         if not result:
             # generate_thumbnail logged the reason (unreadable source,
             # unsupported format, etc.). Nothing else to do here.
+            _record_working_copy_failure(db, photo)
             return "", 404
 
         # Peg the regenerated thumbnail's mtime to the source file_mtime
@@ -13293,6 +13343,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         canonical = get_canonical_image_path(photo, vireo_dir, folders)
         img = load_image(canonical, max_size=size)
         if img is None:
+            _record_working_copy_failure(db, photo)
             return "Could not load image", 500
 
         preview_quality = cfg.load().get("preview_quality", 90)
@@ -13510,6 +13561,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Fallback: serve via load_image
         img = load_image(image_path, max_size=None)
         if img is None:
+            _record_working_copy_failure(db, photo)
             return "Could not load image", 500
         originals_dir = os.path.join(vireo_dir, "originals")
         cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
