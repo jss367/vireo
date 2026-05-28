@@ -266,10 +266,6 @@ function render() {
   content.innerHTML = html || '<div class="highlights-empty"><p>Nothing matches these filters.</p></div>';
 
   // Wire up clicks for cards and expand buttons.
-  buckets.forEach(function(b) {
-    var section = content.querySelector('section.bucket .bucket-title');
-    // Per-bucket click wiring done by section via per-card photo set
-  });
   // Attach card clicks: pick the right photo set per section by walking sections in DOM order.
   var sections = content.querySelectorAll('section.bucket');
   sections.forEach(function(section, idx) {
@@ -317,7 +313,13 @@ document.getElementById('perRowSlider').addEventListener('input', function() {
 document.getElementById('sortSelect').addEventListener('change', function() {
   if (currentData) render();
 });
-document.getElementById('folderSelect').addEventListener('change', loadHighlights);
+document.getElementById('folderSelect').addEventListener('change', function() {
+  // Reset per-row expand state when the user picks a different folder
+  // so the new folder's rows don't inherit the previous folder's state.
+  expandedBuckets.clear();
+  unidentifiedExpanded = false;
+  loadHighlights();
+});
 
 // Save modal
 async function showSaveModal() {
