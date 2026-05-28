@@ -42,6 +42,7 @@ from preview_cache import (
 from preview_cache import (
     reconcile_preview_cache,
 )
+from werkzeug.exceptions import BadRequest
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -10214,8 +10215,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """
         runner = app._job_runner
         db = _get_db()
-        body = request.get_json(silent=True)
-        if body is None:
+        raw_body = request.get_data(cache=True)
+        if request.is_json and raw_body.strip():
+            try:
+                body = request.get_json()
+            except BadRequest:
+                return json_error("Malformed JSON body", 400)
+        elif raw_body.strip():
+            body = request.get_json(silent=True)
+        else:
             body = {}
         if not isinstance(body, dict):
             return json_error("JSON body must be an object", 400)

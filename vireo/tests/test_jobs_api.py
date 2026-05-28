@@ -1852,6 +1852,41 @@ def test_cancel_queued_endpoint_rejects_invalid_body(app_and_db):
         assert resp.status_code == 400
 
 
+def test_cancel_queued_endpoint_rejects_malformed_json_without_cancel(app_and_db):
+    """Malformed JSON must not fall back to the destructive default scope."""
+    import threading
+
+    app, db = app_and_db
+    runner = app._job_runner
+    client = app.test_client()
+    ws_id = db._active_workspace_id
+
+    release = threading.Event()
+    running_id = runner.enqueue_pipeline(
+        work_fn=_block_pipeline_until(release),
+        config={}, workspace_id=ws_id,
+    )
+    queued_id = runner.enqueue_pipeline(
+        work_fn=lambda job: None, config={}, workspace_id=ws_id,
+    )
+    assert runner.get(running_id)["status"] == "running"
+    assert runner.get(queued_id)["status"] == "queued"
+
+    try:
+        resp = client.post(
+            "/api/jobs/cancel-queued",
+            data='{"workspace_id":',
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+        assert runner.get(queued_id)["status"] == "queued"
+    finally:
+        release.set()
+        from wait import wait_for_job_via_runner
+        wait_for_job_via_runner(runner, running_id)
+        wait_for_job_via_runner(runner, queued_id)
+
+
 def test_cancel_queued_endpoint_rejects_invalid_workspace_id(app_and_db):
     """``workspace_id`` must be an integer id, not bool or another type."""
     app, _ = app_and_db
