@@ -793,6 +793,51 @@ def test_serve_thumbnail_refreshes_failure_marker_when_stale_retry_fails(
     assert row["age_seconds"] is not None and row["age_seconds"] < 60
 
 
+def test_serve_thumbnail_does_not_refresh_raw_marker_on_cache_write_error(
+    tmp_path, monkeypatch,
+):
+    """Thumbnail cache write failures should not be recorded as RAW failures."""
+    import thumbnails
+
+    app, db, pid, _thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (pid,),
+    ).fetchone()
+    with open(os.path.join(folder["path"], "bad.NEF"), "wb") as f:
+        f.write(b"raw bytes")
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now', '-48 hours'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, pid),
+    )
+    db.conn.commit()
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("thumbnail cache is unwritable")
+
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fail_write)
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 404
+    row = db.conn.execute(
+        """SELECT (julianday('now') - julianday(working_copy_failed_at))
+                  * 24 * 60 * 60 AS age_seconds
+           FROM photos WHERE id=?""",
+        (pid,),
+    ).fetchone()
+    assert row["age_seconds"] is not None and row["age_seconds"] > 24 * 60 * 60
+
+
 def test_serve_thumbnail_resolves_when_folder_status_is_missing(tmp_path, monkeypatch):
     """The self-heal must use the photo's actual folder path even when
     the folder's status is ``'missing'``. ``get_folder_tree()`` filters

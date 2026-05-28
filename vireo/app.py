@@ -139,6 +139,7 @@ def _chunked(seq, size=_SQL_PARAM_CHUNK):
 
 def _has_current_working_copy_failure(
     photo, vireo_dir=None, trust_existing_working_copy=True,
+    live_source_path=None, folder_path=None,
 ):
     """Return True when this RAW already failed working-copy extraction.
 
@@ -149,9 +150,13 @@ def _has_current_working_copy_failure(
     authoritative for thumbnail/preview routes, but callers that have already
     rejected that copy as insufficient can opt into honoring the marker anyway.
     A stale ``working_copy_path`` whose file was deleted should not bypass a
-    fresh failure marker. Match scanner.py's stale-failure contract: a file
-    replacement changes ``file_mtime`` and failures older than 24 hours are
-    allowed to retry.
+    fresh failure marker. If a RAW+JPEG companion pair has a marker while both
+    the companion and RAW source are currently available, allow request paths to
+    try the RAW: scanner.py prefers companions for working-copy extraction, so
+    that marker may describe a companion-source failure rather than a RAW
+    failure. Match scanner.py's stale-failure contract: a file replacement
+    changes ``file_mtime`` and failures older than 24 hours are allowed to
+    retry.
     """
     def _get(key):
         try:
@@ -179,6 +184,12 @@ def _has_current_working_copy_failure(
         }
     if os.path.splitext(filename)[1].lower() not in RAW_EXTENSIONS:
         return False
+
+    companion_path = _get("companion_path")
+    if companion_path and live_source_path and folder_path:
+        companion_abs = os.path.join(folder_path, companion_path)
+        if os.path.exists(live_source_path) and os.path.exists(companion_abs):
+            return False
 
     failed_at = _get("working_copy_failed_at")
     failed_mtime = _get("working_copy_failed_mtime")
@@ -10718,8 +10729,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Self-heal path: regenerate on miss (or stale) when the photo
         # still exists.
+        folder_row = db.get_folder(photo["folder_id"])
+        if not folder_row:
+            return "", 404
+        live_source = os.path.join(folder_row["path"], photo["filename"])
         if _has_current_working_copy_failure(
             photo, os.path.dirname(thumb_dir),
+            live_source_path=live_source, folder_path=folder_row["path"],
         ):
             log.info(
                 "Skipping thumbnail self-heal for photo %s; RAW working-copy "
@@ -10746,7 +10762,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Workspace membership is already enforced above via
         # ``get_photo(verify_workspace=True)``, so a direct ``get_folder``
         # lookup here is safe and status-agnostic.
-        folder_row = db.get_folder(photo["folder_id"])
         folders = (
             {folder_row["id"]: folder_row["path"]} if folder_row else {}
         )
@@ -10758,7 +10773,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "Thumbnail self-heal failed for photo %s (source=%s)",
                 photo_id, photo["filename"],
             )
-            _record_working_copy_failure(db, photo, source)
             return "", 404
 
         if not result:
@@ -13357,7 +13371,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "Not found", 404
         folders = {folder_row["id"]: folder_row["path"]}
 
-        if _has_current_working_copy_failure(photo, vireo_dir):
+        live_source = os.path.join(folder_row["path"], photo["filename"])
+        if _has_current_working_copy_failure(
+            photo, vireo_dir,
+            live_source_path=live_source, folder_path=folder_row["path"],
+        ):
             log.info(
                 "Skipping preview generation for photo %s; RAW working-copy "
                 "extraction already failed for current source mtime",
@@ -13519,6 +13537,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             not using_offline_cache
             and _has_current_working_copy_failure(
                 photo, vireo_dir, trust_existing_working_copy=False,
+                live_source_path=image_path, folder_path=folder["path"],
             )
         ):
             log.info(

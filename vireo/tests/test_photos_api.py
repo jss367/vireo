@@ -1241,6 +1241,57 @@ def test_preview_skips_recent_failed_raw_when_working_copy_path_is_stale(
     assert called["load"] is False
 
 
+def test_preview_retries_raw_when_recent_marker_came_from_companion(
+    client_with_photo, monkeypatch,
+):
+    """A companion-source failure marker should not suppress a readable RAW."""
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "bad.NEF")
+    companion_path = os.path.join(folder["path"], "bad.jpg")
+    with open(raw_path, "wb") as f:
+        f.write(b"raw bytes")
+    Image.new("RGB", (800, 600), (40, 80, 120)).save(
+        companion_path, "JPEG",
+    )
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               companion_path='bad.jpg',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"path": None}
+
+    def load_raw(path, *_args, **_kwargs):
+        called["path"] = path
+        return Image.new("RGB", (800, 600), (40, 80, 120))
+
+    monkeypatch.setattr(image_loader, "load_image", load_raw)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 200
+    assert called["path"] == raw_path
+
+
 def test_preview_retries_stale_failed_raw_working_copy(
     client_with_photo, monkeypatch,
 ):
