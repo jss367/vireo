@@ -213,8 +213,11 @@ def _record_working_copy_failure(db, photo, source_path=None):
     next thumbnail/preview/original request fails fast again instead of
     repeating the expensive decode until the scanner runs. Mirrors the SQL the
     scanner writes on failure (scanner.py around the working-copy backfill).
-    No-op for non-RAW rows, rows without a recorded ``file_mtime``/``id``, or
-    source paths that are currently unavailable/offline.
+    No-op for non-RAW rows, rows without a recorded ``file_mtime``/``id``,
+    source paths that are currently unavailable/offline, or source paths that
+    aren't the original RAW (e.g. a corrupt working-copy JPEG returned by
+    ``get_canonical_image_path``) — a non-RAW decode failure isn't a RAW
+    extraction failure and must not stamp the RAW marker.
     """
     def _get(key):
         try:
@@ -231,8 +234,11 @@ def _record_working_copy_failure(db, photo, source_path=None):
         }
     if os.path.splitext(filename)[1].lower() not in RAW_EXTENSIONS:
         return
-    if source_path is not None and not os.path.exists(source_path):
-        return
+    if source_path is not None:
+        if os.path.splitext(source_path)[1].lower() not in RAW_EXTENSIONS:
+            return
+        if not os.path.exists(source_path):
+            return
 
     file_mtime = _get("file_mtime")
     photo_id = _get("id")

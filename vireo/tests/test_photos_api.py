@@ -1361,6 +1361,57 @@ def test_preview_does_not_refresh_failure_marker_when_raw_source_is_missing(
     assert row["age_seconds"] is not None and row["age_seconds"] > 24 * 60 * 60
 
 
+def test_preview_does_not_refresh_failure_marker_when_working_copy_jpeg_is_corrupt(
+    client_with_photo, monkeypatch,
+):
+    """A corrupt/unreadable working-copy JPEG must not stamp the RAW marker.
+
+    ``get_canonical_image_path`` prefers an existing working-copy JPEG over the
+    original RAW. If that JPEG fails to load, the failure is in the JPEG, not
+    in RAW extraction — recording it as a RAW failure would suppress legitimate
+    RAW retries for 24h even though the RAW was never tried.
+    """
+    import os
+
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_rel = f"working/{photo_id}.jpg"
+    with open(os.path.join(vireo_dir, wc_rel), "wb") as f:
+        f.write(b"corrupt jpeg bytes")
+
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=?,
+               working_copy_failed_at=datetime('now', '-48 hours'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (wc_rel, file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(image_loader, "load_image", lambda *a, **k: None)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 500
+    row = db.conn.execute(
+        """SELECT (julianday('now') - julianday(working_copy_failed_at))
+                  * 24 * 60 * 60 AS age_seconds
+           FROM photos WHERE id=?""",
+        (photo_id,),
+    ).fetchone()
+    assert row["age_seconds"] is not None and row["age_seconds"] > 24 * 60 * 60
+
+
 def test_original_skips_recent_failed_raw_working_copy(
     client_with_photo, monkeypatch,
 ):
