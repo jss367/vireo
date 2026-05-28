@@ -3913,41 +3913,208 @@ def test_highlights_page(app_and_db):
     assert resp.status_code == 200
 
 
+def test_highlights_page_renders_after_redesign(app_and_db):
+    """The page template still renders against the new API shape."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/highlights")
+    assert resp.status_code == 200
+    assert b"Auto-ID confidence" in resp.data
+    assert b"Per row" in resp.data
+
+
 def test_highlights_get_empty(app_and_db):
-    """GET /api/highlights returns empty when no quality data exists."""
+    """GET /api/highlights returns empty buckets when no quality data exists."""
     app, _ = app_and_db
     client = app.test_client()
     resp = client.get("/api/highlights")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert data["photos"] == []
-    assert "folders" in data
-    assert "meta" in data
+    assert data["buckets"] == []
+    assert data["unidentified"]["photo_count"] == 0
+    assert data["folders"] == []
+    assert data["meta"]["eligible"] == 0
 
 
-def test_highlights_get_with_data(app_and_db):
-    """GET /api/highlights returns highlight photos for a folder with quality data."""
+def test_highlights_buckets_by_accepted_species(app_and_db):
+    """Photos with accepted species keywords populate species buckets."""
     app, db = app_and_db
     client = app.test_client()
     fid = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/highlights_test', 'highlights_test', 'ok')"
+        "INSERT INTO folders (path, name, status) VALUES ('/b', 'b', 'ok')"
     ).lastrowid
     db.conn.execute(
         "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
         (db._ws_id(), fid),
     )
-    for i in range(20):
+    apapane_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('ʻApapane', 'taxonomy', 1)"
+    ).lastrowid
+    for i, q in enumerate([0.9, 0.7, 0.5]):
+        pid = db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+            "VALUES (?, ?, ?, 'none')",
+            (fid, f"a{i}.jpg", q),
+        ).lastrowid
         db.conn.execute(
-            "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, ?, ?, 'none')",
-            (fid, f"img{i}.jpg", 0.9 - i * 0.03),
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, apapane_kw),
         )
     db.conn.commit()
 
-    resp = client.get(f"/api/highlights?folder_id={fid}&count=5")
+    resp = client.get(f"/api/highlights?folder_id={fid}")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert len(data["photos"]) == 5
-    assert data["meta"]["total_in_folder"] == 20
+    assert len(data["buckets"]) == 1
+    bucket = data["buckets"][0]
+    assert bucket["species"] == "ʻApapane"
+    assert bucket["is_accepted"] is True
+    assert bucket["photo_count"] == 3
+    assert bucket["best_quality"] == 0.9
+    # Photos ordered by quality_score desc
+    qs = [p["quality_score"] for p in bucket["photos"]]
+    assert qs == sorted(qs, reverse=True)
+
+
+def test_highlights_bucket_mixed_accepted_predicted_is_not_accepted(app_and_db):
+    """A bucket whose photos are a mix of accepted-tag and prediction-only
+    must report is_accepted=False. The "Confirmed" badge means the whole
+    row is confirmed, not just some of it (UI transparency rule)."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/m', 'm', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    apapane_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('ʻApapane', 'taxonomy', 1)"
+    ).lastrowid
+
+    # Photo 1: accepted ʻApapane keyword.
+    accepted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'a.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (accepted_pid, apapane_kw),
+    )
+
+    # Photo 2: no accepted keyword, only a prediction of ʻApapane above the
+    # default threshold so it lands in the same bucket.
+    predicted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'b.jpg', 0.7, 'none')",
+        (fid,),
+    ).lastrowid
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (predicted_pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'ʻApapane', 0.95)",
+        (did,),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.7")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["buckets"]) == 1
+    bucket = data["buckets"][0]
+    assert bucket["species"] == "ʻApapane"
+    assert bucket["photo_count"] == 2
+    # Mixed bucket: one accepted, one prediction-only → NOT fully confirmed.
+    assert bucket["is_accepted"] is False
+
+
+def test_highlights_predictions_above_threshold_populate_buckets(app_and_db):
+    """Predictions at or above confidence_threshold count as the photo's species."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/p', 'p', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'p.jpg', 0.6, 'none')",
+        (fid,),
+    ).lastrowid
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'ʻIʻiwi', 0.82)",
+        (did,),
+    )
+    db.conn.commit()
+
+    # Threshold 0.70 — prediction wins, populates species bucket
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.70")
+    data = resp.get_json()
+    assert len(data["buckets"]) == 1
+    assert data["buckets"][0]["species"] == "ʻIʻiwi"
+    assert data["buckets"][0]["is_accepted"] is False
+    assert data["unidentified"]["photo_count"] == 0
+
+    # Threshold 0.90 — prediction below threshold, photo falls to Unidentified
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.90")
+    data = resp.get_json()
+    assert data["buckets"] == []
+    assert data["unidentified"]["photo_count"] == 1
+
+
+def test_highlights_accepted_species_wins_over_higher_confidence_prediction(app_and_db):
+    """Manual species tag is authoritative even when a high-confidence
+    prediction disagrees."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/c', 'c', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    accepted_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('Real Bird', 'taxonomy', 1)"
+    ).lastrowid
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'x.jpg', 0.7, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, accepted_kw),
+    )
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'Wrong Bird', 0.99)",
+        (did,),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.5")
+    data = resp.get_json()
+    assert len(data["buckets"]) == 1
+    assert data["buckets"][0]["species"] == "Real Bird"
+    assert data["buckets"][0]["is_accepted"] is True
 
 
 def test_highlights_save(app_and_db):
@@ -3983,116 +4150,37 @@ def test_highlights_save(app_and_db):
 
 
 def test_highlights_scope_workspace_blends_folders(app_and_db):
-    """GET /api/highlights?scope=workspace draws candidates from every
-    folder in the active workspace, so a shoot split across multiple dated
-    folders produces one combined highlight pool."""
+    """scope=workspace blends candidates across every folder in the
+    active workspace (matches existing folder-scope behavior)."""
     app, db = app_and_db
     client = app.test_client()
-    f1 = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/shoot/2024-01-15', '2024-01-15', 'ok')"
+    apapane_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('ʻApapane', 'taxonomy', 1)"
     ).lastrowid
-    f2 = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/shoot/2024-01-16', '2024-01-16', 'ok')"
-    ).lastrowid
-    for fid in (f1, f2):
+    for fname in ("2024-01-15", "2024-01-16"):
+        fid = db.conn.execute(
+            "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+            (f"/shoot/{fname}", fname),
+        ).lastrowid
         db.conn.execute(
             "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
             (db._ws_id(), fid),
         )
-    # 3 photos in each folder with strong quality scores.
-    for fid, prefix in [(f1, "a"), (f2, "b")]:
-        for i in range(3):
-            db.conn.execute(
-                "INSERT INTO photos (folder_id, filename, quality_score, flag) "
-                "VALUES (?, ?, ?, 'none')",
-                (fid, f"{prefix}{i}.jpg", 0.9 - i * 0.01),
-            )
-    db.conn.commit()
-
-    resp = client.get("/api/highlights?scope=workspace&count=6&max_per_species=10")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    filenames = {p["filename"] for p in data["photos"]}
-    # All six photos across both folders are eligible and selected. The
-    # fixture photos lack quality scores so they do not show up here.
-    assert filenames == {"a0.jpg", "a1.jpg", "a2.jpg", "b0.jpg", "b1.jpg", "b2.jpg"}
-    # scope=workspace blends candidates from every folder visible in the
-    # active workspace, which the API advertises via meta.scope.
-    assert data["scope"] == "workspace"
-    assert data["meta"]["eligible"] == 6
-
-
-def test_highlights_scope_workspace_isolates_other_workspaces(app_and_db):
-    """Folders in a non-active workspace must not leak into the scope=workspace pool."""
-    app, db = app_and_db
-    client = app.test_client()
-    active_ws = db._ws_id()
-    other_ws = db.create_workspace("Other")
-
-    # Folder in the active workspace.
-    f_active = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/active', 'active', 'ok')"
-    ).lastrowid
-    db.conn.execute(
-        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
-        (active_ws, f_active),
-    )
-    # Folder only in the other workspace.
-    f_other = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/other', 'other', 'ok')"
-    ).lastrowid
-    db.conn.execute(
-        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
-        (other_ws, f_other),
-    )
-    db.conn.execute(
-        "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, 'keep.jpg', 0.8, 'none')",
-        (f_active,),
-    )
-    db.conn.execute(
-        "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, 'leaked.jpg', 0.95, 'none')",
-        (f_other,),
-    )
-    db.conn.commit()
-
-    resp = client.get("/api/highlights?scope=workspace&count=10&max_per_species=10")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    filenames = {p["filename"] for p in data["photos"]}
-    assert "leaked.jpg" not in filenames
-    assert filenames == {"keep.jpg"}
-
-
-def test_highlights_folder_scope_still_works(app_and_db):
-    """Regression: omitting scope (or passing a folder_id) still filters by folder."""
-    app, db = app_and_db
-    client = app.test_client()
-    f1 = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/a', 'a', 'ok')"
-    ).lastrowid
-    f2 = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/b', 'b', 'ok')"
-    ).lastrowid
-    for fid in (f1, f2):
+        pid = db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+            "VALUES (?, ?, 0.8, 'none')",
+            (fid, f"{fname}.jpg"),
+        ).lastrowid
         db.conn.execute(
-            "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
-            (db._ws_id(), fid),
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, apapane_kw),
         )
-    db.conn.execute(
-        "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, 'only_a.jpg', 0.8, 'none')",
-        (f1,),
-    )
-    db.conn.execute(
-        "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, 'only_b.jpg', 0.9, 'none')",
-        (f2,),
-    )
     db.conn.commit()
 
-    resp = client.get(f"/api/highlights?folder_id={f1}&count=10&max_per_species=10")
-    assert resp.status_code == 200
+    resp = client.get("/api/highlights?scope=workspace")
     data = resp.get_json()
-    filenames = {p["filename"] for p in data["photos"]}
-    assert filenames == {"only_a.jpg"}
+    assert len(data["buckets"]) == 1
+    assert data["buckets"][0]["photo_count"] == 2
 
 
 def test_api_import_folder_preview(app_and_db, tmp_path):

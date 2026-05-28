@@ -6803,19 +6803,16 @@ class Database:
 
         When ``folder_id`` is an int, returns photos in that folder and its
         descendant folders. When ``folder_id`` is ``None``, returns photos
-        across every folder visible in the active workspace — useful when a
-        photoshoot spans multiple dated folders (Vireo auto-organizes imports
-        by EXIF capture date into ``YYYY/YYYY-MM-DD/`` subfolders).
+        across every folder visible in the active workspace.
 
-        In both cases, only photos with ``quality_score >= min_quality`` that
-        are not user-rejected are returned. Includes the photo's species
-        keyword (or NULL) and DINO embeddings for MMR diversity.
+        Each row carries:
+          * ``species`` — accepted species keyword (NULL if none accepted)
+          * ``predicted_species`` / ``predicted_confidence`` — top-confidence
+            non-rejected prediction across the photo's detections (NULL if
+            no usable prediction exists)
 
-        Species is derived from photo_keywords joined to keywords where
-        is_species = 1, which covers both accepted predictions (accept_prediction
-        tags the photo) and manual identification via the confirm-species flow.
-
-        Ordered by quality_score DESC.
+        Only photos with ``quality_score >= min_quality`` that are not
+        user-rejected are returned, ordered by ``quality_score`` DESC.
         """
         ws = self._ws_id()
         if folder_id is None:
@@ -6832,7 +6829,9 @@ class Database:
                       p.thumb_path, p.quality_score, p.subject_sharpness,
                       p.subject_size, p.sharpness, p.phash_crop,
                       p.dino_subject_embedding, p.dino_global_embedding,
-                      bp.species
+                      bp.species,
+                      tp.predicted_species,
+                      tp.predicted_confidence
                FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
@@ -6848,13 +6847,39 @@ class Database:
                        WHERE k.is_species = 1
                    ) WHERE rn = 1
                ) bp ON bp.photo_id = p.id
+               LEFT JOIN (
+                   SELECT photo_id,
+                          species AS predicted_species,
+                          confidence AS predicted_confidence
+                   FROM (
+                       SELECT d.photo_id, pr.species, pr.confidence,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY d.photo_id
+                                  ORDER BY pr.confidence DESC, pr.id DESC
+                              ) AS rn
+                       FROM detections d
+                       JOIN predictions pr ON pr.detection_id = d.id
+                       LEFT JOIN prediction_review pr_rev
+                         ON pr_rev.prediction_id = pr.id
+                        AND pr_rev.workspace_id = ?
+                       WHERE pr.species IS NOT NULL
+                         AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                         AND pr.labels_fingerprint = (
+                             SELECT pr2.labels_fingerprint FROM predictions pr2
+                             WHERE pr2.detection_id = pr.detection_id
+                               AND pr2.classifier_model = pr.classifier_model
+                             ORDER BY pr2.created_at DESC, pr2.id DESC
+                             LIMIT 1
+                         )
+                   ) WHERE rn = 1
+               ) tp ON tp.photo_id = p.id
                WHERE wf.workspace_id = ?
                  {folder_filter}
                  AND p.quality_score IS NOT NULL
                  AND p.quality_score >= ?
                  AND p.flag != 'rejected'
                ORDER BY p.quality_score DESC""",
-            (ws, *folder_params, min_quality),
+            (ws, ws, *folder_params, min_quality),
         ).fetchall()
         return rows
 
