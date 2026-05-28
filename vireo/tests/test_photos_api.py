@@ -1204,6 +1204,43 @@ def test_preview_skips_recent_failed_raw_working_copy(
     assert called["extract"] is False
 
 
+def test_preview_skips_recent_failed_raw_when_working_copy_path_is_stale(
+    client_with_photo, monkeypatch,
+):
+    """A stale DB working_copy_path whose file is gone should not bypass a
+    fresh RAW failure marker."""
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path='working/missing.jpg',
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"load": False}
+
+    def fail_load_if_called(*_args, **_kwargs):
+        called["load"] = True
+        raise AssertionError("preview retried failed RAW with stale wc path")
+
+    monkeypatch.setattr(image_loader, "load_image", fail_load_if_called)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 500
+    assert called["load"] is False
+
+
 def test_preview_retries_stale_failed_raw_working_copy(
     client_with_photo, monkeypatch,
 ):
