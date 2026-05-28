@@ -42,6 +42,7 @@ from preview_cache import (
 from preview_cache import (
     reconcile_preview_cache,
 )
+from werkzeug.exceptions import BadRequest
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -10207,6 +10208,44 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if job is None:
             return json_error("job not found", 404)
         return json_error(f"job is not running (status={job['status']})", 404)
+
+    @app.route("/api/jobs/cancel-queued", methods=["POST"])
+    def api_jobs_cancel_queued():
+        """Bulk-cancel every queued pipeline in a workspace.
+
+        Body (optional): ``{"workspace_id": <id>}``. Default scope is
+        the active workspace — matching what the user sees on the Jobs
+        page. Running pipelines and queued pipelines in OTHER
+        workspaces are untouched.
+
+        Returns ``{"cancelled": [job_ids...]}``.
+        """
+        runner = app._job_runner
+        db = _get_db()
+        raw_body = request.get_data(cache=True)
+        if request.is_json and raw_body:
+            try:
+                body = request.get_json()
+            except BadRequest:
+                return json_error("Malformed JSON body", 400)
+        elif raw_body.strip():
+            body = request.get_json(silent=True)
+        else:
+            body = {}
+        if not isinstance(body, dict):
+            return json_error("JSON body must be an object", 400)
+
+        if "workspace_id" in body:
+            ws_id = body["workspace_id"]
+            if isinstance(ws_id, bool) or not isinstance(ws_id, int):
+                return json_error("workspace_id must be an integer", 400)
+        else:
+            ws_id = db._active_workspace_id
+            if ws_id is None:
+                return json_error("workspace_id is required", 400)
+
+        cancelled = runner.cancel_queued_jobs(workspace_id=ws_id)
+        return jsonify({"cancelled": cancelled})
 
     @app.route("/api/jobs/<job_id>/stream")
     def api_job_stream(job_id):

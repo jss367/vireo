@@ -1760,3 +1760,198 @@ def test_extract_masks_route_workspace_branch_respects_detector_confidence(
         "SELECT active_mask_variant FROM photos WHERE id=?", (pid_low,),
     ).fetchone()
     assert low_active["active_mask_variant"] is None
+
+
+# --- POST /api/jobs/cancel-queued (bulk queued-pipeline cancel) ---------
+#
+# These tests cover the bulk cancel endpoint used by the "Cancel all
+# queued" button on the /jobs page. The endpoint must:
+#   - cancel every queued pipeline (default: scoped to the active
+#     workspace, explicit: scoped to ``workspace_id`` in the body),
+#   - never touch running pipelines,
+#   - never touch queued pipelines belonging to a different workspace
+#     when a workspace is named.
+#
+# Tests below construct queued+running pipelines by reaching directly
+# into ``runner.enqueue_pipeline`` so we don't depend on the full
+# pipeline_job stack to build the fixture.
+
+
+def _block_pipeline_until(event, result=None):
+    """Build a work_fn that waits on ``event`` before returning.
+
+    Used to keep a 'running' pipeline pinned to its slot so that
+    subsequent ``enqueue_pipeline`` calls land in the queued state.
+    """
+    def work(job):
+        event.wait(timeout=5.0)
+        return result or {}
+    return work
+
+
+def test_cancel_queued_endpoint_cancels_all_queued_in_active_workspace(app_and_db):
+    """POST /api/jobs/cancel-queued (no body) cancels every queued
+    pipeline in the active workspace. The currently-running pipeline
+    is left alone.
+    """
+    import threading
+    app, db = app_and_db
+    runner = app._job_runner
+    client = app.test_client()
+    ws_id = db._active_workspace_id
+
+    # Pin slot 1 with a running pipeline so the next two stay queued.
+    release = threading.Event()
+    running_id = runner.enqueue_pipeline(
+        work_fn=_block_pipeline_until(release),
+        config={}, workspace_id=ws_id,
+    )
+    # Two queued pipelines behind it.
+    queued_a = runner.enqueue_pipeline(
+        work_fn=lambda job: None, config={}, workspace_id=ws_id,
+    )
+    queued_b = runner.enqueue_pipeline(
+        work_fn=lambda job: None, config={}, workspace_id=ws_id,
+    )
+    # Sanity: both are queued, the first is running.
+    assert runner.get(running_id)["status"] == "running"
+    assert runner.get(queued_a)["status"] == "queued"
+    assert runner.get(queued_b)["status"] == "queued"
+
+    try:
+        resp = client.post("/api/jobs/cancel-queued", json={})
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        data = resp.get_json()
+        assert set(data["cancelled"]) == {queued_a, queued_b}
+
+        # Queued rows are now cancelled.
+        for jid in (queued_a, queued_b):
+            row = db.conn.execute(
+                "SELECT status FROM job_history WHERE id = ?", (jid,),
+            ).fetchone()
+            assert row is not None
+            assert row["status"] == "cancelled", (
+                f"queued job {jid} should be cancelled, was {row['status']}"
+            )
+
+        # Running pipeline is untouched.
+        assert runner.get(running_id)["status"] == "running"
+    finally:
+        release.set()
+        from wait import wait_for_job_via_runner
+        wait_for_job_via_runner(runner, running_id)
+
+
+def test_cancel_queued_endpoint_rejects_invalid_body(app_and_db):
+    """Bulk queued cancel requires an object body when JSON is supplied."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    for payload in (True, [], "workspace"):
+        resp = client.post("/api/jobs/cancel-queued", json=payload)
+        assert resp.status_code == 400
+
+
+def test_cancel_queued_endpoint_rejects_malformed_json_without_cancel(app_and_db):
+    """Malformed JSON must not fall back to the destructive default scope."""
+    import threading
+
+    app, db = app_and_db
+    runner = app._job_runner
+    client = app.test_client()
+    ws_id = db._active_workspace_id
+
+    release = threading.Event()
+    running_id = runner.enqueue_pipeline(
+        work_fn=_block_pipeline_until(release),
+        config={}, workspace_id=ws_id,
+    )
+    queued_id = runner.enqueue_pipeline(
+        work_fn=lambda job: None, config={}, workspace_id=ws_id,
+    )
+    assert runner.get(running_id)["status"] == "running"
+    assert runner.get(queued_id)["status"] == "queued"
+
+    try:
+        for body in ('{"workspace_id":', "   \n\t"):
+            resp = client.post(
+                "/api/jobs/cancel-queued",
+                data=body,
+                content_type="application/json",
+            )
+            assert resp.status_code == 400
+            assert runner.get(queued_id)["status"] == "queued"
+    finally:
+        release.set()
+        from wait import wait_for_job_via_runner
+        wait_for_job_via_runner(runner, running_id)
+        wait_for_job_via_runner(runner, queued_id)
+
+
+def test_cancel_queued_endpoint_rejects_invalid_workspace_id(app_and_db):
+    """``workspace_id`` must be an integer id, not bool or another type."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    for workspace_id in (True, False, "1", 1.5):
+        resp = client.post(
+            "/api/jobs/cancel-queued", json={"workspace_id": workspace_id},
+        )
+        assert resp.status_code == 400
+
+
+def test_cancel_queued_endpoint_leaves_other_workspaces_alone(app_and_db):
+    """When ``workspace_id`` is given in the body, only queued
+    pipelines in that workspace are cancelled. Queued pipelines in
+    other workspaces stay queued.
+    """
+    import threading
+    app, db = app_and_db
+    runner = app._job_runner
+    client = app.test_client()
+    ws_a = db._active_workspace_id
+    # Create a second workspace so we have a meaningful "other" id.
+    ws_b = db.create_workspace("scoped-other")
+
+    # Pin the single slot so EVERY enqueued pipeline below stays queued
+    # regardless of workspace. (SLOT_CAP=1 in this PR.)
+    release = threading.Event()
+    pin_id = runner.enqueue_pipeline(
+        work_fn=_block_pipeline_until(release),
+        config={}, workspace_id=ws_a,
+    )
+    queued_a = runner.enqueue_pipeline(
+        work_fn=lambda job: None, config={}, workspace_id=ws_a,
+    )
+    queued_b = runner.enqueue_pipeline(
+        work_fn=lambda job: None, config={}, workspace_id=ws_b,
+    )
+    assert runner.get(queued_a)["status"] == "queued"
+    assert runner.get(queued_b)["status"] == "queued"
+
+    try:
+        # Scope explicitly to workspace A.
+        resp = client.post(
+            "/api/jobs/cancel-queued", json={"workspace_id": ws_a},
+        )
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        data = resp.get_json()
+        assert data["cancelled"] == [queued_a], data
+
+        # Workspace A's queued row is cancelled.
+        row_a = db.conn.execute(
+            "SELECT status FROM job_history WHERE id = ?", (queued_a,),
+        ).fetchone()
+        assert row_a["status"] == "cancelled"
+
+        # Workspace B's queued row is still queued — the bulk cancel
+        # must not cross workspace boundaries when a workspace is named.
+        assert runner.get(queued_b) is not None
+        assert runner.get(queued_b)["status"] == "queued"
+    finally:
+        release.set()
+        from wait import wait_for_job_via_runner
+        wait_for_job_via_runner(runner, pin_id)
+        # Cancel the surviving queued job so the test fixture's
+        # teardown isn't waiting on a pipeline that will never run.
+        runner.cancel_job(queued_b)

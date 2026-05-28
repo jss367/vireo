@@ -13,6 +13,8 @@ log = logging.getLogger(__name__)
 # How long to keep completed/failed jobs in memory before eviction (seconds)
 _JOB_RETENTION_SECS = 3600  # 1 hour
 
+_PROMOTION_RETRY_DELAY_SECS = 0.1
+
 
 # Maximum number of pipeline jobs allowed to run concurrently. Kept at
 # 1 in this PR; concurrency is enabled in a later PR after the UI and
@@ -44,6 +46,7 @@ class JobRunner:
         # Monotonic suffix so two enqueues landing in the same
         # millisecond don't collide on the PRIMARY KEY.
         self._enqueue_counter = 0
+        self._promotion_retry_scheduled = False
         if db:
             self._db_path = db.conn.execute("PRAGMA database_list").fetchone()[2]
             self._ensure_history_table(db)
@@ -224,9 +227,12 @@ class JobRunner:
             with self._lock:
                 if self._queued_pipelines.get(job_id) is ctx:
                     ctx.pop("_promoting", None)
-            raise
+                    self._schedule_promotion_retry_locked()
+            log.exception("Failed to promote queued pipeline %s", job_id)
+            return
 
         retry_promotion = False
+        record_terminal = False
         with self._lock:
             if self._queued_pipelines.get(job_id) is not ctx:
                 retry_promotion = True
@@ -235,6 +241,7 @@ class JobRunner:
                 if not promoted:
                     # The row was modified elsewhere (cancelled).
                     self._queued_pipelines.pop(job_id, None)
+                    record_terminal = True
                     retry_promotion = True
                 else:
                     # Move from queue context into the live jobs dict.
@@ -263,7 +270,22 @@ class JobRunner:
                     # waiters' queues.
                     self._subscribers.setdefault(job_id, [])
                     work_fn = ctx["work_fn"]
+                    if job_id in self._cancelled:
+                        def work_fn(job):
+                            return None
 
+        if record_terminal:
+            self._record_terminal_queued_pipeline(job_id, ctx, status="cancelled")
+            self.push_event(
+                job_id,
+                "complete",
+                {
+                    "status": "cancelled",
+                    "result": None,
+                    "duration": 0.0,
+                    "errors": [],
+                },
+            )
         if retry_promotion:
             self._try_promote_queued()
             return
@@ -272,6 +294,50 @@ class JobRunner:
             target=self._run_job, args=(job, work_fn), daemon=True,
         )
         thread.start()
+
+    def _schedule_promotion_retry_locked(self):
+        """Retry queue promotion after a transient DB failure.
+
+        Must be called with self._lock held.
+        """
+        if self._promotion_retry_scheduled:
+            return
+        self._promotion_retry_scheduled = True
+
+        def retry():
+            time.sleep(_PROMOTION_RETRY_DELAY_SECS)
+            with self._lock:
+                self._promotion_retry_scheduled = False
+            self._try_promote_queued()
+
+        thread = threading.Thread(target=retry, daemon=True)
+        thread.start()
+
+    def _record_terminal_queued_pipeline(self, job_id, ctx, status="cancelled"):
+        """Keep a terminal queued pipeline in the normal in-memory lifecycle."""
+        finished_at = datetime.now().isoformat()
+        job = {
+            "id": job_id,
+            "type": "pipeline",
+            "status": status,
+            "started_at": ctx["started_at"],
+            "finished_at": finished_at,
+            "progress": {"current": 0, "total": 0, "current_file": ""},
+            "result": None,
+            "errors": [],
+            "config": ctx["config"],
+            "workspace_id": ctx["workspace_id"],
+            "steps": [],
+            "ephemeral": False,
+            "runtime_warning": ctx.get("runtime_warning"),
+            "_ended_at": time.time(),
+            "_persisted": True,
+        }
+        with self._lock:
+            self._prune_finished_jobs()
+            self._jobs[job_id] = job
+            self._events.setdefault(job_id, deque(maxlen=1000))
+            self._subscribers.setdefault(job_id, [])
 
     def start(self, job_type, work_fn, config=None, workspace_id=None,
               ephemeral=False, runtime_warning=None):
@@ -739,7 +805,7 @@ class JobRunner:
                             step[key] = kwargs[key]
                     break
 
-    def cancel_job(self, job_id):
+    def cancel_job(self, job_id, expected_status=None, promote_after_cancel=True):
         """Request cancellation of a running OR queued job.
 
         For running jobs: the work function should periodically check
@@ -748,22 +814,38 @@ class JobRunner:
 
         For queued pipelines: atomically transition the persisted row
         to ``status='cancelled'`` and remove the in-memory context.
-        The conditional UPDATE in ``_try_promote_queued`` ensures a
-        cancel landing between SELECT and UPDATE wins (its rowcount==0
-        path leaves the row in the cancelled state and gives up).
+        If promotion already flipped the row to ``running`` but has not
+        installed the job in ``_jobs`` yet, preserve the cancellation
+        request so the promoted worker exits as cancelled.
+
+        Args:
+            job_id: id to cancel.
+            expected_status: optional status guard. When set, cancellation only
+                proceeds if the latest in-memory state still has this status.
+            promote_after_cancel: if True, immediately re-check the queue after
+                removing a queued job. Bulk queued cancellation sets this False
+                so the whole snapshot can be cancelled before another queued job
+                is promoted.
 
         Returns True if the job was found and either marked for
         cancellation (running) or transitioned to cancelled (queued).
         """
         emit_complete = False
+        retry_promotion = False
         queued_cancel = None
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None and job["status"] == "running":
+                if expected_status and expected_status != "running":
+                    return False
                 self._cancelled.add(job_id)
                 return True
+            if job is not None:
+                return False
             # Queued case: still in _queued_pipelines, not _jobs yet.
             if job_id in self._queued_pipelines:
+                if expected_status and expected_status != "queued":
+                    return False
                 cancelled_at = datetime.now().isoformat()
                 queued_cancel = self._queued_pipelines[job_id]
             else:
@@ -789,11 +871,26 @@ class JobRunner:
             # rowcount==0 means a concurrent promotion beat us — the row is
             # now 'running' and the worker will see the cancellation flag.
             if not cancelled:
-                self._cancelled.add(job_id)
-                return True
+                job = self._jobs.get(job_id)
+                if (
+                    job is not None
+                    and job["status"] == "running"
+                    and (expected_status is None or expected_status == "running")
+                ):
+                    self._cancelled.add(job_id)
+                    return True
+                if self._queued_pipelines.get(job_id) is queued_cancel:
+                    self._cancelled.add(job_id)
+                    return True
+                return False
             if self._queued_pipelines.get(job_id) is queued_cancel:
                 self._queued_pipelines.pop(job_id, None)
+                retry_promotion = True
             emit_complete = True
+        if emit_complete:
+            self._record_terminal_queued_pipeline(
+                job_id, queued_cancel, status="cancelled",
+            )
         # Emit the terminal SSE event AFTER releasing the lock — clients
         # subscribed to /api/jobs/<id>/stream while the job was queued
         # need a ``complete`` event with status='cancelled' so they
@@ -810,7 +907,28 @@ class JobRunner:
                     "errors": [],
                 },
             )
+        if retry_promotion and promote_after_cancel:
+            self._try_promote_queued()
         return True
+
+    def cancel_queued_jobs(self, workspace_id=None):
+        """Cancel queued pipelines, optionally scoped to one workspace."""
+        with self._lock:
+            job_ids = [
+                job_id
+                for job_id, ctx in self._queued_pipelines.items()
+                if workspace_id is None or ctx.get("workspace_id") == workspace_id
+            ]
+        cancelled = []
+        for job_id in job_ids:
+            if self.cancel_job(
+                job_id,
+                promote_after_cancel=False,
+            ):
+                cancelled.append(job_id)
+        if cancelled:
+            self._try_promote_queued()
+        return cancelled
 
     def is_cancelled(self, job_id):
         """Check whether a job has been marked for cancellation."""
