@@ -137,17 +137,21 @@ def _chunked(seq, size=_SQL_PARAM_CHUNK):
         yield seq[i:i + size]
 
 
-def _has_current_working_copy_failure(photo, vireo_dir=None):
+def _has_current_working_copy_failure(
+    photo, vireo_dir=None, trust_existing_working_copy=True,
+):
     """Return True when this RAW already failed working-copy extraction.
 
     Missing thumbnail/preview requests normally self-heal by decoding the
     source. For RAW rows whose working-copy extraction already failed at the
     same source mtime, retrying that decode in a request thread can block the
     UI for minutes and then fail the same way. A present working copy is still
-    authoritative, but a stale ``working_copy_path`` whose file was deleted
-    should not bypass a fresh failure marker. Match scanner.py's stale-failure
-    contract: a file replacement changes ``file_mtime`` and failures older than
-    24 hours are allowed to retry.
+    authoritative for thumbnail/preview routes, but callers that have already
+    rejected that copy as insufficient can opt into honoring the marker anyway.
+    A stale ``working_copy_path`` whose file was deleted should not bypass a
+    fresh failure marker. Match scanner.py's stale-failure contract: a file
+    replacement changes ``file_mtime`` and failures older than 24 hours are
+    allowed to retry.
     """
     def _get(key):
         try:
@@ -156,7 +160,7 @@ def _has_current_working_copy_failure(photo, vireo_dir=None):
             return None
 
     working_copy_path = _get("working_copy_path")
-    if working_copy_path:
+    if working_copy_path and trust_existing_working_copy:
         if not vireo_dir:
             return False
         wc_abs = (
@@ -13505,7 +13509,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             {photo["folder_id"]: folder["path"]},
         )
 
-        if _has_current_working_copy_failure(photo, vireo_dir):
+        if _has_current_working_copy_failure(
+            photo, vireo_dir, trust_existing_working_copy=False,
+        ):
             log.info(
                 "Skipping original-image extraction for photo %s; RAW working-copy "
                 "extraction already failed for current source mtime",

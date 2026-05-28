@@ -1398,6 +1398,53 @@ def test_original_skips_recent_failed_raw_working_copy(
     assert called["extract"] is False
 
 
+def test_original_skips_recent_failed_raw_after_rejecting_small_working_copy(
+    client_with_photo, monkeypatch,
+):
+    """If a capped working copy is too small for /original, a fresh RAW failure
+    marker should still suppress another full-res extraction attempt."""
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    Image.new("RGB", (100, 100), (40, 80, 120)).save(
+        os.path.join(working_dir, f"{photo_id}.jpg"), "JPEG",
+    )
+
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"extract": False}
+
+    def fail_if_called(*_args, **_kwargs):
+        called["extract"] = True
+        raise AssertionError("original retried RAW after small wc rejection")
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", fail_if_called)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 500
+    assert called["extract"] is False
+
+
 def test_original_refreshes_failure_marker_when_stale_retry_fails(
     client_with_photo, monkeypatch,
 ):
