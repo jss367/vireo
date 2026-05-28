@@ -443,6 +443,65 @@ def test_cancel_promoting_pipeline_after_db_running_preserves_request(tmp_path):
         assert runner._queued_pipelines[job_id]["_promoting"] is True
 
 
+def test_cancel_queued_pipeline_after_promotion_finishes_marks_running(tmp_path, monkeypatch):
+    """A per-job queued cancel still wins if promotion finishes mid-cancel."""
+    import sqlite3
+
+    runner, db = _make_runner_with_db(tmp_path)
+    job_id = "pipeline-1700000000001"
+    db.conn.execute(
+        "INSERT INTO job_history (id, type, status, started_at, error_count) "
+        "VALUES (?, 'pipeline', 'running', '2026-05-26T00:00:00', 0)",
+        (job_id,),
+    )
+    db.conn.commit()
+    with runner._lock:
+        runner._queued_pipelines[job_id] = {
+            "work_fn": lambda job: pytest_fail("should not have run"),
+            "config": {"x": 1},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:00",
+            "_promoting": True,
+        }
+
+    class FakeCursor:
+        rowcount = 0
+
+    class FakeConnection:
+        def execute(self, *args, **kwargs):
+            with runner._lock:
+                ctx = runner._queued_pipelines.pop(job_id)
+                ctx.pop("_promoting", None)
+                runner._jobs[job_id] = {
+                    "id": job_id,
+                    "type": "pipeline",
+                    "status": "running",
+                    "started_at": ctx["started_at"],
+                    "finished_at": None,
+                    "progress": {"current": 0, "total": 0, "current_file": ""},
+                    "result": None,
+                    "errors": [],
+                    "config": ctx["config"],
+                    "workspace_id": ctx["workspace_id"],
+                    "steps": [],
+                    "ephemeral": False,
+                    "runtime_warning": ctx["runtime_warning"],
+                }
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: FakeConnection())
+
+    assert runner.cancel_job(job_id) is True
+    assert runner.is_cancelled(job_id)
+
+
 def test_promoted_pipeline_with_pending_cancel_skips_work_fn(tmp_path):
     """A queued cancel recorded during promotion suppresses pipeline work."""
     runner, db = _make_runner_with_db(tmp_path)

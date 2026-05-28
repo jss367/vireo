@@ -844,8 +844,18 @@ class JobRunner:
             # rowcount==0 means a concurrent promotion beat us — the row is
             # now 'running' and the worker will see the cancellation flag.
             if not cancelled:
-                self._cancelled.add(job_id)
-                return True
+                job = self._jobs.get(job_id)
+                if (
+                    job is not None
+                    and job["status"] == "running"
+                    and (expected_status is None or expected_status == "running")
+                ):
+                    self._cancelled.add(job_id)
+                    return True
+                if self._queued_pipelines.get(job_id) is queued_cancel:
+                    self._cancelled.add(job_id)
+                    return True
+                return False
             if self._queued_pipelines.get(job_id) is queued_cancel:
                 self._queued_pipelines.pop(job_id, None)
             emit_complete = True
