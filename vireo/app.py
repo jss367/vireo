@@ -189,7 +189,7 @@ def _has_current_working_copy_failure(photo):
     return age < _WORKING_COPY_FAILURE_RETRY_SECONDS
 
 
-def _record_working_copy_failure(db, photo):
+def _record_working_copy_failure(db, photo, source_path=None):
     """Persist a RAW extraction failure marker after a request-time retry.
 
     When ``_has_current_working_copy_failure`` returns False because the stored
@@ -199,7 +199,8 @@ def _record_working_copy_failure(db, photo):
     next thumbnail/preview/original request fails fast again instead of
     repeating the expensive decode until the scanner runs. Mirrors the SQL the
     scanner writes on failure (scanner.py around the working-copy backfill).
-    No-op for non-RAW rows or rows without a recorded ``file_mtime``/``id``.
+    No-op for non-RAW rows, rows without a recorded ``file_mtime``/``id``, or
+    source paths that are currently unavailable/offline.
     """
     def _get(key):
         try:
@@ -215,6 +216,8 @@ def _record_working_copy_failure(db, photo):
             ".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf",
         }
     if os.path.splitext(filename)[1].lower() not in RAW_EXTENSIONS:
+        return
+    if source_path is not None and not os.path.exists(source_path):
         return
 
     file_mtime = _get("file_mtime")
@@ -10733,13 +10736,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "Thumbnail self-heal failed for photo %s (source=%s)",
                 photo_id, photo["filename"],
             )
-            _record_working_copy_failure(db, photo)
+            _record_working_copy_failure(db, photo, source)
             return "", 404
 
         if not result:
             # generate_thumbnail logged the reason (unreadable source,
             # unsupported format, etc.). Nothing else to do here.
-            _record_working_copy_failure(db, photo)
+            _record_working_copy_failure(db, photo, source)
             return "", 404
 
         # Peg the regenerated thumbnail's mtime to the source file_mtime
@@ -13343,7 +13346,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         canonical = get_canonical_image_path(photo, vireo_dir, folders)
         img = load_image(canonical, max_size=size)
         if img is None:
-            _record_working_copy_failure(db, photo)
+            _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500
 
         preview_quality = cfg.load().get("preview_quality", 90)
@@ -13561,7 +13564,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Fallback: serve via load_image
         img = load_image(image_path, max_size=None)
         if img is None:
-            _record_working_copy_failure(db, photo)
+            _record_working_copy_failure(db, photo, image_path)
             return "Could not load image", 500
         originals_dir = os.path.join(vireo_dir, "originals")
         cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")

@@ -711,6 +711,12 @@ def test_serve_thumbnail_skips_recent_failed_raw_working_copy(
     import thumbnails
 
     app, db, pid, _thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (pid,),
+    ).fetchone()
+    with open(os.path.join(folder["path"], "bad.NEF"), "wb") as f:
+        f.write(b"not a decodable raw")
     file_mtime = db.conn.execute(
         "SELECT file_mtime FROM photos WHERE id=?", (pid,)
     ).fetchone()["file_mtime"]
@@ -748,6 +754,12 @@ def test_serve_thumbnail_refreshes_failure_marker_when_stale_retry_fails(
     import thumbnails
 
     app, db, pid, _thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (pid,),
+    ).fetchone()
+    with open(os.path.join(folder["path"], "bad.NEF"), "wb") as f:
+        f.write(b"not a decodable raw")
     file_mtime = db.conn.execute(
         "SELECT file_mtime FROM photos WHERE id=?", (pid,)
     ).fetchone()["file_mtime"]

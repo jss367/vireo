@@ -1246,9 +1246,17 @@ def test_preview_refreshes_failure_marker_when_stale_retry_fails(
     """When the retry window has expired and the request-time decode still
     fails, /preview must refresh ``working_copy_failed_at`` so the next
     request fails fast again instead of repeating the slow decode."""
+    import os
+
     import image_loader
 
     app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    with open(os.path.join(folder["path"], "bad.NEF"), "wb") as f:
+        f.write(b"not a decodable raw")
     file_mtime = db.conn.execute(
         "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
     ).fetchone()["file_mtime"]
@@ -1281,6 +1289,39 @@ def test_preview_refreshes_failure_marker_when_stale_retry_fails(
     ).fetchone()
     assert row["working_copy_failed_mtime"] == file_mtime
     assert row["age_seconds"] is not None and row["age_seconds"] < 60
+
+
+def test_preview_does_not_refresh_failure_marker_when_raw_source_is_missing(
+    client_with_photo,
+):
+    """Missing/offline RAW sources are not decode failures; leave stale
+    extraction markers stale so remounting the source can recover quickly."""
+    app, db, photo_id = client_with_photo
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='missing.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now', '-48 hours'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 500
+    row = db.conn.execute(
+        """SELECT (julianday('now') - julianday(working_copy_failed_at))
+                  * 24 * 60 * 60 AS age_seconds
+           FROM photos WHERE id=?""",
+        (photo_id,),
+    ).fetchone()
+    assert row["age_seconds"] is not None and row["age_seconds"] > 24 * 60 * 60
 
 
 def test_original_skips_recent_failed_raw_working_copy(
@@ -1325,9 +1366,17 @@ def test_original_refreshes_failure_marker_when_stale_retry_fails(
 ):
     """A stale RAW failure may retry once; if original extraction and fallback
     loading still fail, the route should refresh the failure marker."""
+    import os
+
     import image_loader
 
     app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    with open(os.path.join(folder["path"], "bad.NEF"), "wb") as f:
+        f.write(b"not a decodable raw")
     file_mtime = db.conn.execute(
         "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
     ).fetchone()["file_mtime"]
