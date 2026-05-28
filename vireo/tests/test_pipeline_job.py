@@ -6295,6 +6295,127 @@ def test_pipeline_miss_stage_skipped_when_regroup_fails(tmp_path, monkeypatch):
         )
 
 
+def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
+    """The workspace_regroup lock must wrap BOTH regroup_stage and
+    miss_stage. Without a single lock spanning both, pipeline B could
+    sneak in between A's regroup release and A's miss acquire and
+    rewrite burst_id / pipeline_results_ws*.json — leaving the
+    persisted miss flags inconsistent with the cached grouping the
+    review UI reads for "Review misses".
+
+    Trace acquire/release vs. regroup-work and miss-step events and
+    verify release happens AFTER the miss step, not between them."""
+    import config as cfg
+    import pipeline as pipeline_mod
+    import pipeline_job as pj
+    import pipeline_locks
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    Image.new("RGB", (16, 16), "black").save(str(photo_dir / "a.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    events = []
+
+    real_acquire = pipeline_locks.acquire_workspace_regroup
+
+    class TrackingLock:
+        def __init__(self, inner, ws):
+            self._inner = inner
+            self._ws = ws
+
+        def __enter__(self):
+            events.append(("acquire", self._ws))
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            events.append(("release", self._ws))
+            return self._inner.__exit__(*args)
+
+    monkeypatch.setattr(
+        pj, "acquire_workspace_regroup",
+        lambda ws: TrackingLock(real_acquire(ws), ws),
+    )
+
+    def _ok_run(photos, config=None, emit_trace=False):
+        events.append(("regroup_work", ws_id))
+        return {"summary": {"groups": 1}, "photos": photos}
+
+    monkeypatch.setattr(pipeline_mod, "run_full_pipeline", _ok_run)
+    monkeypatch.setattr(pipeline_mod, "save_results", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda thread_db, collection_id=None, config=None: [{"id": 1}],
+    )
+
+    class TrackingRunner(FakeRunner):
+        def update_step(self, job_id, step_id, **kwargs):
+            if step_id == "misses":
+                events.append(("miss_step", kwargs.get("status")))
+            super().update_step(job_id, step_id, **kwargs)
+
+    # skip_classify=True keeps the test from needing real model files;
+    # miss_stage takes its early-skip path but still calls update_step
+    # on the "misses" step — which must happen INSIDE the lock.
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+    )
+    runner = TrackingRunner()
+    job = _make_job()
+
+    with contextlib.suppress(Exception):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Strip events from earlier stages that don't touch the regroup lock.
+    interesting = [
+        e for e in events
+        if e[0] in ("acquire", "release", "regroup_work", "miss_step")
+    ]
+    assert ("acquire", ws_id) in interesting, (
+        f"workspace_regroup lock was never acquired; events: {interesting}"
+    )
+    assert ("release", ws_id) in interesting, (
+        f"workspace_regroup lock was never released; events: {interesting}"
+    )
+
+    acquire_idx = interesting.index(("acquire", ws_id))
+    release_idx = interesting.index(("release", ws_id))
+    regroup_idx = next(
+        (i for i, e in enumerate(interesting) if e[0] == "regroup_work"),
+        None,
+    )
+    miss_idx = next(
+        (i for i, e in enumerate(interesting) if e[0] == "miss_step"),
+        None,
+    )
+
+    assert regroup_idx is not None, (
+        f"regroup work never ran; events: {interesting}"
+    )
+    assert miss_idx is not None, (
+        f"miss step never ran; events: {interesting}"
+    )
+    assert acquire_idx < regroup_idx < release_idx, (
+        f"regroup work must run inside the lock; events: {interesting}"
+    )
+    assert acquire_idx < miss_idx < release_idx, (
+        "miss step must run inside the same lock as regroup — otherwise "
+        "a second same-workspace pipeline could sneak in and rewrite "
+        f"grouping state between them. events: {interesting}"
+    )
+
+
 def test_pipeline_regroup_stamps_workspace_group_fingerprint(tmp_path, monkeypatch):
     """When regroup_stage completes successfully, last_grouped_at and
     last_group_fingerprint must be written on the active workspace so the
