@@ -529,12 +529,13 @@ def test_promoted_pipeline_with_pending_cancel_skips_work_fn(tmp_path):
     assert not work_called.is_set()
 
 
-def test_promotion_db_error_clears_promoting_marker(tmp_path, monkeypatch):
-    """A SQLite promotion failure must not permanently consume SLOT_CAP."""
+def test_promotion_db_error_retries_queued_pipeline(tmp_path, monkeypatch):
+    """A transient SQLite promotion failure must not strand queued work."""
     import sqlite3
 
     runner, db = _make_runner_with_db(tmp_path)
     job_id = "pipeline-1700000000001"
+    work_started = threading.Event()
     db.conn.execute(
         "INSERT INTO job_history (id, type, status, started_at, error_count) "
         "VALUES (?, 'pipeline', 'queued', '2026-05-26T00:00:00', 0)",
@@ -543,22 +544,37 @@ def test_promotion_db_error_clears_promoting_marker(tmp_path, monkeypatch):
     db.conn.commit()
     with runner._lock:
         runner._queued_pipelines[job_id] = {
-            "work_fn": lambda job: pytest_fail("should not have run"),
+            "work_fn": lambda job: work_started.set(),
             "config": {"x": 1},
             "workspace_id": 1,
             "runtime_warning": None,
             "started_at": "2026-05-26T00:00:00",
         }
 
+    original_connect = sqlite3.connect
+    calls = {"count": 0}
+
     def fail_connect(*args, **kwargs):
-        raise sqlite3.OperationalError("database is locked")
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_connect(*args, **kwargs)
 
     monkeypatch.setattr(sqlite3, "connect", fail_connect)
     runner._try_promote_queued()
 
     with runner._lock:
-        assert not runner._queued_pipelines[job_id].get("_promoting")
-        assert job_id in runner._queued_pipelines
+        if job_id in runner._queued_pipelines:
+            assert not runner._queued_pipelines[job_id].get("_promoting")
+
+    _wait_for_event(work_started, "promotion retry")
+    final = wait_for_job_via_runner(runner, job_id, wait_for_history=True)
+    assert final["status"] == "completed"
+    assert calls["count"] >= 2
+    row = db.conn.execute(
+        "SELECT status FROM job_history WHERE id = ?", (job_id,),
+    ).fetchone()
+    assert row["status"] == "completed"
 
 
 def test_in_flight_promotion_counts_against_slot_cap_not_global_guard(tmp_path, monkeypatch):

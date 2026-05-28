@@ -13,6 +13,8 @@ log = logging.getLogger(__name__)
 # How long to keep completed/failed jobs in memory before eviction (seconds)
 _JOB_RETENTION_SECS = 3600  # 1 hour
 
+_PROMOTION_RETRY_DELAY_SECS = 0.1
+
 
 # Maximum number of pipeline jobs allowed to run concurrently. Kept at
 # 1 in this PR; concurrency is enabled in a later PR after the UI and
@@ -44,6 +46,7 @@ class JobRunner:
         # Monotonic suffix so two enqueues landing in the same
         # millisecond don't collide on the PRIMARY KEY.
         self._enqueue_counter = 0
+        self._promotion_retry_scheduled = False
         if db:
             self._db_path = db.conn.execute("PRAGMA database_list").fetchone()[2]
             self._ensure_history_table(db)
@@ -224,6 +227,7 @@ class JobRunner:
             with self._lock:
                 if self._queued_pipelines.get(job_id) is ctx:
                     ctx.pop("_promoting", None)
+                    self._schedule_promotion_retry_locked()
             log.exception("Failed to promote queued pipeline %s", job_id)
             return
 
@@ -289,6 +293,24 @@ class JobRunner:
         thread = threading.Thread(
             target=self._run_job, args=(job, work_fn), daemon=True,
         )
+        thread.start()
+
+    def _schedule_promotion_retry_locked(self):
+        """Retry queue promotion after a transient DB failure.
+
+        Must be called with self._lock held.
+        """
+        if self._promotion_retry_scheduled:
+            return
+        self._promotion_retry_scheduled = True
+
+        def retry():
+            time.sleep(_PROMOTION_RETRY_DELAY_SECS)
+            with self._lock:
+                self._promotion_retry_scheduled = False
+            self._try_promote_queued()
+
+        thread = threading.Thread(target=retry, daemon=True)
         thread.start()
 
     def _record_terminal_queued_pipeline(self, job_id, ctx, status="cancelled"):
