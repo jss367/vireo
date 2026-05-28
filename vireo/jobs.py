@@ -200,8 +200,9 @@ class JobRunner:
         promoted = True
         if self._db_path:
             import sqlite3
-            conn = sqlite3.connect(self._db_path, timeout=30)
+            conn = None
             try:
+                conn = sqlite3.connect(self._db_path, timeout=30)
                 cur = conn.execute(
                     "UPDATE job_history SET status='running' "
                     "WHERE id = ? AND status = 'queued'",
@@ -209,8 +210,14 @@ class JobRunner:
                 )
                 promoted = cur.rowcount == 1
                 conn.commit()
+            except Exception:
+                with self._lock:
+                    self._promoting_pipelines.discard(job_id)
+                log.exception("Failed to promote queued pipeline %s", job_id)
+                return
             finally:
-                conn.close()
+                if conn is not None:
+                    conn.close()
 
         if not promoted:
             record_terminal = False

@@ -477,6 +477,38 @@ def test_promoted_pipeline_with_pending_cancel_skips_work_fn(tmp_path):
     assert not work_called.is_set()
 
 
+def test_promotion_db_error_clears_promoting_marker(tmp_path, monkeypatch):
+    """A SQLite promotion failure must not permanently consume SLOT_CAP."""
+    import sqlite3
+
+    runner, db = _make_runner_with_db(tmp_path)
+    job_id = "pipeline-1700000000001"
+    db.conn.execute(
+        "INSERT INTO job_history (id, type, status, started_at, error_count) "
+        "VALUES (?, 'pipeline', 'queued', '2026-05-26T00:00:00', 0)",
+        (job_id,),
+    )
+    db.conn.commit()
+    with runner._lock:
+        runner._queued_pipelines[job_id] = {
+            "work_fn": lambda job: pytest_fail("should not have run"),
+            "config": {"x": 1},
+            "workspace_id": 1,
+            "runtime_warning": None,
+            "started_at": "2026-05-26T00:00:00",
+        }
+
+    def fail_connect(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(sqlite3, "connect", fail_connect)
+    runner._try_promote_queued()
+
+    with runner._lock:
+        assert job_id not in runner._promoting_pipelines
+        assert job_id in runner._queued_pipelines
+
+
 def pytest_fail(msg):
     raise AssertionError(msg)
 
