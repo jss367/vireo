@@ -191,18 +191,18 @@ def test_workspace_regroup_lock_reentrant_keys_share_one_lock():
     assert lock1 is lock2
 
 
-def test_photo_mask_lock_serialises_same_photo_and_variant():
-    """Two threads writing the same (photo, variant) take turns."""
+def test_photo_mask_lock_serialises_same_photo():
+    """Two threads writing the same photo's mask take turns."""
     held = []
 
     def first():
-        with acquire_photo_mask(42, "sam2-small"):
+        with acquire_photo_mask(42):
             held.append("first-in")
             time.sleep(0.05)
             held.append("first-out")
 
     def second():
-        with acquire_photo_mask(42, "sam2-small"):
+        with acquire_photo_mask(42):
             held.append("second-in")
 
     t1 = threading.Thread(target=first)
@@ -217,19 +217,19 @@ def test_photo_mask_lock_serialises_same_photo_and_variant():
 
 
 def test_photo_mask_lock_does_not_block_different_photo():
-    """Same variant, different photo IDs don't contend."""
+    """Different photo IDs don't contend — common case."""
     held = []
     first_holding = threading.Event()
     let_first_go = threading.Event()
 
     def first():
-        with acquire_photo_mask(1, "sam2-small"):
+        with acquire_photo_mask(1):
             held.append("first-in")
             first_holding.set()
             let_first_go.wait(timeout=2.0)
 
     def second():
-        with acquire_photo_mask(2, "sam2-small"):
+        with acquire_photo_mask(2):
             held.append("second-in")
 
     t1 = threading.Thread(target=first)
@@ -244,22 +244,34 @@ def test_photo_mask_lock_does_not_block_different_photo():
     t1.join(timeout=2.0)
 
 
-def test_photo_mask_lock_does_not_block_different_variant():
-    """Same photo, different variants don't contend — each variant has
-    its own deterministic mask path, so they don't conflict.
+def test_photo_mask_lock_serialises_same_photo_across_variants():
+    """Same photo, DIFFERENT SAM variants still take turns.
+
+    Cross-variant serialisation is load-bearing: ``set_active_mask_variant``
+    and ``update_photo_embeddings`` denormalise into the same ``photos``
+    row regardless of variant, so interleaved writes between two
+    pipelines on the same photo with different variants would corrupt
+    the row (e.g. active_mask_variant=large but dino embedding cropped
+    from small's mask). The lock keys on photo_id only — variant is
+    intentionally NOT part of the key.
+
+    The pipeline_job call site passes only photo_id; this test exercises
+    the lock primitive directly to lock in the cross-variant guarantee.
     """
     held = []
     first_holding = threading.Event()
     let_first_go = threading.Event()
 
     def first():
-        with acquire_photo_mask(42, "sam2-small"):
+        # Caller treats lock as photo-scoped — variant is irrelevant.
+        with acquire_photo_mask(42):
             held.append("first-in")
             first_holding.set()
             let_first_go.wait(timeout=2.0)
+            held.append("first-out")
 
     def second():
-        with acquire_photo_mask(42, "sam2-large"):
+        with acquire_photo_mask(42):
             held.append("second-in")
 
     t1 = threading.Thread(target=first)
@@ -267,18 +279,20 @@ def test_photo_mask_lock_does_not_block_different_variant():
     t1.start()
     assert first_holding.wait(timeout=1.0)
     t2.start()
-    t2.join(timeout=1.0)
-    assert not t2.is_alive(), "different variant must not be blocked"
-    assert "second-in" in held
+    # Second must block until first releases — even though semantically
+    # the two pipelines might be working different variants.
+    assert not held.count("second-in"), (
+        "second thread ran while first held the photo lock"
+    )
     let_first_go.set()
     t1.join(timeout=2.0)
+    t2.join(timeout=2.0)
+    assert held == ["first-in", "first-out", "second-in"], held
 
 
 def test_photo_mask_lock_reentrant_keys_share_one_lock():
-    """The lock object for a given (photo_id, variant) is stable."""
+    """The lock object for a given photo_id is stable across calls."""
     from pipeline_locks import _photo_mask_lock_for_tests
-    lock1 = _photo_mask_lock_for_tests(7, "sam2-small")
-    lock2 = _photo_mask_lock_for_tests(7, "sam2-small")
-    lock3 = _photo_mask_lock_for_tests(7, "sam2-large")
+    lock1 = _photo_mask_lock_for_tests(7)
+    lock2 = _photo_mask_lock_for_tests(7)
     assert lock1 is lock2
-    assert lock1 is not lock3

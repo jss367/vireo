@@ -2964,22 +2964,32 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 image_path = os.path.join(folder_path, photo["filename"])
 
                 try:
-                    # Per-(photo, variant) serialisation: two pipelines
-                    # whose collections overlap can both reach this
-                    # photo+variant. Without this lock, both pass the
-                    # get_photo_mask cache miss, both call generate_mask,
-                    # both write the deterministic
-                    # masks/{photo_id}.{variant}.png path, and the file
-                    # on disk can end up describing a different mask than
-                    # the photo_masks row points at (or identical runs
-                    # can truncate each other's PNG mid-write).
+                    # Per-photo serialisation. Two pipelines whose
+                    # collections overlap can both reach this photo.
+                    # Without this lock:
                     #
-                    # Locking by (photo_id, variant) — not (workspace,
-                    # photo) — because the same photo can legitimately
-                    # appear in multiple workspaces (photos are global
-                    # in Vireo); the conflict is keyed on the shared
-                    # filesystem path, not the workspace.
-                    with acquire_photo_mask(photo_id, sam2_variant):
+                    #   - Same variant: both write the same
+                    #     ``masks/{photo_id}.{variant}.png`` file and
+                    #     can corrupt each other's bytes mid-write.
+                    #   - Different variants (e.g. two workspaces
+                    #     sharing folders but configured with sam2-small
+                    #     vs sam2-large): the per-variant mask files
+                    #     don't collide, BUT both runs denormalise into
+                    #     the same ``photos`` row via
+                    #     ``set_active_mask_variant`` and
+                    #     ``update_photo_embeddings``. Their writes can
+                    #     interleave, leaving photos.active_mask_variant
+                    #     pointing at one variant while photos.dino_*
+                    #     embeddings were cropped from the other's mask.
+                    #     regroup reads these denormalised columns, so
+                    #     the corruption would silently flow into
+                    #     grouping.
+                    #
+                    # Keyed by photo_id alone — not (photo_id, variant) —
+                    # so the cross-variant collision in (2) is covered.
+                    # Workspace isn't part of the key because photos are
+                    # global in Vireo.
+                    with acquire_photo_mask(photo_id):
                         # Cache hit: a row already exists for (photo, variant)
                         # AND its stored prompt + detector still match the
                         # current primary detection AND the file is on disk.
