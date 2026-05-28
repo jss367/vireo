@@ -3976,6 +3976,63 @@ def test_highlights_buckets_by_accepted_species(app_and_db):
     assert qs == sorted(qs, reverse=True)
 
 
+def test_highlights_bucket_mixed_accepted_predicted_is_not_accepted(app_and_db):
+    """A bucket whose photos are a mix of accepted-tag and prediction-only
+    must report is_accepted=False. The "Confirmed" badge means the whole
+    row is confirmed, not just some of it (UI transparency rule)."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/m', 'm', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    apapane_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('ʻApapane', 'taxonomy', 1)"
+    ).lastrowid
+
+    # Photo 1: accepted ʻApapane keyword.
+    accepted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'a.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (accepted_pid, apapane_kw),
+    )
+
+    # Photo 2: no accepted keyword, only a prediction of ʻApapane above the
+    # default threshold so it lands in the same bucket.
+    predicted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'b.jpg', 0.7, 'none')",
+        (fid,),
+    ).lastrowid
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (predicted_pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'ʻApapane', 0.95)",
+        (did,),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.7")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["buckets"]) == 1
+    bucket = data["buckets"][0]
+    assert bucket["species"] == "ʻApapane"
+    assert bucket["photo_count"] == 2
+    # Mixed bucket: one accepted, one prediction-only → NOT fully confirmed.
+    assert bucket["is_accepted"] is False
+
+
 def test_highlights_predictions_above_threshold_populate_buckets(app_and_db):
     """Predictions at or above confidence_threshold count as the photo's species."""
     app, db = app_and_db

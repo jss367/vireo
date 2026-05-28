@@ -68,9 +68,18 @@ def test_initial_load_matches_default_workspace_scope(live_server, page):
     # If the initial fetch used workspace scope, both species (Hawk + Robin)
     # are represented. If it only fetched the most-recent folder, we'd only
     # see ``American Robin`` (from ``yard``, the newest folder).
-    species_text = set(page.locator(".card-species").all_inner_texts())
-    assert "Red-tailed Hawk" in species_text and "American Robin" in species_text, (
+    # The redesigned template buckets cards by species, with the species name
+    # rendered in the per-bucket header (.bucket-title); cards no longer carry
+    # a per-card .card-species label.
+    bucket_titles = page.locator(".bucket-title").all_inner_texts()
+    species_text = {t.strip() for title in bucket_titles for t in [title]}
+    # bucket-title text may include a trailing badge (e.g. "Confirmed"); match
+    # by substring so we tolerate either "Red-tailed Hawk" or
+    # "Red-tailed Hawk Confirmed".
+    has_hawk = any("Red-tailed Hawk" in t for t in species_text)
+    has_robin = any("American Robin" in t for t in species_text)
+    assert has_hawk and has_robin, (
         f"Expected both species on initial load (workspace scope), "
-        f"got {species_text!r}. This likely means the first fetch used "
-        f"folder scope and the UI/data are out of sync."
+        f"got bucket titles {species_text!r}. This likely means the first "
+        f"fetch used folder scope and the UI/data are out of sync."
     )

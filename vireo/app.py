@@ -3890,11 +3890,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 unidentified_photos.append(photo)
             else:
                 entry = bucket_map.setdefault(
-                    species, {"is_accepted": False, "photos": []}
+                    species, {"is_accepted": True, "photos": []}
                 )
-                # is_accepted is True if ANY photo in this bucket is accepted.
-                # (Used by UI to render an "accepted" badge on the row.)
-                entry["is_accepted"] = entry["is_accepted"] or is_accepted
+                # is_accepted is True if EVERY photo in this bucket has an
+                # accepted species tag — used by UI to render a "Confirmed"
+                # badge that means the entire row is confirmed, not just some
+                # of it. Initialize to True (the unit element of AND) so the
+                # AND-fold below produces the right answer.
+                entry["is_accepted"] = entry["is_accepted"] and is_accepted
                 entry["photos"].append(photo)
 
         # candidates is already ordered by quality_score desc, so per-bucket
