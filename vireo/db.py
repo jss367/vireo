@@ -6864,6 +6864,13 @@ class Database:
                         AND pr_rev.workspace_id = ?
                        WHERE pr.species IS NOT NULL
                          AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                         AND pr.labels_fingerprint = (
+                             SELECT pr2.labels_fingerprint FROM predictions pr2
+                             WHERE pr2.detection_id = pr.detection_id
+                               AND pr2.classifier_model = pr.classifier_model
+                             ORDER BY pr2.created_at DESC, pr2.id DESC
+                             LIMIT 1
+                         )
                    ) WHERE rn = 1
                ) tp ON tp.photo_id = p.id
                WHERE wf.workspace_id = ?

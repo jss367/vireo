@@ -6318,6 +6318,42 @@ def test_get_highlights_candidates_predicted_excludes_rejected(tmp_path):
     assert rows[0]["predicted_confidence"] is None
 
 
+def test_get_highlights_candidates_predicted_uses_latest_fingerprint(tmp_path):
+    """A reclassified detection (new labels_fingerprint) should bucket the
+    photo under the current classifier results, not an older high-confidence
+    prediction that the rest of the app no longer surfaces.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/p', name='p')
+    pid = db.add_photo(folder_id=fid, filename='reclass.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.5 WHERE id = ?", (pid,))
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    # Older prediction: higher confidence but stale labels_fingerprint.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+        "species, confidence, created_at) "
+        "VALUES (?, 'm', 'OLD', 'Stale Bird', 0.95, '2025-01-01 00:00:00')",
+        (did,),
+    )
+    # Newer prediction: lower confidence but current labels_fingerprint.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+        "species, confidence, created_at) "
+        "VALUES (?, 'm', 'NEW', 'Fresh Bird', 0.60, '2026-01-01 00:00:00')",
+        (did,),
+    )
+    db.conn.commit()
+
+    rows = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    assert rows[0]["predicted_species"] == "Fresh Bird"
+    assert abs(rows[0]["predicted_confidence"] - 0.60) < 1e-6
+
+
 # --- Folders with quality data ---
 
 
