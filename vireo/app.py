@@ -3857,7 +3857,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
 
         candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
-        total_in_workspace = db.count_filtered_photos(folder_id=folder_id)
+        total_in_scope = db.count_filtered_photos(folder_id=folder_id)
 
         # Resolve effective species: accepted wins, then prediction above
         # threshold, otherwise Unidentified.
@@ -3925,7 +3925,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 for f in folders
             ],
             "meta": {
-                "total_in_workspace": total_in_workspace,
+                "total_in_scope": total_in_scope,
                 "eligible": len(candidates),
             },
             "scope": "workspace" if folder_id is None else "folder",

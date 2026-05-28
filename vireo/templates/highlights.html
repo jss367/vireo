@@ -260,7 +260,7 @@ function render() {
   var buckets = sortedBuckets();
   meta.textContent = buckets.length + ' species · '
     + currentData.meta.eligible + ' of '
-    + currentData.meta.total_in_workspace + ' photos scored';
+    + currentData.meta.total_in_scope + ' photos scored';
 
   var html = buckets.map(renderBucket).join('') + renderUnidentified();
   content.innerHTML = html || '<div class="highlights-empty"><p>Nothing matches these filters.</p></div>';
