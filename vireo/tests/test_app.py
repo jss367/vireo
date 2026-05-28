@@ -3913,6 +3913,16 @@ def test_highlights_page(app_and_db):
     assert resp.status_code == 200
 
 
+def test_highlights_page_renders_after_redesign(app_and_db):
+    """The page template still renders against the new API shape."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/highlights")
+    assert resp.status_code == 200
+    assert b"Auto-ID confidence" in resp.data
+    assert b"Per row" in resp.data
+
+
 def test_highlights_get_empty(app_and_db):
     """GET /api/highlights returns empty buckets when no quality data exists."""
     app, _ = app_and_db

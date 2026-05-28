@@ -13,20 +13,32 @@
   .control-group label { font-size:13px; color:var(--text-secondary); white-space:nowrap; }
   .control-group input[type=range] { width:120px; }
   .control-group select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
-  .control-value { font-size:13px; color:var(--text-primary); min-width:30px; }
+  .control-value { font-size:13px; color:var(--text-primary); min-width:36px; }
   .save-btn { margin-left:auto; padding:6px 16px; background:var(--accent); color:var(--accent-text); border:none; border-radius:4px; cursor:pointer; font-size:13px; }
   .save-btn:hover { opacity:0.9; }
-  .highlights-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:12px; padding:24px; }
+
+  .bucket { padding:16px 24px; border-bottom:1px solid var(--border-primary); }
+  .bucket-header { display:flex; align-items:baseline; justify-content:space-between; margin-bottom:10px; }
+  .bucket-title { font-size:16px; color:var(--text-primary); font-weight:600; }
+  .bucket-meta { font-size:13px; color:var(--text-secondary); }
+  .bucket-badge { display:inline-block; margin-left:8px; font-size:10px; padding:2px 6px; border-radius:8px; background:var(--bg-tertiary); color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px; }
+  .bucket-badge.predicted { background:var(--bg-tertiary); color:var(--text-secondary); }
+  .bucket-badge.accepted { background:var(--accent); color:var(--accent-text); }
+  .bucket-strip { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:10px; }
   .highlights-card { position:relative; border-radius:6px; overflow:hidden; background:var(--bg-secondary); cursor:pointer; border:1px solid var(--border-primary); }
   .highlights-card:hover { border-color:var(--accent); }
   .highlights-card img { width:100%; aspect-ratio:3/2; object-fit:cover; display:block; background:var(--bg-tertiary); }
-  .card-info { padding:6px 8px; font-size:12px; display:flex; justify-content:space-between; }
-  .card-species { color:var(--text-primary); }
-  .card-quality { color:var(--text-secondary); }
-  .highlights-summary { padding:8px 24px; font-size:13px; color:var(--text-secondary); border-top:1px solid var(--border-primary); }
+  .card-info { padding:4px 8px; font-size:11px; color:var(--text-secondary); text-align:right; }
+  .bucket-expand { margin-top:8px; font-size:13px; color:var(--accent); cursor:pointer; background:none; border:none; padding:0; }
+  .bucket-expand:hover { text-decoration:underline; }
+
+  .unid-divider { padding:20px 24px 8px; font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:1px; border-top:2px solid var(--border-primary); margin-top:8px; }
+
   .highlights-empty { text-align:center; padding:80px 24px; color:var(--text-secondary); }
   .highlights-empty a { color:var(--accent); }
-  /* Save modal */
+  .highlights-meta { padding:8px 24px; font-size:12px; color:var(--text-secondary); }
+
+  /* Save modal (unchanged) */
   .save-modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:500; align-items:center; justify-content:center; }
   .save-modal-overlay.open { display:flex; }
   .save-modal { background:var(--bg-primary); border:1px solid var(--border-primary); border-radius:8px; padding:24px; min-width:360px; }
@@ -45,30 +57,41 @@
     <select id="folderSelect"></select>
   </div>
   <div class="control-group">
-    <label for="countSlider">Count</label>
-    <input type="range" id="countSlider" min="1" max="100" value="20">
-    <span class="control-value" id="countValue">20</span>
-  </div>
-  <div class="control-group">
-    <label for="speciesSlider">Max/species</label>
-    <input type="range" id="speciesSlider" min="1" max="20" value="5">
-    <span class="control-value" id="speciesValue">5</span>
-  </div>
-  <div class="control-group">
     <label for="qualitySlider">Min quality</label>
     <input type="range" id="qualitySlider" min="0" max="100" value="0" step="5">
     <span class="control-value" id="qualityValue">0.00</span>
   </div>
+  <div class="control-group">
+    <label for="confidenceSlider">Auto-ID confidence</label>
+    <input type="range" id="confidenceSlider" min="50" max="95" value="70" step="5">
+    <span class="control-value" id="confidenceValue">0.70</span>
+  </div>
+  <div class="control-group">
+    <label for="perRowSlider">Per row</label>
+    <input type="range" id="perRowSlider" min="1" max="20" value="5">
+    <span class="control-value" id="perRowValue">5</span>
+  </div>
+  <div class="control-group">
+    <label for="sortSelect">Sort</label>
+    <select id="sortSelect">
+      <option value="fewest">Fewest photos</option>
+      <option value="most">Most photos</option>
+      <option value="best">Best photo first</option>
+      <option value="worst">Worst photo first</option>
+    </select>
+  </div>
   <button class="save-btn" id="saveBtn" onclick="showSaveModal()">Save as Collection</button>
 </div>
 
-<div id="grid" class="highlights-grid"></div>
+<div class="highlights-meta" id="meta"></div>
+
+<div id="content"></div>
+
 <div id="emptyState" class="highlights-empty" style="display:none;">
   <p>No highlights available yet.</p>
   <p>Run a pipeline with quality scoring enabled to generate highlights.</p>
   <p><a href="/jobs">Go to Jobs</a></p>
 </div>
-<div class="highlights-summary" id="summary"></div>
 
 <!-- Save modal -->
 <div class="save-modal-overlay" id="saveModal">
@@ -85,45 +108,35 @@
 </div>
 
 <script>
-var currentPhotos = [];
-var currentFolders = [];
+var WORKSPACE_SCOPE = '__workspace__';
+var currentData = null;          // last API response
+var expandedBuckets = new Set(); // species names whose row is expanded
+var unidentifiedExpanded = false;
 var currentFolderName = '';
 var debounceTimer = null;
 var existingCollections = [];
 
 function escapeAttr(s) {
-  if (!s) return '';
-  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
-
-// Sentinel dropdown value that means "aggregate across every folder in the
-// active workspace" (one shoot often spans multiple dated subfolders).
-var WORKSPACE_SCOPE = '__workspace__';
 
 async function loadHighlights() {
   var params = new URLSearchParams();
   var folderSelect = document.getElementById('folderSelect');
-  // First load runs before the dropdown is populated (folderSelect.value is
-  // empty). The code below will prepend WORKSPACE_SCOPE as the first option
-  // and it becomes the default selection, so send scope=workspace up front
-  // to keep the data aligned with the option the user will see selected.
   var firstLoad = folderSelect.options.length === 0;
   if (folderSelect.value === WORKSPACE_SCOPE || firstLoad) {
     params.set('scope', 'workspace');
   } else if (folderSelect.value) {
     params.set('folder_id', folderSelect.value);
   }
-  params.set('count', document.getElementById('countSlider').value);
-  params.set('max_per_species', document.getElementById('speciesSlider').value);
   params.set('min_quality', (parseInt(document.getElementById('qualitySlider').value) / 100).toFixed(2));
+  params.set('confidence_threshold', (parseInt(document.getElementById('confidenceSlider').value) / 100).toFixed(2));
 
   var data = await safeFetch('/api/highlights?' + params);
+  currentData = data;
 
-  currentPhotos = data.photos;
-  currentFolders = data.folders;
-
-  // Populate folder dropdown on first load. A "whole workspace" entry leads
-  // the list so users can pick it without hunting through folder names.
+  // Populate folder dropdown on first load.
   if (!folderSelect.options.length) {
     var wsOpt = document.createElement('option');
     wsOpt.value = WORKSPACE_SCOPE;
@@ -136,54 +149,152 @@ async function loadHighlights() {
       folderSelect.appendChild(opt);
     });
   }
-
   currentFolderName = folderSelect.options[folderSelect.selectedIndex]
     ? folderSelect.options[folderSelect.selectedIndex].textContent.replace(/\s*\(\d+\)$/, '')
     : '';
 
-  var grid = document.getElementById('grid');
-  var emptyState = document.getElementById('emptyState');
-  var summary = document.getElementById('summary');
+  render();
+}
 
-  if (!data.folders.length) {
-    grid.style.display = 'none';
-    emptyState.style.display = 'block';
-    summary.textContent = '';
-    document.getElementById('controlsBar').style.display = 'none';
+function sortedBuckets() {
+  var sort = document.getElementById('sortSelect').value;
+  var buckets = (currentData.buckets || []).slice();
+  buckets.sort(function(a, b) {
+    if (sort === 'most') return b.photo_count - a.photo_count;
+    if (sort === 'best') return b.best_quality - a.best_quality;
+    if (sort === 'worst') return a.best_quality - b.best_quality;
+    return a.photo_count - b.photo_count; // 'fewest' default
+  });
+  return buckets;
+}
+
+function renderCard(p) {
+  var thumbSrc = '/thumbnails/' + p.id + '.jpg';
+  return '<div class="highlights-card" data-photo-id="' + p.id + '">'
+    + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
+    + '<div class="card-info">' + (p.quality_score != null ? p.quality_score.toFixed(2) : '—') + '</div>'
+    + '</div>';
+}
+
+function attachCardClicks(container, photoSet) {
+  // photoSet is the full list of photos in this bucket — used as the
+  // lightbox navigation set so users can flip through every photo of
+  // the species, not just the visible ones.
+  container.querySelectorAll('.highlights-card').forEach(function(card) {
+    card.addEventListener('click', function() {
+      var pid = parseInt(card.getAttribute('data-photo-id'));
+      var photo = photoSet.find(function(p) { return p.id === pid; });
+      if (window.openLightbox && photo) {
+        openLightbox(pid, photo.filename, photoSet);
+      }
+    });
+  });
+}
+
+function renderBucket(bucket) {
+  var perRow = parseInt(document.getElementById('perRowSlider').value);
+  var expanded = expandedBuckets.has(bucket.species);
+  var visible = expanded ? bucket.photos : bucket.photos.slice(0, perRow);
+  var remaining = bucket.photos.length - visible.length;
+  var badge = bucket.is_accepted
+    ? '<span class="bucket-badge accepted">Confirmed</span>'
+    : '<span class="bucket-badge predicted">Predicted</span>';
+  var meta = bucket.photo_count + ' photo' + (bucket.photo_count === 1 ? '' : 's')
+    + ' · best ' + bucket.best_quality.toFixed(2);
+  var expandBtn = '';
+  if (bucket.photos.length > perRow) {
+    expandBtn = '<button class="bucket-expand" data-species="'
+      + escapeAttr(bucket.species) + '">'
+      + (expanded ? 'Show fewer' : '+ ' + remaining + ' more')
+      + '</button>';
+  }
+  return '<section class="bucket">'
+    + '<div class="bucket-header">'
+    + '<div class="bucket-title">' + escapeAttr(bucket.species) + badge + '</div>'
+    + '<div class="bucket-meta">' + meta + '</div>'
+    + '</div>'
+    + '<div class="bucket-strip">' + visible.map(renderCard).join('') + '</div>'
+    + expandBtn
+    + '</section>';
+}
+
+function renderUnidentified() {
+  var unid = currentData.unidentified;
+  if (!unid || !unid.photo_count) return '';
+  var perRow = parseInt(document.getElementById('perRowSlider').value);
+  var visible = unidentifiedExpanded ? unid.photos : unid.photos.slice(0, perRow);
+  var remaining = unid.photo_count - visible.length;
+  var expandBtn = '';
+  if (unid.photo_count > perRow) {
+    expandBtn = '<button class="bucket-expand" data-unid="1">'
+      + (unidentifiedExpanded ? 'Show fewer' : '+ ' + remaining + ' more')
+      + '</button>';
+  }
+  return '<div class="unid-divider">Unidentified — Vireo couldn\'t ID these</div>'
+    + '<section class="bucket">'
+    + '<div class="bucket-header">'
+    + '<div class="bucket-title">Unidentified</div>'
+    + '<div class="bucket-meta">' + unid.photo_count + ' photos</div>'
+    + '</div>'
+    + '<div class="bucket-strip">' + visible.map(renderCard).join('') + '</div>'
+    + expandBtn
+    + '</section>';
+}
+
+function render() {
+  var content = document.getElementById('content');
+  var empty = document.getElementById('emptyState');
+  var meta = document.getElementById('meta');
+  var controls = document.getElementById('controlsBar');
+
+  if (!currentData.folders.length) {
+    content.innerHTML = '';
+    empty.style.display = 'block';
+    meta.textContent = '';
+    controls.style.display = 'none';
     return;
   }
+  empty.style.display = 'none';
+  controls.style.display = '';
 
-  emptyState.style.display = 'none';
-  grid.style.display = '';
-  document.getElementById('controlsBar').style.display = '';
+  var buckets = sortedBuckets();
+  meta.textContent = buckets.length + ' species · '
+    + currentData.meta.eligible + ' of '
+    + currentData.meta.total_in_workspace + ' photos scored';
 
-  // Update count slider max and clamp value
-  var countSlider = document.getElementById('countSlider');
-  countSlider.max = Math.min(data.meta.eligible, 100);
-  if (parseInt(countSlider.value) > parseInt(countSlider.max)) {
-    countSlider.value = countSlider.max;
-    document.getElementById('countValue').textContent = countSlider.value;
-  }
+  var html = buckets.map(renderBucket).join('') + renderUnidentified();
+  content.innerHTML = html || '<div class="highlights-empty"><p>Nothing matches these filters.</p></div>';
 
-  // Render grid
-  grid.innerHTML = '';
-  data.photos.forEach(function(p) {
-    var card = document.createElement('div');
-    card.className = 'highlights-card';
-    card.onclick = function() { if (window.openLightbox) openLightbox(p.id, p.filename, currentPhotos); };
-    var thumbSrc = '/thumbnails/' + p.id + '.jpg';
-    card.innerHTML = '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
-      + '<div class="card-info">'
-      + '<span class="card-species">' + escapeAttr(p.species || 'Unidentified') + '</span>'
-      + '<span class="card-quality">' + (p.quality_score != null ? p.quality_score.toFixed(2) : '\u2014') + '</span>'
-      + '</div>';
-    grid.appendChild(card);
+  // Wire up clicks for cards and expand buttons.
+  buckets.forEach(function(b) {
+    var section = content.querySelector('section.bucket .bucket-title');
+    // Per-bucket click wiring done by section via per-card photo set
+  });
+  // Attach card clicks: pick the right photo set per section by walking sections in DOM order.
+  var sections = content.querySelectorAll('section.bucket');
+  sections.forEach(function(section, idx) {
+    var photoSet;
+    if (idx < buckets.length) {
+      photoSet = buckets[idx].photos;
+    } else {
+      photoSet = currentData.unidentified.photos;
+    }
+    attachCardClicks(section, photoSet);
   });
 
-  // Summary
-  var speciesCount = Object.keys(data.meta.species_breakdown).length;
-  summary.textContent = 'Showing ' + data.photos.length + ' highlights from ' + data.meta.total_in_folder
-    + ' photos \u00b7 Species: ' + speciesCount + ' \u00b7 Avg quality: ' + data.meta.avg_quality;
+  // Expand buttons
+  content.querySelectorAll('.bucket-expand').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      if (btn.hasAttribute('data-unid')) {
+        unidentifiedExpanded = !unidentifiedExpanded;
+      } else {
+        var sp = btn.getAttribute('data-species');
+        if (expandedBuckets.has(sp)) expandedBuckets.delete(sp);
+        else expandedBuckets.add(sp);
+      }
+      render();
+    });
+  });
 }
 
 function debounceLoad() {
@@ -191,18 +302,20 @@ function debounceLoad() {
   debounceTimer = setTimeout(loadHighlights, 300);
 }
 
-// Slider value display updates
-document.getElementById('countSlider').addEventListener('input', function() {
-  document.getElementById('countValue').textContent = this.value;
-  debounceLoad();
-});
-document.getElementById('speciesSlider').addEventListener('input', function() {
-  document.getElementById('speciesValue').textContent = this.value;
-  debounceLoad();
-});
 document.getElementById('qualitySlider').addEventListener('input', function() {
   document.getElementById('qualityValue').textContent = (this.value / 100).toFixed(2);
   debounceLoad();
+});
+document.getElementById('confidenceSlider').addEventListener('input', function() {
+  document.getElementById('confidenceValue').textContent = (this.value / 100).toFixed(2);
+  debounceLoad();
+});
+document.getElementById('perRowSlider').addEventListener('input', function() {
+  document.getElementById('perRowValue').textContent = this.value;
+  if (currentData) render();
+});
+document.getElementById('sortSelect').addEventListener('change', function() {
+  if (currentData) render();
 });
 document.getElementById('folderSelect').addEventListener('change', loadHighlights);
 
@@ -211,8 +324,6 @@ async function showSaveModal() {
   document.getElementById('saveNameInput').value = 'Highlights - ' + currentFolderName;
   document.getElementById('saveDuplicateWarning').style.display = 'none';
   document.getElementById('replaceBtn').style.display = 'none';
-
-  // Check for existing collection with same name
   existingCollections = await safeFetch('/api/collections');
   var proposed = document.getElementById('saveNameInput').value;
   var existing = existingCollections.find(function(c) { return c.name === proposed; });
@@ -229,10 +340,27 @@ function closeSaveModal() {
   document.getElementById('saveModal').classList.remove('open');
 }
 
+function collectVisiblePhotoIds() {
+  // "What's currently visible on the page" = the photos rendered in
+  // each bucket (respecting expand state) plus unidentified if shown.
+  var ids = [];
+  var perRow = parseInt(document.getElementById('perRowSlider').value);
+  sortedBuckets().forEach(function(b) {
+    var visible = expandedBuckets.has(b.species) ? b.photos : b.photos.slice(0, perRow);
+    visible.forEach(function(p) { ids.push(p.id); });
+  });
+  if (currentData.unidentified && currentData.unidentified.photo_count) {
+    var u = currentData.unidentified.photos;
+    var v = unidentifiedExpanded ? u : u.slice(0, perRow);
+    v.forEach(function(p) { ids.push(p.id); });
+  }
+  return ids;
+}
+
 async function doSave(mode) {
   var name = document.getElementById('saveNameInput').value.trim();
   if (!name) return;
-  var photoIds = currentPhotos.map(function(p) { return p.id; });
+  var photoIds = collectVisiblePhotoIds();
 
   if (mode === 'replace') {
     var existing = existingCollections.find(function(c) { return c.name === name; });
@@ -240,7 +368,6 @@ async function doSave(mode) {
       await safeFetch('/api/collections/' + existing.id, { method: 'DELETE' });
     }
   } else if (mode === 'new') {
-    // If name already taken, append number
     var baseName = name;
     var counter = 2;
     var names = existingCollections.map(function(c) { return c.name; });
@@ -258,7 +385,6 @@ async function doSave(mode) {
   closeSaveModal();
 }
 
-// Initial load
 loadHighlights();
 </script>
 </body>
