@@ -340,6 +340,49 @@ def _pair_raw_jpeg_companions(db):
                 "UPDATE OR IGNORE predictions SET detection_id = ? WHERE detection_id = ?",
                 (new_id, det["id"]),
             )
+            # If a companion prediction collided with an existing primary
+            # prediction, its row stayed on the old detection id. Preserve any
+            # workspace review state by moving it onto the surviving prediction
+            # before the old detection delete cascades the duplicate away.
+            db.conn.execute(
+                """INSERT INTO prediction_review
+                     (prediction_id, workspace_id, status, reviewed_at,
+                      individual, group_id, vote_count, total_votes)
+                   SELECT survivor.id, pr.workspace_id, pr.status,
+                          pr.reviewed_at, pr.individual, pr.group_id,
+                          pr.vote_count, pr.total_votes
+                     FROM predictions duplicate
+                     JOIN predictions survivor
+                       ON survivor.detection_id = ?
+                      AND survivor.classifier_model = duplicate.classifier_model
+                      AND survivor.labels_fingerprint = duplicate.labels_fingerprint
+                      AND survivor.species IS duplicate.species
+                     JOIN prediction_review pr
+                       ON pr.prediction_id = duplicate.id
+                    WHERE duplicate.detection_id = ?
+                   ON CONFLICT(prediction_id, workspace_id)
+                   DO UPDATE SET status = excluded.status,
+                                 reviewed_at = excluded.reviewed_at,
+                                 individual = COALESCE(
+                                     excluded.individual,
+                                     prediction_review.individual
+                                 ),
+                                 group_id = COALESCE(
+                                     excluded.group_id,
+                                     prediction_review.group_id
+                                 ),
+                                 vote_count = COALESCE(
+                                     excluded.vote_count,
+                                     prediction_review.vote_count
+                                 ),
+                                 total_votes = COALESCE(
+                                     excluded.total_votes,
+                                     prediction_review.total_votes
+                                 )
+                    WHERE prediction_review.status = 'pending'
+                      AND excluded.status <> 'pending'""",
+                (new_id, det["id"]),
+            )
             # Redirect classifier_runs too — they're the cache key the
             # non-reclassify gate consults. Without this, paired photos with
             # cached predictions would look unclassified to

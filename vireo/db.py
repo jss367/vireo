@@ -8177,14 +8177,15 @@ class Database:
     def _upsert_detection_rows(self, photo_id, detector_model, detections):
         """Content-addressed UPSERT of detection rows for one (photo, model).
 
-        Returns the list of IDs in caller-supplied order. Does NOT commit —
+        Returns the list of unique IDs in first-seen order. Does NOT commit —
         the caller controls the transaction so the detector_runs row can be
         written in the same commit (see `write_detection_batch`).
         """
         from detection_id import detection_id as _detection_id
 
-        ids = []
-        for det in detections:
+        unique = {}
+        ordered_ids = []
+        for idx, det in enumerate(detections):
             box = det["box"]
             category = det.get("category", "animal")
             det_id = _detection_id(
@@ -8192,6 +8193,24 @@ class Database:
                 (box["x"], box["y"], box["w"], box["h"]),
                 category,
             )
+            if det_id not in unique:
+                ordered_ids.append(det_id)
+                unique[det_id] = (det, category, idx)
+                continue
+            prev_det, _prev_category, prev_idx = unique[det_id]
+            if (
+                det["confidence"] > prev_det["confidence"]
+                or (
+                    det["confidence"] == prev_det["confidence"]
+                    and idx > prev_idx
+                )
+            ):
+                unique[det_id] = (det, category, idx)
+
+        ids = []
+        for det_id in ordered_ids:
+            det, category, _idx = unique[det_id]
+            box = det["box"]
             # INSERT ON CONFLICT DO UPDATE — true UPSERT. Do NOT use
             # `INSERT OR REPLACE`, which DELETEs the conflicting row before
             # re-inserting; that DELETE fires `predictions.detection_id`
@@ -8269,7 +8288,7 @@ class Database:
                    ON CONFLICT(photo_id, detector_model)
                    DO UPDATE SET box_count = excluded.box_count,
                                  run_at = datetime('now')""",
-                (photo_id, detector_model, len(detections)),
+                (photo_id, detector_model, len(ids)),
             )
             commit_with_retry(self.conn)
             return ids

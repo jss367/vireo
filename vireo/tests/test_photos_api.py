@@ -1271,7 +1271,8 @@ def test_preview_retries_raw_when_recent_marker_came_from_companion(
                companion_path='bad.jpg',
                working_copy_path=NULL,
                working_copy_failed_at=datetime('now'),
-               working_copy_failed_mtime=?
+               working_copy_failed_mtime=?,
+               working_copy_failed_source='companion'
            WHERE id=?""",
         (file_mtime, photo_id),
     )

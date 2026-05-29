@@ -4939,6 +4939,49 @@ def test_write_detection_batch_conflict_refreshes_box_fields(tmp_path):
     }
 
 
+def test_write_detection_batch_deduplicates_same_batch_ids(tmp_path):
+    """One detector batch can contain two boxes in the same quantized ID bucket.
+    Persist and count the unique detection once, using the strongest row.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    low = {
+        "box": {"x": 0.10001, "y": 0.20001, "w": 0.30001, "h": 0.40001},
+        "confidence": 0.50,
+        "category": "animal",
+    }
+    high = {
+        "box": {"x": 0.10002, "y": 0.20002, "w": 0.30002, "h": 0.40002},
+        "confidence": 0.95,
+        "category": "animal",
+    }
+
+    ids = db.write_detection_batch(photo_id, "megadetector-v6", [low, high])
+    assert len(ids) == 1
+
+    row = db.conn.execute(
+        "SELECT box_x, detector_confidence FROM detections WHERE id = ?",
+        (ids[0],),
+    ).fetchone()
+    assert row["box_x"] == high["box"]["x"]
+    assert row["detector_confidence"] == high["confidence"]
+    run = db.conn.execute(
+        "SELECT box_count FROM detector_runs WHERE photo_id = ? AND detector_model = ?",
+        (photo_id, "megadetector-v6"),
+    ).fetchone()
+    assert run["box_count"] == 1
+
+
 def test_pairing_recomputes_detection_ids_so_photo_id_reuse_is_safe(tmp_path):
     """Regression: when raw+jpeg pairing moves a detection to the primary photo,
     its content-addressed id MUST be recomputed against the primary's photo_id.
@@ -5047,6 +5090,51 @@ def test_pairing_redirects_classifier_runs_so_cache_gate_still_hits(tmp_path):
         "SELECT 1 FROM classifier_runs WHERE detection_id = ?", (old_det_id,),
     ).fetchone()
     assert stale is None, "stale classifier_runs row must not survive"
+
+
+def test_pairing_preserves_review_when_duplicate_prediction_collapses(tmp_path):
+    """When a companion prediction loses the duplicate collapse, its manual
+    review state must move to the surviving primary prediction.
+    """
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, fid)
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
+                           file_size=1, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG_1.cr3", extension=".cr3",
+                          file_size=1, file_mtime=1.0)
+
+    box = {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}
+    jpeg_det = db.write_detection_batch(jpeg_id, "MDV6", [
+        {"box": box, "confidence": 0.9, "category": "animal"},
+    ])[0]
+    raw_det = db.write_detection_batch(raw_id, "MDV6", [
+        {"box": box, "confidence": 0.9, "category": "animal"},
+    ])[0]
+    db.add_prediction(jpeg_det, "Robin", 0.95, "bioclip", status="accepted")
+    db.add_prediction(raw_det, "Robin", 0.90, "bioclip")
+
+    _pair_raw_jpeg_companions(db)
+
+    row = db.conn.execute(
+        """SELECT pr_rev.status
+             FROM predictions pr
+             JOIN prediction_review pr_rev ON pr_rev.prediction_id = pr.id
+            WHERE pr.detection_id IN (
+                  SELECT id FROM detections WHERE photo_id = ?
+            )
+              AND pr.species = 'Robin'
+              AND pr.classifier_model = 'bioclip'
+              AND pr_rev.workspace_id = ?""",
+        (raw_id, ws),
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == "accepted"
 
 
 def test_multiple_predictions_per_detection(tmp_path):
