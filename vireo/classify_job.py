@@ -420,19 +420,38 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
             if detections:
                 detected += 1
 
-                # Build detection list with database IDs
+                # Build detection list with database IDs. Content-addressed IDs
+                # can collapse near-duplicate detector outputs into one
+                # persisted row, so fall back to the DB rows if the returned ID
+                # count no longer matches the raw detector output count.
                 det_list = []
-                for det, det_id in zip(detections, det_ids, strict=True):
-                    det_list.append({
-                        "id": det_id,
-                        "box_x": det["box"]["x"],
-                        "box_y": det["box"]["y"],
-                        "box_w": det["box"]["w"],
-                        "box_h": det["box"]["h"],
-                        "confidence": det["confidence"],
-                        "category": det.get("category", "animal"),
-                        "detector_model": "megadetector-v6",
-                    })
+                if len(det_ids) == len(detections):
+                    for det, det_id in zip(detections, det_ids, strict=True):
+                        det_list.append({
+                            "id": det_id,
+                            "box_x": det["box"]["x"],
+                            "box_y": det["box"]["y"],
+                            "box_w": det["box"]["w"],
+                            "box_h": det["box"]["h"],
+                            "confidence": det["confidence"],
+                            "category": det.get("category", "animal"),
+                            "detector_model": "megadetector-v6",
+                        })
+                else:
+                    for det in db.get_detections(
+                        photo["id"], min_conf=0,
+                        detector_model="megadetector-v6",
+                    ):
+                        det_list.append({
+                            "id": det["id"],
+                            "box_x": det["box_x"],
+                            "box_y": det["box_y"],
+                            "box_w": det["box_w"],
+                            "box_h": det["box_h"],
+                            "confidence": det["detector_confidence"],
+                            "category": det["category"],
+                            "detector_model": det["detector_model"],
+                        })
                 detection_map[photo["id"]] = det_list
 
                 # Mark as processed immediately after detection rows are committed
