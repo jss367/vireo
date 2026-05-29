@@ -109,6 +109,13 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
 }
+@keyframes spin { to { transform: rotate(360deg); } }
+.btn-spinner {
+  display: inline-block; width: 11px; height: 11px; margin-right: 7px;
+  border: 2px solid rgba(255,255,255,0.4); border-top-color: #fff;
+  border-radius: 50%; animation: spin 0.8s linear infinite;
+  vertical-align: -1px;
+}
 
 /* ---------- Help Modal ---------- */
 .help-overlay {
@@ -4249,18 +4256,50 @@ function showDeleteDialog(photoIds, companionCount, callback) {
 }
 
 function hideDeleteModal() {
+  setDeleteModalBusy(false);
   document.getElementById('deleteModal').classList.remove('open');
   _deletePhotoIds = [];
   _deleteCallback = null;
 }
 
+// Toggle the delete modal's in-flight state. While busy we keep the modal
+// open (rather than closing it instantly) so the user sees that their click
+// registered and work is underway — deleting a large batch can take many
+// seconds of synchronous backend work with no other feedback.
+var _deleteBusy = false;
+function setDeleteModalBusy(busy, count, mode) {
+  _deleteBusy = busy;
+  var confirmBtn = document.getElementById('deleteConfirmBtn');
+  var cancelBtn = document.querySelector('#deleteModal .modal-btn-cancel');
+  if (busy) {
+    var verb = mode === 'vireo' ? 'Removing' : 'Deleting';
+    var noun = count === 1 ? 'photo' : count + ' photos';
+    if (confirmBtn) {
+      confirmBtn.disabled = true;
+      confirmBtn.style.opacity = '0.85';
+      confirmBtn.style.cursor = 'default';
+      confirmBtn.innerHTML = '<span class="btn-spinner"></span>' + verb + ' ' + noun + '…';
+    }
+    if (cancelBtn) cancelBtn.disabled = true;
+  } else {
+    if (confirmBtn) {
+      confirmBtn.disabled = false;
+      confirmBtn.style.opacity = '';
+      confirmBtn.style.cursor = 'pointer';
+      confirmBtn.textContent = 'Delete';
+    }
+    if (cancelBtn) cancelBtn.disabled = false;
+  }
+}
+
 async function confirmDelete() {
+  if (_deleteBusy) return;  // guard against double-submit
   var mode = document.querySelector('input[name="deleteMode"]:checked').value;
   var includeCompanions = document.getElementById('deleteCompanionCheck').checked &&
     document.getElementById('deleteCompanionRow').style.display !== 'none';
   var savedIds = _deletePhotoIds.slice();
   var savedCallback = _deleteCallback;
-  hideDeleteModal();
+  setDeleteModalBusy(true, savedIds.length, mode);
   try {
     var data = await safeFetch('/api/batch/delete', {
       method: 'POST',
@@ -4271,7 +4310,9 @@ async function confirmDelete() {
         include_companions: includeCompanions,
       }),
     });
-  } catch(e) { return; }
+  } catch(e) { hideDeleteModal(); return; }
+
+  hideDeleteModal();
 
   if (data.trash_failed && data.trash_failed.length > 0) {
     var paths = data.trash_failed.map(function(f) { return f.path; });
