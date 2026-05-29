@@ -1096,3 +1096,48 @@ def test_cut_both_null_with_similar_signal_groups():
     segments = cut_microsegments(photos)
     assert len(segments) == 1
     assert len(segments[0]) == 2
+
+
+def test_cut_null_timestamps_cut_at_folder_boundary():
+    """Signal-less nulls from different folders must NOT fuse into one encounter.
+
+    The null sort key (1, datetime.min, folder_id, filename) places the last
+    null of folder A adjacent to the first null of folder B. Without a folder
+    boundary check the both-null branch would force-group unrelated unreadable
+    files from separate shoots.
+    """
+    from encounters import cut_microsegments
+
+    photos = [
+        _null_ts_photo(1, 10, "DSC_8039.NEF"),
+        _null_ts_photo(2, 10, "DSC_8041.NEF"),
+        _null_ts_photo(3, 20, "DSC_9001.NEF"),
+        _null_ts_photo(4, 20, "DSC_9002.NEF"),
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 2, (
+        f"Expected one segment per folder, got "
+        f"{[[p['id'] for p in seg] for seg in segments]}"
+    )
+    assert {p["id"] for p in segments[0]} == {1, 2}
+    assert {p["id"] for p in segments[1]} == {3, 4}
+
+
+def test_cut_null_timestamps_missing_folder_id_still_cuts():
+    """Defensive: nulls with no folder_id at all fall through to the score cut.
+
+    Production scans always populate folder_id, but if it's somehow None the
+    safe behaviour is to cut rather than collapse unrelated rows.
+    """
+    from encounters import cut_microsegments
+
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": None, "filename": "a.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None},
+        {"id": 2, "timestamp": None, "folder_id": None, "filename": "b.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 2

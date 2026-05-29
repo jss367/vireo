@@ -27,11 +27,22 @@ shoot stay adjacent even without EXIF.
 ### 2. Don't cut between two null-timestamp photos
 
 In `cut_microsegments`, add a `both_null` branch *before* the time/score cuts:
-when both adjacent photos have null timestamps, keep them in the same segment.
-Rationale: unreadable files have no timestamp AND no embeddings/species/meta
-(the detector never ran on them), so every similarity signal is ~0 and the
-score cut would otherwise split them into singletons. With no reliable basis to
-separate them, group contiguous nulls by file-order adjacency.
+when both adjacent photos have null timestamps **and share a `folder_id`** and
+neither side carries a similarity signal (embeddings or species), keep them in
+the same segment. Rationale: unreadable files have no timestamp AND no
+embeddings/species/meta (the detector never ran on them), so every similarity
+signal is ~0 and the score cut would otherwise split them into singletons. With
+no reliable basis to separate them, group contiguous nulls by file-order
+adjacency.
+
+The folder check matters because the null sort key
+`(1, datetime.min, folder_id, filename)` places the last null of folder A
+adjacent to the first null of folder B — without the guard the both-null
+branch would fuse unrelated unreadable files from separate shoots into one
+encounter. Photos missing `folder_id` entirely fall through to the score cut.
+
+Readable but undated photos (e.g. screenshots that still carry embeddings)
+are NOT force-grouped: they have similarity signal, so the score cut decides.
 
 Asymmetric pairs (one null, one real) are unaffected: `dt = inf > hard_cut_time`
 still fires a clean cut, so the null cluster never contaminates a real encounter.
@@ -58,7 +69,8 @@ page, flagged with the warning.
 ## Tests
 
 - `test_encounters.py`: both-null no cut; asymmetric still cuts; sort order
-  puts nulls last; contiguous nulls form one segment.
+  puts nulls last; contiguous nulls form one segment; nulls from different
+  folders DO cut at the folder boundary; null pairs with no folder_id cut.
 - `test_bursts.py`: sort order parity.
 - `test_pipeline.py`: `missing_timestamp_count` present and correct; zero when
   all timestamped.

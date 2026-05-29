@@ -383,14 +383,29 @@ def cut_microsegments(photos, config=None, emit_trace=False):
         decision = None
 
         both_null = ts_a is None and ts_b is None
+        folder_a = sorted_photos[i].get("folder_id")
+        folder_b = sorted_photos[i + 1].get("folder_id")
         # "Signal-less" = no timestamp AND no usable similarity signal on
         # either side (no embeddings, no species). Unreadable files are
         # signal-less; undated-but-readable photos (e.g. screenshots, which
         # still get embeddings) are NOT — they must be judged on the score
         # cut, not force-grouped by file order.
-        signal_less = both_null and not (
-            _has_similarity_signal(sorted_photos[i])
-            or _has_similarity_signal(sorted_photos[i + 1])
+        #
+        # Also require the same folder. The null sort key
+        # (1, datetime.min, folder_id, filename) places the last null of
+        # one folder adjacent to the first null of the next, so without
+        # this guard the both-null branch would fuse unrelated unreadable
+        # files from separate shoots into a single encounter. Photos
+        # missing folder_id (shouldn't happen in production scans) fall
+        # through to the score cut to stay on the safe side.
+        signal_less = (
+            both_null
+            and folder_a is not None
+            and folder_a == folder_b
+            and not (
+                _has_similarity_signal(sorted_photos[i])
+                or _has_similarity_signal(sorted_photos[i + 1])
+            )
         )
 
         if bid_a is not None and bid_b is not None and bid_a == bid_b:
