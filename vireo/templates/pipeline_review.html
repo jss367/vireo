@@ -2673,11 +2673,8 @@ function openInspect(photoId) {
   // the encounter consensus. This legacy panel only runs for flat caches with
   // no burst data (burst-backed photos route to the GRM above), so encounter
   // scope is the only meaningful group here.
-  var encPhotos = (enc && enc.photo_ids)
-    ? enc.photo_ids.map(function(pid) { return findPhotoInResults(pid); })
-    : [];
   var encRows = enc ? (enc.species_predictions || []) : [];
-  html += buildSpeciesPredictionsHtml(photo, encRows, consensusTitle('Encounter', encPhotos), minConfidence / 100);
+  html += buildSpeciesPredictionsHtml(photo, encRows, 'Encounter consensus', minConfidence / 100);
 
   // Score waterfall
   html += '<div class="score-waterfall">';
@@ -4061,7 +4058,16 @@ function renderSpeciesBlock(title, rows) {
       var pct = (m.confidence * 100).toFixed(0) + '%';
       // Some aggregate rows are confidence-only (no model name); show just the
       // percentage rather than an empty label with a leading space.
-      return m.model ? escapeHtml(m.model) + ' ' + pct : pct;
+      var part = m.model ? escapeHtml(m.model) + ' ' + pct : pct;
+      // Consensus rows carry photo_count — the number of frames where this
+      // model predicted this species. Surface it so a minority species
+      // predicted on a single frame isn't read as a broad consensus
+      // (CORE_PHILOSOPHY "No black boxes"). Per-photo rows have no photo_count
+      // (each is one frame) and stay count-free.
+      if (typeof m.photo_count === 'number') {
+        part += ' (' + m.photo_count + ' frame' + (m.photo_count === 1 ? '' : 's') + ')';
+      }
+      return part;
     });
     html += '<div class="inspect-species-row">';
     html += '<span class="inspect-species-name">' + escapeHtml(sp.species) + '</span>';
@@ -4104,32 +4110,16 @@ function filterAggSpeciesRows(rows, threshold) {
   }).filter(function(sp) { return sp.models.length > 0; });
 }
 
-// Count frames in `photos` that carry at least one species prediction. The
-// consensus mean is computed only over these frames, so the label must not
-// claim a denominator that includes prediction-less frames (CORE_PHILOSOPHY
-// "No black boxes": a "mean across 14 photos" when only 4 had predictions
-// overstates the consensus).
-function framesWithPredictions(photos) {
-  return (photos || []).filter(function(p) {
-    return p && p.species_top5 && p.species_top5.length > 0;
-  }).length;
-}
-
-// Honest consensus title, e.g. "Burst consensus — mean of 4 frames with
-// predictions". `scopeWord` is "Burst" (group review modal, scoped to the
-// reviewed burst) or "Encounter" (legacy flat-cache inspect fallback).
-function consensusTitle(scopeWord, photos) {
-  var n = framesWithPredictions(photos);
-  return scopeWord + ' consensus — mean of ' + n + ' frame' + (n === 1 ? '' : 's') + ' with predictions';
-}
-
 // Build the per-photo + consensus species prediction blocks. The per-photo
 // block changes as you select different photos; the consensus block is the
-// mean over the scope's frames and is labeled with its scope + honest frame
-// count (see CORE_PHILOSOPHY "No black boxes"). Callers pass the scope's own
-// predictions (`consensusRows`) and title so the block matches what's on
-// screen — burst for the GRM, encounter for the flat-cache fallback.
-// `threshold` (0..1) filters by confidence; pass 0 for none.
+// per-species mean over the scope's frames. The title names only the scope
+// ("Burst consensus" / "Encounter consensus") — it deliberately does NOT claim
+// a global frame denominator, because each row is averaged only over the frames
+// where that species appears (surfaced as per-model frame counts in
+// renderSpeciesBlock). Callers pass the scope's own predictions
+// (`consensusRows`) and title so the block matches what's on screen — burst for
+// the GRM, encounter for the flat-cache fallback. `threshold` (0..1) filters by
+// confidence; pass 0 for none.
 function buildSpeciesPredictionsHtml(photo, consensusRows, consensusTitleText, threshold) {
   threshold = threshold || 0;
   var html = '';
@@ -4173,15 +4163,8 @@ function buildPipelineMetadataHtml(photo) {
   // omitted) rather than re-leaking sibling-burst predictions.
   var burst = enc.bursts && enc.bursts[grmState.burstIdx];
   var hasBurstPreds = burst && Array.isArray(burst.species_predictions);
-  var consRows, consTitle;
-  if (hasBurstPreds) {
-    consRows = burst.species_predictions;
-    consTitle = consensusTitle('Burst', grmState.items);
-  } else {
-    consRows = enc.species_predictions || [];
-    var encPhotos = (enc.photo_ids || []).map(function(pid) { return findPhotoInResults(pid); });
-    consTitle = consensusTitle('Encounter', encPhotos);
-  }
+  var consRows = hasBurstPreds ? burst.species_predictions : (enc.species_predictions || []);
+  var consTitle = hasBurstPreds ? 'Burst consensus' : 'Encounter consensus';
   html += buildSpeciesPredictionsHtml(photo, consRows, consTitle, 0);
 
   // Score waterfall
