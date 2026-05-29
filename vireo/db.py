@@ -8146,32 +8146,76 @@ class Database:
         (photo, model); any workspace re-running the same (photo, model) is a
         bug — callers should short-circuit via `get_detector_run_photo_ids`.
 
+        IDs are content-addressed (see vireo.detection_id) so two pipelines
+        writing the same (photo, model, detections) produce identical rows
+        — the second writer's UPSERT is a no-op rather than a CASCADE-deleting
+        DELETE+INSERT.
+
         Args:
             photo_id: the photo
             detections: list of dicts {box: {x,y,w,h}, confidence, category}
             detector_model: required, e.g. "megadetector-v6"
         Returns:
-            list of new detection IDs (empty if detections was empty).
+            list of detection IDs (empty if detections was empty).
         """
         if detector_model is None:
             raise ValueError("detector_model is required")
-        self.conn.execute(
-            "DELETE FROM detections WHERE photo_id = ? AND detector_model = ?",
-            (photo_id, detector_model),
-        )
+        ids = self._upsert_detection_rows(photo_id, detector_model, detections)
+        commit_with_retry(self.conn)
+        return ids
+
+    def _upsert_detection_rows(self, photo_id, detector_model, detections):
+        """Content-addressed UPSERT of detection rows for one (photo, model).
+
+        Returns the list of IDs in caller-supplied order. Does NOT commit —
+        the caller controls the transaction so the detector_runs row can be
+        written in the same commit (see `write_detection_batch`).
+        """
+        from detection_id import detection_id as _detection_id
+
         ids = []
         for det in detections:
             box = det["box"]
-            cur = self.conn.execute(
-                """INSERT INTO detections
-                     (photo_id, detector_model, box_x, box_y, box_w, box_h,
-                      detector_confidence, category)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (photo_id, detector_model, box["x"], box["y"], box["w"], box["h"],
-                 det["confidence"], det.get("category", "animal")),
+            category = det.get("category", "animal")
+            det_id = _detection_id(
+                photo_id, detector_model,
+                (box["x"], box["y"], box["w"], box["h"]),
+                category,
             )
-            ids.append(cur.lastrowid)
-        commit_with_retry(self.conn)
+            # INSERT ON CONFLICT DO UPDATE — true UPSERT. Do NOT use
+            # `INSERT OR REPLACE`, which DELETEs the conflicting row before
+            # re-inserting; that DELETE fires `predictions.detection_id`
+            # `ON DELETE CASCADE` and silently wipes any predictions another
+            # pipeline has already written for this detection.
+            self.conn.execute(
+                """INSERT INTO detections
+                     (id, photo_id, detector_model, box_x, box_y, box_w, box_h,
+                      detector_confidence, category)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     detector_confidence = excluded.detector_confidence""",
+                (det_id, photo_id, detector_model,
+                 box["x"], box["y"], box["w"], box["h"],
+                 det["confidence"], category),
+            )
+            ids.append(det_id)
+
+        # Retire rows the new run no longer produces. Narrow DELETE: only
+        # rows whose ID is NOT in the new set. Safe under concurrent writers
+        # because two writers with the same detections compute the same
+        # `new_ids` set, so neither deletes the other's rows.
+        new_ids = set(ids)
+        existing = [r["id"] for r in self.conn.execute(
+            "SELECT id FROM detections WHERE photo_id = ? AND detector_model = ?",
+            (photo_id, detector_model),
+        ).fetchall()]
+        stale = [eid for eid in existing if eid not in new_ids]
+        if stale:
+            placeholders = ",".join("?" for _ in stale)
+            self.conn.execute(
+                f"DELETE FROM detections WHERE id IN ({placeholders})",
+                stale,
+            )
         return ids
 
     def write_detection_batch(self, photo_id, detector_model, detections):
@@ -8195,22 +8239,7 @@ class Database:
         if detector_model is None:
             raise ValueError("detector_model is required")
         try:
-            self.conn.execute(
-                "DELETE FROM detections WHERE photo_id = ? AND detector_model = ?",
-                (photo_id, detector_model),
-            )
-            ids = []
-            for det in detections:
-                box = det["box"]
-                cur = self.conn.execute(
-                    """INSERT INTO detections
-                         (photo_id, detector_model, box_x, box_y, box_w, box_h,
-                          detector_confidence, category)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (photo_id, detector_model, box["x"], box["y"], box["w"], box["h"],
-                     det["confidence"], det.get("category", "animal")),
-                )
-                ids.append(cur.lastrowid)
+            ids = self._upsert_detection_rows(photo_id, detector_model, detections)
             self.conn.execute(
                 """INSERT INTO detector_runs (photo_id, detector_model, box_count)
                    VALUES (?, ?, ?)

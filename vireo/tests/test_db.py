@@ -2949,14 +2949,12 @@ def test_get_geolocated_photos_species_filter_multi_species(tmp_path):
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
-    det1 = db.save_detections(p1, [
-        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"}
+    det_ids = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4}, "confidence": 0.60, "category": "animal"},
     ], detector_model="MDV6")
-    det2 = db.save_detections(p1, [
-        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4}, "confidence": 0.60, "category": "animal"}
-    ], detector_model="MDV6")
-    db.add_prediction(det1[0], 'Red-tailed Hawk', 0.95, 'bioclip')
-    db.add_prediction(det2[0], "Sparrow", 0.60, 'bioclip')
+    db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
+    db.add_prediction(det_ids[1], "Sparrow", 0.60, 'bioclip')
     for pr in db.get_predictions(photo_ids=[p1]):
         db.accept_prediction(pr['id'])
 
@@ -3187,14 +3185,12 @@ def test_get_accepted_species_multiple_species_per_photo(tmp_path):
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
     # Two detections for the same photo, each with different species
-    det_ids1 = db.save_detections(p1, [
-        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"}
+    det_ids = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4}, "confidence": 0.60, "category": "animal"},
     ], detector_model="MDV6")
-    det_ids2 = db.save_detections(p1, [
-        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4}, "confidence": 0.60, "category": "animal"}
-    ], detector_model="MDV6")
-    db.add_prediction(det_ids1[0], 'Red-tailed Hawk', 0.95, 'bioclip')
-    db.add_prediction(det_ids2[0], 'Cooper\'s Hawk', 0.60, 'bioclip')
+    db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
+    db.add_prediction(det_ids[1], 'Cooper\'s Hawk', 0.60, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1])
     for pr in preds:
         db.accept_prediction(pr['id'])
@@ -4733,6 +4729,143 @@ def test_write_detection_batch_records_empty_scene(tmp_path):
     assert run is not None
     assert run["box_count"] == 0
     assert photo_id in db.get_detector_run_photo_ids("megadetector-v6")
+
+
+def test_write_detection_batch_ids_are_stable_for_same_content(tmp_path):
+    """IDs are derived from content, not table state. Even after other rows
+    are inserted (so auto-rowid recycling no longer hides the bug), the same
+    (photo, model, detections) must produce the same IDs.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_a = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    photo_b = db.add_photo(
+        folder_id=folder_id, filename="b.jpg", extension=".jpg",
+        file_size=200, file_mtime=2.0,
+    )
+
+    detections = [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2},
+         "confidence": 0.7, "category": "animal"},
+    ]
+    ids1 = db.write_detection_batch(photo_a, "megadetector-v6", detections)
+    # Insert into a different photo so the table is non-empty when photo_a's
+    # rows are deleted-and-reinserted — defeats auto-rowid's "reset to 1
+    # when table empty" recycling that hides the bug.
+    db.write_detection_batch(photo_b, "megadetector-v6", detections)
+    ids2 = db.write_detection_batch(photo_a, "megadetector-v6", detections)
+    assert ids1 == ids2, (
+        f"same content must produce same IDs across rewrites; got {ids1} vs {ids2}"
+    )
+
+    count = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM detections WHERE photo_id = ? AND detector_model = ?",
+        (photo_a, "megadetector-v6"),
+    ).fetchone()["c"]
+    assert count == len(detections), "second write must not duplicate rows"
+
+
+def test_write_detection_batch_retires_stale_rows(tmp_path):
+    """Detections the new run no longer produces must be deleted, even when
+    other detections from the same (photo, model) are unchanged. Predictions
+    against retired detections CASCADE-delete; predictions against retained
+    detections survive.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    a = {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"}
+    b = {"box": {"x": 0.3, "y": 0.3, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"}
+    c = {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"}
+    ids_abc = db.write_detection_batch(photo_id, "megadetector-v6", [a, b, c])
+    id_a, id_b, id_c = ids_abc
+
+    ids_ac = db.write_detection_batch(photo_id, "megadetector-v6", [a, c])
+    assert ids_ac == [id_a, id_c], "stable IDs for retained boxes"
+
+    remaining = {r["id"] for r in db.conn.execute(
+        "SELECT id FROM detections WHERE photo_id = ? AND detector_model = ?",
+        (photo_id, "megadetector-v6"),
+    ).fetchall()}
+    assert remaining == {id_a, id_c}, f"stale id {id_b} must be deleted"
+
+
+def test_write_detection_batch_second_writer_does_not_cascade_predictions(tmp_path):
+    """The race: pipeline A writes detections, classify writes predictions
+    against them, pipeline B writes the same detections again. With
+    auto-rowid IDs, B's DELETE CASCADEs A's predictions (data loss). With
+    content-addressed IDs, B's UPSERT matches A's rows so the FK targets
+    survive.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    detections = [
+        {"box": {"x": 0.10, "y": 0.10, "w": 0.20, "h": 0.20},
+         "confidence": 0.9, "category": "animal"},
+    ]
+
+    # Pipeline A: writes detections, then writes a prediction against the
+    # detection it just produced.
+    ids_a = db.write_detection_batch(photo_id, "megadetector-v6", detections)
+    det_id = ids_a[0]
+    db.conn.execute(
+        """INSERT INTO predictions
+             (detection_id, classifier_model, labels_fingerprint, species, confidence, category)
+           VALUES (?, 'classifier-v1', 'legacy', 'cardinal', 0.95, 'animal')""",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    pred_count_before = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM predictions WHERE detection_id = ?",
+        (det_id,),
+    ).fetchone()["c"]
+    assert pred_count_before == 1
+
+    # Pipeline B: writes the same detections. With auto-rowid this would
+    # DELETE A's row and CASCADE-delete A's prediction.
+    ids_b = db.write_detection_batch(photo_id, "megadetector-v6", detections)
+    assert ids_b == ids_a, "concurrent writer must produce same IDs"
+
+    pred_count_after = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM predictions WHERE detection_id = ?",
+        (det_id,),
+    ).fetchone()["c"]
+    assert pred_count_after == 1, (
+        "B's write must not CASCADE-delete A's prediction; "
+        f"got {pred_count_after} predictions remaining"
+    )
 
 
 def test_multiple_predictions_per_detection(tmp_path):
