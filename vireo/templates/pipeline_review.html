@@ -3618,7 +3618,10 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     // Close is gated on this so a click during the seed window can't ship
     // an empty picks/rejects payload (which would clear pre-existing flags
     // by treating every photo as a candidate).
-    seeded: false
+    seeded: false,
+    // null = follow smart default; true/false = user explicitly set it.
+    confirmSpeciesOverride: null,
+    applyFlagsOverride: null
   };
   _grmLoupeLocked = false;
   _grmZoomMultiplier = 1;
@@ -3890,6 +3893,31 @@ function grmRefreshSpeciesKeywordState() {
   });
 }
 
+// User manually toggled a checkbox: record the override, then re-sync labels.
+function grmOnToggleChange() {
+  var spChk = document.getElementById('grmConfirmSpeciesChk');
+  var flChk = document.getElementById('grmApplyFlagsChk');
+  if (spChk) grmState.confirmSpeciesOverride = spChk.checked;
+  if (flChk) grmState.applyFlagsOverride = flChk.checked;
+  grmUpdateApplyLabel();
+}
+
+// Smart default: is there a real pending change for each side?
+function grmSpeciesDirty(diff) { return !!diff.speciesChanged; }
+function grmFlagsDirty(diff) {
+  return (diff.flagNew + diff.rejectNew + diff.clearNew + diff.detachNew) > 0;
+}
+
+// Resolve the effective checked state: user override wins, else smart default.
+function grmResolveChecks(diff) {
+  var sp = grmState.confirmSpeciesOverride;
+  var fl = grmState.applyFlagsOverride;
+  return {
+    species: sp === null ? grmSpeciesDirty(diff) : sp,
+    flags: fl === null ? grmFlagsDirty(diff) : fl,
+  };
+}
+
 // Update the Apply button label to reflect the *new* DB writes that will
 // happen — not the totals in each zone — so the user can see at a glance
 // what they're committing to. A photo already flagged in the DB and still
@@ -3903,14 +3931,36 @@ function grmUpdateApplyLabel() {
   // misreport pending writes and clobber the error/loading message.
   if (!grmState || !grmState.seeded) return;
   var diff = grmComputeDiff();
+
+  var checks = grmResolveChecks(diff);
+  var spChk = document.getElementById('grmConfirmSpeciesChk');
+  var flChk = document.getElementById('grmApplyFlagsChk');
+  if (spChk) spChk.checked = checks.species;
+  if (flChk) flChk.checked = checks.flags;
+
+  // Amber hint only when a box is unchecked but its side is dirty.
+  var spHint = document.getElementById('grmSpeciesDirtyHint');
+  if (spHint) {
+    var show = !checks.species && grmSpeciesDirty(diff);
+    spHint.style.display = show ? '' : 'none';
+    spHint.textContent = show ? "species won't be confirmed" : '';
+  }
+  var flHint = document.getElementById('grmFlagsDirtyHint');
+  if (flHint) {
+    var n = diff.flagNew + diff.rejectNew + diff.clearNew + diff.detachNew;
+    var showF = !checks.flags && n > 0;
+    flHint.style.display = showF ? '' : 'none';
+    flHint.textContent = showF ? (n + ' cull change' + (n === 1 ? '' : 's') + " won't be saved") : '';
+  }
+
   var parts = [];
-  if (diff.flagNew > 0) parts.push('Flag ' + diff.flagNew);
-  if (diff.rejectNew > 0) parts.push('Reject ' + diff.rejectNew);
-  if (diff.clearNew > 0) parts.push('Clear ' + diff.clearNew);
-  if (diff.speciesChanged) parts.push('Set species');
-  if (diff.tagNew > 0) parts.push('Tag ' + diff.tagNew + (diff.species ? ' as ' + diff.species : ''));
-  if (diff.detachNew > 0) parts.push('Detach ' + diff.detachNew);
-  btn.textContent = parts.length ? parts.join(' · ') + ' & Close' : 'No DB changes & Close';
+  if (checks.flags && diff.flagNew > 0) parts.push('Flag ' + diff.flagNew);
+  if (checks.flags && diff.rejectNew > 0) parts.push('Reject ' + diff.rejectNew);
+  if (checks.flags && diff.clearNew > 0) parts.push('Clear ' + diff.clearNew);
+  if (checks.species && diff.speciesChanged) parts.push('Set species');
+  if (checks.species && diff.tagNew > 0) parts.push('Tag ' + diff.tagNew + (diff.species ? ' as ' + diff.species : ''));
+  if (checks.flags && diff.detachNew > 0) parts.push('Detach ' + diff.detachNew);
+  btn.textContent = parts.length ? parts.join(' · ') + ' & Close' : 'Apply and close';
   btn.title = grmApplyTitle(diff);
 }
 
