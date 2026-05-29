@@ -1726,12 +1726,6 @@ async function applyCurrent(openNext) {
       if (pickSet.has(p.id)) p.flag = 'flagged';
       else if (rejectSet.has(p.id)) p.flag = 'rejected';
       else p.flag = 'none';
-      // The /api/encounters/species call below tags EVERY frame in `items`
-      // (picks and non-picks alike), so mirror that locally for all of them.
-      // Marking only picks would leave non-pick frames in the "Needs species"
-      // queue / without a confirmed-species chip until a reload, even though
-      // the server has already tagged them.
-      if (species) p.confirmed_species = species;
     });
     if (resp && resp.photos) {
       Object.keys(resp.photos).forEach(function(pidStr) {
@@ -1787,6 +1781,15 @@ async function applyCurrent(openNext) {
         //     navigate server truth instead of stale indices.
         rapid.allSessions = buildSessions(rapid.results);
       }
+      // Only now that the species call has SUCCEEDED do we mirror the
+      // confirmation onto the local photos. The endpoint tags EVERY frame in
+      // `items` (picks and non-picks alike), so mark them all — marking only
+      // picks would leave non-pick frames in the "Needs species" queue / without
+      // a confirmed-species chip until a reload. Doing this before the call
+      // (or in the label loop above) would leave the cache claiming confirmation
+      // even when /api/encounters/species fails, hiding the burst from "Needs
+      // species" locally until reload (the catch path doesn't roll it back).
+      items.forEach(function(p) { p.confirmed_species = species; });
     }
     updateSummaryFromPhotos();
     await safeFetch('/api/pipeline/save-cache', {
