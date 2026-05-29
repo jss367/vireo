@@ -765,6 +765,12 @@ def serialize_results(results):
             "burst_count": enc.get("burst_count"),
             "time_range": enc.get("time_range"),
             "photo_ids": [p["id"] for p in photos_list],
+            # Count photos with no EXIF timestamp (scan I/O errors / unreadable
+            # files). The review page badges encounters where this is non-zero
+            # so the user knows the group was assembled by file order, not time.
+            "missing_timestamp_count": sum(
+                1 for p in photos_list if not p.get("timestamp")
+            ),
         }
         # Surface per-cut-point trace when run_full_pipeline was invoked with
         # emit_trace=True (e.g. from /api/pipeline/regroup-live so the
@@ -945,6 +951,11 @@ def prune_results(cache_dir, workspace_id, deleted_ids):
 
     data["photos"] = [p for p in data.get("photos", []) if p.get("id") not in deleted]
 
+    # Timestamp lookup over survivors, so missing_timestamp_count can be
+    # recomputed per encounter after deletions (the ⚠ badge would otherwise
+    # show the pre-deletion count).
+    timestamp_by_id = {p.get("id"): p.get("timestamp") for p in data["photos"]}
+
     pruned_encounters = []
     for enc in data.get("encounters", []):
         enc["photo_ids"] = [pid for pid in enc.get("photo_ids", []) if pid not in deleted]
@@ -961,6 +972,12 @@ def prune_results(cache_dir, workspace_id, deleted_ids):
         if not enc["photo_ids"]:
             continue
         enc["photo_count"] = len(enc["photo_ids"])
+        # Only recompute when the field is present, so pruning a cache written
+        # before this field existed doesn't synthesize one.
+        if "missing_timestamp_count" in enc:
+            enc["missing_timestamp_count"] = sum(
+                1 for pid in enc["photo_ids"] if not timestamp_by_id.get(pid)
+            )
         pruned_encounters.append(enc)
     data["encounters"] = pruned_encounters
 
