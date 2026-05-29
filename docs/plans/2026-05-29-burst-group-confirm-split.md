@@ -116,6 +116,88 @@ git commit -m "pipeline: make /group/apply flags-only; species moves to dedicate
 
 ---
 
+## Task 1b: Fix rapid-review species path (caller of the gutted endpoint)
+
+**Why (added after Task 1 code review):** `vireo/templates/pipeline_rapid_review.html`
+is a *second* caller of `/api/pipeline/group/apply`. Its `applyCurrent()` sends
+`species`, then sets `enc.confirmed_species`/`enc.species_confirmed = true` and
+propagates the species across sibling bursts — relying on the endpoint to tag the
+keyword. After Task 1 it would mark the encounter confirmed while persisting **no**
+species keyword (a "No black boxes" / UI-truthfulness regression). Rapid review has
+no checkboxes — species + flags are intentionally one fast "Apply" action — so the
+fix is just to persist species through the unified path, not to add a UI split.
+
+**Files:**
+- Modify: `vireo/templates/pipeline_rapid_review.html:1690-1761` (`applyCurrent`)
+- Modify: `tests/e2e/test_pipeline_rapid_review.py` (it mocks `/group/apply` and
+  asserts the old species-tagging apply-label text — update to the new contract)
+
+**Step 1: Stop sending `species` to `/group/apply`**
+
+In `applyCurrent` remove the `species: species` field from the `/group/apply`
+body (line ~1714). The `resp.photos[pid].has_species_keyword` branch (line ~1735)
+is now always False — it can stay (dead but harmless) or be simplified; the local
+`if (species && pickSet.has(p.id)) p.confirmed_species = species;` (line ~1727)
+stays for the optimistic UI.
+
+**Step 2: Persist species via the unified endpoint**
+
+After the `/group/apply` call and the local label/flag updates, before the
+encounter-confirm block, add a burst-scoped species confirmation when `species` is
+set. Tag **all** current-burst photos (matching the pipeline decision):
+
+```js
+    if (species) {
+      var spResp = await safeFetch('/api/encounters/species', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          species: species,
+          photo_ids: items.map(function(p) { return p.id; }),
+          burst_index: session.burstIdx,
+        }),
+      });
+      // Adopt authoritative structure (it may auto-detach on species mismatch),
+      // so the save-cache below doesn't clobber the endpoint's restructure.
+      if (spResp && spResp.encounters) {
+        rapid.results.encounters = spResp.encounters;
+        if (spResp.summary) rapid.results.summary = spResp.summary;
+      }
+    }
+```
+
+Keep the existing `enc.confirmed_species`/`species_confirmed` + sibling-burst
+species-hint propagation (lines ~1739-1755) — but note `enc` is read from
+`rapid.results.encounters[session.encIdx]`, which the adopt step above may have
+replaced; re-read `enc` after adoption so it points at the fresh object. The
+`save-cache` (line ~1757) then persists the merged `rapid.results`.
+
+**Step 3: Update the rapid-review e2e expectations**
+
+`tests/e2e/test_pipeline_rapid_review.py` stubs `/api/pipeline/group/apply` via
+`page.route(...)` and asserts an apply-label like
+`'... add species keyword "Test bird" to 1 pick.'`. Update the mock/assertions to
+the new flow: `/group/apply` no longer tags species; species now goes through
+`/api/encounters/species` (which the test must also stub). If the apply-label text
+is generated client-side from the picks/species, adjust the expected string to
+match the new wording; if it was derived from the mocked response, re-point it.
+Read the test first and adapt to its actual structure — do not assume.
+
+**Step 4: Verify**
+
+Run: `python -m pytest tests/e2e/test_pipeline_rapid_review.py -v`
+Expected: PASS. Then manually: rapid-review a burst, type a species, Apply Next →
+the species keyword is actually on the burst photos in the DB and the encounter
+shows confirmed (grid agrees).
+
+**Step 5: Commit**
+
+```bash
+git add vireo/templates/pipeline_rapid_review.html tests/e2e/test_pipeline_rapid_review.py
+git commit -m "pipeline rapid review: persist species via unified endpoint after /group/apply went flags-only"
+```
+
+---
+
 ## Task 2: Footer markup — two checkboxes + "Apply and close"
 
 Replace the single fused button with two checkboxes and one apply button, plus
