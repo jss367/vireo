@@ -1292,6 +1292,67 @@ def test_preview_retries_raw_when_recent_marker_came_from_companion(
     assert called["path"] == raw_path
 
 
+def test_preview_honors_raw_marker_after_companion_bypass_retry_fails(
+    client_with_photo, monkeypatch,
+):
+    """A RAW failure recorded after companion bypass should suppress repeats."""
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "bad.NEF")
+    companion_path = os.path.join(folder["path"], "bad.jpg")
+    with open(raw_path, "wb") as f:
+        f.write(b"raw bytes")
+    Image.new("RGB", (800, 600), (40, 80, 120)).save(
+        companion_path, "JPEG",
+    )
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               companion_path='bad.jpg',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?,
+               working_copy_failed_source='companion'
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    calls = {"count": 0}
+
+    def fail_raw(_path, *_args, **_kwargs):
+        calls["count"] += 1
+        return None
+
+    monkeypatch.setattr(image_loader, "load_image", fail_raw)
+
+    client = app.test_client()
+    first = client.get(f"/photos/{photo_id}/preview?size=1920")
+    second = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert first.status_code == 500
+    assert second.status_code == 500
+    assert calls["count"] == 1
+    row = db.conn.execute(
+        """SELECT working_copy_failed_mtime, working_copy_failed_source
+           FROM photos WHERE id=?""",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_mtime"] == file_mtime
+    assert row["working_copy_failed_source"] == "source"
+
+
 def test_preview_retries_stale_failed_raw_working_copy(
     client_with_photo, monkeypatch,
 ):

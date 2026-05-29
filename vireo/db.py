@@ -286,6 +286,7 @@ class Database:
                 working_copy_path        TEXT,
                 working_copy_failed_at   TEXT,
                 working_copy_failed_mtime REAL,
+                working_copy_failed_source TEXT,
                 eye_x                    REAL,
                 eye_y                    REAL,
                 eye_conf                 REAL,
@@ -763,6 +764,12 @@ class Database:
         except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE photos ADD COLUMN working_copy_failed_mtime REAL"
+            )
+        try:
+            self.conn.execute("SELECT working_copy_failed_source FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos ADD COLUMN working_copy_failed_source TEXT"
             )
         # Migration: add eye_kp_fingerprint column. Set to NULL for new
         # photos; populated when the eye-keypoint stage runs. Phase 1 also
@@ -2768,7 +2775,8 @@ class Database:
     PHOTO_DETAIL_COLS = (
         PHOTO_COLS
         + ", exif_data, eye_x, eye_y, eye_conf, eye_tenengrad,"
-        + " working_copy_failed_at, working_copy_failed_mtime"
+        + " working_copy_failed_at, working_copy_failed_mtime,"
+        + " working_copy_failed_source"
     )
 
     def get_photo(self, photo_id, verify_workspace=False):

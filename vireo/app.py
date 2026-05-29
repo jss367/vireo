@@ -150,13 +150,12 @@ def _has_current_working_copy_failure(
     authoritative for thumbnail/preview routes, but callers that have already
     rejected that copy as insufficient can opt into honoring the marker anyway.
     A stale ``working_copy_path`` whose file was deleted should not bypass a
-    fresh failure marker. If a RAW+JPEG companion pair has a marker while both
-    the companion and RAW source are currently available, allow request paths to
-    try the RAW: scanner.py prefers companions for working-copy extraction, so
-    that marker may describe a companion-source failure rather than a RAW
-    failure. Match scanner.py's stale-failure contract: a file replacement
-    changes ``file_mtime`` and failures older than 24 hours are allowed to
-    retry.
+    fresh failure marker. If a RAW+JPEG companion pair has a companion-source
+    marker while both the companion and RAW source are currently available, allow
+    request paths to try the RAW: scanner.py prefers companions for working-copy
+    extraction, so that marker may not describe a RAW failure. Match scanner.py's
+    stale-failure contract: a file replacement changes ``file_mtime`` and
+    failures older than 24 hours are allowed to retry.
     """
     def _get(key):
         try:
@@ -188,7 +187,12 @@ def _has_current_working_copy_failure(
     companion_path = _get("companion_path")
     if companion_path and live_source_path and folder_path:
         companion_abs = os.path.join(folder_path, companion_path)
-        if os.path.exists(live_source_path) and os.path.exists(companion_abs):
+        failed_source = _get("working_copy_failed_source")
+        if (
+            failed_source != "source"
+            and os.path.exists(live_source_path)
+            and os.path.exists(companion_abs)
+        ):
             return False
 
     failed_at = _get("working_copy_failed_at")
@@ -228,7 +232,9 @@ def _record_working_copy_failure(db, photo, source_path=None):
     source paths that are currently unavailable/offline, or source paths that
     aren't the original RAW (e.g. a corrupt working-copy JPEG returned by
     ``get_canonical_image_path``) — a non-RAW decode failure isn't a RAW
-    extraction failure and must not stamp the RAW marker.
+    extraction failure and must not stamp the RAW marker. Request-time RAW
+    failures are recorded with ``working_copy_failed_source='source'`` so
+    companion-source bypasses do not ignore fresh RAW failures.
     """
     def _get(key):
         try:
@@ -259,7 +265,8 @@ def _record_working_copy_failure(db, photo, source_path=None):
     try:
         db.conn.execute(
             "UPDATE photos SET working_copy_failed_at=datetime('now'),"
-            " working_copy_failed_mtime=?"
+            " working_copy_failed_mtime=?,"
+            " working_copy_failed_source='source'"
             " WHERE id=?",
             (file_mtime, photo_id),
         )
