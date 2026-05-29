@@ -407,23 +407,26 @@ def cut_microsegments(photos, config=None, emit_trace=False):
         both_null = ts_a is None and ts_b is None
         folder_a = sorted_photos[i].get("folder_id")
         folder_b = sorted_photos[i + 1].get("folder_id")
+        # A folder change between two null-timestamp photos is a hard cut.
+        # The null sort key (1, datetime.min, folder_id, filename) places the
+        # last null of one folder adjacent to the first null of the next, and
+        # folder_id is NOT part of compute_s_enc — so without an explicit
+        # boundary cut, two undated photos from DIFFERENT shoots could merge
+        # whether they're unreadable (score ~0, force-grouped by file order)
+        # or signalful (visually similar embeddings/species sliding under the
+        # score cut). Treat distinct or missing folder_id as a boundary; only
+        # same, non-null folders are "unchanged". (Missing folder_id shouldn't
+        # happen in production scans — cutting there stays on the safe side.)
+        folder_changed = folder_a is None or folder_a != folder_b
         # "Signal-less" = no timestamp AND no usable similarity signal on
         # either side (no embeddings, no species). Unreadable files are
         # signal-less; undated-but-readable photos (e.g. screenshots, which
         # still get embeddings) are NOT — they must be judged on the score
-        # cut, not force-grouped by file order.
-        #
-        # Also require the same folder. The null sort key
-        # (1, datetime.min, folder_id, filename) places the last null of
-        # one folder adjacent to the first null of the next, so without
-        # this guard the both-null branch would fuse unrelated unreadable
-        # files from separate shoots into a single encounter. Photos
-        # missing folder_id (shouldn't happen in production scans) fall
-        # through to the score cut to stay on the safe side.
+        # cut, not force-grouped by file order. Requires the same folder so
+        # contiguous nulls only group within a single shoot.
         signal_less = (
             both_null
-            and folder_a is not None
-            and folder_a == folder_b
+            and not folder_changed
             and not (
                 _has_similarity_signal(sorted_photos[i])
                 or _has_similarity_signal(sorted_photos[i + 1])
@@ -442,12 +445,21 @@ def cut_microsegments(photos, config=None, emit_trace=False):
             # contiguous nulls together by file order.
             decision = "kept_no_timestamp"
             recent_scores = []
+        elif both_null and folder_changed:
+            # Both null but across a folder boundary — hard cut, regardless of
+            # similarity signal. dt is inf for both-null pairs, so the time cut
+            # below never fires for them; folder_id isn't in compute_s_enc
+            # either, so a signalful pair would otherwise slide under the score
+            # cut and merge two separate shoots. Cut here to keep them apart.
+            cuts.add(i)
+            recent_scores = []
+            decision = "cut_folder"
         elif not both_null and dt > cfg["hard_cut_time"]:
             # Time cut only applies when at least one side has a timestamp.
             # Asymmetric pairs (one null, one real) give dt=inf and cut here,
             # so the null cluster never absorbs a real photo. Both-null pairs
-            # that reached this point DO have a similarity signal and fall
-            # through to the score cut below.
+            # in the SAME folder that reached this point DO have a similarity
+            # signal and fall through to the score cut below.
             cuts.add(i)
             recent_scores = []
             decision = "cut_time"

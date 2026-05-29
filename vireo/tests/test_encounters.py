@@ -1247,6 +1247,59 @@ def test_cut_null_timestamps_cut_at_folder_boundary():
     assert {p["id"] for p in segments[1]} == {3, 4}
 
 
+def test_cut_both_null_signalful_cuts_at_folder_boundary():
+    """Two undated photos with MATCHING embeddings but in DIFFERENT folders must
+    cut at the folder boundary.
+
+    folder_id is not part of compute_s_enc, so without an explicit boundary cut
+    these visually identical undated frames would slide under the score cut and
+    merge two separate shoots into one encounter. The folder change is a hard
+    cut for ALL both-null pairs, not just signal-less ones.
+    """
+    from encounters import cut_microsegments
+
+    emb = np.ones(768, dtype=np.float32)
+    species = [("robin", 0.9)]
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "shot_a.png",
+         "dino_subject_embedding": emb, "dino_global_embedding": emb,
+         "species_top5": species},
+        {"id": 2, "timestamp": None, "folder_id": 20, "filename": "shot_b.png",
+         "dino_subject_embedding": emb, "dino_global_embedding": emb,
+         "species_top5": species},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 2, (
+        f"Expected the folder boundary to cut despite matching signal, got "
+        f"{[[p['id'] for p in seg] for seg in segments]}"
+    )
+    assert {p["id"] for p in segments[0]} == {1}
+    assert {p["id"] for p in segments[1]} == {2}
+
+
+def test_cut_both_null_signalful_same_folder_groups():
+    """Counterpart to the cross-folder cut: two undated photos with MATCHING
+    embeddings in the SAME folder are still judged by the score and group.
+
+    The folder-boundary cut must not over-fire within a single shoot.
+    """
+    from encounters import cut_microsegments
+
+    emb = np.ones(768, dtype=np.float32)
+    species = [("robin", 0.9)]
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "shot_a.png",
+         "dino_subject_embedding": emb, "dino_global_embedding": emb,
+         "species_top5": species},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "shot_b.png",
+         "dino_subject_embedding": emb, "dino_global_embedding": emb,
+         "species_top5": species},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 1
+    assert len(segments[0]) == 2
+
+
 def test_cut_null_timestamps_missing_folder_id_still_cuts():
     """Defensive: nulls with no folder_id at all fall through to the score cut.
 
