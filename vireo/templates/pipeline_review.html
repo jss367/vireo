@@ -4212,9 +4212,11 @@ function buildPipelineMetadataHtml(photo) {
   // local detach (single-photo bursts inherit the parent's predictions) or a
   // reclassification (per-photo species_top5 updates without rebuilding burst
   // aggregates). Fresh aggregation keeps "Burst consensus" consistent with the
-  // per-photo blocks and the photos actually in this burst. grmState.items is
-  // exactly this burst's photo objects.
-  var consRows = buildBurstConsensus(grmState.items);
+  // per-photo blocks and the photos actually in this burst. Use the same
+  // non-removed item set as the visible cards (_grmVisibleItems) so a photo the
+  // reviewer has marked for removal (but not yet applied) doesn't keep
+  // influencing the consensus.
+  var consRows = buildBurstConsensus(_grmVisibleItems());
   html += buildSpeciesPredictionsHtml(photo, consRows, 'Burst consensus', 0);
 
   // Score waterfall
