@@ -4032,18 +4032,30 @@ function grmOnToggleChange(which) {
 }
 
 // Smart default: is there a real pending change for each side?
-function grmSpeciesDirty(diff) { return !!diff.speciesChanged; }
 function grmFlagsDirty(diff) {
   return (diff.flagNew + diff.rejectNew + diff.clearNew + diff.detachNew) > 0;
+}
+// The species side is dirty when the confirmed species changes OR when the
+// burst is already confirmed as the current species but some post-apply frame
+// still lacks that species keyword (e.g. legacy data that only tagged picks).
+// /api/pipeline/group/apply is flags-only, so those missing keywords would
+// never be written unless the species side commits — mirror the rapid-review
+// gate (speciesChanged || outstanding tag work). The tag count depends on the
+// resolved flags state (a removed photo only drops out when its removal
+// actually commits), so callers pass the already-resolved `flags` value.
+function grmSpeciesDirty(diff, flagsResolved) {
+  if (diff.speciesChanged) return true;
+  return grmSpeciesTagCount({ flags: flagsResolved }, diff.species) > 0;
 }
 
 // Resolve the effective checked state: user override wins, else smart default.
 function grmResolveChecks(diff) {
   var sp = grmState.confirmSpeciesOverride;
   var fl = grmState.applyFlagsOverride;
+  var flags = fl === null ? grmFlagsDirty(diff) : fl;
   return {
-    species: sp === null ? grmSpeciesDirty(diff) : sp,
-    flags: fl === null ? grmFlagsDirty(diff) : fl,
+    species: sp === null ? grmSpeciesDirty(diff, flags) : sp,
+    flags: flags,
   };
 }
 
@@ -4070,7 +4082,7 @@ function grmUpdateApplyLabel() {
   // Amber hint only when a box is unchecked but its side is dirty.
   var spHint = document.getElementById('grmSpeciesDirtyHint');
   if (spHint) {
-    var show = !checks.species && grmSpeciesDirty(diff);
+    var show = !checks.species && grmSpeciesDirty(diff, checks.flags);
     spHint.style.display = show ? '' : 'none';
     spHint.textContent = show ? "species won't be confirmed" : '';
   }

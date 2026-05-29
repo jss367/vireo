@@ -176,6 +176,16 @@ def _photos_with_species(live_server, photo_ids, species):
     return {r["id"] for r in rows}
 
 
+def _tag_all(live_server, photo_ids, species):
+    """Tag every photo with `species` as a species keyword directly in the DB,
+    so /group/state reports has_species_keyword=True for the whole burst."""
+    db = live_server["db"]
+    kid = db.add_keyword(species, is_species=True)
+    for pid in photo_ids:
+        db.tag_photo(pid, kid)
+    return kid
+
+
 def test_smart_default_flags_checked_when_moves_pending(live_server, page):
     """Moving a frame to rejects pre-checks "Apply picks/rejects" via the smart
     default; "Confirm species" stays unchecked because the species field is
@@ -198,6 +208,10 @@ def test_smart_default_species_checked_on_new_species(live_server, page):
     pre-checks "Confirm species"."""
     photo_ids = live_server["data"]["photos"][0:3]
     _write_single_burst_cache(live_server, photo_ids, confirmed_species="Red-tailed Hawk")
+    # Tag every frame with the confirmed species so there is no outstanding
+    # keyword work — this isolates the "species text unchanged → unchecked"
+    # smart default from the missing-keyword gate (covered separately).
+    _tag_all(live_server, photo_ids, "Red-tailed Hawk")
 
     _open_burst_modal(page, live_server)
 
@@ -271,6 +285,46 @@ def test_species_only_apply_leaves_flags_untouched_and_tags_all_frames(live_serv
     assert burst["species_override"]["species"] == "Northern Goshawk"
 
 
+def test_smart_default_species_checked_when_frame_missing_keyword(live_server, page):
+    """Burst already confirmed as the current species, but one frame still
+    lacks that species keyword (e.g. legacy data that only tagged picks). The
+    species field is unchanged, so speciesChanged is false — but outstanding
+    tag work must still flip the "Confirm species" smart default ON, and Apply
+    must POST /api/encounters/species so the missing keyword gets written.
+
+    Regression for the classic burst-group modal analogue of the rapid-review
+    missing-keyword gate: /api/pipeline/group/apply is flags-only, so without
+    this gate the unwritten keyword would be silently dropped.
+    """
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"][0:3]
+    species = "Red-tailed Hawk"
+
+    # Confirm the burst as the species in the cache, but only tag TWO of the
+    # three frames in the DB — the third is missing the keyword.
+    _write_single_burst_cache(live_server, photo_ids, confirmed_species=species)
+    kid = db.add_keyword(species, is_species=True)
+    db.tag_photo(photo_ids[0], kid)
+    db.tag_photo(photo_ids[1], kid)
+    # photo_ids[2] intentionally left untagged.
+
+    _open_burst_modal(page, live_server)
+
+    # Species field reflects the confirmed species; do NOT change it.
+    expect(page.locator("#grmSpecies")).to_have_value(species)
+    # Smart default flips ON because a frame still needs the keyword, even
+    # though the confirmed species itself is unchanged.
+    expect(page.locator("#grmConfirmSpeciesChk")).to_be_checked()
+
+    with page.expect_response("**/api/encounters/species"):
+        page.locator("#grmApplyBtn").click()
+    expect(page.locator("#grmOverlay")).not_to_have_class(re.compile(r"\bopen\b"))
+
+    # All three frames now carry the species keyword — the missing one got it.
+    tagged = _photos_with_species(live_server, photo_ids, species)
+    assert tagged == set(photo_ids), tagged
+
+
 def test_flags_only_apply_leaves_species_unconfirmed(live_server, page):
     """Flags-only apply (species unchecked): flags persist, but no species
     keyword is added and the burst is not marked confirmed."""
@@ -331,6 +385,10 @@ def test_flags_only_apply_preserves_differing_burst_override(live_server, page):
         burst_override_species=override_species,
         burst_override_confirmed=True,
     )
+    # Tag every frame with the override species X so there is no outstanding
+    # keyword work — this keeps "Confirm species" OFF by the smart default,
+    # isolating the override-preservation behavior from the missing-keyword gate.
+    _tag_all(live_server, photo_ids, override_species)
 
     _open_burst_modal(page, live_server)
 
@@ -384,6 +442,10 @@ def test_detached_burst_preserves_differing_confirmed_override(live_server, page
         burst_override_species=override_species,
         burst_override_confirmed=True,
     )
+    # Tag every frame with the override species X so the burst has no
+    # outstanding keyword work — confirm stays OFF, isolating the detach-path
+    # override-preservation from the missing-keyword gate.
+    _tag_all(live_server, photo_ids, override_species)
 
     _open_burst_modal(page, live_server)
 
