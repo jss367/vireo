@@ -961,3 +961,95 @@ def test_segment_encounters_cuts_at_subject_absent_asymmetry():
     )
     # The first encounter should not absorb the subjectless frames.
     assert encounters[0]["photo_count"] == 6
+
+
+# -- null-timestamp grouping (2026-05-29) --
+
+
+def _null_ts_photo(photo_id, folder_id, filename, subj_emb=None,
+                   global_emb=None, species=None, focal_length=None):
+    """A photo with no timestamp (scan I/O error / unreadable file)."""
+    return {
+        "id": photo_id,
+        "timestamp": None,
+        "folder_id": folder_id,
+        "filename": filename,
+        "dino_subject_embedding": subj_emb,
+        "dino_global_embedding": global_emb,
+        "species_top5": species,
+        "focal_length": focal_length,
+    }
+
+
+def test_time_delta_both_none_still_inf():
+    """_time_delta_seconds keeps its inf contract for None inputs.
+
+    It's shared with the merge stage, which divides by / compares against the
+    result; returning None there would crash. The both-null special case lives
+    in cut_microsegments, not here.
+    """
+    from encounters import _time_delta_seconds
+
+    assert _time_delta_seconds(None, None) == float("inf")
+    assert _time_delta_seconds(None, datetime(2026, 5, 25, 10, 0, 0)) == float("inf")
+    assert _time_delta_seconds(datetime(2026, 5, 25, 10, 0, 0), None) == float("inf")
+
+
+def test_cut_keeps_contiguous_null_timestamps_together():
+    """Signal-less null-timestamp photos group into one segment by file order.
+
+    Unreadable files have no timestamp AND no embeddings/species, so every
+    similarity signal is ~0. Without the both-null guard the score cut would
+    split them into singletons.
+    """
+    from encounters import cut_microsegments
+
+    photos = [
+        _null_ts_photo(1, 10, "DSC_8039.NEF"),
+        _null_ts_photo(2, 10, "DSC_8041.NEF"),
+        _null_ts_photo(3, 10, "DSC_8042.NEF"),
+        _null_ts_photo(4, 10, "DSC_8043.NEF"),
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 1
+    assert len(segments[0]) == 4
+
+
+def test_cut_null_timestamps_sort_last_by_file():
+    """Null-timestamp photos sort after all timestamped photos, by (folder, filename)."""
+    from encounters import cut_microsegments
+
+    emb = np.ones(768, dtype=np.float32)
+    species = [("robin", 0.9)]
+    photos = [
+        _null_ts_photo(99, 10, "DSC_8042.NEF"),
+        _make_photo(0, subj_emb=emb, global_emb=emb, species=species, photo_id=1),
+        _null_ts_photo(98, 10, "DSC_8041.NEF"),
+        _make_photo(5, subj_emb=emb, global_emb=emb, species=species, photo_id=2),
+    ]
+    segments = cut_microsegments(photos)
+    flat = [p["id"] for seg in segments for p in seg]
+    # Real-timestamp photos (1, 2) first in time order, then nulls by filename.
+    assert flat == [1, 2, 98, 99]
+
+
+def test_cut_asymmetric_null_still_cuts():
+    """A null-timestamp photo adjacent to a real one cuts cleanly.
+
+    The null cluster must never contaminate a real encounter.
+    """
+    from encounters import cut_microsegments
+
+    emb = np.ones(768, dtype=np.float32)
+    species = [("robin", 0.9)]
+    photos = [
+        _make_photo(0, subj_emb=emb, global_emb=emb, species=species, photo_id=1),
+        _make_photo(5, subj_emb=emb, global_emb=emb, species=species, photo_id=2),
+        _null_ts_photo(50, 10, "DSC_8039.NEF"),
+        _null_ts_photo(51, 10, "DSC_8041.NEF"),
+    ]
+    segments = cut_microsegments(photos)
+    # One real-timestamp segment, one null-timestamp segment — never merged.
+    assert len(segments) == 2
+    assert {p["id"] for p in segments[0]} == {1, 2}
+    assert {p["id"] for p in segments[1]} == {50, 51}

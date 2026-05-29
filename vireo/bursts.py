@@ -94,10 +94,19 @@ def detect_bursts(photos, config=None):
     if len(photos) <= 1:
         return [photos] if photos else []
 
-    # Sort by timestamp (should already be sorted within an encounter, but be safe)
+    # Sort by timestamp (should already be sorted within an encounter, but be
+    # safe). Null-timestamp photos sort AFTER timestamped ones, ordered by
+    # (folder_id, filename) — parity with encounters.cut_microsegments so a
+    # null-timestamp run lands at the end of the timeline rather than at
+    # datetime.min.
+    from datetime import datetime as _dt
     sorted_photos = sorted(
         photos,
-        key=lambda p: _parse_timestamp(p.get("timestamp")) or __import__("datetime").datetime.min,
+        key=lambda p: (
+            (0, _parse_timestamp(p.get("timestamp")), 0, "")
+            if _parse_timestamp(p.get("timestamp")) is not None
+            else (1, _dt.min, p.get("folder_id") or 0, p.get("filename") or "")
+        ),
     )
 
     cuts = set()

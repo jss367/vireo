@@ -331,10 +331,19 @@ def cut_microsegments(photos, config=None, emit_trace=False):
             return ([photos] if photos else []), []
         return [photos] if photos else []
 
-    # Sort by timestamp
+    # Sort by timestamp. Null-timestamp photos (scan I/O errors, unreadable
+    # files) sort AFTER all timestamped photos — never datetime.min, which
+    # would pile them at the top of the review timeline and read as "the whole
+    # pipeline failed to group." Within the null group, order by
+    # (folder_id, filename) so consecutive frames from one shoot stay adjacent
+    # even without EXIF, letting the both-null branch below keep them together.
     sorted_photos = sorted(
         photos,
-        key=lambda p: _parse_timestamp(p.get("timestamp")) or datetime.min,
+        key=lambda p: (
+            (0, _parse_timestamp(p.get("timestamp")), 0, "")
+            if _parse_timestamp(p.get("timestamp")) is not None
+            else (1, datetime.min, p.get("folder_id") or 0, p.get("filename") or "")
+        ),
     )
 
     cuts = set()
@@ -358,11 +367,24 @@ def cut_microsegments(photos, config=None, emit_trace=False):
         bid_b = sorted_photos[i + 1].get("burst_id")
         decision = None
 
+        both_null = ts_a is None and ts_b is None
+
         if bid_a is not None and bid_b is not None and bid_a == bid_b:
             decision = "burst_id_kept"
             recent_scores.append(score)
             if len(recent_scores) > 3:
                 recent_scores.pop(0)
+        elif both_null:
+            # Neither photo has a timestamp, so there's no time signal AND
+            # (for unreadable files) usually no embedding/species either —
+            # every similarity score is ~0. Cutting on score would split the
+            # whole null run into singletons. With no reliable basis to
+            # separate them, keep contiguous nulls together by file order.
+            # Asymmetric pairs (one null, one real) skip this branch and hit
+            # the inf time-cut below, so the null cluster never absorbs a real
+            # photo.
+            decision = "kept_no_timestamp"
+            recent_scores = []
         elif dt > cfg["hard_cut_time"]:
             cuts.add(i)
             recent_scores = []

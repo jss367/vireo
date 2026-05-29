@@ -765,6 +765,12 @@ def serialize_results(results):
             "burst_count": enc.get("burst_count"),
             "time_range": enc.get("time_range"),
             "photo_ids": [p["id"] for p in photos_list],
+            # Count photos with no EXIF timestamp (scan I/O errors / unreadable
+            # files). The review page badges encounters where this is non-zero
+            # so the user knows the group was assembled by file order, not time.
+            "missing_timestamp_count": sum(
+                1 for p in photos_list if not p.get("timestamp")
+            ),
         }
         # Surface per-cut-point trace when run_full_pipeline was invoked with
         # emit_trace=True (e.g. from /api/pipeline/regroup-live so the
