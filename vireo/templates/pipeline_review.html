@@ -4052,7 +4052,10 @@ function renderSpeciesBlock(title, rows) {
   html += '<div style="font-size:13px;font-weight:600;margin-bottom:6px;">' + escapeHtml(title) + '</div>';
   rows.forEach(function(sp) {
     var modelParts = (sp.models || []).map(function(m) {
-      return escapeHtml(m.model) + ' ' + (m.confidence * 100).toFixed(0) + '%';
+      var pct = (m.confidence * 100).toFixed(0) + '%';
+      // Some aggregate rows are confidence-only (no model name); show just the
+      // percentage rather than an empty label with a leading space.
+      return m.model ? escapeHtml(m.model) + ' ' + pct : pct;
     });
     html += '<div class="inspect-species-row">';
     html += '<span class="inspect-species-name">' + escapeHtml(sp.species) + '</span>';
