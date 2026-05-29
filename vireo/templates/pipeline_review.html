@@ -1481,12 +1481,12 @@ input[type="range"]::-moz-range-thumb {
     <span class="grm-hint" id="grmHint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Z = right 1:1 &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <div class="grm-commit-group" style="margin-left:auto;display:flex;align-items:center;gap:14px;">
       <label class="grm-commit-toggle">
-        <input type="checkbox" id="grmConfirmSpeciesChk" onchange="grmOnToggleChange()">
+        <input type="checkbox" id="grmConfirmSpeciesChk" onchange="grmOnToggleChange('species')">
         <span>Confirm species</span>
         <span class="grm-dirty-hint" id="grmSpeciesDirtyHint" style="display:none;"></span>
       </label>
       <label class="grm-commit-toggle">
-        <input type="checkbox" id="grmApplyFlagsChk" onchange="grmOnToggleChange()">
+        <input type="checkbox" id="grmApplyFlagsChk" onchange="grmOnToggleChange('flags')">
         <span>Apply picks/rejects</span>
         <span class="grm-dirty-hint" id="grmFlagsDirtyHint" style="display:none;"></span>
       </label>
@@ -3893,12 +3893,17 @@ function grmRefreshSpeciesKeywordState() {
   });
 }
 
-// User manually toggled a checkbox: record the override, then re-sync labels.
-function grmOnToggleChange() {
-  var spChk = document.getElementById('grmConfirmSpeciesChk');
-  var flChk = document.getElementById('grmApplyFlagsChk');
-  if (spChk) grmState.confirmSpeciesOverride = spChk.checked;
-  if (flChk) grmState.applyFlagsOverride = flChk.checked;
+// User manually toggled a checkbox: record the override for ONLY the box that
+// fired, then re-sync labels. Recording both would pin the untouched box's
+// override and break its smart default (null = follow the dirty heuristic).
+function grmOnToggleChange(which) {
+  if (which === 'species') {
+    var spChk = document.getElementById('grmConfirmSpeciesChk');
+    if (spChk) grmState.confirmSpeciesOverride = spChk.checked;
+  } else if (which === 'flags') {
+    var flChk = document.getElementById('grmApplyFlagsChk');
+    if (flChk) grmState.applyFlagsOverride = flChk.checked;
+  }
   grmUpdateApplyLabel();
 }
 

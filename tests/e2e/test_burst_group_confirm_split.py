@@ -24,28 +24,16 @@ import json
 import os
 import re
 
-import pytest
 from playwright.sync_api import expect
 
-# Known product bug (NOT a test defect): grmOnToggleChange() pins BOTH
-# overrides (confirmSpeciesOverride AND applyFlagsOverride) to their current
-# DOM state on EVERY checkbox toggle, instead of recording an override only
-# for the box the user actually clicked. So the realistic species-only flow —
-# uncheck "Apply picks/rejects" first, THEN type a new species — leaves
+# Regression guard for a fixed product bug: grmOnToggleChange() used to pin
+# BOTH overrides (confirmSpeciesOverride AND applyFlagsOverride) to their
+# current DOM state on EVERY checkbox toggle, instead of recording an override
+# only for the box the user actually clicked. So the realistic species-only
+# flow — uncheck "Apply picks/rejects" first, THEN type a new species — left
 # "Confirm species" stuck unchecked even though a real, pending species change
-# exists. That contradicts the design's per-box override intent ("track
-# whether the user has manually overridden EACH box") and the UI-truthfulness
-# rule (a real pending change must surface). The underlying apply logic is
-# correct (verified: with flags unchecked + species checked, no flag persists,
-# every frame is tagged, the burst is confirmed) — only the checkbox state
-# derivation is wrong. These two tests assert the INTENDED user flow; they are
-# strict-xfail so they flip to a hard failure (XPASS) the moment the bug is
-# fixed, forcing the marker's removal.
-_TOGGLE_PINS_BOTH_OVERRIDES = pytest.mark.xfail(
-    strict=True,
-    reason="grmOnToggleChange pins both overrides on any toggle; unchecking "
-    "flags then typing a species fails to auto-check Confirm species",
-)
+# existed. The fix records an override only for the box that fired (per-box
+# override intent), so the two tests below now exercise the intended flow.
 
 
 def _write_single_burst_cache(live_server, photo_ids, *, confirmed_species=None):
@@ -224,14 +212,12 @@ def test_unchecking_dirty_box_shows_amber_hint(live_server, page):
     expect(hint).to_contain_text("won't be saved")
 
 
-@_TOGGLE_PINS_BOTH_OVERRIDES
 def test_species_only_apply_leaves_flags_untouched_and_tags_all_frames(live_server, page):
     """Species-only apply (flags unchecked): no photo's flag changes, EVERY
     burst frame gets the species keyword, and the burst is marked confirmed.
 
     Intended flow: stage a flag move, uncheck "Apply picks/rejects", THEN type
-    a new species so "Confirm species" auto-checks. Currently xfail — see
-    _TOGGLE_PINS_BOTH_OVERRIDES."""
+    a new species so "Confirm species" auto-checks."""
     photo_ids = live_server["data"]["photos"][0:3]
     _write_single_burst_cache(live_server, photo_ids)
 
@@ -301,7 +287,6 @@ def test_flags_only_apply_leaves_species_unconfirmed(live_server, page):
     assert not (burst.get("species_override") or {}).get("confirmed")
 
 
-@_TOGGLE_PINS_BOTH_OVERRIDES
 def test_species_only_with_removed_photo_keeps_member_and_tags_it(live_server, page):
     """Truthfulness guard: mark a photo "Remove from group", leave flags
     UNCHECKED, confirm species → the removal is discarded (photo stays a burst
