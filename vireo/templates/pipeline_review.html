@@ -2787,29 +2787,14 @@ function openInspect(photoId) {
     html += '</div>';
   }
 
-  // Species predictions (filtered by confidence threshold)
-  if (enc && enc.species_predictions && enc.species_predictions.length > 0) {
-    var threshold = minConfidence / 100;
-    var filtered = enc.species_predictions.filter(function(sp) {
-      return (sp.models || []).some(function(m) { return m.confidence >= threshold; });
-    });
-    if (filtered.length > 0) {
-      html += '<div class="inspect-species-predictions">';
-      html += '<div style="font-size:13px;font-weight:600;margin-bottom:6px;">Species Predictions</div>';
-      filtered.forEach(function(sp) {
-        var modelParts = (sp.models || []).filter(function(m) {
-          return m.confidence >= threshold;
-        }).map(function(m) {
-          return escapeHtml(m.model) + ' ' + (m.confidence * 100).toFixed(0) + '%';
-        });
-        html += '<div class="inspect-species-row">';
-        html += '<span class="inspect-species-name">' + escapeHtml(sp.species) + '</span>';
-        html += '<span class="inspect-species-conf">' + modelParts.join(', ') + '</span>';
-        html += '</div>';
-      });
-      html += '</div>';
-    }
-  }
+  // Species predictions (filtered by confidence threshold): this photo, then
+  // the encounter consensus. This legacy panel only runs for flat caches with
+  // no burst data (burst-backed photos route to the GRM above), so encounter
+  // scope is the only meaningful group here.
+  var encPhotos = (enc && enc.photo_ids)
+    ? enc.photo_ids.map(function(pid) { return findPhotoInResults(pid); }).filter(Boolean)
+    : [];
+  html += buildSpeciesPredictionsHtml(photo, buildBurstConsensus(encPhotos), 'Encounter consensus', minConfidence / 100);
 
   // Score waterfall
   html += '<div class="score-waterfall">';
@@ -4181,6 +4166,134 @@ function grmRefreshSelectedLoupe() {
   }
 }
 
+// Render a single species-prediction block (title + rows). Each row in `rows`
+// is {species, models: [{model, confidence}]}. Returns '' when there are no
+// rows so we never emit an empty header.
+function renderSpeciesBlock(title, rows) {
+  if (!rows || rows.length === 0) return '';
+  var html = '<div class="inspect-species-predictions">';
+  html += '<div style="font-size:13px;font-weight:600;margin-bottom:6px;">' + escapeHtml(title) + '</div>';
+  rows.forEach(function(sp) {
+    var modelParts = (sp.models || []).map(function(m) {
+      var pct = (m.confidence * 100).toFixed(0) + '%';
+      // Some aggregate rows are confidence-only (no model name); show just the
+      // percentage rather than an empty label with a leading space.
+      var part = m.model ? escapeHtml(m.model) + ' ' + pct : pct;
+      // Consensus rows carry photo_count — the number of frames where this
+      // model predicted this species. Surface it so a minority species
+      // predicted on a single frame isn't read as a broad consensus
+      // (CORE_PHILOSOPHY "No black boxes"). Per-photo rows have no photo_count
+      // (each is one frame) and stay count-free.
+      if (typeof m.photo_count === 'number') {
+        part += ' (' + m.photo_count + ' frame' + (m.photo_count === 1 ? '' : 's') + ')';
+      }
+      return part;
+    });
+    html += '<div class="inspect-species-row">';
+    html += '<span class="inspect-species-name">' + escapeHtml(sp.species) + '</span>';
+    html += '<span class="inspect-species-conf">' + modelParts.join(', ') + '</span>';
+    html += '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+// Group a single photo's raw species_top5 ([species, confidence, model] rows)
+// into the same {species, models} shape the aggregate uses, dropping models
+// below `threshold` and sorting by confidence descending.
+function buildPerPhotoSpeciesRows(photo, threshold) {
+  var top5 = (photo && photo.species_top5) || [];
+  if (top5.length === 0) return [];
+  var bySpecies = {};
+  var order = [];
+  top5.forEach(function(entry) {
+    var sp = entry[0];
+    var conf = entry[1];
+    var model = entry[2] || 'unknown';
+    if (conf < threshold) return;
+    if (!bySpecies[sp]) { bySpecies[sp] = []; order.push(sp); }
+    bySpecies[sp].push({ model: model, confidence: conf });
+  });
+  var rows = order.map(function(sp) {
+    var models = bySpecies[sp].slice().sort(function(a, b) { return b.confidence - a.confidence; });
+    return { species: sp, models: models };
+  });
+  rows.sort(function(a, b) { return b.models[0].confidence - a.models[0].confidence; });
+  return rows;
+}
+
+// Drop aggregate rows (and their models) below `threshold`.
+function filterAggSpeciesRows(rows, threshold) {
+  if (!threshold) return rows || [];
+  return (rows || []).map(function(sp) {
+    return { species: sp.species, models: (sp.models || []).filter(function(m) { return m.confidence >= threshold; }) };
+  }).filter(function(sp) { return sp.models.length > 0; });
+}
+
+// Client-side mirror of _build_species_predictions (vireo/pipeline.py): aggregate
+// a list of photo objects' species_top5 into consensus rows
+// ({species, count, avg_confidence, models:[{model, confidence, photo_count}]},
+// sorted by total count desc, models sorted by name). Used to rebuild a burst's
+// predictions after a local detach so the cached/displayed "Burst consensus"
+// reflects only the photos still in that burst — not the ones split off.
+function buildBurstConsensus(photos) {
+  var modelData = {};   // species -> model -> {confs:[], count:0}
+  var order = [];       // species insertion order (stable tiebreak, matches server)
+  (photos || []).forEach(function(p) {
+    ((p && p.species_top5) || []).forEach(function(entry) {
+      var sp = entry[0];
+      var conf = entry[1];
+      var model = entry[2] || 'unknown';
+      if (!modelData[sp]) { modelData[sp] = {}; order.push(sp); }
+      if (!modelData[sp][model]) modelData[sp][model] = { confs: [], count: 0 };
+      modelData[sp][model].confs.push(conf);
+      modelData[sp][model].count += 1;
+    });
+  });
+  var round4 = function(x) { return Math.round(x * 1e4) / 1e4; };
+  var rows = order.map(function(sp) {
+    var models = [];
+    var totalCount = 0, totalConfSum = 0, totalConfCount = 0;
+    Object.keys(modelData[sp]).sort().forEach(function(model) {
+      var data = modelData[sp][model];
+      var sum = data.confs.reduce(function(a, b) { return a + b; }, 0);
+      models.push({ model: model, confidence: round4(sum / data.confs.length), photo_count: data.count });
+      totalCount += data.count;
+      totalConfSum += sum;
+      totalConfCount += data.confs.length;
+    });
+    return {
+      species: sp,
+      count: totalCount,
+      avg_confidence: totalConfCount ? round4(totalConfSum / totalConfCount) : 0,
+      models: models,
+    };
+  });
+  // Stable sort by total count desc (insertion order breaks ties, like the server).
+  rows.sort(function(a, b) { return b.count - a.count; });
+  return rows;
+}
+
+// Build the per-photo + consensus species prediction blocks. The per-photo
+// block changes as you select different photos; the consensus block is the
+// per-species mean over the scope's frames. The title names only the scope
+// ("Burst consensus" / "Encounter consensus") — it deliberately does NOT claim
+// a global frame denominator, because each row is averaged only over the frames
+// where that species appears (surfaced as per-model frame counts in
+// renderSpeciesBlock). Callers pass the scope's own predictions
+// (`consensusRows`) and title so the block matches what's on screen — burst for
+// the GRM, encounter for the flat-cache fallback. `threshold` (0..1) filters by
+// confidence; pass 0 for none.
+function buildSpeciesPredictionsHtml(photo, consensusRows, consensusTitleText, threshold) {
+  threshold = threshold || 0;
+  var html = '';
+  html += renderSpeciesBlock('Species Predictions (this photo)', buildPerPhotoSpeciesRows(photo, threshold));
+  if (consensusRows && consensusRows.length > 0) {
+    html += renderSpeciesBlock(consensusTitleText, filterAggSpeciesRows(consensusRows, threshold));
+  }
+  return html;
+}
+
 function buildPipelineMetadataHtml(photo) {
   var enc = pipelineResults.encounters[grmState.encIdx];
   var label = (photo.label || '').toLowerCase();
@@ -4203,21 +4316,26 @@ function buildPipelineMetadataHtml(photo) {
     html += '</div>';
   }
 
-  // Species predictions
-  if (enc && enc.species_predictions && enc.species_predictions.length > 0) {
-    html += '<div class="inspect-species-predictions">';
-    html += '<div style="font-size:13px;font-weight:600;margin-bottom:6px;">Species Predictions</div>';
-    enc.species_predictions.forEach(function(sp) {
-      var modelParts = (sp.models || []).map(function(m) {
-        return escapeHtml(m.model) + ' ' + (m.confidence * 100).toFixed(0) + '%';
-      });
-      html += '<div class="inspect-species-row">';
-      html += '<span class="inspect-species-name">' + escapeHtml(sp.species) + '</span>';
-      html += '<span class="inspect-species-conf">' + modelParts.join(', ') + '</span>';
-      html += '</div>';
-    });
-    html += '</div>';
-  }
+  // Species predictions: this photo, then the consensus for the burst being
+  // reviewed (the GRM is scoped to a single burst — see openGroupReview). Using
+  // burst-level predictions keeps sibling bursts in the same encounter out of
+  // the consensus, and grmState.items (this burst's photos) gives the honest
+  // "frames with predictions" denominator. Legacy caches store bursts as raw
+  // photo-id arrays with no species_predictions field; detect that with
+  // Array.isArray and fall back to encounter scope so the consensus block isn't
+  // dropped. An empty burst array stays burst-scoped (the block is simply
+  // omitted) rather than re-leaking sibling-burst predictions.
+  // Compute the consensus fresh from this burst's current photos rather than
+  // trusting the cached burst.species_predictions, which can go stale after a
+  // local detach (single-photo bursts inherit the parent's predictions) or a
+  // reclassification (per-photo species_top5 updates without rebuilding burst
+  // aggregates). Fresh aggregation keeps "Burst consensus" consistent with the
+  // per-photo blocks and the photos actually in this burst. Use the same
+  // non-removed item set as the visible cards (_grmVisibleItems) so a photo the
+  // reviewer has marked for removal (but not yet applied) doesn't keep
+  // influencing the consensus.
+  var consRows = buildBurstConsensus(_grmVisibleItems());
+  html += buildSpeciesPredictionsHtml(photo, consRows, 'Burst consensus', 0);
 
   // Score waterfall
   var scores = [
@@ -4974,12 +5092,30 @@ async function grmApply() {
     var enc = pipelineResults.encounters[grmState.encIdx];
     var burst = enc.bursts[grmState.burstIdx];
     var burstIds = burst.photo_ids || burst;
+    // Whether the source burst is the modern object shape (carries its own
+    // predictions) vs a legacy raw photo-id array (no predictions field).
+    var srcHasPreds = burst && Array.isArray(burst.species_predictions);
     grmState.removed.forEach(function(pid) {
       var idx = burstIds.indexOf(pid);
       if (idx >= 0) burstIds.splice(idx, 1);
-      // Add as a new single-photo burst in the same encounter
-      enc.bursts.push({ photo_ids: [pid], species_predictions: burst.species_predictions || [], species_override: null });
+      // New single-photo burst: rebuild its consensus from just this photo so it
+      // doesn't inherit the source burst's predictions for photos it no longer
+      // contains (the loupe and the saved cache both trust burst.species_predictions).
+      var photo = findPhotoInResults(pid);
+      enc.bursts.push({
+        photo_ids: [pid],
+        species_predictions: buildBurstConsensus(photo ? [photo] : []),
+        species_override: null,
+      });
     });
+    // Recompute the shortened source burst's consensus from its remaining
+    // photos, so it no longer reflects the detached ones. Skip legacy array
+    // bursts (no predictions field to maintain).
+    if (srcHasPreds) {
+      burst.species_predictions = buildBurstConsensus(
+        burstIds.map(function(id) { return findPhotoInResults(id); }).filter(Boolean)
+      );
+    }
     // Clean up empty burst
     if (burstIds.length === 0) {
       enc.bursts.splice(grmState.burstIdx, 1);
