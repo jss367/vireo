@@ -36,10 +36,25 @@ from playwright.sync_api import expect
 # override intent), so the two tests below now exercise the intended flow.
 
 
-def _write_single_burst_cache(live_server, photo_ids, *, confirmed_species=None):
+def _write_single_burst_cache(
+    live_server,
+    photo_ids,
+    *,
+    confirmed_species=None,
+    burst_override_species=None,
+    burst_override_confirmed=True,
+):
     """Write a pipeline cache with one encounter containing one multi-frame
     burst over `photo_ids`. Optionally pre-confirm the burst's species so we
     can test the "same species → no-op, stays unchecked" smart default.
+
+    By default the per-burst `species_override` mirrors `confirmed_species`
+    (encounter and burst agree). Pass `burst_override_species` to give the
+    burst an override species that DIFFERS from the encounter
+    `confirmed_species` — this models a burst confirmed/overridden as X while
+    the encounter label is Y, the case the confirm/apply split must not clobber
+    when applying flags only. `burst_override_confirmed` toggles whether that
+    override is confirmed (defaults True).
     """
     db = live_server["db"]
     placeholders = ",".join("?" for _ in photo_ids)
@@ -61,14 +76,19 @@ def _write_single_burst_cache(live_server, photo_ids, *, confirmed_species=None)
         for row in rows
     ]
     ids = [p["id"] for p in photos]
+    if burst_override_species is not None:
+        override = {
+            "species": burst_override_species,
+            "confirmed": burst_override_confirmed,
+        }
+    elif confirmed_species:
+        override = {"species": confirmed_species, "confirmed": True}
+    else:
+        override = None
     burst = {
         "photo_ids": ids,
         "species_predictions": [],
-        "species_override": (
-            {"species": confirmed_species, "confirmed": True}
-            if confirmed_species
-            else None
-        ),
+        "species_override": override,
     }
     cache = {
         "photos": photos,
@@ -285,6 +305,62 @@ def test_flags_only_apply_leaves_species_unconfirmed(live_server, page):
     cache = _read_cache(live_server)
     burst = cache["encounters"][0]["bursts"][0]
     assert not (burst.get("species_override") or {}).get("confirmed")
+
+
+def test_flags_only_apply_preserves_differing_burst_override(live_server, page):
+    """Regression: a burst CONFIRMED as override species X while the encounter
+    label is a different species Y must NOT have X replaced by Y when the user
+    applies pick/reject edits only.
+
+    On open the species field must reflect the burst's actual override (X), not
+    the encounter label (Y), so "Confirm species" stays UNchecked. Moving a
+    frame to rejects and clicking Apply then runs the flags-only path and leaves
+    the override species untouched — it does not silently post Y to
+    /api/encounters/species (which would untag X, tag Y).
+    """
+    # Pick species that the conftest fixture does NOT pre-tag onto these frames
+    # (it only tags photo[0]="Red-tailed Hawk", photo[3]="American Robin"), so a
+    # post-apply keyword check cleanly reflects what THIS apply did.
+    override_species = "Cooper's Hawk"      # X — what the burst is confirmed as
+    encounter_species = "Northern Harrier"  # Y — the encounter label/prediction
+    photo_ids = live_server["data"]["photos"][0:3]
+    _write_single_burst_cache(
+        live_server,
+        photo_ids,
+        confirmed_species=encounter_species,
+        burst_override_species=override_species,
+        burst_override_confirmed=True,
+    )
+
+    _open_burst_modal(page, live_server)
+
+    # Field reflects the BURST override (X), not the encounter label (Y), and
+    # "Confirm species" defaults OFF because field == already-confirmed species.
+    expect(page.locator("#grmSpecies")).to_have_value(override_species)
+    expect(page.locator("#grmConfirmSpeciesChk")).not_to_be_checked()
+
+    # Reject the selected frame; flags auto-checks. Apply runs flags-only.
+    page.keyboard.press("x")
+    expect(page.locator("#grmApplyFlagsChk")).to_be_checked()
+    expect(page.locator("#grmConfirmSpeciesChk")).not_to_be_checked()
+
+    with page.expect_response("**/api/pipeline/group/apply"):
+        page.locator("#grmApplyBtn").click()
+    expect(page.locator("#grmOverlay")).not_to_have_class(re.compile(r"\bopen\b"))
+
+    # The reject persisted.
+    flags = _photo_flags(live_server, photo_ids)
+    assert sorted(flags.values()) == ["none", "none", "rejected"], flags
+
+    # The burst's override species is STILL X (not replaced by Y).
+    cache = _read_cache(live_server)
+    burst = cache["encounters"][0]["bursts"][0]
+    assert burst["species_override"]["species"] == override_species, burst["species_override"]
+    assert burst["species_override"]["confirmed"] is True
+
+    # No frame was tagged with the encounter species Y by a stray species call.
+    tagged_y = _photos_with_species(live_server, photo_ids, encounter_species)
+    assert tagged_y == set(), tagged_y
 
 
 def test_species_only_with_removed_photo_keeps_member_and_tags_it(live_server, page):

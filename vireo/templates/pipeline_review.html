@@ -3579,17 +3579,24 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
 
   var items = photoIds.map(function(pid) { return photoMap[pid]; }).filter(Boolean);
 
-  // Reset the species input to this encounter's value so a stale value from a
+  // Reset the species input to this burst's value so a stale value from a
   // previously-reviewed group doesn't leak in when the prior modal was closed
-  // via × or Escape (only Apply & Close clears it).
-  var initialSpecies = enc.confirmed_species || (enc.species ? enc.species[0] : '') || '';
+  // via × or Escape (only Apply & Close clears it). A per-burst override wins
+  // over the encounter label/prediction so the field reflects what THIS burst
+  // is actually tagged/confirmed as — otherwise applying flags-only would post
+  // the encounter species and silently replace the burst's existing override
+  // (untag X, tag Y). Matches renderSpeciesWidget's burst-override precedence.
+  var burstOvr = burst && burst.species_override;
+  var initialSpecies = (burstOvr && burstOvr.species)
+    || enc.confirmed_species
+    || (enc.species ? enc.species[0] : '')
+    || '';
 
   // The species this burst is ACTUALLY confirmed as (vs initialSpecies, which
   // falls back to the unconfirmed top prediction so the input pre-fills). The
   // "Confirm species" checkbox smart-default keys off THIS: if the field value
   // differs from what's already confirmed, confirming is a meaningful action
   // (including confirming a so-far-unconfirmed prediction). '' = unconfirmed.
-  var burstOvr = burst && burst.species_override;
   var initialConfirmedSpecies = '';
   if (burstOvr && burstOvr.confirmed === true && burstOvr.species) {
     initialConfirmedSpecies = burstOvr.species;
