@@ -285,14 +285,7 @@ async function _syncDiscardFromLightbox(changeIds, photoId) {
     });
   } catch(e) { return; }
 
-  var discardSet = {};
-  changeIds.forEach(function(id) { discardSet[id] = true; });
-  if (_syncPreviewData && _syncPreviewData.photos) {
-    _syncPreviewData.photos.forEach(function(p) {
-      p.changes = p.changes.filter(function(c) { return !discardSet[c.id]; });
-    });
-    _syncPreviewData.photos = _syncPreviewData.photos.filter(function(p) { return p.changes.length > 0; });
-  }
+  _syncForgetChanges(changeIds);
 
   var photoAfter = _syncFindPhotoData(photoId);
   var visibleAfter = _syncVisibleChangesFor(photoAfter);
@@ -339,7 +332,9 @@ document.addEventListener('click', function(e) {
     var pid = parseInt(photoBtn.getAttribute('data-sync-discard-photo'), 10);
     var photo = _syncFindPhotoData(pid);
     if (photo) {
-      var ids = photo.changes.map(function(c) { return c.id; });
+      // Only discard the changes the user can see — hidden-by-filter
+      // changes must survive a filtered "Discard all".
+      var ids = _syncVisibleChangesFor(photo).map(function(c) { return c.id; });
       _syncDiscardFromLightbox(ids, pid);
     }
   }
@@ -354,6 +349,16 @@ document.addEventListener('lightbox:closed', function() {
   _syncDestroyLightboxPanel();
 });
 
+function _syncForgetChanges(changeIds) {
+  if (!_syncPreviewData || !_syncPreviewData.photos || !changeIds || changeIds.length === 0) return;
+  var drop = {};
+  changeIds.forEach(function(id) { drop[id] = true; });
+  _syncPreviewData.photos.forEach(function(p) {
+    p.changes = p.changes.filter(function(c) { return !drop[c.id]; });
+  });
+  _syncPreviewData.photos = _syncPreviewData.photos.filter(function(p) { return p.changes.length > 0; });
+}
+
 async function discardChange(changeId, rowEl) {
   try {
     await safeFetch('/api/sync/discard', {
@@ -361,6 +366,7 @@ async function discardChange(changeId, rowEl) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({change_ids: [changeId]}),
     });
+    _syncForgetChanges([changeId]);
     if (rowEl) {
       rowEl.style.opacity = '0.3';
       rowEl.style.textDecoration = 'line-through';
@@ -375,6 +381,7 @@ async function discardPhotoChanges(changeIds, btn) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({change_ids: changeIds}),
     });
+    _syncForgetChanges(changeIds);
     var row = btn.closest('[style*="border-bottom"]');
     if (row) row.style.display = 'none';
   } catch(e) {}
