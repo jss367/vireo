@@ -4170,12 +4170,12 @@ def test_save_detections(tmp_path):
     ids = db.save_detections(pid, detections, detector_model="MDV6-yolov9-c")
     assert len(ids) == 2
     rows = db.conn.execute(
-        "SELECT * FROM detections WHERE photo_id = ? ORDER BY id",
+        "SELECT * FROM detections WHERE photo_id = ?",
         (pid,),
     ).fetchall()
     assert len(rows) == 2
-    assert rows[0]["box_x"] == 0.1
-    assert rows[1]["box_x"] == 0.5
+    # Content-addressed IDs aren't insertion-ordered, so compare as a set.
+    assert {round(r["box_x"], 4) for r in rows} == {0.1, 0.5}
 
 
 def test_save_detections_replaces_existing(tmp_path):
@@ -4802,6 +4802,21 @@ def test_write_detection_batch_retires_stale_rows(tmp_path):
     ids_abc = db.write_detection_batch(photo_id, "megadetector-v6", [a, b, c])
     id_a, id_b, id_c = ids_abc
 
+    # Plant a prediction against every detection. The retained ones
+    # (id_a, id_c) must survive the second write; only the retired one
+    # (id_b) should cascade-disappear. This pins the cascade contract:
+    # a bad implementation that DELETEs all rows and reinserts the kept
+    # ones would still produce the same `remaining` set below, but it
+    # would wipe id_a and id_c's predictions too.
+    for det_id, species in [(id_a, "A"), (id_b, "B"), (id_c, "C")]:
+        db.conn.execute(
+            """INSERT INTO predictions
+                 (detection_id, classifier_model, labels_fingerprint, species, confidence)
+               VALUES (?, 'classifier-v1', 'legacy', ?, 0.95)""",
+            (det_id, species),
+        )
+    db.conn.commit()
+
     ids_ac = db.write_detection_batch(photo_id, "megadetector-v6", [a, c])
     assert ids_ac == [id_a, id_c], "stable IDs for retained boxes"
 
@@ -4810,6 +4825,16 @@ def test_write_detection_batch_retires_stale_rows(tmp_path):
         (photo_id, "megadetector-v6"),
     ).fetchall()}
     assert remaining == {id_a, id_c}, f"stale id {id_b} must be deleted"
+
+    remaining_predictions = {
+        (r["detection_id"], r["species"]) for r in db.conn.execute(
+            "SELECT detection_id, species FROM predictions"
+        ).fetchall()
+    }
+    assert remaining_predictions == {(id_a, "A"), (id_c, "C")}, (
+        "predictions on retained detections must survive; only id_b's "
+        f"prediction should have cascaded away, got {remaining_predictions}"
+    )
 
 
 def test_write_detection_batch_second_writer_does_not_cascade_predictions(tmp_path):
@@ -4866,6 +4891,58 @@ def test_write_detection_batch_second_writer_does_not_cascade_predictions(tmp_pa
         "B's write must not CASCADE-delete A's prediction; "
         f"got {pred_count_after} predictions remaining"
     )
+
+
+def test_pairing_recomputes_detection_ids_so_photo_id_reuse_is_safe(tmp_path):
+    """Regression: when raw+jpeg pairing moves a detection to the primary photo,
+    its content-addressed id MUST be recomputed against the primary's photo_id.
+
+    Otherwise a later photo that reuses the companion's freed rowid (SQLite
+    INTEGER PRIMARY KEY without AUTOINCREMENT recycles ids) could produce a
+    detection whose computed id collides with the stale-moved row, and the
+    UPSERT would silently update the wrong photo's detection.
+    """
+    from db import Database
+    from detection_id import detection_id as compute_id
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, fid)
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
+                           file_size=1, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG_1.cr3", extension=".cr3",
+                          file_size=1, file_mtime=1.0)
+
+    box = {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}
+    det_ids = db.write_detection_batch(jpeg_id, "MDV6", [
+        {"box": box, "confidence": 0.9, "category": "animal"},
+    ])
+    db.add_prediction(det_ids[0], "Robin", 0.95, "bioclip")
+
+    _pair_raw_jpeg_companions(db)
+
+    # After pairing: the surviving detection's id is computed against the
+    # primary (raw) photo's id, not the companion's.
+    expected_new_id = compute_id(
+        raw_id, "MDV6", (box["x"], box["y"], box["w"], box["h"]), "animal",
+    )
+    rows = db.conn.execute(
+        "SELECT id, photo_id FROM detections WHERE photo_id = ?", (raw_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == expected_new_id, (
+        "moved detection's id must be recomputed against the new photo_id"
+    )
+
+    # Prediction followed the rehash.
+    pred = db.conn.execute(
+        "SELECT species FROM predictions WHERE detection_id = ?",
+        (expected_new_id,),
+    ).fetchone()
+    assert pred is not None and pred["species"] == "Robin"
 
 
 def test_multiple_predictions_per_detection(tmp_path):

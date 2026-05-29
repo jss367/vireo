@@ -93,10 +93,12 @@ def write_detection_batch(self, photo_id, detector_model, detections):
     for det in detections:
         det_id = detection_id(photo_id, detector_model, det.box, det.category)
         self.conn.execute("""
-            INSERT OR REPLACE INTO detections
+            INSERT INTO detections
               (id, photo_id, detector_model, box_x, box_y, box_w, box_h,
                detector_confidence, category)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              detector_confidence = excluded.detector_confidence
         """, (det_id, photo_id, detector_model, det.box.x, det.box.y,
               det.box.w, det.box.h, det.confidence, det.category))
         ids.append(det_id)
@@ -105,7 +107,7 @@ def write_detection_batch(self, photo_id, detector_model, detections):
     return ids
 ```
 
-Two pipelines concurrently writing the same (photo, model) now produce identical IDs and the same row content. `INSERT OR REPLACE` is idempotent for matching rows. Stale detections (boxes the model no longer produces) need explicit cleanup — handled by deleting any existing row whose ID is *not* in the new ID set:
+Two pipelines concurrently writing the same (photo, model) now produce identical IDs and the same row content. `INSERT ... ON CONFLICT(id) DO UPDATE` is idempotent for matching rows and crucially does NOT fire `ON DELETE CASCADE` on `predictions.detection_id` the way `INSERT OR REPLACE` would (replace deletes the conflicting row, then inserts). Stale detections (boxes the model no longer produces) need explicit cleanup — handled by deleting any existing row whose ID is *not* in the new ID set:
 
 ```python
 new_ids = set(ids)

@@ -14,8 +14,15 @@ import hashlib
 
 
 def positive_int_hash(*parts: str) -> int:
-    """Return a 52-bit non-negative int derived from SHA-256 of the parts."""
-    payload = "|".join(parts).encode("utf-8")
+    """Return a 52-bit non-negative int derived from SHA-256 of the parts.
+
+    Uses length-prefix encoding (``len:value`` per part) so the boundary
+    between parts is unambiguous even if a part itself contains the
+    separator character. Today's callers only feed alphanumeric/dotted
+    strings, but pinning the encoding now means future callers don't
+    have to audit for delimiter collisions.
+    """
+    payload = "".join(f"{len(p)}:{p}" for p in parts).encode("utf-8")
     digest = hashlib.sha256(payload).hexdigest()
     return int(digest[:13], 16)  # 13 hex chars == 52 bits
 

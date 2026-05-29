@@ -8210,11 +8210,17 @@ class Database:
             (photo_id, detector_model),
         ).fetchall()]
         stale = [eid for eid in existing if eid not in new_ids]
-        if stale:
-            placeholders = ",".join("?" for _ in stale)
+        # Chunk to stay under SQLite's compile-time SQLITE_MAX_VARIABLE_NUMBER
+        # (defaults to 999 in older builds, 32766 in newer). A single photo
+        # rarely has >1k detections today, but the chunking is cheap insurance
+        # against future detectors that produce many small boxes.
+        CHUNK = 500
+        for i in range(0, len(stale), CHUNK):
+            chunk = stale[i:i + CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
             self.conn.execute(
                 f"DELETE FROM detections WHERE id IN ({placeholders})",
-                stale,
+                chunk,
             )
         return ids
 

@@ -289,11 +289,64 @@ def _pair_raw_jpeg_companions(db):
         )
 
         # Transfer detections (and their cascaded predictions) from companion to primary.
-        # Detections are linked to photos; predictions cascade through detection_id.
-        db.conn.execute(
-            "UPDATE detections SET photo_id = ? WHERE photo_id = ?",
-            (primary["id"], companion["id"]),
-        )
+        # Detection IDs are content-addressed on (photo_id, detector_model, box,
+        # category) — see vireo/detection_id.py. A bare `UPDATE photo_id` would
+        # leave the row's `id` column stale (still hashed against the companion's
+        # photo_id); a later detector run on the primary that produced the same
+        # box would then either collide on the stale id (if SQLite reused the
+        # companion's rowid for a new photo) or, more commonly, never match and
+        # so the stale row would be reaped by the stale-cleanup DELETE in
+        # `_upsert_detection_rows`, cascading away its predictions. Recompute
+        # the id, redirect predictions to the new id, then drop the stale row.
+        from detection_id import detection_id as _detection_id
+
+        moving = db.conn.execute(
+            "SELECT id, detector_model, box_x, box_y, box_w, box_h,"
+            " detector_confidence, category"
+            " FROM detections WHERE photo_id = ?",
+            (companion["id"],),
+        ).fetchall()
+        for det in moving:
+            new_id = _detection_id(
+                primary["id"], det["detector_model"],
+                (det["box_x"], det["box_y"], det["box_w"], det["box_h"]),
+                det["category"],
+            )
+            if new_id == det["id"]:
+                # Cannot happen in practice (photo_id changed) but defensive.
+                db.conn.execute(
+                    "UPDATE detections SET photo_id = ? WHERE id = ?",
+                    (primary["id"], det["id"]),
+                )
+                continue
+            # Insert the row under the new id. If the primary already has a
+            # detection for the same (model, box, category), the UPSERT no-ops
+            # and we just discard the companion's row below.
+            db.conn.execute(
+                "INSERT INTO detections"
+                " (id, photo_id, detector_model, box_x, box_y, box_w, box_h,"
+                "  detector_confidence, category)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(id) DO NOTHING",
+                (new_id, primary["id"], det["detector_model"],
+                 det["box_x"], det["box_y"], det["box_w"], det["box_h"],
+                 det["detector_confidence"], det["category"]),
+            )
+            # Redirect predictions to the new detection id. ON CONFLICT in
+            # predictions is unlikely (would require the primary already had
+            # a prediction for this species against the same detection) but
+            # IGNORE keeps us defensive.
+            db.conn.execute(
+                "UPDATE OR IGNORE predictions SET detection_id = ? WHERE detection_id = ?",
+                (new_id, det["id"]),
+            )
+            # Drop any predictions that lost the UPDATE race (duplicate-key)
+            # along with the now-orphan companion detection row (CASCADE
+            # cleans up any remaining predictions tied to the old id).
+            db.conn.execute(
+                "DELETE FROM detections WHERE id = ?",
+                (det["id"],),
+            )
 
         # Transfer pending_changes from companion to primary. No dedup needed
         # here (unlike the inat_submissions block below): pending_changes has
