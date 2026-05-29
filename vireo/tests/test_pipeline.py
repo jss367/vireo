@@ -333,6 +333,168 @@ def test_load_photo_features_subject_absent_true_for_empty_scene_run(tmp_path):
     )
 
 
+def test_load_photo_features_reads_mask_fields_per_variant(tmp_path):
+    """Mask-derived fields (mask_path, subject_size, subject_tenengrad,
+    bg_tenengrad, crop_complete) must come from photo_masks for the
+    workspace's configured sam2_variant — NOT from the denormalised photos
+    row. Codex P2 on PR #907: with SLOT_CAP=2, a peer pipeline on the same
+    photo with a different sam2_variant can overwrite the denormalised
+    columns between this run's extract_masks and regroup. Reading per-
+    variant from photo_masks keeps regroup correct.
+    """
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    pid = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
+
+    # This workspace's pipeline run wrote a sam2-small mask + features.
+    db.upsert_photo_mask(
+        photo_id=pid, variant="sam2-small",
+        path="/masks/a.sam2-small.png",
+        detector_model="megadetector", prompt_x=0.2, prompt_y=0.2,
+        prompt_w=0.4, prompt_h=0.4,
+        subject_size=0.111, subject_tenengrad=222.0,
+        bg_tenengrad=33.0, crop_complete=0.95,
+    )
+    # Peer workspace's run with sam2-large wrote its own row AND
+    # denormalised LARGE's values into the photos row (set_active_mask_
+    # variant). This is exactly the race the fix targets: by the time
+    # our regroup reads, the photos row reflects the peer's mask, not
+    # ours.
+    db.upsert_photo_mask(
+        photo_id=pid, variant="sam2-large",
+        path="/masks/a.sam2-large.png",
+        detector_model="megadetector", prompt_x=0.2, prompt_y=0.2,
+        prompt_w=0.4, prompt_h=0.4,
+        subject_size=0.999, subject_tenengrad=888.0,
+        bg_tenengrad=77.0, crop_complete=0.55,
+    )
+    db.set_active_mask_variant(pid, "sam2-large")
+    db.conn.commit()
+
+    # Sanity: the photos row really does hold the peer's values now.
+    row = db.conn.execute(
+        "SELECT mask_path, subject_size, subject_tenengrad, bg_tenengrad, "
+        "crop_complete FROM photos WHERE id = ?", (pid,),
+    ).fetchone()
+    assert row["mask_path"] == "/masks/a.sam2-large.png"
+    assert row["subject_size"] == 0.999
+
+    # Our regroup, configured for sam2-small, must see OUR values via
+    # the per-variant join — not the peer's denormalised state.
+    photos = load_photo_features(
+        db, config={"pipeline": {"sam2_variant": "sam2-small"}},
+    )
+    assert len(photos) == 1
+    p = photos[0]
+    assert p["mask_path"] == "/masks/a.sam2-small.png", (
+        "mask_path must come from photo_masks[sam2-small], not the "
+        "peer-overwritten denormalised photos row"
+    )
+    assert p["subject_size"] == 0.111
+    assert p["subject_tenengrad"] == 222.0
+    assert p["bg_tenengrad"] == 33.0
+    assert p["crop_complete"] == 0.95
+
+
+def test_load_photo_features_drops_subject_embedding_when_mask_variant_mismatches(
+    tmp_path,
+):
+    """The DINO subject embedding is cropped from a specific SAM mask, so
+    using it when a peer overwrote it with an embedding cropped from a
+    different SAM variant silently corrupts grouping. Codex P2 on PR #907:
+    load_photo_features must drop the subject embedding when its stored
+    mask variant doesn't match the workspace's configured sam2_variant.
+    The pipeline already tolerates missing subject embeddings (same path
+    as a never-extracted photo); the global embedding (mask-independent)
+    survives the gate.
+    """
+    import numpy as np
+    from db import Database
+    from dino_embed import embedding_to_blob
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    pid = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
+
+    emb = np.ones(768, dtype=np.float32)
+    emb = emb / np.linalg.norm(emb)
+    # Peer pipeline on sam2-large overwrote both the embedding and its
+    # tracking column. Our workspace expects sam2-small.
+    db.update_photo_embeddings(
+        pid,
+        dino_subject_embedding=embedding_to_blob(emb),
+        dino_global_embedding=embedding_to_blob(emb),
+        variant="vit-b14",
+        subject_mask_variant="sam2-large",
+    )
+    db.conn.commit()
+
+    photos = load_photo_features(
+        db,
+        config={
+            "pipeline": {
+                "sam2_variant": "sam2-small",
+                "dinov2_variant": "vit-b14",
+            },
+        },
+    )
+    assert len(photos) == 1
+    p = photos[0]
+    assert p["dino_subject_embedding"] is None, (
+        "subject embedding cropped from sam2-large must not be reused "
+        "when this workspace is configured for sam2-small"
+    )
+    # Global embedding survives — it's computed on the unmasked proxy
+    # and doesn't depend on the SAM variant.
+    assert p["dino_global_embedding"] is not None
+    assert isinstance(p["dino_global_embedding"], np.ndarray)
+
+
+def test_load_photo_features_keeps_subject_embedding_when_mask_variant_matches(
+    tmp_path,
+):
+    """Inverse of the drop test: when the stored subject_mask_variant
+    matches the workspace's configured sam2_variant, the subject
+    embedding flows through normally. Guards against the mask-variant
+    gate being too aggressive and dropping legitimate embeddings.
+    """
+    import numpy as np
+    from db import Database
+    from dino_embed import embedding_to_blob
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    pid = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
+
+    emb = np.ones(768, dtype=np.float32)
+    emb = emb / np.linalg.norm(emb)
+    db.update_photo_embeddings(
+        pid,
+        dino_subject_embedding=embedding_to_blob(emb),
+        dino_global_embedding=embedding_to_blob(emb),
+        variant="vit-b14",
+        subject_mask_variant="sam2-small",
+    )
+    db.conn.commit()
+
+    photos = load_photo_features(
+        db,
+        config={
+            "pipeline": {
+                "sam2_variant": "sam2-small",
+                "dinov2_variant": "vit-b14",
+            },
+        },
+    )
+    assert len(photos) == 1
+    assert photos[0]["dino_subject_embedding"] is not None
+
+
 # -- run_grouping --
 
 

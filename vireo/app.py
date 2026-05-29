@@ -11562,6 +11562,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         dino_subject_embedding=subj_emb_blob,
                         dino_global_embedding=global_emb_blob,
                         variant=dinov2_variant,
+                        subject_mask_variant=sam2_variant,
                     )
                     masked += 1
 

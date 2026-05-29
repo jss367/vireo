@@ -277,6 +277,7 @@ class Database:
                 phash_crop               TEXT,
                 noise_estimate           REAL,
                 dino_embedding_variant   TEXT,
+                dino_subject_embedding_mask_variant TEXT,
                 active_mask_variant      TEXT,
                 focal_length             REAL,
                 burst_id                 TEXT,
@@ -819,6 +820,23 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE photos "
                 "ADD COLUMN wildlife_excluded INTEGER NOT NULL DEFAULT 0"
+            )
+        # Tracks which SAM mask variant was used to crop the subject for
+        # the stored dino_subject_embedding. Needed because the embedding
+        # itself depends on the mask: with SLOT_CAP=2, a peer pipeline on
+        # the same photo with a different sam2_variant can overwrite
+        # photos.dino_subject_embedding between this pipeline's
+        # extract_masks and regroup, and load_photo_features must detect
+        # that and drop the now-stale embedding rather than silently use
+        # an embedding cropped from the wrong mask.
+        try:
+            self.conn.execute(
+                "SELECT dino_subject_embedding_mask_variant FROM photos LIMIT 0"
+            )
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos "
+                "ADD COLUMN dino_subject_embedding_mask_variant TEXT"
             )
 
         # Backfill pre-existing photos with mask_path set on the photos
@@ -5833,7 +5851,7 @@ class Database:
 
     def update_photo_embeddings(
         self, photo_id, dino_subject_embedding=None, dino_global_embedding=None,
-        variant=None,
+        variant=None, subject_mask_variant=None,
     ):
         """Store DINOv2 embedding BLOBs for a photo.
 
@@ -5845,11 +5863,22 @@ class Database:
                 (e.g. "vit-b14"). Stored so the pipeline can detect stale
                 embeddings after a variant switch and drop them instead of
                 feeding mismatched-dim vectors to cosine similarity.
+            subject_mask_variant: SAM mask variant whose mask was used to
+                crop the subject before embedding (e.g. "sam2-small").
+                Stored so ``load_photo_features`` can detect when a peer
+                pipeline on a different sam2_variant has overwritten the
+                row and drop the now-stale subject embedding instead of
+                silently using an embedding cropped from the wrong mask.
+                Only meaningful for ``dino_subject_embedding`` —
+                ``dino_global_embedding`` is computed on the unmasked
+                proxy and is mask-variant-independent.
         """
         self.conn.execute(
             "UPDATE photos SET dino_subject_embedding=?, dino_global_embedding=?, "
-            "dino_embedding_variant=? WHERE id=?",
-            (dino_subject_embedding, dino_global_embedding, variant, photo_id),
+            "dino_embedding_variant=?, dino_subject_embedding_mask_variant=? "
+            "WHERE id=?",
+            (dino_subject_embedding, dino_global_embedding, variant,
+             subject_mask_variant, photo_id),
         )
         commit_with_retry(self.conn)
 

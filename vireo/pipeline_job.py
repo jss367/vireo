@@ -3165,6 +3165,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             dino_subject_embedding=subj_emb_blob,
                             dino_global_embedding=global_emb_blob,
                             variant=dinov2_variant,
+                            subject_mask_variant=sam2_variant,
                         )
                         masked += 1
                 except Exception:

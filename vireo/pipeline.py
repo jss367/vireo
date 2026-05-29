@@ -30,6 +30,36 @@ _PIPELINE_PHOTO_COLS = """
     p.phash_crop,
     p.dino_subject_embedding, p.dino_global_embedding,
     p.dino_embedding_variant,
+    p.dino_subject_embedding_mask_variant,
+    p.focal_length, p.burst_id, p.noise_estimate,
+    p.flag, p.rating,
+    p.eye_x, p.eye_y, p.eye_conf, p.eye_tenengrad
+"""
+
+# When the workspace has a configured sam2_variant, prefer the per-variant
+# photo_masks row over the denormalised photos row for mask-derived fields.
+# Two pipelines running on the same photo with different sam2_variants both
+# write into the same photos row, so the denormalisation can carry a peer
+# workspace's values by the time regroup reads them. The per-variant table
+# is unambiguous: pm.path / pm.subject_size / pm.subject_tenengrad /
+# pm.bg_tenengrad / pm.crop_complete are written only by runs that selected
+# this specific variant.  Falls back to the photos row via COALESCE so this
+# is a no-op for legacy rows that never got a photo_masks entry (the
+# startup migration backfills them as variant='unknown').
+_PIPELINE_PHOTO_COLS_VARIANT_AWARE = """
+    p.id, p.folder_id, p.filename, p.timestamp,
+    p.width, p.height, p.latitude, p.longitude,
+    COALESCE(pm.subject_size, p.subject_size) AS subject_size,
+    COALESCE(pm.path, p.mask_path) AS mask_path,
+    COALESCE(pm.subject_tenengrad, p.subject_tenengrad) AS subject_tenengrad,
+    COALESCE(pm.bg_tenengrad, p.bg_tenengrad) AS bg_tenengrad,
+    COALESCE(pm.crop_complete, p.crop_complete) AS crop_complete,
+    p.bg_separation,
+    p.subject_clip_high, p.subject_clip_low, p.subject_y_median,
+    p.phash_crop,
+    p.dino_subject_embedding, p.dino_global_embedding,
+    p.dino_embedding_variant,
+    p.dino_subject_embedding_mask_variant,
     p.focal_length, p.burst_id, p.noise_estimate,
     p.flag, p.rating,
     p.eye_x, p.eye_y, p.eye_conf, p.eye_tenengrad
@@ -125,25 +155,46 @@ def load_photo_features(db, collection_id=None, config=None,
         if not scoped_photo_ids:
             return []
 
+    # Resolve workspace-configured SAM2 variant. When set, mask-derived
+    # fields (mask_path, subject_size, subject_tenengrad, bg_tenengrad,
+    # crop_complete) are read from photo_masks for *this* variant instead
+    # of from the denormalised photos row, which a peer pipeline on a
+    # different sam2_variant may have overwritten between this run's
+    # extract_masks and regroup.
+    sam2_variant = (config or {}).get("pipeline", {}).get("sam2_variant")
+    if sam2_variant:
+        select_cols = _PIPELINE_PHOTO_COLS_VARIANT_AWARE
+        join_clause = (
+            "LEFT JOIN photo_masks pm "
+            "ON pm.photo_id = p.id AND pm.variant = ?"
+        )
+        join_params = (sam2_variant,)
+    else:
+        select_cols = _PIPELINE_PHOTO_COLS
+        join_clause = ""
+        join_params = ()
+
     if scoped_photo_ids is not None:
         scoped_photo_ids = sorted(scoped_photo_ids)
         placeholders = ",".join("?" for _ in scoped_photo_ids)
         rows = db.conn.execute(
-            f"""SELECT {_PIPELINE_PHOTO_COLS}
+            f"""SELECT {select_cols}
                 FROM photos p
                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                {join_clause}
                 WHERE wf.workspace_id = ? AND p.id IN ({placeholders})
                 ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
-            (ws_id, *scoped_photo_ids),
+            (*join_params, ws_id, *scoped_photo_ids),
         ).fetchall()
     else:
         rows = db.conn.execute(
-            f"""SELECT {_PIPELINE_PHOTO_COLS}
+            f"""SELECT {select_cols}
                 FROM photos p
                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                {join_clause}
                 WHERE wf.workspace_id = ?
                 ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
-            (ws_id,),
+            (*join_params, ws_id),
         ).fetchall()
 
     scope_sql = ""
@@ -295,13 +346,31 @@ def load_photo_features(db, collection_id=None, config=None,
         subj_bytes = row["dino_subject_embedding"]
         subj_emb = None
         if subj_bytes and _embedding_usable(stored_variant, expected_variant, subj_bytes):
-            subj_emb = np.frombuffer(subj_bytes, dtype=np.float32)
+            # dino_subject_embedding was cropped from a specific SAM mask,
+            # so it is only valid when that mask variant matches what this
+            # workspace wants. With SLOT_CAP=2, a peer pipeline on the
+            # same photo with a different sam2_variant can overwrite the
+            # photos row's subject embedding between extract_masks and
+            # regroup; silently using it would feed regroup an embedding
+            # cropped from the wrong mask. Drop it to None (same fallback
+            # as a freshly-imported photo) instead — pipeline tolerates
+            # missing subject embeddings. Skip the check when sam2_variant
+            # isn't configured (legacy callers / tests).
+            stored_mask_variant = row["dino_subject_embedding_mask_variant"]
+            if (sam2_variant is not None
+                    and stored_mask_variant is not None
+                    and stored_mask_variant != sam2_variant):
+                variant_mismatches += 1
+            else:
+                subj_emb = np.frombuffer(subj_bytes, dtype=np.float32)
         elif subj_bytes:
             variant_mismatches += 1
 
         glob_bytes = row["dino_global_embedding"]
         global_emb = None
         if glob_bytes and _embedding_usable(stored_variant, expected_variant, glob_bytes):
+            # dino_global_embedding is computed on the unmasked proxy
+            # (mask-variant-independent), so no mask-variant gate here.
             global_emb = np.frombuffer(glob_bytes, dtype=np.float32)
 
         det = primary_det_by_photo.get(pid)
