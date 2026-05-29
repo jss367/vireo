@@ -1726,7 +1726,12 @@ async function applyCurrent(openNext) {
       if (pickSet.has(p.id)) p.flag = 'flagged';
       else if (rejectSet.has(p.id)) p.flag = 'rejected';
       else p.flag = 'none';
-      if (species && pickSet.has(p.id)) p.confirmed_species = species;
+      // The /api/encounters/species call below tags EVERY frame in `items`
+      // (picks and non-picks alike), so mirror that locally for all of them.
+      // Marking only picks would leave non-pick frames in the "Needs species"
+      // queue / without a confirmed-species chip until a reload, even though
+      // the server has already tagged them.
+      if (species) p.confirmed_species = species;
     });
     if (resp && resp.photos) {
       Object.keys(resp.photos).forEach(function(pidStr) {
@@ -1751,9 +1756,7 @@ async function applyCurrent(openNext) {
     // locally — after an auto-detach the encounter indices shift, so the cached
     // session.encIdx may point at a different (or out-of-bounds) encounter, and
     // a local write would corrupt it and then be persisted by save-cache below.
-    var restructured = false;
     if (species) {
-      var encCountBefore = (rapid.results.encounters || []).length;
       var spResp = await safeFetch('/api/encounters/species', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1768,29 +1771,22 @@ async function applyCurrent(openNext) {
       if (spResp && spResp.encounters) {
         rapid.results.encounters = spResp.encounters;
         if (spResp.summary) rapid.results.summary = spResp.summary;
-        // A change in encounter count is the signal an auto-detach restructured
-        // the queue. When that happens the cached session.encIdx no longer maps
-        // to the same encounter, so we must NOT propagate this (divergent)
-        // species onto the original encounter's sibling bursts: those siblings
-        // kept their original species — that divergence is exactly why the
-        // burst detached.
-        restructured = (rapid.results.encounters.length !== encCountBefore);
+        // Rebuild the sidebar sessions from the server's authoritative
+        // encounters rather than trying to patch the old layout in place.
+        // buildSessions() derives each session's encIdx/burstIdx, species
+        // (via burstSpecies, which reads enc.confirmed_species /
+        // burst.species_override) and hasBurstOverride straight from the
+        // adopted payload, so this single rebuild covers BOTH cases the old
+        // count heuristic tried to distinguish:
+        //   - no detach: the server set confirmed_species on the encounter, so
+        //     sibling bursts pick up the just-confirmed species (the Apply-Next
+        //     pre-fill hint) for free.
+        //   - auto-detach (count-changing OR count-equal merge into an adjacent
+        //     same-species encounter): the shifted encIdx/burstIdx and divergent
+        //     species are reflected exactly, so the sidebar and openClassic()
+        //     navigate server truth instead of stale indices.
+        rapid.allSessions = buildSessions(rapid.results);
       }
-    }
-    // Propagate the confirmed species onto sibling bursts' cached hints only
-    // when no restructure happened. sessions[].species is cached at page load,
-    // so updating every burst in this encounter keeps Apply Next tagging picks
-    // with the confirmed species without the user retyping it per burst.
-    // Iterate allSessions, not the filtered rapid.sessions: a queue
-    // filter/toggle can hide sibling bursts, and they must still get the
-    // confirmed species so they aren't stale when they re-enter the queue.
-    if (species && !restructured) {
-      rapid.allSessions.forEach(function(s) {
-        if (s.encIdx === session.encIdx && !s.hasBurstOverride) {
-          s.species = species;
-          s.subtitle = s.ids.length + ' photos - ' + species;
-        }
-      });
     }
     updateSummaryFromPhotos();
     await safeFetch('/api/pipeline/save-cache', {
