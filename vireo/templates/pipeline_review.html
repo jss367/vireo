@@ -3984,7 +3984,7 @@ function grmUpdateApplyLabel() {
   if (checks.species && tagCount > 0) parts.push('Tag ' + tagCount + (diff.species ? ' as ' + diff.species : ''));
   if (checks.flags && diff.detachNew > 0) parts.push('Detach ' + diff.detachNew);
   btn.textContent = parts.length ? parts.join(' · ') + ' & Close' : 'Apply and close';
-  btn.title = grmApplyTitle(diff, checks.species ? tagCount : 0);
+  btn.title = grmApplyTitle(diff, checks, checks.species ? tagCount : 0);
 }
 
 // Diff the current modal zones against the DB snapshot we opened with.
@@ -4048,14 +4048,18 @@ function grmSpeciesTagCount(checks, species) {
   }).length;
 }
 
-function grmApplyTitle(diff, tagCount) {
+function grmApplyTitle(diff, checks, tagCount) {
+  // Gate each action by the same checkbox that actually commits it, so the
+  // tooltip never promises a write that the current selection won't perform.
+  // "Apply picks/rejects" owns flag changes AND removed-photo detach; the
+  // species checkbox owns the confirmed-species + keyword-tag writes.
   var actions = [];
-  if (diff.flagNew > 0) actions.push('flag ' + diff.flagNew + ' ' + grmPlural(diff.flagNew, 'photo') + ' as ' + grmPlural(diff.flagNew, 'a pick', 'picks'));
-  if (diff.rejectNew > 0) actions.push('reject ' + diff.rejectNew + ' ' + grmPlural(diff.rejectNew, 'photo'));
-  if (diff.clearNew > 0) actions.push('clear flags on ' + diff.clearNew + ' ' + grmPlural(diff.clearNew, 'photo'));
-  if (diff.speciesChanged) actions.push('set confirmed species to "' + diff.species + '"');
-  if (tagCount > 0) actions.push('add species keyword "' + diff.species + '" to ' + tagCount + ' ' + grmPlural(tagCount, 'burst frame'));
-  if (diff.detachNew > 0) actions.push('detach ' + diff.detachNew + ' ' + grmPlural(diff.detachNew, 'photo') + ' from this burst');
+  if (checks.flags && diff.flagNew > 0) actions.push('flag ' + diff.flagNew + ' ' + grmPlural(diff.flagNew, 'photo') + ' as ' + grmPlural(diff.flagNew, 'a pick', 'picks'));
+  if (checks.flags && diff.rejectNew > 0) actions.push('reject ' + diff.rejectNew + ' ' + grmPlural(diff.rejectNew, 'photo'));
+  if (checks.flags && diff.clearNew > 0) actions.push('clear flags on ' + diff.clearNew + ' ' + grmPlural(diff.clearNew, 'photo'));
+  if (checks.species && diff.speciesChanged) actions.push('set confirmed species to "' + diff.species + '"');
+  if (checks.species && tagCount > 0) actions.push('add species keyword "' + diff.species + '" to ' + tagCount + ' ' + grmPlural(tagCount, 'burst frame'));
+  if (checks.flags && diff.detachNew > 0) actions.push('detach ' + diff.detachNew + ' ' + grmPlural(diff.detachNew, 'photo') + ' from this burst');
   return actions.length
     ? 'Apply will ' + actions.join(', ') + ', then close this burst.'
     : 'Apply will make no database changes, then close this burst.';
