@@ -3584,6 +3584,19 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   // via × or Escape (only Apply & Close clears it).
   var initialSpecies = enc.confirmed_species || (enc.species ? enc.species[0] : '') || '';
 
+  // The species this burst is ACTUALLY confirmed as (vs initialSpecies, which
+  // falls back to the unconfirmed top prediction so the input pre-fills). The
+  // "Confirm species" checkbox smart-default keys off THIS: if the field value
+  // differs from what's already confirmed, confirming is a meaningful action
+  // (including confirming a so-far-unconfirmed prediction). '' = unconfirmed.
+  var burstOvr = burst && burst.species_override;
+  var initialConfirmedSpecies = '';
+  if (burstOvr && burstOvr.confirmed === true && burstOvr.species) {
+    initialConfirmedSpecies = burstOvr.species;
+  } else if (enc.species_confirmed && enc.confirmed_species) {
+    initialConfirmedSpecies = enc.confirmed_species;
+  }
+
   // Bump the session id so any in-flight /group/state fetch from a previous
   // openGroupReview call lands as stale and gets ignored when it resolves.
   var sessionId = (grmState.sessionId || 0) + 1;
@@ -3611,6 +3624,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     dbState: {},
     keywordStateSpecies: initialSpecies,
     initialSpecies: initialSpecies,
+    initialConfirmedSpecies: initialConfirmedSpecies,
     source: source,
     allowRemove: allowRemove,
     sessionId: sessionId,
@@ -3984,7 +3998,7 @@ function grmComputeDiff() {
     rejectNew: 0,
     clearNew: 0,
     detachNew: 0,
-    speciesChanged: !!(species && grmState && species !== (grmState.initialSpecies || '')),
+    speciesChanged: !!(species && grmState && species !== (grmState.initialConfirmedSpecies || '')),
     species: species
   };
   if (!grmState || !grmState.items) return diff;

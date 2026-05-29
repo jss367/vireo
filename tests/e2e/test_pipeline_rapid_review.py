@@ -712,10 +712,17 @@ def test_classic_pipeline_review_opens_requested_burst_from_url(live_server, pag
 
     page.keyboard.press("p")
     expect(page.locator("#grmCount")).to_have_text("1 picks, 0 rejects, 2 unsorted")
-    expect(page.locator("#grmApplyBtn")).to_have_text("Flag 1 · Tag 1 as Test bird & Close")
+    # The burst's species ("Test bird") is an unconfirmed prediction, so picking
+    # a frame pre-checks "Confirm species" (smart default keys off confirmed
+    # species, not the prediction fallback). The species is therefore set and
+    # all 3 post-apply burst members are tagged.
+    expect(page.locator("#grmConfirmSpeciesChk")).to_be_checked()
+    expect(page.locator("#grmApplyFlagsChk")).to_be_checked()
+    expect(page.locator("#grmApplyBtn")).to_have_text("Flag 1 · Set species · Tag 3 as Test bird & Close")
     expect(page.locator("#grmApplyBtn")).to_have_attribute(
         "title",
-        'Apply will flag 1 photo as a pick, add species keyword "Test bird" to 1 pick, then close this burst.',
+        'Apply will flag 1 photo as a pick, set confirmed species to "Test bird", '
+        'add species keyword "Test bird" to 3 burst frames, then close this burst.',
     )
 
 
@@ -782,11 +789,20 @@ def test_classic_pipeline_review_single_photo_opens_review_modal(live_server, pa
 
     page.keyboard.press("x")
     expect(page.locator("#grmCount")).to_have_text("0 picks, 1 rejects, 0 unsorted")
-    expect(page.locator("#grmApplyBtn")).to_have_text("Reject 1 & Close")
+    # "Test bird" is an unconfirmed prediction here, so "Confirm species" is
+    # pre-checked regardless of the cull state — the species gets set and the
+    # frame tagged.
+    expect(page.locator("#grmConfirmSpeciesChk")).to_be_checked()
+    expect(page.locator("#grmApplyBtn")).to_have_text("Reject 1 · Set species · Tag 1 as Test bird & Close")
 
     page.keyboard.press("p")
     expect(page.locator("#grmCount")).to_have_text("1 picks, 0 rejects, 0 unsorted")
-    expect(page.locator("#grmApplyBtn")).to_have_text("Flag 1 · Tag 1 as Test bird & Close")
+    # Picking the photo pre-checks both "Confirm species" (unconfirmed
+    # prediction) and "Apply flags" (a pending pick), so the species is
+    # confirmed/tagged on apply — the regression this guards against.
+    expect(page.locator("#grmConfirmSpeciesChk")).to_be_checked()
+    expect(page.locator("#grmApplyFlagsChk")).to_be_checked()
+    expect(page.locator("#grmApplyBtn")).to_have_text("Flag 1 · Set species · Tag 1 as Test bird & Close")
 
 
 def test_classic_pipeline_review_group_shortcuts_do_not_flag_prior_single_photo(live_server, page):
