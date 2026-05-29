@@ -972,8 +972,8 @@ def test_rapid_review_cull_only_on_confirmed_burst_skips_species_post(live_serve
         page,
         results=results,
         apply_photos={
-            "1": {"flag": "flagged", "has_species_keyword": True},
-            "2": {"flag": "rejected", "has_species_keyword": True},
+            "1": {"flag": "rejected", "has_species_keyword": True},
+            "2": {"flag": "none", "has_species_keyword": True},
             "3": {"flag": "none", "has_species_keyword": True},
         },
         state_photos={
