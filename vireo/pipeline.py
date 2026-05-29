@@ -951,6 +951,11 @@ def prune_results(cache_dir, workspace_id, deleted_ids):
 
     data["photos"] = [p for p in data.get("photos", []) if p.get("id") not in deleted]
 
+    # Timestamp lookup over survivors, so missing_timestamp_count can be
+    # recomputed per encounter after deletions (the ⚠ badge would otherwise
+    # show the pre-deletion count).
+    timestamp_by_id = {p.get("id"): p.get("timestamp") for p in data["photos"]}
+
     pruned_encounters = []
     for enc in data.get("encounters", []):
         enc["photo_ids"] = [pid for pid in enc.get("photo_ids", []) if pid not in deleted]
@@ -967,6 +972,12 @@ def prune_results(cache_dir, workspace_id, deleted_ids):
         if not enc["photo_ids"]:
             continue
         enc["photo_count"] = len(enc["photo_ids"])
+        # Only recompute when the field is present, so pruning a cache written
+        # before this field existed doesn't synthesize one.
+        if "missing_timestamp_count" in enc:
+            enc["missing_timestamp_count"] = sum(
+                1 for pid in enc["photo_ids"] if not timestamp_by_id.get(pid)
+            )
         pruned_encounters.append(enc)
     data["encounters"] = pruned_encounters
 

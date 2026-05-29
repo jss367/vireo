@@ -111,6 +111,21 @@ def sim_embedding(emb_a, emb_b):
     return _cosine_sim(emb_a, emb_b)
 
 
+def _has_similarity_signal(photo):
+    """True if a photo carries any signal the score cut can act on.
+
+    Used to decide whether a pair of timestamp-less photos can be judged by
+    similarity (screenshots/exports with embeddings) or is genuinely
+    signal-less (unreadable files — no detection ran, so no embeddings or
+    species) and must instead be grouped by file order.
+    """
+    return (
+        photo.get("dino_subject_embedding") is not None
+        or photo.get("dino_global_embedding") is not None
+        or bool(photo.get("species_top5"))
+    )
+
+
 def sim_species(species_a, species_b):
     """Species similarity via Bhattacharyya coefficient on shared top-5 species.
 
@@ -368,24 +383,34 @@ def cut_microsegments(photos, config=None, emit_trace=False):
         decision = None
 
         both_null = ts_a is None and ts_b is None
+        # "Signal-less" = no timestamp AND no usable similarity signal on
+        # either side (no embeddings, no species). Unreadable files are
+        # signal-less; undated-but-readable photos (e.g. screenshots, which
+        # still get embeddings) are NOT — they must be judged on the score
+        # cut, not force-grouped by file order.
+        signal_less = both_null and not (
+            _has_similarity_signal(sorted_photos[i])
+            or _has_similarity_signal(sorted_photos[i + 1])
+        )
 
         if bid_a is not None and bid_b is not None and bid_a == bid_b:
             decision = "burst_id_kept"
             recent_scores.append(score)
             if len(recent_scores) > 3:
                 recent_scores.pop(0)
-        elif both_null:
-            # Neither photo has a timestamp, so there's no time signal AND
-            # (for unreadable files) usually no embedding/species either —
-            # every similarity score is ~0. Cutting on score would split the
-            # whole null run into singletons. With no reliable basis to
-            # separate them, keep contiguous nulls together by file order.
-            # Asymmetric pairs (one null, one real) skip this branch and hit
-            # the inf time-cut below, so the null cluster never absorbs a real
-            # photo.
+        elif signal_less:
+            # No time signal and no embeddings/species — every similarity
+            # score is ~0, so the score cut would split the whole null run
+            # into singletons. With no reliable basis to separate them, keep
+            # contiguous nulls together by file order.
             decision = "kept_no_timestamp"
             recent_scores = []
-        elif dt > cfg["hard_cut_time"]:
+        elif not both_null and dt > cfg["hard_cut_time"]:
+            # Time cut only applies when at least one side has a timestamp.
+            # Asymmetric pairs (one null, one real) give dt=inf and cut here,
+            # so the null cluster never absorbs a real photo. Both-null pairs
+            # that reached this point DO have a similarity signal and fall
+            # through to the score cut below.
             cuts.add(i)
             recent_scores = []
             decision = "cut_time"

@@ -1053,3 +1053,46 @@ def test_cut_asymmetric_null_still_cuts():
     assert len(segments) == 2
     assert {p["id"] for p in segments[0]} == {1, 2}
     assert {p["id"] for p in segments[1]} == {50, 51}
+
+
+def test_cut_both_null_with_signal_still_cuts_on_score():
+    """Two undated photos that DO have embeddings (e.g. screenshots) are judged
+    on visual similarity, not force-grouped by file order.
+
+    The both-null keep-together rule is only for signal-less rows (unreadable
+    files). When real similarity signal exists, dissimilar undated images must
+    still split.
+    """
+    from encounters import cut_microsegments
+
+    emb_a = np.array([1, 0, 0] * 256, dtype=np.float32)
+    emb_b = np.array([0, 1, 0] * 256, dtype=np.float32)
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "shot_a.png",
+         "dino_subject_embedding": emb_a, "dino_global_embedding": emb_a,
+         "species_top5": [("robin", 0.9)]},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "shot_b.png",
+         "dino_subject_embedding": emb_b, "dino_global_embedding": emb_b,
+         "species_top5": [("eagle", 0.9)]},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 2
+
+
+def test_cut_both_null_with_similar_signal_groups():
+    """Undated photos with matching embeddings/species still group (score keeps)."""
+    from encounters import cut_microsegments
+
+    emb = np.ones(768, dtype=np.float32)
+    species = [("robin", 0.9)]
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "shot_a.png",
+         "dino_subject_embedding": emb, "dino_global_embedding": emb,
+         "species_top5": species},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "shot_b.png",
+         "dino_subject_embedding": emb, "dino_global_embedding": emb,
+         "species_top5": species},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 1
+    assert len(segments[0]) == 2
