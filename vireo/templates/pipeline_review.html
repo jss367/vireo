@@ -237,6 +237,25 @@
   min-width: 32px;
   text-align: right;
 }
+.encounter-sort-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.encounter-sort-wrap select {
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-primary);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+}
+.encounter-sort-wrap select:focus { border-color: var(--accent); }
 
 /* Encounter cards */
 .encounter-card {
@@ -1385,6 +1404,17 @@ input[type="range"]::-moz-range-thumb {
         <input type="text" id="speciesFilterInput" placeholder="Filter by species..." oninput="setSpeciesFilter(this.value)">
         <button class="species-filter-clear" id="speciesFilterClear" onclick="clearSpeciesFilter()" title="Clear filter">&times;</button>
       </div>
+      <div class="encounter-sort-wrap" title="Order encounters are listed in">
+        <label for="encounterSortSelect">Sort:</label>
+        <select id="encounterSortSelect" onchange="setEncounterSort(this.value)">
+          <option value="default">Chronological</option>
+          <option value="photos_desc">Most photos</option>
+          <option value="photos_asc">Fewest photos</option>
+          <option value="bursts_desc">Most bursts</option>
+          <option value="time_desc">Newest first</option>
+          <option value="time_asc">Oldest first</option>
+        </select>
+      </div>
       <div class="confidence-slider-wrap" title="Thumbnail size">
         <span>&#9638;</span>
         <input type="range" id="thumbSizeSlider" min="100" max="320" step="20" value="160"
@@ -1503,6 +1533,11 @@ var collapsedEncounters = new Set();
 var PIPELINE_SIDEBAR_STORAGE_KEY = 'vireo.pipelineReview.sidebarCollapsed';
 var PIPELINE_VIEW_STATE_STORAGE_KEY = 'vireo.pipelineReview.viewState';
 var PIPELINE_REVIEW_FILTERS = ['all', 'KEEP', 'REVIEW', 'REJECT'];
+var PIPELINE_ENCOUNTER_SORTS = ['default', 'photos_desc', 'photos_asc', 'bursts_desc', 'time_desc', 'time_asc'];
+// Display order for the encounter list. Does NOT reorder pipelineResults.encounters;
+// renderResults() iterates a sorted list of original indices so every encounter's
+// canonical index (focus, detach, species overrides, GRM) stays valid.
+var encounterSort = 'default';
 
 function setPipelineSidebarCollapsed(collapsed, persist) {
   var layout = document.getElementById('pipelineLayout');
@@ -1540,6 +1575,7 @@ function persistPipelineReviewViewState() {
       activeFilter: activeFilter,
       speciesFilter: speciesInput ? speciesInput.value : speciesFilterText,
       hideConfirmed: !!hideConfirmed,
+      encounterSort: encounterSort,
       thumbSize: document.getElementById('thumbSizeSlider')
         ? document.getElementById('thumbSizeSlider').value
         : null,
@@ -1559,6 +1595,9 @@ function applyPipelineReviewToolbarState() {
   if (input) input.value = speciesFilterText || '';
   var clearBtn = document.getElementById('speciesFilterClear');
   if (clearBtn) clearBtn.style.display = speciesFilter ? 'block' : 'none';
+
+  var sortSel = document.getElementById('encounterSortSelect');
+  if (sortSel) sortSel.value = encounterSort;
 }
 
 function restorePipelineReviewViewState() {
@@ -1578,6 +1617,10 @@ function restorePipelineReviewViewState() {
   speciesFilter = speciesFilterText.toLowerCase();
   hideConfirmed = !!state.hideConfirmed;
 
+  if (PIPELINE_ENCOUNTER_SORTS.indexOf(state.encounterSort) !== -1) {
+    encounterSort = state.encounterSort;
+  }
+
   var thumbSize = parseInt(state.thumbSize, 10);
   if (!isNaN(thumbSize)) {
     thumbSize = Math.max(100, Math.min(320, thumbSize));
@@ -1587,6 +1630,58 @@ function restorePipelineReviewViewState() {
   }
 
   applyPipelineReviewToolbarState();
+}
+
+function setEncounterSort(val) {
+  if (PIPELINE_ENCOUNTER_SORTS.indexOf(val) === -1) return;
+  encounterSort = val;
+  persistPipelineReviewViewState();
+  renderResults();
+}
+
+// Returns the order in which encounters should be displayed, as a list of
+// ORIGINAL indices into pipelineResults.encounters. Never mutates the array,
+// so every encounter's canonical index stays stable. Falls back to natural
+// (chronological) order for 'default'. Ties break on original index so the
+// result is deterministic regardless of Array.sort stability.
+function encounterSortOrder() {
+  var encs = (pipelineResults && pipelineResults.encounters) || [];
+  var order = encs.map(function(_, i) { return i; });
+  if (encounterSort === 'default') return order;
+  var tsByPhoto = null;
+  function photoTimestamps() {
+    if (tsByPhoto) return tsByPhoto;
+    tsByPhoto = {};
+    ((pipelineResults && pipelineResults.photos) || []).forEach(function(p) {
+      if (p && p.timestamp) tsByPhoto[p.id] = p.timestamp;
+    });
+    return tsByPhoto;
+  }
+  function startTime(e) {
+    if (e && e.time_range && e.time_range[0]) return e.time_range[0];
+    // No stored range (e.g. a freshly detached burst): fall back to the
+    // earliest contained photo timestamp so time sorts place it
+    // chronologically instead of dumping it at an extreme.
+    var map = photoTimestamps(), best = '';
+    ((e && e.photo_ids) || []).forEach(function(pid) {
+      var t = map[pid];
+      if (t && (best === '' || t < best)) best = t;
+    });
+    return best;
+  }
+  function cmpStr(a, b) { return a < b ? -1 : (a > b ? 1 : 0); }
+  order.sort(function(ia, ib) {
+    var a = encs[ia], b = encs[ib], d = 0;
+    switch (encounterSort) {
+      case 'photos_desc': d = (b.photo_count || 0) - (a.photo_count || 0); break;
+      case 'photos_asc':  d = (a.photo_count || 0) - (b.photo_count || 0); break;
+      case 'bursts_desc': d = (b.burst_count || 0) - (a.burst_count || 0); break;
+      case 'time_desc':   d = cmpStr(startTime(b), startTime(a)); break;
+      case 'time_asc':    d = cmpStr(startTime(a), startTime(b)); break;
+    }
+    return d !== 0 ? d : ia - ib;
+  });
+  return order;
 }
 
 function encounterKey(enc) {
@@ -2062,7 +2157,8 @@ function renderResults() {
   // management below can pick a *visible* encounter (not one that was
   // filtered out by species filter, hide-confirmed, or label filter).
   var renderedIndices = [];
-  pipelineResults.encounters.forEach(function(enc, ei) {
+  encounterSortOrder().forEach(function(ei) {
+    var enc = pipelineResults.encounters[ei];
     var timeRange = '';
     if (enc.time_range && enc.time_range[0]) {
       var t0 = enc.time_range[0].split('T')[1] || '';

@@ -1963,6 +1963,58 @@ def test_pipeline_detach_burst(app_and_db):
     assert "Eagle" in new_species
 
 
+def test_pipeline_detach_burst_computes_time_ranges(app_and_db):
+    """detach-burst must compute time_range from photo timestamps for both the
+    new encounter and the shrunken source encounter. A [None, None] range would
+    sort detached encounters to the extremes under the review page's time sorts
+    and render a blank time label in the encounter header."""
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                "species": ["Robin", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 2,
+                # Deliberately stale/missing — the handler must recompute it.
+                "time_range": [None, None],
+                "photo_ids": [1, 2, 3],
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [3], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg", "timestamp": "2024-01-01T10:00:00", "species_top5": []},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg", "timestamp": "2024-01-01T10:00:05", "species_top5": []},
+            {"id": 3, "label": "REVIEW", "filename": "c.jpg", "timestamp": "2024-01-01T10:05:00", "species_top5": []},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 2,
+                     "keep_count": 2, "review_count": 1, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/pipeline/detach-burst",
+                       json={"encounter_index": 0, "burst_index": 1})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Source encounter range recomputed to the surviving photos (1, 2).
+    assert data["encounters"][0]["time_range"] == ["2024-01-01T10:00:00", "2024-01-01T10:00:05"]
+    # New encounter range computed from the detached photo (3), not [None, None].
+    assert data["encounters"][1]["photo_ids"] == [3]
+    assert data["encounters"][1]["time_range"] == ["2024-01-01T10:05:00", "2024-01-01T10:05:00"]
+
+
 def test_pipeline_detach_photo(app_and_db):
     """POST /api/pipeline/detach-photo moves a photo to a new burst."""
     import json as _json
