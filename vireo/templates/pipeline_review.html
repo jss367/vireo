@@ -996,6 +996,10 @@ input[type="range"]::-moz-range-thumb {
   flex-shrink: 0;
 }
 .grm-footer .grm-hint { font-size: 11px; color: var(--text-ghost); flex: 1; }
+.grm-commit-toggle { display:flex; align-items:center; gap:6px; font-size:12px;
+  color: var(--text-muted); cursor:pointer; user-select:none; }
+.grm-commit-toggle input { cursor:pointer; }
+.grm-dirty-hint { font-size:11px; color: var(--warning, #e0a800); }
 .grm-res-control,
 .grm-loupe-zoom-control {
   display: flex;
@@ -1475,7 +1479,21 @@ input[type="range"]::-moz-range-thumb {
       <span id="grmLoupeZoomVal">1×</span>
     </div>
     <span class="grm-hint" id="grmHint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Z = right 1:1 &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
-    <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);" title="Apply pick/reject flag changes and species keywords, then close this burst.">Apply flags/species & Close</button>
+    <div class="grm-commit-group" style="margin-left:auto;display:flex;align-items:center;gap:14px;">
+      <label class="grm-commit-toggle">
+        <input type="checkbox" id="grmConfirmSpeciesChk" onchange="grmOnToggleChange()">
+        <span>Confirm species</span>
+        <span class="grm-dirty-hint" id="grmSpeciesDirtyHint" style="display:none;"></span>
+      </label>
+      <label class="grm-commit-toggle">
+        <input type="checkbox" id="grmApplyFlagsChk" onchange="grmOnToggleChange()">
+        <span>Apply picks/rejects</span>
+        <span class="grm-dirty-hint" id="grmFlagsDirtyHint" style="display:none;"></span>
+      </label>
+      <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept"
+        style="padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);"
+        title="Commit whichever boxes are checked, then close this burst.">Apply and close</button>
+    </div>
   </div>
 </div>
 
