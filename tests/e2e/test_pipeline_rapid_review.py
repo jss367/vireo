@@ -935,6 +935,163 @@ def test_rapid_review_apply_tags_all_burst_frames_via_encounters_species(live_se
     assert sorted(body["photo_ids"]) == [1, 2, 3]
 
 
+def test_rapid_review_cull_only_on_confirmed_burst_skips_species_post(live_server, page):
+    # A burst ALREADY confirmed as "Test bird" (encounter species_confirmed +
+    # burst override confirmed, photos carrying the keyword). Applying ONLY a
+    # cull change (reject a frame) with the species field still = "Test bird"
+    # must NOT post to /api/encounters/species: re-posting an unchanged species
+    # would record a no-op keyword_add edit per frame whose undo strips the
+    # existing species keywords. Flags must still apply + save.
+    species_payloads = []
+    save_payloads = []
+    results = {
+        "photos": [
+            {"id": 1, "filename": "a.jpg", "label": "KEEP", "flag": "flagged", "confirmed_species": "Test bird"},
+            {"id": 2, "filename": "b.jpg", "label": "REVIEW", "flag": "none", "confirmed_species": "Test bird"},
+            {"id": 3, "filename": "c.jpg", "label": "REVIEW", "flag": "none", "confirmed_species": "Test bird"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2, 3],
+                "photo_count": 3,
+                "burst_count": 1,
+                "species": ["Test bird"],
+                "species_confirmed": True,
+                "confirmed_species": "Test bird",
+                "bursts": [
+                    {
+                        "photo_ids": [1, 2, 3],
+                        "species_override": {"species": "Test bird", "confirmed": True},
+                    }
+                ],
+            }
+        ],
+        "summary": {"keep_count": 1, "review_count": 2, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(
+        page,
+        results=results,
+        apply_photos={
+            "1": {"flag": "flagged", "has_species_keyword": True},
+            "2": {"flag": "rejected", "has_species_keyword": True},
+            "3": {"flag": "none", "has_species_keyword": True},
+        },
+        state_photos={
+            "1": {"flag": "flagged", "has_species_keyword": True},
+            "2": {"flag": "none", "has_species_keyword": True},
+            "3": {"flag": "none", "has_species_keyword": True},
+        },
+        species_payloads=species_payloads,
+        save_payloads=save_payloads,
+    )
+
+    # Deep-link forces the "all" queue so a fully-confirmed burst is reviewable.
+    page.goto(f"{live_server['url']}/pipeline/rapid-review?enc=0&burst=0")
+    expect(page.locator("#applyBtn")).to_be_enabled()
+    expect(page.locator("#filename")).to_have_text("a.jpg")
+    # Species field already reflects the confirmed species; do NOT change it.
+    expect(page.locator("#speciesInput")).to_have_value("Test bird")
+    # Reject the current frame — a cull-only change.
+    page.keyboard.press("x")
+    expect(page.locator("#rejectCount")).to_have_text("1")
+
+    with (
+        page.expect_request("**/api/pipeline/group/apply") as apply_req,
+        page.expect_response("**/api/pipeline/save-cache"),
+    ):
+        page.locator("#applyBtn").click()
+
+    # No species post: re-confirming the unchanged species would be a destructive
+    # no-op keyword_add.
+    assert species_payloads == [], "cull-only on a confirmed burst must not re-post species"
+    # Flags still applied via /group/apply (a reject was submitted) and persisted.
+    apply_body = apply_req.value.post_data_json
+    assert apply_body["rejects"], "expected a reject to be submitted to /group/apply"
+    assert save_payloads, "expected save-cache to fire"
+
+
+def test_rapid_review_first_confirmation_and_replacement_post_species(live_server, page):
+    # Converse sanity: an UNCONFIRMED burst (no species_confirmed / no override)
+    # with the species field set posts on first confirmation; changing to a
+    # DIFFERENT species from the confirmed one also posts (replacement).
+    species_payloads = []
+    results = {
+        "photos": [
+            {"id": 1, "filename": "a.jpg", "label": "REVIEW", "flag": "none"},
+            {"id": 2, "filename": "b.jpg", "label": "REVIEW", "flag": "none"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2],
+                "photo_count": 2,
+                "burst_count": 1,
+                "species": ["Test bird"],
+                "bursts": [{"photo_ids": [1, 2]}],
+            }
+        ],
+        "summary": {"keep_count": 0, "review_count": 2, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(page, results=results, species_payloads=species_payloads)
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    expect(page.locator("#applyBtn")).to_be_enabled()
+    # "Test bird" is an unconfirmed prediction (no species_confirmed), so the
+    # field pre-fills with it and applying is a first-time confirmation → posts.
+    expect(page.locator("#speciesInput")).to_have_value("Test bird")
+
+    with page.expect_response("**/api/encounters/species"):
+        page.locator("#applyBtn").click()
+
+    assert species_payloads, "first confirmation of an unconfirmed burst must post"
+    assert species_payloads[-1]["species"] == "Test bird"
+
+
+def test_rapid_review_species_replacement_on_confirmed_burst_posts(live_server, page):
+    # A burst confirmed as "Test bird"; changing the field to a DIFFERENT species
+    # must post (replacement), unlike the unchanged-species cull-only case.
+    species_payloads = []
+    results = {
+        "photos": [
+            {"id": 1, "filename": "a.jpg", "label": "KEEP", "flag": "flagged", "confirmed_species": "Test bird"},
+            {"id": 2, "filename": "b.jpg", "label": "REVIEW", "flag": "none", "confirmed_species": "Test bird"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2],
+                "photo_count": 2,
+                "burst_count": 1,
+                "species": ["Test bird"],
+                "species_confirmed": True,
+                "confirmed_species": "Test bird",
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_override": {"species": "Test bird", "confirmed": True}}
+                ],
+            }
+        ],
+        "summary": {"keep_count": 1, "review_count": 1, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(
+        page,
+        results=results,
+        state_photos={
+            "1": {"flag": "flagged", "has_species_keyword": True},
+            "2": {"flag": "none", "has_species_keyword": True},
+        },
+        species_payloads=species_payloads,
+    )
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review?enc=0&burst=0")
+    expect(page.locator("#applyBtn")).to_be_enabled()
+    expect(page.locator("#speciesInput")).to_have_value("Test bird")
+    page.locator("#speciesInput").fill("Different bird")
+
+    with page.expect_response("**/api/encounters/species"):
+        page.locator("#applyBtn").click()
+
+    assert species_payloads, "species replacement must post"
+    assert species_payloads[-1]["species"] == "Different bird"
+
+
 def test_rapid_review_adopts_detach_restructure_without_clobbering_cache(live_server, page):
     # Simulate the server auto-detaching the burst on a species mismatch: the
     # /api/encounters/species response returns a RESTRUCTURED encounters payload

@@ -1705,6 +1705,35 @@ async function applyCurrent(openNext) {
   var items = rapid.items.slice();
   var pickSet = new Set(picks);
   var rejectSet = new Set(rejects);
+  // Capture the species THIS burst is ALREADY confirmed as, BEFORE any
+  // optimistic local mutation below. Mirrors the burst-group modal's
+  // initialConfirmedSpecies (pipeline_review.html openGroupReview): prefer a
+  // confirmed burst override, else the encounter's confirmed species, else ''
+  // (unconfirmed). The species POST is gated on an ACTUAL change against this
+  // baseline — applying cull-only changes to a burst already tagged as X must
+  // NOT re-post X, because /api/encounters/species records a keyword_add
+  // edit-history entry per submitted frame even when tag_photo is an
+  // INSERT-OR-IGNORE no-op, and undoing that no-op add would strip the
+  // existing species keywords. Snapshot off rapid.results (not live rapid.*)
+  // since openSession() can run during the awaits below.
+  var alreadyConfirmedSpecies = '';
+  var snapEnc = (rapid.results.encounters || [])[session.encIdx];
+  if (snapEnc) {
+    var snapBursts = (snapEnc.bursts && snapEnc.bursts.length) ? snapEnc.bursts : null;
+    var snapBurst = snapBursts ? snapBursts[session.burstIdx] : null;
+    if (snapBurst && snapBurst.species_override && snapBurst.species_override.confirmed === true && snapBurst.species_override.species) {
+      alreadyConfirmedSpecies = snapBurst.species_override.species;
+    } else if (snapEnc.species_confirmed && snapEnc.confirmed_species) {
+      alreadyConfirmedSpecies = snapEnc.confirmed_species;
+    }
+  }
+  // NOTE: this gates on the burst-level confirmed-species change only. A frame
+  // that is part of a "confirmed as X" burst but happens to lack the X keyword
+  // would not be re-tagged by skipping the post. Rapid review has no reliable
+  // per-photo keyword state client-side here, so we deliberately do not invent
+  // that signal; the gate fixes the reported destructive no-op-add bug while
+  // first confirmations and species replacements still post (see below).
+  var speciesChanged = !!(species && species !== alreadyConfirmedSpecies);
 
   try {
     var resp = await safeFetch('/api/pipeline/group/apply', {
@@ -1750,7 +1779,7 @@ async function applyCurrent(openNext) {
     // locally — after an auto-detach the encounter indices shift, so the cached
     // session.encIdx may point at a different (or out-of-bounds) encounter, and
     // a local write would corrupt it and then be persisted by save-cache below.
-    if (species) {
+    if (speciesChanged) {
       var spResp = await safeFetch('/api/encounters/species', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
