@@ -2669,29 +2669,9 @@ function openInspect(photoId) {
     html += '</div>';
   }
 
-  // Species predictions (filtered by confidence threshold)
-  if (enc && enc.species_predictions && enc.species_predictions.length > 0) {
-    var threshold = minConfidence / 100;
-    var filtered = enc.species_predictions.filter(function(sp) {
-      return (sp.models || []).some(function(m) { return m.confidence >= threshold; });
-    });
-    if (filtered.length > 0) {
-      html += '<div class="inspect-species-predictions">';
-      html += '<div style="font-size:13px;font-weight:600;margin-bottom:6px;">Species Predictions</div>';
-      filtered.forEach(function(sp) {
-        var modelParts = (sp.models || []).filter(function(m) {
-          return m.confidence >= threshold;
-        }).map(function(m) {
-          return escapeHtml(m.model) + ' ' + (m.confidence * 100).toFixed(0) + '%';
-        });
-        html += '<div class="inspect-species-row">';
-        html += '<span class="inspect-species-name">' + escapeHtml(sp.species) + '</span>';
-        html += '<span class="inspect-species-conf">' + modelParts.join(', ') + '</span>';
-        html += '</div>';
-      });
-      html += '</div>';
-    }
-  }
+  // Species predictions (filtered by confidence threshold): this photo, then
+  // the encounter-level group mean.
+  html += buildSpeciesPredictionsHtml(photo, enc, minConfidence / 100);
 
   // Score waterfall
   html += '<div class="score-waterfall">';
@@ -4063,6 +4043,74 @@ function grmRefreshSelectedLoupe() {
   }
 }
 
+// Render a single species-prediction block (title + rows). Each row in `rows`
+// is {species, models: [{model, confidence}]}. Returns '' when there are no
+// rows so we never emit an empty header.
+function renderSpeciesBlock(title, rows) {
+  if (!rows || rows.length === 0) return '';
+  var html = '<div class="inspect-species-predictions">';
+  html += '<div style="font-size:13px;font-weight:600;margin-bottom:6px;">' + escapeHtml(title) + '</div>';
+  rows.forEach(function(sp) {
+    var modelParts = (sp.models || []).map(function(m) {
+      return escapeHtml(m.model) + ' ' + (m.confidence * 100).toFixed(0) + '%';
+    });
+    html += '<div class="inspect-species-row">';
+    html += '<span class="inspect-species-name">' + escapeHtml(sp.species) + '</span>';
+    html += '<span class="inspect-species-conf">' + modelParts.join(', ') + '</span>';
+    html += '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+// Group a single photo's raw species_top5 ([species, confidence, model] rows)
+// into the same {species, models} shape the aggregate uses, dropping models
+// below `threshold` and sorting by confidence descending.
+function buildPerPhotoSpeciesRows(photo, threshold) {
+  var top5 = (photo && photo.species_top5) || [];
+  if (top5.length === 0) return [];
+  var bySpecies = {};
+  var order = [];
+  top5.forEach(function(entry) {
+    var sp = entry[0];
+    var conf = entry[1];
+    var model = entry[2] || 'unknown';
+    if (conf < threshold) return;
+    if (!bySpecies[sp]) { bySpecies[sp] = []; order.push(sp); }
+    bySpecies[sp].push({ model: model, confidence: conf });
+  });
+  var rows = order.map(function(sp) {
+    var models = bySpecies[sp].slice().sort(function(a, b) { return b.confidence - a.confidence; });
+    return { species: sp, models: models };
+  });
+  rows.sort(function(a, b) { return b.models[0].confidence - a.models[0].confidence; });
+  return rows;
+}
+
+// Drop aggregate rows (and their models) below `threshold`.
+function filterAggSpeciesRows(rows, threshold) {
+  if (!threshold) return rows || [];
+  return (rows || []).map(function(sp) {
+    return { species: sp.species, models: (sp.models || []).filter(function(m) { return m.confidence >= threshold; }) };
+  }).filter(function(sp) { return sp.models.length > 0; });
+}
+
+// Build the per-photo + group-consensus species prediction blocks. The
+// per-photo block changes as you select different photos; the group block is
+// the encounter-level mean and is labeled as such (see CORE_PHILOSOPHY "No
+// black boxes"). `threshold` (0..1) filters by confidence; pass 0 for none.
+function buildSpeciesPredictionsHtml(photo, enc, threshold) {
+  threshold = threshold || 0;
+  var html = '';
+  html += renderSpeciesBlock('Species Predictions (this photo)', buildPerPhotoSpeciesRows(photo, threshold));
+  if (enc && enc.species_predictions && enc.species_predictions.length > 0) {
+    var aggRows = filterAggSpeciesRows(enc.species_predictions, threshold);
+    var n = enc.photo_count || (enc.photo_ids ? enc.photo_ids.length : 0);
+    html += renderSpeciesBlock('Group consensus — mean across ' + n + ' photo' + (n === 1 ? '' : 's'), aggRows);
+  }
+  return html;
+}
+
 function buildPipelineMetadataHtml(photo) {
   var enc = pipelineResults.encounters[grmState.encIdx];
   var label = (photo.label || '').toLowerCase();
@@ -4085,21 +4133,8 @@ function buildPipelineMetadataHtml(photo) {
     html += '</div>';
   }
 
-  // Species predictions
-  if (enc && enc.species_predictions && enc.species_predictions.length > 0) {
-    html += '<div class="inspect-species-predictions">';
-    html += '<div style="font-size:13px;font-weight:600;margin-bottom:6px;">Species Predictions</div>';
-    enc.species_predictions.forEach(function(sp) {
-      var modelParts = (sp.models || []).map(function(m) {
-        return escapeHtml(m.model) + ' ' + (m.confidence * 100).toFixed(0) + '%';
-      });
-      html += '<div class="inspect-species-row">';
-      html += '<span class="inspect-species-name">' + escapeHtml(sp.species) + '</span>';
-      html += '<span class="inspect-species-conf">' + modelParts.join(', ') + '</span>';
-      html += '</div>';
-    });
-    html += '</div>';
-  }
+  // Species predictions: this photo, then the encounter-level group mean.
+  html += buildSpeciesPredictionsHtml(photo, enc, 0);
 
   // Score waterfall
   var scores = [
