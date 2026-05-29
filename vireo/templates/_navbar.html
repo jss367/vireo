@@ -3702,6 +3702,9 @@ function openLightbox(photoId, filename, photoList, options) {
 
   _lightboxCurrentId = photoId;
   if (photoList) _lightboxPhotoList = photoList;
+  try {
+    document.dispatchEvent(new CustomEvent('lightbox:photochanged', { detail: { photoId: photoId } }));
+  } catch(_) {}
   var currentFromList = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
   if (currentFromList && Object.prototype.hasOwnProperty.call(currentFromList, 'flag')) {
     _lbRememberConfirmedFlag(photoId, currentFromList.flag);
@@ -4097,6 +4100,7 @@ function closeLightbox(e) {
   document.getElementById('lightboxImg').src = '';
   document.getElementById('lightboxZoomBadge').style.display = 'none';
   _lightboxCurrentId = null;
+  try { document.dispatchEvent(new CustomEvent('lightbox:closed')); } catch(_) {}
   _lbSetFlagStatus(undefined);
   var detContainer = document.getElementById('lightboxDetections');
   if (detContainer) detContainer.innerHTML = '';
