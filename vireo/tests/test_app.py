@@ -832,7 +832,22 @@ def test_encounter_species_change_cancels_pending_add(app_and_db):
     """Changing the confirmed species before sync cancels the stale add."""
     app, db = app_and_db
     client = app.test_client()
-    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    # The conftest fixture pre-tags one photo with "Sparrow" via a direct
+    # db.tag_photo (no pending add). Restrict this test to photos that do NOT
+    # already carry Sparrow so the first confirm genuinely queues a pending
+    # add for every photo — that pending add is what the replacement should
+    # cancel (rather than queueing a keyword_remove for a never-synced tag).
+    sparrow_pre = db.conn.execute(
+        """SELECT pk.photo_id FROM photo_keywords pk
+           JOIN keywords k ON k.id = pk.keyword_id
+           WHERE k.name = 'Sparrow'"""
+    ).fetchall()
+    pre_tagged = {r["photo_id"] for r in sparrow_pre}
+    photo_ids = [
+        p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()
+        if p["id"] not in pre_tagged
+    ]
+    assert photo_ids, "expected at least one photo not pre-tagged with Sparrow"
 
     _seed_encounter_cache(app, db, photo_ids)
 
@@ -1066,6 +1081,108 @@ def test_encounter_species_replacement_redo_reapplies(app_and_db):
         names = {k["name"] for k in db.get_photo_keywords(pid)}
         assert "Blue Jay" in names
         assert "Sparrow" not in names
+
+
+def test_encounter_species_no_op_when_all_already_tagged(app_and_db):
+    """Confirming a species every submitted photo already carries records NO
+    new keyword_add edit, so there's nothing on the undo stack to later
+    destructively remove the pre-existing keyword.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    _seed_encounter_cache(app, db, photo_ids)
+    # First confirm tags every photo and records one keyword_add.
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+    assert len(db.get_edit_history()) == 1
+
+    # Re-confirm the SAME species on the SAME photos: all already tagged.
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+
+    # No new edit-history entry: the redundant confirm was a no-op.
+    assert len(db.get_edit_history()) == 1
+
+    # The pre-existing keyword survives — undoing leaves it intact (there's
+    # nothing the redundant confirm could have queued to remove).
+    for pid in photo_ids:
+        names = {k["name"] for k in db.get_photo_keywords(pid)}
+        assert "Blue Jay" in names
+
+
+def test_encounter_species_records_only_newly_tagged(app_and_db):
+    """A mixed set (some already carry the species, some don't) records edit
+    items ONLY for the newly-tagged photos.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    assert len(photo_ids) >= 2
+
+    # Pre-tag the first photo with the species keyword directly.
+    kid = db.add_keyword("Blue Jay", is_species=True)
+    db.tag_photo(photo_ids[0], kid)
+
+    _seed_encounter_cache(app, db, photo_ids)
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+
+    history = db.get_edit_history()
+    assert len(history) == 1
+    assert history[0]["action_type"] == "keyword_add"
+    # Only the (len - 1) newly-tagged photos are in the edit items.
+    assert history[0]["item_count"] == len(photo_ids) - 1
+
+    # Undoing removes the species only from the photos that were newly tagged;
+    # the pre-tagged photo keeps it.
+    db.undo_last_edit()
+    assert "Blue Jay" in {k["name"] for k in db.get_photo_keywords(photo_ids[0])}
+    for pid in photo_ids[1:]:
+        assert "Blue Jay" not in {k["name"] for k in db.get_photo_keywords(pid)}
+
+
+def test_encounter_species_replacement_only_for_changed_photos(app_and_db):
+    """Replacement records the replace only for photos that actually had the
+    old species, and the add side only for photos that actually gained the new
+    one.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    assert len(photo_ids) >= 2
+
+    _seed_encounter_cache(app, db, photo_ids)
+    # Confirm Sparrow on ALL photos.
+    client.post("/api/encounters/species",
+                json={"species": "Sparrow", "photo_ids": photo_ids})
+    # Then untag the last photo's Sparrow so it no longer carries the old
+    # species (simulates a partially-tagged burst on re-confirm).
+    sparrow_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name='Sparrow' AND is_species=1"
+    ).fetchone()["id"]
+    db.untag_photo(photo_ids[-1], sparrow_id)
+    db.conn.execute("DELETE FROM edit_history")
+    db.conn.commit()
+
+    # Replace Sparrow -> Blue Jay across all photos.
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+
+    history = db.get_edit_history()
+    assert len(history) == 1
+    assert history[0]["action_type"] == "species_replace"
+    # All photos gained Blue Jay (none had it), so all are recorded.
+    assert history[0]["item_count"] == len(photo_ids)
+    for pid in photo_ids:
+        assert "Blue Jay" in {k["name"] for k in db.get_photo_keywords(pid)}
+        assert "Sparrow" not in {k["name"] for k in db.get_photo_keywords(pid)}
 
 
 def test_encounter_species_rejects_photo_ids_not_in_burst(app_and_db):

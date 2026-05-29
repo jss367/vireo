@@ -12015,46 +12015,90 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # (SQLite lock, disk error, etc.) can't leave half the photos retagged
         # while the other half still carry the old species.
         try:
+            # Resolve the target species keyword id up front so we can precheck
+            # which photos already carry it. add_keyword is idempotent and
+            # returns the existing id when the species already exists.
+            kid = db.add_keyword(species, is_species=True, _commit=False)
+
+            # Precheck which submitted photos already carry the new species
+            # keyword. Only photos that get a *new* tag should generate
+            # edit-history items and sidecar adds — otherwise confirming an
+            # already-tagged photo would push a no-op onto the undo stack, and
+            # undoing it would destructively remove the pre-existing keyword.
+            # Mirrors the precheck pattern in api_batch_keyword.
+            placeholders_ids = ",".join("?" for _ in photo_ids)
+            already_has_new = {
+                row["photo_id"]
+                for row in db.conn.execute(
+                    f"""SELECT photo_id FROM photo_keywords
+                        WHERE keyword_id = ? AND photo_id IN ({placeholders_ids})""",
+                    [kid] + list(photo_ids),
+                ).fetchall()
+            }
+            newly_tagged = [pid for pid in photo_ids if pid not in already_has_new]
+
+            # For a replacement, only photos that actually carry the old
+            # species keyword should be untagged / generate a remove.
+            had_old = set()
             if is_replacement and old_kid is not None:
+                had_old = {
+                    row["photo_id"]
+                    for row in db.conn.execute(
+                        f"""SELECT photo_id FROM photo_keywords
+                            WHERE keyword_id = ? AND photo_id IN ({placeholders_ids})""",
+                        [old_kid] + list(photo_ids),
+                    ).fetchall()
+                }
                 for pid in photo_ids:
+                    if pid not in had_old:
+                        continue
                     db.untag_photo(pid, old_kid, _commit=False)
                     _queue_keyword_remove(
                         pid, previous_species,
                         workspace_id=ws_id, _commit=False,
                     )
 
-            kid = db.add_keyword(species, is_species=True, _commit=False)
-
-            for pid in photo_ids:
+            for pid in newly_tagged:
                 db.tag_photo(pid, kid, _commit=False)
                 _queue_keyword_add(
                     pid, species, workspace_id=ws_id, _commit=False,
                 )
 
-            if is_replacement and old_kid is not None:
+            if is_replacement and old_kid is not None and had_old:
+                # Photos that actually changed: had the old keyword (so the
+                # remove side fired) and/or newly gained the new one. Use the
+                # union so undo restores the exact state we mutated.
+                newly_set = set(newly_tagged)
+                changed = [
+                    pid for pid in photo_ids if pid in had_old or pid in newly_set
+                ]
                 items = [
-                    {"photo_id": pid, "old_value": str(old_kid), "new_value": str(kid)}
-                    for pid in photo_ids
+                    {
+                        "photo_id": pid,
+                        "old_value": str(old_kid) if pid in had_old else "",
+                        "new_value": str(kid) if pid in newly_set else "",
+                    }
+                    for pid in changed
                 ]
                 db.record_edit(
                     "species_replace",
-                    f'Replaced species "{previous_species}" with "{species}" on {len(photo_ids)} photos',
+                    f'Replaced species "{previous_species}" with "{species}" on {len(changed)} photos',
                     str(kid),
                     items,
-                    is_batch=len(photo_ids) > 1,
+                    is_batch=len(changed) > 1,
                     _commit=False,
                 )
-            else:
+            elif newly_tagged:
                 items = [
                     {"photo_id": pid, "old_value": "", "new_value": str(kid)}
-                    for pid in photo_ids
+                    for pid in newly_tagged
                 ]
                 db.record_edit(
                     "keyword_add",
-                    f'Confirmed species "{species}" on {len(photo_ids)} photos',
+                    f'Confirmed species "{species}" on {len(newly_tagged)} photos',
                     str(kid),
                     items,
-                    is_batch=len(photo_ids) > 1,
+                    is_batch=len(newly_tagged) > 1,
                     _commit=False,
                 )
             db.conn.commit()
@@ -12714,20 +12758,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/pipeline/group/apply", methods=["POST"])
     def api_pipeline_group_apply():
-        """Apply pick/reject decisions and species to a pipeline burst group.
+        """Apply pick/reject/candidate flag decisions to a pipeline burst group.
 
-        Diff-based: only writes flag changes for photos whose flag actually
-        changes, only adds the species keyword when it isn't already on the
-        photo, and clears flags on photos moved to candidates that were
-        previously flagged/rejected. Returns per-photo new flag/keyword state
-        so the client can update its rendered cards without reloading.
+        Flags-only: species confirmation now routes through a dedicated path
+        (`/api/encounters/species`), so this endpoint no longer tags any species
+        keyword. Diff-based: only writes flag changes for photos whose flag
+        actually changes, and clears flags on photos moved to candidates that
+        were previously flagged/rejected. Returns per-photo new flag state so
+        the client can update its rendered cards without reloading.
         """
         db = _get_db()
         body = request.get_json(silent=True) or {}
         picks = list(body.get("picks", []) or [])
         rejects = list(body.get("rejects", []) or [])
         candidates = list(body.get("candidates", []) or [])
-        species = (body.get("species") or "").strip()
 
         # The same photo can't be in two zones. Reject conflicting input.
         seen = set()
@@ -12747,15 +12791,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             row = db.get_photo(pid)
             if row:
                 old_flags[pid] = row["flag"] or "none"
-
-        species_kid = None
-        photos_with_species = set()
-        if species:
-            species_kid = db.add_keyword(species, is_species=True)
-            for pid in picks:
-                kws = db.get_photo_keywords(pid)
-                if any(k["id"] == species_kid for k in kws):
-                    photos_with_species.add(pid)
 
         try:
             # Apply target flags. We rely on update_photo_flag's own write
@@ -12777,20 +12812,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if old in ("flagged", "rejected"):
                     db.update_photo_flag(pid, "none")
                     flag_items.append({"photo_id": pid, "old_value": old, "new_value": "none"})
-
-            kw_added_pids = []
-            if species and species_kid is not None:
-                for pid in picks:
-                    if pid in photos_with_species:
-                        continue
-                    db.tag_photo(pid, species_kid)
-                    # Use the shared helper so a pending `keyword_remove` for
-                    # the same species cancels out instead of co-existing with
-                    # a new `keyword_add`. sync_to_xmp applies removals after
-                    # adds, so a leftover remove would strip the keyword from
-                    # XMP even though the DB still has the tag.
-                    _queue_keyword_add(pid, species)
-                    kw_added_pids.append(pid)
         except ValueError as e:
             return json_error(str(e), 403)
 
@@ -12807,23 +12828,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.record_edit("flag", desc, "pipeline_group_apply", flag_items,
                            is_batch=len(flag_items) > 1)
 
-        if kw_added_pids and species_kid is not None:
-            kw_items = [{"photo_id": pid, "old_value": "", "new_value": str(species_kid)}
-                        for pid in kw_added_pids]
-            db.record_edit("keyword_add",
-                           f'Added "{species}" to {len(kw_added_pids)} photos (pipeline burst group)',
-                           str(species_kid), kw_items, is_batch=len(kw_added_pids) > 1)
-
         # Return new per-photo state so the client can update without a reload.
+        # `has_species_keyword` is kept in the payload (now always False) so the
+        # client cache-sync code need not change shape; this endpoint no longer
+        # tags species.
         result_photos = {}
         for pid in picks + rejects + candidates:
             row = db.get_photo(pid)
             if not row:
                 continue
-            kws = db.get_photo_keywords(pid)
             result_photos[pid] = {
                 "flag": row["flag"] or "none",
-                "has_species_keyword": species_kid is not None and any(k["id"] == species_kid for k in kws),
+                "has_species_keyword": False,
             }
         return jsonify({"ok": True, "photos": result_photos})
 

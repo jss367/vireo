@@ -1020,6 +1020,10 @@ input[type="range"]::-moz-range-thumb {
   flex-shrink: 0;
 }
 .grm-footer .grm-hint { font-size: 11px; color: var(--text-ghost); flex: 1; }
+.grm-commit-toggle { display:flex; align-items:center; gap:6px; font-size:12px;
+  color: var(--text-muted); cursor:pointer; user-select:none; }
+.grm-commit-toggle input { cursor:pointer; }
+.grm-dirty-hint { font-size:11px; color: var(--warning, #e0a800); }
 .grm-res-control,
 .grm-loupe-zoom-control {
   display: flex;
@@ -1510,7 +1514,21 @@ input[type="range"]::-moz-range-thumb {
       <span id="grmLoupeZoomVal">1×</span>
     </div>
     <span class="grm-hint" id="grmHint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Z = right 1:1 &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
-    <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);" title="Apply pick/reject flag changes and species keywords, then close this burst.">Apply flags/species & Close</button>
+    <div class="grm-commit-group" style="margin-left:auto;display:flex;align-items:center;gap:14px;">
+      <label class="grm-commit-toggle">
+        <input type="checkbox" id="grmConfirmSpeciesChk" onchange="grmOnToggleChange('species')">
+        <span>Confirm species</span>
+        <span class="grm-dirty-hint" id="grmSpeciesDirtyHint" style="display:none;"></span>
+      </label>
+      <label class="grm-commit-toggle">
+        <input type="checkbox" id="grmApplyFlagsChk" onchange="grmOnToggleChange('flags')">
+        <span>Apply picks/rejects</span>
+        <span class="grm-dirty-hint" id="grmFlagsDirtyHint" style="display:none;"></span>
+      </label>
+      <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept"
+        style="padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);"
+        title="Commit whichever boxes are checked, then close this burst.">Apply and close</button>
+    </div>
   </div>
 </div>
 
@@ -3664,10 +3682,30 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
 
   var items = photoIds.map(function(pid) { return photoMap[pid]; }).filter(Boolean);
 
-  // Reset the species input to this encounter's value so a stale value from a
+  // Reset the species input to this burst's value so a stale value from a
   // previously-reviewed group doesn't leak in when the prior modal was closed
-  // via × or Escape (only Apply & Close clears it).
-  var initialSpecies = enc.confirmed_species || (enc.species ? enc.species[0] : '') || '';
+  // via × or Escape (only Apply & Close clears it). A per-burst override wins
+  // over the encounter label/prediction so the field reflects what THIS burst
+  // is actually tagged/confirmed as — otherwise applying flags-only would post
+  // the encounter species and silently replace the burst's existing override
+  // (untag X, tag Y). Matches renderSpeciesWidget's burst-override precedence.
+  var burstOvr = burst && burst.species_override;
+  var initialSpecies = (burstOvr && burstOvr.species)
+    || enc.confirmed_species
+    || (enc.species ? enc.species[0] : '')
+    || '';
+
+  // The species this burst is ACTUALLY confirmed as (vs initialSpecies, which
+  // falls back to the unconfirmed top prediction so the input pre-fills). The
+  // "Confirm species" checkbox smart-default keys off THIS: if the field value
+  // differs from what's already confirmed, confirming is a meaningful action
+  // (including confirming a so-far-unconfirmed prediction). '' = unconfirmed.
+  var initialConfirmedSpecies = '';
+  if (burstOvr && burstOvr.confirmed === true && burstOvr.species) {
+    initialConfirmedSpecies = burstOvr.species;
+  } else if (enc.species_confirmed && enc.confirmed_species) {
+    initialConfirmedSpecies = enc.confirmed_species;
+  }
 
   // Bump the session id so any in-flight /group/state fetch from a previous
   // openGroupReview call lands as stale and gets ignored when it resolves.
@@ -3696,6 +3734,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     dbState: {},
     keywordStateSpecies: initialSpecies,
     initialSpecies: initialSpecies,
+    initialConfirmedSpecies: initialConfirmedSpecies,
     source: source,
     allowRemove: allowRemove,
     sessionId: sessionId,
@@ -3703,7 +3742,10 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     // Close is gated on this so a click during the seed window can't ship
     // an empty picks/rejects payload (which would clear pre-existing flags
     // by treating every photo as a candidate).
-    seeded: false
+    seeded: false,
+    // null = follow smart default; true/false = user explicitly set it.
+    confirmSpeciesOverride: null,
+    applyFlagsOverride: null
   };
   _grmLoupeLocked = false;
   _grmZoomMultiplier = 1;
@@ -3975,6 +4017,48 @@ function grmRefreshSpeciesKeywordState() {
   });
 }
 
+// User manually toggled a checkbox: record the override for ONLY the box that
+// fired, then re-sync labels. Recording both would pin the untouched box's
+// override and break its smart default (null = follow the dirty heuristic).
+function grmOnToggleChange(which) {
+  if (which === 'species') {
+    var spChk = document.getElementById('grmConfirmSpeciesChk');
+    if (spChk) grmState.confirmSpeciesOverride = spChk.checked;
+  } else if (which === 'flags') {
+    var flChk = document.getElementById('grmApplyFlagsChk');
+    if (flChk) grmState.applyFlagsOverride = flChk.checked;
+  }
+  grmUpdateApplyLabel();
+}
+
+// Smart default: is there a real pending change for each side?
+function grmFlagsDirty(diff) {
+  return (diff.flagNew + diff.rejectNew + diff.clearNew + diff.detachNew) > 0;
+}
+// The species side is dirty when the confirmed species changes OR when the
+// burst is already confirmed as the current species but some post-apply frame
+// still lacks that species keyword (e.g. legacy data that only tagged picks).
+// /api/pipeline/group/apply is flags-only, so those missing keywords would
+// never be written unless the species side commits — mirror the rapid-review
+// gate (speciesChanged || outstanding tag work). The tag count depends on the
+// resolved flags state (a removed photo only drops out when its removal
+// actually commits), so callers pass the already-resolved `flags` value.
+function grmSpeciesDirty(diff, flagsResolved) {
+  if (diff.speciesChanged) return true;
+  return grmSpeciesTagCount({ flags: flagsResolved }, diff.species) > 0;
+}
+
+// Resolve the effective checked state: user override wins, else smart default.
+function grmResolveChecks(diff) {
+  var sp = grmState.confirmSpeciesOverride;
+  var fl = grmState.applyFlagsOverride;
+  var flags = fl === null ? grmFlagsDirty(diff) : fl;
+  return {
+    species: sp === null ? grmSpeciesDirty(diff, flags) : sp,
+    flags: flags,
+  };
+}
+
 // Update the Apply button label to reflect the *new* DB writes that will
 // happen — not the totals in each zone — so the user can see at a glance
 // what they're committing to. A photo already flagged in the DB and still
@@ -3988,15 +4072,41 @@ function grmUpdateApplyLabel() {
   // misreport pending writes and clobber the error/loading message.
   if (!grmState || !grmState.seeded) return;
   var diff = grmComputeDiff();
+
+  var checks = grmResolveChecks(diff);
+  var spChk = document.getElementById('grmConfirmSpeciesChk');
+  var flChk = document.getElementById('grmApplyFlagsChk');
+  if (spChk) spChk.checked = checks.species;
+  if (flChk) flChk.checked = checks.flags;
+
+  // Amber hint only when a box is unchecked but its side is dirty.
+  var spHint = document.getElementById('grmSpeciesDirtyHint');
+  if (spHint) {
+    var show = !checks.species && grmSpeciesDirty(diff, checks.flags);
+    spHint.style.display = show ? '' : 'none';
+    spHint.textContent = show ? "species won't be confirmed" : '';
+  }
+  var flHint = document.getElementById('grmFlagsDirtyHint');
+  if (flHint) {
+    var n = diff.flagNew + diff.rejectNew + diff.clearNew + diff.detachNew;
+    var showF = !checks.flags && n > 0;
+    flHint.style.display = showF ? '' : 'none';
+    flHint.textContent = showF ? (n + ' cull change' + (n === 1 ? '' : 's') + " won't be saved") : '';
+  }
+
+  // True number of frames the species call will newly tag = all post-apply
+  // burst members (parameterized by checks.flags), not just picks.
+  var tagCount = grmSpeciesTagCount(checks, diff.species);
+
   var parts = [];
-  if (diff.flagNew > 0) parts.push('Flag ' + diff.flagNew);
-  if (diff.rejectNew > 0) parts.push('Reject ' + diff.rejectNew);
-  if (diff.clearNew > 0) parts.push('Clear ' + diff.clearNew);
-  if (diff.speciesChanged) parts.push('Set species');
-  if (diff.tagNew > 0) parts.push('Tag ' + diff.tagNew + (diff.species ? ' as ' + diff.species : ''));
-  if (diff.detachNew > 0) parts.push('Detach ' + diff.detachNew);
-  btn.textContent = parts.length ? parts.join(' · ') + ' & Close' : 'No DB changes & Close';
-  btn.title = grmApplyTitle(diff);
+  if (checks.flags && diff.flagNew > 0) parts.push('Flag ' + diff.flagNew);
+  if (checks.flags && diff.rejectNew > 0) parts.push('Reject ' + diff.rejectNew);
+  if (checks.flags && diff.clearNew > 0) parts.push('Clear ' + diff.clearNew);
+  if (checks.species && diff.speciesChanged) parts.push('Set species');
+  if (checks.species && tagCount > 0) parts.push('Tag ' + tagCount + (diff.species ? ' as ' + diff.species : ''));
+  if (checks.flags && diff.detachNew > 0) parts.push('Detach ' + diff.detachNew);
+  btn.textContent = parts.length ? parts.join(' · ') + ' & Close' : 'Apply and close';
+  btn.title = grmApplyTitle(diff, checks, checks.species ? tagCount : 0);
 }
 
 // Diff the current modal zones against the DB snapshot we opened with.
@@ -4009,9 +4119,8 @@ function grmComputeDiff() {
     flagNew: 0,
     rejectNew: 0,
     clearNew: 0,
-    tagNew: 0,
     detachNew: 0,
-    speciesChanged: !!(species && grmState && species !== (grmState.initialSpecies || '')),
+    speciesChanged: !!(species && grmState && species !== (grmState.initialConfirmedSpecies || '')),
     species: species
   };
   if (!grmState || !grmState.items) return diff;
@@ -4023,9 +4132,6 @@ function grmComputeDiff() {
     }
     var st = (grmState.dbState && grmState.dbState[p.id]) || {};
     var oldFlag = st.flag || 'none';
-    var hasKw = species &&
-      grmState.keywordStateSpecies === species &&
-      !!st.has_species_keyword;
     var newFlag;
     if (grmState.picks.has(p.id)) newFlag = 'flagged';
     else if (grmState.rejects.has(p.id)) newFlag = 'rejected';
@@ -4036,7 +4142,6 @@ function grmComputeDiff() {
       else if (newFlag === 'rejected') diff.rejectNew++;
       else diff.clearNew++;
     }
-    if (species && newFlag === 'flagged' && !hasKw) diff.tagNew++;
   });
   return diff;
 }
@@ -4045,14 +4150,38 @@ function grmPlural(n, one, many) {
   return n === 1 ? one : (many || one + 's');
 }
 
-function grmApplyTitle(diff) {
+// Photos that will carry the confirmed species = the burst's post-apply
+// members. A removed photo is excluded only if its removal actually
+// commits (checks.flags); when flags are unchecked the removal is
+// discarded, so the photo stays a member and is tagged.
+function grmSpeciesMemberItems(checks) {
+  return grmState.items.filter(function(p) {
+    return checks.flags ? !grmState.removed.has(p.id) : true;
+  });
+}
+// Count of those members that don't already carry the species keyword
+// (i.e. the number /api/encounters/species will newly tag).
+function grmSpeciesTagCount(checks, species) {
+  if (!species) return 0;
+  return grmSpeciesMemberItems(checks).filter(function(p) {
+    var st = (grmState.dbState && grmState.dbState[p.id]) || {};
+    var hasKw = grmState.keywordStateSpecies === species && !!st.has_species_keyword;
+    return !hasKw;
+  }).length;
+}
+
+function grmApplyTitle(diff, checks, tagCount) {
+  // Gate each action by the same checkbox that actually commits it, so the
+  // tooltip never promises a write that the current selection won't perform.
+  // "Apply picks/rejects" owns flag changes AND removed-photo detach; the
+  // species checkbox owns the confirmed-species + keyword-tag writes.
   var actions = [];
-  if (diff.flagNew > 0) actions.push('flag ' + diff.flagNew + ' ' + grmPlural(diff.flagNew, 'photo') + ' as ' + grmPlural(diff.flagNew, 'a pick', 'picks'));
-  if (diff.rejectNew > 0) actions.push('reject ' + diff.rejectNew + ' ' + grmPlural(diff.rejectNew, 'photo'));
-  if (diff.clearNew > 0) actions.push('clear flags on ' + diff.clearNew + ' ' + grmPlural(diff.clearNew, 'photo'));
-  if (diff.speciesChanged) actions.push('set confirmed species to "' + diff.species + '"');
-  if (diff.tagNew > 0) actions.push('add species keyword "' + diff.species + '" to ' + diff.tagNew + ' ' + grmPlural(diff.tagNew, 'pick'));
-  if (diff.detachNew > 0) actions.push('detach ' + diff.detachNew + ' ' + grmPlural(diff.detachNew, 'photo') + ' from this burst');
+  if (checks.flags && diff.flagNew > 0) actions.push('flag ' + diff.flagNew + ' ' + grmPlural(diff.flagNew, 'photo') + ' as ' + grmPlural(diff.flagNew, 'a pick', 'picks'));
+  if (checks.flags && diff.rejectNew > 0) actions.push('reject ' + diff.rejectNew + ' ' + grmPlural(diff.rejectNew, 'photo'));
+  if (checks.flags && diff.clearNew > 0) actions.push('clear flags on ' + diff.clearNew + ' ' + grmPlural(diff.clearNew, 'photo'));
+  if (checks.species && diff.speciesChanged) actions.push('set confirmed species to "' + diff.species + '"');
+  if (checks.species && tagCount > 0) actions.push('add species keyword "' + diff.species + '" to ' + tagCount + ' ' + grmPlural(tagCount, 'burst frame'));
+  if (checks.flags && diff.detachNew > 0) actions.push('detach ' + diff.detachNew + ' ' + grmPlural(diff.detachNew, 'photo') + ' from this burst');
   return actions.length
     ? 'Apply will ' + actions.join(', ') + ', then close this burst.'
     : 'Apply will make no database changes, then close this burst.';
@@ -4980,6 +5109,33 @@ document.addEventListener('contextmenu', function(e) {
 
 /* --- Apply & Close --- */
 
+// Confirm species for the burst. Pipeline bursts go through the same endpoint
+// the grid uses (persists confirmation + auto-detach). Browse-selection ad-hoc
+// sets have no encounter, so just tag the keyword on all members.
+async function grmConfirmSpeciesCall(species, memberIds) {
+  if (!species || memberIds.length === 0) return;
+  if (grmState.source === 'browse-selection') {
+    // Browse selections are ad-hoc and have no persisted encounter/burst to
+    // confirm, so "Confirm species" here means "tag these frames with the
+    // species keyword" — it does not set species_confirmed (there's nothing
+    // to mark). Pipeline bursts below get full server-owned confirmation.
+    await safeFetch('/api/batch/keyword', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photo_ids: memberIds, name: species, type: 'taxonomy' }),
+    });
+    return;
+  }
+  var resp = await safeFetch('/api/encounters/species', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ species: species, photo_ids: memberIds, burst_index: grmState.burstIdx }),
+  });
+  // Adopt authoritative structure (mirrors confirmSpecies()).
+  if (resp && resp.encounters) {
+    pipelineResults.encounters = resp.encounters;
+    if (resp.summary) pipelineResults.summary = resp.summary;
+  }
+}
+
 async function grmApply() {
   // Belt-and-suspenders: the button is disabled until seed completes, but
   // a stuck-open modal whose /group/state never resolved (offline, server
@@ -4988,156 +5144,205 @@ async function grmApply() {
     console.warn('grmApply called before /group/state seed completed; ignoring.');
     return;
   }
+  var diff = grmComputeDiff();
+  var checks = grmResolveChecks(diff);
   var species = document.getElementById('grmSpecies').value.trim();
 
-  var picksArr = Array.from(grmState.picks);
-  var rejectsArr = Array.from(grmState.rejects);
-  var candidatesArr = grmState.items
-    .filter(function(p) {
-      return !grmState.picks.has(p.id) && !grmState.rejects.has(p.id) && !grmState.removed.has(p.id);
-    })
-    .map(function(p) { return p.id; });
+  // --- Flags side (picks/rejects/candidates + removed→detach) ---
+  // Only committed when the "Apply picks/rejects" box is checked. Removals are
+  // part of "cull changes", so the removed→detach block is gated here too.
+  if (checks.flags) {
+    var picksArr = Array.from(grmState.picks);
+    var rejectsArr = Array.from(grmState.rejects);
+    var candidatesArr = grmState.items
+      .filter(function(p) {
+        return !grmState.picks.has(p.id) && !grmState.rejects.has(p.id) && !grmState.removed.has(p.id);
+      })
+      .map(function(p) { return p.id; });
 
-  // Persist to the database first. If this fails we abort so the local
-  // pipeline cache and the DB can't drift apart — the prior fire-and-forget
-  // save-cache + no-DB-write was the bug behind this whole change.
-  var applyResp;
-  try {
-    applyResp = await safeFetch('/api/pipeline/group/apply', {
+    // Persist flags to the database first. If this fails we abort so the local
+    // pipeline cache and the DB can't drift apart — the prior fire-and-forget
+    // save-cache + no-DB-write was the bug behind this whole change.
+    var applyResp;
+    try {
+      applyResp = await safeFetch('/api/pipeline/group/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          picks: picksArr,
+          rejects: rejectsArr,
+          candidates: candidatesArr,
+        }),
+      });
+    } catch (e) {
+      console.error('Pipeline group apply failed:', e);
+      return;
+    }
+
+    // Update local pipelineResults with pick/reject/candidate decisions
+    var photoMap = {};
+    pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
+
+    grmState.picks.forEach(function(pid) {
+      var p = photoMap[pid];
+      if (p) p.label = 'KEEP';
+    });
+
+    grmState.rejects.forEach(function(pid) {
+      var p = photoMap[pid];
+      if (p) p.label = 'REJECT';
+    });
+
+    // Candidates (not picked, not rejected, not removed) → REVIEW
+    grmState.items.forEach(function(item) {
+      if (!grmState.picks.has(item.id) && !grmState.rejects.has(item.id) && !grmState.removed.has(item.id)) {
+        var p = photoMap[item.id];
+        if (p) p.label = 'REVIEW';
+      }
+    });
+
+    // Sync the in-memory pipeline cache's per-photo `flag` with what the
+    // server just wrote, so the badges in the main grid (which read p.flag)
+    // refresh without a full reload.
+    if (applyResp && applyResp.photos) {
+      Object.keys(applyResp.photos).forEach(function(pidStr) {
+        var pid = parseInt(pidStr, 10);
+        var p = photoMap[pid];
+        if (p) p.flag = applyResp.photos[pidStr].flag;
+      });
+    }
+
+    if (grmState.source === 'browse-selection') {
+      if (grmState.removed.size > 0) {
+        var encBrowse = pipelineResults.encounters[grmState.encIdx];
+        var keepIds = encBrowse.photo_ids.filter(function(pid) { return !grmState.removed.has(pid); });
+        if (keepIds.length === 0) {
+          // Every photo was removed from the temporary Browse burst. Any
+          // flag edits were already persisted by /group/apply above, so there
+          // is nothing left to review (and no burst left to confirm a species
+          // on). Drop the handoff and degrade to normal pipeline review
+          // instead of stranding the page on an empty browse-selection
+          // encounter (0 photos but still 1 encounter/1 burst, with a Reopen
+          // flow that can no longer reopen).
+          document.getElementById('grmSpecies').value = '';
+          closeGroupReview();
+          fallbackToNormalPipelineReview();
+          return;
+        }
+        encBrowse.photo_ids = keepIds;
+        encBrowse.photo_count = keepIds.length;
+        if (encBrowse.bursts && encBrowse.bursts[grmState.burstIdx]) {
+          encBrowse.bursts[grmState.burstIdx].photo_ids = keepIds.slice();
+        }
+        pipelineResults.photos = pipelineResults.photos.filter(function(p) {
+          return !grmState.removed.has(p.id);
+        });
+      }
+      // Flags are now persisted to the DB — the one-shot handoff has served
+      // its purpose, so drop it. A later reload degrades to normal review;
+      // the in-memory group stays reopenable via the Reopen button.
+      clearBrowseBurstHandoff();
+    } else if (grmState.removed.size > 0) {
+      // Detach removed photos from the burst into new single-photo bursts.
+      var enc = pipelineResults.encounters[grmState.encIdx];
+      var burst = enc.bursts[grmState.burstIdx];
+      var burstIds = burst.photo_ids || burst;
+      // Whether the source burst is the modern object shape (carries its own
+      // predictions) vs a legacy raw photo-id array (no predictions field).
+      var srcHasPreds = burst && Array.isArray(burst.species_predictions);
+      grmState.removed.forEach(function(pid) {
+        var idx = burstIds.indexOf(pid);
+        if (idx >= 0) burstIds.splice(idx, 1);
+        // New single-photo burst: rebuild its consensus from just this photo so it
+        // doesn't inherit the source burst's predictions for photos it no longer
+        // contains (the loupe and the saved cache both trust burst.species_predictions).
+        var photo = findPhotoInResults(pid);
+        // Preserve a burst-specific confirmed species: if the source burst had
+        // a species_override differing from the encounter default, the detached
+        // single-photo burst must keep it (shallow clone so it doesn't alias the
+        // source), or a flags-only apply would silently revert this photo to the
+        // encounter species and drop the burst-specific confirmation.
+        enc.bursts.push({
+          photo_ids: [pid],
+          species_predictions: buildBurstConsensus(photo ? [photo] : []),
+          species_override: burst && burst.species_override
+            ? Object.assign({}, burst.species_override)
+            : null,
+        });
+      });
+      // Recompute the shortened source burst's consensus from its remaining
+      // photos, so it no longer reflects the detached ones. Skip legacy array
+      // bursts (no predictions field to maintain).
+      if (srcHasPreds) {
+        burst.species_predictions = buildBurstConsensus(
+          burstIds.map(function(id) { return findPhotoInResults(id); }).filter(Boolean)
+        );
+      }
+      // Clean up empty burst
+      if (burstIds.length === 0) {
+        enc.bursts.splice(grmState.burstIdx, 1);
+      }
+      enc.burst_count = enc.bursts.length;
+    }
+  }
+
+  // Save the updated pipeline cache (label + flag changes + detached bursts)
+  // BEFORE confirming species: /api/encounters/species reloads the cache from
+  // disk and validates photo_ids ⊆ bursts[burst_index], so the structure the
+  // user sees must be persisted first.
+  //
+  // Skip for browse-selection: pipelineResults there is a *temporary* ad-hoc
+  // selection set, not the real pipeline run, and save_results_raw would
+  // clobber the actual per-workspace cache. Its species path uses
+  // /api/batch/keyword (no cache read), so there is no ordering dependency.
+  //
+  // Also skip when flags weren't committed: the only local mutations to
+  // pipelineResults (label/flag sync + removed→detach) live under the
+  // checks.flags block above, so with flags unchecked there is nothing new to
+  // persist. The species-only path relies on the SERVER to save the cache —
+  // /api/encounters/species loads the on-disk cache and re-saves it itself
+  // (we adopt resp.encounters after) — so a local save-cache here would be a
+  // no-op write on the wire.
+  if (grmState.source !== 'browse-selection' && checks.flags) {
+    await safeFetch('/api/pipeline/save-cache', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        picks: picksArr,
-        rejects: rejectsArr,
-        candidates: candidatesArr,
-        species: species,
-      }),
+      body: JSON.stringify(pipelineResults),
     });
-  } catch (e) {
-    console.error('Pipeline group apply failed:', e);
-    return;
   }
 
-  // Update local pipelineResults with pick/reject/candidate decisions
-  var photoMap = {};
-  pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
-
-  grmState.picks.forEach(function(pid) {
-    var p = photoMap[pid];
-    if (p) p.label = 'KEEP';
-  });
-
-  grmState.rejects.forEach(function(pid) {
-    var p = photoMap[pid];
-    if (p) p.label = 'REJECT';
-  });
-
-  // Candidates (not picked, not rejected, not removed) → REVIEW
-  grmState.items.forEach(function(item) {
-    if (!grmState.picks.has(item.id) && !grmState.rejects.has(item.id) && !grmState.removed.has(item.id)) {
-      var p = photoMap[item.id];
-      if (p) p.label = 'REVIEW';
+  // --- Species side ---
+  // Server-owned now: tag all remaining (non-removed) burst frames + mark the
+  // burst confirmed via the unified endpoint. Removed photos are excluded so
+  // they aren't tagged. Skip when the burst no longer exists (emptied by the
+  // detach above) or has no members left.
+  if (checks.species) {
+    var burstExists = grmState.source === 'browse-selection' ||
+      (pipelineResults.encounters[grmState.encIdx] &&
+       pipelineResults.encounters[grmState.encIdx].bursts &&
+       pipelineResults.encounters[grmState.encIdx].bursts[grmState.burstIdx]);
+    if (burstExists) {
+      // Post-apply burst members carry the species. Uses the same rule as the
+      // label/tooltip (grmSpeciesMemberItems): a removed photo is excluded only
+      // when its removal actually committed (checks.flags); otherwise it stays a
+      // member and gets tagged.
+      var memberIds = grmSpeciesMemberItems(checks).map(function(p) { return p.id; });
+      // A species-call failure intentionally throws out of grmApply *before*
+      // close, leaving the modal open so the user can retry. Any flags were
+      // already committed idempotently above, so a retry re-runs only the
+      // species side. No try/catch — propagating the throw is the desired
+      // "keep modal open" behavior.
+      await grmConfirmSpeciesCall(species, memberIds);
     }
-  });
-
-  // Sync the in-memory pipeline cache's per-photo `flag` with what the
-  // server just wrote, so the badges in the main grid (which read p.flag)
-  // refresh without a full reload.
-  if (applyResp && applyResp.photos) {
-    Object.keys(applyResp.photos).forEach(function(pidStr) {
-      var pid = parseInt(pidStr, 10);
-      var p = photoMap[pid];
-      if (p) p.flag = applyResp.photos[pidStr].flag;
-    });
   }
 
+  // Browse-selection is a one-shot handoff: drop it on close regardless of
+  // which side was committed, so a reload degrades to normal review instead
+  // of reopening a burst whose edits already landed. (Idempotent with the
+  // call inside the flags block above.)
   if (grmState.source === 'browse-selection') {
-    if (grmState.removed.size > 0) {
-      var encBrowse = pipelineResults.encounters[grmState.encIdx];
-      var keepIds = encBrowse.photo_ids.filter(function(pid) { return !grmState.removed.has(pid); });
-      if (keepIds.length === 0) {
-        // Every photo was removed from the temporary Browse burst. Any
-        // flag/species edits were already persisted by /group/apply above,
-        // so there is nothing left to review. Drop the handoff and degrade
-        // to normal pipeline review instead of stranding the page on an
-        // empty browse-selection encounter (0 photos but still 1 encounter/
-        // 1 burst, with a Reopen flow that can no longer reopen).
-        document.getElementById('grmSpecies').value = '';
-        closeGroupReview();
-        fallbackToNormalPipelineReview();
-        return;
-      }
-      encBrowse.photo_ids = keepIds;
-      encBrowse.photo_count = keepIds.length;
-      if (encBrowse.bursts && encBrowse.bursts[grmState.burstIdx]) {
-        encBrowse.bursts[grmState.burstIdx].photo_ids = keepIds.slice();
-      }
-      pipelineResults.photos = pipelineResults.photos.filter(function(p) {
-        return !grmState.removed.has(p.id);
-      });
-    }
-    // Flags/species are now persisted to the DB — the one-shot handoff has
-    // served its purpose, so drop it. A later reload degrades to normal
-    // review; the in-memory group stays reopenable via the Reopen button.
     clearBrowseBurstHandoff();
-    closeGroupReview();
-    document.getElementById('grmSpecies').value = '';
-    renderResults();
-    updateSummaryBar(refreshLocalSummaryCounts());
-    return;
   }
-
-  // Detach removed photos from the burst into new single-photo bursts
-  if (grmState.removed.size > 0) {
-    var enc = pipelineResults.encounters[grmState.encIdx];
-    var burst = enc.bursts[grmState.burstIdx];
-    var burstIds = burst.photo_ids || burst;
-    // Whether the source burst is the modern object shape (carries its own
-    // predictions) vs a legacy raw photo-id array (no predictions field).
-    var srcHasPreds = burst && Array.isArray(burst.species_predictions);
-    grmState.removed.forEach(function(pid) {
-      var idx = burstIds.indexOf(pid);
-      if (idx >= 0) burstIds.splice(idx, 1);
-      // New single-photo burst: rebuild its consensus from just this photo so it
-      // doesn't inherit the source burst's predictions for photos it no longer
-      // contains (the loupe and the saved cache both trust burst.species_predictions).
-      var photo = findPhotoInResults(pid);
-      enc.bursts.push({
-        photo_ids: [pid],
-        species_predictions: buildBurstConsensus(photo ? [photo] : []),
-        species_override: null,
-      });
-    });
-    // Recompute the shortened source burst's consensus from its remaining
-    // photos, so it no longer reflects the detached ones. Skip legacy array
-    // bursts (no predictions field to maintain).
-    if (srcHasPreds) {
-      burst.species_predictions = buildBurstConsensus(
-        burstIds.map(function(id) { return findPhotoInResults(id); }).filter(Boolean)
-      );
-    }
-    // Clean up empty burst
-    if (burstIds.length === 0) {
-      enc.bursts.splice(grmState.burstIdx, 1);
-    }
-    enc.burst_count = enc.bursts.length;
-  }
-
-  // Update species if changed
-  if (species) {
-    var enc = pipelineResults.encounters[grmState.encIdx];
-    if (enc) {
-      enc.confirmed_species = species;
-      enc.species_confirmed = true;
-    }
-  }
-
-  // Save the updated pipeline cache (label + flag changes + detached bursts).
-  safeFetch('/api/pipeline/save-cache', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(pipelineResults),
-  });
 
   closeGroupReview();
   // Clear the species input for next use
