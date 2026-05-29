@@ -620,6 +620,87 @@ def test_pipeline_previews_stage_runs(tmp_path, monkeypatch):
         "Expected 'previews' stage in progress events"
 
 
+def test_pipeline_previews_stage_writes_atomically(tmp_path, monkeypatch):
+    """previews_stage must write to a sibling temp file then os.replace into
+    the deterministic ``previews/{id}_{max_size}.jpg`` path.
+
+    With SLOT_CAP > 1, two pipelines processing the same photo can both miss
+    the os.path.exists() cache check and race on the same deterministic path.
+    A direct img.save(cache_path) would interleave/truncate bytes, leaving a
+    corrupt JPEG that preview_cache claims is valid. Regression for Codex
+    P2 review on PR #907.
+    """
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    Image.new("RGB", (100, 100), "red").save(str(photo_dir / "a.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Capture every path Image.save() is invoked with so we can prove the
+    # final cache_path was never the direct target — only the os.replace
+    # destination is.
+    saved_paths = []
+    real_save = Image.Image.save
+
+    def tracking_save(self, fp, *args, **kwargs):
+        saved_paths.append(fp)
+        return real_save(self, fp, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "save", tracking_save)
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+        preview_max_size=1920,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    preview_dir = os.path.join(os.path.dirname(db_path), "previews")
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws_id)
+    photo_id = db2.get_photos(per_page=1)[0]["id"]
+    final_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+
+    # The final preview must exist and be a complete, openable JPEG (proves
+    # os.replace ran).
+    assert os.path.isfile(final_path)
+    with Image.open(final_path) as img:
+        img.verify()
+
+    # No Image.save call targeted the final deterministic path directly —
+    # every write went through a sibling temp file. Thumbnails go through
+    # generate_thumbnail (also atomic) so those saves also won't target the
+    # preview path; restrict the check to saves inside preview_dir.
+    preview_dir_saves = [
+        p for p in saved_paths
+        if isinstance(p, (str, bytes)) and str(p).startswith(preview_dir)
+    ]
+    assert preview_dir_saves, "previews_stage should have written at least one file"
+    for p in preview_dir_saves:
+        assert str(p) != final_path, (
+            f"previews_stage wrote directly to {final_path}; expected a "
+            "temp sibling + os.replace to make the swap atomic under "
+            "concurrent same-photo pipelines"
+        )
+        assert str(p).endswith(".jpg.tmp"), (
+            f"expected .jpg.tmp temp file, got {p}"
+        )
+
+
 def test_pipeline_params_sources_used_over_source():
     """When sources is provided, it should take precedence over source."""
     params = PipelineParams(source="/single", sources=["/a", "/b"])

@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import queue
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -1387,7 +1388,26 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     canonical = get_canonical_image_path(photo, base_dir, folders)
                     img = load_image(canonical, max_size=max_size)
                     if img:
-                        img.save(cache_path, format="JPEG", quality=preview_quality)
+                        # Atomic write: with SLOT_CAP > 1 two pipelines
+                        # processing the same photo can both miss the
+                        # os.path.exists() check above and race here on the
+                        # deterministic {id}_{max_size}.jpg path. A direct
+                        # img.save(cache_path) would interleave/truncate the
+                        # JPEG bytes; tempfile + os.replace makes the visible
+                        # file flip atomically (same pattern as
+                        # thumbnails.generate_thumbnail).
+                        fd, tmp_path = tempfile.mkstemp(
+                            prefix=f'.{photo["id"]}.', suffix=".jpg.tmp",
+                            dir=preview_dir,
+                        )
+                        os.close(fd)
+                        try:
+                            img.save(tmp_path, format="JPEG", quality=preview_quality)
+                            os.replace(tmp_path, cache_path)
+                        except Exception:
+                            with contextlib.suppress(OSError):
+                                os.unlink(tmp_path)
+                            raise
                         with contextlib.suppress(Exception):
                             thread_db.preview_cache_insert(
                                 photo["id"], max_size, os.path.getsize(cache_path),
