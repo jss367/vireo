@@ -12015,46 +12015,90 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # (SQLite lock, disk error, etc.) can't leave half the photos retagged
         # while the other half still carry the old species.
         try:
+            # Resolve the target species keyword id up front so we can precheck
+            # which photos already carry it. add_keyword is idempotent and
+            # returns the existing id when the species already exists.
+            kid = db.add_keyword(species, is_species=True, _commit=False)
+
+            # Precheck which submitted photos already carry the new species
+            # keyword. Only photos that get a *new* tag should generate
+            # edit-history items and sidecar adds — otherwise confirming an
+            # already-tagged photo would push a no-op onto the undo stack, and
+            # undoing it would destructively remove the pre-existing keyword.
+            # Mirrors the precheck pattern in api_batch_keyword.
+            placeholders_ids = ",".join("?" for _ in photo_ids)
+            already_has_new = {
+                row["photo_id"]
+                for row in db.conn.execute(
+                    f"""SELECT photo_id FROM photo_keywords
+                        WHERE keyword_id = ? AND photo_id IN ({placeholders_ids})""",
+                    [kid] + list(photo_ids),
+                ).fetchall()
+            }
+            newly_tagged = [pid for pid in photo_ids if pid not in already_has_new]
+
+            # For a replacement, only photos that actually carry the old
+            # species keyword should be untagged / generate a remove.
+            had_old = set()
             if is_replacement and old_kid is not None:
+                had_old = {
+                    row["photo_id"]
+                    for row in db.conn.execute(
+                        f"""SELECT photo_id FROM photo_keywords
+                            WHERE keyword_id = ? AND photo_id IN ({placeholders_ids})""",
+                        [old_kid] + list(photo_ids),
+                    ).fetchall()
+                }
                 for pid in photo_ids:
+                    if pid not in had_old:
+                        continue
                     db.untag_photo(pid, old_kid, _commit=False)
                     _queue_keyword_remove(
                         pid, previous_species,
                         workspace_id=ws_id, _commit=False,
                     )
 
-            kid = db.add_keyword(species, is_species=True, _commit=False)
-
-            for pid in photo_ids:
+            for pid in newly_tagged:
                 db.tag_photo(pid, kid, _commit=False)
                 _queue_keyword_add(
                     pid, species, workspace_id=ws_id, _commit=False,
                 )
 
-            if is_replacement and old_kid is not None:
+            if is_replacement and old_kid is not None and had_old:
+                # Photos that actually changed: had the old keyword (so the
+                # remove side fired) and/or newly gained the new one. Use the
+                # union so undo restores the exact state we mutated.
+                newly_set = set(newly_tagged)
+                changed = [
+                    pid for pid in photo_ids if pid in had_old or pid in newly_set
+                ]
                 items = [
-                    {"photo_id": pid, "old_value": str(old_kid), "new_value": str(kid)}
-                    for pid in photo_ids
+                    {
+                        "photo_id": pid,
+                        "old_value": str(old_kid) if pid in had_old else "",
+                        "new_value": str(kid) if pid in newly_set else "",
+                    }
+                    for pid in changed
                 ]
                 db.record_edit(
                     "species_replace",
-                    f'Replaced species "{previous_species}" with "{species}" on {len(photo_ids)} photos',
+                    f'Replaced species "{previous_species}" with "{species}" on {len(changed)} photos',
                     str(kid),
                     items,
-                    is_batch=len(photo_ids) > 1,
+                    is_batch=len(changed) > 1,
                     _commit=False,
                 )
-            else:
+            elif newly_tagged:
                 items = [
                     {"photo_id": pid, "old_value": "", "new_value": str(kid)}
-                    for pid in photo_ids
+                    for pid in newly_tagged
                 ]
                 db.record_edit(
                     "keyword_add",
-                    f'Confirmed species "{species}" on {len(photo_ids)} photos',
+                    f'Confirmed species "{species}" on {len(newly_tagged)} photos',
                     str(kid),
                     items,
-                    is_batch=len(photo_ids) > 1,
+                    is_batch=len(newly_tagged) > 1,
                     _commit=False,
                 )
             db.conn.commit()
