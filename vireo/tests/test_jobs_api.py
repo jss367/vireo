@@ -1789,32 +1789,51 @@ def _block_pipeline_until(event, result=None):
     return work
 
 
+def _fill_pipeline_slots(runner, workspace_id):
+    """Enqueue ``SLOT_CAP`` blocking pipelines + wait for them all to
+    start, so the next enqueue lands in the queued state.
+
+    Returns ``(occupant_ids, release_event)``. Call ``release_event.set()``
+    to let them finish.
+    """
+    import threading
+
+    from jobs import SLOT_CAP
+    release = threading.Event()
+    started = [threading.Event() for _ in range(SLOT_CAP)]
+    ids = []
+    for i in range(SLOT_CAP):
+        evt = started[i]
+        def work(job, _evt=evt, _release=release):
+            _evt.set()
+            _release.wait(timeout=5.0)
+            return {}
+        ids.append(runner.enqueue_pipeline(
+            work_fn=work, config={}, workspace_id=workspace_id,
+        ))
+    for i, evt in enumerate(started):
+        assert evt.wait(timeout=2.0), f"slot-filler {i} never started"
+    return ids, release
+
+
 def test_cancel_queued_endpoint_cancels_all_queued_in_active_workspace(app_and_db):
     """POST /api/jobs/cancel-queued (no body) cancels every queued
     pipeline in the active workspace. The currently-running pipeline
     is left alone.
     """
-    import threading
     app, db = app_and_db
     runner = app._job_runner
     client = app.test_client()
     ws_id = db._active_workspace_id
 
-    # Pin slot 1 with a running pipeline so the next two stay queued.
-    release = threading.Event()
-    running_id = runner.enqueue_pipeline(
-        work_fn=_block_pipeline_until(release),
-        config={}, workspace_id=ws_id,
-    )
-    # Two queued pipelines behind it.
+    # Fill every slot so the next two enqueues stay queued.
+    occupant_ids, release = _fill_pipeline_slots(runner, ws_id)
     queued_a = runner.enqueue_pipeline(
         work_fn=lambda job: None, config={}, workspace_id=ws_id,
     )
     queued_b = runner.enqueue_pipeline(
         work_fn=lambda job: None, config={}, workspace_id=ws_id,
     )
-    # Sanity: both are queued, the first is running.
-    assert runner.get(running_id)["status"] == "running"
     assert runner.get(queued_a)["status"] == "queued"
     assert runner.get(queued_b)["status"] == "queued"
 
@@ -1834,12 +1853,14 @@ def test_cancel_queued_endpoint_cancels_all_queued_in_active_workspace(app_and_d
                 f"queued job {jid} should be cancelled, was {row['status']}"
             )
 
-        # Running pipeline is untouched.
-        assert runner.get(running_id)["status"] == "running"
+        # Slot-filler pipelines (still running) are untouched.
+        for jid in occupant_ids:
+            assert runner.get(jid)["status"] == "running"
     finally:
         release.set()
         from wait import wait_for_job_via_runner
-        wait_for_job_via_runner(runner, running_id)
+        for jid in occupant_ids:
+            wait_for_job_via_runner(runner, jid)
 
 
 def test_cancel_queued_endpoint_rejects_invalid_body(app_and_db):
@@ -1854,22 +1875,16 @@ def test_cancel_queued_endpoint_rejects_invalid_body(app_and_db):
 
 def test_cancel_queued_endpoint_rejects_malformed_json_without_cancel(app_and_db):
     """Malformed JSON must not fall back to the destructive default scope."""
-    import threading
 
     app, db = app_and_db
     runner = app._job_runner
     client = app.test_client()
     ws_id = db._active_workspace_id
 
-    release = threading.Event()
-    running_id = runner.enqueue_pipeline(
-        work_fn=_block_pipeline_until(release),
-        config={}, workspace_id=ws_id,
-    )
+    occupant_ids, release = _fill_pipeline_slots(runner, ws_id)
     queued_id = runner.enqueue_pipeline(
         work_fn=lambda job: None, config={}, workspace_id=ws_id,
     )
-    assert runner.get(running_id)["status"] == "running"
     assert runner.get(queued_id)["status"] == "queued"
 
     try:
@@ -1884,7 +1899,8 @@ def test_cancel_queued_endpoint_rejects_malformed_json_without_cancel(app_and_db
     finally:
         release.set()
         from wait import wait_for_job_via_runner
-        wait_for_job_via_runner(runner, running_id)
+        for jid in occupant_ids:
+            wait_for_job_via_runner(runner, jid)
         wait_for_job_via_runner(runner, queued_id)
 
 
@@ -1905,7 +1921,6 @@ def test_cancel_queued_endpoint_leaves_other_workspaces_alone(app_and_db):
     pipelines in that workspace are cancelled. Queued pipelines in
     other workspaces stay queued.
     """
-    import threading
     app, db = app_and_db
     runner = app._job_runner
     client = app.test_client()
@@ -1913,13 +1928,9 @@ def test_cancel_queued_endpoint_leaves_other_workspaces_alone(app_and_db):
     # Create a second workspace so we have a meaningful "other" id.
     ws_b = db.create_workspace("scoped-other")
 
-    # Pin the single slot so EVERY enqueued pipeline below stays queued
-    # regardless of workspace. (SLOT_CAP=1 in this PR.)
-    release = threading.Event()
-    pin_id = runner.enqueue_pipeline(
-        work_fn=_block_pipeline_until(release),
-        config={}, workspace_id=ws_a,
-    )
+    # Fill every slot in ws_a so subsequent enqueues (in either
+    # workspace) stay queued. Slot capacity is global, not per-workspace.
+    occupant_ids, release = _fill_pipeline_slots(runner, ws_a)
     queued_a = runner.enqueue_pipeline(
         work_fn=lambda job: None, config={}, workspace_id=ws_a,
     )
@@ -1951,7 +1962,8 @@ def test_cancel_queued_endpoint_leaves_other_workspaces_alone(app_and_db):
     finally:
         release.set()
         from wait import wait_for_job_via_runner
-        wait_for_job_via_runner(runner, pin_id)
+        for jid in occupant_ids:
+            wait_for_job_via_runner(runner, jid)
         # Cancel the surviving queued job so the test fixture's
         # teardown isn't waiting on a pipeline that will never run.
         runner.cancel_job(queued_b)

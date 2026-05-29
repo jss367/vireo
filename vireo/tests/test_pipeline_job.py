@@ -620,6 +620,87 @@ def test_pipeline_previews_stage_runs(tmp_path, monkeypatch):
         "Expected 'previews' stage in progress events"
 
 
+def test_pipeline_previews_stage_writes_atomically(tmp_path, monkeypatch):
+    """previews_stage must write to a sibling temp file then os.replace into
+    the deterministic ``previews/{id}_{max_size}.jpg`` path.
+
+    With SLOT_CAP > 1, two pipelines processing the same photo can both miss
+    the os.path.exists() cache check and race on the same deterministic path.
+    A direct img.save(cache_path) would interleave/truncate bytes, leaving a
+    corrupt JPEG that preview_cache claims is valid. Regression for Codex
+    P2 review on PR #907.
+    """
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    Image.new("RGB", (100, 100), "red").save(str(photo_dir / "a.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Capture every path Image.save() is invoked with so we can prove the
+    # final cache_path was never the direct target — only the os.replace
+    # destination is.
+    saved_paths = []
+    real_save = Image.Image.save
+
+    def tracking_save(self, fp, *args, **kwargs):
+        saved_paths.append(fp)
+        return real_save(self, fp, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "save", tracking_save)
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+        preview_max_size=1920,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    preview_dir = os.path.join(os.path.dirname(db_path), "previews")
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws_id)
+    photo_id = db2.get_photos(per_page=1)[0]["id"]
+    final_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+
+    # The final preview must exist and be a complete, openable JPEG (proves
+    # os.replace ran).
+    assert os.path.isfile(final_path)
+    with Image.open(final_path) as img:
+        img.verify()
+
+    # No Image.save call targeted the final deterministic path directly —
+    # every write went through a sibling temp file. Thumbnails go through
+    # generate_thumbnail (also atomic) so those saves also won't target the
+    # preview path; restrict the check to saves inside preview_dir.
+    preview_dir_saves = [
+        p for p in saved_paths
+        if isinstance(p, (str, bytes)) and str(p).startswith(preview_dir)
+    ]
+    assert preview_dir_saves, "previews_stage should have written at least one file"
+    for p in preview_dir_saves:
+        assert str(p) != final_path, (
+            f"previews_stage wrote directly to {final_path}; expected a "
+            "temp sibling + os.replace to make the swap atomic under "
+            "concurrent same-photo pipelines"
+        )
+        assert str(p).endswith(".jpg.tmp"), (
+            f"expected .jpg.tmp temp file, got {p}"
+        )
+
+
 def test_pipeline_params_sources_used_over_source():
     """When sources is provided, it should take precedence over source."""
     params = PipelineParams(source="/single", sources=["/a", "/b"])
@@ -6295,6 +6376,127 @@ def test_pipeline_miss_stage_skipped_when_regroup_fails(tmp_path, monkeypatch):
         )
 
 
+def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
+    """The workspace_regroup lock must wrap BOTH regroup_stage and
+    miss_stage. Without a single lock spanning both, pipeline B could
+    sneak in between A's regroup release and A's miss acquire and
+    rewrite burst_id / pipeline_results_ws*.json — leaving the
+    persisted miss flags inconsistent with the cached grouping the
+    review UI reads for "Review misses".
+
+    Trace acquire/release vs. regroup-work and miss-step events and
+    verify release happens AFTER the miss step, not between them."""
+    import config as cfg
+    import pipeline as pipeline_mod
+    import pipeline_job as pj
+    import pipeline_locks
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    Image.new("RGB", (16, 16), "black").save(str(photo_dir / "a.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    events = []
+
+    real_acquire = pipeline_locks.acquire_workspace_regroup
+
+    class TrackingLock:
+        def __init__(self, inner, ws):
+            self._inner = inner
+            self._ws = ws
+
+        def __enter__(self):
+            events.append(("acquire", self._ws))
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            events.append(("release", self._ws))
+            return self._inner.__exit__(*args)
+
+    monkeypatch.setattr(
+        pj, "acquire_workspace_regroup",
+        lambda ws: TrackingLock(real_acquire(ws), ws),
+    )
+
+    def _ok_run(photos, config=None, emit_trace=False):
+        events.append(("regroup_work", ws_id))
+        return {"summary": {"groups": 1}, "photos": photos}
+
+    monkeypatch.setattr(pipeline_mod, "run_full_pipeline", _ok_run)
+    monkeypatch.setattr(pipeline_mod, "save_results", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda thread_db, collection_id=None, config=None: [{"id": 1}],
+    )
+
+    class TrackingRunner(FakeRunner):
+        def update_step(self, job_id, step_id, **kwargs):
+            if step_id == "misses":
+                events.append(("miss_step", kwargs.get("status")))
+            super().update_step(job_id, step_id, **kwargs)
+
+    # skip_classify=True keeps the test from needing real model files;
+    # miss_stage takes its early-skip path but still calls update_step
+    # on the "misses" step — which must happen INSIDE the lock.
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+    )
+    runner = TrackingRunner()
+    job = _make_job()
+
+    with contextlib.suppress(Exception):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Strip events from earlier stages that don't touch the regroup lock.
+    interesting = [
+        e for e in events
+        if e[0] in ("acquire", "release", "regroup_work", "miss_step")
+    ]
+    assert ("acquire", ws_id) in interesting, (
+        f"workspace_regroup lock was never acquired; events: {interesting}"
+    )
+    assert ("release", ws_id) in interesting, (
+        f"workspace_regroup lock was never released; events: {interesting}"
+    )
+
+    acquire_idx = interesting.index(("acquire", ws_id))
+    release_idx = interesting.index(("release", ws_id))
+    regroup_idx = next(
+        (i for i, e in enumerate(interesting) if e[0] == "regroup_work"),
+        None,
+    )
+    miss_idx = next(
+        (i for i, e in enumerate(interesting) if e[0] == "miss_step"),
+        None,
+    )
+
+    assert regroup_idx is not None, (
+        f"regroup work never ran; events: {interesting}"
+    )
+    assert miss_idx is not None, (
+        f"miss step never ran; events: {interesting}"
+    )
+    assert acquire_idx < regroup_idx < release_idx, (
+        f"regroup work must run inside the lock; events: {interesting}"
+    )
+    assert acquire_idx < miss_idx < release_idx, (
+        "miss step must run inside the same lock as regroup — otherwise "
+        "a second same-workspace pipeline could sneak in and rewrite "
+        f"grouping state between them. events: {interesting}"
+    )
+
+
 def test_pipeline_regroup_stamps_workspace_group_fingerprint(tmp_path, monkeypatch):
     """When regroup_stage completes successfully, last_grouped_at and
     last_group_fingerprint must be written on the active workspace so the
@@ -7019,6 +7221,124 @@ def _run_extract_masks_for_test(
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
     return db, runner, generate_mask_calls, photo_ids
+
+
+def _apply_extract_masks_stubs(monkeypatch, generate_mask_calls):
+    """(Re)install the SAM2/DINOv2 stubs for a follow-up extract_masks run on
+    an existing DB. generate_mask appends (variant, det_box) to the passed
+    list so the caller can assert whether SAM ran.
+    """
+    import dino_embed
+    import masking
+    import numpy as np
+    import quality
+
+    monkeypatch.setattr(
+        masking, "render_proxy",
+        lambda *a, **k: np.zeros((4, 4, 3), dtype=np.uint8),
+    )
+
+    def fake_generate_mask(proxy, det_box, variant=None):
+        generate_mask_calls.append((variant, tuple(sorted(det_box.items()))))
+        return np.ones((4, 4), dtype=bool)
+
+    monkeypatch.setattr(masking, "generate_mask", fake_generate_mask)
+    monkeypatch.setattr(masking, "crop_completeness", lambda m: 0.9)
+    monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
+    monkeypatch.setattr(masking, "ensure_sam2_weights", lambda **k: None)
+    monkeypatch.setattr(
+        quality, "compute_all_quality_features",
+        lambda p, m: {
+            "subject_tenengrad": 1.5, "bg_tenengrad": 0.3,
+            "subject_clip_high": 0.01, "subject_clip_low": 0.01,
+            "subject_y_median": 100.0, "bg_separation": 50.0,
+            "phash_crop": "deadbeef", "noise_estimate": 5.0,
+        },
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed",
+        lambda p, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed_batch",
+        lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32),
+    )
+    monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
+    monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
+
+
+def test_extract_masks_recomputes_when_active_variant_differs(
+    tmp_path, monkeypatch,
+):
+    """Cross-variant cache-hit consistency (Codex P2 on PR #907).
+
+    A cached mask exists for the *requested* SAM variant, but the photos
+    row is currently active on a DIFFERENT variant (e.g. two workspaces
+    share a folder, one configured sam2-small and one sam2-large, both on
+    dinov2 vit-b14). The cheap "re-activate only" fast path would call
+    set_active_mask_variant — denormalising the requested variant's mask
+    features — WITHOUT update_photo_embeddings, leaving photos.dino_*
+    describing the previously-active variant's mask. regroup reads both off
+    the photos row, so it would mix one variant's mask features with
+    another's embedding. The fix forces a recompute when the active variant
+    (or dino embedding variant) doesn't already match, so generate_mask runs
+    and the photos row ends internally consistent.
+    """
+    import config as cfg
+
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200),
+            "model": "MegaDetector"}
+
+    # Run 1: variant small → photo_masks[small], photos.active=small.
+    db, _, _, photo_ids = _run_extract_masks_for_test(
+        tmp_path, monkeypatch, "sam2-small", [spec],
+    )
+    pid = photo_ids[0]
+    db_path = str(tmp_path / "test.db")
+    ws_id = db._active_workspace_id
+    col_id = db.conn.execute(
+        "SELECT id FROM collections ORDER BY id LIMIT 1"
+    ).fetchone()[0]
+
+    def rerun(variant):
+        calls = []
+        _apply_extract_masks_stubs(monkeypatch, calls)
+        cfg.save({"pipeline": {"sam2_variant": variant,
+                               "dinov2_variant": "vit-b14"}})
+        run_pipeline_job(
+            _make_job(), FakeRunner(), db_path, ws_id,
+            PipelineParams(collection_id=col_id, skip_classify=True,
+                           skip_extract_masks=False, skip_regroup=True),
+        )
+        return calls
+
+    # Run 2: variant large → adds photo_masks[large], photos.active=large.
+    calls_large = rerun("sam2-large")
+    assert calls_large, "switching to a new variant must run SAM"
+    state = db.conn.execute(
+        "SELECT active_mask_variant FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert state["active_mask_variant"] == "sam2-large"
+    # Both variant rows now cached on disk.
+    variants = {r["variant"] for r in db.list_masks_for_photo(pid)}
+    assert variants == {"sam2-small", "sam2-large"}
+
+    # Run 3: back to small. The small row is cached (prompt+detector match,
+    # file on disk) so the OLD code would cheap-skip via set_active_mask_
+    # variant and never touch embeddings. With the fix, because the photos
+    # row is active on large, the stage recomputes: generate_mask runs for
+    # small and the row ends active+consistent on small.
+    calls_small = rerun("sam2-small")
+    assert calls_small, (
+        "cached mask but stale active variant must recompute, not cheap-skip; "
+        f"generate_mask was not called: {calls_small}"
+    )
+    final = db.conn.execute(
+        "SELECT active_mask_variant, dino_embedding_variant FROM photos "
+        "WHERE id=?", (pid,),
+    ).fetchone()
+    assert final["active_mask_variant"] == "sam2-small"
+    assert final["dino_embedding_variant"] == "vit-b14"
 
 
 def test_extract_masks_skips_sam_when_cached_with_same_prompt(

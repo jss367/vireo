@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import queue
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from dataclasses import dataclass
 import numpy as np
 from db import Database, commit_with_retry
 from model_cache import get_default_cache
-from pipeline_locks import acquire_workspace_regroup
+from pipeline_locks import acquire_photo_mask, acquire_workspace_regroup
 
 log = logging.getLogger(__name__)
 
@@ -1387,7 +1388,26 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     canonical = get_canonical_image_path(photo, base_dir, folders)
                     img = load_image(canonical, max_size=max_size)
                     if img:
-                        img.save(cache_path, format="JPEG", quality=preview_quality)
+                        # Atomic write: with SLOT_CAP > 1 two pipelines
+                        # processing the same photo can both miss the
+                        # os.path.exists() check above and race here on the
+                        # deterministic {id}_{max_size}.jpg path. A direct
+                        # img.save(cache_path) would interleave/truncate the
+                        # JPEG bytes; tempfile + os.replace makes the visible
+                        # file flip atomically (same pattern as
+                        # thumbnails.generate_thumbnail).
+                        fd, tmp_path = tempfile.mkstemp(
+                            prefix=f'.{photo["id"]}.', suffix=".jpg.tmp",
+                            dir=preview_dir,
+                        )
+                        os.close(fd)
+                        try:
+                            img.save(tmp_path, format="JPEG", quality=preview_quality)
+                            os.replace(tmp_path, cache_path)
+                        except Exception:
+                            with contextlib.suppress(OSError):
+                                os.unlink(tmp_path)
+                            raise
                         with contextlib.suppress(Exception):
                             thread_db.preview_cache_insert(
                                 photo["id"], max_size, os.path.getsize(cache_path),
@@ -2964,135 +2984,189 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 image_path = os.path.join(folder_path, photo["filename"])
 
                 try:
-                    # Cache hit: a row already exists for (photo, variant)
-                    # AND its stored prompt + detector still match the
-                    # current primary detection AND the file is on disk.
-                    # In that case the SAM result is unchanged, so we
-                    # only re-activate the mask (cheap denormalize) and
-                    # skip the heavy SAM + DINOv2 work.
-                    existing = thread_db.get_photo_mask(
-                        photo_id, sam2_variant,
-                    )
-                    if existing is not None:
-                        cached_prompt = (
-                            existing["prompt_x"], existing["prompt_y"],
-                            existing["prompt_w"], existing["prompt_h"],
+                    # Per-photo serialisation. Two pipelines whose
+                    # collections overlap can both reach this photo.
+                    # Without this lock:
+                    #
+                    #   - Same variant: both write the same
+                    #     ``masks/{photo_id}.{variant}.png`` file and
+                    #     can corrupt each other's bytes mid-write.
+                    #   - Different variants (e.g. two workspaces
+                    #     sharing folders but configured with sam2-small
+                    #     vs sam2-large): the per-variant mask files
+                    #     don't collide, BUT both runs denormalise into
+                    #     the same ``photos`` row via
+                    #     ``set_active_mask_variant`` and
+                    #     ``update_photo_embeddings``. Their writes can
+                    #     interleave, leaving photos.active_mask_variant
+                    #     pointing at one variant while photos.dino_*
+                    #     embeddings were cropped from the other's mask.
+                    #     regroup reads these denormalised columns, so
+                    #     the corruption would silently flow into
+                    #     grouping.
+                    #
+                    # Keyed by photo_id alone — not (photo_id, variant) —
+                    # so the cross-variant collision in (2) is covered.
+                    # Workspace isn't part of the key because photos are
+                    # global in Vireo.
+                    with acquire_photo_mask(photo_id):
+                        # Cache hit: a row already exists for (photo, variant)
+                        # AND its stored prompt + detector still match the
+                        # current primary detection AND the file is on disk.
+                        # In that case the SAM result is unchanged, so we
+                        # only re-activate the mask (cheap denormalize) and
+                        # skip the heavy SAM + DINOv2 work.
+                        existing = thread_db.get_photo_mask(
+                            photo_id, sam2_variant,
                         )
-                        if (existing["detector_model"]
-                                == entry["detector_model"]
-                                and cached_prompt == entry["prompt"]
-                                and existing["path"]
-                                and os.path.isfile(existing["path"])):
-                            thread_db.set_active_mask_variant(
-                                photo_id, sam2_variant,
+                        if existing is not None:
+                            cached_prompt = (
+                                existing["prompt_x"], existing["prompt_y"],
+                                existing["prompt_w"], existing["prompt_h"],
                             )
-                            masked += 1
+                            if (existing["detector_model"]
+                                    == entry["detector_model"]
+                                    and cached_prompt == entry["prompt"]
+                                    and existing["path"]
+                                    and os.path.isfile(existing["path"])):
+                                # The cheap skip (re-activate only) is correct
+                                # ONLY when the photos row is already fully
+                                # consistent for this variant. set_active_mask_
+                                # variant denormalises this variant's mask
+                                # features, but it does NOT touch the
+                                # dino_* embeddings — those still describe
+                                # whatever mask was active when they were last
+                                # computed. If the row is currently active on a
+                                # different SAM variant (e.g. two workspaces
+                                # share a folder but use sam2-small vs -large),
+                                # re-activating would leave the denormalised
+                                # mask features describing this variant while
+                                # the subject embedding was cropped from the
+                                # other variant's mask. regroup reads both off
+                                # the photos row, so it would mix them. Only
+                                # skip when active_mask_variant AND
+                                # dino_embedding_variant already match; else
+                                # fall through to the full recompute, which
+                                # writes set_active_mask_variant +
+                                # update_photo_embeddings together.
+                                state = thread_db.conn.execute(
+                                    "SELECT active_mask_variant, "
+                                    "dino_embedding_variant FROM photos "
+                                    "WHERE id = ?",
+                                    (photo_id,),
+                                ).fetchone()
+                                if (state is not None
+                                        and state["active_mask_variant"]
+                                        == sam2_variant
+                                        and state["dino_embedding_variant"]
+                                        == dinov2_variant):
+                                    masked += 1
+                                    processed = i + 1
+                                    continue
+
+                        # First true cache miss: ensure SAM2 + DINOv2 weights
+                        # are present before render_proxy/generate_mask runs.
+                        # No-op on subsequent iterations.
+                        _ensure_weights()
+
+                        proxy = render_proxy(image_path, longest_edge=proxy_longest_edge)
+                        if proxy is None:
+                            skipped += 1
                             processed = i + 1
                             continue
+                        if _should_abort(abort):
+                            break
 
-                    # First true cache miss: ensure SAM2 + DINOv2 weights
-                    # are present before render_proxy/generate_mask runs.
-                    # No-op on subsequent iterations.
-                    _ensure_weights()
+                        # GPU serialisation lives inside masking.generate_mask
+                        # (around the encoder/decoder session.run calls). The
+                        # wider wrap previously here held the semaphore through
+                        # SAM weight load + image preprocessing + prompt-coord
+                        # math, blocking other pipelines' GPU work for CPU-only
+                        # phases.
+                        mask = generate_mask(proxy, det_box, variant=sam2_variant)
+                        if mask is None:
+                            skipped += 1
+                            processed = i + 1
+                            continue
+                        if _should_abort(abort):
+                            break
 
-                    proxy = render_proxy(image_path, longest_edge=proxy_longest_edge)
-                    if proxy is None:
-                        skipped += 1
-                        processed = i + 1
-                        continue
-                    if _should_abort(abort):
-                        break
-
-                    # GPU serialisation lives inside masking.generate_mask
-                    # (around the encoder/decoder session.run calls). The
-                    # wider wrap previously here held the semaphore through
-                    # SAM weight load + image preprocessing + prompt-coord
-                    # math, blocking other pipelines' GPU work for CPU-only
-                    # phases.
-                    mask = generate_mask(proxy, det_box, variant=sam2_variant)
-                    if mask is None:
-                        skipped += 1
-                        processed = i + 1
-                        continue
-                    if _should_abort(abort):
-                        break
-
-                    mask_path = save_mask(
-                        mask, masks_dir, photo_id, sam2_variant,
-                    )
-                    completeness = crop_completeness(mask)
-                    features = compute_all_quality_features(proxy, mask)
-                    if _should_abort(abort):
-                        break
-
-                    # Per-mask features (move from photos row into
-                    # photo_masks; set_active_mask_variant denormalizes
-                    # them back into photos for downstream readers).
-                    mask_subject_tenengrad = features.pop(
-                        "subject_tenengrad", None,
-                    )
-                    mask_bg_tenengrad = features.pop("bg_tenengrad", None)
-                    # Mask-derived subject_size: fraction of frame
-                    # covered by the boolean mask. Replaces the
-                    # detection-bbox approximation classify uses.
-                    total_pixels = float(mask.size)
-                    if total_pixels > 0:
-                        mask_subject_size = float(
-                            np.count_nonzero(mask) / total_pixels
+                        mask_path = save_mask(
+                            mask, masks_dir, photo_id, sam2_variant,
                         )
-                    else:
-                        mask_subject_size = None
+                        completeness = crop_completeness(mask)
+                        features = compute_all_quality_features(proxy, mask)
+                        if _should_abort(abort):
+                            break
 
-                    # GPU serialisation lives inside dino_embed.embed /
-                    # embed_batch (around the session.run call). The wider
-                    # wrap previously here held the semaphore through
-                    # per-image resize/normalize preprocessing.
-                    subject_crop = crop_subject(proxy, mask, margin=0.15)
-                    if subject_crop is not None:
-                        embs = embed_batch(
-                            [subject_crop, proxy], variant=dinov2_variant,
+                        # Per-mask features (move from photos row into
+                        # photo_masks; set_active_mask_variant denormalizes
+                        # them back into photos for downstream readers).
+                        mask_subject_tenengrad = features.pop(
+                            "subject_tenengrad", None,
                         )
-                        subj_emb_blob = embedding_to_blob(embs[0])
-                        global_emb_blob = embedding_to_blob(embs[1])
-                    else:
-                        subj_emb_blob = None
-                        global_emb_blob = embedding_to_blob(
-                            embed(proxy, variant=dinov2_variant),
-                        )
+                        mask_bg_tenengrad = features.pop("bg_tenengrad", None)
+                        # Mask-derived subject_size: fraction of frame
+                        # covered by the boolean mask. Replaces the
+                        # detection-bbox approximation classify uses.
+                        total_pixels = float(mask.size)
+                        if total_pixels > 0:
+                            mask_subject_size = float(
+                                np.count_nonzero(mask) / total_pixels
+                            )
+                        else:
+                            mask_subject_size = None
 
-                    thread_db.upsert_photo_mask(
-                        photo_id=photo_id,
-                        variant=sam2_variant,
-                        path=mask_path,
-                        detector_model=entry["detector_model"],
-                        prompt_x=entry["prompt"][0],
-                        prompt_y=entry["prompt"][1],
-                        prompt_w=entry["prompt"][2],
-                        prompt_h=entry["prompt"][3],
-                        subject_size=mask_subject_size,
-                        subject_tenengrad=mask_subject_tenengrad,
-                        bg_tenengrad=mask_bg_tenengrad,
-                        crop_complete=completeness,
-                    )
-                    thread_db.set_active_mask_variant(
-                        photo_id, sam2_variant,
-                    )
-                    # Remaining (non-mask) per-photo features still land
-                    # on the photos row.  mask_path / crop_complete /
-                    # subject_tenengrad / bg_tenengrad now flow via
-                    # set_active_mask_variant above, so they are
-                    # intentionally NOT passed here.
-                    if features:
-                        thread_db.update_photo_pipeline_features(
-                            photo_id, **features,
+                        # GPU serialisation lives inside dino_embed.embed /
+                        # embed_batch (around the session.run call). The wider
+                        # wrap previously here held the semaphore through
+                        # per-image resize/normalize preprocessing.
+                        subject_crop = crop_subject(proxy, mask, margin=0.15)
+                        if subject_crop is not None:
+                            embs = embed_batch(
+                                [subject_crop, proxy], variant=dinov2_variant,
+                            )
+                            subj_emb_blob = embedding_to_blob(embs[0])
+                            global_emb_blob = embedding_to_blob(embs[1])
+                        else:
+                            subj_emb_blob = None
+                            global_emb_blob = embedding_to_blob(
+                                embed(proxy, variant=dinov2_variant),
+                            )
+
+                        thread_db.upsert_photo_mask(
+                            photo_id=photo_id,
+                            variant=sam2_variant,
+                            path=mask_path,
+                            detector_model=entry["detector_model"],
+                            prompt_x=entry["prompt"][0],
+                            prompt_y=entry["prompt"][1],
+                            prompt_w=entry["prompt"][2],
+                            prompt_h=entry["prompt"][3],
+                            subject_size=mask_subject_size,
+                            subject_tenengrad=mask_subject_tenengrad,
+                            bg_tenengrad=mask_bg_tenengrad,
+                            crop_complete=completeness,
                         )
-                    thread_db.update_photo_embeddings(
-                        photo_id,
-                        dino_subject_embedding=subj_emb_blob,
-                        dino_global_embedding=global_emb_blob,
-                        variant=dinov2_variant,
-                    )
-                    masked += 1
+                        thread_db.set_active_mask_variant(
+                            photo_id, sam2_variant,
+                        )
+                        # Remaining (non-mask) per-photo features still land
+                        # on the photos row.  mask_path / crop_complete /
+                        # subject_tenengrad / bg_tenengrad now flow via
+                        # set_active_mask_variant above, so they are
+                        # intentionally NOT passed here.
+                        if features:
+                            thread_db.update_photo_pipeline_features(
+                                photo_id, **features,
+                            )
+                        thread_db.update_photo_embeddings(
+                            photo_id,
+                            dino_subject_embedding=subj_emb_blob,
+                            dino_global_embedding=global_emb_blob,
+                            variant=dinov2_variant,
+                        )
+                        masked += 1
                 except Exception:
                     em_failed += 1
                     log.warning("Mask extraction failed for photo %s", photo_id, exc_info=True)
@@ -3402,109 +3476,106 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         runner.update_step(job["id"], "regroup", status="running")
         _update_stages(runner, job["id"], stages)
 
-        # Two pipelines targeting the same workspace must not regroup
-        # concurrently — save_results + set_workspace_group_state would
-        # race and leave inconsistent grouping state. Per-workspace lock
-        # serialises only this stage; pipelines on different workspaces
-        # don't interact.
-        #
-        # runner.update_step takes JobRunner._lock; per the documented
-        # lock order in pipeline_locks.py, JobRunner._lock is outer to
-        # workspace_regroup. So we capture the intended update inside the
-        # `with` block and apply it after releasing the lock.
-        deferred_step_update = None  # dict of kwargs for runner.update_step
+        # The per-workspace regroup lock is now acquired by the
+        # orchestrator (see run_pipeline_job body) so it spans BOTH
+        # regroup_stage and miss_stage atomically — the inner lock
+        # that used to live here would deadlock against the outer one
+        # (Python locks aren't reentrant). The deferred-update pattern
+        # likewise goes away: runner.update_step is fine to call here
+        # because nothing under JobRunner._lock acquires the workspace
+        # regroup lock, so there's no cycle to invert.
         try:
-            with acquire_workspace_regroup(workspace_id):
-                import config as cfg
-                from pipeline import load_photo_features, run_full_pipeline, save_results
+            import config as cfg
+            from pipeline import load_photo_features, run_full_pipeline, save_results
 
-                thread_db = Database(db_path)
-                thread_db.set_active_workspace(workspace_id)
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(workspace_id)
 
-                effective_cfg = thread_db.get_effective_config(cfg.load())
-                pipeline_cfg = effective_cfg.get("pipeline", {})
+            effective_cfg = thread_db.get_effective_config(cfg.load())
+            pipeline_cfg = effective_cfg.get("pipeline", {})
 
-                photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
-                if params.exclude_photo_ids:
-                    photos = [p for p in photos if p["id"] not in params.exclude_photo_ids]
-                if not photos:
-                    result["stages"]["regroup"] = {"error": "No photos with pipeline features found."}
-                    stages["regroup"]["status"] = "completed"
-                    deferred_step_update = {
-                        "status": "completed", "summary": "No photos to group",
-                    }
+            photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
+            if params.exclude_photo_ids:
+                photos = [p for p in photos if p["id"] not in params.exclude_photo_ids]
+            if not photos:
+                result["stages"]["regroup"] = {"error": "No photos with pipeline features found."}
+                stages["regroup"]["status"] = "completed"
+                runner.update_step(
+                    job["id"], "regroup",
+                    status="completed", summary="No photos to group",
+                )
+            else:
+                results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
+                cache_dir = os.path.dirname(db_path)
+                save_results(results, cache_dir, workspace_id)
+
+                # Stamp the grouping fingerprint + timestamp BEFORE marking
+                # the step completed, so a partial regroup that crashes
+                # between here and update_step doesn't end up labeled "fresh"
+                # with a stale fp.
+                #
+                # Only stamp when the regroup actually covered the whole
+                # workspace — if it ran on a filtered subset (a
+                # sub-collection, or with exclude_photo_ids set) some
+                # workspace photos were intentionally not regrouped, so
+                # claiming workspace-level freshness would let the pipeline
+                # page hide a real stale state.
+                from pipeline import (
+                    _resolve_collection_photo_ids,
+                    compute_group_fingerprint,
+                )
+                collection_photo_ids = _resolve_collection_photo_ids(
+                    thread_db, collection_id,
+                )
+                ws_photo_ids = {
+                    r["id"] for r in thread_db.conn.execute(
+                        """SELECT p.id
+                             FROM photos p
+                             JOIN workspace_folders wf
+                               ON wf.folder_id = p.folder_id
+                            WHERE wf.workspace_id = ?""",
+                        (workspace_id,),
+                    ).fetchall()
+                }
+                covered_full_workspace = (
+                    not params.exclude_photo_ids
+                    and ws_photo_ids.issubset(collection_photo_ids)
+                )
+                if covered_full_workspace:
+                    thread_db.set_workspace_group_state(
+                        workspace_id=workspace_id,
+                        fingerprint=compute_group_fingerprint(effective_cfg),
+                        when_ts=int(time.time()),
+                    )
                 else:
-                    results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
-                    cache_dir = os.path.dirname(db_path)
-                    save_results(results, cache_dir, workspace_id)
+                    # Partial run — save_results just clobbered
+                    # pipeline_results_ws*.json with subset output, so any
+                    # pre-existing fingerprint now points at a cache that
+                    # no longer reflects the full workspace. Invalidate so
+                    # the pipeline page surfaces the staleness as will-run
+                    # instead of falsely reporting done-prior.
+                    thread_db.set_workspace_group_state(
+                        workspace_id=workspace_id,
+                        fingerprint=None,
+                        when_ts=None,
+                    )
 
-                    # Stamp the grouping fingerprint + timestamp BEFORE marking
-                    # the step completed, so a partial regroup that crashes
-                    # between here and update_step doesn't end up labeled "fresh"
-                    # with a stale fp.
-                    #
-                    # Only stamp when the regroup actually covered the whole
-                    # workspace — if it ran on a filtered subset (a
-                    # sub-collection, or with exclude_photo_ids set) some
-                    # workspace photos were intentionally not regrouped, so
-                    # claiming workspace-level freshness would let the pipeline
-                    # page hide a real stale state.
-                    from pipeline import (
-                        _resolve_collection_photo_ids,
-                        compute_group_fingerprint,
-                    )
-                    collection_photo_ids = _resolve_collection_photo_ids(
-                        thread_db, collection_id,
-                    )
-                    ws_photo_ids = {
-                        r["id"] for r in thread_db.conn.execute(
-                            """SELECT p.id
-                                 FROM photos p
-                                 JOIN workspace_folders wf
-                                   ON wf.folder_id = p.folder_id
-                                WHERE wf.workspace_id = ?""",
-                            (workspace_id,),
-                        ).fetchall()
-                    }
-                    covered_full_workspace = (
-                        not params.exclude_photo_ids
-                        and ws_photo_ids.issubset(collection_photo_ids)
-                    )
-                    if covered_full_workspace:
-                        thread_db.set_workspace_group_state(
-                            workspace_id=workspace_id,
-                            fingerprint=compute_group_fingerprint(effective_cfg),
-                            when_ts=int(time.time()),
-                        )
-                    else:
-                        # Partial run — save_results just clobbered
-                        # pipeline_results_ws*.json with subset output, so any
-                        # pre-existing fingerprint now points at a cache that
-                        # no longer reflects the full workspace. Invalidate so
-                        # the pipeline page surfaces the staleness as will-run
-                        # instead of falsely reporting done-prior.
-                        thread_db.set_workspace_group_state(
-                            workspace_id=workspace_id,
-                            fingerprint=None,
-                            when_ts=None,
-                        )
-
-                    stages["regroup"]["status"] = "completed"
-                    summary_info = results.get("summary", {})
-                    groups = summary_info.get("groups", "")
-                    deferred_step_update = {
-                        "status": "completed",
-                        "summary": f"{groups} groups" if groups else "Done",
-                    }
-                    result["stages"]["regroup"] = summary_info
+                stages["regroup"]["status"] = "completed"
+                summary_info = results.get("summary", {})
+                groups = summary_info.get("groups", "")
+                runner.update_step(
+                    job["id"], "regroup",
+                    status="completed",
+                    summary=f"{groups} groups" if groups else "Done",
+                )
+                result["stages"]["regroup"] = summary_info
         except Exception as e:
             errors.append(f"[regroup] Fatal: {e}")
             log.exception("Pipeline regroup stage failed")
             stages["regroup"]["status"] = "failed"
-            deferred_step_update = {"status": "failed", "error": str(e)}
-
-        if deferred_step_update is not None:
-            runner.update_step(job["id"], "regroup", **deferred_step_update)
+            runner.update_step(
+                job["id"], "regroup", status="failed", error=str(e),
+            )
         _update_stages(runner, job["id"], stages)
 
     def miss_stage():
@@ -3634,19 +3705,29 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     if not abort.is_set():
         eye_keypoints_stage()
 
-    # Phase 4: regroup (needs extract-masks + eye-keypoints output)
+    # Phases 4 + 5: regroup and miss detection. Held under the
+    # per-workspace regroup lock TOGETHER so a concurrent same-workspace
+    # pipeline can't slip a regroup_stage in between this run's
+    # regroup_stage and its miss_stage — that would leave the persisted
+    # miss flags + ``miss_computed_at`` paired with a grouping
+    # (burst_id / pipeline_results_ws*.json) the miss computation never
+    # saw. Pipelines targeting different workspaces share neither
+    # stage's state and don't contend here.
     if not abort.is_set():
-        regroup_stage()
-
-    # Phase 5: miss detection (pure derivation from per-photo features +
-    # burst_id written by regroup). Cheap; no model inference.
-    # Skip when regroup failed: miss classification depends on regroup's
-    # burst_id output, so running here after a regroup failure would
-    # overwrite miss_* flags with stale context during an already-failing
-    # job. regroup_stage marks itself "failed" without setting abort, so
-    # check the stage status explicitly.
-    if not abort.is_set() and stages["regroup"].get("status") != "failed":
-        miss_stage()
+        with acquire_workspace_regroup(workspace_id):
+            regroup_stage()
+            # Skip miss when regroup failed: miss classification depends
+            # on regroup's burst_id output, so running here after a
+            # regroup failure would overwrite miss_* flags with stale
+            # context during an already-failing job. regroup_stage marks
+            # itself "failed" without setting abort, so check the stage
+            # status explicitly. abort.is_set() is re-checked too — a
+            # user cancel between regroup and miss should skip miss.
+            if (
+                not abort.is_set()
+                and stages["regroup"].get("status") != "failed"
+            ):
+                miss_stage()
 
     cancel_watcher_stop.set()
 

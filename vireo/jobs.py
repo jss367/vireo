@@ -16,10 +16,15 @@ _JOB_RETENTION_SECS = 3600  # 1 hour
 _PROMOTION_RETRY_DELAY_SECS = 0.1
 
 
-# Maximum number of pipeline jobs allowed to run concurrently. Kept at
-# 1 in this PR; concurrency is enabled in a later PR after the UI and
-# resource locks land. See docs/plans/2026-05-26-pipeline-concurrency-design.md.
-SLOT_CAP = 1
+# Maximum number of pipeline jobs allowed to run concurrently. Bumped
+# to 2 in Step 6 of the concurrency rollout (Steps 1-3 added the
+# ModelCache + GPU/regroup locks that make this safe; Steps 4-5 added
+# the queue + UI). The cap is intentionally low: the gains from
+# overlapping two pipelines come from one's GPU phase running while
+# another's I/O / CPU phases progress. A third pipeline would mostly
+# queue at the GPU lock without adding throughput.
+# See docs/plans/2026-05-26-pipeline-concurrency-design.md.
+SLOT_CAP = 2
 
 
 class JobRunner:

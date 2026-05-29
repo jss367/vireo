@@ -8,14 +8,20 @@ Two primitives:
   classify doesn't completely starve a second pipeline that just wants
   one quick GPU op.
 
-* ``acquire_workspace_regroup(workspace_id)`` — a per-workspace lock so
-  two pipelines targeting the same workspace serialise on regroup but
-  not on earlier stages.
+* ``acquire_workspace_regroup(workspace_id)`` — a per-workspace lock
+  held across BOTH ``regroup_stage`` and ``miss_stage`` so two pipelines
+  targeting the same workspace can't interleave on the workspace-scoped
+  grouping state (``burst_id`` writes, ``pipeline_results_ws*.json``,
+  and the ``miss_computed_at`` timestamp paired with that grouping).
+  Pipelines on different workspaces never contend.
 
 Lock order (acquire outermost first): ``_progress_lock`` →
-``JobRunner._lock`` → ``acquire_workspace_regroup`` → ``acquire_gpu``.
-Never invert. The GPU lock is the innermost; nothing else may be acquired
-while it is held.
+``acquire_workspace_regroup`` → ``JobRunner._lock`` → ``acquire_gpu``.
+``JobRunner._lock`` is a brief leaf lock taken by ``runner.update_step``
+inside the workspace critical section; this is safe because no code
+path under ``JobRunner._lock`` acquires ``acquire_workspace_regroup``,
+so there is no cycle. ``acquire_gpu`` is the innermost: nothing else
+may be acquired while it is held.
 """
 
 import threading
@@ -128,3 +134,54 @@ def acquire_workspace_regroup(workspace_id):
 # the module-private dict directly.
 def _workspace_regroup_lock_for_tests(workspace_id):
     return acquire_workspace_regroup(workspace_id)
+
+
+# Per-photo locks for mask extraction. Two concurrent pipelines whose
+# collections overlap can both reach extract_masks_stage with the same
+# photo. The conflict has two distinct sources, and the lock has to
+# cover BOTH:
+#
+#   1. The deterministic ``masks/{photo_id}.{variant}.png`` file path
+#      (per-variant collision). Two pipelines with the SAME variant
+#      would corrupt each other's PNG bytes.
+#
+#   2. The denormalised writes to the ``photos`` row —
+#      ``set_active_mask_variant`` (mask_path, crop_complete,
+#      subject_tenengrad, bg_tenengrad) and ``update_photo_embeddings``
+#      (dino_subject_embedding, dino_global_embedding) — happen
+#      regardless of variant. Two pipelines processing the same photo
+#      with DIFFERENT variants can still interleave these writes,
+#      leaving photos.active_mask_variant pointing at one variant
+#      while photos.dino_subject_embedding was cropped from the
+#      other's mask.
+#
+# Because (2) crosses variants, the key is ``photo_id`` only.
+# Concurrency loss: two pipelines on the same photo with different
+# SAM variants now serialise on the whole extract-masks body. This is
+# rare in practice (it requires two workspaces sharing folders AND
+# configured with different SAM variants), and the alternative —
+# splitting into a per-variant lock for the mask file + a per-photo
+# lock for the row writes — would invert the lock order (a worker
+# holding the inner lock then trying to take the outer would deadlock).
+_PHOTO_MASK_LOCKS: dict = {}
+_PHOTO_MASK_LOCKS_GUARD = threading.Lock()
+
+
+def acquire_photo_mask(photo_id):
+    """Context manager for the per-photo mask-write lock.
+
+    Held across the get_photo_mask → generate_mask → save_mask →
+    upsert_photo_mask → set_active_mask_variant → update_photo_embeddings
+    sequence in ``extract_masks_stage`` so two pipelines hitting the
+    same photo serialise. Pipelines on different photos don't contend.
+    """
+    with _PHOTO_MASK_LOCKS_GUARD:
+        lock = _PHOTO_MASK_LOCKS.get(photo_id)
+        if lock is None:
+            lock = threading.Lock()
+            _PHOTO_MASK_LOCKS[photo_id] = lock
+    return lock
+
+
+def _photo_mask_lock_for_tests(photo_id):
+    return acquire_photo_mask(photo_id)
