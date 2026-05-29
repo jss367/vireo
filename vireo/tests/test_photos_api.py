@@ -1161,6 +1161,501 @@ def test_full_is_alias_for_preview_at_configured_size(client_with_photo, monkeyp
     assert len(full) > 0
 
 
+def test_preview_skips_recent_failed_raw_working_copy(
+    client_with_photo, monkeypatch,
+):
+    """A RAW whose working-copy extraction already failed at the current mtime
+    should fail fast instead of retrying RAW decode in /preview."""
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"load": False, "extract": False}
+
+    def fail_load_if_called(*_args, **_kwargs):
+        called["load"] = True
+        raise AssertionError("preview retried failed RAW decode")
+
+    def fail_extract_if_called(*_args, **_kwargs):
+        called["extract"] = True
+        raise AssertionError("preview retried failed RAW extraction")
+
+    monkeypatch.setattr(image_loader, "load_image", fail_load_if_called)
+    monkeypatch.setattr(image_loader, "extract_working_copy", fail_extract_if_called)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 500
+    assert called["load"] is False
+    assert called["extract"] is False
+
+
+def test_preview_skips_recent_failed_raw_when_working_copy_path_is_stale(
+    client_with_photo, monkeypatch,
+):
+    """A stale DB working_copy_path whose file is gone should not bypass a
+    fresh RAW failure marker."""
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path='working/missing.jpg',
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"load": False}
+
+    def fail_load_if_called(*_args, **_kwargs):
+        called["load"] = True
+        raise AssertionError("preview retried failed RAW with stale wc path")
+
+    monkeypatch.setattr(image_loader, "load_image", fail_load_if_called)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 500
+    assert called["load"] is False
+
+
+def test_preview_retries_raw_when_recent_marker_came_from_companion(
+    client_with_photo, monkeypatch,
+):
+    """A companion-source failure marker should not suppress a readable RAW."""
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "bad.NEF")
+    companion_path = os.path.join(folder["path"], "bad.jpg")
+    with open(raw_path, "wb") as f:
+        f.write(b"raw bytes")
+    Image.new("RGB", (800, 600), (40, 80, 120)).save(
+        companion_path, "JPEG",
+    )
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               companion_path='bad.jpg',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"path": None}
+
+    def load_raw(path, *_args, **_kwargs):
+        called["path"] = path
+        return Image.new("RGB", (800, 600), (40, 80, 120))
+
+    monkeypatch.setattr(image_loader, "load_image", load_raw)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 200
+    assert called["path"] == raw_path
+
+
+def test_preview_honors_raw_marker_after_companion_bypass_retry_fails(
+    client_with_photo, monkeypatch,
+):
+    """A RAW failure recorded after companion bypass should suppress repeats."""
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "bad.NEF")
+    companion_path = os.path.join(folder["path"], "bad.jpg")
+    with open(raw_path, "wb") as f:
+        f.write(b"raw bytes")
+    Image.new("RGB", (800, 600), (40, 80, 120)).save(
+        companion_path, "JPEG",
+    )
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               companion_path='bad.jpg',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?,
+               working_copy_failed_source='companion'
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    calls = {"count": 0}
+
+    def fail_raw(_path, *_args, **_kwargs):
+        calls["count"] += 1
+        return None
+
+    monkeypatch.setattr(image_loader, "load_image", fail_raw)
+
+    client = app.test_client()
+    first = client.get(f"/photos/{photo_id}/preview?size=1920")
+    second = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert first.status_code == 500
+    assert second.status_code == 500
+    assert calls["count"] == 1
+    row = db.conn.execute(
+        """SELECT working_copy_failed_mtime, working_copy_failed_source
+           FROM photos WHERE id=?""",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_mtime"] == file_mtime
+    assert row["working_copy_failed_source"] == "source"
+
+
+def test_preview_retries_stale_failed_raw_working_copy(
+    client_with_photo, monkeypatch,
+):
+    """A RAW failure older than the retry window should be allowed to retry."""
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now', '-48 hours'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"load": False}
+
+    def record_retry(*_args, **_kwargs):
+        called["load"] = True
+        return None
+
+    monkeypatch.setattr(image_loader, "load_image", record_retry)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 500
+    assert called["load"] is True
+
+
+def test_preview_refreshes_failure_marker_when_stale_retry_fails(
+    client_with_photo, monkeypatch,
+):
+    """When the retry window has expired and the request-time decode still
+    fails, /preview must refresh ``working_copy_failed_at`` so the next
+    request fails fast again instead of repeating the slow decode."""
+    import os
+
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    with open(os.path.join(folder["path"], "bad.NEF"), "wb") as f:
+        f.write(b"not a decodable raw")
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now', '-48 hours'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(image_loader, "load_image", lambda *a, **k: None)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert resp.status_code == 500
+
+    # Marker should now be fresh (within a few seconds of "now") and the
+    # mtime should match the file's current mtime so the gate fires again
+    # on the next request.
+    row = db.conn.execute(
+        """SELECT working_copy_failed_mtime,
+                  (julianday('now') - julianday(working_copy_failed_at))
+                  * 24 * 60 * 60 AS age_seconds
+           FROM photos WHERE id=?""",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_mtime"] == file_mtime
+    assert row["age_seconds"] is not None and row["age_seconds"] < 60
+
+
+def test_preview_does_not_refresh_failure_marker_when_raw_source_is_missing(
+    client_with_photo,
+):
+    """Missing/offline RAW sources are not decode failures; leave stale
+    extraction markers stale so remounting the source can recover quickly."""
+    app, db, photo_id = client_with_photo
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='missing.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now', '-48 hours'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 500
+    row = db.conn.execute(
+        """SELECT (julianday('now') - julianday(working_copy_failed_at))
+                  * 24 * 60 * 60 AS age_seconds
+           FROM photos WHERE id=?""",
+        (photo_id,),
+    ).fetchone()
+    assert row["age_seconds"] is not None and row["age_seconds"] > 24 * 60 * 60
+
+
+def test_preview_does_not_refresh_failure_marker_when_working_copy_jpeg_is_corrupt(
+    client_with_photo, monkeypatch,
+):
+    """A corrupt/unreadable working-copy JPEG must not stamp the RAW marker.
+
+    ``get_canonical_image_path`` prefers an existing working-copy JPEG over the
+    original RAW. If that JPEG fails to load, the failure is in the JPEG, not
+    in RAW extraction — recording it as a RAW failure would suppress legitimate
+    RAW retries for 24h even though the RAW was never tried.
+    """
+    import os
+
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_rel = f"working/{photo_id}.jpg"
+    with open(os.path.join(vireo_dir, wc_rel), "wb") as f:
+        f.write(b"corrupt jpeg bytes")
+
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=?,
+               working_copy_failed_at=datetime('now', '-48 hours'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (wc_rel, file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(image_loader, "load_image", lambda *a, **k: None)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 500
+    row = db.conn.execute(
+        """SELECT (julianday('now') - julianday(working_copy_failed_at))
+                  * 24 * 60 * 60 AS age_seconds
+           FROM photos WHERE id=?""",
+        (photo_id,),
+    ).fetchone()
+    assert row["age_seconds"] is not None and row["age_seconds"] > 24 * 60 * 60
+
+
+def test_original_skips_recent_failed_raw_working_copy(
+    client_with_photo, monkeypatch,
+):
+    """The 1:1 original route should also fail fast for a current RAW
+    extraction failure."""
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"extract": False}
+
+    def fail_if_called(*_args, **_kwargs):
+        called["extract"] = True
+        raise AssertionError("original route retried failed RAW extraction")
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", fail_if_called)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 500
+    assert called["extract"] is False
+
+
+def test_original_skips_recent_failed_raw_after_rejecting_small_working_copy(
+    client_with_photo, monkeypatch,
+):
+    """If a capped working copy is too small for /original, a fresh RAW failure
+    marker should still suppress another full-res extraction attempt."""
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    Image.new("RGB", (100, 100), (40, 80, 120)).save(
+        os.path.join(working_dir, f"{photo_id}.jpg"), "JPEG",
+    )
+
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"extract": False}
+
+    def fail_if_called(*_args, **_kwargs):
+        called["extract"] = True
+        raise AssertionError("original retried RAW after small wc rejection")
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", fail_if_called)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 500
+    assert called["extract"] is False
+
+
+def test_original_refreshes_failure_marker_when_stale_retry_fails(
+    client_with_photo, monkeypatch,
+):
+    """A stale RAW failure may retry once; if original extraction and fallback
+    loading still fail, the route should refresh the failure marker."""
+    import os
+
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    with open(os.path.join(folder["path"], "bad.NEF"), "wb") as f:
+        f.write(b"not a decodable raw")
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now', '-48 hours'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", lambda *a, **k: False)
+    monkeypatch.setattr(image_loader, "load_image", lambda *a, **k: None)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 500
+    row = db.conn.execute(
+        """SELECT working_copy_failed_mtime,
+                  (julianday('now') - julianday(working_copy_failed_at))
+                  * 24 * 60 * 60 AS age_seconds
+           FROM photos WHERE id=?""",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_mtime"] == file_mtime
+    assert row["age_seconds"] is not None and row["age_seconds"] < 60
+
+
 def test_eviction_removes_oldest_files_when_over_quota(tmp_path, monkeypatch):
     """When writes push cache over quota, oldest-accessed entries are evicted."""
     import os

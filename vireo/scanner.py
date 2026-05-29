@@ -392,7 +392,8 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
     db.conn.execute(
         "UPDATE photos SET working_copy_path = NULL,"
         " working_copy_failed_at = NULL,"
-        " working_copy_failed_mtime = NULL"
+        " working_copy_failed_mtime = NULL,"
+        " working_copy_failed_source = NULL"
         " WHERE id = ?",
         (photo_id,),
     )
@@ -694,10 +695,12 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
 
         # Prefer companion JPEG if available
         source = os.path.join(row["folder_path"], row["filename"])
+        failure_source = "source"
         if row["companion_path"]:
             companion = os.path.join(row["folder_path"], row["companion_path"])
             if os.path.isfile(companion):
                 source = companion
+                failure_source = "companion"
 
         # extract_working_copy is slow (RAW decode + JPEG encode); run it
         # before any DB write so no transaction is open while it runs.
@@ -706,7 +709,8 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
             db.conn.execute(
                 "UPDATE photos SET working_copy_path=?,"
                 " working_copy_failed_at=NULL,"
-                " working_copy_failed_mtime=NULL"
+                " working_copy_failed_mtime=NULL,"
+                " working_copy_failed_source=NULL"
                 " WHERE id=?",
                 (wc_rel, row["id"]),
             )
@@ -725,9 +729,10 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
             )
             db.conn.execute(
                 "UPDATE photos SET working_copy_failed_at=datetime('now'),"
-                " working_copy_failed_mtime=?"
+                " working_copy_failed_mtime=?,"
+                " working_copy_failed_source=?"
                 " WHERE id=?",
-                (row["file_mtime"], row["id"]),
+                (row["file_mtime"], failure_source, row["id"]),
             )
         commit_with_retry(db.conn)
 

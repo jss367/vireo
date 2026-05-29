@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 import webbrowser
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -127,12 +127,154 @@ logging.getLogger("werkzeug").addFilter(_QuietRequestFilter())
 # SQLite versions. Sized below 999 to leave headroom for additional bound
 # parameters in joined statements.
 _SQL_PARAM_CHUNK = 900
+_WORKING_COPY_FAILURE_RETRY_SECONDS = 24 * 60 * 60
 
 
 def _chunked(seq, size=_SQL_PARAM_CHUNK):
     """Yield ``seq`` in successive lists of at most ``size`` items."""
     for i in range(0, len(seq), size):
         yield seq[i:i + size]
+
+
+def _has_current_working_copy_failure(
+    photo, vireo_dir=None, trust_existing_working_copy=True,
+    live_source_path=None, folder_path=None,
+):
+    """Return True when this RAW already failed working-copy extraction.
+
+    Missing thumbnail/preview requests normally self-heal by decoding the
+    source. For RAW rows whose working-copy extraction already failed at the
+    same source mtime, retrying that decode in a request thread can block the
+    UI for minutes and then fail the same way. A present working copy is still
+    authoritative for thumbnail/preview routes, but callers that have already
+    rejected that copy as insufficient can opt into honoring the marker anyway.
+    A stale ``working_copy_path`` whose file was deleted should not bypass a
+    fresh failure marker. If a RAW+JPEG companion pair has a companion-source
+    marker while both the companion and RAW source are currently available, allow
+    request paths to try the RAW: scanner.py prefers companions for working-copy
+    extraction, so that marker may not describe a RAW failure. Match scanner.py's
+    stale-failure contract: a file replacement changes ``file_mtime`` and
+    failures older than 24 hours are allowed to retry.
+    """
+    def _get(key):
+        try:
+            return photo[key]
+        except (KeyError, IndexError, TypeError):
+            return None
+
+    working_copy_path = _get("working_copy_path")
+    if working_copy_path and trust_existing_working_copy:
+        if not vireo_dir:
+            return False
+        wc_abs = (
+            working_copy_path if os.path.isabs(working_copy_path)
+            else os.path.join(vireo_dir, working_copy_path)
+        )
+        if os.path.exists(wc_abs):
+            return False
+
+    filename = _get("filename") or ""
+    try:
+        from image_loader import RAW_EXTENSIONS
+    except Exception:
+        RAW_EXTENSIONS = {
+            ".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf",
+        }
+    if os.path.splitext(filename)[1].lower() not in RAW_EXTENSIONS:
+        return False
+
+    companion_path = _get("companion_path")
+    if companion_path and live_source_path and folder_path:
+        companion_abs = os.path.join(folder_path, companion_path)
+        failed_source = _get("working_copy_failed_source")
+        if (
+            failed_source != "source"
+            and os.path.exists(live_source_path)
+            and os.path.exists(companion_abs)
+        ):
+            return False
+
+    failed_at = _get("working_copy_failed_at")
+    failed_mtime = _get("working_copy_failed_mtime")
+    file_mtime = _get("file_mtime")
+    if not failed_at or failed_mtime is None or file_mtime is None:
+        return False
+    try:
+        if float(failed_mtime) != float(file_mtime):
+            return False
+    except (TypeError, ValueError):
+        return False
+    try:
+        failed_s = str(failed_at).strip()
+        if failed_s.endswith("Z"):
+            failed_s = failed_s[:-1] + "+00:00"
+        failed_dt = datetime.fromisoformat(failed_s)
+        if failed_dt.tzinfo is None:
+            failed_dt = failed_dt.replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return False
+    age = (datetime.now(UTC) - failed_dt.astimezone(UTC)).total_seconds()
+    return age < _WORKING_COPY_FAILURE_RETRY_SECONDS
+
+
+def _record_working_copy_failure(db, photo, source_path=None):
+    """Persist a RAW extraction failure marker after a request-time retry.
+
+    When ``_has_current_working_copy_failure`` returns False because the stored
+    marker is older than ``_WORKING_COPY_FAILURE_RETRY_SECONDS``, the request
+    paths are allowed to retry the slow RAW decode. If that retry still fails,
+    we refresh ``working_copy_failed_at``/``working_copy_failed_mtime`` so the
+    next thumbnail/preview/original request fails fast again instead of
+    repeating the expensive decode until the scanner runs. Mirrors the SQL the
+    scanner writes on failure (scanner.py around the working-copy backfill).
+    No-op for non-RAW rows, rows without a recorded ``file_mtime``/``id``,
+    source paths that are currently unavailable/offline, or source paths that
+    aren't the original RAW (e.g. a corrupt working-copy JPEG returned by
+    ``get_canonical_image_path``) — a non-RAW decode failure isn't a RAW
+    extraction failure and must not stamp the RAW marker. Request-time RAW
+    failures are recorded with ``working_copy_failed_source='source'`` so
+    companion-source bypasses do not ignore fresh RAW failures.
+    """
+    def _get(key):
+        try:
+            return photo[key]
+        except (KeyError, IndexError, TypeError):
+            return None
+
+    filename = _get("filename") or ""
+    try:
+        from image_loader import RAW_EXTENSIONS
+    except Exception:
+        RAW_EXTENSIONS = {
+            ".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf",
+        }
+    if os.path.splitext(filename)[1].lower() not in RAW_EXTENSIONS:
+        return
+    if source_path is not None:
+        if os.path.splitext(source_path)[1].lower() not in RAW_EXTENSIONS:
+            return
+        if not os.path.exists(source_path):
+            return
+
+    file_mtime = _get("file_mtime")
+    photo_id = _get("id")
+    if file_mtime is None or photo_id is None:
+        return
+
+    try:
+        db.conn.execute(
+            "UPDATE photos SET working_copy_failed_at=datetime('now'),"
+            " working_copy_failed_mtime=?,"
+            " working_copy_failed_source='source'"
+            " WHERE id=?",
+            (file_mtime, photo_id),
+        )
+        db.conn.commit()
+    except Exception:
+        log.debug(
+            "Could not refresh working_copy_failed marker for photo %s",
+            photo_id, exc_info=True,
+        )
 
 
 def _ensure_volume_trashes_dir(filepath, ensured_volumes):
@@ -10620,6 +10762,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Self-heal path: regenerate on miss (or stale) when the photo
         # still exists.
+        folder_row = db.get_folder(photo["folder_id"])
+        if not folder_row:
+            return "", 404
+        live_source = os.path.join(folder_row["path"], photo["filename"])
+        if _has_current_working_copy_failure(
+            photo, os.path.dirname(thumb_dir),
+            live_source_path=live_source, folder_path=folder_row["path"],
+        ):
+            log.info(
+                "Skipping thumbnail self-heal for photo %s; RAW working-copy "
+                "extraction already failed for current source mtime",
+                photo_id,
+            )
+            return "", 404
 
         # Resolve source via the canonical-path helper so we prefer the
         # JPEG working copy over the original RAW. This makes the
@@ -10639,7 +10795,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Workspace membership is already enforced above via
         # ``get_photo(verify_workspace=True)``, so a direct ``get_folder``
         # lookup here is safe and status-agnostic.
-        folder_row = db.get_folder(photo["folder_id"])
         folders = (
             {folder_row["id"]: folder_row["path"]} if folder_row else {}
         )
@@ -10656,6 +10811,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not result:
             # generate_thumbnail logged the reason (unreadable source,
             # unsupported format, etc.). Nothing else to do here.
+            _record_working_copy_failure(db, photo, source)
             return "", 404
 
         # Peg the regenerated thumbnail's mtime to the source file_mtime
@@ -13248,9 +13404,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "Not found", 404
         folders = {folder_row["id"]: folder_row["path"]}
 
+        live_source = os.path.join(folder_row["path"], photo["filename"])
+        if _has_current_working_copy_failure(
+            photo, vireo_dir,
+            live_source_path=live_source, folder_path=folder_row["path"],
+        ):
+            log.info(
+                "Skipping preview generation for photo %s; RAW working-copy "
+                "extraction already failed for current source mtime",
+                photo_id,
+            )
+            return "Could not load image", 500
+
         canonical = get_canonical_image_path(photo, vireo_dir, folders)
         img = load_image(canonical, max_size=size)
         if img is None:
+            _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500
 
         preview_quality = cfg.load().get("preview_quality", 90)
@@ -13397,6 +13566,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             {photo["folder_id"]: folder["path"]},
         )
 
+        if (
+            not using_offline_cache
+            and _has_current_working_copy_failure(
+                photo, vireo_dir, trust_existing_working_copy=False,
+                live_source_path=image_path, folder_path=folder["path"],
+            )
+        ):
+            log.info(
+                "Skipping original-image extraction for photo %s; RAW working-copy "
+                "extraction already failed for current source mtime",
+                photo_id,
+            )
+            return "Could not load image", 500
+
         # For browser-native formats without a working copy, serve directly
         ext = os.path.splitext(photo["filename"])[1].lower()
         if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp") and not photo["working_copy_path"] and os.path.exists(image_path):
@@ -13460,6 +13643,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Fallback: serve via load_image
         img = load_image(image_path, max_size=None)
         if img is None:
+            _record_working_copy_failure(db, photo, image_path)
             return "Could not load image", 500
         originals_dir = os.path.join(vireo_dir, "originals")
         cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")

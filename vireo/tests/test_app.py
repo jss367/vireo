@@ -277,6 +277,43 @@ def test_original_route_uses_offline_cache_when_source_missing(client_with_photo
     assert offline_resp.data == source_bytes
 
 
+def test_original_route_uses_offline_cache_despite_recent_raw_failure_marker(
+    client_with_photo,
+):
+    """A RAW failure marker should not block an available offline original."""
+    app, db, pid = client_with_photo
+    client = app.test_client()
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+
+    photo = db.get_photo(pid)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+    ).fetchone()
+    source = os.path.join(folder["path"], photo["filename"])
+    os.remove(source)
+    assert not os.path.isfile(source)
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='missing.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (photo["file_mtime"], pid),
+    )
+    db.conn.commit()
+
+    offline_resp = client.get(f"/photos/{pid}/original")
+
+    assert offline_resp.status_code == 200
+    assert offline_resp.data[:2] == b"\xff\xd8"
+
+
 def test_offline_cache_rerun_preserves_cache_when_source_missing(client_with_photo):
     """Re-running Make Offline with the source unavailable keeps the cached copy."""
     app, db, pid = client_with_photo
