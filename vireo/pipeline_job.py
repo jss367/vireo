@@ -3009,12 +3009,40 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     and cached_prompt == entry["prompt"]
                                     and existing["path"]
                                     and os.path.isfile(existing["path"])):
-                                thread_db.set_active_mask_variant(
-                                    photo_id, sam2_variant,
-                                )
-                                masked += 1
-                                processed = i + 1
-                                continue
+                                # The cheap skip (re-activate only) is correct
+                                # ONLY when the photos row is already fully
+                                # consistent for this variant. set_active_mask_
+                                # variant denormalises this variant's mask
+                                # features, but it does NOT touch the
+                                # dino_* embeddings — those still describe
+                                # whatever mask was active when they were last
+                                # computed. If the row is currently active on a
+                                # different SAM variant (e.g. two workspaces
+                                # share a folder but use sam2-small vs -large),
+                                # re-activating would leave the denormalised
+                                # mask features describing this variant while
+                                # the subject embedding was cropped from the
+                                # other variant's mask. regroup reads both off
+                                # the photos row, so it would mix them. Only
+                                # skip when active_mask_variant AND
+                                # dino_embedding_variant already match; else
+                                # fall through to the full recompute, which
+                                # writes set_active_mask_variant +
+                                # update_photo_embeddings together.
+                                state = thread_db.conn.execute(
+                                    "SELECT active_mask_variant, "
+                                    "dino_embedding_variant FROM photos "
+                                    "WHERE id = ?",
+                                    (photo_id,),
+                                ).fetchone()
+                                if (state is not None
+                                        and state["active_mask_variant"]
+                                        == sam2_variant
+                                        and state["dino_embedding_variant"]
+                                        == dinov2_variant):
+                                    masked += 1
+                                    processed = i + 1
+                                    continue
 
                         # First true cache miss: ensure SAM2 + DINOv2 weights
                         # are present before render_proxy/generate_mask runs.

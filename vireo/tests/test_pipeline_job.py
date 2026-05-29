@@ -7142,6 +7142,124 @@ def _run_extract_masks_for_test(
     return db, runner, generate_mask_calls, photo_ids
 
 
+def _apply_extract_masks_stubs(monkeypatch, generate_mask_calls):
+    """(Re)install the SAM2/DINOv2 stubs for a follow-up extract_masks run on
+    an existing DB. generate_mask appends (variant, det_box) to the passed
+    list so the caller can assert whether SAM ran.
+    """
+    import dino_embed
+    import masking
+    import numpy as np
+    import quality
+
+    monkeypatch.setattr(
+        masking, "render_proxy",
+        lambda *a, **k: np.zeros((4, 4, 3), dtype=np.uint8),
+    )
+
+    def fake_generate_mask(proxy, det_box, variant=None):
+        generate_mask_calls.append((variant, tuple(sorted(det_box.items()))))
+        return np.ones((4, 4), dtype=bool)
+
+    monkeypatch.setattr(masking, "generate_mask", fake_generate_mask)
+    monkeypatch.setattr(masking, "crop_completeness", lambda m: 0.9)
+    monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
+    monkeypatch.setattr(masking, "ensure_sam2_weights", lambda **k: None)
+    monkeypatch.setattr(
+        quality, "compute_all_quality_features",
+        lambda p, m: {
+            "subject_tenengrad": 1.5, "bg_tenengrad": 0.3,
+            "subject_clip_high": 0.01, "subject_clip_low": 0.01,
+            "subject_y_median": 100.0, "bg_separation": 50.0,
+            "phash_crop": "deadbeef", "noise_estimate": 5.0,
+        },
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed",
+        lambda p, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed_batch",
+        lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32),
+    )
+    monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
+    monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
+
+
+def test_extract_masks_recomputes_when_active_variant_differs(
+    tmp_path, monkeypatch,
+):
+    """Cross-variant cache-hit consistency (Codex P2 on PR #907).
+
+    A cached mask exists for the *requested* SAM variant, but the photos
+    row is currently active on a DIFFERENT variant (e.g. two workspaces
+    share a folder, one configured sam2-small and one sam2-large, both on
+    dinov2 vit-b14). The cheap "re-activate only" fast path would call
+    set_active_mask_variant — denormalising the requested variant's mask
+    features — WITHOUT update_photo_embeddings, leaving photos.dino_*
+    describing the previously-active variant's mask. regroup reads both off
+    the photos row, so it would mix one variant's mask features with
+    another's embedding. The fix forces a recompute when the active variant
+    (or dino embedding variant) doesn't already match, so generate_mask runs
+    and the photos row ends internally consistent.
+    """
+    import config as cfg
+
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200),
+            "model": "MegaDetector"}
+
+    # Run 1: variant small → photo_masks[small], photos.active=small.
+    db, _, _, photo_ids = _run_extract_masks_for_test(
+        tmp_path, monkeypatch, "sam2-small", [spec],
+    )
+    pid = photo_ids[0]
+    db_path = str(tmp_path / "test.db")
+    ws_id = db._active_workspace_id
+    col_id = db.conn.execute(
+        "SELECT id FROM collections ORDER BY id LIMIT 1"
+    ).fetchone()[0]
+
+    def rerun(variant):
+        calls = []
+        _apply_extract_masks_stubs(monkeypatch, calls)
+        cfg.save({"pipeline": {"sam2_variant": variant,
+                               "dinov2_variant": "vit-b14"}})
+        run_pipeline_job(
+            _make_job(), FakeRunner(), db_path, ws_id,
+            PipelineParams(collection_id=col_id, skip_classify=True,
+                           skip_extract_masks=False, skip_regroup=True),
+        )
+        return calls
+
+    # Run 2: variant large → adds photo_masks[large], photos.active=large.
+    calls_large = rerun("sam2-large")
+    assert calls_large, "switching to a new variant must run SAM"
+    state = db.conn.execute(
+        "SELECT active_mask_variant FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert state["active_mask_variant"] == "sam2-large"
+    # Both variant rows now cached on disk.
+    variants = {r["variant"] for r in db.list_masks_for_photo(pid)}
+    assert variants == {"sam2-small", "sam2-large"}
+
+    # Run 3: back to small. The small row is cached (prompt+detector match,
+    # file on disk) so the OLD code would cheap-skip via set_active_mask_
+    # variant and never touch embeddings. With the fix, because the photos
+    # row is active on large, the stage recomputes: generate_mask runs for
+    # small and the row ends active+consistent on small.
+    calls_small = rerun("sam2-small")
+    assert calls_small, (
+        "cached mask but stale active variant must recompute, not cheap-skip; "
+        f"generate_mask was not called: {calls_small}"
+    )
+    final = db.conn.execute(
+        "SELECT active_mask_variant, dino_embedding_variant FROM photos "
+        "WHERE id=?", (pid,),
+    ).fetchone()
+    assert final["active_mask_variant"] == "sam2-small"
+    assert final["dino_embedding_variant"] == "vit-b14"
+
+
 def test_extract_masks_skips_sam_when_cached_with_same_prompt(
     tmp_path, monkeypatch,
 ):
