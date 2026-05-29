@@ -479,7 +479,74 @@
     background: var(--bg-secondary, #0E2A3D);
     flex-shrink: 0;
   }
-  .grm-footer .grm-hint { font-size: 11px; color: var(--text-ghost, #555); flex: 1; }
+  .grm-keys-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    padding: 7px 20px;
+    background: var(--bg-secondary, #0E2A3D);
+    border-top: 1px solid var(--border-primary, #1A4560);
+    font-size: 11px;
+    color: var(--text-ghost, #555);
+    flex-shrink: 0;
+  }
+  .grm-keys-bar .grm-key { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .grm-keys-bar kbd {
+    display: inline-block;
+    min-width: 14px;
+    padding: 1px 6px;
+    text-align: center;
+    border-radius: 4px;
+    background: var(--bg-tertiary, #14374E);
+    border: 1px solid var(--border-secondary, #1A4560);
+    color: var(--text-muted, #888);
+    font-family: inherit;
+    font-size: 10px;
+    line-height: 1.7;
+  }
+  .grm-mouse-help {
+    position: relative;
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    cursor: help;
+    color: var(--text-dim, #6a8a9a);
+  }
+  .grm-mouse-help .grm-mouse-help-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    border: 1px solid var(--border-secondary, #1A4560);
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted, #888);
+  }
+  .grm-mouse-pop {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 8px);
+    right: 0;
+    width: max-content;
+    max-width: 280px;
+    padding: 8px 12px;
+    background: var(--bg-tertiary, #14374E);
+    border: 1px solid var(--border-primary, #1A4560);
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+    color: var(--text-secondary, #B0D0D0);
+    line-height: 1.8;
+    text-align: left;
+    z-index: 10;
+  }
+  .grm-mouse-pop strong { display: block; color: var(--text-primary, #E0F0F0); margin-bottom: 4px; font-size: 11px; }
+  .grm-mouse-help:hover .grm-mouse-pop,
+  .grm-mouse-help:focus .grm-mouse-pop,
+  .grm-mouse-help:focus-within .grm-mouse-pop { display: block; }
   .grm-res-control,
   .grm-loupe-zoom-control {
     display: flex;
@@ -2653,8 +2720,24 @@ document.addEventListener('keydown', function(e) {
       <input type="range" id="grmLoupeZoomSlider" min="100" max="500" step="25" value="100" oninput="grmSetLoupeZoom(this.value)">
       <span id="grmLoupeZoomVal">1×</span>
     </div>
-    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Z = right 1:1 &nbsp; 1 = strip 1:1 &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;">Apply & Close</button>
+  </div>
+  <div class="grm-keys-bar">
+    <span class="grm-key"><kbd>↑↓</kbd> move zone</span>
+    <span class="grm-key"><kbd>←→</kbd> navigate</span>
+    <span class="grm-key"><kbd>Space</kbd> unsort</span>
+    <span class="grm-key"><kbd>Del</kbd> remove</span>
+    <span class="grm-key"><kbd>Z</kbd> right 1:1</span>
+    <span class="grm-key"><kbd>1</kbd> strip 1:1</span>
+    <span class="grm-mouse-help" tabindex="0" role="button" aria-label="Mouse controls">
+      <span class="grm-mouse-help-icon">?</span> mouse
+      <span class="grm-mouse-pop">
+        <strong>Mouse</strong>
+        Click the preview to lock/unlock zoom<br>
+        Drag a thumbnail to pan it<br>
+        Double-click a thumbnail to reset pan
+      </span>
+    </span>
   </div>
 </div>
 

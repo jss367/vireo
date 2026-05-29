@@ -1019,7 +1019,74 @@ input[type="range"]::-moz-range-thumb {
   background: var(--bg-secondary);
   flex-shrink: 0;
 }
-.grm-footer .grm-hint { font-size: 11px; color: var(--text-ghost); flex: 1; }
+.grm-keys-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 7px 20px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-primary);
+  font-size: 11px;
+  color: var(--text-ghost);
+  flex-shrink: 0;
+}
+.grm-keys-bar .grm-key { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.grm-keys-bar kbd {
+  display: inline-block;
+  min-width: 14px;
+  padding: 1px 6px;
+  text-align: center;
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-secondary);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1.7;
+}
+.grm-mouse-help {
+  position: relative;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: help;
+  color: var(--text-dim);
+}
+.grm-mouse-help .grm-mouse-help-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1px solid var(--border-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.grm-mouse-pop {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  width: max-content;
+  max-width: 280px;
+  padding: 8px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+  color: var(--text-secondary);
+  line-height: 1.8;
+  text-align: left;
+  z-index: 10;
+}
+.grm-mouse-pop strong { display: block; color: var(--text-primary); margin-bottom: 4px; font-size: 11px; }
+.grm-mouse-help:hover .grm-mouse-pop,
+.grm-mouse-help:focus .grm-mouse-pop,
+.grm-mouse-help:focus-within .grm-mouse-pop { display: block; }
 .grm-commit-toggle { display:flex; align-items:center; gap:6px; font-size:12px;
   color: var(--text-muted); cursor:pointer; user-select:none; }
 .grm-commit-toggle input { cursor:pointer; }
@@ -1513,7 +1580,6 @@ input[type="range"]::-moz-range-thumb {
       <input type="range" id="grmLoupeZoomSlider" min="100" max="500" step="25" value="100" oninput="grmSetLoupeZoom(this.value)">
       <span id="grmLoupeZoomVal">1×</span>
     </div>
-    <span class="grm-hint" id="grmHint">P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Z = right 1:1 &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <div class="grm-commit-group" style="margin-left:auto;display:flex;align-items:center;gap:14px;">
       <label class="grm-commit-toggle">
         <input type="checkbox" id="grmConfirmSpeciesChk" onchange="grmOnToggleChange('species')">
@@ -1529,6 +1595,24 @@ input[type="range"]::-moz-range-thumb {
         style="padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);"
         title="Commit whichever boxes are checked, then close this burst.">Apply and close</button>
     </div>
+  </div>
+  <div class="grm-keys-bar">
+    <span class="grm-key"><kbd>P</kbd> pick</span>
+    <span class="grm-key"><kbd>X</kbd> reject</span>
+    <span class="grm-key"><kbd>↑↓</kbd> move zone</span>
+    <span class="grm-key" id="grmKeyNav"><kbd>←→</kbd> navigate</span>
+    <span class="grm-key"><kbd>Space</kbd> unsort</span>
+    <span class="grm-key" id="grmKeyRemove"><kbd>Del</kbd> remove</span>
+    <span class="grm-key"><kbd>Z</kbd> right 1:1</span>
+    <span class="grm-mouse-help" tabindex="0" role="button" aria-label="Mouse controls">
+      <span class="grm-mouse-help-icon">?</span> mouse
+      <span class="grm-mouse-pop">
+        <strong>Mouse</strong>
+        Click the preview to lock/unlock zoom<br>
+        Drag a thumbnail to pan it<br>
+        Double-click a thumbnail to reset pan
+      </span>
+    </span>
   </div>
 </div>
 
@@ -3774,12 +3858,13 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
       ? 'Remove this photo from the temporary review set'
       : 'Detach this photo from the burst group on apply';
   }
-  var hint = document.getElementById('grmHint');
-  if (hint) {
-    hint.innerHTML = isSinglePhotoReview && source !== 'browse-selection'
-      ? 'P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; Space = unsort &nbsp; Click preview to lock/unlock zoom &nbsp; Drag thumbnail to pan; double-click to reset'
-      : 'P = pick &nbsp; X = reject &nbsp; ↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset';
-  }
+  // Navigate (←→) only makes sense with more than one frame; remove (Del)
+  // tracks the Remove button's availability. Keep these keycaps honest so the
+  // bar never advertises a shortcut that does nothing in the current context.
+  var navKey = document.getElementById('grmKeyNav');
+  if (navKey) navKey.style.display = (isSinglePhotoReview && source !== 'browse-selection') ? 'none' : '';
+  var removeKey = document.getElementById('grmKeyRemove');
+  if (removeKey) removeKey.style.display = (allowRemove === false) ? 'none' : '';
   grmSetThumbSize(GRM_CARD_W, false);
 
   // Disable Apply while we wait for /group/state — clicking it before
