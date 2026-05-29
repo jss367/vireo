@@ -4165,11 +4165,23 @@ function buildPipelineMetadataHtml(photo) {
   // Species predictions: this photo, then the consensus for the burst being
   // reviewed (the GRM is scoped to a single burst — see openGroupReview). Using
   // burst-level predictions keeps sibling bursts in the same encounter out of
-  // the consensus. grmState.items is exactly this burst's photos, so it gives
-  // the honest "frames with predictions" denominator.
+  // the consensus, and grmState.items (this burst's photos) gives the honest
+  // "frames with predictions" denominator. Legacy caches store bursts as raw
+  // photo-id arrays with no species_predictions field; detect that with
+  // Array.isArray and fall back to encounter scope so the consensus block isn't
+  // dropped. An empty burst array stays burst-scoped (the block is simply
+  // omitted) rather than re-leaking sibling-burst predictions.
   var burst = enc.bursts && enc.bursts[grmState.burstIdx];
-  var consRows = burst ? (burst.species_predictions || []) : (enc.species_predictions || []);
-  var consTitle = consensusTitle(burst ? 'Burst' : 'Encounter', grmState.items);
+  var hasBurstPreds = burst && Array.isArray(burst.species_predictions);
+  var consRows, consTitle;
+  if (hasBurstPreds) {
+    consRows = burst.species_predictions;
+    consTitle = consensusTitle('Burst', grmState.items);
+  } else {
+    consRows = enc.species_predictions || [];
+    var encPhotos = (enc.photo_ids || []).map(function(pid) { return findPhotoInResults(pid); });
+    consTitle = consensusTitle('Encounter', encPhotos);
+  }
   html += buildSpeciesPredictionsHtml(photo, consRows, consTitle, 0);
 
   // Score waterfall
