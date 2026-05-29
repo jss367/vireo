@@ -2552,11 +2552,33 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         first_model_photo_ids
                         & detect_state["processed_ids"]
                     )
+                    # Delete only pre-run ids the current run did NOT
+                    # re-produce. Detection ids are content-addressed
+                    # (vireo/detection_id.py), so re-detecting the same boxes
+                    # yields the SAME ids as the pre-run snapshot, and
+                    # write_detection_batch UPSERTs them with the freshly
+                    # written predictions now hanging off them. Deleting every
+                    # pre-run id unconditionally would cascade-delete those
+                    # predictions (and the live detection rows) for every photo
+                    # whose boxes didn't change — the common reclassify case.
+                    # Compare against the ids THIS run actually re-detected
+                    # (detect_state["detections"] is the in-memory map
+                    # _detect_batch built); a photo that came back empty has
+                    # no entry, so its pre-run rows are all stale and get
+                    # purged (write_detection_batch([]) already cleared them at
+                    # the data layer — this is the belt-and-suspenders pass and
+                    # cross-model cleanup). A photo re-detected with the same
+                    # boxes has its ids in the fresh set, so they survive.
+                    fresh_by_photo = detect_state["detections"]
                     stale_ids = [
                         det_id
                         for photo_id, id_set in pre_ids.items()
-                        for det_id in id_set
                         if photo_id in purge_ids
+                        for det_id in id_set
+                        if det_id not in {
+                            d["id"]
+                            for d in fresh_by_photo.get(photo_id, [])
+                        }
                     ]
                     if stale_ids:
                         getattr(

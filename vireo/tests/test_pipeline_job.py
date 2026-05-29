@@ -2752,6 +2752,109 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     )
 
 
+def test_pipeline_reclassify_same_boxes_preserves_predictions(
+    tmp_path, monkeypatch,
+):
+    """Reclassify that re-detects the SAME boxes must NOT purge the rows it
+    just rewrote.
+
+    Detection ids are content-addressed, so re-detecting an unchanged box
+    yields the same id as the pre-run snapshot. write_detection_batch UPSERTs
+    that row and classify writes fresh predictions onto it. The reclassify
+    purge used to delete every pre-run id unconditionally — which, with stable
+    ids, meant deleting the live detection and cascading the just-written
+    predictions for every photo whose boxes didn't change (the common case).
+    The purge must subtract the current live set so only genuinely-dropped
+    rows are deleted. (Codex P1 family on PR #907 / latent since the
+    content-addressed-id merge.)
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
+    _drop_jpeg(folder_path, "test.jpg")
+
+    box = {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}
+    prior = db.save_detections(
+        photo_id,
+        [{"box": box, "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    prior_id = prior[0]
+
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    # Reclassify re-detects the SAME box → content-addressed id == prior_id.
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        dmap = {}
+        for p in batch:
+            ids = db_.write_detection_batch(
+                p["id"], "megadetector-v6",
+                [{"box": box, "confidence": 0.9, "category": "animal"}],
+            )
+            dmap[p["id"]] = [{
+                "id": ids[0], "box_x": box["x"], "box_y": box["y"],
+                "box_w": box["w"], "box_h": box["h"], "confidence": 0.9,
+                "category": "animal", "detector_model": "megadetector-v6",
+            }]
+        return dmap, len(batch), {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    class FakeClassifier:
+        def __init__(self, *a, **k):
+            pass
+
+        def classify_with_embedding(self, img, threshold=0):
+            import numpy as np
+            return ([{"species": "Robin", "score": 0.9}],
+                    np.zeros(512, dtype=np.float32))
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            z = np.zeros(512, dtype=np.float32)
+            return [([{"species": "Robin", "score": 0.9}], z) for _ in images]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id, model_ids=model_ids[:1], reclassify=True,
+        skip_extract_masks=True, skip_regroup=True,
+    )
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    verify = Database(db_path)
+    verify.set_active_workspace(ws_id)
+    assert verify.get_detections(photo_id) != [], (
+        "re-detected detection (same box → same content id) must survive "
+        "reclassify, not be purged as 'stale'"
+    )
+    preds = verify.conn.execute(
+        "SELECT COUNT(*) AS c FROM predictions WHERE detection_id=?",
+        (prior_id,),
+    ).fetchone()["c"]
+    assert preds >= 1, (
+        f"freshly-written predictions must survive the reclassify purge; "
+        f"got {preds}"
+    )
+
+
 def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     """A photo with no animals, recorded in detector_runs, must not be
     re-detected on a subsequent non-reclassify pipeline run.
