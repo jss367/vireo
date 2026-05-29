@@ -1619,7 +1619,10 @@ function rapidComputeApplyDiff() {
     var hasSpeciesKeyword = species &&
       rapid.keywordStateSpecies === species &&
       !!rapid.initialSpeciesKeywords[p.id];
-    if (species && newFlag === 'flagged' && !hasSpeciesKeyword) diff.tagNew++;
+    // Apply tags EVERY frame in the burst with the species keyword (matching
+    // the grid / the persisted pipeline decision), not just picks. Count all
+    // current-burst members that don't already carry it.
+    if (species && !hasSpeciesKeyword) diff.tagNew++;
   });
   return diff;
 }
@@ -1641,7 +1644,7 @@ function rapidApplyTitle(diff, openNext) {
   if (diff.clearNew > 0) actions.push('clear flags on ' + diff.clearNew + ' ' + rapidPlural(diff.clearNew, 'photo'));
   if (diff.speciesChanged) actions.push('set confirmed species to "' + diff.species + '"');
   if (diff.tagNew > 0) {
-    actions.push('add species keyword "' + diff.species + '" to ' + diff.tagNew + ' ' + rapidPlural(diff.tagNew, 'pick'));
+    actions.push('add species keyword "' + diff.species + '" to ' + diff.tagNew + ' ' + rapidPlural(diff.tagNew, 'burst frame'));
   }
   var text = actions.length ? ('Apply will ' + actions.join(', ') + '.') : 'Apply will make no database changes for this burst.';
   if (openNext) text += ' Then open the next burst.';
@@ -1738,7 +1741,15 @@ async function applyCurrent(openNext) {
     // /group/apply is flags-only now; persist the species through the same
     // unified endpoint the grid uses so confirmation actually lands server-side
     // (tags all burst frames, handles species replacement + auto-detach).
+    // The server now OWNS confirmation: it sets species_confirmed on the
+    // correct encounter and returns the authoritative structure via
+    // spResp.encounters. We do not write enc.confirmed_species/species_confirmed
+    // locally — after an auto-detach the encounter indices shift, so the cached
+    // session.encIdx may point at a different (or out-of-bounds) encounter, and
+    // a local write would corrupt it and then be persisted by save-cache below.
+    var restructured = false;
     if (species) {
+      var encCountBefore = (rapid.results.encounters || []).length;
       var spResp = await safeFetch('/api/encounters/species', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1753,19 +1764,23 @@ async function applyCurrent(openNext) {
       if (spResp && spResp.encounters) {
         rapid.results.encounters = spResp.encounters;
         if (spResp.summary) rapid.results.summary = spResp.summary;
+        // A change in encounter count is the signal an auto-detach restructured
+        // the queue. When that happens the cached session.encIdx no longer maps
+        // to the same encounter, so we must NOT propagate this (divergent)
+        // species onto the original encounter's sibling bursts: those siblings
+        // kept their original species — that divergence is exactly why the
+        // burst detached.
+        restructured = (rapid.results.encounters.length !== encCountBefore);
       }
     }
-    // Re-read after the adopt step above may have replaced encounters[].
-    var enc = rapid.results.encounters[session.encIdx];
-    if (species && enc) {
-      enc.confirmed_species = species;
-      enc.species_confirmed = true;
-      // sessions[].species is cached at page load, so update every burst in
-      // this encounter — otherwise Apply Next stops tagging picks with the
-      // confirmed species until the user retypes it for each burst. Iterate
-      // allSessions, not the filtered rapid.sessions: a queue filter/toggle
-      // can hide sibling bursts, and they must still get the confirmed
-      // species so they aren't stale when they re-enter the queue.
+    // Propagate the confirmed species onto sibling bursts' cached hints only
+    // when no restructure happened. sessions[].species is cached at page load,
+    // so updating every burst in this encounter keeps Apply Next tagging picks
+    // with the confirmed species without the user retyping it per burst.
+    // Iterate allSessions, not the filtered rapid.sessions: a queue
+    // filter/toggle can hide sibling bursts, and they must still get the
+    // confirmed species so they aren't stale when they re-enter the queue.
+    if (species && !restructured) {
       rapid.allSessions.forEach(function(s) {
         if (s.encIdx === session.encIdx && !s.hasBurstOverride) {
           s.species = species;

@@ -22,6 +22,8 @@ def _mock_pipeline_rapid_review(
     original_content_type="image/png",
     shortcut_config=None,
     state_photos=None,
+    species_payloads=None,
+    species_response=None,
 ):
     image_body = base64.b64decode(_PNG_1X1)
     if shortcut_config is None:
@@ -102,19 +104,23 @@ def _mock_pipeline_rapid_review(
         route.fulfill(json={"ok": True})
 
     page.route("**/api/pipeline/save-cache", save_cache)
+
     # /group/apply is flags-only now; species confirmation routes through the
-    # unified /api/encounters/species endpoint. Echo back the current structure
-    # so the client's adopt step is a no-op (preserves the mocked encounters).
-    page.route(
-        "**/api/encounters/species",
-        lambda route: route.fulfill(
-            json={
-                "ok": True,
-                "encounters": results["encounters"],
-                "summary": results["summary"],
-            }
-        ),
-    )
+    # unified /api/encounters/species endpoint. By default echo back the current
+    # structure (no-op adopt). Tests can capture request bodies via
+    # species_payloads and override the adopted structure via species_response
+    # (e.g. to simulate the server's auto-detach restructure).
+    def encounters_species(route):
+        if species_payloads is not None:
+            species_payloads.append(route.request.post_data_json)
+        body = species_response if species_response is not None else {
+            "ok": True,
+            "encounters": results["encounters"],
+            "summary": results["summary"],
+        }
+        route.fulfill(json=body)
+
+    page.route("**/api/encounters/species", encounters_species)
     page.route(
         "**/thumbnails/*.jpg",
         lambda route: route.fulfill(body=image_body, content_type="image/png"),
@@ -229,16 +235,19 @@ def test_rapid_review_apply_button_summarizes_pending_writes(live_server, page):
 
     page.goto(f"{live_server['url']}/pipeline/rapid-review")
 
-    expect(page.locator("#applyBtn")).to_have_text("Apply: no DB changes")
+    # Species tagging now covers EVERY frame in the burst (not just picks), so
+    # with a pre-filled species and no frames yet carrying the keyword, Apply
+    # would tag all 3 — the label must say so before any pick.
+    expect(page.locator("#applyBtn")).to_have_text("Apply: Tag 3")
 
     page.keyboard.press("p")
-    expect(page.locator("#applyBtn")).to_have_text("Apply: Flag 1 · Tag 1")
+    expect(page.locator("#applyBtn")).to_have_text("Apply: Flag 1 · Tag 3")
 
     page.keyboard.press("x")
-    expect(page.locator("#applyBtn")).to_have_text("Apply: Flag 1 · Reject 1 · Tag 1")
+    expect(page.locator("#applyBtn")).to_have_text("Apply: Flag 1 · Reject 1 · Tag 3")
     expect(page.locator("#applyBtn")).to_have_attribute(
         "title",
-        'Apply will flag 1 photo as a pick, reject 1 photo, add species keyword "Test bird" to 1 pick.',
+        'Apply will flag 1 photo as a pick, reject 1 photo, add species keyword "Test bird" to 3 burst frames.',
     )
 
 
@@ -858,3 +867,132 @@ def test_classic_pipeline_review_group_shortcuts_do_not_flag_prior_single_photo(
     expect(page.locator("#grmCount")).to_have_text("0 picks, 1 rejects, 1 unsorted")
     page.wait_for_timeout(200)
     assert stale_flag_payloads == []
+
+
+def test_rapid_review_apply_tags_all_burst_frames_via_encounters_species(live_server, page):
+    # A multi-frame burst where only ONE frame is a pick. Species tagging must
+    # cover EVERY frame (matching the pipeline decision / the grid), so the
+    # /api/encounters/species request body must carry all burst photo_ids — not
+    # just the pick — plus the burst's index.
+    species_payloads = []
+    results = {
+        "photos": [
+            {"id": 1, "filename": "a.jpg", "label": "REVIEW", "flag": "none"},
+            {"id": 2, "filename": "b.jpg", "label": "REVIEW", "flag": "none"},
+            {"id": 3, "filename": "c.jpg", "label": "REVIEW", "flag": "none"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2, 3],
+                "photo_count": 3,
+                "burst_count": 1,
+                "species": ["Test bird"],
+                "bursts": [{"photo_ids": [1, 2, 3]}],
+            }
+        ],
+        "summary": {"keep_count": 0, "review_count": 3, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(
+        page,
+        results=results,
+        apply_photos={
+            "1": {"flag": "flagged", "has_species_keyword": False},
+            "2": {"flag": "none", "has_species_keyword": False},
+            "3": {"flag": "none", "has_species_keyword": False},
+        },
+        species_payloads=species_payloads,
+    )
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    expect(page.locator("#applyBtn")).to_be_enabled()
+    # Pick only the first frame; the other two stay unsorted.
+    page.keyboard.press("p")
+
+    with page.expect_response("**/api/encounters/species"):
+        page.locator("#applyBtn").click()
+
+    assert species_payloads, "expected /api/encounters/species to fire"
+    body = species_payloads[-1]
+    assert body["species"] == "Test bird"
+    assert body["burst_index"] == 0
+    # ALL burst frames, not just the single pick.
+    assert sorted(body["photo_ids"]) == [1, 2, 3]
+
+
+def test_rapid_review_adopts_detach_restructure_without_clobbering_cache(live_server, page):
+    # Simulate the server auto-detaching the burst on a species mismatch: the
+    # /api/encounters/species response returns a RESTRUCTURED encounters payload
+    # (one extra encounter, indices shifted). The client must adopt that exact
+    # structure and the subsequent save-cache must persist it — proving there is
+    # no stale-index local write that corrupts the encounter the user confirmed.
+    save_payloads = []
+    results = {
+        "photos": [
+            {"id": 1, "filename": "a.jpg", "label": "REVIEW", "flag": "none"},
+            {"id": 2, "filename": "b.jpg", "label": "REVIEW", "flag": "none"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2],
+                "photo_count": 2,
+                "burst_count": 2,
+                "species": ["Original bird"],
+                "bursts": [{"photo_ids": [1]}, {"photo_ids": [2]}],
+            }
+        ],
+        "summary": {"keep_count": 0, "review_count": 2, "reject_count": 0},
+    }
+    # The detached burst (photo 1, the confirmed-divergent species) becomes its
+    # own new encounter; the original encounter keeps the remaining sibling.
+    restructured = {
+        "ok": True,
+        "encounters": [
+            {
+                "photo_ids": [2],
+                "photo_count": 1,
+                "burst_count": 1,
+                "species": ["Original bird"],
+                "bursts": [{"photo_ids": [2]}],
+            },
+            {
+                "photo_ids": [1],
+                "photo_count": 1,
+                "burst_count": 1,
+                "species": ["Divergent bird"],
+                "species_confirmed": True,
+                "confirmed_species": "Divergent bird",
+                "bursts": [{"photo_ids": [1], "species_override": {"species": "Divergent bird", "confirmed": True}}],
+            },
+        ],
+        "summary": {"keep_count": 0, "review_count": 2, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(
+        page,
+        results=results,
+        apply_photos={"1": {"flag": "none", "has_species_keyword": False}},
+        save_payloads=save_payloads,
+        species_response=restructured,
+    )
+
+    page.goto(f"{live_server['url']}/pipeline/rapid-review?enc=0&burst=0")
+    expect(page.locator("#applyBtn")).to_be_enabled()
+    expect(page.locator("#filename")).to_have_text("a.jpg")
+    # Confirm a species that diverges from the encounter's, triggering detach.
+    page.locator("#speciesInput").fill("Divergent bird")
+
+    with page.expect_response("**/api/pipeline/save-cache"):
+        page.locator("#applyBtn").click()
+
+    assert save_payloads, "expected save-cache to fire"
+    saved = save_payloads[-1]
+    # The client adopted the server's restructured encounters verbatim — the
+    # save-cache body must match it exactly (no clobber, no stale-index write).
+    assert saved["encounters"] == restructured["encounters"]
+    # The detached encounter still carries its server-set confirmation; nothing
+    # locally overwrote the (now index-shifted) encounter the user confirmed.
+    detached = next(e for e in saved["encounters"] if e["photo_ids"] == [1])
+    assert detached["species_confirmed"] is True
+    assert detached["confirmed_species"] == "Divergent bird"
+    # The sibling that kept the original species was NOT given the divergent one.
+    sibling = next(e for e in saved["encounters"] if e["photo_ids"] == [2])
+    assert sibling["species"] == ["Original bird"]
