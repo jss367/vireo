@@ -1734,6 +1734,10 @@ async function applyCurrent(openNext) {
         var p = rapid.photoMap[pid];
         if (p) {
           p.flag = resp.photos[pidStr].flag;
+          // /group/apply is flags-only, so has_species_keyword is always
+          // false here in production; confirmed species comes from the
+          // adopted /api/encounters/species response below. Kept only because
+          // some rapid-review tests still mock the old response shape.
           if (species && resp.photos[pidStr].has_species_keyword) p.confirmed_species = species;
         }
       });

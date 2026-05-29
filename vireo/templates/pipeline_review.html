@@ -4856,6 +4856,10 @@ document.addEventListener('contextmenu', function(e) {
 async function grmConfirmSpeciesCall(species, memberIds) {
   if (!species || memberIds.length === 0) return;
   if (grmState.source === 'browse-selection') {
+    // Browse selections are ad-hoc and have no persisted encounter/burst to
+    // confirm, so "Confirm species" here means "tag these frames with the
+    // species keyword" — it does not set species_confirmed (there's nothing
+    // to mark). Pipeline bursts below get full server-owned confirmation.
     await safeFetch('/api/batch/keyword', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ photo_ids: memberIds, name: species, type: 'taxonomy' }),
