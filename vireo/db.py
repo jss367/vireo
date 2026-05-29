@@ -8203,7 +8203,14 @@ class Database:
                       detector_confidence, category)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
-                     detector_confidence = excluded.detector_confidence""",
+                     photo_id = excluded.photo_id,
+                     detector_model = excluded.detector_model,
+                     box_x = excluded.box_x,
+                     box_y = excluded.box_y,
+                     box_w = excluded.box_w,
+                     box_h = excluded.box_h,
+                     detector_confidence = excluded.detector_confidence,
+                     category = excluded.category""",
                 (det_id, photo_id, detector_model,
                  box["x"], box["y"], box["w"], box["h"],
                  det["confidence"], category),

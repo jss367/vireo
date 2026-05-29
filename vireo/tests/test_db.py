@@ -4893,6 +4893,52 @@ def test_write_detection_batch_second_writer_does_not_cascade_predictions(tmp_pa
     )
 
 
+def test_write_detection_batch_conflict_refreshes_box_fields(tmp_path):
+    """If a replacement box falls in the same quantized ID bucket, the row's
+    exact stored coordinates must still update to the latest detector output.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    first = {
+        "box": {"x": 0.10001, "y": 0.20001, "w": 0.30001, "h": 0.40001},
+        "confidence": 0.70,
+        "category": "animal",
+    }
+    second = {
+        "box": {"x": 0.10002, "y": 0.20002, "w": 0.30002, "h": 0.40002},
+        "confidence": 0.91,
+        "category": "animal",
+    }
+
+    ids1 = db.write_detection_batch(photo_id, "megadetector-v6", [first])
+    ids2 = db.write_detection_batch(photo_id, "megadetector-v6", [second])
+    assert ids2 == ids1, "sub-quantization box drift should keep the same id"
+
+    row = db.conn.execute(
+        "SELECT box_x, box_y, box_w, box_h, detector_confidence, category"
+        " FROM detections WHERE id = ?",
+        (ids1[0],),
+    ).fetchone()
+    assert dict(row) == {
+        "box_x": second["box"]["x"],
+        "box_y": second["box"]["y"],
+        "box_w": second["box"]["w"],
+        "box_h": second["box"]["h"],
+        "detector_confidence": second["confidence"],
+        "category": "animal",
+    }
+
+
 def test_pairing_recomputes_detection_ids_so_photo_id_reuse_is_safe(tmp_path):
     """Regression: when raw+jpeg pairing moves a detection to the primary photo,
     its content-addressed id MUST be recomputed against the primary's photo_id.
