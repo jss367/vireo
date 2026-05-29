@@ -1648,7 +1648,27 @@ function encounterSortOrder() {
   var encs = (pipelineResults && pipelineResults.encounters) || [];
   var order = encs.map(function(_, i) { return i; });
   if (encounterSort === 'default') return order;
-  function startTime(e) { return (e && e.time_range && e.time_range[0]) ? e.time_range[0] : ''; }
+  var tsByPhoto = null;
+  function photoTimestamps() {
+    if (tsByPhoto) return tsByPhoto;
+    tsByPhoto = {};
+    ((pipelineResults && pipelineResults.photos) || []).forEach(function(p) {
+      if (p && p.timestamp) tsByPhoto[p.id] = p.timestamp;
+    });
+    return tsByPhoto;
+  }
+  function startTime(e) {
+    if (e && e.time_range && e.time_range[0]) return e.time_range[0];
+    // No stored range (e.g. a freshly detached burst): fall back to the
+    // earliest contained photo timestamp so time sorts place it
+    // chronologically instead of dumping it at an extreme.
+    var map = photoTimestamps(), best = '';
+    ((e && e.photo_ids) || []).forEach(function(pid) {
+      var t = map[pid];
+      if (t && (best === '' || t < best)) best = t;
+    });
+    return best;
+  }
   function cmpStr(a, b) { return a < b ? -1 : (a > b ? 1 : 0); }
   order.sort(function(ia, ib) {
     var a = encs[ia], b = encs[ib], d = 0;
