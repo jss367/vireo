@@ -4945,6 +4945,64 @@ def test_pairing_recomputes_detection_ids_so_photo_id_reuse_is_safe(tmp_path):
     assert pred is not None and pred["species"] == "Robin"
 
 
+def test_pairing_redirects_classifier_runs_so_cache_gate_still_hits(tmp_path):
+    """Regression for Codex P2 on PR #912: after pair-up rehashes a
+    detection's id, the classifier_runs row must follow.
+
+    `get_classifier_run_keys(detection_id)` is the gate that decides
+    whether classify_photos can serve cached predictions. If the run-key
+    row stays pointed at the old (companion) id, paired-then-rehashed
+    photos look unclassified to the gate and get re-classified
+    unnecessarily on every subsequent classify pass.
+    """
+    from db import Database
+    from detection_id import detection_id as compute_id
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, fid)
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
+                           file_size=1, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG_1.cr3", extension=".cr3",
+                          file_size=1, file_mtime=1.0)
+
+    box = {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}
+    det_ids = db.write_detection_batch(jpeg_id, "MDV6", [
+        {"box": box, "confidence": 0.9, "category": "animal"},
+    ])
+    old_det_id = det_ids[0]
+    db.add_prediction(old_det_id, "Robin", 0.95, "bioclip")
+    # Record the classifier_run row that gates non-reclassify reruns.
+    db.conn.execute(
+        """INSERT INTO classifier_runs
+             (detection_id, classifier_model, labels_fingerprint, prediction_count)
+           VALUES (?, 'bioclip', 'fp-x', 1)""",
+        (old_det_id,),
+    )
+    db.conn.commit()
+
+    _pair_raw_jpeg_companions(db)
+
+    expected_new_id = compute_id(
+        raw_id, "MDV6", (box["x"], box["y"], box["w"], box["h"]), "animal",
+    )
+    # The classifier_runs row must now point at the rehashed detection id —
+    # otherwise the non-reclassify gate would treat the paired photo as
+    # unclassified and rerun the classifier needlessly.
+    keys = db.get_classifier_run_keys(expected_new_id)
+    assert ("bioclip", "fp-x") in keys, (
+        f"classifier_runs must follow rehash; new id keys: {keys}"
+    )
+    # And nothing left pointing at the stale old id (CASCADE cleanup).
+    stale = db.conn.execute(
+        "SELECT 1 FROM classifier_runs WHERE detection_id = ?", (old_det_id,),
+    ).fetchone()
+    assert stale is None, "stale classifier_runs row must not survive"
+
+
 def test_multiple_predictions_per_detection(tmp_path):
     """Multiple species predictions can be stored for the same detection."""
     from db import Database

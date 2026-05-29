@@ -340,9 +340,21 @@ def _pair_raw_jpeg_companions(db):
                 "UPDATE OR IGNORE predictions SET detection_id = ? WHERE detection_id = ?",
                 (new_id, det["id"]),
             )
-            # Drop any predictions that lost the UPDATE race (duplicate-key)
-            # along with the now-orphan companion detection row (CASCADE
-            # cleans up any remaining predictions tied to the old id).
+            # Redirect classifier_runs too — they're the cache key the
+            # non-reclassify gate consults. Without this, paired photos with
+            # cached predictions would look unclassified to
+            # `get_classifier_run_keys(new_id)` and rerun the classifier
+            # after every pair-up. Same OR IGNORE pattern as predictions:
+            # primary's own run rows win on (detection_id, classifier_model,
+            # labels_fingerprint) conflicts.
+            db.conn.execute(
+                "UPDATE OR IGNORE classifier_runs SET detection_id = ? WHERE detection_id = ?",
+                (new_id, det["id"]),
+            )
+            # Drop any predictions/classifier_runs that lost the UPDATE race
+            # (duplicate-key) along with the now-orphan companion detection
+            # row — CASCADE on both FKs cleans up any remaining rows tied to
+            # the old id.
             db.conn.execute(
                 "DELETE FROM detections WHERE id = ?",
                 (det["id"],),
