@@ -2670,8 +2670,14 @@ function openInspect(photoId) {
   }
 
   // Species predictions (filtered by confidence threshold): this photo, then
-  // the encounter-level group mean.
-  html += buildSpeciesPredictionsHtml(photo, enc, minConfidence / 100);
+  // the encounter consensus. This legacy panel only runs for flat caches with
+  // no burst data (burst-backed photos route to the GRM above), so encounter
+  // scope is the only meaningful group here.
+  var encPhotos = (enc && enc.photo_ids)
+    ? enc.photo_ids.map(function(pid) { return findPhotoInResults(pid); })
+    : [];
+  var encRows = enc ? (enc.species_predictions || []) : [];
+  html += buildSpeciesPredictionsHtml(photo, encRows, consensusTitle('Encounter', encPhotos), minConfidence / 100);
 
   // Score waterfall
   html += '<div class="score-waterfall">';
@@ -4098,18 +4104,38 @@ function filterAggSpeciesRows(rows, threshold) {
   }).filter(function(sp) { return sp.models.length > 0; });
 }
 
-// Build the per-photo + group-consensus species prediction blocks. The
-// per-photo block changes as you select different photos; the group block is
-// the encounter-level mean and is labeled as such (see CORE_PHILOSOPHY "No
-// black boxes"). `threshold` (0..1) filters by confidence; pass 0 for none.
-function buildSpeciesPredictionsHtml(photo, enc, threshold) {
+// Count frames in `photos` that carry at least one species prediction. The
+// consensus mean is computed only over these frames, so the label must not
+// claim a denominator that includes prediction-less frames (CORE_PHILOSOPHY
+// "No black boxes": a "mean across 14 photos" when only 4 had predictions
+// overstates the consensus).
+function framesWithPredictions(photos) {
+  return (photos || []).filter(function(p) {
+    return p && p.species_top5 && p.species_top5.length > 0;
+  }).length;
+}
+
+// Honest consensus title, e.g. "Burst consensus — mean of 4 frames with
+// predictions". `scopeWord` is "Burst" (group review modal, scoped to the
+// reviewed burst) or "Encounter" (legacy flat-cache inspect fallback).
+function consensusTitle(scopeWord, photos) {
+  var n = framesWithPredictions(photos);
+  return scopeWord + ' consensus — mean of ' + n + ' frame' + (n === 1 ? '' : 's') + ' with predictions';
+}
+
+// Build the per-photo + consensus species prediction blocks. The per-photo
+// block changes as you select different photos; the consensus block is the
+// mean over the scope's frames and is labeled with its scope + honest frame
+// count (see CORE_PHILOSOPHY "No black boxes"). Callers pass the scope's own
+// predictions (`consensusRows`) and title so the block matches what's on
+// screen — burst for the GRM, encounter for the flat-cache fallback.
+// `threshold` (0..1) filters by confidence; pass 0 for none.
+function buildSpeciesPredictionsHtml(photo, consensusRows, consensusTitleText, threshold) {
   threshold = threshold || 0;
   var html = '';
   html += renderSpeciesBlock('Species Predictions (this photo)', buildPerPhotoSpeciesRows(photo, threshold));
-  if (enc && enc.species_predictions && enc.species_predictions.length > 0) {
-    var aggRows = filterAggSpeciesRows(enc.species_predictions, threshold);
-    var n = enc.photo_count || (enc.photo_ids ? enc.photo_ids.length : 0);
-    html += renderSpeciesBlock('Group consensus — mean across ' + n + ' photo' + (n === 1 ? '' : 's'), aggRows);
+  if (consensusRows && consensusRows.length > 0) {
+    html += renderSpeciesBlock(consensusTitleText, filterAggSpeciesRows(consensusRows, threshold));
   }
   return html;
 }
@@ -4136,8 +4162,15 @@ function buildPipelineMetadataHtml(photo) {
     html += '</div>';
   }
 
-  // Species predictions: this photo, then the encounter-level group mean.
-  html += buildSpeciesPredictionsHtml(photo, enc, 0);
+  // Species predictions: this photo, then the consensus for the burst being
+  // reviewed (the GRM is scoped to a single burst — see openGroupReview). Using
+  // burst-level predictions keeps sibling bursts in the same encounter out of
+  // the consensus. grmState.items is exactly this burst's photos, so it gives
+  // the honest "frames with predictions" denominator.
+  var burst = enc.bursts && enc.bursts[grmState.burstIdx];
+  var consRows = burst ? (burst.species_predictions || []) : (enc.species_predictions || []);
+  var consTitle = consensusTitle(burst ? 'Burst' : 'Encounter', grmState.items);
+  html += buildSpeciesPredictionsHtml(photo, consRows, consTitle, 0);
 
   // Score waterfall
   var scores = [
