@@ -1150,6 +1150,78 @@ def test_cut_both_null_no_detector_run_still_groups():
     assert len(segments[0]) == 2
 
 
+def test_cut_both_null_focal_length_metadata_cuts():
+    """Two undated photos with no embeddings/species/detector verdict but
+    differing focal lengths must be judged by the score cut, not force-grouped.
+
+    compute_s_enc always folds sim_meta into the score, so a focal-length
+    mismatch (e.g. imports with stripped capture dates but retained lens data)
+    is real dissimilarity signal. _has_similarity_signal must recognise focal
+    length so the pair falls through to the score cut instead of the
+    signal-less keep-together branch.
+    """
+    from encounters import cut_microsegments
+
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "a.jpg",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "focal_length": 24.0},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "b.jpg",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "focal_length": 400.0},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 2, (
+        f"Expected the focal-length mismatch to cut, got "
+        f"{[[p['id'] for p in seg] for seg in segments]}"
+    )
+
+
+def test_cut_both_null_gps_metadata_cuts():
+    """Undated photos with no embeddings/species/detector verdict but distant
+    GPS fixes must cut on the score, not force-group by file order."""
+    from encounters import cut_microsegments
+
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "a.jpg",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "latitude": 47.6, "longitude": -122.3},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "b.jpg",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "latitude": 40.7, "longitude": -74.0},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 2, (
+        f"Expected the GPS mismatch to cut, got "
+        f"{[[p['id'] for p in seg] for seg in segments]}"
+    )
+
+
+def test_cut_both_null_no_metadata_still_groups():
+    """Truly signal-less nulls — no embeddings/species/detector verdict AND no
+    focal length or GPS — still group by file order.
+
+    Guards against over-tightening: a focal_length of 0 / None and absent GPS
+    must NOT count as signal, keeping unreadable files in the keep-together
+    branch.
+    """
+    from encounters import cut_microsegments
+
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "a.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "focal_length": 0, "latitude": None,
+         "longitude": None},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "b.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "focal_length": None, "latitude": None,
+         "longitude": None},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 1
+    assert len(segments[0]) == 2
+
+
 def test_cut_null_timestamps_cut_at_folder_boundary():
     """Signal-less nulls from different folders must NOT fuse into one encounter.
 

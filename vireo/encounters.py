@@ -122,15 +122,29 @@ def _has_similarity_signal(photo):
     A detector verdict counts too: subject_absent/subject_present means
     detection ran. compute_s_enc turns an absent-vs-present pair into an
     active dissimilarity (score cut), so we must NOT force-group such a pair
-    by file order. Only rows where detection genuinely never ran (no
-    embeddings, no species, no detector verdict) are signal-less.
+    by file order.
+
+    Metadata counts too: sim_meta always contributes to compute_s_enc, so a
+    usable focal length (> 0) or a GPS fix (both latitude and longitude) lets
+    the score cut distinguish two timestamp-less photos (e.g. imported images
+    with stripped capture dates but retained lens/GPS data). Force-grouping
+    those by file order would discard the signal sim_meta would have produced.
+
+    Only rows where detection genuinely never ran (no embeddings, no species,
+    no detector verdict) AND that carry no usable metadata (no focal length,
+    no GPS) are signal-less.
     """
+    fl = photo.get("focal_length")
+    has_focal = fl is not None and fl > 0
+    has_gps = photo.get("latitude") is not None and photo.get("longitude") is not None
     return (
         photo.get("dino_subject_embedding") is not None
         or photo.get("dino_global_embedding") is not None
         or bool(photo.get("species_top5"))
         or bool(photo.get("subject_absent"))
         or bool(photo.get("subject_present"))
+        or has_focal
+        or has_gps
     )
 
 
