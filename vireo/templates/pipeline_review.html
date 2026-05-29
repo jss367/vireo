@@ -4812,6 +4812,29 @@ document.addEventListener('contextmenu', function(e) {
 
 /* --- Apply & Close --- */
 
+// Confirm species for the burst. Pipeline bursts go through the same endpoint
+// the grid uses (persists confirmation + auto-detach). Browse-selection ad-hoc
+// sets have no encounter, so just tag the keyword on all members.
+async function grmConfirmSpeciesCall(species, memberIds) {
+  if (!species || memberIds.length === 0) return;
+  if (grmState.source === 'browse-selection') {
+    await safeFetch('/api/batch/keyword', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photo_ids: memberIds, name: species, type: 'taxonomy' }),
+    });
+    return;
+  }
+  var resp = await safeFetch('/api/encounters/species', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ species: species, photo_ids: memberIds, burst_index: grmState.burstIdx }),
+  });
+  // Adopt authoritative structure (mirrors confirmSpecies()).
+  if (resp && resp.encounters) {
+    pipelineResults.encounters = resp.encounters;
+    if (resp.summary) pipelineResults.summary = resp.summary;
+  }
+}
+
 async function grmApply() {
   // Belt-and-suspenders: the button is disabled until seed completes, but
   // a stuck-open modal whose /group/state never resolved (offline, server
@@ -4820,138 +4843,165 @@ async function grmApply() {
     console.warn('grmApply called before /group/state seed completed; ignoring.');
     return;
   }
+  var diff = grmComputeDiff();
+  var checks = grmResolveChecks(diff);
   var species = document.getElementById('grmSpecies').value.trim();
 
-  var picksArr = Array.from(grmState.picks);
-  var rejectsArr = Array.from(grmState.rejects);
-  var candidatesArr = grmState.items
-    .filter(function(p) {
-      return !grmState.picks.has(p.id) && !grmState.rejects.has(p.id) && !grmState.removed.has(p.id);
-    })
-    .map(function(p) { return p.id; });
+  // --- Flags side (picks/rejects/candidates + removed→detach) ---
+  // Only committed when the "Apply picks/rejects" box is checked. Removals are
+  // part of "cull changes", so the removed→detach block is gated here too.
+  if (checks.flags) {
+    var picksArr = Array.from(grmState.picks);
+    var rejectsArr = Array.from(grmState.rejects);
+    var candidatesArr = grmState.items
+      .filter(function(p) {
+        return !grmState.picks.has(p.id) && !grmState.rejects.has(p.id) && !grmState.removed.has(p.id);
+      })
+      .map(function(p) { return p.id; });
 
-  // Persist to the database first. If this fails we abort so the local
-  // pipeline cache and the DB can't drift apart — the prior fire-and-forget
-  // save-cache + no-DB-write was the bug behind this whole change.
-  var applyResp;
-  try {
-    applyResp = await safeFetch('/api/pipeline/group/apply', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        picks: picksArr,
-        rejects: rejectsArr,
-        candidates: candidatesArr,
-        species: species,
-      }),
-    });
-  } catch (e) {
-    console.error('Pipeline group apply failed:', e);
-    return;
-  }
-
-  // Update local pipelineResults with pick/reject/candidate decisions
-  var photoMap = {};
-  pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
-
-  grmState.picks.forEach(function(pid) {
-    var p = photoMap[pid];
-    if (p) p.label = 'KEEP';
-  });
-
-  grmState.rejects.forEach(function(pid) {
-    var p = photoMap[pid];
-    if (p) p.label = 'REJECT';
-  });
-
-  // Candidates (not picked, not rejected, not removed) → REVIEW
-  grmState.items.forEach(function(item) {
-    if (!grmState.picks.has(item.id) && !grmState.rejects.has(item.id) && !grmState.removed.has(item.id)) {
-      var p = photoMap[item.id];
-      if (p) p.label = 'REVIEW';
+    // Persist flags to the database first. If this fails we abort so the local
+    // pipeline cache and the DB can't drift apart — the prior fire-and-forget
+    // save-cache + no-DB-write was the bug behind this whole change.
+    var applyResp;
+    try {
+      applyResp = await safeFetch('/api/pipeline/group/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          picks: picksArr,
+          rejects: rejectsArr,
+          candidates: candidatesArr,
+        }),
+      });
+    } catch (e) {
+      console.error('Pipeline group apply failed:', e);
+      return;
     }
-  });
 
-  // Sync the in-memory pipeline cache's per-photo `flag` with what the
-  // server just wrote, so the badges in the main grid (which read p.flag)
-  // refresh without a full reload.
-  if (applyResp && applyResp.photos) {
-    Object.keys(applyResp.photos).forEach(function(pidStr) {
-      var pid = parseInt(pidStr, 10);
+    // Update local pipelineResults with pick/reject/candidate decisions
+    var photoMap = {};
+    pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
+
+    grmState.picks.forEach(function(pid) {
       var p = photoMap[pid];
-      if (p) p.flag = applyResp.photos[pidStr].flag;
+      if (p) p.label = 'KEEP';
     });
-  }
 
-  if (grmState.source === 'browse-selection') {
-    if (grmState.removed.size > 0) {
-      var encBrowse = pipelineResults.encounters[grmState.encIdx];
-      var keepIds = encBrowse.photo_ids.filter(function(pid) { return !grmState.removed.has(pid); });
-      if (keepIds.length === 0) {
-        // Every photo was removed from the temporary Browse burst. Any
-        // flag/species edits were already persisted by /group/apply above,
-        // so there is nothing left to review. Drop the handoff and degrade
-        // to normal pipeline review instead of stranding the page on an
-        // empty browse-selection encounter (0 photos but still 1 encounter/
-        // 1 burst, with a Reopen flow that can no longer reopen).
-        document.getElementById('grmSpecies').value = '';
-        closeGroupReview();
-        fallbackToNormalPipelineReview();
-        return;
+    grmState.rejects.forEach(function(pid) {
+      var p = photoMap[pid];
+      if (p) p.label = 'REJECT';
+    });
+
+    // Candidates (not picked, not rejected, not removed) → REVIEW
+    grmState.items.forEach(function(item) {
+      if (!grmState.picks.has(item.id) && !grmState.rejects.has(item.id) && !grmState.removed.has(item.id)) {
+        var p = photoMap[item.id];
+        if (p) p.label = 'REVIEW';
       }
-      encBrowse.photo_ids = keepIds;
-      encBrowse.photo_count = keepIds.length;
-      if (encBrowse.bursts && encBrowse.bursts[grmState.burstIdx]) {
-        encBrowse.bursts[grmState.burstIdx].photo_ids = keepIds.slice();
-      }
-      pipelineResults.photos = pipelineResults.photos.filter(function(p) {
-        return !grmState.removed.has(p.id);
+    });
+
+    // Sync the in-memory pipeline cache's per-photo `flag` with what the
+    // server just wrote, so the badges in the main grid (which read p.flag)
+    // refresh without a full reload.
+    if (applyResp && applyResp.photos) {
+      Object.keys(applyResp.photos).forEach(function(pidStr) {
+        var pid = parseInt(pidStr, 10);
+        var p = photoMap[pid];
+        if (p) p.flag = applyResp.photos[pidStr].flag;
       });
     }
-    // Flags/species are now persisted to the DB — the one-shot handoff has
-    // served its purpose, so drop it. A later reload degrades to normal
-    // review; the in-memory group stays reopenable via the Reopen button.
-    clearBrowseBurstHandoff();
-    closeGroupReview();
-    document.getElementById('grmSpecies').value = '';
-    renderResults();
-    updateSummaryBar(refreshLocalSummaryCounts());
-    return;
+
+    if (grmState.source === 'browse-selection') {
+      if (grmState.removed.size > 0) {
+        var encBrowse = pipelineResults.encounters[grmState.encIdx];
+        var keepIds = encBrowse.photo_ids.filter(function(pid) { return !grmState.removed.has(pid); });
+        if (keepIds.length === 0) {
+          // Every photo was removed from the temporary Browse burst. Any
+          // flag edits were already persisted by /group/apply above, so there
+          // is nothing left to review (and no burst left to confirm a species
+          // on). Drop the handoff and degrade to normal pipeline review
+          // instead of stranding the page on an empty browse-selection
+          // encounter (0 photos but still 1 encounter/1 burst, with a Reopen
+          // flow that can no longer reopen).
+          document.getElementById('grmSpecies').value = '';
+          closeGroupReview();
+          fallbackToNormalPipelineReview();
+          return;
+        }
+        encBrowse.photo_ids = keepIds;
+        encBrowse.photo_count = keepIds.length;
+        if (encBrowse.bursts && encBrowse.bursts[grmState.burstIdx]) {
+          encBrowse.bursts[grmState.burstIdx].photo_ids = keepIds.slice();
+        }
+        pipelineResults.photos = pipelineResults.photos.filter(function(p) {
+          return !grmState.removed.has(p.id);
+        });
+      }
+      // Flags are now persisted to the DB — the one-shot handoff has served
+      // its purpose, so drop it. A later reload degrades to normal review;
+      // the in-memory group stays reopenable via the Reopen button.
+      clearBrowseBurstHandoff();
+    } else if (grmState.removed.size > 0) {
+      // Detach removed photos from the burst into new single-photo bursts.
+      var enc = pipelineResults.encounters[grmState.encIdx];
+      var burst = enc.bursts[grmState.burstIdx];
+      var burstIds = burst.photo_ids || burst;
+      grmState.removed.forEach(function(pid) {
+        var idx = burstIds.indexOf(pid);
+        if (idx >= 0) burstIds.splice(idx, 1);
+        // Add as a new single-photo burst in the same encounter
+        enc.bursts.push({ photo_ids: [pid], species_predictions: burst.species_predictions || [], species_override: null });
+      });
+      // Clean up empty burst
+      if (burstIds.length === 0) {
+        enc.bursts.splice(grmState.burstIdx, 1);
+      }
+      enc.burst_count = enc.bursts.length;
+    }
   }
 
-  // Detach removed photos from the burst into new single-photo bursts
-  if (grmState.removed.size > 0) {
-    var enc = pipelineResults.encounters[grmState.encIdx];
-    var burst = enc.bursts[grmState.burstIdx];
-    var burstIds = burst.photo_ids || burst;
-    grmState.removed.forEach(function(pid) {
-      var idx = burstIds.indexOf(pid);
-      if (idx >= 0) burstIds.splice(idx, 1);
-      // Add as a new single-photo burst in the same encounter
-      enc.bursts.push({ photo_ids: [pid], species_predictions: burst.species_predictions || [], species_override: null });
+  // Save the updated pipeline cache (label + flag changes + detached bursts)
+  // BEFORE confirming species: /api/encounters/species reloads the cache from
+  // disk and validates photo_ids ⊆ bursts[burst_index], so the structure the
+  // user sees must be persisted first.
+  //
+  // Skip for browse-selection: pipelineResults there is a *temporary* ad-hoc
+  // selection set, not the real pipeline run, and save_results_raw would
+  // clobber the actual per-workspace cache. Its species path uses
+  // /api/batch/keyword (no cache read), so there is no ordering dependency.
+  if (grmState.source !== 'browse-selection') {
+    await safeFetch('/api/pipeline/save-cache', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pipelineResults),
     });
-    // Clean up empty burst
-    if (burstIds.length === 0) {
-      enc.bursts.splice(grmState.burstIdx, 1);
-    }
-    enc.burst_count = enc.bursts.length;
   }
 
-  // Update species if changed
-  if (species) {
-    var enc = pipelineResults.encounters[grmState.encIdx];
-    if (enc) {
-      enc.confirmed_species = species;
-      enc.species_confirmed = true;
+  // --- Species side ---
+  // Server-owned now: tag all remaining (non-removed) burst frames + mark the
+  // burst confirmed via the unified endpoint. Removed photos are excluded so
+  // they aren't tagged. Skip when the burst no longer exists (emptied by the
+  // detach above) or has no members left.
+  if (checks.species) {
+    var burstExists = grmState.source === 'browse-selection' ||
+      (pipelineResults.encounters[grmState.encIdx] &&
+       pipelineResults.encounters[grmState.encIdx].bursts &&
+       pipelineResults.encounters[grmState.encIdx].bursts[grmState.burstIdx]);
+    if (burstExists) {
+      var memberIds = grmState.items
+        .filter(function(p) { return !grmState.removed.has(p.id); })
+        .map(function(p) { return p.id; });
+      await grmConfirmSpeciesCall(species, memberIds);
     }
   }
 
-  // Save the updated pipeline cache (label + flag changes + detached bursts).
-  safeFetch('/api/pipeline/save-cache', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(pipelineResults),
-  });
+  // Browse-selection is a one-shot handoff: drop it on close regardless of
+  // which side was committed, so a reload degrades to normal review instead
+  // of reopening a burst whose edits already landed. (Idempotent with the
+  // call inside the flags block above.)
+  if (grmState.source === 'browse-selection') {
+    clearBrowseBurstHandoff();
+  }
 
   closeGroupReview();
   // Clear the species input for next use
