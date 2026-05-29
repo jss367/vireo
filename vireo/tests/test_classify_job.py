@@ -1202,12 +1202,12 @@ def test_store_grouped_predictions_persists_group_match_for_cache(tmp_path, monk
     assert result["predictions_stored"] == 0
     assert result["already_labeled"] == 2
     rows = db.conn.execute(
-        "SELECT detection_id, species, category FROM predictions ORDER BY detection_id"
+        "SELECT detection_id, species, category FROM predictions"
     ).fetchall()
-    assert [(r["detection_id"], r["species"], r["category"]) for r in rows] == [
+    assert {(r["detection_id"], r["species"], r["category"]) for r in rows} == {
         (det_ids[0], "Robin", "match"),
         (det_ids[1], "Robin", "match"),
-    ]
+    }
 
 
 def test_group_match_drops_per_frame_alternatives(tmp_path, monkeypatch):
@@ -1296,16 +1296,15 @@ def test_group_match_drops_per_frame_alternatives(tmp_path, monkeypatch):
         "SELECT detection_id, species, category, status "
         "FROM predictions "
         "LEFT JOIN prediction_review "
-        "  ON prediction_review.prediction_id = predictions.id "
-        "ORDER BY detection_id"
+        "  ON prediction_review.prediction_id = predictions.id"
     ).fetchall()
-    assert [
+    assert {
         (r["detection_id"], r["species"], r["category"], r["status"])
         for r in rows
-    ] == [
+    } == {
         (det_ids[0], "Robin", "match", "accepted"),
         (det_ids[1], "Robin", "match", "accepted"),
-    ]
+    }
     # The cached top-1 (confidence-DESC) is the consensus species, not Hawk.
     top = db.get_predictions_for_detection(det_ids[0], min_classifier_conf=0)
     assert top[0]["species"] == "Robin"

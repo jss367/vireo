@@ -981,15 +981,9 @@ def _classify_photos(
                     batch = []
         else:
             # No detections — use (or create) a full-image synthetic detection
-            # to carry the classifier output.
-            #
-            # save_detections() does clear-and-reinsert per
-            # (photo_id, detector_model), so calling it on every pass would
-            # generate a new id each time and cascade-delete prior predictions
-            # and classifier_runs tied to the old id. Reuse the existing
-            # full-image detection when one is already cached, and only
-            # create a fresh one if none exists (or if the caller asked for
-            # a reclassify).
+            # to carry the classifier output. save_detections is now idempotent
+            # under content-addressed IDs, but reading the existing row first
+            # avoids an UPSERT + stale-cleanup roundtrip on the common path.
             # min_conf=0 because the synthetic full-image detection is
             # written with confidence=0 — the default threshold filter would
             # hide it.
