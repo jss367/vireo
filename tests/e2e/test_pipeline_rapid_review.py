@@ -102,6 +102,19 @@ def _mock_pipeline_rapid_review(
         route.fulfill(json={"ok": True})
 
     page.route("**/api/pipeline/save-cache", save_cache)
+    # /group/apply is flags-only now; species confirmation routes through the
+    # unified /api/encounters/species endpoint. Echo back the current structure
+    # so the client's adopt step is a no-op (preserves the mocked encounters).
+    page.route(
+        "**/api/encounters/species",
+        lambda route: route.fulfill(
+            json={
+                "ok": True,
+                "encounters": results["encounters"],
+                "summary": results["summary"],
+            }
+        ),
+    )
     page.route(
         "**/thumbnails/*.jpg",
         lambda route: route.fulfill(body=image_body, content_type="image/png"),

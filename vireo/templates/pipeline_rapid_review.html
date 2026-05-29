@@ -1711,7 +1711,6 @@ async function applyCurrent(openNext) {
         picks: picks,
         rejects: rejects,
         candidates: candidates,
-        species: species,
       }),
     });
     items.forEach(function(p) {
@@ -1736,6 +1735,27 @@ async function applyCurrent(openNext) {
         }
       });
     }
+    // /group/apply is flags-only now; persist the species through the same
+    // unified endpoint the grid uses so confirmation actually lands server-side
+    // (tags all burst frames, handles species replacement + auto-detach).
+    if (species) {
+      var spResp = await safeFetch('/api/encounters/species', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          species: species,
+          photo_ids: items.map(function(p) { return p.id; }),
+          burst_index: session.burstIdx,
+        }),
+      });
+      // Adopt the authoritative structure (the endpoint may auto-detach on a
+      // species mismatch), so the save-cache below doesn't clobber its restructure.
+      if (spResp && spResp.encounters) {
+        rapid.results.encounters = spResp.encounters;
+        if (spResp.summary) rapid.results.summary = spResp.summary;
+      }
+    }
+    // Re-read after the adopt step above may have replaced encounters[].
     var enc = rapid.results.encounters[session.encIdx];
     if (species && enc) {
       enc.confirmed_species = species;
