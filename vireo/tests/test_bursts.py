@@ -245,3 +245,31 @@ def test_segment_bursts_for_encounters():
     assert len(result[0]["bursts"]) == 2
     assert len(result[0]["bursts"][0]) == 2
     assert len(result[0]["bursts"][1]) == 2
+
+
+# -- null-timestamp ordering (2026-05-29) --
+
+
+def test_detect_bursts_sorts_null_timestamps_last_by_file():
+    """Null-timestamp photos sort after timestamped ones, ordered by filename.
+
+    Parity with encounters.cut_microsegments so a null-timestamp run lands at
+    the end of the timeline (not datetime.min at the top).
+    """
+    from bursts import detect_bursts
+
+    emb = np.ones(768, dtype=np.float32)
+
+    def _null(photo_id, folder_id, filename):
+        return {"id": photo_id, "timestamp": None, "folder_id": folder_id,
+                "filename": filename, "dino_subject_embedding": emb}
+
+    photos = [
+        _null(99, 10, "DSC_8042.NEF"),
+        _make_photo(0.0, subj_emb=emb, photo_id=1),
+        _null(98, 10, "DSC_8041.NEF"),
+        _make_photo(0.5, subj_emb=emb, photo_id=2),
+    ]
+    bursts = detect_bursts(photos)
+    flat = [p["id"] for b in bursts for p in b]
+    assert flat == [1, 2, 98, 99]

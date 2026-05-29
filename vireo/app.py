@@ -12533,6 +12533,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Remove burst from encounter
         detached = bursts.pop(burst_idx)
         detached_ids = detached["photo_ids"]
+        photos_by_id = {p["id"]: p for p in results.get("photos", [])}
 
         if len(bursts) == 0:
             # Last burst — remove the encounter entirely, detached becomes the encounter
@@ -12542,6 +12543,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             enc["photo_ids"] = [pid for pid in enc["photo_ids"] if pid not in detached_ids]
             enc["photo_count"] = len(enc["photo_ids"])
             enc["burst_count"] = len(bursts)
+            # Photos left, so the remaining range can only shrink; recompute it
+            # (mirrors _auto_detach_burst_for_species) instead of leaving a stale,
+            # too-wide range that would misplace this encounter under time sorts.
+            enc["time_range"] = _compute_time_range(photos_by_id, enc["photo_ids"])
             enc["species_predictions"] = rebuild_species_predictions(results, enc["photo_ids"])
             # Pair indices in trace reference the original photo composition;
             # drop it so the algorithm-trace panel renders an honest "needs
@@ -12562,7 +12567,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "species_confirmed": bool(detached.get("species_override", {}).get("confirmed")) if detached.get("species_override") else False,
             "photo_count": len(detached_ids),
             "burst_count": 1,
-            "time_range": [None, None],
+            # Compute from the detached photos' timestamps. A [None, None] range
+            # here would sort to the extremes under the encounter time sorts and
+            # render a blank time label in the encounter header.
+            "time_range": _compute_time_range(photos_by_id, detached_ids),
             "photo_ids": detached_ids,
             "bursts": [detached],
         }

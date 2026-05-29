@@ -2567,3 +2567,88 @@ def test_compute_group_fingerprint_ignores_unrelated_pipeline_keys():
         {"pipeline": {"classifier_model": "x", "detector_confidence": 0.9}},
     )
     assert unrelated == base
+
+
+def test_serialize_results_counts_missing_timestamps():
+    """Each serialized encounter reports how many of its photos lack a timestamp."""
+    from pipeline import serialize_results
+
+    results = {
+        "encounters": [
+            {  # 2 of 3 photos missing timestamps
+                "species": None,
+                "photos": [
+                    {"id": 1, "timestamp": "2026-05-25T10:00:00", "confirmed_species": None},
+                    {"id": 2, "timestamp": None, "confirmed_species": None},
+                    {"id": 3, "timestamp": None, "confirmed_species": None},
+                ],
+                "photo_count": 3,
+                "burst_count": 1,
+                "time_range": [None, None],
+            },
+            {  # all timestamped
+                "species": None,
+                "photos": [
+                    {"id": 4, "timestamp": "2026-05-25T11:00:00", "confirmed_species": None},
+                    {"id": 5, "timestamp": "2026-05-25T11:00:05", "confirmed_species": None},
+                ],
+                "photo_count": 2,
+                "burst_count": 1,
+                "time_range": ["2026-05-25T11:00:00", "2026-05-25T11:00:05"],
+            },
+        ],
+        "photos": [
+            {"id": 1, "timestamp": "2026-05-25T10:00:00", "label": "REVIEW"},
+            {"id": 2, "timestamp": None, "label": "REVIEW"},
+            {"id": 3, "timestamp": None, "label": "REVIEW"},
+            {"id": 4, "timestamp": "2026-05-25T11:00:00", "label": "KEEP"},
+            {"id": 5, "timestamp": "2026-05-25T11:00:05", "label": "REVIEW"},
+        ],
+        "summary": {},
+    }
+
+    serialized = serialize_results(results)
+    encs = serialized["encounters"]
+    assert encs[0]["missing_timestamp_count"] == 2
+    # Zero (not absent) so the JS `if (enc.missing_timestamp_count)` is clean.
+    assert encs[1]["missing_timestamp_count"] == 0
+
+
+def test_prune_results_recomputes_missing_timestamp_count(tmp_path):
+    """Deleting a null-timestamp photo updates the encounter's missing count.
+
+    Otherwise the ⚠ badge keeps showing the pre-deletion count.
+    """
+    from pipeline import load_results, prune_results
+
+    cache = {
+        "encounters": [
+            {
+                "species": None, "confirmed_species": None,
+                "species_predictions": [], "species_confirmed": False,
+                "photo_count": 3, "burst_count": 1,
+                "time_range": [None, None],
+                "photo_ids": [1, 2, 3],
+                "missing_timestamp_count": 2,
+                "bursts": [
+                    {"photo_ids": [1, 2, 3], "species_predictions": [],
+                     "species_override": None},
+                ],
+            },
+        ],
+        "photos": [
+            {"id": 1, "label": "REVIEW", "timestamp": "2026-05-25T10:00:00"},
+            {"id": 2, "label": "REVIEW", "timestamp": None},
+            {"id": 3, "label": "REVIEW", "timestamp": None},
+        ],
+        "summary": {},
+    }
+    _write_cache(str(tmp_path), 1, cache)
+
+    # Delete one of the two null-timestamp photos.
+    prune_results(str(tmp_path), 1, [3])
+
+    loaded = load_results(str(tmp_path), 1)
+    enc = loaded["encounters"][0]
+    assert enc["photo_count"] == 2
+    assert enc["missing_timestamp_count"] == 1
