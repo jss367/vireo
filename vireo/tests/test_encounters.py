@@ -1098,6 +1098,58 @@ def test_cut_both_null_with_similar_signal_groups():
     assert len(segments[0]) == 2
 
 
+def test_cut_both_null_detector_conflict_cuts():
+    """Two undated photos with no embeddings/species but conflicting detector
+    verdicts (one subject_absent, one subject_present) must split, not
+    force-group.
+
+    The detector already ran and disagrees about whether a subject is present.
+    compute_s_enc treats absent-vs-present as active dissimilarity (score ~0),
+    so this pair must fall through to the score cut rather than the
+    signal-less keep-together branch — otherwise an undated empty frame would
+    be collapsed into an undated animal frame whenever embeddings happen to be
+    missing or failed.
+    """
+    from encounters import cut_microsegments
+
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "a.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "subject_absent": True, "subject_present": False},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "b.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "subject_absent": False, "subject_present": True},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 2, (
+        f"Expected the detector conflict to cut, got "
+        f"{[[p['id'] for p in seg] for seg in segments]}"
+    )
+
+
+def test_cut_both_null_no_detector_run_still_groups():
+    """Genuinely signal-less nulls (detector never ran) still group by file
+    order even when subject_absent/subject_present are both False.
+
+    Guards against over-tightening _has_similarity_signal: an unreadable file
+    has no embeddings, no species, AND no detector verdict, so it must remain
+    in the keep-together branch.
+    """
+    from encounters import cut_microsegments
+
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "a.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "subject_absent": False, "subject_present": False},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "b.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "subject_absent": False, "subject_present": False},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 1
+    assert len(segments[0]) == 2
+
+
 def test_cut_null_timestamps_cut_at_folder_boundary():
     """Signal-less nulls from different folders must NOT fuse into one encounter.
 

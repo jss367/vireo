@@ -118,11 +118,19 @@ def _has_similarity_signal(photo):
     similarity (screenshots/exports with embeddings) or is genuinely
     signal-less (unreadable files — no detection ran, so no embeddings or
     species) and must instead be grouped by file order.
+
+    A detector verdict counts too: subject_absent/subject_present means
+    detection ran. compute_s_enc turns an absent-vs-present pair into an
+    active dissimilarity (score cut), so we must NOT force-group such a pair
+    by file order. Only rows where detection genuinely never ran (no
+    embeddings, no species, no detector verdict) are signal-less.
     """
     return (
         photo.get("dino_subject_embedding") is not None
         or photo.get("dino_global_embedding") is not None
         or bool(photo.get("species_top5"))
+        or bool(photo.get("subject_absent"))
+        or bool(photo.get("subject_present"))
     )
 
 
