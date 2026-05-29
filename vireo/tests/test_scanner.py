@@ -510,8 +510,18 @@ def test_pairing_merges_predictions_without_unique_violation(tmp_path):
     assert preds[0]["species"] == "Robin"
 
 
-def test_pairing_merges_duplicate_predictions_keeps_higher_confidence(tmp_path):
-    """When both raw and JPEG have predictions, both detections transfer to primary."""
+def test_pairing_collapses_duplicate_detections_across_raw_jpeg(tmp_path):
+    """When raw and JPEG already have identical detections (same model + box +
+    category) from prior detector runs, pairing collapses them into one row.
+
+    With content-addressed detection IDs, an identical (model, box, category)
+    on the *same* primary photo collapses to one detection — the companion's
+    moved detection re-hashes to the primary's existing id, the UPSERT
+    no-ops, and the duplicate prediction is dropped by the UNIQUE
+    (detection_id, classifier_model) constraint. This is the correct
+    semantics: RAW + JPEG of the same scene with the same detector output
+    is logically one detection, not two.
+    """
     from db import Database
 
     img_dir = tmp_path / "photos"
@@ -523,10 +533,6 @@ def test_pairing_merges_duplicate_predictions_keeps_higher_confidence(tmp_path):
         f.write(b"\x00" * 200)
 
     db = Database(str(tmp_path / "test.db"))
-    # Scan — this creates both records, then pairs them. But we need BOTH to have
-    # predictions before pairing. So: scan once (creates paired result), undo pairing
-    # manually to set up the scenario, then re-pair.
-    # Instead: create photos manually, add predictions, then run pairing.
     from scanner import _pair_raw_jpeg_companions
 
     fid = db.add_folder(str(img_dir), name="photos")
@@ -535,7 +541,7 @@ def test_pairing_merges_duplicate_predictions_keeps_higher_confidence(tmp_path):
     raw_id = db.add_photo(folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
                           file_size=2000, file_mtime=1.0)
 
-    # Both classified with same model — JPEG has higher confidence
+    # Both classified with same model + same box + same category.
     jpeg_det = db.save_detections(jpeg_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
@@ -552,17 +558,24 @@ def test_pairing_merges_duplicate_predictions_keeps_higher_confidence(tmp_path):
     assert len(photos) == 1
     assert photos[0]["filename"] == "IMG_001.cr3"
 
+    # Detections collapse to one: same primary, same (model, box, category)
+    # hashes to a single id.
+    dets = db.conn.execute(
+        "SELECT id FROM detections WHERE photo_id = ?", (photos[0]["id"],),
+    ).fetchall()
+    assert len(dets) == 1, "duplicate detections must collapse to one row"
+
     preds = db.conn.execute(
         """SELECT pr.species, pr.confidence FROM predictions pr
            JOIN detections d ON d.id = pr.detection_id
            WHERE d.photo_id = ?""",
         (photos[0]["id"],),
     ).fetchall()
-    # Both detections (and their predictions) transfer to the primary photo.
-    # UNIQUE(detection_id, model) doesn't conflict since detection IDs differ.
-    assert len(preds) == 2
-    confidences = sorted(p["confidence"] for p in preds)
-    assert confidences == [0.70, 0.95]
+    # UNIQUE(detection_id, classifier_model) means only one Robin@bioclip
+    # prediction can survive on the collapsed detection. We don't pin which
+    # confidence wins — UPDATE OR IGNORE keeps the primary's existing row.
+    assert len(preds) == 1
+    assert preds[0]["species"] == "Robin"
 
 
 def test_pairing_transfers_inat_submissions(tmp_path):

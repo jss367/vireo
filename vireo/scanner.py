@@ -289,11 +289,119 @@ def _pair_raw_jpeg_companions(db):
         )
 
         # Transfer detections (and their cascaded predictions) from companion to primary.
-        # Detections are linked to photos; predictions cascade through detection_id.
-        db.conn.execute(
-            "UPDATE detections SET photo_id = ? WHERE photo_id = ?",
-            (primary["id"], companion["id"]),
-        )
+        # Detection IDs are content-addressed on (photo_id, detector_model, box,
+        # category) — see vireo/detection_id.py. A bare `UPDATE photo_id` would
+        # leave the row's `id` column stale (still hashed against the companion's
+        # photo_id); a later detector run on the primary that produced the same
+        # box would then either collide on the stale id (if SQLite reused the
+        # companion's rowid for a new photo) or, more commonly, never match and
+        # so the stale row would be reaped by the stale-cleanup DELETE in
+        # `_upsert_detection_rows`, cascading away its predictions. Recompute
+        # the id, redirect predictions to the new id, then drop the stale row.
+        from detection_id import detection_id as _detection_id
+
+        moving = db.conn.execute(
+            "SELECT id, detector_model, box_x, box_y, box_w, box_h,"
+            " detector_confidence, category"
+            " FROM detections WHERE photo_id = ?",
+            (companion["id"],),
+        ).fetchall()
+        for det in moving:
+            new_id = _detection_id(
+                primary["id"], det["detector_model"],
+                (det["box_x"], det["box_y"], det["box_w"], det["box_h"]),
+                det["category"],
+            )
+            if new_id == det["id"]:
+                # Cannot happen in practice (photo_id changed) but defensive.
+                db.conn.execute(
+                    "UPDATE detections SET photo_id = ? WHERE id = ?",
+                    (primary["id"], det["id"]),
+                )
+                continue
+            # Insert the row under the new id. If the primary already has a
+            # detection for the same (model, box, category), the UPSERT no-ops
+            # and we just discard the companion's row below.
+            db.conn.execute(
+                "INSERT INTO detections"
+                " (id, photo_id, detector_model, box_x, box_y, box_w, box_h,"
+                "  detector_confidence, category)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(id) DO NOTHING",
+                (new_id, primary["id"], det["detector_model"],
+                 det["box_x"], det["box_y"], det["box_w"], det["box_h"],
+                 det["detector_confidence"], det["category"]),
+            )
+            # Redirect predictions to the new detection id. ON CONFLICT in
+            # predictions is unlikely (would require the primary already had
+            # a prediction for this species against the same detection) but
+            # IGNORE keeps us defensive.
+            db.conn.execute(
+                "UPDATE OR IGNORE predictions SET detection_id = ? WHERE detection_id = ?",
+                (new_id, det["id"]),
+            )
+            # If a companion prediction collided with an existing primary
+            # prediction, its row stayed on the old detection id. Preserve any
+            # workspace review state by moving it onto the surviving prediction
+            # before the old detection delete cascades the duplicate away.
+            db.conn.execute(
+                """INSERT INTO prediction_review
+                     (prediction_id, workspace_id, status, reviewed_at,
+                      individual, group_id, vote_count, total_votes)
+                   SELECT survivor.id, pr.workspace_id, pr.status,
+                          pr.reviewed_at, pr.individual, pr.group_id,
+                          pr.vote_count, pr.total_votes
+                     FROM predictions duplicate
+                     JOIN predictions survivor
+                       ON survivor.detection_id = ?
+                      AND survivor.classifier_model = duplicate.classifier_model
+                      AND survivor.labels_fingerprint = duplicate.labels_fingerprint
+                      AND survivor.species IS duplicate.species
+                     JOIN prediction_review pr
+                       ON pr.prediction_id = duplicate.id
+                    WHERE duplicate.detection_id = ?
+                   ON CONFLICT(prediction_id, workspace_id)
+                   DO UPDATE SET status = excluded.status,
+                                 reviewed_at = excluded.reviewed_at,
+                                 individual = COALESCE(
+                                     excluded.individual,
+                                     prediction_review.individual
+                                 ),
+                                 group_id = COALESCE(
+                                     excluded.group_id,
+                                     prediction_review.group_id
+                                 ),
+                                 vote_count = COALESCE(
+                                     excluded.vote_count,
+                                     prediction_review.vote_count
+                                 ),
+                                 total_votes = COALESCE(
+                                     excluded.total_votes,
+                                     prediction_review.total_votes
+                                 )
+                    WHERE prediction_review.status = 'pending'
+                      AND excluded.status <> 'pending'""",
+                (new_id, det["id"]),
+            )
+            # Redirect classifier_runs too — they're the cache key the
+            # non-reclassify gate consults. Without this, paired photos with
+            # cached predictions would look unclassified to
+            # `get_classifier_run_keys(new_id)` and rerun the classifier
+            # after every pair-up. Same OR IGNORE pattern as predictions:
+            # primary's own run rows win on (detection_id, classifier_model,
+            # labels_fingerprint) conflicts.
+            db.conn.execute(
+                "UPDATE OR IGNORE classifier_runs SET detection_id = ? WHERE detection_id = ?",
+                (new_id, det["id"]),
+            )
+            # Drop any predictions/classifier_runs that lost the UPDATE race
+            # (duplicate-key) along with the now-orphan companion detection
+            # row — CASCADE on both FKs cleans up any remaining rows tied to
+            # the old id.
+            db.conn.execute(
+                "DELETE FROM detections WHERE id = ?",
+                (det["id"],),
+            )
 
         # Transfer pending_changes from companion to primary. No dedup needed
         # here (unlike the inat_submissions block below): pending_changes has

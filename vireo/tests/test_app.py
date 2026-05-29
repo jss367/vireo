@@ -311,7 +311,11 @@ def test_original_route_uses_offline_cache_despite_recent_raw_failure_marker(
     offline_resp = client.get(f"/photos/{pid}/original")
 
     assert offline_resp.status_code == 200
-    assert offline_resp.data[:2] == b"\xff\xd8"
+    row = db.offline_original_get(pid)
+    assert row is not None and row["bytes"] > 0
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    with open(os.path.join(vireo_dir, row["original_path"]), "rb") as f:
+        assert offline_resp.data == f.read()
 
 
 def test_offline_cache_rerun_preserves_cache_when_source_missing(client_with_photo):

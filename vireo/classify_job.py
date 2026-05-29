@@ -420,19 +420,38 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
             if detections:
                 detected += 1
 
-                # Build detection list with database IDs
+                # Build detection list with database IDs. Content-addressed IDs
+                # can collapse near-duplicate detector outputs into one
+                # persisted row, so fall back to the DB rows if the returned ID
+                # count no longer matches the raw detector output count.
                 det_list = []
-                for det, det_id in zip(detections, det_ids, strict=True):
-                    det_list.append({
-                        "id": det_id,
-                        "box_x": det["box"]["x"],
-                        "box_y": det["box"]["y"],
-                        "box_w": det["box"]["w"],
-                        "box_h": det["box"]["h"],
-                        "confidence": det["confidence"],
-                        "category": det.get("category", "animal"),
-                        "detector_model": "megadetector-v6",
-                    })
+                if len(det_ids) == len(detections):
+                    for det, det_id in zip(detections, det_ids, strict=True):
+                        det_list.append({
+                            "id": det_id,
+                            "box_x": det["box"]["x"],
+                            "box_y": det["box"]["y"],
+                            "box_w": det["box"]["w"],
+                            "box_h": det["box"]["h"],
+                            "confidence": det["confidence"],
+                            "category": det.get("category", "animal"),
+                            "detector_model": "megadetector-v6",
+                        })
+                else:
+                    for det in db.get_detections(
+                        photo["id"], min_conf=0,
+                        detector_model="megadetector-v6",
+                    ):
+                        det_list.append({
+                            "id": det["id"],
+                            "box_x": det["box_x"],
+                            "box_y": det["box_y"],
+                            "box_w": det["box_w"],
+                            "box_h": det["box_h"],
+                            "confidence": det["detector_confidence"],
+                            "category": det["category"],
+                            "detector_model": det["detector_model"],
+                        })
                 detection_map[photo["id"]] = det_list
 
                 # Mark as processed immediately after detection rows are committed
@@ -981,15 +1000,9 @@ def _classify_photos(
                     batch = []
         else:
             # No detections — use (or create) a full-image synthetic detection
-            # to carry the classifier output.
-            #
-            # save_detections() does clear-and-reinsert per
-            # (photo_id, detector_model), so calling it on every pass would
-            # generate a new id each time and cascade-delete prior predictions
-            # and classifier_runs tied to the old id. Reuse the existing
-            # full-image detection when one is already cached, and only
-            # create a fresh one if none exists (or if the caller asked for
-            # a reclassify).
+            # to carry the classifier output. save_detections is now idempotent
+            # under content-addressed IDs, but reading the existing row first
+            # avoids an UPSERT + stale-cleanup roundtrip on the common path.
             # min_conf=0 because the synthetic full-image detection is
             # written with confidence=0 — the default threshold filter would
             # hide it.

@@ -13566,8 +13566,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             {photo["folder_id"]: folder["path"]},
         )
 
+        from image_loader import RAW_EXTENSIONS
+        resolved_ext = os.path.splitext(image_path)[1].lower()
         if (
-            not using_offline_cache
+            (not using_offline_cache or resolved_ext in RAW_EXTENSIONS)
             and _has_current_working_copy_failure(
                 photo, vireo_dir, trust_existing_working_copy=False,
                 live_source_path=image_path, folder_path=folder["path"],
@@ -13581,7 +13583,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "Could not load image", 500
 
         # For browser-native formats without a working copy, serve directly
-        ext = os.path.splitext(photo["filename"])[1].lower()
+        ext = resolved_ext
         if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp") and not photo["working_copy_path"] and os.path.exists(image_path):
             return send_file(image_path)
 

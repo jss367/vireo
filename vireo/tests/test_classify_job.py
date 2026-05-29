@@ -534,6 +534,75 @@ def test_detect_batch_returns_all_detections(tmp_path):
     mock_db.write_detection_batch.assert_called_once()
 
 
+def test_detect_batch_handles_same_batch_detection_id_collapse(tmp_path):
+    """If DB persistence collapses two detector outputs to one content ID,
+    _detect_batch must classify the persisted row instead of strict-zip failing.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from classify_job import _detect_batch
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    img = Image.new("RGB", (200, 200), color="green")
+    img_path = str(tmp_path / "bird.jpg")
+    img.save(img_path)
+
+    photos = [
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10},
+    ]
+    folders = {10: str(tmp_path)}
+
+    fake_detections = [
+        {"box": {"x": 0.10001, "y": 0.2, "w": 0.3, "h": 0.4},
+         "confidence": 0.80, "category": "animal"},
+        {"box": {"x": 0.10002, "y": 0.2, "w": 0.3, "h": 0.4},
+         "confidence": 0.95, "category": "animal"},
+    ]
+
+    mock_db = MagicMock()
+    mock_db.write_detection_batch.return_value = [101]
+    mock_db.get_detections.return_value = [{
+        "id": 101,
+        "box_x": 0.10002,
+        "box_y": 0.2,
+        "box_w": 0.3,
+        "box_h": 0.4,
+        "detector_confidence": 0.95,
+        "category": "animal",
+        "detector_model": "megadetector-v6",
+    }]
+
+    with patch("classify_job.detect_animals", return_value=fake_detections), \
+         patch("classify_job.get_primary_detection", return_value=fake_detections[1]), \
+         patch("classify_job.compute_sharpness", return_value=50.0):
+        detection_map, detected, _processed = _detect_batch(
+            photos=photos,
+            folders=folders,
+            runner=runner,
+            job=job,
+            reclassify=False,
+            db=mock_db,
+            already_detected_ids=set(),
+        )
+
+    assert detected == 1
+    assert detection_map[1] == [{
+        "id": 101,
+        "box_x": 0.10002,
+        "box_y": 0.2,
+        "box_w": 0.3,
+        "box_h": 0.4,
+        "confidence": 0.95,
+        "category": "animal",
+        "detector_model": "megadetector-v6",
+    }]
+    mock_db.get_detections.assert_called_once_with(
+        1, min_conf=0, detector_model="megadetector-v6",
+    )
+
+
 def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     """A photo with no animals is recorded in detector_runs; rerun skips detection."""
     from db import Database
@@ -1202,12 +1271,12 @@ def test_store_grouped_predictions_persists_group_match_for_cache(tmp_path, monk
     assert result["predictions_stored"] == 0
     assert result["already_labeled"] == 2
     rows = db.conn.execute(
-        "SELECT detection_id, species, category FROM predictions ORDER BY detection_id"
+        "SELECT detection_id, species, category FROM predictions"
     ).fetchall()
-    assert [(r["detection_id"], r["species"], r["category"]) for r in rows] == [
+    assert {(r["detection_id"], r["species"], r["category"]) for r in rows} == {
         (det_ids[0], "Robin", "match"),
         (det_ids[1], "Robin", "match"),
-    ]
+    }
 
 
 def test_group_match_drops_per_frame_alternatives(tmp_path, monkeypatch):
@@ -1296,16 +1365,15 @@ def test_group_match_drops_per_frame_alternatives(tmp_path, monkeypatch):
         "SELECT detection_id, species, category, status "
         "FROM predictions "
         "LEFT JOIN prediction_review "
-        "  ON prediction_review.prediction_id = predictions.id "
-        "ORDER BY detection_id"
+        "  ON prediction_review.prediction_id = predictions.id"
     ).fetchall()
-    assert [
+    assert {
         (r["detection_id"], r["species"], r["category"], r["status"])
         for r in rows
-    ] == [
+    } == {
         (det_ids[0], "Robin", "match", "accepted"),
         (det_ids[1], "Robin", "match", "accepted"),
-    ]
+    }
     # The cached top-1 (confidence-DESC) is the consensus species, not Hawk.
     top = db.get_predictions_for_detection(det_ids[0], min_classifier_conf=0)
     assert top[0]["species"] == "Robin"
