@@ -1604,7 +1604,7 @@ input[type="range"]::-moz-range-thumb {
     <span class="grm-key"><kbd>Space</kbd> unsort</span>
     <span class="grm-key" id="grmKeyRemove"><kbd>Del</kbd> remove</span>
     <span class="grm-key"><kbd>Z</kbd> right 1:1</span>
-    <span class="grm-mouse-help" tabindex="0" role="button" aria-label="Mouse controls">
+    <span class="grm-mouse-help" tabindex="0" aria-label="Mouse controls">
       <span class="grm-mouse-help-icon">?</span> mouse
       <span class="grm-mouse-pop">
         <strong>Mouse</strong>
@@ -5140,6 +5140,10 @@ function grmRemoveFromGroup() {
 document.addEventListener('keydown', function(e) {
   if (!document.getElementById('grmOverlay').classList.contains('open')) return;
   if (e.target.tagName === 'INPUT') return;
+  // The mouse-help control is focusable so keyboard users can read its
+  // popover; don't let keystrokes there (e.g. Space) fall through to the
+  // review shortcuts and mutate the selected photo's state.
+  if (e.target.closest && e.target.closest('.grm-mouse-help')) return;
 
   if (e.key === 'Escape') { closeGroupReview(); e.preventDefault(); return; }
   if (e.key === 'ArrowUp') { grmMoveUp(); e.preventDefault(); return; }
