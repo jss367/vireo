@@ -363,6 +363,71 @@ def test_flags_only_apply_preserves_differing_burst_override(live_server, page):
     assert tagged_y == set(), tagged_y
 
 
+def test_detached_burst_preserves_differing_confirmed_override(live_server, page):
+    """Regression: detaching a frame from a burst that is CONFIRMED as override
+    species X (while the encounter label is a different species Y) must carry X
+    onto the new single-photo burst — not drop it to null (which silently
+    reverts that frame to the encounter species Y on a flags-only apply).
+
+    "Remove from group" one frame, leave "Apply picks/rejects" CHECKED (the
+    flags-only detach path runs), Apply → the new single-photo burst in the
+    saved cache must retain species_override = {species: X, confirmed: True},
+    and the shortened source burst must still carry X too.
+    """
+    override_species = "Cooper's Hawk"      # X — what the burst is confirmed as
+    encounter_species = "Northern Harrier"  # Y — the encounter label/prediction
+    photo_ids = live_server["data"]["photos"][0:3]
+    _write_single_burst_cache(
+        live_server,
+        photo_ids,
+        confirmed_species=encounter_species,
+        burst_override_species=override_species,
+        burst_override_confirmed=True,
+    )
+
+    _open_burst_modal(page, live_server)
+
+    # Field reflects the burst override (X); confirm defaults OFF (no change).
+    expect(page.locator("#grmSpecies")).to_have_value(override_species)
+    expect(page.locator("#grmConfirmSpeciesChk")).not_to_be_checked()
+
+    # Remove the second card from the group; keep "Apply picks/rejects" CHECKED
+    # so grmApply runs the flags-only detach path that splits it into its own
+    # single-photo burst.
+    second_pid = int(
+        page.locator("#grmOverlay .grm-card[data-photo-id]").nth(1).get_attribute("data-photo-id")
+    )
+    page.locator(f"#grmOverlay .grm-card[data-photo-id='{second_pid}']").click()
+    page.locator("#grmRemoveBtn").click()
+    expect(page.locator("#grmApplyFlagsChk")).to_be_checked()
+    expect(page.locator("#grmConfirmSpeciesChk")).not_to_be_checked()
+
+    with page.expect_response("**/api/pipeline/group/apply"):
+        page.locator("#grmApplyBtn").click()
+    expect(page.locator("#grmOverlay")).not_to_have_class(re.compile(r"\bopen\b"))
+
+    cache = _read_cache(live_server)
+    bursts = cache["encounters"][0]["bursts"]
+    # The detach produced a second burst (the removed frame on its own).
+    assert len(bursts) == 2, [b["photo_ids"] for b in bursts]
+    detached = next(b for b in bursts if b["photo_ids"] == [second_pid])
+    source = next(b for b in bursts if second_pid not in b["photo_ids"])
+
+    # The detached single-photo burst KEEPS the burst-specific confirmed override
+    # X — it is not null and not the encounter species Y.
+    assert detached["species_override"] is not None, detached
+    assert detached["species_override"]["species"] == override_species, detached["species_override"]
+    assert detached["species_override"]["confirmed"] is True, detached["species_override"]
+
+    # The shortened source burst still carries X for its remaining frames.
+    assert source["species_override"]["species"] == override_species, source["species_override"]
+    assert source["species_override"]["confirmed"] is True
+
+    # No frame was tagged with the encounter species Y by a stray species call.
+    tagged_y = _photos_with_species(live_server, photo_ids, encounter_species)
+    assert tagged_y == set(), tagged_y
+
+
 def test_species_only_with_removed_photo_keeps_member_and_tags_it(live_server, page):
     """Truthfulness guard: mark a photo "Remove from group", leave flags
     UNCHECKED, confirm species → the removal is discarded (photo stays a burst

@@ -5245,10 +5245,17 @@ async function grmApply() {
         // doesn't inherit the source burst's predictions for photos it no longer
         // contains (the loupe and the saved cache both trust burst.species_predictions).
         var photo = findPhotoInResults(pid);
+        // Preserve a burst-specific confirmed species: if the source burst had
+        // a species_override differing from the encounter default, the detached
+        // single-photo burst must keep it (shallow clone so it doesn't alias the
+        // source), or a flags-only apply would silently revert this photo to the
+        // encounter species and drop the burst-specific confirmation.
         enc.bursts.push({
           photo_ids: [pid],
           species_predictions: buildBurstConsensus(photo ? [photo] : []),
-          species_override: null,
+          species_override: burst && burst.species_override
+            ? Object.assign({}, burst.species_override)
+            : null,
         });
       });
       // Recompute the shortened source burst's consensus from its remaining

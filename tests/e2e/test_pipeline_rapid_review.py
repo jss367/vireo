@@ -1010,6 +1010,80 @@ def test_rapid_review_cull_only_on_confirmed_burst_skips_species_post(live_serve
     assert save_payloads, "expected save-cache to fire"
 
 
+def test_rapid_review_confirmed_burst_with_untagged_frame_posts_species(live_server, page):
+    # A burst confirmed as "Test bird" but where /group/state reports one frame
+    # STILL MISSING the species keyword (e.g. legacy data that only tagged
+    # picks). The species field is unchanged ("Test bird"), so the confirmed
+    # species does NOT change — but rapidComputeApplyDiff advertises "Tag N", and
+    # /api/pipeline/group/apply is flags-only, so the missing keyword would never
+    # be written unless we still POST /api/encounters/species. The gate must fire
+    # on outstanding tag work, not only on a confirmed-species change. (Regression
+    # for the no-tag-on-already-confirmed-but-untagged-frame gap.)
+    species_payloads = []
+    save_payloads = []
+    results = {
+        "photos": [
+            {"id": 1, "filename": "a.jpg", "label": "KEEP", "flag": "flagged", "confirmed_species": "Test bird"},
+            {"id": 2, "filename": "b.jpg", "label": "REVIEW", "flag": "none", "confirmed_species": "Test bird"},
+            {"id": 3, "filename": "c.jpg", "label": "REVIEW", "flag": "none", "confirmed_species": "Test bird"},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2, 3],
+                "photo_count": 3,
+                "burst_count": 1,
+                "species": ["Test bird"],
+                "species_confirmed": True,
+                "confirmed_species": "Test bird",
+                "bursts": [
+                    {
+                        "photo_ids": [1, 2, 3],
+                        "species_override": {"species": "Test bird", "confirmed": True},
+                    }
+                ],
+            }
+        ],
+        "summary": {"keep_count": 1, "review_count": 2, "reject_count": 0},
+    }
+    _mock_pipeline_rapid_review(
+        page,
+        results=results,
+        apply_photos={
+            "1": {"flag": "flagged", "has_species_keyword": True},
+            "2": {"flag": "none", "has_species_keyword": True},
+            "3": {"flag": "none", "has_species_keyword": True},
+        },
+        # Frame 3 lacks the species keyword despite the burst being confirmed.
+        state_photos={
+            "1": {"flag": "flagged", "has_species_keyword": True},
+            "2": {"flag": "none", "has_species_keyword": True},
+            "3": {"flag": "none", "has_species_keyword": False},
+        },
+        species_payloads=species_payloads,
+        save_payloads=save_payloads,
+    )
+
+    # Deep-link the "all" queue so a confirmed burst is reviewable.
+    page.goto(f"{live_server['url']}/pipeline/rapid-review?enc=0&burst=0")
+    expect(page.locator("#applyBtn")).to_be_enabled()
+    # Species field already reflects the confirmed species; leave it unchanged.
+    expect(page.locator("#speciesInput")).to_have_value("Test bird")
+    # The Apply button must advertise the outstanding tag work (truthfulness).
+    expect(page.locator("#applyBtn")).to_contain_text("Tag 1")
+
+    # Apply with NO flag or species change — only the missing keyword to write.
+    with page.expect_response("**/api/encounters/species"):
+        page.locator("#applyBtn").click()
+
+    # The species post fired despite the species being unchanged, so the missing
+    # keyword is written to all burst frames.
+    assert species_payloads, "expected /api/encounters/species to fire for outstanding tag work"
+    body = species_payloads[-1]
+    assert body["species"] == "Test bird"
+    assert sorted(body["photo_ids"]) == [1, 2, 3]
+    assert body["burst_index"] == 0
+
+
 def test_rapid_review_first_confirmation_and_replacement_post_species(live_server, page):
     # Converse sanity: an UNCONFIRMED burst (no species_confirmed / no override)
     # with the species field set posts on first confirmation; changing to a
