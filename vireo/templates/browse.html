@@ -1790,6 +1790,69 @@ function renderCardInfo(p) {
   return infoHtml;
 }
 
+function renderPhotoCard(p, idx) {
+  var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
+
+  // Detection box overlays — render one per detection in the photo
+  var boxHtml = '';
+  if (showDetectionBoxes && Array.isArray(p.detections)) {
+    p.detections.forEach(function(d) {
+      if (d == null || d.x == null) return;
+      var conf = (d.confidence != null) ? Math.round(d.confidence * 100) + '%' : '';
+      var cat = (d.category && d.category !== 'animal') ? escapeHtml(d.category) + ' ' : '';
+      boxHtml += '<div class="det-box" style="left:' + (d.x * 100) + '%;top:' + (d.y * 100) + '%;width:' + (d.w * 100) + '%;height:' + (d.h * 100) + '%;">' +
+        ((cat || conf) ? '<span class="det-box-label">' + cat + conf + '</span>' : '') +
+      '</div>';
+    });
+  }
+
+  var clipBadge = '';
+  if (p._similarity !== undefined) {
+    clipBadge = '<span class="clip-score-badge">' + Math.round(p._similarity * 100) + '%</span>';
+  }
+  var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
+  var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
+
+  // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
+  var speciesBadgeHtml = '';
+  if (cardFields.indexOf('species') === -1 && p.species && p.species.length > 0) {
+    var maxShow = 3;
+    var shown = p.species.slice(0, maxShow);
+    speciesBadgeHtml = '<div class="species-badges">';
+    shown.forEach(function(s) {
+      speciesBadgeHtml += '<span class="species-badge">' + escapeHtml(s) + '</span>';
+    });
+    if (p.species.length > maxShow) {
+      speciesBadgeHtml += '<span class="species-badge-overflow">+' + (p.species.length - maxShow) + ' more</span>';
+    }
+    speciesBadgeHtml += '</div>';
+  }
+
+  return '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
+    '<div class="grid-card-img-wrap">' +
+      '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
+      clipBadge +
+      boxHtml +
+      inatBadge +
+      wildlifeBadge +
+      speciesBadgeHtml +
+    '</div>' +
+    '<div class="grid-card-info">' +
+      renderCardInfo(p) +
+    '</div>' +
+  '</div>';
+}
+
+function appendGridPhotos(newPhotos, startIdx) {
+  if (!newPhotos.length) return;
+  var grid = document.getElementById('grid');
+  var html = '';
+  newPhotos.forEach(function(p, offset) {
+    html += renderPhotoCard(p, startIdx + offset);
+  });
+  grid.insertAdjacentHTML('beforeend', html);
+}
+
 function refreshGridCards(photoIds) {
   photoIds.forEach(function(id) {
     var p = photos.find(function(x) { return x.id === id; });
@@ -2758,6 +2821,7 @@ async function loadPhotos() {
     var data = await safeFetch(url);
     if (epoch !== loadEpoch) return;  // grid was reset mid-flight; drop stale response
     totalPhotos = data.total;
+    var firstNewIdx = photos.length;
 
     if (data.photos.length === 0) {
       allLoaded = true;
@@ -2770,7 +2834,8 @@ async function loadPhotos() {
       if (photos.length >= totalPhotos) allLoaded = true;
     }
 
-    renderGrid();
+    if (firstNewIdx === 0) renderGrid();
+    else appendGridPhotos(data.photos, firstNewIdx);
     updateFilterSummary();
   } catch(e) {
     if (epoch !== loadEpoch) return;
@@ -3151,56 +3216,7 @@ function renderGrid() {
 
   var html = '';
   photos.forEach(function(p, idx) {
-    var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
-
-    // Detection box overlays — render one per detection in the photo
-    var boxHtml = '';
-    if (showDetectionBoxes && Array.isArray(p.detections)) {
-      p.detections.forEach(function(d) {
-        if (d == null || d.x == null) return;
-        var conf = (d.confidence != null) ? Math.round(d.confidence * 100) + '%' : '';
-        var cat = (d.category && d.category !== 'animal') ? escapeHtml(d.category) + ' ' : '';
-        boxHtml += '<div class="det-box" style="left:' + (d.x * 100) + '%;top:' + (d.y * 100) + '%;width:' + (d.w * 100) + '%;height:' + (d.h * 100) + '%;">' +
-          ((cat || conf) ? '<span class="det-box-label">' + cat + conf + '</span>' : '') +
-        '</div>';
-      });
-    }
-
-    var clipBadge = '';
-    if (p._similarity !== undefined) {
-      clipBadge = '<span class="clip-score-badge">' + Math.round(p._similarity * 100) + '%</span>';
-    }
-    var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
-    var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
-
-    // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
-    var speciesBadgeHtml = '';
-    if (cardFields.indexOf('species') === -1 && p.species && p.species.length > 0) {
-      var maxShow = 3;
-      var shown = p.species.slice(0, maxShow);
-      speciesBadgeHtml = '<div class="species-badges">';
-      shown.forEach(function(s) {
-        speciesBadgeHtml += '<span class="species-badge">' + escapeHtml(s) + '</span>';
-      });
-      if (p.species.length > maxShow) {
-        speciesBadgeHtml += '<span class="species-badge-overflow">+' + (p.species.length - maxShow) + ' more</span>';
-      }
-      speciesBadgeHtml += '</div>';
-    }
-
-    html += '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
-      '<div class="grid-card-img-wrap">' +
-        '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
-        clipBadge +
-        boxHtml +
-        inatBadge +
-        wildlifeBadge +
-        speciesBadgeHtml +
-      '</div>' +
-      '<div class="grid-card-info">' +
-        renderCardInfo(p) +
-      '</div>' +
-    '</div>';
+    html += renderPhotoCard(p, idx);
   });
   grid.innerHTML = html;
 }
@@ -3253,14 +3269,15 @@ function browseKeyMatchesConfiguredShortcut(e) {
 }
 
 /* ---------- Infinite Scroll ---------- */
+var gridContainer = document.getElementById('gridContainer');
 var observer = new IntersectionObserver(function(entries) {
   if (entries[0].isIntersecting) loadPhotos();
-}, { rootMargin: '200px' });
+}, { root: gridContainer, rootMargin: '1200px 0px' });
 observer.observe(document.getElementById('scrollSentinel'));
 
 /* ---------- Scroll Position Tracking ---------- */
 var scrollTimer = null;
-document.getElementById('gridContainer').addEventListener('scroll', function() {
+gridContainer.addEventListener('scroll', function() {
   if (scrollTimer) clearTimeout(scrollTimer);
   scrollTimer = setTimeout(updateScrollPosition, 50);
 });
