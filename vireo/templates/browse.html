@@ -1943,6 +1943,7 @@ async function bootstrapBrowse() {
   if (new URLSearchParams(window.location.search).get('photo_id')) return;
   // Prevent the IntersectionObserver from triggering loadPhotos() while bootstrap is in flight
   loading = true;
+  var bootstrapSucceeded = false;
   try {
     applyBrowseConfig(await _cfgPromise);
     var data = await safeFetch('/api/browse/init?per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value);
@@ -1965,10 +1966,12 @@ async function bootstrapBrowse() {
     document.getElementById('loadingState').style.display = 'none';
     // Lazy-load collection photo counts to avoid N+1 on init
     loadCollectionCounts();
+    bootstrapSucceeded = true;
   } catch(e) {
     document.getElementById('loadingState').textContent = 'Error loading.';
   }
   loading = false;
+  if (bootstrapSucceeded) rearmInfiniteScrollObserver();
 }
 
 function renderCollectionList(collections) {
@@ -2852,8 +2855,12 @@ async function loadPhotos() {
     // missing until an unrelated full grid render.
     if (data.photos.length > 0) {
       var refreshIds = data.photos.map(function(p) { return p.id; });
-      loadInatStatus(refreshIds).then(function() { refreshGridCards(refreshIds); });
-      fetchColorLabels(refreshIds).then(function() { refreshGridCards(refreshIds); });
+      loadInatStatus(refreshIds).then(function() {
+        if (epoch === loadEpoch) refreshGridCards(refreshIds);
+      });
+      fetchColorLabels(refreshIds).then(function() {
+        if (epoch === loadEpoch) refreshGridCards(refreshIds);
+      });
     }
   } catch(e) {
     if (epoch !== loadEpoch) return;
@@ -2862,20 +2869,7 @@ async function loadPhotos() {
     if (epoch === loadEpoch) {
       loading = false;
       document.getElementById('loadingState').style.display = 'none';
-      // Re-arm the infinite-scroll observer. With the 1200px root margin
-      // the sentinel often remains intersecting after a load completes (e.g.
-      // bootstrap returned a short page on a tall viewport), and the
-      // observer was originally registered while loading=true so its single
-      // initial callback was a no-op. Re-observing fires a fresh callback
-      // with the current state so the next page is requested without
-      // requiring the user to scroll.
-      if (!allLoaded && typeof observer !== 'undefined') {
-        var sentinel = document.getElementById('scrollSentinel');
-        if (sentinel) {
-          observer.unobserve(sentinel);
-          observer.observe(sentinel);
-        }
-      }
+      rearmInfiniteScrollObserver();
     }
   }
 }
@@ -3306,6 +3300,18 @@ var observer = new IntersectionObserver(function(entries) {
   if (entries[0].isIntersecting) loadPhotos();
 }, { root: gridContainer, rootMargin: '1200px 0px' });
 observer.observe(document.getElementById('scrollSentinel'));
+
+function rearmInfiniteScrollObserver() {
+  // With the 1200px root margin, the sentinel can remain intersecting after
+  // bootstrap or page loads. Re-observing asks IntersectionObserver to deliver
+  // a fresh callback for the current layout instead of waiting for a scroll
+  // transition that may never occur.
+  if (allLoaded || typeof observer === 'undefined') return;
+  var sentinel = document.getElementById('scrollSentinel');
+  if (!sentinel) return;
+  observer.unobserve(sentinel);
+  observer.observe(sentinel);
+}
 
 /* ---------- Scroll Position Tracking ---------- */
 var scrollTimer = null;
