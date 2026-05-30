@@ -2233,7 +2233,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from capture_time import build_capture_time_preview
 
         db = _get_db()
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return json_error("request body must be a JSON object", 400)
         raw_ids = body.get("photo_ids", [])
         if not isinstance(raw_ids, list):
             return json_error("photo_ids must be a list", 400)
@@ -10214,7 +10218,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/jobs/capture-time", methods=["POST"])
     def api_job_capture_time():
         """Adjust capture timestamps and timezone offsets for selected photos."""
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return json_error("request body must be a JSON object", 400)
         raw_ids = body.get("photo_ids", [])
         if not isinstance(raw_ids, list):
             return json_error("photo_ids must be a list", 400)

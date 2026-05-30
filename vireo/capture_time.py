@@ -1,6 +1,7 @@
 """Capture-time and timezone repair helpers."""
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -8,6 +9,8 @@ import subprocess
 from datetime import datetime, timedelta
 
 from metadata import extract_metadata
+
+log = logging.getLogger(__name__)
 
 OFFSET_RE = re.compile(r"^([+-])(\d{2}):(\d{2})$")
 
@@ -22,7 +25,11 @@ def parse_offset_minutes(value):
     sign, hh, mm = match.groups()
     hours = int(hh)
     minutes = int(mm)
-    if hours > 14 or minutes > 59:
+    if minutes > 59:
+        return None
+    if sign == "+" and (hours > 14 or (hours == 14 and minutes > 0)):
+        return None
+    if sign == "-" and (hours > 12 or (hours == 12 and minutes > 0)):
         return None
     total = hours * 60 + minutes
     return -total if sign == "-" else total
@@ -84,6 +91,15 @@ def _capture_offset(photo):
         or exif.get("OffsetTime")
         or exif.get("OffsetTimeDigitized")
     )
+
+
+def _normalize_subsec(subsec):
+    if subsec is None:
+        return None
+    digits = "".join(ch for ch in str(subsec).strip() if ch.isdigit())
+    if not digits:
+        return None
+    return int(digits[:6].ljust(6, "0"))
 
 
 def _normalize_inputs(mode, target_offset, shift_minutes):
@@ -207,10 +223,9 @@ def _timestamp_from_exif_group(exif_group):
     try:
         dt = datetime.strptime(str(dto), "%Y:%m:%d %H:%M:%S")
         subsec = exif_group.get("SubSecTimeOriginal") or exif_group.get("SubSecTime")
-        if subsec is not None:
-            subsec_str = str(subsec).strip()
-            if subsec_str.isdigit():
-                dt = dt.replace(microsecond=int(subsec_str[:6].ljust(6, "0")))
+        microsecond = _normalize_subsec(subsec)
+        if microsecond is not None:
+            dt = dt.replace(microsecond=microsecond)
         return dt.isoformat()
     except (TypeError, ValueError):
         return None
@@ -233,7 +248,8 @@ def _refresh_photo_metadata(db, photo_id, primary_path):
         updates.append("file_mtime=?")
         params.append(file_mtime)
     params.append(photo_id)
-    db.conn.execute(f"UPDATE photos SET {', '.join(updates)} WHERE id=?", params)
+    update_clause = ", ".join(updates)
+    db.conn.execute("UPDATE photos SET " + update_clause + " WHERE id=?", params)
 
 
 def adjust_capture_time(
@@ -263,6 +279,7 @@ def adjust_capture_time(
     if not photos:
         raise ValueError("no photos found")
 
+    log.info("Starting capture-time adjustment for %d photo(s)", len(photos))
     written = 0
     failed = 0
     failures = []
@@ -307,6 +324,12 @@ def adjust_capture_time(
         cmd.extend(paths)
 
         try:
+            log.info(
+                "Running ExifTool capture-time adjustment for photo %s on %d file(s)",
+                photo["id"],
+                len(paths),
+            )
+            log.debug("ExifTool command: %s", cmd)
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -317,9 +340,17 @@ def adjust_capture_time(
                 raise RuntimeError((result.stderr or result.stdout or "ExifTool failed").strip())
             _refresh_photo_metadata(db, photo["id"], paths[0])
             db.conn.commit()
+            log.debug("ExifTool stdout: %s", result.stdout.strip())
+            if result.stderr:
+                log.debug("ExifTool stderr: %s", result.stderr.strip())
             written += 1
             shifts_used.append(photo_shift)
+        except (subprocess.TimeoutExpired, RuntimeError, OSError) as exc:
+            log.warning("Capture-time adjustment failed for photo %s: %s", photo["id"], exc)
+            failed += 1
+            failures.append({"photo_id": photo["id"], "filename": photo["filename"], "error": str(exc)})
         except Exception as exc:
+            log.exception("Unexpected capture-time adjustment error for photo %s", photo["id"])
             failed += 1
             failures.append({"photo_id": photo["id"], "filename": photo["filename"], "error": str(exc)})
         if progress_callback:
@@ -327,6 +358,7 @@ def adjust_capture_time(
 
     unanimous = bool(shifts_used) and all(s == shifts_used[0] for s in shifts_used)
     summary_shift = shifts_used[0] if unanimous else None
+    log.info("Capture-time adjustment finished: %d updated, %d failed", written, failed)
 
     return {
         "updated": written,

@@ -5,6 +5,16 @@ from types import SimpleNamespace
 from wait import wait_for_job_via_client
 
 
+def test_capture_time_offset_validation_rejects_invalid_extremes():
+    from capture_time import parse_offset_minutes
+
+    assert parse_offset_minutes("+14:00") == 14 * 60
+    assert parse_offset_minutes("-12:00") == -12 * 60
+    assert parse_offset_minutes("+14:30") is None
+    assert parse_offset_minutes("-12:30") is None
+    assert parse_offset_minutes("-13:00") is None
+
+
 def test_capture_time_preview_preserves_instant_from_current_offset(app_and_db):
     app, db = app_and_db
     photo = db.get_photos()[0]
@@ -42,6 +52,25 @@ def test_capture_time_preview_preserves_instant_from_current_offset(app_and_db):
     assert data["samples"][0]["before_offset"] == "-07:00"
     assert data["samples"][0]["after_time"] == "2026-05-22 17:07:23.56"
     assert data["samples"][0]["after_offset"] == "-10:00"
+
+
+def test_capture_time_routes_reject_non_object_json(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+
+    preview = client.post(
+        "/api/capture-time/preview",
+        data='["not", "an", "object"]',
+        content_type="application/json",
+    )
+    job = client.post(
+        "/api/jobs/capture-time",
+        data='"not an object"',
+        content_type="application/json",
+    )
+
+    assert preview.status_code == 400
+    assert job.status_code == 400
 
 
 def test_capture_time_job_writes_exiftool_and_refreshes_cache(client_with_photo, monkeypatch):

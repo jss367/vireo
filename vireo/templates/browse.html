@@ -3988,7 +3988,7 @@ function renderCaptureTimePreview(data) {
       perRowShift = ' <span style="color:var(--text-muted);font-size:11px;">(' + formatShiftMinutes(row.shift_minutes) + ')</span>';
     }
     html += '<div class="capture-time-row">' +
-      '<div class="capture-time-filename" title="' + escapeHtml(row.filename || '') + '">' + escapeHtml(row.filename || '') + '</div>' +
+      '<div class="capture-time-filename" title="' + escapeAttr(row.filename || '') + '">' + escapeHtml(row.filename || '') + '</div>' +
       '<div class="capture-time-before">' + escapeHtml(before) + '</div>' +
       '<div class="capture-time-after">' + escapeHtml(after) + perRowShift + '</div>' +
     '</div>';
