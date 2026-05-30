@@ -4,6 +4,11 @@ All notable changes to Vireo are documented in this file.
 
 ## Unreleased
 
+### Fixed
+- Miss detection now aligns its default no-subject threshold with the default
+  detector confidence floor, avoiding "no subject" misses for photos whose
+  bird detection is already visible.
+
 ### Changed
 - **Global detection/classifier cache.** MegaDetector and classifier results
   are now cached per-photo instead of per-workspace. Switching to a new

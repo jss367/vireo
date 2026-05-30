@@ -19,8 +19,8 @@ def _row(**overrides):
 
 
 DEFAULT_CONFIG = {
-    "miss_det_confidence": 0.25,
-    "miss_det_confidence_burst": 0.15,
+    "miss_det_confidence": 0.20,
+    "miss_det_confidence_burst": 0.12,
     "miss_bbox_area_min": 0.005,
     "miss_bbox_area_min_singleton": 0.002,
     "miss_oof_ratio": 0.5,
@@ -166,7 +166,7 @@ def test_classify_miss_falls_back_to_defaults_for_partial_config():
     partial = {"model": "whatever"}
 
     # With low detection confidence and empty siblings (singleton), the
-    # default miss_det_confidence=0.25 should classify this as no_subject.
+    # default miss_det_confidence=0.20 should classify this as no_subject.
     row = _row(detection_conf=0.10)
     flags = classify_miss(row, siblings=[], config=partial)
     assert flags == {"no_subject": True, "clipped": False, "oof": False}
@@ -531,6 +531,25 @@ def test_high_classifier_confidence_overrides_no_subject(tmp_path):
     assert row["miss_no_subject"] == 0
     assert row["miss_clipped"] == 0
     assert row["miss_oof"] == 0
+
+
+def test_default_visible_detection_is_not_no_subject(tmp_path):
+    """A detection above the default detector floor should not be a
+    ``no_subject`` miss under the default miss threshold."""
+    import config as cfg
+    from db import Database
+    from misses import compute_misses_for_workspace
+
+    db = Database(str(tmp_path / "m.db"))
+    pid, _det_id = _photo_with_weak_detection(db, "visible", 1, det_conf=0.22)
+
+    compute_misses_for_workspace(db, cfg.DEFAULTS["pipeline"])
+
+    row = dict(db.conn.execute(
+        "SELECT miss_no_subject, miss_clipped, miss_oof FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone())
+    assert row == {"miss_no_subject": 0, "miss_clipped": 0, "miss_oof": 0}
 
 
 def test_low_classifier_confidence_does_not_override_no_subject(tmp_path):

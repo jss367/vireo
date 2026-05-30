@@ -405,8 +405,8 @@ def test_miss_defaults_present():
     import config as cfg
     d = cfg.DEFAULTS["pipeline"]
     assert d["miss_enabled"] is True
-    assert d["miss_det_confidence"] == 0.25
-    assert d["miss_det_confidence_burst"] == 0.15
+    assert d["miss_det_confidence"] == 0.20
+    assert d["miss_det_confidence_burst"] == 0.12
     assert d["miss_bbox_area_min"] == 0.005
     assert d["miss_bbox_area_min_singleton"] == 0.002
     assert d["miss_oof_ratio"] == 0.5

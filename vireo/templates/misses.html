@@ -187,15 +187,6 @@
     background: rgba(0,0,0,0.15);
   }
 
-  /* Detection bbox overlay (matches browse.html .det-box styling) */
-  .miss-bbox {
-    position: absolute;
-    border: 2px solid var(--accent);
-    border-radius: 2px;
-    pointer-events: none;
-    box-shadow: 0 0 4px color-mix(in srgb, var(--accent) 40%, transparent);
-  }
-
   .miss-card-badge {
     position: absolute;
     top: 6px;
@@ -427,7 +418,7 @@
           <span>No-subject threshold</span>
           <output id="missCfgNoSubjectVal">--</output>
         </label>
-        <input id="missCfgNoSubject" type="range" min="0" max="100" step="1" value="25" disabled>
+        <input id="missCfgNoSubject" type="range" min="0" max="100" step="1" value="20" disabled>
       </div>
       <div class="misses-tuning-control">
         <label for="missCfgClassifierRescue">
@@ -853,11 +844,7 @@ function renderSection(cat, photos) {
 function renderCard(cat, p, idx) {
   var bbox = parseDetectionBox(p.detection_box);
   var bboxHtml = '';
-  if (bbox) {
-    bboxHtml =
-      '<div class="miss-bbox" style="left:' + (bbox.x * 100) + '%;top:' + (bbox.y * 100) + '%;' +
-      'width:' + (bbox.w * 100) + '%;height:' + (bbox.h * 100) + '%;"></div>';
-  } else if (cat === 'no_subject') {
+  if (!bbox && cat === 'no_subject') {
     bboxHtml = '<div class="no-subject-frame">No subject detected</div>';
   }
 
