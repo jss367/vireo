@@ -119,6 +119,249 @@ class _QuietRequestFilter(logging.Filter):
 logging.getLogger("werkzeug").addFilter(_QuietRequestFilter())
 
 
+def _rank01(value, values):
+    valid = [v for v in values if v is not None]
+    if value is None:
+        return 0.0
+    if len(valid) <= 1:
+        return 0.5 if valid else 0.0
+    below = sum(1 for v in valid if v < value)
+    equal = sum(1 for v in valid if v == value)
+    return (below + 0.5 * equal) / len(valid)
+
+
+def _highlight_exposure_score(photo):
+    clip_high = photo.get("subject_clip_high") or 0.0
+    clip_low = photo.get("subject_clip_low") or 0.0
+    y_median = photo.get("subject_y_median")
+    if y_median is None:
+        return 0.5
+    clip_penalty = math.exp(-6.0 * clip_high - 3.0 * clip_low)
+    lum_penalty = math.exp(-abs((y_median / 255.0) - 0.45) / 0.30)
+    return max(0.0, min(1.0, clip_penalty * lum_penalty))
+
+
+def _highlight_area_score(subject_size):
+    if subject_size is None or subject_size <= 0:
+        return 0.0
+    return min(1.0, math.sqrt(subject_size) * 2.0)
+
+
+def _highlight_score_bucket(photos):
+    """Attach highlight scores and compact reason labels to one species bucket."""
+    subject_values = [p.get("subject_tenengrad") for p in photos]
+    eye_values = [p.get("eye_tenengrad") for p in photos if p.get("eye_tenengrad") is not None]
+    bg_values = [p.get("bg_tenengrad") for p in photos]
+    bg_sep_values = [p.get("bg_separation") for p in photos if p.get("bg_separation") is not None]
+    noise_values = [p.get("noise_estimate") for p in photos if p.get("noise_estimate") is not None]
+    max_bg_sep = max(bg_sep_values) if bg_sep_values else None
+
+    for p in photos:
+        if p.get("eye_tenengrad") is not None and eye_values:
+            focus = _rank01(p.get("eye_tenengrad"), eye_values)
+            focus_label = "eye focus"
+        else:
+            subject_t = p.get("subject_tenengrad")
+            rank = _rank01(subject_t, subject_values)
+            if subject_t is not None and p.get("bg_tenengrad") is not None:
+                ratio = math.log((subject_t + 1e-8) / (p.get("bg_tenengrad") + 1e-8))
+                bg_term = 1.0 / (1.0 + math.exp(-ratio))
+                focus = 0.70 * rank + 0.30 * bg_term
+            elif subject_t is not None:
+                focus = rank
+            else:
+                focus = p.get("quality_score") if p.get("quality_score") is not None else 0.0
+            focus_label = "focus"
+
+        exposure = _highlight_exposure_score(p)
+        crop = p.get("crop_complete")
+        crop_score = crop if crop is not None else 0.5
+        if max_bg_sep and p.get("bg_separation") is not None:
+            bg_sep = 1.0 - min(1.0, p.get("bg_separation") / max_bg_sep)
+        else:
+            bg_sep = 0.5
+        composition = 0.55 * crop_score + 0.45 * bg_sep
+        area = _highlight_area_score(p.get("subject_size"))
+        if p.get("noise_estimate") is not None and noise_values:
+            noise = 1.0 - _rank01(p.get("noise_estimate"), noise_values)
+        else:
+            noise = 1.0 - _rank01(p.get("bg_tenengrad"), bg_values) if bg_values else 0.5
+
+        rich_available = any(
+            p.get(k) is not None
+            for k in (
+                "subject_tenengrad", "eye_tenengrad", "crop_complete",
+                "subject_clip_high", "subject_y_median", "noise_estimate",
+            )
+        )
+        if rich_available:
+            score = (
+                0.42 * focus
+                + 0.18 * exposure
+                + 0.16 * composition
+                + 0.10 * area
+                + 0.08 * noise
+                + 0.06 * (p.get("quality_score") or 0.0)
+            )
+        else:
+            score = p.get("quality_score") if p.get("quality_score") is not None else 0.0
+
+        rating = p.get("rating") or 0
+        if p.get("flag") == "flagged":
+            score += 0.08
+        if rating >= 4:
+            score += 0.04 + 0.02 * (rating - 4)
+        elif rating == 3:
+            score += 0.015
+
+        reasons = []
+        if p.get("flag") == "flagged":
+            reasons.append("picked")
+        if rating:
+            reasons.append(f"{rating} star")
+        if focus >= 0.72:
+            reasons.append(f"strong {focus_label}")
+        elif focus < 0.35 and rich_available:
+            reasons.append("soft subject")
+        if exposure >= 0.70:
+            reasons.append("good exposure")
+        elif p.get("subject_clip_high") is not None and p.get("subject_clip_high") > 0.30:
+            reasons.append("highlight clipping")
+        if crop is not None:
+            if crop >= 0.90:
+                reasons.append("clean crop")
+            elif crop < 0.60:
+                reasons.append("clipped subject")
+        if area >= 0.50:
+            reasons.append("large subject")
+        if not reasons:
+            reasons.append("legacy quality")
+
+        p["highlight_score"] = round(max(0.0, min(1.0, score)), 4)
+        p["score_parts"] = {
+            "focus": round(focus, 3),
+            "exposure": round(exposure, 3),
+            "composition": round(composition, 3),
+            "subject": round(area, 3),
+            "noise": round(noise, 3),
+        }
+        p["reasons"] = reasons[:3]
+
+    photos.sort(
+        key=lambda p: (
+            p.get("highlight_score") or 0,
+            p.get("predicted_confidence") or 0,
+            p.get("quality_score") or 0,
+            p.get("rating") or 0,
+            -p.get("id", 0),
+        ),
+        reverse=True,
+    )
+
+
+def _highlight_confidence_label(confidence, is_accepted):
+    if is_accepted:
+        return "confirmed"
+    if confidence is None:
+        return "unknown"
+    if confidence >= 0.85:
+        return "likely"
+    return "candidate"
+
+
+def _collect_highlight_buckets(candidates, confidence_threshold):
+    bucket_map = {}
+    unidentified_photos = []
+
+    for row in candidates:
+        r = dict(row)
+        accepted = r.get("species")
+        predicted_conf = r.get("predicted_confidence")
+        if accepted:
+            species = accepted
+            is_accepted = True
+        elif (
+            r.get("predicted_species")
+            and predicted_conf is not None
+            and predicted_conf >= confidence_threshold
+        ):
+            species = r["predicted_species"]
+            is_accepted = False
+        else:
+            species = None
+            is_accepted = False
+
+        photo = {
+            "id": r["id"],
+            "filename": r["filename"],
+            "rating": r.get("rating") or 0,
+            "flag": r.get("flag") or "none",
+            "quality_score": r.get("quality_score"),
+            "subject_sharpness": r.get("subject_sharpness"),
+            "subject_size": r.get("subject_size"),
+            "sharpness": r.get("sharpness"),
+            "mask_path": r.get("mask_path"),
+            "subject_tenengrad": r.get("subject_tenengrad"),
+            "bg_tenengrad": r.get("bg_tenengrad"),
+            "crop_complete": r.get("crop_complete"),
+            "bg_separation": r.get("bg_separation"),
+            "subject_clip_high": r.get("subject_clip_high"),
+            "subject_clip_low": r.get("subject_clip_low"),
+            "subject_y_median": r.get("subject_y_median"),
+            "noise_estimate": r.get("noise_estimate"),
+            "eye_tenengrad": r.get("eye_tenengrad"),
+            "predicted_confidence": predicted_conf,
+            "has_accepted_species": accepted is not None,
+        }
+
+        if species is None:
+            unidentified_photos.append(photo)
+        else:
+            entry = bucket_map.setdefault(
+                species, {"is_accepted": True, "photos": []}
+            )
+            entry["is_accepted"] = entry["is_accepted"] and is_accepted
+            entry["photos"].append(photo)
+
+    buckets = []
+    for species, entry in bucket_map.items():
+        photos = entry["photos"]
+        _highlight_score_bucket(photos)
+        confidences = [
+            p["predicted_confidence"]
+            for p in photos
+            if p.get("predicted_confidence") is not None
+        ]
+        avg_confidence = (
+            round(sum(confidences) / len(confidences), 4)
+            if confidences else None
+        )
+        best = photos[0] if photos else {}
+        buckets.append({
+            "species": species,
+            "is_accepted": entry["is_accepted"],
+            "certainty": _highlight_confidence_label(
+                avg_confidence, entry["is_accepted"]
+            ),
+            "avg_confidence": avg_confidence,
+            "photo_count": len(photos),
+            "best_quality": best.get("quality_score"),
+            "best_score": best.get("highlight_score"),
+            "photos": photos,
+        })
+
+    _highlight_score_bucket(unidentified_photos)
+    buckets.sort(
+        key=lambda b: (
+            b.get("best_score") or 0,
+            b.get("avg_confidence") or 0,
+            b.get("photo_count") or 0,
+        ),
+        reverse=True,
+    )
+    return buckets, unidentified_photos
+
+
 # Maximum number of bound parameters per SQL statement. SQLite's
 # ``SQLITE_MAX_VARIABLE_NUMBER`` defaults to 32766 on builds since 3.32 but
 # remains 999 on older builds (and on some packagers' default builds). Bulk
@@ -3997,70 +4240,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         confidence_threshold = request.args.get(
             "confidence_threshold", 0.70, type=float
         )
+        limit_per_bucket = max(
+            1, min(request.args.get("limit_per_bucket", 20, type=int), 100)
+        )
+        species_filter = (request.args.get("species") or "").strip().lower()
 
         candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
         total_in_scope = db.count_filtered_photos(folder_id=folder_id)
 
-        # Resolve effective species: accepted wins, then prediction above
-        # threshold, otherwise Unidentified.
-        bucket_map = {}  # species name -> {is_accepted: bool, photos: list}
-        unidentified_photos = []
+        buckets, unidentified_photos = _collect_highlight_buckets(
+            candidates, confidence_threshold
+        )
+        if species_filter:
+            buckets = [
+                b for b in buckets if species_filter in b["species"].lower()
+            ]
+            if "unidentified".find(species_filter) < 0:
+                unidentified_photos = []
 
-        for row in candidates:
-            r = dict(row)
-            accepted = r.get("species")
-            if accepted:
-                species = accepted
-                is_accepted = True
-            elif (r.get("predicted_species")
-                  and r.get("predicted_confidence") is not None
-                  and r["predicted_confidence"] >= confidence_threshold):
-                species = r["predicted_species"]
-                is_accepted = False
-            else:
-                species = None
-                is_accepted = False
-
-            photo = {
-                "id": r["id"],
-                "filename": r["filename"],
-                "quality_score": r["quality_score"],
-                "has_accepted_species": accepted is not None,
+        def limited_bucket(bucket):
+            photos = bucket["photos"]
+            limited = photos[:limit_per_bucket]
+            return {
+                **bucket,
+                "photos": limited,
+                "loaded_count": len(limited),
+                "has_more": len(photos) > len(limited),
             }
 
-            if species is None:
-                unidentified_photos.append(photo)
-            else:
-                entry = bucket_map.setdefault(
-                    species, {"is_accepted": True, "photos": []}
-                )
-                # is_accepted is True if EVERY photo in this bucket has an
-                # accepted species tag — used by UI to render a "Confirmed"
-                # badge that means the entire row is confirmed, not just some
-                # of it. Initialize to True (the unit element of AND) so the
-                # AND-fold below produces the right answer.
-                entry["is_accepted"] = entry["is_accepted"] and is_accepted
-                entry["photos"].append(photo)
-
-        # candidates is already ordered by quality_score desc, so per-bucket
-        # photos inherit that order without resorting.
-
-        buckets = []
-        for species, entry in bucket_map.items():
-            photos = entry["photos"]
-            buckets.append({
-                "species": species,
-                "is_accepted": entry["is_accepted"],
-                "photo_count": len(photos),
-                "best_quality": photos[0]["quality_score"] if photos else None,
-                "photos": photos,
-            })
+        unidentified_limited = unidentified_photos[:limit_per_bucket]
 
         return jsonify({
-            "buckets": buckets,
+            "buckets": [limited_bucket(b) for b in buckets],
             "unidentified": {
                 "photo_count": len(unidentified_photos),
-                "photos": unidentified_photos,
+                "photos": unidentified_limited,
+                "loaded_count": len(unidentified_limited),
+                "has_more": len(unidentified_photos) > len(unidentified_limited),
             },
             "folders": [
                 {"id": f["id"], "name": f["name"], "photo_count": f["photo_count"]}
@@ -4069,8 +4285,53 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "meta": {
                 "total_in_scope": total_in_scope,
                 "eligible": len(candidates),
+                "limit_per_bucket": limit_per_bucket,
             },
             "scope": "workspace" if folder_id is None else "folder",
+        })
+
+    @app.route("/api/highlights/bucket")
+    def api_highlights_bucket():
+        db = _get_db()
+        folders = db.get_folders_with_quality_data()
+        scope = request.args.get("scope", "folder")
+        folder_id = request.args.get("folder_id", type=int)
+        if scope == "workspace":
+            folder_id = None
+        elif folder_id is None and folders:
+            folder_id = folders[0]["id"]
+
+        min_quality = request.args.get("min_quality", 0.0, type=float)
+        confidence_threshold = request.args.get(
+            "confidence_threshold", 0.70, type=float
+        )
+        species = (request.args.get("species") or "").strip()
+        offset = max(0, request.args.get("offset", 0, type=int))
+        limit = max(1, min(request.args.get("limit", 100, type=int), 500))
+        if not species:
+            return json_error("species required")
+
+        candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
+        buckets, unidentified_photos = _collect_highlight_buckets(
+            candidates, confidence_threshold
+        )
+        if species == "__unidentified__":
+            photos = unidentified_photos
+            label = "Unidentified"
+        else:
+            bucket = next((b for b in buckets if b["species"] == species), None)
+            if bucket is None:
+                return json_error("species not found", 404)
+            photos = bucket["photos"]
+            label = bucket["species"]
+
+        chunk = photos[offset: offset + limit]
+        return jsonify({
+            "species": label,
+            "photos": chunk,
+            "photo_count": len(photos),
+            "loaded_count": min(len(photos), offset + len(chunk)),
+            "has_more": offset + len(chunk) < len(photos),
         })
 
     @app.route("/api/highlights/save", methods=["POST"])
