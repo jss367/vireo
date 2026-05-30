@@ -4194,9 +4194,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if pred is None:
                 skipped.append({"photo_id": pid, "reason": "no_prediction"})
                 continue
-            if pred["status"] != "pending":
-                skipped.append({"photo_id": pid, "reason": pred["status"]})
-                continue
             key = (
                 "group",
                 pred["classifier_model"],
@@ -4251,6 +4248,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             kid = db.add_keyword(species, is_species=True, _commit=False)
             items = []
             rejected_prediction_ids = []
+            has_old_species = False
             for pid in photo_ids:
                 pred = top_predictions.get(pid)
                 if pred is not None:
@@ -4267,6 +4265,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     (pid,),
                 ).fetchall()
                 old_primary = old_rows[0] if old_rows else None
+                if old_primary is not None:
+                    has_old_species = True
                 for old in old_rows:
                     db.untag_photo(pid, old["id"], _commit=False)
                     if old["name"].strip().lower() != species.lower():
@@ -4276,15 +4276,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
                 db.tag_photo(pid, kid, _commit=False)
                 _queue_keyword_add(pid, species, workspace_id=ws_id, _commit=False)
+                old_value = str(old_primary["id"]) if old_primary else ""
+                if pred is not None:
+                    old_value = json.dumps({
+                        "keyword_id": old_value,
+                        "prediction_id": pred["id"],
+                        "prediction_status": pred["status"],
+                    }, sort_keys=True)
                 items.append({
                     "photo_id": pid,
-                    "old_value": str(old_primary["id"]) if old_primary else "",
+                    "old_value": old_value,
                     "new_value": str(kid),
                 })
 
             action_type = (
                 "species_replace"
-                if any(item["old_value"] for item in items)
+                if has_old_species
                 else "keyword_add"
             )
             if action_type == "species_replace":

@@ -4160,6 +4160,38 @@ def test_highlights_confirm_accepts_current_prediction(app_and_db):
     assert history[0]["action_type"] == "prediction_accept"
 
 
+def test_highlights_confirm_accepts_reviewed_prediction(app_and_db):
+    """Highlights Confirm accepts non-rejected predictions it displays."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hcr', 'hcr', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'reviewed.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Bald Eagle", 0.91, "m", status="reviewed")
+    pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE species = 'Bald Eagle'"
+    ).fetchone()
+
+    resp = client.post("/api/highlights/confirm", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    assert db.get_review_status(pred["id"], db._ws_id()) == "accepted"
+    assert "Bald Eagle" in {kw["name"] for kw in db.get_photo_keywords(pid)}
+
+
 def test_highlights_relabel_rejects_prediction_and_replaces_species(app_and_db):
     """POST /api/highlights/relabel retags photos and rejects the stale prediction."""
     app, db = app_and_db
@@ -4200,6 +4232,56 @@ def test_highlights_relabel_rejects_prediction_and_replaces_species(app_and_db):
     assert "Bald Eagle" not in keywords
     history = db.get_edit_history(limit=1)
     assert history[0]["action_type"] == "species_replace"
+
+
+def test_highlights_relabel_undo_restores_rejected_prediction(app_and_db):
+    """Undoing a Highlights relabel restores both species tags and prediction status."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hru', 'hru', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'undo-relabel.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Bald Eagle", 0.88, "m")
+    pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE species = 'Bald Eagle'"
+    ).fetchone()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "House Sparrow"},
+    )
+    assert resp.status_code == 200
+    assert db.get_review_status(pred["id"], db._ws_id()) == "rejected"
+
+    undone = db.undo_last_edit()
+    assert undone["action_type"] == "species_replace"
+    assert db.get_review_status(pred["id"], db._ws_id()) == "pending"
+    keywords = {kw["name"] for kw in db.get_photo_keywords(pid)}
+    assert "Bald Eagle" in keywords
+    assert "House Sparrow" not in keywords
+
+    redone = db.redo_last_undo()
+    assert redone["action_type"] == "species_replace"
+    assert db.get_review_status(pred["id"], db._ws_id()) == "rejected"
+    keywords = {kw["name"] for kw in db.get_photo_keywords(pid)}
+    assert "House Sparrow" in keywords
+    assert "Bald Eagle" not in keywords
 
 
 def test_highlights_relabel_unidentified_sets_species(app_and_db):

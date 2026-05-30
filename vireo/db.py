@@ -8921,11 +8921,14 @@ class Database:
                 else:
                     self.remove_color_label(pid)
             elif entry['action_type'] in ('keyword_add', 'prediction_accept'):
+                old_meta = self._edit_old_value_meta(old_val)
                 self.untag_photo(pid, int(entry['new_value']))
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
                                        (int(entry['new_value']),)).fetchone()
                 if kw:
                     self.remove_pending_changes(pid, 'keyword_add', kw['name'])
+                if entry['action_type'] == 'keyword_add':
+                    self._restore_edit_prediction_status(old_meta)
                 if entry['action_type'] == 'prediction_accept' and old_val:
                     pred_id = int(old_val)
                     ws = self._ws_id()
@@ -8995,8 +8998,9 @@ class Database:
                 # Atomic swap: the edit replaced old_value's species with
                 # new_value's. Undo untags the new species and retags the
                 # old one, symmetrically reversing the pending-change queue.
+                old_meta = self._edit_old_value_meta(old_val)
                 new_kid = int(item['new_value']) if item['new_value'] else None
-                old_kid = int(old_val) if old_val else None
+                old_kid = old_meta.get("keyword_id")
                 if new_kid:
                     self.untag_photo(pid, new_kid)
                     new_kw = self.conn.execute(
@@ -9019,6 +9023,7 @@ class Database:
                         )
                         if cancelled == 0:
                             self.queue_change(pid, 'keyword_add', old_kw['name'])
+                self._restore_edit_prediction_status(old_meta)
 
     def _apply_redo(self, entry, items):
         """Re-apply the effects of an undone edit entry."""
@@ -9045,11 +9050,14 @@ class Database:
                 else:
                     self.remove_color_label(pid)
             elif entry['action_type'] in ('keyword_add', 'prediction_accept'):
+                old_meta = self._edit_old_value_meta(item['old_value'])
                 self.tag_photo(pid, int(entry['new_value']))
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
                                        (int(entry['new_value']),)).fetchone()
                 if kw:
                     self.queue_change(pid, 'keyword_add', kw['name'])
+                if entry['action_type'] == 'keyword_add':
+                    self._reject_edit_prediction(old_meta)
                 if entry['action_type'] == 'prediction_accept' and item['old_value']:
                     pred_id = int(item['old_value'])
                     ws = self._ws_id()
@@ -9097,8 +9105,9 @@ class Database:
                     self.queue_change(pid, 'keyword_remove', kw['name'])
             elif entry['action_type'] == 'species_replace':
                 # Re-apply the swap: untag old, retag new, mirror pending queue.
+                old_meta = self._edit_old_value_meta(item['old_value'])
                 new_kid = int(new_val) if new_val else None
-                old_kid = int(item['old_value']) if item['old_value'] else None
+                old_kid = old_meta.get("keyword_id")
                 if old_kid:
                     self.untag_photo(pid, old_kid)
                     old_kw = self.conn.execute(
@@ -9121,6 +9130,40 @@ class Database:
                         )
                         if cancelled == 0:
                             self.queue_change(pid, 'keyword_add', new_kw['name'])
+                self._reject_edit_prediction(old_meta)
+
+    def _edit_old_value_meta(self, old_value):
+        """Parse edit item old_value, including newer JSON metadata payloads."""
+        if not old_value:
+            return {"keyword_id": None}
+        if isinstance(old_value, str) and old_value.lstrip().startswith("{"):
+            try:
+                data = json.loads(old_value)
+            except (TypeError, ValueError):
+                return {"keyword_id": None}
+            keyword_id = data.get("keyword_id")
+            try:
+                data["keyword_id"] = int(keyword_id) if keyword_id else None
+            except (TypeError, ValueError):
+                data["keyword_id"] = None
+            return data
+        try:
+            return {"keyword_id": int(old_value)}
+        except (TypeError, ValueError):
+            return {"keyword_id": None}
+
+    def _restore_edit_prediction_status(self, meta):
+        pred_id = meta.get("prediction_id")
+        if not pred_id:
+            return
+        status = meta.get("prediction_status") or "pending"
+        self.update_prediction_status(int(pred_id), status, _commit=False)
+
+    def _reject_edit_prediction(self, meta):
+        pred_id = meta.get("prediction_id")
+        if not pred_id:
+            return
+        self.update_prediction_status(int(pred_id), "rejected", _commit=False)
 
     def _prune_edit_history(self):
         """Delete oldest entries beyond the configured max (excludes undone entries awaiting redo)."""
