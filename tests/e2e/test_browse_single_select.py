@@ -3,6 +3,17 @@ import json
 from playwright.sync_api import expect
 
 
+def disable_infinite_scroll(page):
+    page.add_init_script("""
+      class NoopIntersectionObserver {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      }
+      window.IntersectionObserver = NoopIntersectionObserver;
+    """)
+
+
 def test_single_click_reveals_batch_bar(live_server, page):
     """Normal-click on one photo reveals the batch bar so Develop/Export/Delete
     are reachable with a single photo selected.
@@ -365,6 +376,7 @@ def test_singleton_set_keyboard_shortcut_applies(live_server, page):
 def test_arrow_navigation_loads_next_page_at_loaded_boundary(live_server, page):
     """Keyboard navigation should continue past the currently loaded page."""
     url = live_server["url"]
+    disable_infinite_scroll(page)
     page.route(
         "**/api/config",
         lambda route: route.fulfill(
@@ -386,11 +398,33 @@ def test_arrow_navigation_loads_next_page_at_loaded_boundary(live_server, page):
     assert page.evaluate("selectedPhotoId === photos[2].id")
 
 
+def test_vertical_arrow_navigation_moves_by_rendered_grid_columns(live_server, page):
+    """Up/down should move spatially by one visible grid row, not by one photo."""
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1400, "height": 900})
+    page.goto(f"{url}/browse")
+
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.locator(".grid-card").first.click()
+    columns = page.evaluate("getBrowseGridColumnCount()")
+    assert columns >= 2
+    page.wait_for_function("cols => photos.length > cols", arg=columns)
+
+    page.keyboard.press("ArrowDown")
+    page.wait_for_function("cols => selectedIndex === cols", arg=columns)
+    assert page.evaluate("selectedPhotoId === photos[selectedIndex].id")
+
+    page.keyboard.press("ArrowUp")
+    page.wait_for_function("selectedIndex === 0")
+    assert page.evaluate("selectedPhotoId === photos[0].id")
+
+
 def test_shift_arrow_navigation_preserves_range_selection_at_loaded_boundary(
     live_server, page
 ):
     """Loading another page for keyboard navigation must preserve modifiers."""
     url = live_server["url"]
+    disable_infinite_scroll(page)
     page.route(
         "**/api/config",
         lambda route: route.fulfill(

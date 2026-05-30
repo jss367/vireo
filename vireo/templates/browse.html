@@ -5146,13 +5146,21 @@ document.addEventListener('keydown', function(e) {
   }
 
   // Arrow keys: navigate grid (not configurable)
-  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+  if (e.key === 'ArrowRight') {
     e.preventDefault();
     moveBrowseSelection(1, e);
     return;
-  } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+  } else if (e.key === 'ArrowLeft') {
     e.preventDefault();
     moveBrowseSelection(-1, e);
+    return;
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    moveBrowseSelection(getBrowseGridColumnCount(), e);
+    return;
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    moveBrowseSelection(-getBrowseGridColumnCount(), e);
     return;
   }
 
@@ -5216,10 +5224,26 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
+function getBrowseGridColumnCount() {
+  var grid = document.getElementById('grid');
+  var cards = grid ? grid.querySelectorAll('.grid-card') : document.querySelectorAll('.grid-card');
+  if (!cards.length) return 1;
+
+  var firstTop = cards[0].offsetTop;
+  var count = 0;
+  for (var i = 0; i < cards.length; i++) {
+    if (Math.abs(cards[i].offsetTop - firstTop) > 2) break;
+    count++;
+  }
+  return Math.max(1, count);
+}
+
 async function moveBrowseSelection(delta, e) {
   var nextIndex = selectedIndex + delta;
-  if (delta > 0 && nextIndex >= photos.length && !allLoaded) {
+  while (delta > 0 && nextIndex >= photos.length && !allLoaded) {
+    var beforeLength = photos.length;
     await loadPhotos();
+    if (photos.length === beforeLength) break;
     nextIndex = selectedIndex + delta;
   }
   if (nextIndex < 0 || nextIndex >= photos.length || !photos[nextIndex]) return;
