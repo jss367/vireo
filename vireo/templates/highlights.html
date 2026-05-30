@@ -19,7 +19,8 @@
   .save-btn:hover { opacity:0.9; }
 
   .bucket { padding:16px 24px; border-bottom:1px solid var(--border-primary); }
-  .bucket-header { display:flex; align-items:baseline; justify-content:space-between; margin-bottom:10px; }
+  .bucket-header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }
+  .bucket-heading { display:flex; align-items:baseline; gap:8px; min-width:0; flex-wrap:wrap; }
   .bucket-title { font-size:16px; color:var(--text-primary); font-weight:600; }
   .bucket-meta { font-size:13px; color:var(--text-secondary); }
   .bucket-badge { display:inline-block; margin-left:8px; font-size:10px; padding:2px 6px; border-radius:8px; background:var(--bg-tertiary); color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px; }
@@ -27,6 +28,11 @@
   .bucket-badge.likely { background:rgba(34,139,34,0.16); color:var(--success); }
   .bucket-badge.candidate { background:rgba(229,194,51,0.18); color:var(--warning); }
   .bucket-badge.accepted { background:var(--accent); color:var(--accent-text); }
+  .bucket-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+  .bucket-action { padding:4px 10px; border-radius:4px; border:1px solid var(--border-secondary); background:var(--bg-secondary); color:var(--text-primary); cursor:pointer; font-size:12px; }
+  .bucket-action.primary { background:var(--accent); color:var(--accent-text); border-color:var(--accent); }
+  .bucket-action:hover { border-color:var(--accent); }
+  .bucket-action:disabled { opacity:0.55; cursor:default; }
   .bucket-strip { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:10px; }
   .highlights-card { position:relative; border-radius:6px; overflow:hidden; background:var(--bg-secondary); cursor:pointer; border:1px solid var(--border-primary); }
   .highlights-card:hover { border-color:var(--accent); }
@@ -55,6 +61,20 @@
   .save-modal input[type=text] { width:100%; padding:8px; font-size:14px; border:1px solid var(--border-secondary); border-radius:4px; box-sizing:border-box; margin-bottom:12px; background:var(--bg-input); color:var(--text-primary); }
   .save-modal-actions { display:flex; gap:8px; justify-content:flex-end; }
   .save-modal-actions button { padding:6px 16px; border-radius:4px; border:none; cursor:pointer; font-size:13px; }
+
+  .species-modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:700; align-items:center; justify-content:center; }
+  .species-modal-overlay.open { display:flex; }
+  .species-modal { width:min(420px, calc(100vw - 32px)); background:var(--bg-primary); border:1px solid var(--border-primary); border-radius:8px; padding:20px; box-shadow:0 16px 48px rgba(0,0,0,0.35); }
+  .species-modal h3 { margin:0 0 12px; font-size:16px; color:var(--text-primary); }
+  .species-modal p { margin:0 0 12px; color:var(--text-secondary); font-size:13px; }
+  .species-modal input[type=text] { width:100%; padding:8px; font-size:14px; border:1px solid var(--border-secondary); border-radius:4px; box-sizing:border-box; background:var(--bg-input); color:var(--text-primary); }
+  .species-modal-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:14px; }
+  .species-modal-actions button { padding:6px 16px; border-radius:4px; border:1px solid var(--border-secondary); background:var(--bg-secondary); color:var(--text-primary); cursor:pointer; font-size:13px; }
+  .species-modal-actions .primary { background:var(--accent); color:var(--accent-text); border-color:var(--accent); }
+
+  .highlight-lb-panel { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:5px 8px; border-radius:4px; background:rgba(0,0,0,0.6); border:1px solid var(--text-faint); color:var(--text-secondary); font-size:12px; }
+  .highlight-lb-panel button { border:1px solid var(--border-secondary); background:rgba(255,255,255,0.08); color:var(--text-primary); border-radius:4px; padding:4px 9px; cursor:pointer; font-size:12px; }
+  .highlight-lb-panel button.primary { border-color:var(--accent); color:var(--accent); }
 </style>
 </head>
 <body>
@@ -120,6 +140,20 @@
   </div>
 </div>
 
+<!-- Species correction modal -->
+<div class="species-modal-overlay" id="speciesModal" onclick="if (event.target === this) closeSpeciesModal();">
+  <div class="species-modal">
+    <h3 id="speciesModalTitle">Set species</h3>
+    <p id="speciesModalSummary"></p>
+    <input type="text" id="speciesModalInput" list="highlightSpeciesList" placeholder="Species name" autocomplete="off">
+    <datalist id="highlightSpeciesList"></datalist>
+    <div class="species-modal-actions">
+      <button onclick="closeSpeciesModal()">Cancel</button>
+      <button class="primary" id="speciesModalSubmit" onclick="submitSpeciesModal()">Apply</button>
+    </div>
+  </div>
+</div>
+
 <script>
 var WORKSPACE_SCOPE = '__workspace__';
 var currentData = null;          // last API response
@@ -128,6 +162,9 @@ var unidentifiedExpanded = false;
 var currentFolderName = '';
 var debounceTimer = null;
 var existingCollections = [];
+var speciesSuggestionsLoaded = false;
+var speciesModalPhotoIds = [];
+var activeLightboxPhotoId = null;
 
 function escapeAttr(s) {
   if (s === null || s === undefined) return '';
@@ -223,10 +260,127 @@ function attachCardClicks(container, photoSet) {
       var pid = parseInt(card.getAttribute('data-photo-id'));
       var photo = photoSet.find(function(p) { return p.id === pid; });
       if (window.openLightbox && photo) {
+        activeLightboxPhotoId = pid;
         openLightbox(pid, photo.filename, photoSet);
       }
     });
   });
+}
+
+async function ensureFullBucketLoaded(species, isUnidentified) {
+  var target = isUnidentified
+    ? (currentData && currentData.unidentified)
+    : (currentData && currentData.buckets || []).find(function(b) { return b.species === species; });
+  if (!target) return [];
+  while (target.has_more) {
+    await loadMoreBucket(species, isUnidentified);
+  }
+  return target.photos || [];
+}
+
+async function bucketPhotoIds(bucket) {
+  var photos = await ensureFullBucketLoaded(bucket.species, false);
+  return photos.map(function(p) { return p.id; });
+}
+
+async function unidPhotoIds() {
+  var photos = await ensureFullBucketLoaded(null, true);
+  return photos
+    .map(function(p) { return p.id; });
+}
+
+function photoCurrentLabel(photo) {
+  if (!photo) return '';
+  if (photo.has_accepted_species && photo.species) {
+    return 'Confirmed: ' + photo.species;
+  }
+  if (photo.predicted_species) {
+    var conf = photo.predicted_confidence != null
+      ? ' (' + Math.round(photo.predicted_confidence * 100) + '%)'
+      : '';
+    return 'Predicted: ' + photo.predicted_species + conf;
+  }
+  return 'Unidentified';
+}
+
+function photoSpeciesName(photo) {
+  if (!photo) return '';
+  if (photo.has_accepted_species && photo.species) return photo.species;
+  if (photo.predicted_species) return photo.predicted_species;
+  return '';
+}
+
+async function confirmPhotoIds(photoIds, button) {
+  if (!photoIds.length) return;
+  if (button) button.disabled = true;
+  try {
+    await safeFetch('/api/highlights/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photo_ids: photoIds }),
+    });
+    await loadHighlights();
+    if (typeof showToast === 'function') showToast('Prediction confirmed', 'success');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function loadSpeciesSuggestions() {
+  if (speciesSuggestionsLoaded) return;
+  speciesSuggestionsLoaded = true;
+  try {
+    var keywords = await safeFetch('/api/keywords/all', {}, { toast: false });
+    var list = document.getElementById('highlightSpeciesList');
+    list.innerHTML = '';
+    (keywords || []).filter(function(k) {
+      return k && k.name && (k.type === 'taxonomy' || k.taxon_name || k.taxon_common_name);
+    }).forEach(function(k) {
+      var opt = document.createElement('option');
+      opt.value = k.name;
+      list.appendChild(opt);
+    });
+  } catch (e) {
+    speciesSuggestionsLoaded = false;
+    // Free typing still works if suggestions cannot be loaded.
+  }
+}
+
+function showSpeciesModal(title, summary, photoIds, initialSpecies) {
+  speciesModalPhotoIds = photoIds.slice();
+  document.getElementById('speciesModalTitle').textContent = title;
+  document.getElementById('speciesModalSummary').textContent = summary;
+  var input = document.getElementById('speciesModalInput');
+  input.value = initialSpecies || '';
+  document.getElementById('speciesModal').classList.add('open');
+  loadSpeciesSuggestions();
+  setTimeout(function() { input.focus(); input.select(); }, 0);
+}
+
+function closeSpeciesModal() {
+  document.getElementById('speciesModal').classList.remove('open');
+  speciesModalPhotoIds = [];
+}
+
+async function submitSpeciesModal() {
+  var input = document.getElementById('speciesModalInput');
+  var species = input.value.trim();
+  if (!species || !speciesModalPhotoIds.length) return;
+  var submit = document.getElementById('speciesModalSubmit');
+  submit.disabled = true;
+  try {
+    await safeFetch('/api/highlights/relabel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photo_ids: speciesModalPhotoIds, species: species }),
+    });
+    closeSpeciesModal();
+    await loadHighlights();
+    updateHighlightsLightboxControls(activeLightboxPhotoId);
+    if (typeof showToast === 'function') showToast('Species updated', 'success');
+  } finally {
+    submit.disabled = false;
+  }
 }
 
 function renderBucket(bucket) {
@@ -249,10 +403,18 @@ function renderBucket(bucket) {
       + (expanded ? (bucket.has_more ? 'Load more' : 'Show fewer') : '+ ' + remaining + ' more')
       + '</button>';
   }
+  var actions = '<div class="bucket-actions">';
+  if (!bucket.is_accepted) {
+    actions += '<button class="bucket-action primary" data-action="confirm-bucket" data-species="'
+      + escapeAttr(bucket.species) + '">Confirm</button>';
+  }
+  actions += '<button class="bucket-action" data-action="change-bucket" data-species="'
+    + escapeAttr(bucket.species) + '">Change</button></div>';
   return '<section class="bucket">'
     + '<div class="bucket-header">'
-    + '<div class="bucket-title">' + escapeAttr(bucket.species) + badge + '</div>'
-    + '<div class="bucket-meta">' + meta + '</div>'
+    + '<div class="bucket-heading"><div class="bucket-title">' + escapeAttr(bucket.species) + badge + '</div>'
+    + '<div class="bucket-meta">' + meta + '</div></div>'
+    + actions
     + '</div>'
     + '<div class="bucket-strip">' + visible.map(renderCard).join('') + '</div>'
     + expandBtn
@@ -274,8 +436,9 @@ function renderUnidentified() {
   return '<div class="unid-divider">Unidentified — Vireo couldn\'t ID these</div>'
     + '<section class="bucket">'
     + '<div class="bucket-header">'
-    + '<div class="bucket-title">Unidentified</div>'
-    + '<div class="bucket-meta">' + unid.photo_count + ' photos</div>'
+    + '<div class="bucket-heading"><div class="bucket-title">Unidentified</div>'
+    + '<div class="bucket-meta">' + unid.photo_count + ' photos</div></div>'
+    + '<div class="bucket-actions"><button class="bucket-action" data-action="change-unidentified">Set species</button></div>'
     + '</div>'
     + '<div class="bucket-strip">' + visible.map(renderCard).join('') + '</div>'
     + expandBtn
@@ -356,7 +519,113 @@ function render() {
       render();
     });
   });
+
+  content.querySelectorAll('.bucket-action').forEach(function(btn) {
+    btn.addEventListener('click', async function() {
+      var action = btn.getAttribute('data-action');
+      btn.disabled = true;
+      try {
+        if (action === 'confirm-bucket') {
+          var species = btn.getAttribute('data-species');
+          var bucket = buckets.find(function(b) { return b.species === species; });
+          if (bucket) await confirmPhotoIds(await bucketPhotoIds(bucket), btn);
+        } else if (action === 'change-bucket') {
+          var changeSpecies = btn.getAttribute('data-species');
+          var changeBucket = buckets.find(function(b) { return b.species === changeSpecies; });
+          if (changeBucket) {
+            var changeIds = await bucketPhotoIds(changeBucket);
+            showSpeciesModal(
+              'Change species',
+              changeIds.length + ' photo' + (changeIds.length === 1 ? '' : 's'),
+              changeIds,
+              changeBucket.species
+            );
+          }
+        } else if (action === 'change-unidentified') {
+          var ids = await unidPhotoIds();
+          showSpeciesModal(
+            'Set species',
+            ids.length + ' unidentified photo' + (ids.length === 1 ? '' : 's'),
+            ids,
+            ''
+          );
+        }
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+  updateHighlightsLightboxControls(activeLightboxPhotoId);
 }
+
+function findHighlightPhoto(photoId) {
+  if (!currentData || photoId == null) return null;
+  var buckets = currentData.buckets || [];
+  for (var i = 0; i < buckets.length; i++) {
+    var match = (buckets[i].photos || []).find(function(p) { return p.id === photoId; });
+    if (match) return match;
+  }
+  var unid = currentData.unidentified && currentData.unidentified.photos || [];
+  return unid.find(function(p) { return p.id === photoId; }) || null;
+}
+
+function ensureHighlightsLightboxPanel() {
+  var actions = document.getElementById('lightboxActions');
+  if (!actions) return null;
+  var panel = document.getElementById('highlightLightboxPanel');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'highlightLightboxPanel';
+    panel.className = 'highlight-lb-panel';
+    actions.insertBefore(panel, actions.firstChild);
+  }
+  return panel;
+}
+
+function updateHighlightsLightboxControls(photoId) {
+  var panel = ensureHighlightsLightboxPanel();
+  if (!panel) return;
+  var photo = findHighlightPhoto(photoId);
+  if (!photo) {
+    panel.style.display = 'none';
+    panel.innerHTML = '';
+    return;
+  }
+  panel.style.display = '';
+  var html = '<span>' + escapeAttr(photoCurrentLabel(photo)) + '</span>';
+  if (photo.is_confirmable_prediction) {
+    html += '<button class="primary" data-lb-action="confirm">Confirm</button>';
+  }
+  html += '<button data-lb-action="change">' + (photo.is_confirmable_prediction || photo.has_accepted_species ? 'Change' : 'Set species') + '</button>';
+  panel.innerHTML = html;
+  panel.querySelectorAll('button').forEach(function(btn) {
+    btn.addEventListener('click', function(event) {
+      event.stopPropagation();
+      if (btn.getAttribute('data-lb-action') === 'confirm') {
+        confirmPhotoIds([photo.id], btn);
+      } else {
+        var modalTitle = (photo.is_confirmable_prediction || photo.has_accepted_species)
+          ? 'Change species'
+          : 'Set species';
+        showSpeciesModal(modalTitle, photo.filename || '', [photo.id], photoSpeciesName(photo));
+      }
+    });
+  });
+}
+
+document.addEventListener('lightbox:photochanged', function(event) {
+  activeLightboxPhotoId = event.detail ? event.detail.photoId : null;
+  updateHighlightsLightboxControls(activeLightboxPhotoId);
+});
+
+document.getElementById('speciesModalInput').addEventListener('keydown', function(event) {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    submitSpeciesModal();
+  } else if (event.key === 'Escape') {
+    closeSpeciesModal();
+  }
+});
 
 function debounceLoad() {
   clearTimeout(debounceTimer);

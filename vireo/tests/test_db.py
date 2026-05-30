@@ -4604,6 +4604,44 @@ def test_accept_prediction_tags_photo(tmp_path):
     assert any(k["name"] == "Elk" for k in kws)
 
 
+def test_accept_prediction_commit_false_preserves_caller_transaction_on_error(
+    tmp_path, monkeypatch,
+):
+    """accept_prediction(_commit=False) leaves rollback to the caller."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename="elk.jpg",
+        extension=".jpg",
+        file_size=100,
+        file_mtime=1.0,
+    )
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
+    pred = db.get_predictions()[0]
+
+    db.conn.execute(
+        "INSERT INTO keywords (name, is_species) VALUES ('Outer Marker', 0)"
+    )
+
+    def fail_add_keyword(*args, **kwargs):
+        raise RuntimeError("simulated accept failure")
+
+    monkeypatch.setattr(db, "add_keyword", fail_add_keyword)
+    with pytest.raises(RuntimeError, match="simulated accept failure"):
+        db.accept_prediction(pred["id"], _commit=False)
+
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE name = 'Outer Marker'"
+    ).fetchone() is not None
+    db.conn.rollback()
+
+
 def test_get_existing_detection_photo_ids(tmp_path):
     """get_existing_detection_photo_ids shim returns photo IDs where the default
     detector model has run (delegates to get_detector_run_photo_ids)."""

@@ -310,8 +310,16 @@ def _collect_highlight_buckets(candidates, confidence_threshold):
             "subject_y_median": r.get("subject_y_median"),
             "noise_estimate": r.get("noise_estimate"),
             "eye_tenengrad": r.get("eye_tenengrad"),
+            "species": accepted,
+            "prediction_id": r.get("prediction_id"),
+            "predicted_species": r.get("predicted_species"),
             "predicted_confidence": predicted_conf,
             "has_accepted_species": accepted is not None,
+            "is_confirmable_prediction": (
+                accepted is None
+                and species is not None
+                and r.get("prediction_id") is not None
+            ),
         }
 
         if species is None:
@@ -4382,6 +4390,86 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Highlights --
 
+    def _parse_highlight_photo_ids(body):
+        raw_ids = body.get("photo_ids", [])
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return None, "photo_ids required"
+        photo_ids = []
+        seen = set()
+        for raw in raw_ids:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return None, "photo_ids must be integers"
+            if raw not in seen:
+                photo_ids.append(raw)
+                seen.add(raw)
+        return photo_ids, None
+
+    def _validate_highlight_photo_ids(db, photo_ids):
+        found_ids = set()
+        batch_size = 800
+        for i in range(0, len(photo_ids), batch_size):
+            chunk = photo_ids[i:i + batch_size]
+            placeholders = ",".join("?" for _ in chunk)
+            found_ids.update(
+                r["id"] for r in db.conn.execute(
+                    f"SELECT id FROM photos WHERE id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+            )
+        missing = [pid for pid in photo_ids if pid not in found_ids]
+        if missing:
+            return f"Unknown photo_ids: {missing}", 404
+        outside = [pid for pid in photo_ids if not db._photo_in_workspace(pid)]
+        if outside:
+            return (
+                f"Photo IDs do not belong to the active workspace: {outside}",
+                403,
+            )
+        return None, None
+
+    def _highlight_top_predictions(db, photo_ids):
+        if not photo_ids:
+            return {}
+        ws = db._ws_id()
+        results = {}
+        batch_size = 800
+        for i in range(0, len(photo_ids), batch_size):
+            chunk = photo_ids[i:i + batch_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT photo_id, id, species, confidence, classifier_model,
+                          group_id, status
+                   FROM (
+                       SELECT d.photo_id, pr.id, pr.species, pr.confidence,
+                              pr.classifier_model,
+                              pr_rev.group_id,
+                              COALESCE(pr_rev.status, 'pending') AS status,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY d.photo_id
+                                  ORDER BY pr.confidence DESC, pr.id DESC
+                              ) AS rn
+                       FROM detections d
+                       JOIN predictions pr ON pr.detection_id = d.id
+                       LEFT JOIN prediction_review pr_rev
+                         ON pr_rev.prediction_id = pr.id
+                        AND pr_rev.workspace_id = ?
+                       WHERE d.photo_id IN ({placeholders})
+                         AND pr.species IS NOT NULL
+                         AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                         AND pr.labels_fingerprint = (
+                             SELECT pr2.labels_fingerprint FROM predictions pr2
+                             WHERE pr2.detection_id = pr.detection_id
+                               AND pr2.classifier_model = pr.classifier_model
+                             ORDER BY pr2.created_at DESC, pr2.id DESC
+                             LIMIT 1
+                         )
+                   ) WHERE rn = 1""",
+                (ws, *chunk),
+            ).fetchall()
+            for row in rows:
+                results[row["photo_id"]] = row
+        return results
+
     @app.route("/api/highlights")
     def api_highlights():
         db = _get_db()
@@ -4447,6 +4535,203 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "limit_per_bucket": limit_per_bucket,
             },
             "scope": "workspace" if folder_id is None else "folder",
+        })
+
+    @app.route("/api/highlights/confirm", methods=["POST"])
+    def api_highlights_confirm():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids, error = _parse_highlight_photo_ids(body)
+        if error:
+            return json_error(error)
+        error, status = _validate_highlight_photo_ids(db, photo_ids)
+        if error:
+            return json_error(error, status)
+
+        try:
+            top_predictions = _highlight_top_predictions(db, photo_ids)
+            accepted_photo_ids = set()
+            for i in range(0, len(photo_ids), 800):
+                chunk = photo_ids[i:i + 800]
+                placeholders = ",".join("?" for _ in chunk)
+                accepted_photo_ids.update(
+                    row["photo_id"] for row in db.conn.execute(
+                        f"""SELECT DISTINCT pk.photo_id
+                            FROM photo_keywords pk
+                            JOIN keywords k ON k.id = pk.keyword_id
+                            WHERE pk.photo_id IN ({placeholders})
+                              AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                        chunk,
+                    ).fetchall()
+                )
+            processed = set()
+            confirmable_photo_ids_by_key = {}
+            for pid in photo_ids:
+                if pid in accepted_photo_ids:
+                    continue
+                pred = top_predictions.get(pid)
+                if pred is None:
+                    continue
+                key = (
+                    "group",
+                    pred["classifier_model"],
+                    pred["group_id"],
+                ) if pred["group_id"] else ("prediction", pred["id"])
+                confirmable_photo_ids_by_key.setdefault(key, []).append(pid)
+            affected = []
+            skipped = []
+            for pid in photo_ids:
+                if pid in accepted_photo_ids:
+                    skipped.append({"photo_id": pid, "reason": "already_confirmed"})
+                    continue
+                pred = top_predictions.get(pid)
+                if pred is None:
+                    skipped.append({"photo_id": pid, "reason": "no_prediction"})
+                    continue
+                key = (
+                    "group",
+                    pred["classifier_model"],
+                    pred["group_id"],
+                ) if pred["group_id"] else ("prediction", pred["id"])
+                if key in processed:
+                    continue
+                processed.add(key)
+                result = db.accept_prediction(
+                    pred["id"],
+                    photo_ids=confirmable_photo_ids_by_key.get(key, [pid]),
+                    _commit=False,
+                )
+                if result is None:
+                    skipped.append({"photo_id": pid, "reason": "prediction_not_found"})
+                    continue
+                if not result["affected"]:
+                    skipped.extend(
+                        {"photo_id": confirm_pid, "reason": "prediction_not_found"}
+                        for confirm_pid in confirmable_photo_ids_by_key.get(key, [pid])
+                    )
+                    continue
+                items = [
+                    {
+                        "photo_id": a["photo_id"],
+                        "old_value": str(a["prediction_id"]),
+                        "new_value": str(result["keyword_id"]),
+                    }
+                    for a in result["affected"]
+                ]
+                desc = f'Accepted prediction: added "{result["species"]}"'
+                if len(items) > 1:
+                    desc += f" to {len(items)} photos"
+                db.record_edit(
+                    "prediction_accept",
+                    desc,
+                    str(result["keyword_id"]),
+                    items,
+                    is_batch=len(items) > 1,
+                    _commit=False,
+                )
+                affected.extend(items)
+            db.conn.commit()
+        except Exception:
+            db.conn.rollback()
+            raise
+        db._prune_edit_history()
+        return jsonify({"ok": True, "affected": affected, "skipped": skipped})
+
+    @app.route("/api/highlights/relabel", methods=["POST"])
+    def api_highlights_relabel():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids, error = _parse_highlight_photo_ids(body)
+        if error:
+            return json_error(error)
+        species = body.get("species", "")
+        species = species.strip() if isinstance(species, str) else ""
+        if not species:
+            return json_error("species required")
+        error, status = _validate_highlight_photo_ids(db, photo_ids)
+        if error:
+            return json_error(error, status)
+
+        top_predictions = _highlight_top_predictions(db, photo_ids)
+        ws_id = db._ws_id()
+        try:
+            kid = db.add_keyword(species, is_species=True, _commit=False)
+            items = []
+            rejected_prediction_ids = []
+            has_old_species = False
+            for pid in photo_ids:
+                pred = top_predictions.get(pid)
+                if pred is not None:
+                    db.update_prediction_status(pred["id"], "rejected", _commit=False)
+                    rejected_prediction_ids.append(pred["id"])
+
+                old_rows = db.conn.execute(
+                    """SELECT k.id, k.name, k.is_species, k.type
+                       FROM photo_keywords pk
+                       JOIN keywords k ON k.id = pk.keyword_id
+                       WHERE pk.photo_id = ?
+                         AND (k.is_species = 1 OR k.type = 'taxonomy')
+                       ORDER BY k.is_species DESC, pk.rowid DESC""",
+                    (pid,),
+                ).fetchall()
+                old_primary = old_rows[0] if old_rows else None
+                if old_primary is not None:
+                    has_old_species = True
+                for old in old_rows:
+                    db.untag_photo(pid, old["id"], _commit=False)
+                    if old["name"].strip().lower() != species.lower():
+                        _queue_keyword_remove(
+                            pid, old["name"], workspace_id=ws_id, _commit=False,
+                        )
+
+                db.tag_photo(pid, kid, _commit=False)
+                _queue_keyword_add(pid, species, workspace_id=ws_id, _commit=False)
+                old_value = str(old_primary["id"]) if old_primary else ""
+                old_keyword_ids = [old["id"] for old in old_rows]
+                if pred is not None or len(old_keyword_ids) > 1:
+                    old_payload = {
+                        "keyword_id": old_value,
+                        "keyword_ids": old_keyword_ids,
+                    }
+                    if pred is not None:
+                        old_payload.update({
+                            "prediction_id": pred["id"],
+                            "prediction_status": pred["status"],
+                        })
+                    old_value = json.dumps(old_payload, sort_keys=True)
+                items.append({
+                    "photo_id": pid,
+                    "old_value": old_value,
+                    "new_value": str(kid),
+                })
+
+            action_type = (
+                "species_replace"
+                if has_old_species
+                else "keyword_add"
+            )
+            if action_type == "species_replace":
+                desc = f'Replaced species with "{species}" on {len(photo_ids)} photos'
+            else:
+                desc = f'Set species "{species}" on {len(photo_ids)} photos'
+            db.record_edit(
+                action_type,
+                desc,
+                str(kid),
+                items,
+                is_batch=len(items) > 1,
+                _commit=False,
+            )
+            db.conn.commit()
+        except Exception:
+            db.conn.rollback()
+            raise
+        db._prune_edit_history()
+        return jsonify({
+            "ok": True,
+            "keyword_id": kid,
+            "affected": items,
+            "rejected_prediction_ids": rejected_prediction_ids,
         })
 
     @app.route("/api/highlights/bucket")
