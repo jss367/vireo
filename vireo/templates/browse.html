@@ -365,6 +365,57 @@ body {
   font-size: 12px;
   line-height: 1.4;
 }
+.capture-time-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.capture-time-field label,
+.capture-time-option {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.capture-time-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 8px 0 12px;
+}
+.capture-time-preview {
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  max-height: 220px;
+  overflow: auto;
+  margin: 10px 0 12px;
+}
+.capture-time-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(145px, 1fr) minmax(145px, 1fr);
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-primary);
+  font-size: 12px;
+  align-items: center;
+}
+.capture-time-row:last-child { border-bottom: none; }
+.capture-time-row.header {
+  color: var(--text-ghost);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--bg-secondary);
+}
+.capture-time-filename {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.capture-time-before { color: var(--text-muted); }
+.capture-time-after { color: var(--accent); }
 .detail-close {
   float: right;
   background: none;
@@ -1164,6 +1215,7 @@ body {
       <button onclick="batchSetFlag('rejected')" style="background:var(--bg-tertiary);color:var(--danger);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
       <button onclick="batchAddKeyword()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
       <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
+      <button onclick="openCaptureTimeModal()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Adjust Time</button>
       <button id="compareBtn" onclick="openBrowseCompare()" title="Compare two selected photos side by side" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Compare</button>
       <button id="burstReviewBtn" onclick="openSelectedInBurstReview()" title="Open selected photos in burst review" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Review Burst</button>
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
@@ -1401,6 +1453,43 @@ body {
     <div class="modal-actions">
       <button class="modal-btn modal-btn-primary" onclick="confirmBatchCollection()">Add</button>
       <button class="modal-btn modal-btn-cancel" onclick="hideBatchCollectionModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Capture Time Modal -->
+<div class="modal-overlay" id="captureTimeModal">
+  <div class="modal" style="width:720px;max-width:calc(100vw - 32px);">
+    <h3 id="captureTimeTitle">Adjust Capture Time</h3>
+    <div class="capture-time-hint">
+      Use this when a camera was left in the wrong timezone. Preserving the instant shifts the wall-clock time by the offset difference.
+    </div>
+    <div class="capture-time-grid">
+      <div class="capture-time-field">
+        <label for="captureTimeTargetOffset">Target offset</label>
+        <input class="modal-input" id="captureTimeTargetOffset" value="-10:00" placeholder="-10:00" oninput="updateCaptureTimePreview()">
+      </div>
+      <div class="capture-time-field">
+        <label for="captureTimeManualShift">Manual shift, minutes</label>
+        <input class="modal-input" id="captureTimeManualShift" type="number" value="0" step="1" oninput="updateCaptureTimePreview()">
+      </div>
+    </div>
+    <label class="capture-time-option">
+      <input type="radio" name="captureTimeMode" value="preserve_instant" checked onchange="syncCaptureTimeFieldState(); updateCaptureTimePreview()">
+      Set offset and preserve actual instant
+    </label>
+    <label class="capture-time-option">
+      <input type="radio" name="captureTimeMode" value="manual" onchange="syncCaptureTimeFieldState(); updateCaptureTimePreview()">
+      Use manual time shift
+    </label>
+    <label class="capture-time-option">
+      <input type="checkbox" id="captureTimeKeepBackups" checked>
+      Keep ExifTool backup files
+    </label>
+    <div id="captureTimePreview" class="capture-time-preview"></div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" id="captureTimeApplyBtn" onclick="startCaptureTimeJob()">Apply</button>
+      <button class="modal-btn modal-btn-cancel" onclick="hideCaptureTimeModal()">Cancel</button>
     </div>
   </div>
 </div>
@@ -3914,6 +4003,168 @@ async function confirmBatchCollection() {
   clearSelection();
 }
 
+var captureTimePreviewSeq = 0;
+
+function getCaptureTimeMode() {
+  var selected = document.querySelector('input[name="captureTimeMode"]:checked');
+  return selected ? selected.value : 'preserve_instant';
+}
+
+function buildCaptureTimePayload() {
+  var ids = getActiveSelection();
+  var mode = getCaptureTimeMode();
+  var targetOffset = document.getElementById('captureTimeTargetOffset').value.trim();
+  var shiftRaw = document.getElementById('captureTimeManualShift').value;
+  var shiftMinutes = parseInt(shiftRaw, 10);
+  if (isNaN(shiftMinutes)) shiftMinutes = 0;
+  return {
+    photo_ids: ids,
+    mode: mode,
+    target_offset: mode === 'manual' ? null : (targetOffset || null),
+    shift_minutes: shiftMinutes,
+    keep_backups: document.getElementById('captureTimeKeepBackups').checked,
+  };
+}
+
+function syncCaptureTimeFieldState() {
+  var mode = getCaptureTimeMode();
+  var targetInput = document.getElementById('captureTimeTargetOffset');
+  var shiftInput = document.getElementById('captureTimeManualShift');
+  if (!targetInput || !shiftInput) return;
+  if (mode === 'manual') {
+    targetInput.disabled = true;
+    targetInput.title = 'Not used in manual shift mode';
+    shiftInput.disabled = false;
+    shiftInput.title = '';
+  } else {
+    targetInput.disabled = false;
+    targetInput.title = '';
+    shiftInput.disabled = true;
+    shiftInput.title = 'Not used in preserve-instant mode';
+  }
+}
+
+function formatShiftMinutes(mins) {
+  var sign = mins >= 0 ? '+' : '';
+  var hours = mins / 60;
+  var hoursPart = Number.isInteger(hours) ? ' (' + (hours >= 0 ? '+' : '') + hours + ' hours)' : '';
+  return sign + mins + ' minutes' + hoursPart;
+}
+
+function renderCaptureTimePreview(data) {
+  var rows = data.samples || [];
+  var shiftsVary = !!data.shifts_vary;
+  var html = '<div class="capture-time-row header">' +
+    '<div>File</div><div>Current</div><div>After</div></div>';
+  rows.forEach(function(row) {
+    var before = (row.before_time || 'No capture time') + (row.before_offset ? ' ' + row.before_offset : '');
+    var after = (row.after_time || 'No capture time') + (row.after_offset ? ' ' + row.after_offset : '');
+    var perRowShift = '';
+    if (shiftsVary && typeof row.shift_minutes === 'number') {
+      perRowShift = ' <span style="color:var(--text-muted);font-size:11px;">(' + formatShiftMinutes(row.shift_minutes) + ')</span>';
+    }
+    html += '<div class="capture-time-row">' +
+      '<div class="capture-time-filename" title="' + escapeAttr(row.filename || '') + '">' + escapeHtml(row.filename || '') + '</div>' +
+      '<div class="capture-time-before">' + escapeHtml(before) + '</div>' +
+      '<div class="capture-time-after">' + escapeHtml(after) + perRowShift + '</div>' +
+    '</div>';
+  });
+  var summary;
+  if (shiftsVary) {
+    summary = 'Shift varies per photo (each photo is shifted to land on the target offset).';
+  } else if (typeof data.shift_minutes === 'number') {
+    summary = 'Resolved shift: ' + formatShiftMinutes(data.shift_minutes);
+  } else {
+    summary = 'No shift will be applied.';
+  }
+  html += '<div class="capture-time-hint" style="padding:0 10px 10px;margin:0;">' + escapeHtml(summary) + '</div>';
+  document.getElementById('captureTimePreview').innerHTML = html;
+}
+
+async function updateCaptureTimePreview() {
+  var modal = document.getElementById('captureTimeModal');
+  if (!modal.classList.contains('open')) return;
+  var payload = buildCaptureTimePayload();
+  var previewEl = document.getElementById('captureTimePreview');
+  var applyBtn = document.getElementById('captureTimeApplyBtn');
+  if (!payload.photo_ids.length) {
+    previewEl.innerHTML = '<div class="capture-time-hint" style="padding:10px;margin:0;">No photos selected.</div>';
+    applyBtn.disabled = true;
+    return;
+  }
+  var seq = ++captureTimePreviewSeq;
+  applyBtn.disabled = true;
+  previewEl.innerHTML = '<div class="capture-time-hint" style="padding:10px;margin:0;">Loading preview...</div>';
+  try {
+    var data = await safeFetch('/api/capture-time/preview', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    }, { toast: false });
+    if (seq !== captureTimePreviewSeq) return;
+    renderCaptureTimePreview(data);
+    applyBtn.disabled = false;
+    applyBtn.textContent = 'Apply to ' + payload.photo_ids.length + ' photo' + (payload.photo_ids.length === 1 ? '' : 's');
+  } catch(e) {
+    if (seq !== captureTimePreviewSeq) return;
+    previewEl.innerHTML = '<div class="capture-time-hint" style="padding:10px;margin:0;color:var(--danger);">' + escapeHtml(e.message || 'Could not build preview') + '</div>';
+    applyBtn.disabled = true;
+  }
+}
+
+function openCaptureTimeModal() {
+  var ids = getActiveSelection();
+  if (!ids.length) return;
+  document.getElementById('captureTimeTitle').textContent = 'Adjust Capture Time for ' + ids.length + ' photo' + (ids.length === 1 ? '' : 's');
+  document.getElementById('captureTimeApplyBtn').textContent = 'Apply';
+  document.getElementById('captureTimeApplyBtn').disabled = true;
+  document.getElementById('captureTimeModal').classList.add('open');
+  syncCaptureTimeFieldState();
+  updateCaptureTimePreview();
+}
+
+function hideCaptureTimeModal() {
+  document.getElementById('captureTimeModal').classList.remove('open');
+  window._vireoNativeMenuPhotoIdsOverride = null;
+}
+
+async function startCaptureTimeJob() {
+  var payload = buildCaptureTimePayload();
+  if (!payload.photo_ids.length) return;
+  var applyBtn = document.getElementById('captureTimeApplyBtn');
+  applyBtn.disabled = true;
+  try {
+    var data = await safeFetch('/api/jobs/capture-time', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    hideCaptureTimeModal();
+    showToast('Adjusting capture time for ' + payload.photo_ids.length + ' photo' + (payload.photo_ids.length === 1 ? '' : 's') + '...');
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(prog) {
+        showToast('Adjusting capture time: ' + prog.current + '/' + prog.total + ' — ' + (prog.current_file || ''));
+      },
+      onComplete: function(done) {
+        if (done.status && done.status !== 'completed') {
+          var errors = done.errors || [];
+          showToast('Capture time failed: ' + (errors[0] || done.status), 'error');
+          return;
+        }
+        var result = done.result || {};
+        showToast('Capture time updated: ' + (result.updated || 0) + ' updated, ' + (result.failed || 0) + ' failed', result.failed ? 'error' : 'success');
+        resetAndLoad();
+        loadSummary();
+      },
+      onError: function() {
+        applyBtn.disabled = false;
+      },
+    });
+  } catch(e) {
+    applyBtn.disabled = false;
+  }
+}
+
 function clearSelection() {
   anchorRestoreEpoch++;
   // Clear both tracks that feed getActiveSelection(), otherwise the batch bar
@@ -5111,6 +5362,7 @@ function buildPhotoContextMenu(photoIds) {
     { separator: true },
     { label: 'Add Keyword\u2026', onClick: function() { batchAddKeyword(); } },
     { label: 'Add to Collection\u2026', onClick: function() { addToCollection(); } },
+    { label: 'Adjust Capture Time\u2026', onClick: function() { openCaptureTimeModal(); } },
     { separator: true },
     { label: 'Delete', onClick: function() { batchDelete(); } },
   ]);

@@ -2475,6 +2475,56 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         _attach_detections(db, photos)
         return jsonify({"photos": photos})
 
+    @app.route("/api/capture-time/preview", methods=["POST"])
+    def api_capture_time_preview():
+        """Preview a capture-time correction for selected photos."""
+        from capture_time import build_capture_time_preview
+
+        db = _get_db()
+        body = request.get_json(silent=True)
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return json_error("request body must be a JSON object", 400)
+        raw_ids = body.get("photo_ids", [])
+        if not isinstance(raw_ids, list):
+            return json_error("photo_ids must be a list", 400)
+        if not raw_ids:
+            return json_error("photo_ids required", 400)
+        if len(raw_ids) > 500:
+            return json_error("too many photo_ids", 400)
+
+        photo_ids = []
+        seen = set()
+        for raw in raw_ids:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return json_error("photo_ids must be integers", 400)
+            if raw in seen:
+                continue
+            seen.add(raw)
+            photo_ids.append(raw)
+
+        photos = []
+        for pid in photo_ids[:20]:
+            photo = db.get_photo(pid, verify_workspace=True)
+            if photo:
+                photos.append(photo)
+        if not photos:
+            return json_error("no photos found", 404)
+
+        try:
+            preview = build_capture_time_preview(
+                photos,
+                mode=body.get("mode", "preserve_instant"),
+                target_offset=body.get("target_offset"),
+                shift_minutes=body.get("shift_minutes"),
+                limit=5,
+            )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        preview["count"] = len(photo_ids)
+        return jsonify(preview)
+
     @app.route("/api/pipeline/selection-results", methods=["POST"])
     def api_pipeline_selection_results():
         """Return a temporary Pipeline Review result for selected photo IDs."""
@@ -10430,6 +10480,90 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return sync_to_xmp(thread_db, progress_callback=progress_cb)
 
         job_id = runner.start("sync", work, workspace_id=active_ws)
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/jobs/capture-time", methods=["POST"])
+    def api_job_capture_time():
+        """Adjust capture timestamps and timezone offsets for selected photos."""
+        body = request.get_json(silent=True)
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return json_error("request body must be a JSON object", 400)
+        raw_ids = body.get("photo_ids", [])
+        if not isinstance(raw_ids, list):
+            return json_error("photo_ids must be a list", 400)
+        if not raw_ids:
+            return json_error("photo_ids required", 400)
+        if len(raw_ids) > 5000:
+            return json_error("too many photo_ids", 400)
+
+        photo_ids = []
+        seen = set()
+        for raw in raw_ids:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return json_error("photo_ids must be integers", 400)
+            if raw in seen:
+                continue
+            seen.add(raw)
+            photo_ids.append(raw)
+
+        mode = body.get("mode", "preserve_instant")
+        target_offset = body.get("target_offset")
+        shift_minutes = body.get("shift_minutes")
+        keep_backups = bool(body.get("keep_backups", True))
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            from capture_time import adjust_capture_time
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+            job["_start_time"] = time.time()
+            job["progress"]["total"] = len(photo_ids)
+
+            def progress_cb(current, total, filename):
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = filename
+                runner.push_event(
+                    job["id"],
+                    "progress",
+                    {
+                        "current": current,
+                        "total": total,
+                        "current_file": filename,
+                        "rate": round(
+                            current / max(time.time() - job["_start_time"], 0.01), 1
+                        ),
+                        "phase": "Adjusting capture time",
+                    },
+                )
+
+            return adjust_capture_time(
+                thread_db,
+                photo_ids,
+                mode=mode,
+                target_offset=target_offset,
+                shift_minutes=shift_minutes,
+                keep_backups=keep_backups,
+                progress_callback=progress_cb,
+                cancel_check=lambda: runner.is_cancelled(job["id"]),
+            )
+
+        job_id = runner.start(
+            "capture-time",
+            work,
+            config={
+                "photo_ids": photo_ids,
+                "mode": mode,
+                "target_offset": target_offset,
+                "shift_minutes": shift_minutes,
+                "keep_backups": keep_backups,
+            },
+            workspace_id=active_ws,
+        )
         return jsonify({"job_id": job_id})
 
     @app.route("/api/jobs/sharpness", methods=["POST"])
