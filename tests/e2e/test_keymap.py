@@ -301,6 +301,29 @@ def test_shortcuts_sheet_lists_misses_and_shared_hotkeys(live_server, page):
     assert {"key": "Alt+U", "label": "Clear pick/reject flag"} in groups["Lightbox"]
 
 
+def test_question_mark_opens_shortcuts_sheet_over_lightbox(live_server, page):
+    """The global ? shortcut should still work while the lightbox owns focus."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=15000)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate("openLightbox(1, 'hawk1.jpg')")
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=2000,
+    )
+
+    page.keyboard.press("?")
+    page.wait_for_function(
+        "document.getElementById('shortcutsCheatSheet').classList.contains('open')",
+        timeout=2000,
+    )
+
+    assert page.evaluate(
+        "document.getElementById('lightboxOverlay').classList.contains('active')"
+    ) is True
+
+
 def test_two_overlays_unwind_one_esc_each(live_server, page):
     """With lightbox open and cheat sheet stacked on top, each Esc closes one
     overlay (top-of-stack first). Locks in the new one-Esc-per-overlay model
