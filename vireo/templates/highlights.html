@@ -12,7 +12,8 @@
   .control-group { display:flex; align-items:center; gap:8px; }
   .control-group label { font-size:13px; color:var(--text-secondary); white-space:nowrap; }
   .control-group input[type=range] { width:120px; }
-  .control-group select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
+  .control-group input[type=search], .control-group select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
+  .control-group input[type=search] { width:180px; }
   .control-value { font-size:13px; color:var(--text-primary); min-width:36px; }
   .save-btn { margin-left:auto; padding:6px 16px; background:var(--accent); color:var(--accent-text); border:none; border-radius:4px; cursor:pointer; font-size:13px; }
   .save-btn:hover { opacity:0.9; }
@@ -23,12 +24,20 @@
   .bucket-meta { font-size:13px; color:var(--text-secondary); }
   .bucket-badge { display:inline-block; margin-left:8px; font-size:10px; padding:2px 6px; border-radius:8px; background:var(--bg-tertiary); color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px; }
   .bucket-badge.predicted { background:var(--bg-tertiary); color:var(--text-secondary); }
+  .bucket-badge.likely { background:rgba(34,139,34,0.16); color:var(--success); }
+  .bucket-badge.candidate { background:rgba(229,194,51,0.18); color:var(--warning); }
   .bucket-badge.accepted { background:var(--accent); color:var(--accent-text); }
   .bucket-strip { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:10px; }
   .highlights-card { position:relative; border-radius:6px; overflow:hidden; background:var(--bg-secondary); cursor:pointer; border:1px solid var(--border-primary); }
   .highlights-card:hover { border-color:var(--accent); }
+  .highlights-card.best-card { border-color:var(--accent); }
+  .best-ribbon { position:absolute; top:6px; left:6px; padding:2px 6px; border-radius:999px; background:var(--accent); color:var(--accent-text); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; }
   .highlights-card img { width:100%; aspect-ratio:3/2; object-fit:cover; display:block; background:var(--bg-tertiary); }
-  .card-info { padding:4px 8px; font-size:11px; color:var(--text-secondary); text-align:right; }
+  .card-info { padding:6px 8px; font-size:11px; color:var(--text-secondary); display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:4px; min-height:28px; }
+  .card-chip { padding:1px 5px; border-radius:999px; background:var(--bg-tertiary); white-space:nowrap; }
+  .card-chip.score { color:var(--text-primary); font-weight:600; }
+  .card-chip.conf { color:var(--text-secondary); }
+  .card-chip.reason { color:var(--text-secondary); max-width:100%; overflow:hidden; text-overflow:ellipsis; }
   .bucket-expand { margin-top:8px; font-size:13px; color:var(--accent); cursor:pointer; background:none; border:none; padding:0; }
   .bucket-expand:hover { text-decoration:underline; }
 
@@ -57,6 +66,10 @@
     <select id="folderSelect"></select>
   </div>
   <div class="control-group">
+    <label for="speciesSearch">Species</label>
+    <input type="search" id="speciesSearch" placeholder="Cardinal">
+  </div>
+  <div class="control-group">
     <label for="qualitySlider">Min quality</label>
     <input type="range" id="qualitySlider" min="0" max="100" value="0" step="5">
     <span class="control-value" id="qualityValue">0.00</span>
@@ -74,9 +87,9 @@
   <div class="control-group">
     <label for="sortSelect">Sort</label>
     <select id="sortSelect">
+      <option value="best">Best photo first</option>
       <option value="fewest">Fewest photos</option>
       <option value="most">Most photos</option>
-      <option value="best">Best photo first</option>
       <option value="worst">Worst photo first</option>
     </select>
   </div>
@@ -121,7 +134,15 @@ function escapeAttr(s) {
   return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-async function loadHighlights() {
+function formatScore(v) {
+  return v == null ? '—' : Number(v).toFixed(2);
+}
+
+function formatPercent(v) {
+  return v == null ? '' : Math.round(Number(v) * 100) + '%';
+}
+
+function requestScopeParams() {
   var params = new URLSearchParams();
   var folderSelect = document.getElementById('folderSelect');
   var firstLoad = folderSelect.options.length === 0;
@@ -132,6 +153,15 @@ async function loadHighlights() {
   }
   params.set('min_quality', (parseInt(document.getElementById('qualitySlider').value) / 100).toFixed(2));
   params.set('confidence_threshold', (parseInt(document.getElementById('confidenceSlider').value) / 100).toFixed(2));
+  return params;
+}
+
+async function loadHighlights() {
+  var params = requestScopeParams();
+  var folderSelect = document.getElementById('folderSelect');
+  var speciesSearch = document.getElementById('speciesSearch').value.trim();
+  params.set('limit_per_bucket', Math.max(20, parseInt(document.getElementById('perRowSlider').value)));
+  if (speciesSearch) params.set('species', speciesSearch);
 
   var data = await safeFetch('/api/highlights?' + params);
   currentData = data;
@@ -161,18 +191,26 @@ function sortedBuckets() {
   var buckets = (currentData.buckets || []).slice();
   buckets.sort(function(a, b) {
     if (sort === 'most') return b.photo_count - a.photo_count;
-    if (sort === 'best') return b.best_quality - a.best_quality;
-    if (sort === 'worst') return a.best_quality - b.best_quality;
+    if (sort === 'best') return (b.best_score || 0) - (a.best_score || 0);
+    if (sort === 'worst') return (a.best_score || 0) - (b.best_score || 0);
     return a.photo_count - b.photo_count; // 'fewest' default
   });
   return buckets;
 }
 
-function renderCard(p) {
+function renderCard(p, idx) {
   var thumbSrc = '/thumbnails/' + p.id + '.jpg';
-  return '<div class="highlights-card" data-photo-id="' + p.id + '">'
+  var conf = p.has_accepted_species
+    ? '<span class="card-chip conf">Tagged</span>'
+    : (p.predicted_confidence != null ? '<span class="card-chip conf">ID ' + formatPercent(p.predicted_confidence) + '</span>' : '');
+  var reasons = (p.reasons || []).slice(0, 2).map(function(r) {
+    return '<span class="card-chip reason">' + escapeAttr(r) + '</span>';
+  }).join('');
+  var title = (p.reasons || []).join(', ');
+  return '<div class="highlights-card' + (idx === 0 ? ' best-card' : '') + '" data-photo-id="' + p.id + '" title="' + escapeAttr(title) + '">'
+    + (idx === 0 ? '<div class="best-ribbon">Best</div>' : '')
     + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
-    + '<div class="card-info">' + (p.quality_score != null ? p.quality_score.toFixed(2) : '—') + '</div>'
+    + '<div class="card-info"><span class="card-chip score">' + formatScore(p.highlight_score) + '</span>' + conf + reasons + '</div>'
     + '</div>';
 }
 
@@ -195,17 +233,20 @@ function renderBucket(bucket) {
   var perRow = parseInt(document.getElementById('perRowSlider').value);
   var expanded = expandedBuckets.has(bucket.species);
   var visible = expanded ? bucket.photos : bucket.photos.slice(0, perRow);
-  var remaining = bucket.photos.length - visible.length;
+  var remaining = bucket.photo_count - visible.length;
+  var badgeClass = bucket.is_accepted ? 'accepted' : (bucket.certainty === 'likely' ? 'likely' : 'candidate');
+  var badgeText = bucket.is_accepted ? 'Confirmed' : (bucket.certainty === 'likely' ? 'Likely ID' : 'Top candidates');
   var badge = bucket.is_accepted
     ? '<span class="bucket-badge accepted">Confirmed</span>'
-    : '<span class="bucket-badge predicted">Predicted</span>';
+    : '<span class="bucket-badge ' + badgeClass + '">' + badgeText + '</span>';
   var meta = bucket.photo_count + ' photo' + (bucket.photo_count === 1 ? '' : 's')
-    + ' · best ' + bucket.best_quality.toFixed(2);
+    + ' · best ' + formatScore(bucket.best_score);
+  if (!bucket.is_accepted && bucket.avg_confidence != null) meta += ' · ID ' + formatPercent(bucket.avg_confidence);
   var expandBtn = '';
-  if (bucket.photos.length > perRow) {
+  if (bucket.photo_count > perRow) {
     expandBtn = '<button class="bucket-expand" data-species="'
       + escapeAttr(bucket.species) + '">'
-      + (expanded ? 'Show fewer' : '+ ' + remaining + ' more')
+      + (expanded ? (bucket.has_more ? 'Load more' : 'Show fewer') : '+ ' + remaining + ' more')
       + '</button>';
   }
   return '<section class="bucket">'
@@ -227,7 +268,7 @@ function renderUnidentified() {
   var expandBtn = '';
   if (unid.photo_count > perRow) {
     expandBtn = '<button class="bucket-expand" data-unid="1">'
-      + (unidentifiedExpanded ? 'Show fewer' : '+ ' + remaining + ' more')
+      + (unidentifiedExpanded ? (unid.has_more ? 'Load more' : 'Show fewer') : '+ ' + remaining + ' more')
       + '</button>';
   }
   return '<div class="unid-divider">Unidentified — Vireo couldn\'t ID these</div>'
@@ -239,6 +280,19 @@ function renderUnidentified() {
     + '<div class="bucket-strip">' + visible.map(renderCard).join('') + '</div>'
     + expandBtn
     + '</section>';
+}
+
+async function loadMoreBucket(species, isUnidentified) {
+  var params = requestScopeParams();
+  var target = isUnidentified ? currentData.unidentified : (currentData.buckets || []).find(function(b) { return b.species === species; });
+  if (!target || !target.has_more) return;
+  params.set('species', isUnidentified ? '__unidentified__' : species);
+  params.set('offset', target.photos.length);
+  params.set('limit', 500);
+  var data = await safeFetch('/api/highlights/bucket?' + params);
+  target.photos = target.photos.concat(data.photos || []);
+  target.loaded_count = data.loaded_count;
+  target.has_more = data.has_more;
 }
 
 function render() {
@@ -258,7 +312,8 @@ function render() {
   controls.style.display = '';
 
   var buckets = sortedBuckets();
-  meta.textContent = buckets.length + ' species · '
+  var speciesSearch = document.getElementById('speciesSearch').value.trim();
+  meta.textContent = buckets.length + (speciesSearch ? ' matching' : '') + ' species · '
     + currentData.meta.eligible + ' of '
     + currentData.meta.total_in_scope + ' photos scored';
 
@@ -280,13 +335,23 @@ function render() {
 
   // Expand buttons
   content.querySelectorAll('.bucket-expand').forEach(function(btn) {
-    btn.addEventListener('click', function() {
+    btn.addEventListener('click', async function() {
       if (btn.hasAttribute('data-unid')) {
-        unidentifiedExpanded = !unidentifiedExpanded;
+        if (!unidentifiedExpanded || currentData.unidentified.has_more) {
+          unidentifiedExpanded = true;
+          await loadMoreBucket(null, true);
+        } else {
+          unidentifiedExpanded = false;
+        }
       } else {
         var sp = btn.getAttribute('data-species');
-        if (expandedBuckets.has(sp)) expandedBuckets.delete(sp);
-        else expandedBuckets.add(sp);
+        var bucket = (currentData.buckets || []).find(function(b) { return b.species === sp; });
+        if (!expandedBuckets.has(sp) || (bucket && bucket.has_more)) {
+          expandedBuckets.add(sp);
+          await loadMoreBucket(sp, false);
+        } else {
+          expandedBuckets.delete(sp);
+        }
       }
       render();
     });
@@ -304,6 +369,9 @@ document.getElementById('qualitySlider').addEventListener('input', function() {
 });
 document.getElementById('confidenceSlider').addEventListener('input', function() {
   document.getElementById('confidenceValue').textContent = (this.value / 100).toFixed(2);
+  debounceLoad();
+});
+document.getElementById('speciesSearch').addEventListener('input', function() {
   debounceLoad();
 });
 document.getElementById('perRowSlider').addEventListener('input', function() {

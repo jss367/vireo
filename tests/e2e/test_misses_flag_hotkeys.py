@@ -145,3 +145,17 @@ def test_misses_honors_modifier_rebind(live_server, page):
     page.keyboard.press("Alt+x")
     flag = _wait_for_flag(db, pid, "rejected")
     assert flag == "rejected", f"expected 'rejected' after Alt+X, got {flag!r}"
+
+
+def test_misses_grid_does_not_draw_detection_boxes(live_server, page):
+    """Miss cards show clean thumbnails; bbox inspection belongs in lightbox."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    _seed_miss(db, pid, "clipped")
+
+    page.goto(f"{url}/misses")
+    card = page.locator(f"[data-testid='miss-card-clipped-{pid}']")
+    card.wait_for(state="visible", timeout=3000)
+
+    assert card.locator(".miss-bbox").count() == 0

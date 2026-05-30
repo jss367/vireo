@@ -9,6 +9,10 @@ single-folder. This test locks in the fix by asserting that on first render,
 the photos shown reflect workspace scope (blending every folder with quality
 data) and the dropdown selection matches.
 """
+import json
+from urllib.parse import quote
+from urllib.request import urlopen
+
 from playwright.sync_api import expect
 
 
@@ -83,3 +87,123 @@ def test_initial_load_matches_default_workspace_scope(live_server, page):
         f"got bucket titles {species_text!r}. This likely means the first "
         f"fetch used folder scope and the UI/data are out of sync."
     )
+
+
+def test_highlights_ranks_species_by_rich_subject_score(live_server, page):
+    """Best image should use persisted subject quality, not only legacy score.
+
+    The first hawk has a low legacy ``quality_score`` but strong subject
+    metrics; the second has a high legacy score but soft/clipped/incomplete
+    subject metrics. Highlights should put the real photographic keeper first.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    hawk_good, hawk_bad = data["photos"][0], data["photos"][1]
+    db.conn.execute(
+        """UPDATE photos
+           SET quality_score = 0.20,
+               subject_tenengrad = 900,
+               bg_tenengrad = 20,
+               crop_complete = 0.98,
+               bg_separation = 10,
+               subject_clip_high = 0.0,
+               subject_clip_low = 0.0,
+               subject_y_median = 115,
+               noise_estimate = 4,
+               subject_size = 0.10
+           WHERE id = ?""",
+        (hawk_good,),
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET quality_score = 0.95,
+               subject_tenengrad = 20,
+               bg_tenengrad = 400,
+               crop_complete = 0.35,
+               bg_separation = 200,
+               subject_clip_high = 0.65,
+               subject_clip_low = 0.0,
+               subject_y_median = 245,
+               noise_estimate = 90,
+               subject_size = 0.01
+           WHERE id = ?""",
+        (hawk_bad,),
+    )
+    db.conn.commit()
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+    expect(hawk_section.locator(".highlights-card img").first).to_have_attribute(
+        "alt", "hawk1.jpg"
+    )
+
+
+def test_highlights_species_search_filters_buckets(live_server, page):
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    expect(page.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    with page.expect_response(
+        lambda r: "/api/highlights?" in r.url and "species=robin" in r.url.lower()
+    ):
+        page.locator("#speciesSearch").fill("robin")
+    expect(page.locator(".bucket-title")).to_have_count(1)
+    expect(page.locator(".bucket-title").first).to_contain_text("American Robin")
+    assert not any(
+        "Red-tailed Hawk" in title
+        for title in page.locator(".bucket-title").all_inner_texts()
+    )
+
+
+def test_highlights_api_limits_initial_bucket_and_loads_more(live_server):
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    hawk_kid = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("Red-tailed Hawk",)
+    ).fetchone()["id"]
+    folder_id = data["folders"][0]
+    for i in range(25):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=f"extra-hawk-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=1.0,
+            timestamp=f"2024-03-11T08:{i:02d}:00",
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = ? WHERE id = ?",
+            (0.7 - i * 0.001, pid),
+        )
+        db.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, hawk_kid),
+        )
+    db.conn.commit()
+
+    base = live_server["url"]
+    with urlopen(f"{base}/api/highlights?scope=workspace&limit_per_bucket=5") as resp:
+        payload = json.load(resp)
+    hawk = next(b for b in payload["buckets"] if b["species"] == "Red-tailed Hawk")
+    assert hawk["photo_count"] == 28
+    assert hawk["loaded_count"] == 5
+    assert hawk["has_more"] is True
+    assert len(hawk["photos"]) == 5
+
+    species = quote("Red-tailed Hawk")
+    with urlopen(
+        f"{base}/api/highlights/bucket?scope=workspace&species={species}&offset=5&limit=10"
+    ) as resp:
+        chunk = json.load(resp)
+    assert chunk["photo_count"] == 28
+    assert chunk["loaded_count"] == 15
+    assert chunk["has_more"] is True
+    assert len(chunk["photos"]) == 10
