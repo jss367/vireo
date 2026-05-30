@@ -593,10 +593,10 @@ function updateHighlightsLightboxControls(photoId) {
   }
   panel.style.display = '';
   var html = '<span>' + escapeAttr(photoCurrentLabel(photo)) + '</span>';
-  if (!photo.has_accepted_species && photo.prediction_id) {
+  if (photo.is_confirmable_prediction) {
     html += '<button class="primary" data-lb-action="confirm">Confirm</button>';
   }
-  html += '<button data-lb-action="change">' + (photo.prediction_id || photo.has_accepted_species ? 'Change' : 'Set species') + '</button>';
+  html += '<button data-lb-action="change">' + (photo.is_confirmable_prediction || photo.has_accepted_species ? 'Change' : 'Set species') + '</button>';
   panel.innerHTML = html;
   panel.querySelectorAll('button').forEach(function(btn) {
     btn.addEventListener('click', function(event) {
@@ -604,7 +604,7 @@ function updateHighlightsLightboxControls(photoId) {
       if (btn.getAttribute('data-lb-action') === 'confirm') {
         confirmPhotoIds([photo.id], btn);
       } else {
-        var modalTitle = (photo.prediction_id || photo.has_accepted_species)
+        var modalTitle = (photo.is_confirmable_prediction || photo.has_accepted_species)
           ? 'Change species'
           : 'Set species';
         showSpeciesModal(modalTitle, photo.filename || '', [photo.id], photoSpeciesName(photo));

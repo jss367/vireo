@@ -315,6 +315,11 @@ def _collect_highlight_buckets(candidates, confidence_threshold):
             "predicted_species": r.get("predicted_species"),
             "predicted_confidence": predicted_conf,
             "has_accepted_species": accepted is not None,
+            "is_confirmable_prediction": (
+                accepted is None
+                and species is not None
+                and r.get("prediction_id") is not None
+            ),
         }
 
         if species is None:

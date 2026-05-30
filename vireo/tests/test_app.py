@@ -4280,6 +4280,7 @@ def test_highlights_predictions_above_threshold_populate_buckets(app_and_db):
     assert photo["prediction_id"] is not None
     assert photo["predicted_species"] == "ʻIʻiwi"
     assert photo["predicted_confidence"] == 0.82
+    assert photo["is_confirmable_prediction"] is True
     assert data["unidentified"]["photo_count"] == 0
 
     # Threshold 0.90 — prediction below threshold, photo falls to Unidentified
@@ -4287,6 +4288,10 @@ def test_highlights_predictions_above_threshold_populate_buckets(app_and_db):
     data = resp.get_json()
     assert data["buckets"] == []
     assert data["unidentified"]["photo_count"] == 1
+    photo = data["unidentified"]["photos"][0]
+    assert photo["prediction_id"] is not None
+    assert photo["predicted_species"] == "ʻIʻiwi"
+    assert photo["is_confirmable_prediction"] is False
 
 
 def test_highlights_confirm_accepts_current_prediction(app_and_db):
