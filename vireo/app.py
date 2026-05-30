@@ -2797,6 +2797,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return " · ".join(parts)
 
     def _coerce_place_id(candidate):
+        """Return a stripped string ``place_id`` for any JSON scalar value."""
         if candidate is None:
             return ""
         if isinstance(candidate, str):
@@ -2804,6 +2805,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return str(candidate).strip()
 
     def _extract_place_id(body):
+        """Extract ``place_id`` from top-level or nested client place payloads."""
         candidate = body.get("place_id")
         if candidate is None and isinstance(body.get("place"), dict):
             candidate = body["place"].get("place_id")
