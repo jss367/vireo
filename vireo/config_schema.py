@@ -123,6 +123,12 @@ SCHEMA = {
         "label": "Sync pick/reject flags to XMP",
         "desc": "Write Vireo pick/reject flags to XMP sidecars using Lightroom-compatible pick metadata.",
     },
+    "write_assigned_location_to_xmp": {
+        "type": "bool",
+        "category": "Metadata", "scope": "both",
+        "label": "Write assigned locations to XMP",
+        "desc": "Write Vireo-assigned location coordinates to XMP sidecars so Lightroom exports can include GPS metadata.",
+    },
     "scan_workers": {
         "type": "int", "min": 0, "max": 64,
         "category": "Behavior", "scope": "global",

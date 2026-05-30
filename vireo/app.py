@@ -2696,6 +2696,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 workspace_id=workspace_id, _commit=_commit,
             )
 
+    def _queue_location_sync_if_enabled(photo_id, workspace_id=None, _commit=True):
+        """Queue GPS sidecar sync for location edits when the setting is enabled."""
+        db = _get_db()
+        import config as cfg
+
+        enabled = bool(
+            db.get_effective_config(cfg.load()).get(
+                "write_assigned_location_to_xmp", False
+            )
+        )
+        if not enabled:
+            return
+        db.remove_pending_changes(
+            photo_id, "location", workspace_id=workspace_id, _commit=_commit,
+        )
+        db.queue_change(
+            photo_id, "location", "effective",
+            workspace_id=workspace_id, _commit=_commit,
+        )
+
     # -- Edit API routes --
 
     @app.route("/api/photos/<int:photo_id>/rating", methods=["POST"])
@@ -3337,6 +3357,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "error_detail": str(err),
             }), 409
         db.set_photo_location(photo_id, leaf_id)
+        _queue_location_sync_if_enabled(photo_id)
         db.record_edit(
             'location_set',
             f"set location: {details.get('name', 'unknown')}",
@@ -3371,6 +3392,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Defensive: validation above should already catch empty input.
             return json_error("missing name", 400)
         db.set_photo_location(photo_id, leaf_id)
+        _queue_location_sync_if_enabled(photo_id)
         db.record_edit(
             'location_set',
             f"set location: {stripped}",
@@ -3388,6 +3410,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ).fetchone() is None:
             return json_error("photo_not_found", 404)
         db.clear_photo_location(photo_id)
+        _queue_location_sync_if_enabled(photo_id)
         db.record_edit(
             'location_clear',
             "cleared location",
@@ -3551,6 +3574,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             str(result['keyword_id']),
             [],
         )
+
+        photo_rows = db.conn.execute(
+            "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+            (result["keyword_id"],),
+        ).fetchall()
+        for row in photo_rows:
+            _queue_location_sync_if_enabled(row["photo_id"])
 
         return jsonify({
             "keyword": _serialize_keyword(db, result["keyword_id"]),
@@ -8615,9 +8645,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             params.append("taxon_name=" + species)
         if photo["timestamp"]:
             params.append("observed_on=" + photo["timestamp"][:10])
-        lat = photo["latitude"] if "latitude" in photo.keys() else None
-        lng = photo["longitude"] if "longitude" in photo.keys() else None
-        if lat and lng:
+        loc = db.get_effective_photo_location(photo_id)
+        lat = loc["latitude"] if loc else None
+        lng = loc["longitude"] if loc else None
+        if lat is not None and lng is not None:
             params.append("lat=" + str(lat))
             params.append("lng=" + str(lng))
 
@@ -8703,8 +8734,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         taxon = data.get("taxon_name") or (pred["scientific_name"] if pred else None) or (pred["species"] if pred else None)
         observed_on = data.get("observed_on") or (photo["timestamp"][:10] if photo["timestamp"] else None)
-        photo_lat = photo["latitude"] if "latitude" in photo.keys() else None
-        photo_lng = photo["longitude"] if "longitude" in photo.keys() else None
+        loc = db.get_effective_photo_location(photo_id)
+        photo_lat = loc["latitude"] if loc else None
+        photo_lng = loc["longitude"] if loc else None
         lat = data.get("latitude") if data.get("latitude") is not None else photo_lat
         lng = data.get("longitude") if data.get("longitude") is not None else photo_lng
 
@@ -8775,8 +8807,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             taxon = sub.get("taxon_name") or (pred["scientific_name"] if pred else None) or (pred["species"] if pred else None)
             observed_on = sub.get("observed_on") or (photo["timestamp"][:10] if photo["timestamp"] else None)
-            photo_lat = photo["latitude"] if "latitude" in photo.keys() else None
-            photo_lng = photo["longitude"] if "longitude" in photo.keys() else None
+            loc = db.get_effective_photo_location(photo_id)
+            photo_lat = loc["latitude"] if loc else None
+            photo_lng = loc["longitude"] if loc else None
             lat = sub.get("latitude") if sub.get("latitude") is not None else photo_lat
             lng = sub.get("longitude") if sub.get("longitude") is not None else photo_lng
 

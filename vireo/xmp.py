@@ -17,6 +17,8 @@ NS_DC = "http://purl.org/dc/elements/1.1/"
 NS_LR = "http://ns.adobe.com/lightroom/1.0/"
 NS_XMP = "http://ns.adobe.com/xap/1.0/"
 NS_XMPDM = "http://ns.adobe.com/xmp/1.0/DynamicMedia/"
+NS_EXIF = "http://ns.adobe.com/exif/1.0/"
+NS_VIREO = "https://vireo.app/ns/1.0/"
 
 # Register namespaces so ET preserves prefixes on output
 ET.register_namespace("x", NS_X)
@@ -27,9 +29,10 @@ ET.register_namespace("xmp", NS_XMP)
 ET.register_namespace("xmpDM", NS_XMPDM)
 ET.register_namespace("crs", "http://ns.adobe.com/camera-raw-settings/1.0/")
 ET.register_namespace("photoshop", "http://ns.adobe.com/photoshop/1.0/")
-ET.register_namespace("exif", "http://ns.adobe.com/exif/1.0/")
+ET.register_namespace("exif", NS_EXIF)
 ET.register_namespace("tiff", "http://ns.adobe.com/tiff/1.0/")
 ET.register_namespace("aux", "http://ns.adobe.com/exif/1.0/aux/")
+ET.register_namespace("vireo", NS_VIREO)
 
 
 # ── Private helpers ─────────────────────────────────────────────────────
@@ -96,6 +99,15 @@ def _get_or_create_description(root):
     if desc is None:
         desc = ET.SubElement(rdf, f"{{{NS_RDF}}}Description")
     return desc
+
+
+def _format_gps_coordinate(value, positive_ref, negative_ref):
+    """Return an XMP GPSCoordinate string such as ``48,51.398N``."""
+    ref = positive_ref if value >= 0 else negative_ref
+    absolute = abs(float(value))
+    degrees = int(absolute)
+    minutes = (absolute - degrees) * 60.0
+    return f"{degrees},{minutes:.6f}{ref}"
 
 
 # ── Public API ──────────────────────────────────────────────────────────
@@ -235,6 +247,77 @@ def write_pick_flag(xmp_path, flag):
     desc.set(f"{{{NS_XMPDM}}}pick", values[flag])
     ET.indent(tree, space="  ")
     tree.write(xmp_path, xml_declaration=True, encoding="unicode")
+
+
+def write_gps_location(xmp_path, latitude, longitude, source="assigned"):
+    """Write Lightroom-compatible GPS coordinates to an XMP sidecar.
+
+    A small Vireo marker records that these GPS fields were written by Vireo,
+    so ``remove_vireo_gps_location`` can clear stale assigned-location GPS
+    without touching unrelated GPS metadata from another application.
+    """
+    root, tree = _load_or_create_xmp(xmp_path)
+    desc = _get_or_create_description(root)
+    marker = f"{{{NS_VIREO}}}gpsSource"
+    exif_attrs = {
+        "GPSLatitude": f"{{{NS_EXIF}}}GPSLatitude",
+        "GPSLongitude": f"{{{NS_EXIF}}}GPSLongitude",
+        "GPSMapDatum": f"{{{NS_EXIF}}}GPSMapDatum",
+        "GPSVersionID": f"{{{NS_EXIF}}}GPSVersionID",
+    }
+
+    # First Vireo write: preserve any GPS another app had already written so
+    # clearing the Vireo-assigned location can restore it. Rewrites of an
+    # existing Vireo GPS keep the original backup.
+    if marker not in desc.attrib:
+        for name, attr in exif_attrs.items():
+            if attr in desc.attrib:
+                desc.set(f"{{{NS_VIREO}}}previous{name}", desc.attrib[attr])
+
+    desc.set(exif_attrs["GPSLatitude"], _format_gps_coordinate(latitude, "N", "S"))
+    desc.set(exif_attrs["GPSLongitude"], _format_gps_coordinate(longitude, "E", "W"))
+    desc.set(exif_attrs["GPSMapDatum"], "WGS-84")
+    desc.set(exif_attrs["GPSVersionID"], "2.3.0.0")
+    desc.set(marker, source or "assigned")
+    ET.indent(tree, space="  ")
+    tree.write(xmp_path, xml_declaration=True, encoding="unicode")
+
+
+def remove_vireo_gps_location(xmp_path):
+    """Remove GPS fields only when Vireo previously wrote them."""
+    result = _parse_xmp(xmp_path)
+    if result is None:
+        return False
+
+    root, tree = result
+    desc = root.find(f".//{{{NS_RDF}}}Description")
+    if desc is None:
+        return False
+
+    marker = f"{{{NS_VIREO}}}gpsSource"
+    if marker not in desc.attrib:
+        return False
+
+    removed = False
+    for name in ("GPSLatitude", "GPSLongitude", "GPSMapDatum", "GPSVersionID"):
+        gps_attr = f"{{{NS_EXIF}}}{name}"
+        previous_attr = f"{{{NS_VIREO}}}previous{name}"
+        if previous_attr in desc.attrib:
+            desc.set(gps_attr, desc.attrib[previous_attr])
+            del desc.attrib[previous_attr]
+            removed = True
+        elif gps_attr in desc.attrib:
+            del desc.attrib[gps_attr]
+            removed = True
+
+    if marker in desc.attrib:
+        del desc.attrib[marker]
+        removed = True
+
+    if removed:
+        ET.indent(tree, space="  ")
+        tree.write(xmp_path, xml_declaration=True, encoding="unicode")
+    return removed
 
 
 def remove_keywords(xmp_path, keywords_to_remove):

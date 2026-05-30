@@ -21,6 +21,7 @@ DEFAULTS = {
     "preview_max_size": 1920,
     "keyword_case": "auto",
     "sync_flags_to_xmp": True,
+    "write_assigned_location_to_xmp": False,
     "max_edit_history": 1000,
     "inat_token": "",
     "hf_token": "",

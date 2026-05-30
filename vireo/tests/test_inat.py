@@ -185,6 +185,29 @@ def test_api_inat_prepare_includes_submission_status(app_and_db):
     assert data['existing_observation_url'] == "https://www.inaturalist.org/observations/999"
 
 
+def test_api_inat_prepare_uses_assigned_location_coords(app_and_db):
+    app, db, pid = app_and_db
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?)",
+        ("Paris Airbnb", 48.8566, 2.3522),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f'/api/inat/prepare/{pid}')
+    data = resp.get_json()
+
+    assert data['latitude'] == 48.8566
+    assert data['longitude'] == 2.3522
+    assert "lat=48.8566" in data["upload_url"]
+    assert "lng=2.3522" in data["upload_url"]
+
+
 def test_api_inat_submit_no_token(app_and_db):
     app, db, pid = app_and_db
     client = app.test_client()
@@ -208,6 +231,32 @@ def test_api_inat_submit_success(app_and_db):
     # Verify recorded in DB
     subs = db.get_inat_submissions([pid])
     assert pid in subs
+
+
+def test_api_inat_submit_uses_assigned_location_coords(app_and_db):
+    app, db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?)",
+        ("Paris Airbnb", 48.8566, 2.3522),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    with patch("inat.submit_observation", return_value=(12345, "https://www.inaturalist.org/observations/12345")) as mock_submit:
+        resp = client.post('/api/inat/submit', json={'photo_id': pid})
+
+    assert resp.status_code == 200
+    kwargs = mock_submit.call_args.kwargs
+    assert kwargs["latitude"] == 48.8566
+    assert kwargs["longitude"] == 2.3522
 
 
 def test_api_inat_submit_batch(app_and_db):

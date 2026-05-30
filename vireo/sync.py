@@ -4,7 +4,15 @@ import logging
 import os
 from collections import defaultdict
 
-from xmp import read_keywords, remove_keywords, write_pick_flag, write_rating, write_sidecar
+from xmp import (
+    read_keywords,
+    remove_keywords,
+    remove_vireo_gps_location,
+    write_gps_location,
+    write_pick_flag,
+    write_rating,
+    write_sidecar,
+)
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +87,7 @@ def sync_to_xmp(db, progress_callback=None):
             keywords_to_remove = set()
             new_rating = None
             new_flag = None
+            sync_location = False
             supported_ids = []
             unsupported_changes = []
 
@@ -98,6 +107,9 @@ def sync_to_xmp(db, progress_callback=None):
                         supported_ids.append(c["id"])
                     else:
                         unsupported_changes.append(c)
+                elif c["change_type"] == "location":
+                    sync_location = True
+                    supported_ids.append(c["id"])
 
             # Write keywords
             if keywords_to_add:
@@ -118,6 +130,18 @@ def sync_to_xmp(db, progress_callback=None):
             # Write rating
             if new_rating is not None:
                 write_rating(xmp_path, new_rating)
+
+            if sync_location:
+                loc = db.get_effective_photo_location(photo_id)
+                if loc and loc.get("latitude") is not None and loc.get("longitude") is not None:
+                    write_gps_location(
+                        xmp_path,
+                        loc["latitude"],
+                        loc["longitude"],
+                        source=loc.get("source") or "assigned",
+                    )
+                else:
+                    remove_vireo_gps_location(xmp_path)
 
             if supported_ids:
                 synced += 1

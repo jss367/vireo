@@ -3175,6 +3175,63 @@ def test_get_geolocated_photos_with_partial_exif_uses_keyword_pair(tmp_path):
     assert r['keyword_location_name'] == 'Central Park'
 
 
+def test_get_effective_photo_location_prefers_exif(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='both.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET latitude=?, longitude=? WHERE id=?",
+        (37.7749, -122.4194, pid),
+    )
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?)",
+        ('Paris Airbnb', 48.8566, 2.3522),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+
+    loc = db.get_effective_photo_location(pid)
+    assert loc["source"] == "exif"
+    assert loc["latitude"] == 37.7749
+    assert loc["longitude"] == -122.4194
+    assert loc["keyword_location_name"] is None
+
+
+def test_get_effective_photo_location_falls_back_to_keyword_pair(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='assigned.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET latitude=?, longitude=NULL WHERE id=?",
+        (37.7749, pid),
+    )
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, place_id, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?, ?)",
+        ('Paris Airbnb', 'place_123', 48.8566, 2.3522),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+
+    loc = db.get_effective_photo_location(pid)
+    assert loc["source"] == "keyword"
+    assert loc["latitude"] == 48.8566
+    assert loc["longitude"] == 2.3522
+    assert loc["keyword_location_name"] == "Paris Airbnb"
+    assert loc["place_id"] == "place_123"
+
+
 def test_get_accepted_species(tmp_path):
     """get_accepted_species returns distinct marker species from geolocated photos."""
     from db import Database
