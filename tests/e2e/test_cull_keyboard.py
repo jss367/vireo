@@ -73,3 +73,19 @@ def test_cull_arrow_keys_ignore_form_controls(live_server, page):
     page.keyboard.press("ArrowRight")
 
     expect(page.locator(".pose-group.focused .pose-label")).to_contain_text("Encounter 1")
+
+
+def test_cull_arrow_keys_ignore_modified_browser_shortcuts(live_server, page):
+    page.route(
+        "**/api/pipeline/page-init",
+        lambda route: route.fulfill(json={"results": _pipeline_results_for_cull_keyboard()}),
+    )
+
+    page.goto(f"{live_server['url']}/cull")
+    expect(page.locator(".pose-group.focused .pose-label")).to_contain_text("Encounter 1")
+
+    page.keyboard.press("Alt+ArrowRight")
+    expect(page.locator(".pose-group.focused .pose-label")).to_contain_text("Encounter 1")
+
+    page.keyboard.press("Meta+ArrowRight")
+    expect(page.locator(".pose-group.focused .pose-label")).to_contain_text("Encounter 1")

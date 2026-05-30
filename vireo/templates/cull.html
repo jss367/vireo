@@ -870,6 +870,7 @@ function cullKeyTargetIsEditable(target) {
 document.addEventListener('keydown', function(e) {
   if (e.defaultPrevented) return;
   if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+  if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
   if (cullKeyTargetIsEditable(e.target)) return;
   if (document.querySelector('.lightbox-overlay.active, .modal-overlay.open, .help-overlay.active, .report-overlay.active')) return;
   if (moveFocusedCullGroup(e.key === 'ArrowRight' ? 1 : -1)) {
