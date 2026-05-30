@@ -3387,9 +3387,21 @@ function browseKeyMatchesConfiguredShortcut(e) {
 
 /* ---------- Infinite Scroll ---------- */
 var gridContainer = document.getElementById('gridContainer');
+var infiniteScrollObserverDisconnected = false;
 var observer = new IntersectionObserver(function(entries) {
   if (entries[0].isIntersecting) loadPhotos();
 }, { root: gridContainer, rootMargin: '1200px 0px' });
+
+var _observerObserve = observer.observe.bind(observer);
+var _observerDisconnect = observer.disconnect.bind(observer);
+observer.observe = function(target) {
+  infiniteScrollObserverDisconnected = false;
+  return _observerObserve(target);
+};
+observer.disconnect = function() {
+  infiniteScrollObserverDisconnected = true;
+  return _observerDisconnect();
+};
 observer.observe(document.getElementById('scrollSentinel'));
 
 function rearmInfiniteScrollObserver() {
@@ -3397,6 +3409,7 @@ function rearmInfiniteScrollObserver() {
   // bootstrap or page loads. Re-observing asks IntersectionObserver to deliver
   // a fresh callback for the current layout instead of waiting for a scroll
   // transition that may never occur.
+  if (infiniteScrollObserverDisconnected) return;
   if (allLoaded || typeof observer === 'undefined') return;
   var sentinel = document.getElementById('scrollSentinel');
   if (!sentinel) return;
