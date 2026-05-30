@@ -7990,7 +7990,8 @@ class Database:
                 self.conn.commit()
             return {"species": species, "keyword_id": kid, "affected": affected}
         except Exception:
-            self.conn.rollback()
+            if _commit:
+                self.conn.rollback()
             raise
 
     # -- Detections --
