@@ -3565,6 +3565,44 @@ def test_post_keyword_link_place_rejects_non_finite_client_coords(app_and_db):
     assert row["longitude"] is None
 
 
+def test_post_keyword_link_place_falls_back_on_malformed_client_geometry(
+    app_and_db, monkeypatch,
+):
+    """Malformed client geometry should not turn a valid request into a 500."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    captured = {}
+
+    def fake_place_details(place_id, key):
+        captured["place_id"] = place_id
+        captured["key"] = key
+        return _central_park_details()
+
+    monkeypatch.setattr(places, "place_details", fake_place_details)
+    kw_id = db.get_or_create_text_location("Central Park")
+    place = _central_park_client_place()
+    place["geometry"] = "bad"
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={
+            "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+            "place": place,
+        },
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    assert captured == {
+        "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+        "key": "FAKE-KEY",
+    }
+    assert resp.get_json()["keyword"]["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+
+
 def test_post_keyword_link_place_rejects_mismatched_client_place_id(app_and_db):
     """A client place payload must not bind one place_id to another place's geometry."""
     import config as cfg

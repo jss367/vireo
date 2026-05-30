@@ -2838,7 +2838,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     return value
             return None
 
-        geometry_location = ((raw.get("geometry") or {}).get("location") or {})
+        geometry = raw.get("geometry")
+        geometry_location = {}
+        if isinstance(geometry, dict):
+            location = geometry.get("location")
+            if isinstance(location, dict):
+                geometry_location = location
         lat_value = first_present(
             raw.get("lat"),
             raw.get("latitude"),
