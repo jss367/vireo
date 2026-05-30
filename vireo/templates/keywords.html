@@ -741,12 +741,22 @@
       // `input`; binding twice triggers two `place_changed` events).
       _activeLinkAutocomplete = new google.maps.places.Autocomplete(input, {
         types: ['geocode', 'establishment'],
-        fields: ['place_id', 'name', 'formatted_address'],
+        fields: [
+          'place_id',
+          'name',
+          'formatted_address',
+          'geometry',
+          'address_components'
+        ],
       });
       _activeLinkAutocomplete.addListener('place_changed', function() {
         const place = _activeLinkAutocomplete.getPlace();
         if (place && place.place_id && _activeLinkKeywordId) {
-          submitLinkPlace(_activeLinkKeywordId, place.place_id);
+          submitLinkPlace(
+            _activeLinkKeywordId,
+            place.place_id,
+            normalizeGooglePlaceForSubmit(place)
+          );
         }
       });
     } catch(err) {
@@ -762,14 +772,41 @@
     _hideLinkError();
   }
 
-  async function submitLinkPlace(keywordId, placeId) {
+  function normalizeGooglePlaceForSubmit(place) {
+    if (!place || !place.place_id) return null;
+    const loc = place.geometry && place.geometry.location;
+    let lat = null;
+    let lng = null;
+    if (loc) {
+      lat = (typeof loc.lat === 'function') ? loc.lat() : loc.lat;
+      lng = (typeof loc.lng === 'function') ? loc.lng() : loc.lng;
+    }
+    if (lat == null || lng == null) return null;
+    return {
+      place_id: place.place_id,
+      name: place.name || place.formatted_address || '',
+      lat: lat,
+      lng: lng,
+      address_components: (place.address_components || []).map(function(c) {
+        return {
+          name: c.long_name || c.name || '',
+          short_name: c.short_name || '',
+          types: c.types || [],
+        };
+      }),
+    };
+  }
+
+  async function submitLinkPlace(keywordId, placeId, placeDetails) {
     _hideLinkError();
+    const body = {place_id: placeId};
+    if (placeDetails) body.place = placeDetails;
     let resp;
     try {
       resp = await fetch('/api/keywords/' + keywordId + '/link-place', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({place_id: placeId}),
+        body: JSON.stringify(body),
       });
     } catch(err) {
       _showLinkError('Network error: ' + (err && err.message || err));

@@ -4454,7 +4454,13 @@ async function bindLocationAutocomplete() {
     if (!google || !google.maps || !google.maps.places) return;
     _locationAutocomplete = new google.maps.places.Autocomplete(input, {
       types: ['geocode', 'establishment'],
-      fields: ['place_id', 'name', 'formatted_address'],
+      fields: [
+        'place_id',
+        'name',
+        'formatted_address',
+        'geometry',
+        'address_components'
+      ],
     });
     _locationAutocomplete.addListener('place_changed', function() {
       var place = _locationAutocomplete.getPlace();
@@ -4467,7 +4473,7 @@ async function bindLocationAutocomplete() {
         clearTimeout(_locationPendingTextSubmit);
         _locationPendingTextSubmit = null;
       }
-      _submitLocationPlace(place.place_id);
+      _submitLocationPlace(place.place_id, normalizeGooglePlaceForSubmit(place));
     });
   }).catch(function(err) {
     console.warn('Google Maps load failed:', err);
@@ -4475,15 +4481,42 @@ async function bindLocationAutocomplete() {
   });
 }
 
-async function _submitLocationPlace(placeId) {
+function normalizeGooglePlaceForSubmit(place) {
+  if (!place || !place.place_id) return null;
+  var loc = place.geometry && place.geometry.location;
+  var lat = null;
+  var lng = null;
+  if (loc) {
+    lat = (typeof loc.lat === 'function') ? loc.lat() : loc.lat;
+    lng = (typeof loc.lng === 'function') ? loc.lng() : loc.lng;
+  }
+  if (lat == null || lng == null) return null;
+  return {
+    place_id: place.place_id,
+    name: place.name || place.formatted_address || '',
+    lat: lat,
+    lng: lng,
+    address_components: (place.address_components || []).map(function(c) {
+      return {
+        name: c.long_name || c.name || '',
+        short_name: c.short_name || '',
+        types: c.types || [],
+      };
+    }),
+  };
+}
+
+async function _submitLocationPlace(placeId, placeDetails) {
   var photoId = window._detailPhotoId;
   if (!photoId) return;
   _hideLocationError();
+  var body = { place_id: placeId };
+  if (placeDetails) body.place = placeDetails;
   try {
     var resp = await safeFetch('/api/photos/' + photoId + '/location', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ place_id: placeId }),
+      body: JSON.stringify(body),
     });
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
