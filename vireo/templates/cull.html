@@ -858,6 +858,7 @@ function moveFocusedCullGroup(delta) {
   var current = refs.findIndex(cullGroupMatches);
   if (current < 0) current = 0;
   var next = Math.max(0, Math.min(refs.length - 1, current + delta));
+  if (next === current) return false;
   return focusCullGroup(refs[next], true);
 }
 
