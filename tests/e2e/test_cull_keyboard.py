@@ -49,10 +49,14 @@ def test_cull_arrow_keys_move_between_encounters(live_server, page):
 
     expect(page.locator(".pose-group")).to_have_count(3)
     expect(page.locator(".pose-group.focused .pose-label")).to_contain_text("Encounter 1")
+    page.keyboard.press("ArrowLeft")
+    expect(page.locator(".pose-group.focused .pose-label")).to_contain_text("Encounter 1")
 
     page.keyboard.press("ArrowRight")
     expect(page.locator(".pose-group.focused .pose-label")).to_contain_text("Encounter 2")
 
+    page.keyboard.press("ArrowRight")
+    expect(page.locator(".pose-group.focused .pose-label")).to_contain_text("Encounter 3")
     page.keyboard.press("ArrowRight")
     expect(page.locator(".pose-group.focused .pose-label")).to_contain_text("Encounter 3")
 
