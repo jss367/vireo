@@ -6817,9 +6817,10 @@ class Database:
 
         Each row carries:
           * ``species`` — accepted species keyword (NULL if none accepted)
-          * ``predicted_species`` / ``predicted_confidence`` — top-confidence
-            non-rejected prediction across the photo's detections (NULL if
-            no usable prediction exists)
+          * ``prediction_id`` / ``predicted_species`` /
+            ``predicted_confidence`` — top-confidence non-rejected prediction
+            across the photo's detections (NULL if no usable prediction
+            exists)
 
         Only photos with ``quality_score >= min_quality`` that are not
         user-rejected are returned, ordered by ``quality_score`` DESC.
@@ -6840,6 +6841,7 @@ class Database:
                       p.subject_size, p.sharpness, p.phash_crop,
                       p.dino_subject_embedding, p.dino_global_embedding,
                       bp.species,
+                      tp.prediction_id,
                       tp.predicted_species,
                       tp.predicted_confidence
                FROM photos p
@@ -6859,10 +6861,11 @@ class Database:
                ) bp ON bp.photo_id = p.id
                LEFT JOIN (
                    SELECT photo_id,
+                          id AS prediction_id,
                           species AS predicted_species,
                           confidence AS predicted_confidence
                    FROM (
-                       SELECT d.photo_id, pr.species, pr.confidence,
+                       SELECT d.photo_id, pr.id, pr.species, pr.confidence,
                               ROW_NUMBER() OVER (
                                   PARTITION BY d.photo_id
                                   ORDER BY pr.confidence DESC, pr.id DESC

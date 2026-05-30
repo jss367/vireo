@@ -4107,6 +4107,10 @@ def test_highlights_predictions_above_threshold_populate_buckets(app_and_db):
     assert len(data["buckets"]) == 1
     assert data["buckets"][0]["species"] == "ʻIʻiwi"
     assert data["buckets"][0]["is_accepted"] is False
+    photo = data["buckets"][0]["photos"][0]
+    assert photo["prediction_id"] is not None
+    assert photo["predicted_species"] == "ʻIʻiwi"
+    assert photo["predicted_confidence"] == 0.82
     assert data["unidentified"]["photo_count"] == 0
 
     # Threshold 0.90 — prediction below threshold, photo falls to Unidentified
@@ -4114,6 +4118,114 @@ def test_highlights_predictions_above_threshold_populate_buckets(app_and_db):
     data = resp.get_json()
     assert data["buckets"] == []
     assert data["unidentified"]["photo_count"] == 1
+
+
+def test_highlights_confirm_accepts_current_prediction(app_and_db):
+    """POST /api/highlights/confirm accepts the server-resolved top prediction."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hc', 'hc', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'confirm.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Bald Eagle", 0.91, "m")
+    db.add_prediction(det, "House Sparrow", 0.42, "m")
+    pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE species = 'Bald Eagle'"
+    ).fetchone()
+    sibling = db.conn.execute(
+        "SELECT id FROM predictions WHERE species = 'House Sparrow'"
+    ).fetchone()
+
+    resp = client.post("/api/highlights/confirm", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    assert db.get_review_status(pred["id"], db._ws_id()) == "accepted"
+    assert db.get_review_status(sibling["id"], db._ws_id()) == "rejected"
+    assert "Bald Eagle" in {kw["name"] for kw in db.get_photo_keywords(pid)}
+    history = db.get_edit_history(limit=1)
+    assert history[0]["action_type"] == "prediction_accept"
+
+
+def test_highlights_relabel_rejects_prediction_and_replaces_species(app_and_db):
+    """POST /api/highlights/relabel retags photos and rejects the stale prediction."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hr', 'hr', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'relabel.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Bald Eagle", 0.88, "m")
+    pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE species = 'Bald Eagle'"
+    ).fetchone()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "House Sparrow"},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    assert db.get_review_status(pred["id"], db._ws_id()) == "rejected"
+    keywords = {kw["name"] for kw in db.get_photo_keywords(pid)}
+    assert "House Sparrow" in keywords
+    assert "Bald Eagle" not in keywords
+    history = db.get_edit_history(limit=1)
+    assert history[0]["action_type"] == "species_replace"
+
+
+def test_highlights_relabel_unidentified_sets_species(app_and_db):
+    """Relabel also works for unidentified photos with no prediction to reject."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hu', 'hu', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'unid.jpg', 0.7, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Song Sparrow"},
+    )
+    assert resp.status_code == 200
+    assert "Song Sparrow" in {kw["name"] for kw in db.get_photo_keywords(pid)}
 
 
 def test_highlights_accepted_species_wins_over_higher_confidence_prediction(app_and_db):
