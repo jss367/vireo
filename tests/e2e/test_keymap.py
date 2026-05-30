@@ -320,6 +320,12 @@ def test_question_mark_opens_shortcuts_sheet_over_lightbox(live_server, page):
         timeout=2000,
     )
 
+    assert page.evaluate("""
+        () => {
+          const el = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2);
+          return !!(el && el.closest('#shortcutsCheatSheet'));
+        }
+    """) is True
     assert page.evaluate(
         "document.getElementById('lightboxOverlay').classList.contains('active')"
     ) is True
