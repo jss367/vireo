@@ -240,6 +240,31 @@ def test_ephemeral_tab_pin_button_persists_tab(live_server, page):
     )
 
 
+def test_map_tab_can_be_pinned_before_leaflet_cdn_finishes(live_server, page):
+    """The navbar must initialize without waiting for /map's CDN scripts."""
+    url = live_server["url"]
+
+    held_routes = []
+
+    def hold_unpkg(route):
+        if route.request.url.endswith(".css"):
+            route.fulfill(status=200, content_type="text/css", body="")
+            return
+        held_routes.append(route)
+
+    page.route("https://unpkg.com/**", hold_unpkg)
+    page.goto(f"{url}/map", wait_until="commit")
+    page.wait_for_selector(".nav-tab[data-nav-id='map'].is-ephemeral", timeout=3000)
+    page.click("[data-testid='nav-tab-pin-map']")
+    page.wait_for_selector(
+        ".nav-tab[data-nav-id='map']:not(.is-ephemeral)", timeout=3000
+    )
+    assert held_routes, "Expected Leaflet JS to be requested from unpkg.com"
+
+    for route in held_routes:
+        route.abort()
+
+
 def test_rapid_review_ephemeral_tab_pin_button_persists_tab(live_server, page):
     """Rapid Review can be pinned from its ephemeral tab."""
     url = live_server["url"]
