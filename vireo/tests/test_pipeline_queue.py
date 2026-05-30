@@ -1002,8 +1002,8 @@ def test_get_history_excludes_queued_rows(tmp_path):
 
         blocker.set()
         for fid in filler_ids:
-            wait_for_job_via_runner(runner, fid)
-        wait_for_job_via_runner(runner, queued_id)
+            wait_for_job_via_runner(runner, fid, wait_for_history=True)
+        wait_for_job_via_runner(runner, queued_id, wait_for_history=True)
 
         # After completion the live rows DO appear in history.
         history_ids = [j["id"] for j in runner.get_history(db, limit=50)]
