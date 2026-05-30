@@ -2796,6 +2796,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return ""
         return " · ".join(parts)
 
+    def _extract_place_id(body):
+        candidate = body.get("place_id")
+        if candidate is None and isinstance(body.get("place"), dict):
+            candidate = body["place"].get("place_id")
+        if candidate is None and isinstance(body.get("details"), dict):
+            candidate = body["details"].get("place_id")
+        if candidate is None:
+            return ""
+        if isinstance(candidate, str):
+            return candidate.strip()
+        return str(candidate).strip()
+
     def _normalize_client_place_details(body):
         """Normalize a Google Maps JS Place payload from the request body.
 
@@ -2808,9 +2820,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(raw, dict):
             return None
 
-        place_id = str(
-            raw.get("place_id") or body.get("place_id") or ""
-        ).strip()
+        place_id = _extract_place_id(body)
         if not place_id:
             return None
 
@@ -2835,6 +2845,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lat = float(lat_value)
             lng = float(lng_value)
         except (TypeError, ValueError):
+            return None
+        if (
+            not math.isfinite(lat)
+            or not math.isfinite(lng)
+            or lat < -90
+            or lat > 90
+            or lng < -180
+            or lng > 180
+        ):
             return None
 
         components = []
@@ -2959,12 +2978,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ``type='location'`` link).
         """
         body = request.get_json(silent=True) or {}
-        place_id = (
-            body.get("place_id")
-            or ((body.get("place") or {}).get("place_id") if isinstance(body.get("place"), dict) else "")
-            or ((body.get("details") or {}).get("place_id") if isinstance(body.get("details"), dict) else "")
-            or ""
-        ).strip()
+        place_id = _extract_place_id(body)
         if not place_id:
             return json_error("missing place_id", 400)
 
@@ -3159,12 +3173,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
           underlying RuntimeError for debugging.
         """
         body = request.get_json(silent=True) or {}
-        place_id = (
-            body.get("place_id")
-            or ((body.get("place") or {}).get("place_id") if isinstance(body.get("place"), dict) else "")
-            or ((body.get("details") or {}).get("place_id") if isinstance(body.get("details"), dict) else "")
-            or ""
-        ).strip()
+        place_id = _extract_place_id(body)
         if not place_id:
             return json_error("missing place_id", 400)
 

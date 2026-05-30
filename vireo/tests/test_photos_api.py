@@ -2775,6 +2775,29 @@ def test_post_photo_location_accepts_client_place_details_without_server_lookup(
     ]
 
 
+def test_post_photo_location_normalizes_non_string_client_place_id(app_and_db):
+    """Nested client place_id values are string-normalized before use."""
+    import config as cfg
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+
+    place = _central_park_client_place()
+    place["place_id"] = 12345
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={"place": place},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    loc = resp.get_json()["location"]
+    assert loc["place_id"] == "12345"
+
+
 def test_post_photo_location_returns_400_on_missing_place_id(app_and_db):
     """Empty body / missing place_id is a 400 — never reaches Google."""
     app, db = app_and_db
@@ -3509,6 +3532,37 @@ def test_post_keyword_link_place_accepts_client_place_details_without_server_loo
     assert [p["name"] for p in kw["parent_chain"]] == [
         "United States", "New York", "New York County", "New York",
     ]
+
+
+def test_post_keyword_link_place_rejects_non_finite_client_coords(app_and_db):
+    """Client-supplied coordinates must be finite and in valid lat/lng bounds."""
+    import config as cfg
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+    kw_id = db.get_or_create_text_location("Central Park")
+
+    place = _central_park_client_place()
+    place["geometry"]["location"]["lat"] = "NaN"
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={
+            "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+            "place": place,
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "no_api_key"
+
+    row = db.conn.execute(
+        "SELECT place_id, latitude, longitude FROM keywords WHERE id = ?",
+        (kw_id,),
+    ).fetchone()
+    assert row["place_id"] is None
+    assert row["latitude"] is None
+    assert row["longitude"] is None
 
 
 def test_post_keyword_link_place_merges_when_place_id_already_taken(
