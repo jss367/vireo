@@ -9779,6 +9779,11 @@ class Database:
                 )
         self.conn.commit()
 
+    def create_default_collections_for_all_workspaces(self):
+        """Create missing default smart collections in every workspace."""
+        for ws in self.get_workspaces():
+            self.create_default_collections(workspace_id=ws["id"])
+
     def migrate_default_subject_collection(self):
         """Rename legacy 'Needs Classification' (with rule has_species==0)
         to 'Needs Identification' (rule has_subject==0) across ALL workspaces.

@@ -1358,6 +1358,40 @@ def test_default_collections_adds_missing(tmp_path):
     assert len(colls) == 6  # no duplicate Flagged
 
 
+def test_default_collections_for_all_workspaces_adds_missing_defaults(tmp_path):
+    """Startup seeding covers non-active workspaces in upgraded databases."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws1 = db.ensure_default_workspace()
+    ws2 = db.create_workspace("ws-b")
+
+    # Simulate an upgraded multi-workspace database where only one workspace
+    # already had the older default set. The all-workspaces startup pass should
+    # add the new Needs Location default everywhere without duplicating Flagged.
+    db.conn.execute(
+        "INSERT INTO collections (workspace_id, name, rules) VALUES (?, ?, ?)",
+        (
+            ws2,
+            "Flagged",
+            json.dumps([{"field": "flag", "op": "equals", "value": "flagged"}]),
+        ),
+    )
+    db.conn.commit()
+
+    db.set_active_workspace(ws1)
+    db.create_default_collections_for_all_workspaces()
+
+    for ws in (ws1, ws2):
+        rows = db.conn.execute(
+            "SELECT name FROM collections WHERE workspace_id = ?", (ws,),
+        ).fetchall()
+        names = [r["name"] for r in rows]
+        assert "Needs Location" in names
+        assert names.count("Flagged") == 1
+
+
 def test_default_collection_uses_has_subject_for_new_workspaces(tmp_path):
     """A newly-created workspace gets 'Needs Identification' (not 'Needs
     Classification') with the has_subject==0 rule."""

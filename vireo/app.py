@@ -1124,7 +1124,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # because the target name already exists, leaving a duplicate.
     init_db.migrate_default_subject_collection()
     init_db.migrate_default_needs_identification_collection()
-    init_db.create_default_collections()
+    init_db.create_default_collections_for_all_workspaces()
 
     # Wildlife backfill timing:
     # - Subsequent boots: marker is set, nothing to do, fast.
@@ -4185,6 +4185,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Activate the new workspace
         db.set_active_workspace(ws_id)
+        db.create_default_collections(workspace_id=ws_id)
         db.update_workspace(ws_id, last_opened_at=datetime.now().isoformat())
 
         # Return the target workspace's saved page path
