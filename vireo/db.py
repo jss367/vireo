@@ -9766,6 +9766,10 @@ class Database:
                 "Recent Import",
                 [{"field": "timestamp", "op": "recent_days", "value": 30}],
             ),
+            (
+                "Needs Location",
+                [{"field": "location_keyword_missing", "op": "equals", "value": 1}],
+            ),
         ]
         for name, rules in defaults:
             if name not in existing_names:

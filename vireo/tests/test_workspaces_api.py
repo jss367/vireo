@@ -102,7 +102,7 @@ def test_create_workspace_seeds_default_collections(app_and_db):
     ).fetchall()
     names = {r["name"] for r in rows}
     assert {"All Photos", "Needs Identification", "Untagged",
-            "Flagged", "Recent Import"} <= names
+            "Flagged", "Recent Import", "Needs Location"} <= names
 
 
 def test_update_workspace(app_and_db):

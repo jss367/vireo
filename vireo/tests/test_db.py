@@ -1320,6 +1320,7 @@ def test_default_collections_created(tmp_path):
     assert 'Untagged' in names
     assert 'Flagged' in names
     assert 'Recent Import' in names
+    assert 'Needs Location' in names
 
 
 def test_default_collections_idempotent(tmp_path):
@@ -1332,7 +1333,7 @@ def test_default_collections_idempotent(tmp_path):
     db.create_default_collections()
 
     colls = db.get_collections()
-    assert len(colls) == 5
+    assert len(colls) == 6
 
 
 def test_default_collections_adds_missing(tmp_path):
@@ -1353,7 +1354,8 @@ def test_default_collections_adds_missing(tmp_path):
     assert 'Needs Identification' in names
     assert 'Untagged' in names
     assert 'Recent Import' in names
-    assert len(colls) == 5  # no duplicate Flagged
+    assert 'Needs Location' in names
+    assert len(colls) == 6  # no duplicate Flagged
 
 
 def test_default_collection_uses_has_subject_for_new_workspaces(tmp_path):
@@ -1491,10 +1493,47 @@ def test_upgrade_path_no_duplicate_collection(tmp_path):
         {"field": "has_subject", "op": "equals", "value": 0},
         {"field": "wildlife_excluded", "op": "equals", "value": 0},
     ]
-    # Sanity: total default-collection count is 5, not 6 (no duplicate).
+    # Sanity: default collections include one Needs Identification, not a
+    # duplicate alongside the legacy Needs Classification.
     default_names = {"All Photos", "Needs Identification", "Untagged",
-                     "Flagged", "Recent Import"}
+                     "Flagged", "Recent Import", "Needs Location"}
     assert default_names.issubset(cols.keys())
+
+
+def test_default_needs_location_collection_matches_gps_without_location_keyword(tmp_path):
+    """The default Needs Location collection surfaces geotagged photos that
+    still need Vireo's structured location keyword."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    needs_location = db.add_photo(
+        folder_id=fid, filename='gps-no-location.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    no_gps = db.add_photo(
+        folder_id=fid, filename='no-gps.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    has_location = db.add_photo(
+        folder_id=fid, filename='gps-with-location.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET latitude = 1.0, longitude = 2.0 WHERE id IN (?, ?)",
+        (needs_location, has_location),
+    )
+    loc_kw = db.add_keyword("Yosemite", kw_type="location")
+    db.tag_photo(has_location, loc_kw)
+
+    db.create_default_collections()
+    cid = next(c["id"] for c in db.get_collections()
+               if c["name"] == "Needs Location")
+
+    pids = {p["id"] for p in db.get_collection_photos(cid, per_page=999)}
+    assert pids == {needs_location}
 
 
 def test_default_genre_keywords_inserted(tmp_path):
