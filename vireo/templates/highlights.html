@@ -290,6 +290,7 @@ async function loadSpeciesSuggestions() {
       list.appendChild(opt);
     });
   } catch (e) {
+    speciesSuggestionsLoaded = false;
     // Free typing still works if suggestions cannot be loaded.
   }
 }
@@ -519,7 +520,10 @@ function updateHighlightsLightboxControls(photoId) {
       if (btn.getAttribute('data-lb-action') === 'confirm') {
         confirmPhotoIds([photo.id], btn);
       } else {
-        showSpeciesModal('Change species', photo.filename || '', [photo.id], photoSpeciesName(photo));
+        var modalTitle = (photo.prediction_id || photo.has_accepted_species)
+          ? 'Change species'
+          : 'Set species';
+        showSpeciesModal(modalTitle, photo.filename || '', [photo.id], photoSpeciesName(photo));
       }
     });
   });

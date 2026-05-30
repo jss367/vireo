@@ -7804,7 +7804,7 @@ class Database:
         ).fetchone()
         return bool(row["is_species"]) if row else False
 
-    def accept_prediction(self, prediction_id, replace_species=False):
+    def accept_prediction(self, prediction_id, replace_species=False, _commit=True):
         """Accept a prediction: mark as accepted and add species keyword.
 
         If the prediction belongs to a group, derives the consensus species
@@ -7817,8 +7817,8 @@ class Database:
         list carries the ``old_species`` names that were stripped from that
         photo (empty when ``replace_species`` is False).
 
-        All database changes are performed atomically in a single transaction.
-        On failure, all changes are rolled back.
+        All database changes are performed atomically in a single transaction
+        unless ``_commit`` is False and the caller owns the transaction.
         """
         ws = self._ws_id()
         pred = self.conn.execute(
@@ -7954,7 +7954,8 @@ class Database:
             else:
                 _accept_for_photo(pred["photo_id"], prediction_id)
 
-            self.conn.commit()
+            if _commit:
+                self.conn.commit()
             return {"species": species, "keyword_id": kid, "affected": affected}
         except Exception:
             self.conn.rollback()
@@ -8930,7 +8931,9 @@ class Database:
                 if entry['action_type'] == 'keyword_add':
                     self._restore_edit_prediction_status(old_meta)
                 if entry['action_type'] == 'prediction_accept' and old_val:
-                    pred_id = int(old_val)
+                    pred_id = self._edit_prediction_id(old_meta, old_val)
+                    if pred_id is None:
+                        continue
                     ws = self._ws_id()
                     # Restore predictions to pre-accept state. Scope by
                     # labels_fingerprint too — without it, undoing an accept
@@ -9000,7 +9003,7 @@ class Database:
                 # old one, symmetrically reversing the pending-change queue.
                 old_meta = self._edit_old_value_meta(old_val)
                 new_kid = int(item['new_value']) if item['new_value'] else None
-                old_kid = old_meta.get("keyword_id")
+                old_kids = old_meta.get("keyword_ids") or []
                 if new_kid:
                     self.untag_photo(pid, new_kid)
                     new_kw = self.conn.execute(
@@ -9012,7 +9015,7 @@ class Database:
                         )
                         if cancelled == 0:
                             self.queue_change(pid, 'keyword_remove', new_kw['name'])
-                if old_kid:
+                for old_kid in old_kids:
                     self.tag_photo(pid, old_kid)
                     old_kw = self.conn.execute(
                         "SELECT name FROM keywords WHERE id = ?", (old_kid,)
@@ -9059,7 +9062,9 @@ class Database:
                 if entry['action_type'] == 'keyword_add':
                     self._reject_edit_prediction(old_meta)
                 if entry['action_type'] == 'prediction_accept' and item['old_value']:
-                    pred_id = int(item['old_value'])
+                    pred_id = self._edit_prediction_id(old_meta, item['old_value'])
+                    if pred_id is None:
+                        continue
                     ws = self._ws_id()
                     self.update_prediction_status(pred_id, 'accepted')
                     # Re-reject siblings, scoped to the same labels_fingerprint
@@ -9107,8 +9112,8 @@ class Database:
                 # Re-apply the swap: untag old, retag new, mirror pending queue.
                 old_meta = self._edit_old_value_meta(item['old_value'])
                 new_kid = int(new_val) if new_val else None
-                old_kid = old_meta.get("keyword_id")
-                if old_kid:
+                old_kids = old_meta.get("keyword_ids") or []
+                for old_kid in old_kids:
                     self.untag_photo(pid, old_kid)
                     old_kw = self.conn.execute(
                         "SELECT name FROM keywords WHERE id = ?", (old_kid,)
@@ -9135,22 +9140,40 @@ class Database:
     def _edit_old_value_meta(self, old_value):
         """Parse edit item old_value, including newer JSON metadata payloads."""
         if not old_value:
-            return {"keyword_id": None}
+            return {"keyword_id": None, "keyword_ids": []}
         if isinstance(old_value, str) and old_value.lstrip().startswith("{"):
             try:
                 data = json.loads(old_value)
             except (TypeError, ValueError):
                 return {"keyword_id": None}
             keyword_id = data.get("keyword_id")
+            keyword_ids = data.get("keyword_ids")
             try:
                 data["keyword_id"] = int(keyword_id) if keyword_id else None
             except (TypeError, ValueError):
                 data["keyword_id"] = None
+            if not isinstance(keyword_ids, list):
+                keyword_ids = [data["keyword_id"]] if data["keyword_id"] else []
+            parsed_ids = []
+            for kid in keyword_ids:
+                with contextlib.suppress(TypeError, ValueError):
+                    parsed_ids.append(int(kid))
+            data["keyword_ids"] = parsed_ids
             return data
         try:
-            return {"keyword_id": int(old_value)}
+            keyword_id = int(old_value)
+            return {"keyword_id": keyword_id, "keyword_ids": [keyword_id]}
         except (TypeError, ValueError):
-            return {"keyword_id": None}
+            return {"keyword_id": None, "keyword_ids": []}
+
+    def _edit_prediction_id(self, meta, fallback):
+        raw = meta.get("prediction_id") if meta else None
+        if raw is None:
+            raw = fallback
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
 
     def _restore_edit_prediction_status(self, meta):
         pred_id = meta.get("prediction_id")

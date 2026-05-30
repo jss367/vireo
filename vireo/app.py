@@ -4168,63 +4168,70 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if error:
             return json_error(error, status)
 
-        top_predictions = _highlight_top_predictions(db, photo_ids)
-        accepted_photo_ids = set()
-        for i in range(0, len(photo_ids), 800):
-            chunk = photo_ids[i:i + 800]
-            placeholders = ",".join("?" for _ in chunk)
-            accepted_photo_ids.update(
-                row["photo_id"] for row in db.conn.execute(
-                    f"""SELECT DISTINCT pk.photo_id
-                        FROM photo_keywords pk
-                        JOIN keywords k ON k.id = pk.keyword_id
-                        WHERE pk.photo_id IN ({placeholders})
-                          AND k.is_species = 1""",
-                    chunk,
-                ).fetchall()
-            )
-        processed = set()
-        affected = []
-        skipped = []
-        for pid in photo_ids:
-            if pid in accepted_photo_ids:
-                skipped.append({"photo_id": pid, "reason": "already_confirmed"})
-                continue
-            pred = top_predictions.get(pid)
-            if pred is None:
-                skipped.append({"photo_id": pid, "reason": "no_prediction"})
-                continue
-            key = (
-                "group",
-                pred["classifier_model"],
-                pred["group_id"],
-            ) if pred["group_id"] else ("prediction", pred["id"])
-            if key in processed:
-                continue
-            processed.add(key)
-            result = db.accept_prediction(pred["id"])
-            if result is None:
-                skipped.append({"photo_id": pid, "reason": "prediction_not_found"})
-                continue
-            items = [
-                {
-                    "photo_id": a["photo_id"],
-                    "old_value": str(a["prediction_id"]),
-                    "new_value": str(result["keyword_id"]),
-                }
-                for a in result["affected"]
-            ]
-            desc = f'Accepted prediction: added "{result["species"]}"'
-            if len(items) > 1:
-                desc += f" to {len(items)} photos"
-            db.record_edit(
-                "prediction_accept",
-                desc,
-                str(result["keyword_id"]),
-                items,
-                is_batch=len(items) > 1,
-            )
-            affected.extend(items)
+        try:
+            top_predictions = _highlight_top_predictions(db, photo_ids)
+            accepted_photo_ids = set()
+            for i in range(0, len(photo_ids), 800):
+                chunk = photo_ids[i:i + 800]
+                placeholders = ",".join("?" for _ in chunk)
+                accepted_photo_ids.update(
+                    row["photo_id"] for row in db.conn.execute(
+                        f"""SELECT DISTINCT pk.photo_id
+                            FROM photo_keywords pk
+                            JOIN keywords k ON k.id = pk.keyword_id
+                            WHERE pk.photo_id IN ({placeholders})
+                              AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                        chunk,
+                    ).fetchall()
+                )
+            processed = set()
+            affected = []
+            skipped = []
+            for pid in photo_ids:
+                if pid in accepted_photo_ids:
+                    skipped.append({"photo_id": pid, "reason": "already_confirmed"})
+                    continue
+                pred = top_predictions.get(pid)
+                if pred is None:
+                    skipped.append({"photo_id": pid, "reason": "no_prediction"})
+                    continue
+                key = (
+                    "group",
+                    pred["classifier_model"],
+                    pred["group_id"],
+                ) if pred["group_id"] else ("prediction", pred["id"])
+                if key in processed:
+                    continue
+                processed.add(key)
+                result = db.accept_prediction(pred["id"], _commit=False)
+                if result is None:
+                    skipped.append({"photo_id": pid, "reason": "prediction_not_found"})
+                    continue
+                items = [
+                    {
+                        "photo_id": a["photo_id"],
+                        "old_value": str(a["prediction_id"]),
+                        "new_value": str(result["keyword_id"]),
+                    }
+                    for a in result["affected"]
+                ]
+                desc = f'Accepted prediction: added "{result["species"]}"'
+                if len(items) > 1:
+                    desc += f" to {len(items)} photos"
+                db.record_edit(
+                    "prediction_accept",
+                    desc,
+                    str(result["keyword_id"]),
+                    items,
+                    is_batch=len(items) > 1,
+                    _commit=False,
+                )
+                affected.extend(items)
+            db.conn.commit()
+        except Exception:
+            db.conn.rollback()
+            raise
+        db._prune_edit_history()
         return jsonify({"ok": True, "affected": affected, "skipped": skipped})
 
     @app.route("/api/highlights/relabel", methods=["POST"])
@@ -4277,12 +4284,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 db.tag_photo(pid, kid, _commit=False)
                 _queue_keyword_add(pid, species, workspace_id=ws_id, _commit=False)
                 old_value = str(old_primary["id"]) if old_primary else ""
-                if pred is not None:
-                    old_value = json.dumps({
+                old_keyword_ids = [old["id"] for old in old_rows]
+                if pred is not None or len(old_keyword_ids) > 1:
+                    old_payload = {
                         "keyword_id": old_value,
-                        "prediction_id": pred["id"],
-                        "prediction_status": pred["status"],
-                    }, sort_keys=True)
+                        "keyword_ids": old_keyword_ids,
+                    }
+                    if pred is not None:
+                        old_payload.update({
+                            "prediction_id": pred["id"],
+                            "prediction_status": pred["status"],
+                        })
+                    old_value = json.dumps(old_payload, sort_keys=True)
                 items.append({
                     "photo_id": pid,
                     "old_value": old_value,
