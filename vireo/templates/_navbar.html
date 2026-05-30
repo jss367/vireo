@@ -4599,6 +4599,14 @@ document.addEventListener('keydown', function(e) {
     else if (matchesShortcut(e, unflagKey)) lbFlag = 'none';
     if (lbFlag !== null && _lightboxCurrentId != null) {
       var pid = _lightboxCurrentId;
+      if (
+        typeof window.handleMissesLightboxFlagShortcut === 'function' &&
+        window.handleMissesLightboxFlagShortcut(pid, lbFlag) === true
+      ) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
       _lbApplyFlag(pid, lbFlag);
       e.preventDefault();
       e.stopImmediatePropagation();
