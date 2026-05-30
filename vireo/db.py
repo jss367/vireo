@@ -9773,6 +9773,10 @@ class Database:
                 "Recent Import",
                 [{"field": "timestamp", "op": "recent_days", "value": 30}],
             ),
+            (
+                "Needs Location",
+                [{"field": "location_keyword_missing", "op": "equals", "value": 1}],
+            ),
         ]
         for name, rules in defaults:
             if name not in existing_names:
@@ -9781,6 +9785,11 @@ class Database:
                     (name, json.dumps(rules), ws_id),
                 )
         self.conn.commit()
+
+    def create_default_collections_for_all_workspaces(self):
+        """Create missing default smart collections in every workspace."""
+        for ws in self.get_workspaces():
+            self.create_default_collections(workspace_id=ws["id"])
 
     def migrate_default_subject_collection(self):
         """Rename legacy 'Needs Classification' (with rule has_species==0)

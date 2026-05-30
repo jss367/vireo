@@ -1372,7 +1372,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # workspace overrides. Gated by a marker so it runs once; re-saved
     # legacy values are preserved on subsequent boots.
     cfg.migrate_legacy_miss_thresholds(init_db)
-    init_db.create_default_collections()
+    init_db.create_default_collections_for_all_workspaces()
 
     # Wildlife backfill timing:
     # - Subsequent boots: marker is set, nothing to do, fast.
@@ -4501,6 +4501,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Activate the new workspace
         db.set_active_workspace(ws_id)
+        db.create_default_collections(workspace_id=ws_id)
         db.update_workspace(ws_id, last_opened_at=datetime.now().isoformat())
 
         # Return the target workspace's saved page path
