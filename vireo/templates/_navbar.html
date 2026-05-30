@@ -2163,7 +2163,12 @@ window.NAV_ALL_PAGES = [
     },
   };
 
-  if (document.readyState === 'loading') {
+  // The tab strip only needs the navbar DOM above, not the full page. Start it
+  // immediately so pages with slow blocking scripts (notably /map's Leaflet
+  // CDN scripts) still show an ephemeral tab that can be pinned.
+  if (STRIP()) {
+    fetchAndRender();
+  } else if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', fetchAndRender);
   } else {
     fetchAndRender();
