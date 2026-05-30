@@ -149,7 +149,7 @@ def test_api_misses_config_returns_thresholds(client, db_with_misses):
     assert r.status_code == 200
     data = r.get_json()
     assert data["detector_confidence"] == pytest.approx(0.2)
-    assert data["miss_det_confidence"] == pytest.approx(0.25)
+    assert data["miss_det_confidence"] == pytest.approx(0.20)
     assert data["miss_classifier_override_conf"] == pytest.approx(0.8)
 
 

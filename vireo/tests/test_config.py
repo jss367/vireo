@@ -405,11 +405,162 @@ def test_miss_defaults_present():
     import config as cfg
     d = cfg.DEFAULTS["pipeline"]
     assert d["miss_enabled"] is True
-    assert d["miss_det_confidence"] == 0.25
-    assert d["miss_det_confidence_burst"] == 0.15
+    assert d["miss_det_confidence"] == 0.20
+    assert d["miss_det_confidence_burst"] == 0.12
     assert d["miss_bbox_area_min"] == 0.005
     assert d["miss_bbox_area_min_singleton"] == 0.002
     assert d["miss_oof_ratio"] == 0.5
+
+
+def _write_raw(path, data):
+    import json as _json
+    with open(path, "w") as f:
+        _json.dump(data, f)
+
+
+def _read_raw(path):
+    import json as _json
+    with open(path) as f:
+        return _json.load(f)
+
+
+def test_migrate_legacy_miss_thresholds_rewrites_exact_pair(tmp_path, monkeypatch):
+    """An install with the previous default pair persisted gets rewritten."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {
+            "miss_det_confidence": 0.25,
+            "miss_det_confidence_burst": 0.15,
+        },
+    })
+
+    assert cfg.migrate_legacy_miss_thresholds() is True
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["miss_det_confidence"] == 0.20
+    assert raw["pipeline"]["miss_det_confidence_burst"] == 0.12
+    assert cfg.MIGRATION_MISS_THRESHOLDS in raw["_migrations_applied"]
+
+
+def test_migrate_legacy_miss_thresholds_preserves_customized(tmp_path, monkeypatch):
+    """A user who set a non-default pair (e.g. 0.30/0.18) is left alone."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {
+            "miss_det_confidence": 0.30,
+            "miss_det_confidence_burst": 0.18,
+        },
+    })
+
+    cfg.migrate_legacy_miss_thresholds()
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["miss_det_confidence"] == 0.30
+    assert raw["pipeline"]["miss_det_confidence_burst"] == 0.18
+    assert cfg.MIGRATION_MISS_THRESHOLDS in raw["_migrations_applied"]
+
+
+def test_migrate_legacy_miss_thresholds_skips_partial_pair(tmp_path, monkeypatch):
+    """If only the singleton matches the legacy default but the burst is
+    custom (or missing), neither is rewritten — the exact pair gate is what
+    distinguishes 'never touched defaults' from 'partial customization'."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {
+            "miss_det_confidence": 0.25,
+            "miss_det_confidence_burst": 0.10,
+        },
+    })
+
+    cfg.migrate_legacy_miss_thresholds()
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["miss_det_confidence"] == 0.25
+    assert raw["pipeline"]["miss_det_confidence_burst"] == 0.10
+
+
+def test_migrate_legacy_miss_thresholds_is_one_time(tmp_path, monkeypatch):
+    """Once the marker is set, a user who explicitly re-saves the legacy
+    pair (e.g. 25% via the slider) is NOT silently rewritten on next load.
+    """
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {
+            "miss_det_confidence": 0.25,
+            "miss_det_confidence_burst": 0.15,
+        },
+    })
+    cfg.migrate_legacy_miss_thresholds()
+
+    # User explicitly re-saves 25%/15% later — paired by the settings UI.
+    raw = _read_raw(cfg.CONFIG_PATH)
+    raw["pipeline"]["miss_det_confidence"] = 0.25
+    raw["pipeline"]["miss_det_confidence_burst"] = 0.15
+    _write_raw(cfg.CONFIG_PATH, raw)
+
+    assert cfg.migrate_legacy_miss_thresholds() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["miss_det_confidence"] == 0.25
+    assert raw["pipeline"]["miss_det_confidence_burst"] == 0.15
+
+
+def test_migrate_legacy_miss_thresholds_no_config_file(tmp_path, monkeypatch):
+    """No config.json yet — migration creates the file with just the marker
+    and returns False (nothing was rewritten)."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    assert cfg.migrate_legacy_miss_thresholds() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert cfg.MIGRATION_MISS_THRESHOLDS in raw["_migrations_applied"]
+
+
+def test_migrate_legacy_miss_thresholds_rewrites_workspace_overrides(
+    tmp_path, monkeypatch
+):
+    """Workspace overrides carrying the exact legacy pair are rewritten."""
+    import json as _json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    ws_id = db.create_workspace(
+        "Legacy",
+        config_overrides={
+            "pipeline": {
+                "miss_det_confidence": 0.25,
+                "miss_det_confidence_burst": 0.15,
+            },
+        },
+    )
+    db.create_workspace(
+        "Customized",
+        config_overrides={
+            "pipeline": {
+                "miss_det_confidence": 0.30,
+                "miss_det_confidence_burst": 0.18,
+            },
+        },
+    )
+
+    cfg.migrate_legacy_miss_thresholds(db)
+
+    legacy_ws = db.get_workspace(ws_id)
+    legacy_overrides = _json.loads(legacy_ws["config_overrides"])
+    assert legacy_overrides["pipeline"]["miss_det_confidence"] == 0.20
+    assert legacy_overrides["pipeline"]["miss_det_confidence_burst"] == 0.12
+
+    custom_ws_id = next(
+        w["id"] for w in db.get_workspaces() if w["name"] == "Customized"
+    )
+    custom_overrides = _json.loads(
+        db.get_workspace(custom_ws_id)["config_overrides"]
+    )
+    assert custom_overrides["pipeline"]["miss_det_confidence"] == 0.30
+    assert custom_overrides["pipeline"]["miss_det_confidence_burst"] == 0.18
 
 
 def test_default_subject_types_includes_taxonomy_individual_genre(tmp_path, monkeypatch):
