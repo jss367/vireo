@@ -3968,24 +3968,40 @@ function buildCaptureTimePayload() {
   };
 }
 
+function formatShiftMinutes(mins) {
+  var sign = mins >= 0 ? '+' : '';
+  var hours = mins / 60;
+  var hoursPart = Number.isInteger(hours) ? ' (' + (hours >= 0 ? '+' : '') + hours + ' hours)' : '';
+  return sign + mins + ' minutes' + hoursPart;
+}
+
 function renderCaptureTimePreview(data) {
   var rows = data.samples || [];
+  var shiftsVary = !!data.shifts_vary;
   var html = '<div class="capture-time-row header">' +
     '<div>File</div><div>Current</div><div>After</div></div>';
   rows.forEach(function(row) {
     var before = (row.before_time || 'No capture time') + (row.before_offset ? ' ' + row.before_offset : '');
     var after = (row.after_time || 'No capture time') + (row.after_offset ? ' ' + row.after_offset : '');
+    var perRowShift = '';
+    if (shiftsVary && typeof row.shift_minutes === 'number') {
+      perRowShift = ' <span style="color:var(--text-muted);font-size:11px;">(' + formatShiftMinutes(row.shift_minutes) + ')</span>';
+    }
     html += '<div class="capture-time-row">' +
       '<div class="capture-time-filename" title="' + escapeHtml(row.filename || '') + '">' + escapeHtml(row.filename || '') + '</div>' +
       '<div class="capture-time-before">' + escapeHtml(before) + '</div>' +
-      '<div class="capture-time-after">' + escapeHtml(after) + '</div>' +
+      '<div class="capture-time-after">' + escapeHtml(after) + perRowShift + '</div>' +
     '</div>';
   });
-  var hours = data.shift_minutes / 60;
-  html += '<div class="capture-time-hint" style="padding:0 10px 10px;margin:0;">' +
-    'Resolved shift: ' + (data.shift_minutes >= 0 ? '+' : '') + data.shift_minutes + ' minutes' +
-    (Number.isInteger(hours) ? ' (' + (hours >= 0 ? '+' : '') + hours + ' hours)' : '') +
-    '</div>';
+  var summary;
+  if (shiftsVary) {
+    summary = 'Shift varies per photo (each photo is shifted to land on the target offset).';
+  } else if (typeof data.shift_minutes === 'number') {
+    summary = 'Resolved shift: ' + formatShiftMinutes(data.shift_minutes);
+  } else {
+    summary = 'No shift will be applied.';
+  }
+  html += '<div class="capture-time-hint" style="padding:0 10px 10px;margin:0;">' + escapeHtml(summary) + '</div>';
   document.getElementById('captureTimePreview').innerHTML = html;
 }
 

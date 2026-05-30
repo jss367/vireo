@@ -86,28 +86,33 @@ def _capture_offset(photo):
     )
 
 
-def resolve_shift_minutes(mode, target_offset=None, shift_minutes=None, sample_photos=None):
-    """Resolve user intent into a signed minute shift."""
+def _normalize_inputs(mode, target_offset, shift_minutes):
+    """Validate user inputs and return (target_minutes, manual_shift, target_offset_str)."""
     if mode == "manual":
         try:
-            return int(shift_minutes or 0)
+            manual_shift = int(shift_minutes or 0)
         except (TypeError, ValueError) as exc:
             raise ValueError("shift_minutes must be an integer") from exc
-
-    if mode != "preserve_instant":
+        target_minutes = None
+    elif mode == "preserve_instant":
+        target_minutes = parse_offset_minutes(target_offset)
+        if target_minutes is None:
+            raise ValueError("target_offset is required for preserve_instant")
+        manual_shift = None
+    else:
         raise ValueError("mode must be preserve_instant or manual")
+    target_offset_str = validate_offset(target_offset) if target_offset else None
+    return target_minutes, manual_shift, target_offset_str
 
-    target_minutes = parse_offset_minutes(target_offset)
-    if target_minutes is None:
-        raise ValueError("target_offset is required for preserve_instant")
 
-    sample_photos = sample_photos or []
-    for photo in sample_photos:
-        current_minutes = parse_offset_minutes(_capture_offset(photo))
-        if current_minutes is not None:
-            return target_minutes - current_minutes
-
-    raise ValueError("current offset not found; use a manual time shift")
+def _photo_shift_minutes(mode, target_minutes, manual_shift, photo):
+    """Return the signed minute shift for a single photo, or raise ValueError."""
+    if mode == "manual":
+        return manual_shift
+    current_minutes = parse_offset_minutes(_capture_offset(photo))
+    if current_minutes is None:
+        raise ValueError("current offset not found; use a manual time shift")
+    return target_minutes - current_minutes
 
 
 def format_preview_timestamp(dt):
@@ -121,21 +126,33 @@ def format_preview_timestamp(dt):
 
 
 def build_capture_time_preview(photos, *, mode, target_offset=None, shift_minutes=None, limit=5):
-    """Return sample before/after rows for the selected photos."""
+    """Return sample before/after rows for the selected photos.
+
+    For ``preserve_instant`` each sampled photo gets its own shift based on its
+    own current offset, so a selection with mixed offsets is shown accurately
+    instead of being collapsed onto a single shift derived from the first photo.
+    """
     sample = list(photos)[: max(1, int(limit))]
-    resolved_shift = resolve_shift_minutes(
-        mode,
-        target_offset=target_offset,
-        shift_minutes=shift_minutes,
-        sample_photos=sample,
+    target_minutes, manual_shift, target_offset_str = _normalize_inputs(
+        mode, target_offset, shift_minutes
     )
-    target_offset = validate_offset(target_offset) if target_offset else None
 
     rows = []
+    shifts_seen = []
     for photo in sample:
         dt = _capture_datetime(photo)
         current_offset = _capture_offset(photo)
-        after = dt + timedelta(minutes=resolved_shift) if dt is not None else None
+        try:
+            shift = _photo_shift_minutes(mode, target_minutes, manual_shift, photo)
+        except ValueError:
+            shift = None
+        after = (
+            dt + timedelta(minutes=shift)
+            if (dt is not None and shift is not None)
+            else None
+        )
+        if shift is not None:
+            shifts_seen.append(shift)
         rows.append(
             {
                 "photo_id": photo["id"],
@@ -143,14 +160,22 @@ def build_capture_time_preview(photos, *, mode, target_offset=None, shift_minute
                 "before_time": format_preview_timestamp(dt),
                 "before_offset": current_offset,
                 "after_time": format_preview_timestamp(after),
-                "after_offset": target_offset or current_offset,
+                "after_offset": target_offset_str or current_offset,
+                "shift_minutes": shift,
             }
         )
 
+    if mode == "preserve_instant" and not shifts_seen:
+        raise ValueError("current offset not found; use a manual time shift")
+
+    unanimous = bool(shifts_seen) and all(s == shifts_seen[0] for s in shifts_seen)
+    summary_shift = shifts_seen[0] if unanimous else None
+
     return {
         "mode": mode,
-        "shift_minutes": resolved_shift,
-        "target_offset": target_offset,
+        "shift_minutes": summary_shift,
+        "shifts_vary": not unanimous and len(shifts_seen) > 1,
+        "target_offset": target_offset_str,
         "samples": rows,
     }
 
@@ -226,6 +251,10 @@ def adjust_capture_time(
     if shutil.which("exiftool") is None:
         raise RuntimeError("exiftool is not installed")
 
+    target_minutes, manual_shift, target_offset_str = _normalize_inputs(
+        mode, target_offset, shift_minutes
+    )
+
     photos = []
     for pid in photo_ids:
         row = db.get_photo(pid, verify_workspace=True)
@@ -234,20 +263,11 @@ def adjust_capture_time(
     if not photos:
         raise ValueError("no photos found")
 
-    preview = build_capture_time_preview(
-        photos,
-        mode=mode,
-        target_offset=target_offset,
-        shift_minutes=shift_minutes,
-        limit=1,
-    )
-    resolved_shift = preview["shift_minutes"]
-    target_offset = preview["target_offset"]
-
     written = 0
     failed = 0
     failures = []
     total = len(photos)
+    shifts_used = []
     for index, photo in enumerate(photos, start=1):
         if cancel_check and cancel_check():
             break
@@ -259,17 +279,28 @@ def adjust_capture_time(
                 progress_callback(index, total, photo["filename"])
             continue
 
+        try:
+            photo_shift = _photo_shift_minutes(mode, target_minutes, manual_shift, photo)
+        except ValueError as exc:
+            failed += 1
+            failures.append(
+                {"photo_id": photo["id"], "filename": photo["filename"], "error": str(exc)}
+            )
+            if progress_callback:
+                progress_callback(index, total, photo["filename"])
+            continue
+
         cmd = ["exiftool"]
         if not keep_backups:
             cmd.append("-overwrite_original")
-        if resolved_shift:
-            cmd.append(_shift_arg(resolved_shift))
-        if target_offset:
+        if photo_shift:
+            cmd.append(_shift_arg(photo_shift))
+        if target_offset_str:
             cmd.extend(
                 [
-                    f"-OffsetTime={target_offset}",
-                    f"-OffsetTimeOriginal={target_offset}",
-                    f"-OffsetTimeDigitized={target_offset}",
+                    f"-OffsetTime={target_offset_str}",
+                    f"-OffsetTimeOriginal={target_offset_str}",
+                    f"-OffsetTimeDigitized={target_offset_str}",
                 ]
             )
         cmd.append("--")
@@ -287,17 +318,22 @@ def adjust_capture_time(
             _refresh_photo_metadata(db, photo["id"], paths[0])
             db.conn.commit()
             written += 1
+            shifts_used.append(photo_shift)
         except Exception as exc:
             failed += 1
             failures.append({"photo_id": photo["id"], "filename": photo["filename"], "error": str(exc)})
         if progress_callback:
             progress_callback(index, total, photo["filename"])
 
+    unanimous = bool(shifts_used) and all(s == shifts_used[0] for s in shifts_used)
+    summary_shift = shifts_used[0] if unanimous else None
+
     return {
         "updated": written,
         "failed": failed,
         "failures": failures[:20],
-        "shift_minutes": resolved_shift,
-        "target_offset": target_offset,
+        "shift_minutes": summary_shift,
+        "shifts_vary": not unanimous and len(shifts_used) > 1,
+        "target_offset": target_offset_str,
         "backup_files": bool(keep_backups),
     }
