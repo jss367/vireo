@@ -4271,6 +4271,11 @@ function setDeleteModalBusy(busy, count, mode) {
   _deleteBusy = busy;
   var confirmBtn = document.getElementById('deleteConfirmBtn');
   var cancelBtn = document.querySelector('#deleteModal .modal-btn-cancel');
+  // The mode radios and companion checkbox were already read into the request
+  // when the delete started, so changing them mid-flight does nothing — lock
+  // them too so the UI stays honest about what's in progress.
+  var inputs = document.querySelectorAll(
+    '#deleteModal input[name="deleteMode"], #deleteCompanionCheck');
   if (busy) {
     var verb = mode === 'vireo' ? 'Removing' : 'Deleting';
     var noun = count === 1 ? 'photo' : count + ' photos';
@@ -4281,6 +4286,7 @@ function setDeleteModalBusy(busy, count, mode) {
       confirmBtn.innerHTML = '<span class="btn-spinner"></span>' + verb + ' ' + noun + '…';
     }
     if (cancelBtn) cancelBtn.disabled = true;
+    inputs.forEach(function(el) { el.disabled = true; });
   } else {
     if (confirmBtn) {
       confirmBtn.disabled = false;
@@ -4289,6 +4295,7 @@ function setDeleteModalBusy(busy, count, mode) {
       confirmBtn.textContent = 'Delete';
     }
     if (cancelBtn) cancelBtn.disabled = false;
+    inputs.forEach(function(el) { el.disabled = false; });
   }
 }
 
