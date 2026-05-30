@@ -367,6 +367,110 @@ def test_question_mark_opens_shortcuts_sheet_over_lightbox(live_server, page):
     )
 
 
+def test_question_mark_opens_shortcuts_sheet_over_fullscreen_lightbox(live_server, page):
+    """When the lightbox owns browser fullscreen (after 'f' or direct fullscreen
+    open), the cheat sheet must be reparented into the fullscreen element so it
+    renders inside the fullscreen top layer — z-index alone can't put a sibling
+    above the fullscreen element. See Codex review on PR #926."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=15000)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate("openLightbox(1, 'hawk1.jpg')")
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=2000,
+    )
+
+    # Headless browsers don't reliably grant real browser fullscreen, so mock
+    # document.fullscreenElement. The relocation logic only reads that getter.
+    page.evaluate("""
+        () => {
+            const overlay = document.getElementById('lightboxOverlay');
+            Object.defineProperty(document, 'fullscreenElement', {
+                configurable: true,
+                get: () => overlay,
+            });
+        }
+    """)
+
+    page.keyboard.press("?")
+    page.wait_for_function(
+        "document.getElementById('shortcutsCheatSheet').classList.contains('open')",
+        timeout=2000,
+    )
+
+    # The sheet must be a child of the fullscreen element so it renders inside
+    # the fullscreen top layer (no z-index can lift a sibling above it).
+    sheet_parent_id = page.evaluate(
+        "document.getElementById('shortcutsCheatSheet').parentElement.id"
+    )
+    assert sheet_parent_id == "lightboxOverlay", (
+        f"sheet should be reparented into the fullscreen element "
+        f"(#lightboxOverlay), got parent #{sheet_parent_id!r}"
+    )
+
+    # Closing must restore the sheet's original parent so the next
+    # (non-fullscreen) open isn't orphaned inside the lightbox subtree.
+    page.evaluate("closeShortcutsSheet()")
+    sheet_parent_after_close = page.evaluate(
+        "document.getElementById('shortcutsCheatSheet').parentElement.id"
+    )
+    assert sheet_parent_after_close != "lightboxOverlay", (
+        "sheet parent should be restored to its original location on close, "
+        f"still parented under #{sheet_parent_after_close!r}"
+    )
+
+
+def test_fullscreen_exit_restores_shortcuts_sheet_parent(live_server, page):
+    """If browser fullscreen ends while the sheet was relocated inside the
+    fullscreen element (e.g., user pressed browser Esc to exit fullscreen),
+    the sheet must be moved back so the next open isn't orphaned in a stale
+    container."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=15000)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate("openLightbox(1, 'hawk1.jpg')")
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=2000,
+    )
+
+    # Mock entering fullscreen with the lightbox overlay, then expose a hook
+    # that clears the mock and dispatches fullscreenchange to simulate exit.
+    page.evaluate("""
+        () => {
+            const overlay = document.getElementById('lightboxOverlay');
+            let fsEl = overlay;
+            Object.defineProperty(document, 'fullscreenElement', {
+                configurable: true,
+                get: () => fsEl,
+            });
+            window.__exitMockFullscreen = () => {
+                fsEl = null;
+                document.dispatchEvent(new Event('fullscreenchange'));
+            };
+        }
+    """)
+
+    page.keyboard.press("?")
+    page.wait_for_function(
+        "document.getElementById('shortcutsCheatSheet').parentElement.id === 'lightboxOverlay'",
+        timeout=2000,
+    )
+
+    page.evaluate("window.__exitMockFullscreen()")
+
+    parent_id = page.evaluate(
+        "document.getElementById('shortcutsCheatSheet').parentElement.id"
+    )
+    assert parent_id != "lightboxOverlay", (
+        f"sheet parent should be restored after fullscreen exit; "
+        f"still parented under #{parent_id!r}"
+    )
+
+
 def test_two_overlays_unwind_one_esc_each(live_server, page):
     """With lightbox open and cheat sheet stacked on top, each Esc closes one
     overlay (top-of-stack first). Locks in the new one-Esc-per-overlay model

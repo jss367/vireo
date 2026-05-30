@@ -2659,11 +2659,41 @@ window.NAV_ALL_PAGES = [
     document.getElementById('shortcutsSheetContent').innerHTML = html;
   }
 
+  // When the lightbox owns the browser fullscreen (via requestLightboxFullscreen),
+  // a sibling element's z-index can't beat the fullscreen top layer. Reparent
+  // the sheet into the active fullscreen element so it renders above. Track
+  // the original location so close() (or an unexpected fullscreen exit) puts
+  // it back where it lived in the DOM.
+  var _sheetOriginalParent = null;
+  var _sheetOriginalNext = null;
+
+  function _activeFullscreenElement() {
+    return document.fullscreenElement || document.webkitFullscreenElement || null;
+  }
+
+  function _relocateSheetIfFullscreen() {
+    var fsEl = _activeFullscreenElement();
+    var sheet = document.getElementById('shortcutsCheatSheet');
+    if (!fsEl || !sheet || sheet.parentNode === fsEl) return;
+    _sheetOriginalParent = sheet.parentNode;
+    _sheetOriginalNext = sheet.nextSibling;
+    fsEl.appendChild(sheet);
+  }
+
+  function _restoreSheetParent() {
+    if (!_sheetOriginalParent) return;
+    var sheet = document.getElementById('shortcutsCheatSheet');
+    if (sheet) _sheetOriginalParent.insertBefore(sheet, _sheetOriginalNext);
+    _sheetOriginalParent = null;
+    _sheetOriginalNext = null;
+  }
+
   window.openShortcutsSheet = function() {
     var alreadyOpen = !!window._sheetEscToken;
     if (alreadyOpen) Keymap.popEsc(window._sheetEscToken);
     window._sheetEscToken = Keymap.pushEsc(function() { closeShortcutsSheet(); });
     renderSheet();
+    _relocateSheetIfFullscreen();
     document.getElementById('shortcutsCheatSheet').classList.add('open');
     if (!alreadyOpen) Keymap.lockBodyScroll();
   };
@@ -2672,8 +2702,18 @@ window.NAV_ALL_PAGES = [
     var wasOpen = !!window._sheetEscToken;
     if (wasOpen) { Keymap.popEsc(window._sheetEscToken); window._sheetEscToken = null; }
     document.getElementById('shortcutsCheatSheet').classList.remove('open');
+    _restoreSheetParent();
     if (wasOpen) Keymap.unlockBodyScroll();
   };
+
+  // If fullscreen ends (browser-level Esc, user toggled 'f', etc.) while the
+  // sheet is still parented inside the now-defunct fullscreen element, return
+  // it to the document body so the next open isn't orphaned.
+  function _onFullscreenChange() {
+    if (!_activeFullscreenElement()) _restoreSheetParent();
+  }
+  document.addEventListener('fullscreenchange', _onFullscreenChange);
+  document.addEventListener('webkitfullscreenchange', _onFullscreenChange);
 
   // Listen for ? key. Esc is owned by the Keymap.pushEsc stack — this listener
   // only opens the sheet on '?' and consumes non-Esc keys while the sheet is
