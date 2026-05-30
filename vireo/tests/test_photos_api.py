@@ -2663,6 +2663,22 @@ def _central_park_details():
     }
 
 
+def _central_park_client_place():
+    """Canned Google Maps JS Place payload sent by the browser."""
+    return {
+        "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+        "name": "Central Park",
+        "geometry": {"location": {"lat": 40.7828, "lng": -73.9654}},
+        "address_components": [
+            {"long_name": "New York", "short_name": "New York", "types": ["locality"]},
+            {"long_name": "New York County", "short_name": "New York County",
+             "types": ["administrative_area_level_2"]},
+            {"long_name": "New York", "short_name": "NY", "types": ["administrative_area_level_1"]},
+            {"long_name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+
 def test_post_photo_location_with_valid_place_id(app_and_db, monkeypatch):
     """Valid pick: route stores leaf + parents and returns the serialized location."""
     import config as cfg
@@ -2717,6 +2733,69 @@ def test_post_photo_location_with_valid_place_id(app_and_db, monkeypatch):
     assert len(rows) == 1
     assert rows[0]["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
     assert rows[0]["name"] == "Central Park"
+
+
+def test_post_photo_location_accepts_client_place_details_without_server_lookup(
+    app_and_db, monkeypatch,
+):
+    """Autocomplete may succeed with a referrer-restricted browser key even
+    when a server-side Place Details request would be denied. If the browser
+    sends full details, the route should store them directly.
+    """
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+
+    def fail_place_details(place_id, key):
+        raise AssertionError("server-side Place Details should not be called")
+
+    monkeypatch.setattr(places, "place_details", fail_place_details)
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={
+            "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+            "place": _central_park_client_place(),
+        },
+    )
+    assert resp.status_code == 200, resp.get_json()
+    loc = resp.get_json()["location"]
+    assert loc["name"] == "Central Park"
+    assert loc["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+    assert loc["latitude"] == 40.7828
+    assert loc["longitude"] == -73.9654
+    assert [p["name"] for p in loc["parent_chain"]] == [
+        "United States", "New York", "New York County", "New York",
+    ]
+
+
+def test_post_photo_location_normalizes_non_string_client_place_id(app_and_db):
+    """Nested client place_id values are string-normalized before use."""
+    import config as cfg
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+
+    place = _central_park_client_place()
+    place["place_id"] = 12345
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={"place": place},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    loc = resp.get_json()["location"]
+    assert loc["place_id"] == "12345"
 
 
 def test_post_photo_location_returns_400_on_missing_place_id(app_and_db):
@@ -3411,6 +3490,176 @@ def test_post_keyword_link_place_attaches_metadata(app_and_db, monkeypatch):
     ).fetchall()
     assert len(rows) == 1
     assert rows[0]["id"] == kw_id
+
+
+def test_post_keyword_link_place_accepts_client_place_details_without_server_lookup(
+    app_and_db, monkeypatch,
+):
+    """Keyword linking can use the autocomplete payload directly instead of
+    requiring a second backend Place Details request.
+    """
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+
+    def fail_place_details(place_id, key):
+        raise AssertionError("server-side Place Details should not be called")
+
+    monkeypatch.setattr(places, "place_details", fail_place_details)
+
+    kw_id = db.get_or_create_text_location("Central Park")
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={
+            "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+            "place": _central_park_client_place(),
+        },
+    )
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+
+    assert data["merged"] is False
+    kw = data["keyword"]
+    assert kw["keyword_id"] == kw_id
+    assert kw["name"] == "Central Park"
+    assert kw["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+    assert kw["latitude"] == 40.7828
+    assert kw["longitude"] == -73.9654
+    assert [p["name"] for p in kw["parent_chain"]] == [
+        "United States", "New York", "New York County", "New York",
+    ]
+
+
+def test_post_keyword_link_place_rejects_non_finite_client_coords(app_and_db):
+    """Client-supplied coordinates must be finite and in valid lat/lng bounds."""
+    import config as cfg
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+    kw_id = db.get_or_create_text_location("Central Park")
+
+    place = _central_park_client_place()
+    place["geometry"]["location"]["lat"] = "NaN"
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={
+            "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+            "place": place,
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "no_api_key"
+
+    row = db.conn.execute(
+        "SELECT place_id, latitude, longitude FROM keywords WHERE id = ?",
+        (kw_id,),
+    ).fetchone()
+    assert row["place_id"] is None
+    assert row["latitude"] is None
+    assert row["longitude"] is None
+
+
+def test_post_keyword_link_place_falls_back_on_malformed_client_geometry(
+    app_and_db, monkeypatch,
+):
+    """Malformed client geometry should not turn a valid request into a 500."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    captured = {}
+
+    def fake_place_details(place_id, key):
+        captured["place_id"] = place_id
+        captured["key"] = key
+        return _central_park_details()
+
+    monkeypatch.setattr(places, "place_details", fake_place_details)
+    kw_id = db.get_or_create_text_location("Central Park")
+    place = _central_park_client_place()
+    place["geometry"] = "bad"
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={
+            "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+            "place": place,
+        },
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    assert captured == {
+        "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+        "key": "FAKE-KEY",
+    }
+    assert resp.get_json()["keyword"]["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+
+
+def test_post_keyword_link_place_ignores_malformed_component_types(
+    app_and_db, monkeypatch,
+):
+    """Malformed component metadata should not reject otherwise valid details."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+
+    def fail_place_details(place_id, key):
+        raise AssertionError("server-side Place Details should not be called")
+
+    monkeypatch.setattr(places, "place_details", fail_place_details)
+    kw_id = db.get_or_create_text_location("Central Park")
+    place = _central_park_client_place()
+    place["address_components"][0]["types"] = 42
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={
+            "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+            "place": place,
+        },
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["keyword"]["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+
+
+def test_post_keyword_link_place_rejects_mismatched_client_place_id(app_and_db):
+    """A client place payload must not bind one place_id to another place's geometry."""
+    import config as cfg
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+    kw_id = db.get_or_create_text_location("Central Park")
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={
+            "place_id": "ChIJDifferentPlace",
+            "place": _central_park_client_place(),
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "no_api_key"
+
+    row = db.conn.execute(
+        "SELECT place_id, latitude, longitude FROM keywords WHERE id = ?",
+        (kw_id,),
+    ).fetchone()
+    assert row["place_id"] is None
+    assert row["latitude"] is None
+    assert row["longitude"] is None
 
 
 def test_post_keyword_link_place_merges_when_place_id_already_taken(

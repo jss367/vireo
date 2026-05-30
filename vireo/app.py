@@ -3094,6 +3094,106 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return ""
         return " · ".join(parts)
 
+    def _coerce_place_id(candidate):
+        """Return a stripped string ``place_id`` for any JSON scalar value."""
+        if candidate is None:
+            return ""
+        if isinstance(candidate, str):
+            return candidate.strip()
+        return str(candidate).strip()
+
+    def _extract_place_id(body):
+        """Extract ``place_id`` from top-level or nested client place payloads."""
+        candidate = body.get("place_id")
+        if candidate is None and isinstance(body.get("place"), dict):
+            candidate = body["place"].get("place_id")
+        if candidate is None and isinstance(body.get("details"), dict):
+            candidate = body["details"].get("place_id")
+        return _coerce_place_id(candidate)
+
+    def _normalize_client_place_details(body):
+        """Normalize a Google Maps JS Place payload from the request body.
+
+        Browser autocomplete already receives geometry and address components
+        when the Maps JS key is valid. Accepting that payload avoids a second
+        server-side Place Details request, which can fail for correctly
+        referrer-restricted browser keys.
+        """
+        raw = body.get("place") or body.get("details")
+        if not isinstance(raw, dict):
+            return None
+
+        place_id = _coerce_place_id(raw.get("place_id"))
+        if not place_id:
+            return None
+        body_place_id = _coerce_place_id(body.get("place_id"))
+        if body_place_id and body_place_id != place_id:
+            return None
+
+        def first_present(*values):
+            for value in values:
+                if value is not None:
+                    return value
+            return None
+
+        geometry = raw.get("geometry")
+        geometry_location = {}
+        if isinstance(geometry, dict):
+            location = geometry.get("location")
+            if isinstance(location, dict):
+                geometry_location = location
+        lat_value = first_present(
+            raw.get("lat"),
+            raw.get("latitude"),
+            geometry_location.get("lat") if isinstance(geometry_location, dict) else None,
+        )
+        lng_value = first_present(
+            raw.get("lng"),
+            raw.get("longitude"),
+            geometry_location.get("lng") if isinstance(geometry_location, dict) else None,
+        )
+        try:
+            lat = float(lat_value)
+            lng = float(lng_value)
+        except (TypeError, ValueError):
+            return None
+        if (
+            not math.isfinite(lat)
+            or not math.isfinite(lng)
+            or lat < -90
+            or lat > 90
+            or lng < -180
+            or lng > 180
+        ):
+            return None
+
+        raw_components = raw.get("address_components")
+        if not isinstance(raw_components, list):
+            raw_components = []
+        components = []
+        for comp in raw_components:
+            if not isinstance(comp, dict):
+                continue
+            name = comp.get("name") or comp.get("long_name") or ""
+            if not name:
+                continue
+            types = comp.get("types")
+            if not isinstance(types, list):
+                types = []
+            components.append({
+                "name": name,
+                "short_name": comp.get("short_name") or "",
+                "types": types,
+            })
+
+        return {
+            "place_id": place_id,
+            "name": raw.get("name") or raw.get("formatted_address") or "",
+            "lat": lat,
+            "lng": lng,
+            "address_components": components,
+        }
+
     def _walk_parent_chain(db, leaf_parent_id):
         """Walk ``parent_id`` upward from ``leaf_parent_id`` to the root.
 
@@ -3195,14 +3295,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ``type='location'`` link).
         """
         body = request.get_json(silent=True) or {}
-        place_id = (body.get("place_id") or "").strip()
+        place_id = _extract_place_id(body)
         if not place_id:
             return json_error("missing place_id", 400)
-
-        import config as cfg
-        key = cfg.load().get("google_maps_api_key", "")
-        if not key:
-            return json_error("no_api_key", 400)
 
         db = _get_db()
         # Guard against stale clients (e.g. tab open after photo deleted).
@@ -3213,9 +3308,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ).fetchone() is None:
             return json_error("photo_not_found", 404)
 
-        details = places.place_details(place_id, key)
+        details = _normalize_client_place_details(body)
         if details is None:
-            return json_error("place_not_found", 404)
+            import config as cfg
+            key = cfg.load().get("google_maps_api_key", "")
+            if not key:
+                return json_error("no_api_key", 400)
+            details = places.place_details(place_id, key)
+            if details is None:
+                return json_error("place_not_found", 404)
 
         try:
             leaf_id = db.upsert_place_chain(details)
@@ -3365,7 +3466,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_link_keyword_to_place(keyword_id):
         """Attach Google place data to an existing keyword.
 
-        Body: ``{"place_id": "ChIJ..."}``. Looks up the place via
+        Body: ``{"place_id": "ChIJ..."}``, optionally with a normalized
+        ``place`` object from Google Maps JS autocomplete. When the client
+        does not provide details, looks up the place via
         :func:`places.place_details` and delegates to
         :meth:`Database.link_keyword_to_place`, which UPDATEs the target row
         in-place — or, if another keyword already owns this ``place_id``,
@@ -3387,18 +3490,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
           underlying RuntimeError for debugging.
         """
         body = request.get_json(silent=True) or {}
-        place_id = (body.get("place_id") or "").strip()
+        place_id = _extract_place_id(body)
         if not place_id:
             return json_error("missing place_id", 400)
 
-        import config as cfg
-        key = cfg.load().get("google_maps_api_key", "")
-        if not key:
-            return json_error("no_api_key", 400)
-
-        details = places.place_details(place_id, key)
+        details = _normalize_client_place_details(body)
         if details is None:
-            return json_error("place_not_found", 404)
+            import config as cfg
+            key = cfg.load().get("google_maps_api_key", "")
+            if not key:
+                return json_error("no_api_key", 400)
+            details = places.place_details(place_id, key)
+            if details is None:
+                return json_error("place_not_found", 404)
 
         db = _get_db()
         try:

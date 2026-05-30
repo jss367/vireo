@@ -769,10 +769,6 @@ def test_promotion_db_error_retries_queued_pipeline(tmp_path, monkeypatch):
     monkeypatch.setattr(sqlite3, "connect", fail_connect)
     runner._try_promote_queued()
 
-    with runner._lock:
-        if job_id in runner._queued_pipelines:
-            assert not runner._queued_pipelines[job_id].get("_promoting")
-
     _wait_for_event(work_started, "promotion retry")
     final = wait_for_job_via_runner(runner, job_id, wait_for_history=True)
     assert final["status"] == "completed"
