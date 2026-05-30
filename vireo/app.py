@@ -2796,17 +2796,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return ""
         return " · ".join(parts)
 
+    def _coerce_place_id(candidate):
+        if candidate is None:
+            return ""
+        if isinstance(candidate, str):
+            return candidate.strip()
+        return str(candidate).strip()
+
     def _extract_place_id(body):
         candidate = body.get("place_id")
         if candidate is None and isinstance(body.get("place"), dict):
             candidate = body["place"].get("place_id")
         if candidate is None and isinstance(body.get("details"), dict):
             candidate = body["details"].get("place_id")
-        if candidate is None:
-            return ""
-        if isinstance(candidate, str):
-            return candidate.strip()
-        return str(candidate).strip()
+        return _coerce_place_id(candidate)
 
     def _normalize_client_place_details(body):
         """Normalize a Google Maps JS Place payload from the request body.
@@ -2820,8 +2823,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(raw, dict):
             return None
 
-        place_id = _extract_place_id(body)
+        place_id = _coerce_place_id(raw.get("place_id"))
         if not place_id:
+            return None
+        body_place_id = _coerce_place_id(body.get("place_id"))
+        if body_place_id and body_place_id != place_id:
             return None
 
         def first_present(*values):

@@ -3565,6 +3565,34 @@ def test_post_keyword_link_place_rejects_non_finite_client_coords(app_and_db):
     assert row["longitude"] is None
 
 
+def test_post_keyword_link_place_rejects_mismatched_client_place_id(app_and_db):
+    """A client place payload must not bind one place_id to another place's geometry."""
+    import config as cfg
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+    kw_id = db.get_or_create_text_location("Central Park")
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={
+            "place_id": "ChIJDifferentPlace",
+            "place": _central_park_client_place(),
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "no_api_key"
+
+    row = db.conn.execute(
+        "SELECT place_id, latitude, longitude FROM keywords WHERE id = ?",
+        (kw_id,),
+    ).fetchone()
+    assert row["place_id"] is None
+    assert row["latitude"] is None
+    assert row["longitude"] is None
+
+
 def test_post_keyword_link_place_merges_when_place_id_already_taken(
     app_and_db, monkeypatch,
 ):
