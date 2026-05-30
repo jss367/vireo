@@ -1861,6 +1861,18 @@ function refreshGridCards(photoIds) {
     if (!card) return;
     var info = card.querySelector('.grid-card-info');
     if (info) info.innerHTML = renderCardInfo(p);
+    // iNat badge lives in img-wrap (not grid-card-info), so sync it explicitly
+    // when async metadata arrives after the card was appended.
+    var wrap = card.querySelector('.grid-card-img-wrap');
+    if (wrap) {
+      var existing = wrap.querySelector('.inat-badge');
+      var shouldShow = !!inatSubmitted[String(id)];
+      if (shouldShow && !existing) {
+        wrap.insertAdjacentHTML('beforeend', '<span class="inat-badge">iNat</span>');
+      } else if (!shouldShow && existing) {
+        existing.remove();
+      }
+    }
   });
 }
 
@@ -2827,9 +2839,6 @@ async function loadPhotos() {
       allLoaded = true;
     } else {
       photos = photos.concat(data.photos);
-      var newIds = data.photos.map(function(p) { return p.id; });
-      loadInatStatus(newIds);
-      fetchColorLabels(newIds);
       currentPage++;
       if (photos.length >= totalPhotos) allLoaded = true;
     }
@@ -2837,6 +2846,15 @@ async function loadPhotos() {
     if (firstNewIdx === 0) renderGrid();
     else appendGridPhotos(data.photos, firstNewIdx);
     updateFilterSummary();
+
+    // Refresh appended cards once async metadata resolves — appendGridPhotos
+    // only renders each page once, so badges/labels would otherwise stay
+    // missing until an unrelated full grid render.
+    if (data.photos.length > 0) {
+      var refreshIds = data.photos.map(function(p) { return p.id; });
+      loadInatStatus(refreshIds).then(function() { refreshGridCards(refreshIds); });
+      fetchColorLabels(refreshIds).then(function() { refreshGridCards(refreshIds); });
+    }
   } catch(e) {
     if (epoch !== loadEpoch) return;
     document.getElementById('loadingState').textContent = 'Error loading photos.';
@@ -2844,6 +2862,20 @@ async function loadPhotos() {
     if (epoch === loadEpoch) {
       loading = false;
       document.getElementById('loadingState').style.display = 'none';
+      // Re-arm the infinite-scroll observer. With the 1200px root margin
+      // the sentinel often remains intersecting after a load completes (e.g.
+      // bootstrap returned a short page on a tall viewport), and the
+      // observer was originally registered while loading=true so its single
+      // initial callback was a no-op. Re-observing fires a fresh callback
+      // with the current state so the next page is requested without
+      // requiring the user to scroll.
+      if (!allLoaded && typeof observer !== 'undefined') {
+        var sentinel = document.getElementById('scrollSentinel');
+        if (sentinel) {
+          observer.unobserve(sentinel);
+          observer.observe(sentinel);
+        }
+      }
     }
   }
 }
