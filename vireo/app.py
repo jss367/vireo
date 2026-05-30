@@ -5910,6 +5910,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import datetime as _datetime
 
         raw = _read_raw_config_file()
+        raw.pop("_migrations_applied", None)
         body = json.dumps(raw, indent=2)
         today = _datetime.date.today().isoformat()
         resp = make_response(body)
