@@ -394,7 +394,28 @@ def test_question_mark_does_not_open_hidden_sheet_in_fullscreen_lightbox(live_se
     """)
 
     page.keyboard.press("?")
-    page.wait_for_timeout(100)
+    page.wait_for_function(
+        """() => new Promise((resolve, reject) => {
+            const sheet = document.getElementById('shortcutsCheatSheet');
+            const isOpen = () => sheet.classList.contains('open');
+            if (isOpen()) {
+                reject(new Error('shortcuts sheet opened immediately'));
+                return;
+            }
+            const deadline = performance.now() + 300;
+            function check() {
+                if (isOpen()) {
+                    reject(new Error('shortcuts sheet opened during fullscreen guard window'));
+                } else if (performance.now() >= deadline) {
+                    resolve(true);
+                } else {
+                    requestAnimationFrame(check);
+                }
+            }
+            requestAnimationFrame(check);
+        })""",
+        timeout=1000,
+    )
 
     assert page.evaluate(
         "document.getElementById('shortcutsCheatSheet').classList.contains('open')"
