@@ -103,21 +103,27 @@ def _normalize_subsec(subsec):
 
 
 def _normalize_inputs(mode, target_offset, shift_minutes):
-    """Validate user inputs and return (target_minutes, manual_shift, target_offset_str)."""
+    """Validate user inputs and return (target_minutes, manual_shift, target_offset_str).
+
+    In ``manual`` mode ``target_offset`` is intentionally ignored so a stale
+    or prefilled value can't silently overwrite ``OffsetTime*`` tags when the
+    user only asked for a minute shift.
+    """
     if mode == "manual":
         try:
             manual_shift = int(shift_minutes or 0)
         except (TypeError, ValueError) as exc:
             raise ValueError("shift_minutes must be an integer") from exc
         target_minutes = None
+        target_offset_str = None
     elif mode == "preserve_instant":
         target_minutes = parse_offset_minutes(target_offset)
         if target_minutes is None:
             raise ValueError("target_offset is required for preserve_instant")
         manual_shift = None
+        target_offset_str = validate_offset(target_offset)
     else:
         raise ValueError("mode must be preserve_instant or manual")
-    target_offset_str = validate_offset(target_offset) if target_offset else None
     return target_minutes, manual_shift, target_offset_str
 
 

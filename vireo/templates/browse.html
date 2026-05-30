@@ -1475,11 +1475,11 @@ body {
       </div>
     </div>
     <label class="capture-time-option">
-      <input type="radio" name="captureTimeMode" value="preserve_instant" checked onchange="updateCaptureTimePreview()">
+      <input type="radio" name="captureTimeMode" value="preserve_instant" checked onchange="syncCaptureTimeFieldState(); updateCaptureTimePreview()">
       Set offset and preserve actual instant
     </label>
     <label class="capture-time-option">
-      <input type="radio" name="captureTimeMode" value="manual" onchange="updateCaptureTimePreview()">
+      <input type="radio" name="captureTimeMode" value="manual" onchange="syncCaptureTimeFieldState(); updateCaptureTimePreview()">
       Use manual time shift
     </label>
     <label class="capture-time-option">
@@ -3955,17 +3955,36 @@ function getCaptureTimeMode() {
 
 function buildCaptureTimePayload() {
   var ids = getActiveSelection();
+  var mode = getCaptureTimeMode();
   var targetOffset = document.getElementById('captureTimeTargetOffset').value.trim();
   var shiftRaw = document.getElementById('captureTimeManualShift').value;
   var shiftMinutes = parseInt(shiftRaw, 10);
   if (isNaN(shiftMinutes)) shiftMinutes = 0;
   return {
     photo_ids: ids,
-    mode: getCaptureTimeMode(),
-    target_offset: targetOffset || null,
+    mode: mode,
+    target_offset: mode === 'manual' ? null : (targetOffset || null),
     shift_minutes: shiftMinutes,
     keep_backups: document.getElementById('captureTimeKeepBackups').checked,
   };
+}
+
+function syncCaptureTimeFieldState() {
+  var mode = getCaptureTimeMode();
+  var targetInput = document.getElementById('captureTimeTargetOffset');
+  var shiftInput = document.getElementById('captureTimeManualShift');
+  if (!targetInput || !shiftInput) return;
+  if (mode === 'manual') {
+    targetInput.disabled = true;
+    targetInput.title = 'Not used in manual shift mode';
+    shiftInput.disabled = false;
+    shiftInput.title = '';
+  } else {
+    targetInput.disabled = false;
+    targetInput.title = '';
+    shiftInput.disabled = true;
+    shiftInput.title = 'Not used in preserve-instant mode';
+  }
 }
 
 function formatShiftMinutes(mins) {
@@ -4043,6 +4062,7 @@ function openCaptureTimeModal() {
   document.getElementById('captureTimeApplyBtn').textContent = 'Apply';
   document.getElementById('captureTimeApplyBtn').disabled = true;
   document.getElementById('captureTimeModal').classList.add('open');
+  syncCaptureTimeFieldState();
   updateCaptureTimePreview();
 }
 

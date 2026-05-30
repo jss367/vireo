@@ -215,6 +215,105 @@ def test_capture_time_preview_preserves_instant_uses_per_photo_shifts(app_and_db
     assert data["shift_minutes"] is None
 
 
+def test_capture_time_manual_mode_ignores_target_offset(client_with_photo, monkeypatch):
+    """Manual shifts must not rewrite OffsetTime* tags, even if target_offset is sent."""
+    import capture_time
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()
+    path = os.path.join(folder["path"], photo["filename"])
+    db.conn.execute(
+        "UPDATE photos SET exif_data = ? WHERE id = ?",
+        (
+            json.dumps(
+                {
+                    "EXIF": {
+                        "DateTimeOriginal": "2026:05:22 20:00:00",
+                        "OffsetTimeOriginal": "-07:00",
+                    }
+                }
+            ),
+            photo_id,
+        ),
+    )
+    db.conn.commit()
+
+    commands = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def fake_extract(paths):
+        return {paths[0]: {"EXIF": {"OffsetTimeOriginal": "-07:00"}}}
+
+    monkeypatch.setattr(capture_time.shutil, "which", lambda name: "/usr/bin/exiftool")
+    monkeypatch.setattr(capture_time.subprocess, "run", fake_run)
+    monkeypatch.setattr(capture_time, "extract_metadata", fake_extract)
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/jobs/capture-time",
+        json={
+            "photo_ids": [photo_id],
+            "mode": "manual",
+            "target_offset": "-10:00",
+            "shift_minutes": 30,
+            "keep_backups": False,
+        },
+    )
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+    assert job["result"]["updated"] == 1
+    assert job["result"]["target_offset"] is None
+
+    assert commands
+    cmd = commands[0]
+    assert "-AllDates+=0:0:0 0:30:0" in cmd
+    assert not any(arg.startswith("-OffsetTime") for arg in cmd), cmd
+
+
+def test_capture_time_preview_manual_mode_ignores_target_offset(app_and_db):
+    """Manual preview must not present target_offset as the after-offset."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    db.conn.execute(
+        "UPDATE photos SET exif_data = ? WHERE id = ?",
+        (
+            json.dumps(
+                {
+                    "EXIF": {
+                        "DateTimeOriginal": "2026:05:22 20:00:00",
+                        "OffsetTimeOriginal": "-07:00",
+                    }
+                }
+            ),
+            photo["id"],
+        ),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/capture-time/preview",
+        json={
+            "photo_ids": [photo["id"]],
+            "mode": "manual",
+            "target_offset": "-10:00",
+            "shift_minutes": 30,
+        },
+    )
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["target_offset"] is None
+    assert data["samples"][0]["after_offset"] == "-07:00"
+
+
 def test_capture_time_job_applies_per_photo_shifts(client_with_photo, monkeypatch):
     """Each ExifTool invocation must use that photo's own derived shift."""
     import capture_time
