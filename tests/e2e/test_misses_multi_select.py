@@ -154,7 +154,7 @@ def test_x_with_selection_bulk_rejects(live_server, page):
     assert untouched["flag"] in (None, "none"), f"pids[1] was modified: {untouched['flag']!r}"
 
     # Selection cleared after bulk apply.
-    assert page.evaluate("selection.size") == 0
+    page.wait_for_function("selection.size === 0", timeout=3000)
 
 
 def test_p_with_selection_bulk_flags(live_server, page):
@@ -416,6 +416,41 @@ def test_u_unmarks_miss_from_lightbox(live_server, page):
     ).fetchone()
     assert row["miss_oof"] == 0
     assert row["flag"] in (None, "none")
+
+
+def test_u_unmarks_only_active_miss_category_from_lightbox(live_server, page):
+    """A lightbox `u` clears the miss category that opened the lightbox."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    _seed_misses(db, [pid], "clipped")
+    _seed_misses(db, [pid], "oof")
+
+    page.goto(f"{url}/misses")
+    clipped_card = page.locator(f"[data-testid='miss-card-clipped-{pid}']")
+    oof_card = page.locator(f"[data-testid='miss-card-oof-{pid}']")
+    clipped_card.wait_for(state="visible", timeout=3000)
+    oof_card.wait_for(state="visible", timeout=3000)
+
+    clipped_card.dblclick()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+
+    page.keyboard.press("u")
+
+    page.wait_for_function(
+        f"!document.querySelector('[data-testid=\"miss-card-clipped-{pid}\"]')"
+        f" && document.querySelector('[data-testid=\"miss-card-oof-{pid}\"]')",
+        timeout=3000,
+    )
+    row = db.conn.execute(
+        "SELECT miss_clipped, miss_oof FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert row["miss_clipped"] == 0
+    assert row["miss_oof"] == 1
 
 
 def test_selection_bar_unmarks_selected_misses(live_server, page):

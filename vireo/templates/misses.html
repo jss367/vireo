@@ -1157,37 +1157,29 @@ async function unflagMiss(cat, photoId, e) {
   render();
 }
 
-async function unflagMissEverywhere(photoId) {
+async function unflagLightboxMiss(photoId) {
   if (previewActive) {
     if (typeof showToast === 'function') {
       showToast('Save or reset the preview before unmarking misses', 'error');
     }
     return;
   }
-  var cats = CATEGORY_ORDER.filter(function(cat) {
-    return (missesData[cat] || []).some(function(p) { return p.id === photoId; });
-  });
-  if (cats.length === 0 && missLightboxCurrent && missLightboxCurrent.photoId === photoId) {
-    cats = [missLightboxCurrent.category];
-  }
-  if (cats.length === 0) return;
+  if (!missLightboxCurrent || missLightboxCurrent.photoId !== photoId) return;
+  var cat = missLightboxCurrent.category;
+  if (!cat) return;
 
   var failures = 0;
-  await Promise.all(cats.map(function(cat) {
-    return fetch('/api/misses/' + photoId + '/unflag', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ category: cat }),
-    }).then(function(r) { if (!r.ok) failures++; }).catch(function() { failures++; });
-  }));
+  await fetch('/api/misses/' + photoId + '/unflag', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ category: cat }),
+  }).then(function(r) { if (!r.ok) failures++; }).catch(function() { failures++; });
   if (failures > 0) {
     if (typeof showToast === 'function') showToast('Unflag failed', 'error');
     return;
   }
-  cats.forEach(function(cat) {
-    missesData[cat] = (missesData[cat] || []).filter(function(p) {
-      return p.id !== photoId;
-    });
+  missesData[cat] = (missesData[cat] || []).filter(function(p) {
+    return p.id !== photoId;
   });
   pruneSelectionToVisible();
   render();
@@ -1196,7 +1188,7 @@ async function unflagMissEverywhere(photoId) {
 window.handleMissesLightboxFlagShortcut = function(photoId, flag) {
   if (flag !== 'none') return false;
   if (!missLightboxCurrent || missLightboxCurrent.photoId !== photoId) return false;
-  unflagMissEverywhere(photoId);
+  unflagLightboxMiss(photoId);
   return true;
 };
 
