@@ -9841,6 +9841,49 @@ class Database:
             self.conn.commit()
         return updated
 
+    def rewrite_legacy_miss_thresholds_in_workspaces(
+        self, legacy_det, legacy_burst, new_det, new_burst
+    ):
+        """Rewrite the exact legacy miss-threshold default pair in every
+        workspace's ``config_overrides``. Customized values are left alone.
+
+        Called from ``config.migrate_legacy_miss_thresholds``, which gates
+        the whole migration behind a one-time marker so this only runs
+        once per install — a user who later explicitly re-saves the
+        legacy pair via the settings UI keeps that setting.
+        """
+        rows = self.conn.execute(
+            "SELECT id, config_overrides FROM workspaces "
+            "WHERE config_overrides IS NOT NULL"
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            raw = row["config_overrides"]
+            try:
+                overrides = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(overrides, dict):
+                continue
+            pipeline = overrides.get("pipeline")
+            if not isinstance(pipeline, dict):
+                continue
+            if (
+                pipeline.get("miss_det_confidence") != legacy_det
+                or pipeline.get("miss_det_confidence_burst") != legacy_burst
+            ):
+                continue
+            pipeline["miss_det_confidence"] = new_det
+            pipeline["miss_det_confidence_burst"] = new_burst
+            self.conn.execute(
+                "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
+                (json.dumps(overrides), row["id"]),
+            )
+            updated += 1
+        if updated:
+            self.conn.commit()
+        return updated
+
     # ------ iNaturalist submissions ------
 
     def record_inat_submission(self, photo_id, observation_id, observation_url):

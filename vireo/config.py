@@ -233,6 +233,87 @@ def set(key, value):
         save(config)
 
 
+# --- One-time migrations ---------------------------------------------------
+#
+# When a DEFAULTS value changes, existing installs that have persisted the
+# previous default in ``~/.vireo/config.json`` or in a workspace's
+# ``config_overrides`` would otherwise keep running with the old value —
+# ``load()`` and ``Database.get_effective_config()`` deep-merge persisted
+# values on top of DEFAULTS, so a change to DEFAULTS alone is invisible to
+# upgraded users. Migrations rewrite the *exact* legacy default value to
+# the new one, leaving any user-customized value alone. They run **once**
+# per install, gated by an entry in ``_migrations_applied`` in the config
+# file, so a user who later explicitly re-saves the legacy value (e.g.
+# 25% via the slider) keeps that setting on future loads.
+
+MIGRATION_MISS_THRESHOLDS = "miss_thresholds_2026_05"
+
+_LEGACY_MISS_DET_CONFIDENCE = 0.25
+_LEGACY_MISS_DET_CONFIDENCE_BURST = 0.15
+_NEW_MISS_DET_CONFIDENCE = 0.20
+_NEW_MISS_DET_CONFIDENCE_BURST = 0.12
+
+
+def _read_raw():
+    """Return the raw on-disk config (no DEFAULTS merge), or ``{}``."""
+    if not os.path.exists(CONFIG_PATH):
+        return {}
+    try:
+        with open(CONFIG_PATH) as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _migrations_applied(raw):
+    applied = raw.get("_migrations_applied")
+    return list(applied) if isinstance(applied, list) else []
+
+
+def migrate_legacy_miss_thresholds(db=None):
+    """One-time rewrite of the legacy miss-threshold default pair.
+
+    Rewrites ``pipeline.miss_det_confidence`` / ``...burst`` from the
+    previous legacy default pair (0.25 / 0.15) to the new default pair
+    (0.20 / 0.12) in both the global config file and every workspace's
+    ``config_overrides``. Only the **exact** legacy pair is touched —
+    customized values (e.g. 0.30 / 0.18 or a partial pair) are left alone.
+    Gated by a marker so it runs at most once per install; a user who
+    later explicitly re-saves 25%/15% will keep that setting.
+    """
+    with _lock:
+        raw = _read_raw()
+        applied = _migrations_applied(raw)
+        if MIGRATION_MISS_THRESHOLDS in applied:
+            return False
+        rewrote = False
+        pipeline = raw.get("pipeline")
+        if isinstance(pipeline, dict):
+            det = pipeline.get("miss_det_confidence")
+            burst = pipeline.get("miss_det_confidence_burst")
+            if (
+                det == _LEGACY_MISS_DET_CONFIDENCE
+                and burst == _LEGACY_MISS_DET_CONFIDENCE_BURST
+            ):
+                pipeline["miss_det_confidence"] = _NEW_MISS_DET_CONFIDENCE
+                pipeline["miss_det_confidence_burst"] = _NEW_MISS_DET_CONFIDENCE_BURST
+                rewrote = True
+        if db is not None:
+            ws_rewrites = db.rewrite_legacy_miss_thresholds_in_workspaces(
+                _LEGACY_MISS_DET_CONFIDENCE,
+                _LEGACY_MISS_DET_CONFIDENCE_BURST,
+                _NEW_MISS_DET_CONFIDENCE,
+                _NEW_MISS_DET_CONFIDENCE_BURST,
+            )
+            if ws_rewrites:
+                rewrote = True
+        applied.append(MIGRATION_MISS_THRESHOLDS)
+        raw["_migrations_applied"] = applied
+        save(raw)
+        return rewrote
+
+
 def get_editors():
     """Return the configured external editors as a list of {name, path} dicts.
 
