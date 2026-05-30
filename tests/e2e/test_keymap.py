@@ -367,6 +367,43 @@ def test_question_mark_opens_shortcuts_sheet_over_lightbox(live_server, page):
     )
 
 
+def test_question_mark_does_not_open_hidden_sheet_in_fullscreen_lightbox(live_server, page):
+    """When the lightbox is the browser fullscreen element, sibling overlays
+    cannot render above it; ? should not open a hidden shortcuts sheet."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=15000)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate("openLightbox(1, 'hawk1.jpg')")
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=2000,
+    )
+    page.evaluate("""
+        () => {
+          const lightbox = document.getElementById('lightboxOverlay');
+          Object.defineProperty(document, 'fullscreenElement', {
+            configurable: true,
+            get: () => lightbox,
+          });
+          Object.defineProperty(document, 'webkitFullscreenElement', {
+            configurable: true,
+            get: () => null,
+          });
+        }
+    """)
+
+    page.keyboard.press("?")
+    page.wait_for_timeout(100)
+
+    assert page.evaluate(
+        "document.getElementById('shortcutsCheatSheet').classList.contains('open')"
+    ) is False
+    assert page.evaluate(
+        "document.getElementById('lightboxOverlay').classList.contains('active')"
+    ) is True
+
+
 def test_two_overlays_unwind_one_esc_each(live_server, page):
     """With lightbox open and cheat sheet stacked on top, each Esc closes one
     overlay (top-of-stack first). Locks in the new one-Esc-per-overlay model
