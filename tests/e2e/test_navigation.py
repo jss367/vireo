@@ -259,6 +259,7 @@ def test_map_tab_can_be_pinned_before_leaflet_cdn_finishes(live_server, page):
     page.wait_for_selector(
         ".nav-tab[data-nav-id='map']:not(.is-ephemeral)", timeout=3000
     )
+    assert held_routes, "Expected Leaflet JS to be requested from unpkg.com"
 
     for route in held_routes:
         route.abort()
