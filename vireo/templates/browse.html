@@ -5284,6 +5284,7 @@ document.addEventListener('contextmenu', function(e) {
 
   // Prevent the IntersectionObserver from triggering loadPhotos() while deep-link is loading
   loading = true;
+  var deepLinkLoaded = false;
   try {
     applyBrowseConfig(await _cfgPromise);
     var photo = await safeFetch('/api/photos/' + photoId, {}, { toast: false });
@@ -5318,6 +5319,7 @@ document.addEventListener('contextmenu', function(e) {
       if (photos.length >= totalPhotos) allLoaded = true;
       renderGrid();
       document.getElementById('loadingState').style.display = 'none';
+      deepLinkLoaded = true;
     }
 
     // Keep loading pages until we find the photo or run out
@@ -5344,6 +5346,7 @@ document.addEventListener('contextmenu', function(e) {
     }
   } catch(e) { /* ignore deep-link errors silently */ }
   loading = false;
+  if (deepLinkLoaded) rearmInfiniteScrollObserver();
 })();
 
 /* ---------- Export Modal ---------- */
