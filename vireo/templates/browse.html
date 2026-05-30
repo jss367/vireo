@@ -2800,6 +2800,7 @@ async function loadPhotos() {
   if (loading || allLoaded) return;
   loading = true;
   var epoch = loadEpoch;
+  var loadSucceeded = false;
   document.getElementById('loadingState').style.display = 'block';
 
   var url;
@@ -2862,6 +2863,7 @@ async function loadPhotos() {
         if (epoch === loadEpoch) refreshGridCards(refreshIds);
       });
     }
+    loadSucceeded = true;
   } catch(e) {
     if (epoch !== loadEpoch) return;
     document.getElementById('loadingState').textContent = 'Error loading photos.';
@@ -2869,7 +2871,7 @@ async function loadPhotos() {
     if (epoch === loadEpoch) {
       loading = false;
       document.getElementById('loadingState').style.display = 'none';
-      rearmInfiniteScrollObserver();
+      if (loadSucceeded) rearmInfiniteScrollObserver();
     }
   }
 }
