@@ -863,12 +863,14 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .modal-error { color: var(--danger); font-size: 13px; margin-top: 8px; display: none; }
 
 /* ---------- Shortcuts Cheat Sheet ---------- */
+/* z-index sits above the lightbox stack (overlay 9999, close 10000, nav 10001)
+   so the sheet remains visible when stacked over an active lightbox. */
 .shortcuts-overlay {
   display: none;
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
   background: rgba(0,0,0,0.7);
-  z-index: 500;
+  z-index: 10002;
   justify-content: center;
   align-items: center;
 }
