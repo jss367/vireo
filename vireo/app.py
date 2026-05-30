@@ -2869,17 +2869,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ):
             return None
 
+        raw_components = raw.get("address_components")
+        if not isinstance(raw_components, list):
+            raw_components = []
         components = []
-        for comp in raw.get("address_components") or []:
+        for comp in raw_components:
             if not isinstance(comp, dict):
                 continue
             name = comp.get("name") or comp.get("long_name") or ""
             if not name:
                 continue
+            types = comp.get("types")
+            if not isinstance(types, list):
+                types = []
             components.append({
                 "name": name,
                 "short_name": comp.get("short_name") or "",
-                "types": list(comp.get("types") or []),
+                "types": types,
             })
 
         return {

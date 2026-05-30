@@ -3603,6 +3603,37 @@ def test_post_keyword_link_place_falls_back_on_malformed_client_geometry(
     assert resp.get_json()["keyword"]["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
 
 
+def test_post_keyword_link_place_ignores_malformed_component_types(
+    app_and_db, monkeypatch,
+):
+    """Malformed component metadata should not reject otherwise valid details."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+
+    def fail_place_details(place_id, key):
+        raise AssertionError("server-side Place Details should not be called")
+
+    monkeypatch.setattr(places, "place_details", fail_place_details)
+    kw_id = db.get_or_create_text_location("Central Park")
+    place = _central_park_client_place()
+    place["address_components"][0]["types"] = 42
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={
+            "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+            "place": place,
+        },
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["keyword"]["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+
+
 def test_post_keyword_link_place_rejects_mismatched_client_place_id(app_and_db):
     """A client place payload must not bind one place_id to another place's geometry."""
     import config as cfg
