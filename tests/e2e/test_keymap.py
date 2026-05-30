@@ -301,6 +301,72 @@ def test_shortcuts_sheet_lists_misses_and_shared_hotkeys(live_server, page):
     assert {"key": "Alt+U", "label": "Clear pick/reject flag"} in groups["Lightbox"]
 
 
+def test_question_mark_opens_shortcuts_sheet_over_lightbox(live_server, page):
+    """The global ? shortcut should still work while the lightbox owns focus,
+    and the sheet must render visibly above the lightbox (not behind it)."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=15000)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate("openLightbox(1, 'hawk1.jpg')")
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=2000,
+    )
+
+    page.keyboard.press("?")
+    page.wait_for_function(
+        "document.getElementById('shortcutsCheatSheet').classList.contains('open')",
+        timeout=2000,
+    )
+
+    assert page.evaluate("""
+        () => {
+          const el = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2);
+          return !!(el && el.closest('#shortcutsCheatSheet'));
+        }
+    """) is True
+    assert page.evaluate(
+        "document.getElementById('lightboxOverlay').classList.contains('active')"
+    ) is True
+
+    # Verify the sheet is visually above the lightbox, not hidden behind it.
+    # A class of `open` alone is insufficient when z-index puts the sheet below
+    # the lightbox overlay — see Codex review on PR #926.
+    z_indexes = page.evaluate(
+        """() => {
+            const sheet = document.getElementById('shortcutsCheatSheet');
+            const lb = document.getElementById('lightboxOverlay');
+            return {
+                sheet: parseInt(getComputedStyle(sheet).zIndex, 10),
+                lightbox: parseInt(getComputedStyle(lb).zIndex, 10),
+            };
+        }"""
+    )
+    assert z_indexes["sheet"] > z_indexes["lightbox"], (
+        f"shortcuts sheet z-index ({z_indexes['sheet']}) must exceed "
+        f"lightbox z-index ({z_indexes['lightbox']}) so the sheet renders on top"
+    )
+
+    # The topmost element at the sheet's center must belong to the sheet's
+    # subtree, not the lightbox — proves the stacking actually works in render.
+    topmost_belongs_to_sheet = page.evaluate(
+        """() => {
+            const sheet = document.getElementById('shortcutsCheatSheet');
+            const r = sheet.getBoundingClientRect();
+            const el = document.elementFromPoint(
+                r.left + r.width / 2,
+                r.top + r.height / 2,
+            );
+            return el !== null && sheet.contains(el);
+        }"""
+    )
+    assert topmost_belongs_to_sheet, (
+        "topmost element at the sheet's center should be inside the sheet, "
+        "not the lightbox behind it"
+    )
+
+
 def test_two_overlays_unwind_one_esc_each(live_server, page):
     """With lightbox open and cheat sheet stacked on top, each Esc closes one
     overlay (top-of-stack first). Locks in the new one-Esc-per-overlay model

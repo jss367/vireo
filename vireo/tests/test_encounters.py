@@ -961,3 +961,360 @@ def test_segment_encounters_cuts_at_subject_absent_asymmetry():
     )
     # The first encounter should not absorb the subjectless frames.
     assert encounters[0]["photo_count"] == 6
+
+
+# -- null-timestamp grouping (2026-05-29) --
+
+
+def _null_ts_photo(photo_id, folder_id, filename, subj_emb=None,
+                   global_emb=None, species=None, focal_length=None):
+    """A photo with no timestamp (scan I/O error / unreadable file)."""
+    return {
+        "id": photo_id,
+        "timestamp": None,
+        "folder_id": folder_id,
+        "filename": filename,
+        "dino_subject_embedding": subj_emb,
+        "dino_global_embedding": global_emb,
+        "species_top5": species,
+        "focal_length": focal_length,
+    }
+
+
+def test_time_delta_both_none_still_inf():
+    """_time_delta_seconds keeps its inf contract for None inputs.
+
+    It's shared with the merge stage, which divides by / compares against the
+    result; returning None there would crash. The both-null special case lives
+    in cut_microsegments, not here.
+    """
+    from encounters import _time_delta_seconds
+
+    assert _time_delta_seconds(None, None) == float("inf")
+    assert _time_delta_seconds(None, datetime(2026, 5, 25, 10, 0, 0)) == float("inf")
+    assert _time_delta_seconds(datetime(2026, 5, 25, 10, 0, 0), None) == float("inf")
+
+
+def test_cut_keeps_contiguous_null_timestamps_together():
+    """Signal-less null-timestamp photos group into one segment by file order.
+
+    Unreadable files have no timestamp AND no embeddings/species, so every
+    similarity signal is ~0. Without the both-null guard the score cut would
+    split them into singletons.
+    """
+    from encounters import cut_microsegments
+
+    photos = [
+        _null_ts_photo(1, 10, "DSC_8039.NEF"),
+        _null_ts_photo(2, 10, "DSC_8041.NEF"),
+        _null_ts_photo(3, 10, "DSC_8042.NEF"),
+        _null_ts_photo(4, 10, "DSC_8043.NEF"),
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 1
+    assert len(segments[0]) == 4
+
+
+def test_cut_null_timestamps_sort_last_by_file():
+    """Null-timestamp photos sort after all timestamped photos, by (folder, filename)."""
+    from encounters import cut_microsegments
+
+    emb = np.ones(768, dtype=np.float32)
+    species = [("robin", 0.9)]
+    photos = [
+        _null_ts_photo(99, 10, "DSC_8042.NEF"),
+        _make_photo(0, subj_emb=emb, global_emb=emb, species=species, photo_id=1),
+        _null_ts_photo(98, 10, "DSC_8041.NEF"),
+        _make_photo(5, subj_emb=emb, global_emb=emb, species=species, photo_id=2),
+    ]
+    segments = cut_microsegments(photos)
+    flat = [p["id"] for seg in segments for p in seg]
+    # Real-timestamp photos (1, 2) first in time order, then nulls by filename.
+    assert flat == [1, 2, 98, 99]
+
+
+def test_cut_asymmetric_null_still_cuts():
+    """A null-timestamp photo adjacent to a real one cuts cleanly.
+
+    The null cluster must never contaminate a real encounter.
+    """
+    from encounters import cut_microsegments
+
+    emb = np.ones(768, dtype=np.float32)
+    species = [("robin", 0.9)]
+    photos = [
+        _make_photo(0, subj_emb=emb, global_emb=emb, species=species, photo_id=1),
+        _make_photo(5, subj_emb=emb, global_emb=emb, species=species, photo_id=2),
+        _null_ts_photo(50, 10, "DSC_8039.NEF"),
+        _null_ts_photo(51, 10, "DSC_8041.NEF"),
+    ]
+    segments = cut_microsegments(photos)
+    # One real-timestamp segment, one null-timestamp segment — never merged.
+    assert len(segments) == 2
+    assert {p["id"] for p in segments[0]} == {1, 2}
+    assert {p["id"] for p in segments[1]} == {50, 51}
+
+
+def test_cut_both_null_with_signal_still_cuts_on_score():
+    """Two undated photos that DO have embeddings (e.g. screenshots) are judged
+    on visual similarity, not force-grouped by file order.
+
+    The both-null keep-together rule is only for signal-less rows (unreadable
+    files). When real similarity signal exists, dissimilar undated images must
+    still split.
+    """
+    from encounters import cut_microsegments
+
+    emb_a = np.array([1, 0, 0] * 256, dtype=np.float32)
+    emb_b = np.array([0, 1, 0] * 256, dtype=np.float32)
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "shot_a.png",
+         "dino_subject_embedding": emb_a, "dino_global_embedding": emb_a,
+         "species_top5": [("robin", 0.9)]},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "shot_b.png",
+         "dino_subject_embedding": emb_b, "dino_global_embedding": emb_b,
+         "species_top5": [("eagle", 0.9)]},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 2
+
+
+def test_cut_both_null_with_similar_signal_groups():
+    """Undated photos with matching embeddings/species still group (score keeps)."""
+    from encounters import cut_microsegments
+
+    emb = np.ones(768, dtype=np.float32)
+    species = [("robin", 0.9)]
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "shot_a.png",
+         "dino_subject_embedding": emb, "dino_global_embedding": emb,
+         "species_top5": species},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "shot_b.png",
+         "dino_subject_embedding": emb, "dino_global_embedding": emb,
+         "species_top5": species},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 1
+    assert len(segments[0]) == 2
+
+
+def test_cut_both_null_detector_conflict_cuts():
+    """Two undated photos with no embeddings/species but conflicting detector
+    verdicts (one subject_absent, one subject_present) must split, not
+    force-group.
+
+    The detector already ran and disagrees about whether a subject is present.
+    compute_s_enc treats absent-vs-present as active dissimilarity (score ~0),
+    so this pair must fall through to the score cut rather than the
+    signal-less keep-together branch — otherwise an undated empty frame would
+    be collapsed into an undated animal frame whenever embeddings happen to be
+    missing or failed.
+    """
+    from encounters import cut_microsegments
+
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "a.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "subject_absent": True, "subject_present": False},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "b.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "subject_absent": False, "subject_present": True},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 2, (
+        f"Expected the detector conflict to cut, got "
+        f"{[[p['id'] for p in seg] for seg in segments]}"
+    )
+
+
+def test_cut_both_null_no_detector_run_still_groups():
+    """Genuinely signal-less nulls (detector never ran) still group by file
+    order even when subject_absent/subject_present are both False.
+
+    Guards against over-tightening _has_similarity_signal: an unreadable file
+    has no embeddings, no species, AND no detector verdict, so it must remain
+    in the keep-together branch.
+    """
+    from encounters import cut_microsegments
+
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "a.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "subject_absent": False, "subject_present": False},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "b.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "subject_absent": False, "subject_present": False},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 1
+    assert len(segments[0]) == 2
+
+
+def test_cut_both_null_focal_length_metadata_cuts():
+    """Two undated photos with no embeddings/species/detector verdict but
+    differing focal lengths must be judged by the score cut, not force-grouped.
+
+    compute_s_enc always folds sim_meta into the score, so a focal-length
+    mismatch (e.g. imports with stripped capture dates but retained lens data)
+    is real dissimilarity signal. _has_similarity_signal must recognise focal
+    length so the pair falls through to the score cut instead of the
+    signal-less keep-together branch.
+    """
+    from encounters import cut_microsegments
+
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "a.jpg",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "focal_length": 24.0},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "b.jpg",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "focal_length": 400.0},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 2, (
+        f"Expected the focal-length mismatch to cut, got "
+        f"{[[p['id'] for p in seg] for seg in segments]}"
+    )
+
+
+def test_cut_both_null_gps_metadata_cuts():
+    """Undated photos with no embeddings/species/detector verdict but distant
+    GPS fixes must cut on the score, not force-group by file order."""
+    from encounters import cut_microsegments
+
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "a.jpg",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "latitude": 47.6, "longitude": -122.3},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "b.jpg",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "latitude": 40.7, "longitude": -74.0},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 2, (
+        f"Expected the GPS mismatch to cut, got "
+        f"{[[p['id'] for p in seg] for seg in segments]}"
+    )
+
+
+def test_cut_both_null_no_metadata_still_groups():
+    """Truly signal-less nulls — no embeddings/species/detector verdict AND no
+    focal length or GPS — still group by file order.
+
+    Guards against over-tightening: a focal_length of 0 / None and absent GPS
+    must NOT count as signal, keeping unreadable files in the keep-together
+    branch.
+    """
+    from encounters import cut_microsegments
+
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "a.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "focal_length": 0, "latitude": None,
+         "longitude": None},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "b.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None, "focal_length": None, "latitude": None,
+         "longitude": None},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 1
+    assert len(segments[0]) == 2
+
+
+def test_cut_null_timestamps_cut_at_folder_boundary():
+    """Signal-less nulls from different folders must NOT fuse into one encounter.
+
+    The null sort key (1, datetime.min, folder_id, filename) places the last
+    null of folder A adjacent to the first null of folder B. Without a folder
+    boundary check the both-null branch would force-group unrelated unreadable
+    files from separate shoots.
+    """
+    from encounters import cut_microsegments
+
+    photos = [
+        _null_ts_photo(1, 10, "DSC_8039.NEF"),
+        _null_ts_photo(2, 10, "DSC_8041.NEF"),
+        _null_ts_photo(3, 20, "DSC_9001.NEF"),
+        _null_ts_photo(4, 20, "DSC_9002.NEF"),
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 2, (
+        f"Expected one segment per folder, got "
+        f"{[[p['id'] for p in seg] for seg in segments]}"
+    )
+    assert {p["id"] for p in segments[0]} == {1, 2}
+    assert {p["id"] for p in segments[1]} == {3, 4}
+
+
+def test_cut_both_null_signalful_cuts_at_folder_boundary():
+    """Two undated photos with MATCHING embeddings but in DIFFERENT folders must
+    cut at the folder boundary.
+
+    folder_id is not part of compute_s_enc, so without an explicit boundary cut
+    these visually identical undated frames would slide under the score cut and
+    merge two separate shoots into one encounter. The folder change is a hard
+    cut for ALL both-null pairs, not just signal-less ones.
+    """
+    from encounters import cut_microsegments
+
+    emb = np.ones(768, dtype=np.float32)
+    species = [("robin", 0.9)]
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "shot_a.png",
+         "dino_subject_embedding": emb, "dino_global_embedding": emb,
+         "species_top5": species},
+        {"id": 2, "timestamp": None, "folder_id": 20, "filename": "shot_b.png",
+         "dino_subject_embedding": emb, "dino_global_embedding": emb,
+         "species_top5": species},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 2, (
+        f"Expected the folder boundary to cut despite matching signal, got "
+        f"{[[p['id'] for p in seg] for seg in segments]}"
+    )
+    assert {p["id"] for p in segments[0]} == {1}
+    assert {p["id"] for p in segments[1]} == {2}
+
+
+def test_cut_both_null_signalful_same_folder_groups():
+    """Counterpart to the cross-folder cut: two undated photos with MATCHING
+    embeddings in the SAME folder are still judged by the score and group.
+
+    The folder-boundary cut must not over-fire within a single shoot.
+    """
+    from encounters import cut_microsegments
+
+    emb = np.ones(768, dtype=np.float32)
+    species = [("robin", 0.9)]
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": 10, "filename": "shot_a.png",
+         "dino_subject_embedding": emb, "dino_global_embedding": emb,
+         "species_top5": species},
+        {"id": 2, "timestamp": None, "folder_id": 10, "filename": "shot_b.png",
+         "dino_subject_embedding": emb, "dino_global_embedding": emb,
+         "species_top5": species},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 1
+    assert len(segments[0]) == 2
+
+
+def test_cut_null_timestamps_missing_folder_id_still_cuts():
+    """Defensive: nulls with no folder_id at all fall through to the score cut.
+
+    Production scans always populate folder_id, but if it's somehow None the
+    safe behaviour is to cut rather than collapse unrelated rows.
+    """
+    from encounters import cut_microsegments
+
+    photos = [
+        {"id": 1, "timestamp": None, "folder_id": None, "filename": "a.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None},
+        {"id": 2, "timestamp": None, "folder_id": None, "filename": "b.NEF",
+         "dino_subject_embedding": None, "dino_global_embedding": None,
+         "species_top5": None},
+    ]
+    segments = cut_microsegments(photos)
+    assert len(segments) == 2

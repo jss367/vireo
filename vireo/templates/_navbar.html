@@ -109,6 +109,13 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
 }
+@keyframes spin { to { transform: rotate(360deg); } }
+.btn-spinner {
+  display: inline-block; width: 11px; height: 11px; margin-right: 7px;
+  border: 2px solid rgba(255,255,255,0.4); border-top-color: #fff;
+  border-radius: 50%; animation: spin 0.8s linear infinite;
+  vertical-align: -1px;
+}
 
 /* ---------- Help Modal ---------- */
 .help-overlay {
@@ -856,12 +863,14 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .modal-error { color: var(--danger); font-size: 13px; margin-top: 8px; display: none; }
 
 /* ---------- Shortcuts Cheat Sheet ---------- */
+/* z-index sits above the lightbox stack (overlay 9999, close 10000, nav 10001)
+   so the sheet remains visible when stacked over an active lightbox. */
 .shortcuts-overlay {
   display: none;
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
   background: rgba(0,0,0,0.7);
-  z-index: 500;
+  z-index: 10002;
   justify-content: center;
   align-items: center;
 }
@@ -2156,7 +2165,12 @@ window.NAV_ALL_PAGES = [
     },
   };
 
-  if (document.readyState === 'loading') {
+  // The tab strip only needs the navbar DOM above, not the full page. Start it
+  // immediately so pages with slow blocking scripts (notably /map's Leaflet
+  // CDN scripts) still show an ephemeral tab that can be pinned.
+  if (STRIP()) {
+    fetchAndRender();
+  } else if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', fetchAndRender);
   } else {
     fetchAndRender();
@@ -2671,7 +2685,7 @@ window.NAV_ALL_PAGES = [
   // open so page handlers (rating, navigation, etc.) don't also fire.
   document.addEventListener('keydown', function(e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-    if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .help-overlay.active')) return;
+    if (document.querySelector('.pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .help-overlay.active')) return;
     // When sheet is open, consume non-Esc keys so page handlers don't fire.
     // Esc is handled by the Keymap.pushEsc stack and must reach the dispatcher.
     if (document.getElementById('shortcutsCheatSheet').classList.contains('open')) {
@@ -4249,18 +4263,57 @@ function showDeleteDialog(photoIds, companionCount, callback) {
 }
 
 function hideDeleteModal() {
+  setDeleteModalBusy(false);
   document.getElementById('deleteModal').classList.remove('open');
   _deletePhotoIds = [];
   _deleteCallback = null;
 }
 
+// Toggle the delete modal's in-flight state. While busy we keep the modal
+// open (rather than closing it instantly) so the user sees that their click
+// registered and work is underway — deleting a large batch can take many
+// seconds of synchronous backend work with no other feedback.
+var _deleteBusy = false;
+function setDeleteModalBusy(busy, count, mode) {
+  _deleteBusy = busy;
+  var confirmBtn = document.getElementById('deleteConfirmBtn');
+  var cancelBtn = document.querySelector('#deleteModal .modal-btn-cancel');
+  // The mode radios and companion checkbox were already read into the request
+  // when the delete started, so changing them mid-flight does nothing — lock
+  // them too so the UI stays honest about what's in progress.
+  var inputs = document.querySelectorAll(
+    '#deleteModal input[name="deleteMode"], #deleteCompanionCheck');
+  if (busy) {
+    var verb = mode === 'vireo' ? 'Removing' : 'Deleting';
+    var noun = count === 1 ? 'photo' : count + ' photos';
+    if (confirmBtn) {
+      confirmBtn.disabled = true;
+      confirmBtn.style.opacity = '0.85';
+      confirmBtn.style.cursor = 'default';
+      confirmBtn.innerHTML = '<span class="btn-spinner"></span>' + verb + ' ' + noun + '…';
+    }
+    if (cancelBtn) cancelBtn.disabled = true;
+    inputs.forEach(function(el) { el.disabled = true; });
+  } else {
+    if (confirmBtn) {
+      confirmBtn.disabled = false;
+      confirmBtn.style.opacity = '';
+      confirmBtn.style.cursor = 'pointer';
+      confirmBtn.textContent = 'Delete';
+    }
+    if (cancelBtn) cancelBtn.disabled = false;
+    inputs.forEach(function(el) { el.disabled = false; });
+  }
+}
+
 async function confirmDelete() {
+  if (_deleteBusy) return;  // guard against double-submit
   var mode = document.querySelector('input[name="deleteMode"]:checked').value;
   var includeCompanions = document.getElementById('deleteCompanionCheck').checked &&
     document.getElementById('deleteCompanionRow').style.display !== 'none';
   var savedIds = _deletePhotoIds.slice();
   var savedCallback = _deleteCallback;
-  hideDeleteModal();
+  setDeleteModalBusy(true, savedIds.length, mode);
   try {
     var data = await safeFetch('/api/batch/delete', {
       method: 'POST',
@@ -4271,7 +4324,9 @@ async function confirmDelete() {
         include_companions: includeCompanions,
       }),
     });
-  } catch(e) { return; }
+  } catch(e) { hideDeleteModal(); return; }
+
+  hideDeleteModal();
 
   if (data.trash_failed && data.trash_failed.length > 0) {
     var paths = data.trash_failed.map(function(f) { return f.path; });
@@ -4599,6 +4654,14 @@ document.addEventListener('keydown', function(e) {
     else if (matchesShortcut(e, unflagKey)) lbFlag = 'none';
     if (lbFlag !== null && _lightboxCurrentId != null) {
       var pid = _lightboxCurrentId;
+      if (
+        typeof window.handleMissesLightboxFlagShortcut === 'function' &&
+        window.handleMissesLightboxFlagShortcut(pid, lbFlag) === true
+      ) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
       _lbApplyFlag(pid, lbFlag);
       e.preventDefault();
       e.stopImmediatePropagation();

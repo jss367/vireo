@@ -612,10 +612,10 @@
           <small>Detector confidence below this flags the frame as "no subject". Burst siblings relax the bar; singletons use the full threshold.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgMissDetConf" min="10" max="50" step="1" value="25"
+          <input type="range" id="cfgMissDetConf" min="10" max="50" step="1" value="20"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgMissDetConfVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgMissDetConfVal">25%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgMissDetConfVal">20%</span>
         </div>
       </div>
       <div class="setting-row">
@@ -1862,7 +1862,7 @@ function saveConfig() {
             // different kinds of evidence:
             //   - det_conf: siblings confirm a subject, so a burst is
             //     forgiving of low confidence (lower threshold). Default
-            //     det_conf=0.25 / det_conf_burst=0.15 → burst = 0.60 * singleton.
+            //     det_conf=0.20 / det_conf_burst=0.12 -> burst = 0.60 * singleton.
             //   - bbox_min: siblings showing a larger subject make a tiny
             //     bbox look like lost framing, so a burst flags more
             //     aggressively (higher threshold). Default bbox_min=0.005 /

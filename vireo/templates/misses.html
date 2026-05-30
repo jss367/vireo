@@ -187,15 +187,6 @@
     background: rgba(0,0,0,0.15);
   }
 
-  /* Detection bbox overlay (matches browse.html .det-box styling) */
-  .miss-bbox {
-    position: absolute;
-    border: 2px solid var(--accent);
-    border-radius: 2px;
-    pointer-events: none;
-    box-shadow: 0 0 4px color-mix(in srgb, var(--accent) 40%, transparent);
-  }
-
   .miss-card-badge {
     position: absolute;
     top: 6px;
@@ -427,7 +418,7 @@
           <span>No-subject threshold</span>
           <output id="missCfgNoSubjectVal">--</output>
         </label>
-        <input id="missCfgNoSubject" type="range" min="0" max="100" step="1" value="25" disabled>
+        <input id="missCfgNoSubject" type="range" min="0" max="100" step="1" value="20" disabled>
       </div>
       <div class="misses-tuning-control">
         <label for="missCfgClassifierRescue">
@@ -489,6 +480,8 @@ var previewRequestId = 0;
 var missConfigLoaded = false;
 var focusedCategory = null;
 var focusedIndex = -1;
+var missLightboxCategoryById = {};
+var missLightboxCurrent = null;
 // Multi-select state. Spans categories — ctrl-click on cards in different
 // sections accumulates them all. The focused card doubles as the anchor for
 // shift-click range selection (range stays within the clicked category).
@@ -853,11 +846,7 @@ function renderSection(cat, photos) {
 function renderCard(cat, p, idx) {
   var bbox = parseDetectionBox(p.detection_box);
   var bboxHtml = '';
-  if (bbox) {
-    bboxHtml =
-      '<div class="miss-bbox" style="left:' + (bbox.x * 100) + '%;top:' + (bbox.y * 100) + '%;' +
-      'width:' + (bbox.w * 100) + '%;height:' + (bbox.h * 100) + '%;"></div>';
-  } else if (cat === 'no_subject') {
+  if (!bbox && cat === 'no_subject') {
     bboxHtml = '<div class="no-subject-frame">No subject detected</div>';
   }
 
@@ -920,7 +909,12 @@ function openMiss(cat, idx, e) {
   if (!photos || !photos[idx]) return;
   var p = photos[idx];
   setFocused(cat, idx);
-  var photoList = photos.map(function(q) { return { id: q.id, filename: q.filename }; });
+  missLightboxCategoryById = {};
+  var photoList = photos.map(function(q) {
+    missLightboxCategoryById[q.id] = cat;
+    return { id: q.id, filename: q.filename, missCategory: cat };
+  });
+  missLightboxCurrent = { photoId: p.id, category: cat };
 
   if (typeof openLightbox !== 'function') return;
   // The wrap onclick handler in _navbar.html guards on !window._lightboxZoomHandled,
@@ -929,6 +923,16 @@ function openMiss(cat, idx, e) {
   window._lightboxZoomHandled = false;
   openLightbox(p.id, p.filename || '', photoList);
 }
+
+document.addEventListener('lightbox:photochanged', function(e) {
+  var photoId = e && e.detail ? e.detail.photoId : null;
+  var cat = photoId != null ? missLightboxCategoryById[photoId] : null;
+  missLightboxCurrent = cat ? { photoId: photoId, category: cat } : null;
+});
+
+document.addEventListener('lightbox:closed', function() {
+  missLightboxCurrent = null;
+});
 
 function getFocusedMiss() {
   if (focusedCategory == null || focusedIndex < 0) return null;
@@ -1139,6 +1143,41 @@ async function unflagMiss(cat, photoId, e) {
   pruneSelectionToVisible();
   render();
 }
+
+async function unflagLightboxMiss(photoId) {
+  if (previewActive) {
+    if (typeof showToast === 'function') {
+      showToast('Save or reset the preview before unmarking misses', 'error');
+    }
+    return;
+  }
+  if (!missLightboxCurrent || missLightboxCurrent.photoId !== photoId) return;
+  var cat = missLightboxCurrent.category;
+  if (!cat) return;
+
+  var failures = 0;
+  await fetch('/api/misses/' + photoId + '/unflag', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ category: cat }),
+  }).then(function(r) { if (!r.ok) failures++; }).catch(function() { failures++; });
+  if (failures > 0) {
+    if (typeof showToast === 'function') showToast('Unflag failed', 'error');
+    return;
+  }
+  missesData[cat] = (missesData[cat] || []).filter(function(p) {
+    return p.id !== photoId;
+  });
+  pruneSelectionToVisible();
+  render();
+}
+
+window.handleMissesLightboxFlagShortcut = function(photoId, flag) {
+  if (flag !== 'none') return false;
+  if (!missLightboxCurrent || missLightboxCurrent.photoId !== photoId) return false;
+  unflagLightboxMiss(photoId);
+  return true;
+};
 
 /* ---------- Selection ----------
  * Plain click selects exactly one photo. Ctrl/Cmd-click toggles additional

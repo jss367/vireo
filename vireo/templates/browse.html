@@ -1790,6 +1790,69 @@ function renderCardInfo(p) {
   return infoHtml;
 }
 
+function renderPhotoCard(p, idx) {
+  var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
+
+  // Detection box overlays — render one per detection in the photo
+  var boxHtml = '';
+  if (showDetectionBoxes && Array.isArray(p.detections)) {
+    p.detections.forEach(function(d) {
+      if (d == null || d.x == null) return;
+      var conf = (d.confidence != null) ? Math.round(d.confidence * 100) + '%' : '';
+      var cat = (d.category && d.category !== 'animal') ? escapeHtml(d.category) + ' ' : '';
+      boxHtml += '<div class="det-box" style="left:' + (d.x * 100) + '%;top:' + (d.y * 100) + '%;width:' + (d.w * 100) + '%;height:' + (d.h * 100) + '%;">' +
+        ((cat || conf) ? '<span class="det-box-label">' + cat + conf + '</span>' : '') +
+      '</div>';
+    });
+  }
+
+  var clipBadge = '';
+  if (p._similarity !== undefined) {
+    clipBadge = '<span class="clip-score-badge">' + Math.round(p._similarity * 100) + '%</span>';
+  }
+  var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
+  var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
+
+  // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
+  var speciesBadgeHtml = '';
+  if (cardFields.indexOf('species') === -1 && p.species && p.species.length > 0) {
+    var maxShow = 3;
+    var shown = p.species.slice(0, maxShow);
+    speciesBadgeHtml = '<div class="species-badges">';
+    shown.forEach(function(s) {
+      speciesBadgeHtml += '<span class="species-badge">' + escapeHtml(s) + '</span>';
+    });
+    if (p.species.length > maxShow) {
+      speciesBadgeHtml += '<span class="species-badge-overflow">+' + (p.species.length - maxShow) + ' more</span>';
+    }
+    speciesBadgeHtml += '</div>';
+  }
+
+  return '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
+    '<div class="grid-card-img-wrap">' +
+      '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
+      clipBadge +
+      boxHtml +
+      inatBadge +
+      wildlifeBadge +
+      speciesBadgeHtml +
+    '</div>' +
+    '<div class="grid-card-info">' +
+      renderCardInfo(p) +
+    '</div>' +
+  '</div>';
+}
+
+function appendGridPhotos(newPhotos, startIdx) {
+  if (!newPhotos.length) return;
+  var grid = document.getElementById('grid');
+  var html = '';
+  newPhotos.forEach(function(p, offset) {
+    html += renderPhotoCard(p, startIdx + offset);
+  });
+  grid.insertAdjacentHTML('beforeend', html);
+}
+
 function refreshGridCards(photoIds) {
   photoIds.forEach(function(id) {
     var p = photos.find(function(x) { return x.id === id; });
@@ -1798,6 +1861,18 @@ function refreshGridCards(photoIds) {
     if (!card) return;
     var info = card.querySelector('.grid-card-info');
     if (info) info.innerHTML = renderCardInfo(p);
+    // iNat badge lives in img-wrap (not grid-card-info), so sync it explicitly
+    // when async metadata arrives after the card was appended.
+    var wrap = card.querySelector('.grid-card-img-wrap');
+    if (wrap) {
+      var existing = wrap.querySelector('.inat-badge');
+      var shouldShow = !!inatSubmitted[String(id)];
+      if (shouldShow && !existing) {
+        wrap.insertAdjacentHTML('beforeend', '<span class="inat-badge">iNat</span>');
+      } else if (!shouldShow && existing) {
+        existing.remove();
+      }
+    }
   });
 }
 
@@ -1868,6 +1943,7 @@ async function bootstrapBrowse() {
   if (new URLSearchParams(window.location.search).get('photo_id')) return;
   // Prevent the IntersectionObserver from triggering loadPhotos() while bootstrap is in flight
   loading = true;
+  var bootstrapSucceeded = false;
   try {
     applyBrowseConfig(await _cfgPromise);
     var data = await safeFetch('/api/browse/init?per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value);
@@ -1890,10 +1966,12 @@ async function bootstrapBrowse() {
     document.getElementById('loadingState').style.display = 'none';
     // Lazy-load collection photo counts to avoid N+1 on init
     loadCollectionCounts();
+    bootstrapSucceeded = true;
   } catch(e) {
     document.getElementById('loadingState').textContent = 'Error loading.';
   }
   loading = false;
+  if (bootstrapSucceeded) rearmInfiniteScrollObserver();
 }
 
 function renderCollectionList(collections) {
@@ -2722,6 +2800,7 @@ async function loadPhotos() {
   if (loading || allLoaded) return;
   loading = true;
   var epoch = loadEpoch;
+  var loadSucceeded = false;
   document.getElementById('loadingState').style.display = 'block';
 
   var url;
@@ -2758,20 +2837,33 @@ async function loadPhotos() {
     var data = await safeFetch(url);
     if (epoch !== loadEpoch) return;  // grid was reset mid-flight; drop stale response
     totalPhotos = data.total;
+    var firstNewIdx = photos.length;
 
     if (data.photos.length === 0) {
       allLoaded = true;
     } else {
       photos = photos.concat(data.photos);
-      var newIds = data.photos.map(function(p) { return p.id; });
-      loadInatStatus(newIds);
-      fetchColorLabels(newIds);
       currentPage++;
       if (photos.length >= totalPhotos) allLoaded = true;
     }
 
-    renderGrid();
+    if (firstNewIdx === 0) renderGrid();
+    else appendGridPhotos(data.photos, firstNewIdx);
     updateFilterSummary();
+
+    // Refresh appended cards once async metadata resolves — appendGridPhotos
+    // only renders each page once, so badges/labels would otherwise stay
+    // missing until an unrelated full grid render.
+    if (data.photos.length > 0) {
+      var refreshIds = data.photos.map(function(p) { return p.id; });
+      loadInatStatus(refreshIds).then(function() {
+        if (epoch === loadEpoch) refreshGridCards(refreshIds);
+      });
+      fetchColorLabels(refreshIds).then(function() {
+        if (epoch === loadEpoch) refreshGridCards(refreshIds);
+      });
+    }
+    loadSucceeded = true;
   } catch(e) {
     if (epoch !== loadEpoch) return;
     document.getElementById('loadingState').textContent = 'Error loading photos.';
@@ -2779,6 +2871,7 @@ async function loadPhotos() {
     if (epoch === loadEpoch) {
       loading = false;
       document.getElementById('loadingState').style.display = 'none';
+      if (loadSucceeded) rearmInfiniteScrollObserver();
     }
   }
 }
@@ -3151,56 +3244,7 @@ function renderGrid() {
 
   var html = '';
   photos.forEach(function(p, idx) {
-    var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
-
-    // Detection box overlays — render one per detection in the photo
-    var boxHtml = '';
-    if (showDetectionBoxes && Array.isArray(p.detections)) {
-      p.detections.forEach(function(d) {
-        if (d == null || d.x == null) return;
-        var conf = (d.confidence != null) ? Math.round(d.confidence * 100) + '%' : '';
-        var cat = (d.category && d.category !== 'animal') ? escapeHtml(d.category) + ' ' : '';
-        boxHtml += '<div class="det-box" style="left:' + (d.x * 100) + '%;top:' + (d.y * 100) + '%;width:' + (d.w * 100) + '%;height:' + (d.h * 100) + '%;">' +
-          ((cat || conf) ? '<span class="det-box-label">' + cat + conf + '</span>' : '') +
-        '</div>';
-      });
-    }
-
-    var clipBadge = '';
-    if (p._similarity !== undefined) {
-      clipBadge = '<span class="clip-score-badge">' + Math.round(p._similarity * 100) + '%</span>';
-    }
-    var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
-    var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
-
-    // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
-    var speciesBadgeHtml = '';
-    if (cardFields.indexOf('species') === -1 && p.species && p.species.length > 0) {
-      var maxShow = 3;
-      var shown = p.species.slice(0, maxShow);
-      speciesBadgeHtml = '<div class="species-badges">';
-      shown.forEach(function(s) {
-        speciesBadgeHtml += '<span class="species-badge">' + escapeHtml(s) + '</span>';
-      });
-      if (p.species.length > maxShow) {
-        speciesBadgeHtml += '<span class="species-badge-overflow">+' + (p.species.length - maxShow) + ' more</span>';
-      }
-      speciesBadgeHtml += '</div>';
-    }
-
-    html += '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
-      '<div class="grid-card-img-wrap">' +
-        '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
-        clipBadge +
-        boxHtml +
-        inatBadge +
-        wildlifeBadge +
-        speciesBadgeHtml +
-      '</div>' +
-      '<div class="grid-card-info">' +
-        renderCardInfo(p) +
-      '</div>' +
-    '</div>';
+    html += renderPhotoCard(p, idx);
   });
   grid.innerHTML = html;
 }
@@ -3253,14 +3297,27 @@ function browseKeyMatchesConfiguredShortcut(e) {
 }
 
 /* ---------- Infinite Scroll ---------- */
+var gridContainer = document.getElementById('gridContainer');
 var observer = new IntersectionObserver(function(entries) {
   if (entries[0].isIntersecting) loadPhotos();
-}, { rootMargin: '200px' });
+}, { root: gridContainer, rootMargin: '1200px 0px' });
 observer.observe(document.getElementById('scrollSentinel'));
+
+function rearmInfiniteScrollObserver() {
+  // With the 1200px root margin, the sentinel can remain intersecting after
+  // bootstrap or page loads. Re-observing asks IntersectionObserver to deliver
+  // a fresh callback for the current layout instead of waiting for a scroll
+  // transition that may never occur.
+  if (allLoaded || typeof observer === 'undefined') return;
+  var sentinel = document.getElementById('scrollSentinel');
+  if (!sentinel) return;
+  observer.unobserve(sentinel);
+  observer.observe(sentinel);
+}
 
 /* ---------- Scroll Position Tracking ---------- */
 var scrollTimer = null;
-document.getElementById('gridContainer').addEventListener('scroll', function() {
+gridContainer.addEventListener('scroll', function() {
   if (scrollTimer) clearTimeout(scrollTimer);
   scrollTimer = setTimeout(updateScrollPosition, 50);
 });
@@ -5229,6 +5286,7 @@ document.addEventListener('contextmenu', function(e) {
 
   // Prevent the IntersectionObserver from triggering loadPhotos() while deep-link is loading
   loading = true;
+  var deepLinkLoaded = false;
   try {
     applyBrowseConfig(await _cfgPromise);
     var photo = await safeFetch('/api/photos/' + photoId, {}, { toast: false });
@@ -5263,6 +5321,7 @@ document.addEventListener('contextmenu', function(e) {
       if (photos.length >= totalPhotos) allLoaded = true;
       renderGrid();
       document.getElementById('loadingState').style.display = 'none';
+      deepLinkLoaded = true;
     }
 
     // Keep loading pages until we find the photo or run out
@@ -5289,6 +5348,7 @@ document.addEventListener('contextmenu', function(e) {
     }
   } catch(e) { /* ignore deep-link errors silently */ }
   loading = false;
+  if (deepLinkLoaded) rearmInfiniteScrollObserver();
 })();
 
 /* ---------- Export Modal ---------- */

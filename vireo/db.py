@@ -6823,7 +6823,9 @@ class Database:
             exists)
 
         Only photos with ``quality_score >= min_quality`` that are not
-        user-rejected are returned, ordered by ``quality_score`` DESC.
+        user-rejected are returned. The API layer applies the final
+        highlights ranking because it combines these persisted quality fields
+        with prediction confidence and user ratings.
         """
         ws = self._ws_id()
         if folder_id is None:
@@ -6839,6 +6841,11 @@ class Database:
                       p.timestamp, p.width, p.height, p.rating, p.flag,
                       p.thumb_path, p.quality_score, p.subject_sharpness,
                       p.subject_size, p.sharpness, p.phash_crop,
+                      p.mask_path, p.subject_tenengrad, p.bg_tenengrad,
+                      p.crop_complete, p.bg_separation,
+                      p.subject_clip_high, p.subject_clip_low,
+                      p.subject_y_median, p.noise_estimate,
+                      p.eye_tenengrad,
                       p.dino_subject_embedding, p.dino_global_embedding,
                       bp.species,
                       tp.prediction_id,
@@ -6856,7 +6863,7 @@ class Database:
                               ) AS rn
                        FROM photo_keywords pk
                        JOIN keywords k ON k.id = pk.keyword_id
-                       WHERE k.is_species = 1
+                       WHERE k.is_species = 1 OR k.type = 'taxonomy'
                    ) WHERE rn = 1
                ) bp ON bp.photo_id = p.id
                LEFT JOIN (
@@ -9904,6 +9911,49 @@ class Database:
             self.conn.execute(
                 "UPDATE collections SET rules = ? WHERE id = ?",
                 (json.dumps(NEEDS_IDENTIFICATION_RULES), row["id"]),
+            )
+            updated += 1
+        if updated:
+            self.conn.commit()
+        return updated
+
+    def rewrite_legacy_miss_thresholds_in_workspaces(
+        self, legacy_det, legacy_burst, new_det, new_burst
+    ):
+        """Rewrite the exact legacy miss-threshold default pair in every
+        workspace's ``config_overrides``. Customized values are left alone.
+
+        Called from ``config.migrate_legacy_miss_thresholds``, which gates
+        the whole migration behind a one-time marker so this only runs
+        once per install — a user who later explicitly re-saves the
+        legacy pair via the settings UI keeps that setting.
+        """
+        rows = self.conn.execute(
+            "SELECT id, config_overrides FROM workspaces "
+            "WHERE config_overrides IS NOT NULL"
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            raw = row["config_overrides"]
+            try:
+                overrides = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(overrides, dict):
+                continue
+            pipeline = overrides.get("pipeline")
+            if not isinstance(pipeline, dict):
+                continue
+            if (
+                pipeline.get("miss_det_confidence") != legacy_det
+                or pipeline.get("miss_det_confidence_burst") != legacy_burst
+            ):
+                continue
+            pipeline["miss_det_confidence"] = new_det
+            pipeline["miss_det_confidence_burst"] = new_burst
+            self.conn.execute(
+                "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
+                (json.dumps(overrides), row["id"]),
             )
             updated += 1
         if updated:
