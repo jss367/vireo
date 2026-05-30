@@ -7811,7 +7811,13 @@ class Database:
         ).fetchone()
         return bool(row["is_species"]) if row else False
 
-    def accept_prediction(self, prediction_id, replace_species=False, _commit=True):
+    def accept_prediction(
+        self,
+        prediction_id,
+        replace_species=False,
+        photo_ids=None,
+        _commit=True,
+    ):
         """Accept a prediction: mark as accepted and add species keyword.
 
         If the prediction belongs to a group, derives the consensus species
@@ -7824,10 +7830,17 @@ class Database:
         list carries the ``old_species`` names that were stripped from that
         photo (empty when ``replace_species`` is False).
 
+        When ``photo_ids`` is provided for a grouped prediction, only matching
+        group members are tagged and marked accepted. This lets callers apply a
+        grouped accept to a filtered subset without changing hidden photos.
+
         All database changes are performed atomically in a single transaction
         unless ``_commit`` is False and the caller owns the transaction.
         """
         ws = self._ws_id()
+        limited_photo_ids = None
+        if photo_ids is not None:
+            limited_photo_ids = {int(pid) for pid in photo_ids}
         pred = self.conn.execute(
             """SELECT pr.*,
                       pr.classifier_model AS model,
@@ -7957,8 +7970,20 @@ class Database:
                     (ws, ws, pred["group_id"], pred["model"]),
                 ).fetchall()
                 for gp in group_preds:
+                    if (
+                        limited_photo_ids is not None
+                        and gp["photo_id"] not in limited_photo_ids
+                    ):
+                        continue
                     _accept_for_photo(gp["photo_id"], gp["id"])
             else:
+                if (
+                    limited_photo_ids is not None
+                    and pred["photo_id"] not in limited_photo_ids
+                ):
+                    if _commit:
+                        self.conn.commit()
+                    return {"species": species, "keyword_id": kid, "affected": []}
                 _accept_for_photo(pred["photo_id"], prediction_id)
 
             if _commit:

@@ -4406,6 +4406,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     ).fetchall()
                 )
             processed = set()
+            confirmable_photo_ids_by_key = {}
+            for pid in photo_ids:
+                if pid in accepted_photo_ids:
+                    continue
+                pred = top_predictions.get(pid)
+                if pred is None:
+                    continue
+                key = (
+                    "group",
+                    pred["classifier_model"],
+                    pred["group_id"],
+                ) if pred["group_id"] else ("prediction", pred["id"])
+                confirmable_photo_ids_by_key.setdefault(key, []).append(pid)
             affected = []
             skipped = []
             for pid in photo_ids:
@@ -4424,9 +4437,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if key in processed:
                     continue
                 processed.add(key)
-                result = db.accept_prediction(pred["id"], _commit=False)
+                result = db.accept_prediction(
+                    pred["id"],
+                    photo_ids=confirmable_photo_ids_by_key.get(key, [pid]),
+                    _commit=False,
+                )
                 if result is None:
                     skipped.append({"photo_id": pid, "reason": "prediction_not_found"})
+                    continue
+                if not result["affected"]:
+                    skipped.extend(
+                        {"photo_id": confirm_pid, "reason": "prediction_not_found"}
+                        for confirm_pid in confirmable_photo_ids_by_key.get(key, [pid])
+                    )
                     continue
                 items = [
                     {

@@ -4403,6 +4403,62 @@ def test_highlights_confirm_skips_taxonomy_keyword_photo(app_and_db):
     assert db.get_review_status(pred["id"], db._ws_id()) == "pending"
 
 
+def test_highlights_confirm_group_limited_to_submitted_photos(app_and_db):
+    """Grouped Highlights confirm does not tag hidden or unsubmitted group photos."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hcg', 'hcg', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    pid1 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'group-1.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    pid2 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'group-2.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    existing_kid = db.add_keyword("House Sparrow", is_species=True)
+    db.tag_photo(pid2, existing_kid)
+    det1 = db.save_detections(
+        pid1,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    det2 = db.save_detections(
+        pid2,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det1, "Bald Eagle", 0.91, "m", group_id="group-1")
+    db.add_prediction(det2, "Bald Eagle", 0.89, "m", group_id="group-1")
+    pred1 = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (det1, "Bald Eagle"),
+    ).fetchone()
+    pred2 = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (det2, "Bald Eagle"),
+    ).fetchone()
+
+    resp = client.post("/api/highlights/confirm", json={"photo_ids": [pid1]})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert [item["photo_id"] for item in body["affected"]] == [pid1]
+    assert db.get_review_status(pred1["id"], db._ws_id()) == "accepted"
+    assert db.get_review_status(pred2["id"], db._ws_id()) == "pending"
+    assert "Bald Eagle" in {kw["name"] for kw in db.get_photo_keywords(pid1)}
+    pid2_keywords = {kw["name"] for kw in db.get_photo_keywords(pid2)}
+    assert "House Sparrow" in pid2_keywords
+    assert "Bald Eagle" not in pid2_keywords
+
+
 def test_highlights_relabel_rejects_prediction_and_replaces_species(app_and_db):
     """POST /api/highlights/relabel retags photos and rejects the stale prediction."""
     app, db = app_and_db

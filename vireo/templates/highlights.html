@@ -267,12 +267,25 @@ function attachCardClicks(container, photoSet) {
   });
 }
 
-function bucketPhotoIds(bucket) {
-  return (bucket.photos || []).map(function(p) { return p.id; });
+async function ensureFullBucketLoaded(species, isUnidentified) {
+  var target = isUnidentified
+    ? (currentData && currentData.unidentified)
+    : (currentData && currentData.buckets || []).find(function(b) { return b.species === species; });
+  if (!target) return [];
+  while (target.has_more) {
+    await loadMoreBucket(species, isUnidentified);
+  }
+  return target.photos || [];
 }
 
-function unidPhotoIds() {
-  return (currentData && currentData.unidentified && currentData.unidentified.photos || [])
+async function bucketPhotoIds(bucket) {
+  var photos = await ensureFullBucketLoaded(bucket.species, false);
+  return photos.map(function(p) { return p.id; });
+}
+
+async function unidPhotoIds() {
+  var photos = await ensureFullBucketLoaded(null, true);
+  return photos
     .map(function(p) { return p.id; });
 }
 
@@ -508,31 +521,37 @@ function render() {
   });
 
   content.querySelectorAll('.bucket-action').forEach(function(btn) {
-    btn.addEventListener('click', function() {
+    btn.addEventListener('click', async function() {
       var action = btn.getAttribute('data-action');
-      if (action === 'confirm-bucket') {
-        var species = btn.getAttribute('data-species');
-        var bucket = buckets.find(function(b) { return b.species === species; });
-        if (bucket) confirmPhotoIds(bucketPhotoIds(bucket), btn);
-      } else if (action === 'change-bucket') {
-        var changeSpecies = btn.getAttribute('data-species');
-        var changeBucket = buckets.find(function(b) { return b.species === changeSpecies; });
-        if (changeBucket) {
+      btn.disabled = true;
+      try {
+        if (action === 'confirm-bucket') {
+          var species = btn.getAttribute('data-species');
+          var bucket = buckets.find(function(b) { return b.species === species; });
+          if (bucket) await confirmPhotoIds(await bucketPhotoIds(bucket), btn);
+        } else if (action === 'change-bucket') {
+          var changeSpecies = btn.getAttribute('data-species');
+          var changeBucket = buckets.find(function(b) { return b.species === changeSpecies; });
+          if (changeBucket) {
+            var changeIds = await bucketPhotoIds(changeBucket);
+            showSpeciesModal(
+              'Change species',
+              changeIds.length + ' photo' + (changeIds.length === 1 ? '' : 's'),
+              changeIds,
+              changeBucket.species
+            );
+          }
+        } else if (action === 'change-unidentified') {
+          var ids = await unidPhotoIds();
           showSpeciesModal(
-            'Change species',
-            changeBucket.photo_count + ' photo' + (changeBucket.photo_count === 1 ? '' : 's'),
-            bucketPhotoIds(changeBucket),
-            changeBucket.species
+            'Set species',
+            ids.length + ' unidentified photo' + (ids.length === 1 ? '' : 's'),
+            ids,
+            ''
           );
         }
-      } else if (action === 'change-unidentified') {
-        var ids = unidPhotoIds();
-        showSpeciesModal(
-          'Set species',
-          ids.length + ' unidentified photo' + (ids.length === 1 ? '' : 's'),
-          ids,
-          ''
-        );
+      } finally {
+        btn.disabled = false;
       }
     });
   });
