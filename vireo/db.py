@@ -6822,7 +6822,9 @@ class Database:
             no usable prediction exists)
 
         Only photos with ``quality_score >= min_quality`` that are not
-        user-rejected are returned, ordered by ``quality_score`` DESC.
+        user-rejected are returned. The API layer applies the final
+        highlights ranking because it combines these persisted quality fields
+        with prediction confidence and user ratings.
         """
         ws = self._ws_id()
         if folder_id is None:
@@ -6838,6 +6840,11 @@ class Database:
                       p.timestamp, p.width, p.height, p.rating, p.flag,
                       p.thumb_path, p.quality_score, p.subject_sharpness,
                       p.subject_size, p.sharpness, p.phash_crop,
+                      p.mask_path, p.subject_tenengrad, p.bg_tenengrad,
+                      p.crop_complete, p.bg_separation,
+                      p.subject_clip_high, p.subject_clip_low,
+                      p.subject_y_median, p.noise_estimate,
+                      p.eye_tenengrad,
                       p.dino_subject_embedding, p.dino_global_embedding,
                       bp.species,
                       tp.predicted_species,
@@ -6854,7 +6861,7 @@ class Database:
                               ) AS rn
                        FROM photo_keywords pk
                        JOIN keywords k ON k.id = pk.keyword_id
-                       WHERE k.is_species = 1
+                       WHERE k.is_species = 1 OR k.type = 'taxonomy'
                    ) WHERE rn = 1
                ) bp ON bp.photo_id = p.id
                LEFT JOIN (
