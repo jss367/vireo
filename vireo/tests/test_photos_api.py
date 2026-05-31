@@ -3042,6 +3042,50 @@ def test_post_photo_location_normalizes_non_string_client_place_id(app_and_db):
     assert loc["place_id"] == "12345"
 
 
+def test_post_photo_location_client_place_types_drops_same_named_leaf_parent(
+    app_and_db,
+):
+    """Client autocomplete must forward `place.types` so a locality named the
+    same as a higher administrative area (e.g. city `New York` inside state
+    `New York`) does not get duplicated as its own parent in the chain.
+    """
+    import config as cfg
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+
+    new_york_city_place = {
+        "place_id": "ChIJOwg_06VPwokRYv534QaPC8g",
+        "name": "New York",
+        "types": ["locality", "political"],
+        "geometry": {"location": {"lat": 40.7128, "lng": -74.006}},
+        "address_components": [
+            {"long_name": "New York", "short_name": "New York",
+             "types": ["locality", "political"]},
+            {"long_name": "New York", "short_name": "NY",
+             "types": ["administrative_area_level_1", "political"]},
+            {"long_name": "United States", "short_name": "US",
+             "types": ["country", "political"]},
+        ],
+    }
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={"place": new_york_city_place},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    loc = resp.get_json()["location"]
+    assert loc["name"] == "New York"
+    # Parent chain (broadest -> narrowest, excluding leaf) must NOT include a
+    # second "New York" — only the country and the state level.
+    parent_names = [p["name"] for p in loc["parent_chain"]]
+    assert parent_names == ["United States", "New York"]
+
+
 def test_post_photo_location_returns_400_on_missing_place_id(app_and_db):
     """Empty body / missing place_id is a 400 — never reaches Google."""
     app, db = app_and_db
