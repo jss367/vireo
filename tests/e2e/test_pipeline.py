@@ -137,6 +137,19 @@ def test_pipeline_status_pills_visible_for_processing_stages(live_server, page):
     expect(page.locator("#pillExtract")).to_contain_text("Will run")
 
 
+def test_pipeline_import_plan_waits_for_folder_preview_scope(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    expect(page.locator("#pillClassify")).to_contain_text("Already done")
+
+    page.route("**/api/import/folder-preview", lambda route: None)
+    page.fill("#cfgSourceInput", "/Volumes/Photography/Raw Files/USA/2026/2026-05-30")
+    page.locator("#card-source button", has_text="Add").click()
+
+    expect(page.locator("[data-testid='pipeline-plan-summary'] .plan-loading")).to_be_visible()
+    expect(page.locator("#pillClassify")).not_to_contain_text("Already done")
+
+
 def test_pipeline_reclassify_flips_classify_pill_to_will_run(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
