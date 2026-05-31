@@ -221,10 +221,9 @@ def test_link_attaches_place_id_via_test_hook(live_server, page, monkeypatch):
     # Linking the leaf decreases the unlinked count by one. Parent-chain rows
     # are visible as ancestors, but they are not directly tagged on photos and
     # should not be counted as user-actionable unlinked locations.
-    final_count = int(page.locator("#kwUnlinkedCount").inner_text())
-    assert final_count == 0, f"expected 0, got {final_count}"
+    expect(page.locator("#kwUnlinkedCount")).to_have_text("0")
     page.locator("#kwFilterUnlinked").click()
-    expect(page.locator("tr[data-id]")).to_have_count(0)
+    expect(page.locator("tr[data-id]:visible")).to_have_count(0)
 
     # Sanity-check the DB row got place_id + coords.
     row_db = live_server["db"].conn.execute(

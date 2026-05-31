@@ -631,6 +631,7 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_photos_file_hash ON photos(file_hash);
 
             CREATE INDEX IF NOT EXISTS idx_keywords_name ON keywords(name);
+            CREATE INDEX IF NOT EXISTS idx_keywords_parent_id ON keywords(parent_id);
             -- type is low-cardinality (5-value enum) but heavily filtered:
             -- has_subject rule, filter_out_subject_tagged, backfill_wildlife,
             -- and the warm-path migration probes all do WHERE type [IN/=] ...
@@ -7308,7 +7309,7 @@ class Database:
                    WHERE k.parent_id IS NOT NULL
                ),
                descendants(ancestor_id, descendant_id, depth) AS (
-                   SELECT id, id, 0 FROM keywords
+                   SELECT id, id, 0 FROM ancestors
                    UNION ALL
                    SELECT d.ancestor_id, k.id, d.depth + 1
                    FROM descendants d
