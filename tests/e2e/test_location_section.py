@@ -126,6 +126,41 @@ def test_freetext_enter_creates_location(live_server, page):
     expect(page.locator("#locationEmpty")).to_be_hidden()
 
 
+def test_existing_location_keywords_suggest_while_typing(live_server, page):
+    """The Location input shows saved location keywords separately from Google."""
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"][:2]
+    existing_location_id = db.get_or_create_text_location("San Diego Airbnb")
+    db.set_photo_location(photo_ids[1], existing_location_id)
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(f".grid-card[data-id='{photo_ids[0]}']").wait_for(state="visible")
+    page.locator(f".grid-card[data-id='{photo_ids[0]}']").click()
+    _wait_for_detail_loaded(page)
+
+    inp = page.locator("#locationInput")
+    inp.wait_for(state="visible")
+    inp.fill("SA")
+
+    suggestions = page.locator("#locationKeywordSuggestions")
+    expect(suggestions).to_be_visible()
+    expect(suggestions).to_contain_text("San Diego Airbnb")
+    expect(suggestions).to_contain_text("Saved location")
+
+    suggestions.locator(".keyword-suggestion-option", has_text="San Diego Airbnb").click()
+
+    expect(page.locator("#locationFilled")).to_be_visible()
+    expect(page.locator("#locationFilled .filled-place")).to_have_text(
+        "San Diego Airbnb"
+    )
+    row = db.conn.execute(
+        "SELECT 1 FROM photo_keywords "
+        "WHERE photo_id = ? AND keyword_id = ?",
+        (photo_ids[0], existing_location_id),
+    ).fetchone()
+    assert row is not None
+
+
 def test_enter_after_place_changed_does_not_submit_freetext(live_server, page):
     """Regression for the keyboard-selected-autocomplete race: when the
     user presses Enter to pick a highlighted Google suggestion, the
