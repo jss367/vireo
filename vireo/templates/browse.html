@@ -1708,6 +1708,7 @@ var inatSubmitted = {};  // {photo_id: true}
 var colorLabels = {};    // {photo_id: color_string}
 var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch responses
 var loadEpoch = 0;       // bumped on any grid reset; guards against stale loadPhotos responses
+var selectAllRequestSeq = 0; // bumped to ignore stale async select-all responses
 var filterRating = 0;
 var flagFilter = '';
 var activeFolderId = null;
@@ -3029,6 +3030,7 @@ function resetAndLoad() {
   currentPage = 1;
   allLoaded = false;
   loadEpoch++;
+  selectAllRequestSeq++;
   loading = false;
   // Dataset is about to change; any prior selection (multi-select Set or
   // single-focus id) points at photos that may not exist in the new view.
@@ -3662,6 +3664,8 @@ async function selectAllMatchingPhotos() {
   anchorRestoreEpoch++;
   selectedPhotoId = null;
   selectedIndex = -1;
+  var requestSeq = ++selectAllRequestSeq;
+  var requestEpoch = loadEpoch;
 
   if (clipSearchActive) {
     photos.forEach(function(p) { selectedPhotos.add(p.id); });
@@ -3681,6 +3685,7 @@ async function selectAllMatchingPhotos() {
   showToast('Selecting all matching photos...');
   try {
     var data = await safeFetch(url, {}, { toast: false });
+    if (requestSeq !== selectAllRequestSeq || requestEpoch !== loadEpoch) return;
     selectedPhotos.clear();
     (data.photo_ids || []).forEach(function(id) { selectedPhotos.add(id); });
     renderGrid();
