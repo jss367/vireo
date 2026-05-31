@@ -199,6 +199,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
             )
     # Reclassify is a user override, not a settings-change signal.
     fingerprint_outdated = stale_total > 0 and not params.reclassify
+    fingerprint_reason = "label_set_changed" if fingerprint_outdated else None
 
     if total_dets == 0:
         if new_count > 0:
@@ -223,6 +224,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 "new_photos": new_count,
                 "stale": stale_total,
                 "fingerprint_outdated": fingerprint_outdated,
+                "fingerprint_reason": fingerprint_reason,
             },
         }
 
@@ -265,6 +267,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 "eligible": 0,
                 "stale": stale_total,
                 "fingerprint_outdated": fingerprint_outdated,
+                "fingerprint_reason": fingerprint_reason,
             },
         }
 
@@ -290,6 +293,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                     "new_photos": new_count,
                     "stale": stale_total,
                     "fingerprint_outdated": fingerprint_outdated,
+                    "fingerprint_reason": fingerprint_reason,
                 },
             }
         return {
@@ -307,6 +311,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 "eligible": eligible,
                 "stale": stale_total,
                 "fingerprint_outdated": fingerprint_outdated,
+                "fingerprint_reason": fingerprint_reason,
             },
         }
 
@@ -321,10 +326,17 @@ def _classify_plan(db, params, photo_ids, new_count=0):
         breakdown = ", ".join(
             f"{n} for {name}" for name, n in pending_per_model.items()
         )
-        summary = (
-            f"Will classify {pending_total} new "
-            f"pair{_plural(pending_total)} ({breakdown})"
-        )
+        if fingerprint_outdated:
+            summary = (
+                f"Current label set differs from cached classifications — "
+                f"will classify {pending_total} "
+                f"pair{_plural(pending_total)} ({breakdown})"
+            )
+        else:
+            summary = (
+                f"Will classify {pending_total} new "
+                f"pair{_plural(pending_total)} ({breakdown})"
+            )
     if new_count > 0:
         # Mixed scope: some existing detections still to classify *and*
         # N new photos coming in (each will get its own detections + class).
@@ -341,6 +353,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
         "eligible": eligible + new_count,
         "stale": stale_total,
         "fingerprint_outdated": fingerprint_outdated,
+        "fingerprint_reason": fingerprint_reason,
     }
     if new_count > 0:
         detail["new_photos"] = new_count

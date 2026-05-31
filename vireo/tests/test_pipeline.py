@@ -472,6 +472,43 @@ def test_load_results_missing(tmp_path):
     assert load_results(str(tmp_path), workspace_id=999) is None
 
 
+def test_load_results_quarantines_corrupt_cache(tmp_path):
+    """A malformed cache should not crash request handlers that read it."""
+    from pipeline import load_results, load_results_raw
+
+    path = tmp_path / "pipeline_results_ws1.json"
+    path.write_text('{"photos": [], "encounters": [{"photo_ids"')
+
+    assert load_results(str(tmp_path), workspace_id=1) is None
+    assert not path.exists()
+    backups = list(tmp_path.glob("pipeline_results_ws1.json.corrupt-*"))
+    assert len(backups) == 1
+    assert backups[0].read_text().startswith('{"photos"')
+
+    # Subsequent raw reads see a missing cache, not the original JSON error.
+    assert load_results_raw(str(tmp_path), workspace_id=1) is None
+
+
+def test_save_results_raw_replaces_corrupt_cache_atomically(tmp_path):
+    """Saving raw results should replace an unusable cache with valid JSON."""
+    from pipeline import load_results_raw, save_results_raw
+
+    path = tmp_path / "pipeline_results_ws1.json"
+    path.write_text('{"photos": [')
+
+    saved = save_results_raw({"photos": [], "encounters": []}, str(tmp_path), 1)
+
+    assert saved == str(path)
+    loaded = load_results_raw(str(tmp_path), workspace_id=1)
+    assert loaded["photos"] == []
+    assert loaded["encounters"] == []
+    assert loaded["summary"]["total_photos"] == 0
+    assert loaded["summary"]["encounter_count"] == 0
+    assert loaded["summary"]["confirmed_count"] == 0
+    assert loaded["summary"]["unconfirmed_count"] == 0
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
 # -- prune_results --
 
 
