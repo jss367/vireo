@@ -2702,10 +2702,12 @@ def test_all_keywords_scoped_by_workspace(app_and_db):
         names = [k["name"] for k in data]
         # Child keyword tagged in workspace A — present
         assert "Hawk" in names
-        # Parent keyword not tagged but is ancestor of Hawk — present with photo_count=0
+        # Parent keyword not tagged but is ancestor of Hawk — present with
+        # descendant photo count, plus direct count for callers that need it.
         assert "Birds" in names
         birds = next(k for k in data if k["name"] == "Birds")
-        assert birds["photo_count"] == 0
+        assert birds["photo_count"] == 1
+        assert birds["direct_photo_count"] == 0
         # Keyword only in workspace B — absent
         assert "Penguin" not in names
 

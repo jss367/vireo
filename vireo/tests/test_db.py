@@ -9690,6 +9690,173 @@ def test_upsert_place_chain_walks_full_parent_chain(db):
     assert chain[-1]["parent_id"] is None
 
 
+def test_upsert_place_chain_filters_address_fragments(db):
+    """Street numbers, routes, and postal codes should not become keywords."""
+    details = {
+        "place_id": "ChIJ_Address_Fragment_Test",
+        "name": "123 Main St",
+        "lat": 37.1,
+        "lng": -122.2,
+        "address_components": [
+            {"name": "123", "short_name": "123", "types": ["street_number"]},
+            {"name": "Main St", "short_name": "Main St", "types": ["route"]},
+            {"name": "Mountain View", "short_name": "Mountain View", "types": ["locality"]},
+            {"name": "Santa Clara County", "short_name": "Santa Clara County",
+             "types": ["administrative_area_level_2"]},
+            {"name": "California", "short_name": "CA",
+             "types": ["administrative_area_level_1"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+            {"name": "94043", "short_name": "94043", "types": ["postal_code"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "123 Main St",
+        "Mountain View",
+        "Santa Clara County",
+        "California",
+        "United States",
+    ]
+    all_location_names = {
+        row["name"]
+        for row in db.conn.execute(
+            "SELECT name FROM keywords WHERE type = 'location'"
+        ).fetchall()
+    }
+    assert "123" not in all_location_names
+    assert "94043" not in all_location_names
+    assert "Main St" not in all_location_names
+
+
+def test_upsert_place_chain_preserves_lower_admin_levels(db):
+    """Administrative levels 6 and 7 are valid location parents."""
+    details = {
+        "place_id": "ChIJ_Admin_Level_7_Test",
+        "name": "Village Square",
+        "lat": 48.1,
+        "lng": 11.2,
+        "address_components": [
+            {"name": "Village Square", "short_name": "Village Square",
+             "types": ["point_of_interest"]},
+            {"name": "Quarter Seven", "short_name": "Q7",
+             "types": ["administrative_area_level_7"]},
+            {"name": "District Six", "short_name": "D6",
+             "types": ["administrative_area_level_6"]},
+            {"name": "Region Five", "short_name": "R5",
+             "types": ["administrative_area_level_5"]},
+            {"name": "Germany", "short_name": "DE", "types": ["country"]},
+            {"name": "12", "short_name": "12", "types": ["street_number"]},
+            {"name": "10115", "short_name": "10115", "types": ["postal_code"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "Village Square",
+        "Quarter Seven",
+        "District Six",
+        "Region Five",
+        "Germany",
+    ]
+
+
+def test_upsert_place_chain_preserves_same_named_admin_parent(db):
+    """Leaf-name filtering must not drop broader same-named parents."""
+    details = {
+        "place_id": "ChIJ_New_York_City_Test",
+        "name": "New York",
+        "types": ["locality", "political"],
+        "lat": 40.7128,
+        "lng": -74.0060,
+        "address_components": [
+            {"name": "New York", "short_name": "New York", "types": ["locality"]},
+            {"name": "New York County", "short_name": "New York County",
+             "types": ["administrative_area_level_2"]},
+            {"name": "New York", "short_name": "NY",
+             "types": ["administrative_area_level_1"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "New York",
+        "New York County",
+        "New York",
+        "United States",
+    ]
+
+
+def test_upsert_place_chain_preserves_same_named_poi_parent(db):
+    """POI leaves should not remove same-named geographic parents."""
+    details = {
+        "place_id": "ChIJ_Manhattan_Venue_Test",
+        "name": "Manhattan",
+        "types": ["point_of_interest", "establishment"],
+        "lat": 40.75,
+        "lng": -73.99,
+        "address_components": [
+            {"name": "Manhattan", "short_name": "Manhattan",
+             "types": ["sublocality_level_1", "sublocality", "political"]},
+            {"name": "New York", "short_name": "New York",
+             "types": ["locality", "political"]},
+            {"name": "New York", "short_name": "NY",
+             "types": ["administrative_area_level_1", "political"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "Manhattan",
+        "Manhattan",
+        "New York",
+        "New York",
+        "United States",
+    ]
+
+
 def test_upsert_place_chain_is_idempotent(db):
     details = _central_park_details()
     first_id = db.upsert_place_chain(details)

@@ -55,6 +55,26 @@ def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
 # - general: catch-all/free-form tag (the legacy default)
 KEYWORD_TYPES = frozenset({"taxonomy", "individual", "location", "genre", "general"})
 
+_LOCATION_COMPONENT_RANKS = {
+    "country": 10,
+    "administrative_area_level_1": 20,
+    "administrative_area_level_2": 30,
+    "administrative_area_level_3": 40,
+    "administrative_area_level_4": 50,
+    "administrative_area_level_5": 60,
+    "administrative_area_level_6": 70,
+    "administrative_area_level_7": 80,
+    "locality": 90,
+    "postal_town": 90,
+    "sublocality": 100,
+    "sublocality_level_1": 100,
+    "sublocality_level_2": 110,
+    "sublocality_level_3": 120,
+    "sublocality_level_4": 130,
+    "sublocality_level_5": 140,
+    "neighborhood": 150,
+}
+
 # Default set of types that count as "identifying" a photo for queue
 # membership / classifier skip purposes. Workspaces can override.
 SUBJECT_TYPES_DEFAULT = frozenset({"taxonomy", "individual", "genre"})
@@ -613,6 +633,7 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_photos_file_hash ON photos(file_hash);
 
             CREATE INDEX IF NOT EXISTS idx_keywords_name ON keywords(name);
+            CREATE INDEX IF NOT EXISTS idx_keywords_parent_id ON keywords(parent_id);
             -- type is low-cardinality (5-value enum) but heavily filtered:
             -- has_subject rule, filter_out_subject_tagged, backfill_wildlife,
             -- and the warm-path migration probes all do WHERE type [IN/=] ...
@@ -6394,7 +6415,81 @@ class Database:
                 f"type={clash['type']!r}, can't reuse for location chain"
             ) from integrity_err
 
-    def _upsert_location_parent_chain(self, components):
+    @staticmethod
+    def _location_component_rank(component):
+        """Return a broad-to-narrow rank for useful location components."""
+        types = component.get("types") if isinstance(component, dict) else []
+        if not isinstance(types, list):
+            return None
+        ranks = [
+            _LOCATION_COMPONENT_RANKS[t]
+            for t in types
+            if isinstance(t, str) and t in _LOCATION_COMPONENT_RANKS
+        ]
+        if not ranks:
+            return None
+        return min(ranks)
+
+    def _location_parent_components(self, components, leaf_name="", leaf_types=None):
+        """Return address components suitable for keyword parents.
+
+        Google address components can include street numbers, routes, postal
+        codes, rooms, and other address fragments. Those are useful for a
+        formatted address, but they make noisy keyword parents such as "1200"
+        or "94107". Keep administrative/geographic levels only and sort by
+        component type so postal-code placement in Google's response cannot
+        become the root of the hierarchy.
+        """
+        leaf_type_set = (
+            {t for t in (leaf_types or []) if isinstance(t, str)}
+            if isinstance(leaf_types, list)
+            else set()
+        )
+        candidates = []
+        seen = set()
+        leaf_norm = leaf_name.strip().casefold() if isinstance(leaf_name, str) else ""
+        for index, comp in enumerate(components or []):
+            if not isinstance(comp, dict):
+                continue
+            name = (comp.get("name") or comp.get("long_name") or "").strip()
+            if not name:
+                continue
+            rank = self._location_component_rank(comp)
+            if rank is None:
+                continue
+            types = tuple(t for t in comp.get("types", []) if isinstance(t, str))
+            candidates.append((rank, index, name, types))
+
+        leaf_component = None
+        if leaf_norm and leaf_type_set:
+            leaf_matches = [
+                item for item in candidates
+                if item[2].casefold() == leaf_norm
+                and any(
+                    t in leaf_type_set and t in _LOCATION_COMPONENT_RANKS
+                    for t in item[3]
+                )
+            ]
+            if leaf_matches:
+                # If a leaf has the same text as multiple admin levels
+                # ("New York" city and state), drop only the narrowest
+                # matching component and keep the broader parent.
+                leaf_component = max(leaf_matches, key=lambda item: item[0])
+
+        normalized = []
+        for candidate in candidates:
+            rank, index, name, _types = candidate
+            if leaf_component is not None and candidate == leaf_component:
+                continue
+            key = (rank, name.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append((rank, index, {"name": name}))
+        normalized.sort(key=lambda item: (item[0], item[1]))
+        return [item[2] for item in normalized]
+
+    def _upsert_location_parent_chain(self, components, leaf_name="", leaf_types=None):
         """Upsert a chain of parent location keywords from ``address_components``.
 
         Walks broadest → narrowest, returning the list of visited keyword ids
@@ -6405,8 +6500,7 @@ class Database:
         """
         chain: list[int] = []
         parent_id = None
-        # Reverse Google's narrowest-first list to walk broadest → narrowest.
-        for comp in reversed(components or []):
+        for comp in self._location_parent_components(components, leaf_name, leaf_types):
             if not comp.get("name"):
                 continue
             parent_id = self._upsert_one_keyword(
@@ -6424,13 +6518,14 @@ class Database:
 
         ``details`` is the normalized dict produced by
         :func:`vireo.places.place_details`: ``place_id``, ``name``, ``lat``,
-        ``lng``, ``address_components`` (Google's narrowest-first order).
+        ``lng``, ``address_components``.
 
-        Each ``address_component`` becomes a parent ``type='location'``
-        keyword chained via ``parent_id``. Per Task 4's finding, Google's
-        standard responses do NOT carry a per-component ``place_id``, so
-        parents dedupe on ``(name, parent_id)`` and only the leaf carries
-        ``place_id``/coords.
+        Useful administrative/geographic ``address_component`` entries become
+        parent ``type='location'`` keywords chained via ``parent_id``. Street
+        numbers, routes, postal codes, and other address fragments are not
+        keyword parents. Per Task 4's finding, Google's standard responses do
+        NOT carry a per-component ``place_id``, so parents dedupe on
+        ``(name, parent_id)`` and only the leaf carries ``place_id``/coords.
 
         Idempotent: calling twice with the same ``details`` returns the same
         leaf id and does not create duplicate rows.
@@ -6444,7 +6539,11 @@ class Database:
         components = details.get("address_components") or []
 
         with self.conn:
-            chain = self._upsert_location_parent_chain(components)
+            chain = self._upsert_location_parent_chain(
+                components,
+                leaf_name=name,
+                leaf_types=details.get("types"),
+            )
             parent_id = chain[-1] if chain else None
             leaf_id = self._upsert_one_keyword(
                 name=name,
@@ -6562,7 +6661,11 @@ class Database:
         components = details.get("address_components") or []
 
         with self.conn:
-            chain = self._upsert_location_parent_chain(components)
+            chain = self._upsert_location_parent_chain(
+                components,
+                leaf_name=new_name,
+                leaf_types=details.get("types"),
+            )
             parent_id = chain[-1] if chain else None
 
             # If the chain itself reused this very keyword anywhere — as the
@@ -7241,11 +7344,20 @@ class Database:
                    FROM keywords k
                    JOIN ancestors a ON a.id = k.id
                    WHERE k.parent_id IS NOT NULL
+               ),
+               descendants(ancestor_id, descendant_id, depth) AS (
+                   SELECT id, id, 0 FROM ancestors
+                   UNION ALL
+                   SELECT d.ancestor_id, k.id, d.depth + 1
+                   FROM descendants d
+                   JOIN keywords k ON k.parent_id = d.descendant_id
+                   WHERE d.depth < 20
                )
                SELECT k.id, k.name, k.parent_id, k.type, k.taxon_id,
                       k.latitude, k.longitude, k.place_id,
                       t.name AS taxon_name, t.common_name AS taxon_common_name,
-                      COUNT(ws_photo.photo_id) AS photo_count
+                      COUNT(DISTINCT ws_desc.photo_id) AS photo_count,
+                      COUNT(DISTINCT ws_direct.photo_id) AS direct_photo_count
                FROM keywords k
                JOIN ancestors a ON a.id = k.id
                LEFT JOIN taxa t ON t.id = k.taxon_id
@@ -7255,10 +7367,18 @@ class Database:
                    JOIN photos p ON p.id = pk.photo_id
                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                    WHERE wf.workspace_id = ?
-               ) ws_photo ON ws_photo.keyword_id = k.id
+               ) ws_direct ON ws_direct.keyword_id = k.id
+               LEFT JOIN descendants d ON d.ancestor_id = k.id
+               LEFT JOIN (
+                   SELECT pk.keyword_id, pk.photo_id
+                   FROM photo_keywords pk
+                   JOIN photos p ON p.id = pk.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   WHERE wf.workspace_id = ?
+               ) ws_desc ON ws_desc.keyword_id = d.descendant_id
                GROUP BY k.id
                ORDER BY k.name""",
-            (ws, ws),
+            (ws, ws, ws),
         ).fetchall()
 
     # -- Predictions --

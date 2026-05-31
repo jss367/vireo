@@ -12,6 +12,7 @@ Both public functions normalize Google's response into a single shape::
     {
         "place_id":            str,
         "name":                str,
+        "types":               list[str],
         "lat":                 float,
         "lng":                 float,
         "address_components":  [
@@ -107,7 +108,7 @@ def place_details(place_id: str, api_key: str) -> dict | None:
     params = {
         "place_id": place_id,
         "key": api_key,
-        "fields": "place_id,name,geometry/location,address_components",
+        "fields": "place_id,name,type,geometry/location,address_components",
     }
     url = f"{_PLACE_DETAILS_URL}?{urllib.parse.urlencode(params)}"
 
@@ -139,6 +140,7 @@ def place_details(place_id: str, api_key: str) -> dict | None:
     return {
         "place_id": result.get("place_id", place_id),
         "name": result.get("name", ""),
+        "types": list(result.get("types", []) or []),
         "lat": lat,
         "lng": lng,
         "address_components": _normalize_components(result.get("address_components")),
@@ -216,6 +218,7 @@ def reverse_geocode(lat: float, lng: float, api_key: str) -> dict | None:
     return {
         "place_id": result.get("place_id", ""),
         "name": name,
+        "types": list(result.get("types", []) or []),
         "lat": out_lat,
         "lng": out_lng,
         "address_components": _normalize_components(components),
