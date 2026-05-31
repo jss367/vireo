@@ -6430,7 +6430,7 @@ class Database:
             return None
         return min(ranks)
 
-    def _location_parent_components(self, components, leaf_name=""):
+    def _location_parent_components(self, components, leaf_name="", leaf_types=None):
         """Return address components suitable for keyword parents.
 
         Google address components can include street numbers, routes, postal
@@ -6440,6 +6440,11 @@ class Database:
         component type so postal-code placement in Google's response cannot
         become the root of the hierarchy.
         """
+        leaf_type_set = (
+            {t for t in (leaf_types or []) if isinstance(t, str)}
+            if isinstance(leaf_types, list)
+            else set()
+        )
         candidates = []
         seen = set()
         leaf_norm = leaf_name.strip().casefold() if isinstance(leaf_name, str) else ""
@@ -6452,12 +6457,18 @@ class Database:
             rank = self._location_component_rank(comp)
             if rank is None:
                 continue
-            candidates.append((rank, index, name))
+            types = tuple(t for t in comp.get("types", []) if isinstance(t, str))
+            candidates.append((rank, index, name, types))
 
         leaf_component = None
-        if leaf_norm:
+        if leaf_norm and leaf_type_set:
             leaf_matches = [
-                item for item in candidates if item[2].casefold() == leaf_norm
+                item for item in candidates
+                if item[2].casefold() == leaf_norm
+                and any(
+                    t in leaf_type_set and t in _LOCATION_COMPONENT_RANKS
+                    for t in item[3]
+                )
             ]
             if leaf_matches:
                 # If a leaf has the same text as multiple admin levels
@@ -6466,8 +6477,9 @@ class Database:
                 leaf_component = max(leaf_matches, key=lambda item: item[0])
 
         normalized = []
-        for rank, index, name in candidates:
-            if leaf_component is not None and (rank, index, name) == leaf_component:
+        for candidate in candidates:
+            rank, index, name, _types = candidate
+            if leaf_component is not None and candidate == leaf_component:
                 continue
             key = (rank, name.casefold())
             if key in seen:
@@ -6477,7 +6489,7 @@ class Database:
         normalized.sort(key=lambda item: (item[0], item[1]))
         return [item[2] for item in normalized]
 
-    def _upsert_location_parent_chain(self, components, leaf_name=""):
+    def _upsert_location_parent_chain(self, components, leaf_name="", leaf_types=None):
         """Upsert a chain of parent location keywords from ``address_components``.
 
         Walks broadest → narrowest, returning the list of visited keyword ids
@@ -6488,7 +6500,7 @@ class Database:
         """
         chain: list[int] = []
         parent_id = None
-        for comp in self._location_parent_components(components, leaf_name):
+        for comp in self._location_parent_components(components, leaf_name, leaf_types):
             if not comp.get("name"):
                 continue
             parent_id = self._upsert_one_keyword(
@@ -6527,7 +6539,11 @@ class Database:
         components = details.get("address_components") or []
 
         with self.conn:
-            chain = self._upsert_location_parent_chain(components, leaf_name=name)
+            chain = self._upsert_location_parent_chain(
+                components,
+                leaf_name=name,
+                leaf_types=details.get("types"),
+            )
             parent_id = chain[-1] if chain else None
             leaf_id = self._upsert_one_keyword(
                 name=name,
@@ -6645,7 +6661,11 @@ class Database:
         components = details.get("address_components") or []
 
         with self.conn:
-            chain = self._upsert_location_parent_chain(components, leaf_name=new_name)
+            chain = self._upsert_location_parent_chain(
+                components,
+                leaf_name=new_name,
+                leaf_types=details.get("types"),
+            )
             parent_id = chain[-1] if chain else None
 
             # If the chain itself reused this very keyword anywhere — as the

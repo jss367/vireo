@@ -9786,6 +9786,7 @@ def test_upsert_place_chain_preserves_same_named_admin_parent(db):
     details = {
         "place_id": "ChIJ_New_York_City_Test",
         "name": "New York",
+        "types": ["locality", "political"],
         "lat": 40.7128,
         "lng": -74.0060,
         "address_components": [
@@ -9812,6 +9813,45 @@ def test_upsert_place_chain_preserves_same_named_admin_parent(db):
     assert names == [
         "New York",
         "New York County",
+        "New York",
+        "United States",
+    ]
+
+
+def test_upsert_place_chain_preserves_same_named_poi_parent(db):
+    """POI leaves should not remove same-named geographic parents."""
+    details = {
+        "place_id": "ChIJ_Manhattan_Venue_Test",
+        "name": "Manhattan",
+        "types": ["point_of_interest", "establishment"],
+        "lat": 40.75,
+        "lng": -73.99,
+        "address_components": [
+            {"name": "Manhattan", "short_name": "Manhattan",
+             "types": ["sublocality_level_1", "sublocality", "political"]},
+            {"name": "New York", "short_name": "New York",
+             "types": ["locality", "political"]},
+            {"name": "New York", "short_name": "NY",
+             "types": ["administrative_area_level_1", "political"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "Manhattan",
+        "Manhattan",
+        "New York",
         "New York",
         "United States",
     ]

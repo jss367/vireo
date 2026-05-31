@@ -3645,9 +3645,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "types": types,
             })
 
+        raw_types = raw.get("types")
+        if not isinstance(raw_types, list):
+            raw_types = []
+
         return {
             "place_id": place_id,
             "name": raw.get("name") or raw.get("formatted_address") or "",
+            "types": raw_types,
             "lat": lat,
             "lng": lng,
             "address_components": components,

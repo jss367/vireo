@@ -53,6 +53,7 @@ def test_place_details_parses_response(monkeypatch):
         "result": {
             "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
             "name": "Central Park",
+            "types": ["park", "point_of_interest", "establishment"],
             "geometry": {"location": {"lat": 40.7828647, "lng": -73.9653551}},
             "address_components": [
                 {
@@ -90,6 +91,7 @@ def test_place_details_parses_response(monkeypatch):
     assert out is not None
     assert out["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
     assert out["name"] == "Central Park"
+    assert out["types"] == ["park", "point_of_interest", "establishment"]
     assert isinstance(out["lat"], float)
     assert isinstance(out["lng"], float)
     assert out["lat"] == pytest.approx(40.7828647)
