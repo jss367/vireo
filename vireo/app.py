@@ -11460,6 +11460,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_job_sync():
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
+        body = request.get_json(silent=True)
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return json_error("request body must be a JSON object", 400)
+
+        raw_change_ids = body.get("change_ids")
+        change_ids = None
+        if raw_change_ids is not None:
+            if not isinstance(raw_change_ids, list):
+                return json_error("change_ids must be a list", 400)
+            if not raw_change_ids:
+                return json_error("change_ids required", 400)
+            if len(raw_change_ids) > 50000:
+                return json_error("too many change_ids", 400)
+            change_ids = []
+            seen = set()
+            for raw in raw_change_ids:
+                if isinstance(raw, bool):
+                    return json_error("change_ids must be integers", 400)
+                try:
+                    cid = int(raw)
+                except (TypeError, ValueError):
+                    return json_error("change_ids must be integers", 400)
+                if cid <= 0:
+                    return json_error("change_ids must be positive integers", 400)
+                if cid not in seen:
+                    seen.add(cid)
+                    change_ids.append(cid)
 
         def work(job):
             from sync import sync_to_xmp
@@ -11479,9 +11508,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     },
                 )
 
-            return sync_to_xmp(thread_db, progress_callback=progress_cb)
+            return sync_to_xmp(thread_db, progress_callback=progress_cb, change_ids=change_ids)
 
-        job_id = runner.start("sync", work, workspace_id=active_ws)
+        config = {"change_ids": change_ids} if change_ids is not None else {}
+        job_id = runner.start("sync", work, config=config, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
     @app.route("/api/jobs/capture-time", methods=["POST"])

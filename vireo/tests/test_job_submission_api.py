@@ -333,3 +333,30 @@ def test_job_sync_returns_job_id(app_and_db):
     data = resp.get_json()
     assert "job_id" in data
     assert data["job_id"].startswith("sync-")
+
+
+def test_job_sync_accepts_selected_change_ids(app_and_db):
+    """POST /api/jobs/sync accepts a checked pending-change subset."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+    db.queue_change(pid, "rating", "4")
+    change_id = db.get_pending_changes()[0]["id"]
+
+    resp = client.post("/api/jobs/sync", json={"change_ids": [change_id]})
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "job_id" in data
+    assert data["job_id"].startswith("sync-")
+
+
+def test_job_sync_rejects_empty_selected_change_ids(app_and_db):
+    """An explicitly empty checked subset is a client error."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    resp = client.post("/api/jobs/sync", json={"change_ids": []})
+
+    assert resp.status_code == 400
+    assert "change_ids" in resp.get_json()["error"]
