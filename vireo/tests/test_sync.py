@@ -79,6 +79,39 @@ def test_sync_to_xmp_writes_rating(tmp_path):
     assert rating == '4'
 
 
+def test_sync_to_xmp_limits_sync_to_selected_change_ids(tmp_path):
+    """sync_to_xmp can write only the checked pending changes."""
+    from xml.etree import ElementTree as ET
+
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    db.queue_change(pid, "keyword_add", "Northern cardinal")
+    db.queue_change(pid, "rating", "4")
+    pending = db.get_pending_changes()
+    ids_by_type = {c["change_type"]: c["id"] for c in pending}
+
+    result = sync_to_xmp(db, change_ids=[ids_by_type["keyword_add"]])
+
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+    assert "Northern cardinal" in read_keywords(xmp_path)
+
+    desc = ET.parse(xmp_path).getroot().find(
+        ".//{http://www.w3.org/1999/02/22-rdf-syntax-ns#}Description"
+    )
+    assert desc.get("{http://ns.adobe.com/xap/1.0/}Rating") is None
+
+    remaining = db.get_pending_changes()
+    assert [(c["change_type"], c["value"]) for c in remaining] == [("rating", "4")]
+
+
 def test_sync_to_xmp_handles_missing_file(tmp_path):
     """sync_to_xmp tracks failures when XMP file path doesn't exist."""
     from db import Database

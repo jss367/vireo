@@ -54,17 +54,22 @@ def _write_assigned_location_to_xmp_enabled(db):
         return False
 
 
-def sync_to_xmp(db, progress_callback=None):
+def sync_to_xmp(db, progress_callback=None, change_ids=None):
     """Write pending changes to XMP sidecars.
 
     Args:
         db: Database instance
         progress_callback: optional callable(current, total)
+        change_ids: optional pending_changes ids to sync. When provided, any
+            other queued changes are left pending.
 
     Returns:
         dict with synced, failed, failures counts
     """
     changes = db.get_pending_changes()
+    if change_ids is not None:
+        selected_ids = {int(cid) for cid in change_ids}
+        changes = [c for c in changes if c["id"] in selected_ids]
     if not changes:
         return {"synced": 0, "failed": 0, "failures": []}
 
