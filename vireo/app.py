@@ -14480,9 +14480,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result.pop("detection_box", None)
         result.pop("detection_conf", None)
 
-        # Get detections for this photo — threshold resolved at read time
-        # from the workspace-effective config.
-        dets = db.get_detections(photo_id)
+        # Get detections for this photo. The main inspector view honors the
+        # workspace-effective detector threshold, but the diagnostics keep raw
+        # counts so the UI can distinguish "not run" from "hidden by threshold".
+        import config as cfg
+        ws = db._active_workspace_id
+        min_conf = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
+        try:
+            min_conf = float(min_conf)
+        except (TypeError, ValueError):
+            min_conf = 0.2
+        raw_dets = [
+            d for d in db.get_detections(photo_id, min_conf=0)
+            if d["detector_model"] != "full-image"
+        ]
+        dets = [d for d in raw_dets if d["detector_confidence"] >= min_conf]
         result["detections"] = [dict(d) for d in dets]
 
         # Primary detection = highest-confidence above threshold.
@@ -14505,11 +14519,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Also pin to the most recent labels_fingerprint per
         # (detection, classifier_model) so a workspace that rotated label
         # sets doesn't see a debug payload mixing stale and current labels.
-        import config as cfg
-        ws = db._active_workspace_id
-        min_conf = db.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
         preds = db.conn.execute(
             """SELECT pr.species, pr.confidence, pr.classifier_model AS model,
                       pr.category,
@@ -14525,6 +14534,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                  ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                WHERE d.photo_id = ?
                  AND d.detector_confidence >= ?
+                 AND d.detector_model != 'full-image'
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
                     WHERE pr2.detection_id = pr.detection_id
@@ -14536,6 +14546,84 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             (ws, photo_id, min_conf),
         ).fetchall()
         result["predictions"] = [dict(p) for p in preds]
+
+        current_pred_rows = db.conn.execute(
+            """SELECT pr.id, d.detector_confidence
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE d.photo_id = ?
+                 AND d.detector_model != 'full-image'
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )""",
+            (photo_id,),
+        ).fetchall()
+        classifier_runs = db.conn.execute(
+            """SELECT cr.prediction_count, d.detector_confidence
+               FROM classifier_runs cr
+               JOIN detections d ON d.id = cr.detection_id
+               WHERE d.photo_id = ?
+                 AND d.detector_model != 'full-image'""",
+            (photo_id,),
+        ).fetchall()
+        full_image_pred_rows = db.conn.execute(
+            """SELECT pr.id
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE d.photo_id = ?
+                 AND d.detector_model = 'full-image'
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )""",
+            (photo_id,),
+        ).fetchall()
+        full_image_classifier_runs = db.conn.execute(
+            """SELECT cr.prediction_count
+               FROM classifier_runs cr
+               JOIN detections d ON d.id = cr.detection_id
+               WHERE d.photo_id = ?
+                 AND d.detector_model = 'full-image'""",
+            (photo_id,),
+        ).fetchall()
+        max_raw_conf = (
+            max(d["detector_confidence"] for d in raw_dets)
+            if raw_dets else None
+        )
+        result["classification_diagnostics"] = {
+            "detector_confidence_threshold": min_conf,
+            "raw_detection_count": len(raw_dets),
+            "visible_detection_count": len(dets),
+            "hidden_detection_count": max(0, len(raw_dets) - len(dets)),
+            "max_detector_confidence": max_raw_conf,
+            "current_prediction_count": len(current_pred_rows),
+            "visible_prediction_count": len(preds),
+            "hidden_prediction_count": sum(
+                1
+                for p in current_pred_rows
+                if p["detector_confidence"] < min_conf
+            ),
+            "classifier_run_count": len(classifier_runs),
+            "full_image_prediction_count": len(full_image_pred_rows),
+            "full_image_classifier_run_count": len(full_image_classifier_runs),
+            "hidden_classifier_run_count": sum(
+                1
+                for r in classifier_runs
+                if r["detector_confidence"] < min_conf
+            ),
+            "zero_prediction_classifier_run_count": sum(
+                1
+                for r in classifier_runs
+                if r["prediction_count"] == 0
+            ),
+        }
 
         # Get keywords
         keywords = db.get_photo_keywords(photo_id)

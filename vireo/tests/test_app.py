@@ -1681,6 +1681,98 @@ def test_api_photo_pipeline_predictions_honor_threshold_and_fingerprint(app_and_
         f"predictions must match detections (one current-fingerprint "
         f"row, no stale, no below-threshold); got {species}"
     )
+    diag = data["classification_diagnostics"]
+    assert diag["raw_detection_count"] == 2
+    assert diag["visible_detection_count"] == 1
+    assert diag["hidden_detection_count"] == 1
+    assert diag["current_prediction_count"] == 2
+    assert diag["visible_prediction_count"] == 1
+    assert diag["hidden_prediction_count"] == 1
+
+
+def test_api_photo_pipeline_diagnoses_threshold_hidden_predictions(app_and_db):
+    """A photo can be classified while the inspector has no visible predictions.
+
+    Low-confidence detections are stored globally and may have predictions from
+    the run that produced them. The visible inspector lists still honor the
+    active detector threshold, but diagnostics must make the hidden state clear.
+    """
+    app, db = app_and_db
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0.6, "y": 0.6, "w": 0.3, "h": 0.3},
+         "confidence": 0.05, "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Sparrow', 0.9, '2026-04-24')",
+        (det_id,),
+    )
+    db.conn.execute(
+        "INSERT INTO classifier_runs (detection_id, classifier_model, "
+        "labels_fingerprint, prediction_count) VALUES (?, 'bioclip-2', 'fp-new', 1)",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pid}/pipeline")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["detections"] == []
+    assert data["predictions"] == []
+    diag = data["classification_diagnostics"]
+    assert diag["raw_detection_count"] == 1
+    assert diag["visible_detection_count"] == 0
+    assert diag["hidden_detection_count"] == 1
+    assert diag["current_prediction_count"] == 1
+    assert diag["visible_prediction_count"] == 0
+    assert diag["hidden_prediction_count"] == 1
+    assert diag["classifier_run_count"] == 1
+    assert diag["hidden_classifier_run_count"] == 1
+
+
+def test_api_photo_pipeline_diagnoses_full_image_predictions(app_and_db):
+    """Synthetic full-image anchors are not below-threshold detector boxes."""
+    app, db = app_and_db
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.update_workspace(db._active_workspace_id, config_overrides={
+        "detector_confidence": 0.0,
+    })
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+         "confidence": 0, "category": "animal"},
+    ], detector_model="full-image")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.8, '2026-04-24')",
+        (det_id,),
+    )
+    db.conn.execute(
+        "INSERT INTO classifier_runs (detection_id, classifier_model, "
+        "labels_fingerprint, prediction_count) VALUES (?, 'bioclip-2', 'fp-new', 1)",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pid}/pipeline")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["detections"] == []
+    assert data["predictions"] == []
+    diag = data["classification_diagnostics"]
+    assert diag["raw_detection_count"] == 0
+    assert diag["hidden_detection_count"] == 0
+    assert diag["current_prediction_count"] == 0
+    assert diag["hidden_prediction_count"] == 0
+    assert diag["classifier_run_count"] == 0
+    assert diag["full_image_prediction_count"] == 1
+    assert diag["full_image_classifier_run_count"] == 1
 
 
 def test_compare_predictions_api_requires_collection(app_and_db):
