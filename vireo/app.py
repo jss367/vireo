@@ -8665,6 +8665,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ).fetchone()
         if not photo:
             return json_error("Photo not found", 404)
+        if not db._photo_in_workspace(photo_id):
+            return json_error(
+                f"Photo {photo_id} does not belong to the active workspace", 403,
+            )
 
         # Use the current-fingerprint helper so a photo with cached
         # predictions from multiple label sets doesn't prefill iNat with
@@ -8757,6 +8761,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ).fetchone()
         if not photo:
             return json_error("Photo not found", 404)
+        if not db._photo_in_workspace(photo_id):
+            return json_error(
+                f"Photo {photo_id} does not belong to the active workspace", 403,
+            )
 
         photo_path = os.path.join(photo["folder_path"], photo["filename"])
         if not os.path.isfile(photo_path):
@@ -8834,6 +8842,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ).fetchone()
             if not photo:
                 results.append({"photo_id": photo_id, "error": "Photo not found"})
+                continue
+            if not db._photo_in_workspace(photo_id):
+                results.append({
+                    "photo_id": photo_id,
+                    "error": (
+                        f"Photo {photo_id} does not belong to the active workspace"
+                    ),
+                })
                 continue
 
             photo_path = os.path.join(photo["folder_path"], photo["filename"])

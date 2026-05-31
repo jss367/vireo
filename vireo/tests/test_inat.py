@@ -209,6 +209,39 @@ def test_api_inat_prepare_uses_assigned_location_coords(app_and_db):
     assert "lng=2.3522" in data["upload_url"]
 
 
+def _add_out_of_workspace_photo(db):
+    active_ws = db._active_workspace_id
+    base_dir = db.conn.execute("SELECT path FROM folders LIMIT 1").fetchone()["path"]
+    other_dir = os.path.join(os.path.dirname(base_dir), "other-photos")
+    os.makedirs(other_dir, exist_ok=True)
+    Image.new('RGB', (100, 100)).save(os.path.join(other_dir, 'outside.jpg'))
+
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    fid = db.add_folder(other_dir, name="other-photos")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename='outside.jpg',
+        extension='.jpg',
+        file_size=1000,
+        file_mtime=1.0,
+        timestamp='2024-06-02T10:00:00',
+    )
+    db.set_active_workspace(active_ws)
+    return pid
+
+
+def test_api_inat_prepare_rejects_out_of_workspace_photo(app_and_db):
+    app, db, _ = app_and_db
+    pid = _add_out_of_workspace_photo(db)
+
+    client = app.test_client()
+    resp = client.get(f'/api/inat/prepare/{pid}')
+
+    assert resp.status_code == 403
+    assert "active workspace" in resp.get_json()["error"]
+
+
 def test_api_inat_submit_no_token(app_and_db):
     app, db, pid = app_and_db
     client = app.test_client()
@@ -260,6 +293,21 @@ def test_api_inat_submit_uses_assigned_location_coords(app_and_db):
     assert kwargs["longitude"] == 2.3522
 
 
+def test_api_inat_submit_rejects_out_of_workspace_photo(app_and_db):
+    app, db, _ = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+    pid = _add_out_of_workspace_photo(db)
+
+    client = app.test_client()
+    with patch("inat.submit_observation") as mock_submit:
+        resp = client.post('/api/inat/submit', json={'photo_id': pid})
+
+    assert resp.status_code == 403
+    assert "active workspace" in resp.get_json()["error"]
+    mock_submit.assert_not_called()
+
+
 def test_api_inat_submit_batch(app_and_db):
     app, db, pid = app_and_db
     import config as cfg
@@ -273,6 +321,27 @@ def test_api_inat_submit_batch(app_and_db):
     data = resp.get_json()
     assert len(data['results']) == 1
     assert data['results'][0]['observation_id'] == 11111
+
+
+def test_api_inat_submit_batch_rejects_out_of_workspace_photo(app_and_db):
+    app, db, _ = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+    pid = _add_out_of_workspace_photo(db)
+
+    client = app.test_client()
+    with patch("inat.submit_observation") as mock_submit:
+        resp = client.post('/api/inat/submit-batch', json={
+            'submissions': [{'photo_id': pid}]
+        })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['results'] == [{
+        'photo_id': pid,
+        'error': f"Photo {pid} does not belong to the active workspace",
+    }]
+    mock_submit.assert_not_called()
 
 
 def test_api_inat_submissions_lookup(app_and_db):
