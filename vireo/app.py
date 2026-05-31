@@ -11970,20 +11970,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     {
                         "current": current,
                         "total": total,
+                        "current_file": "Writing XMP metadata...",
+                        "phase": "Writing XMP metadata",
                     },
                 )
 
-            runner.push_event(
-                job["id"],
-                "progress",
-                {
-                    "current": 0,
-                    "total": 0,
-                    "current_file": "Waiting for current XMP sync...",
-                    "phase": "Waiting for current XMP sync",
-                },
-            )
-            with app._sync_job_lock:
+            lock_acquired = app._sync_job_lock.acquire(blocking=False)
+            if not lock_acquired:
+                runner.push_event(
+                    job["id"],
+                    "progress",
+                    {
+                        "current": 0,
+                        "total": 0,
+                        "current_file": "Waiting for current XMP sync...",
+                        "phase": "Waiting for current XMP sync",
+                    },
+                )
+                app._sync_job_lock.acquire()
+
+            try:
                 if runner.is_cancelled(job["id"]):
                     return {"synced": 0, "failed": 0, "failures": []}
                 runner.push_event(
@@ -11993,7 +11999,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "current": 0,
                         "total": 0,
                         "current_file": "Preparing XMP sync...",
-                        "phase": "Writing XMP metadata",
+                        "phase": "Preparing XMP sync",
                     },
                 )
                 return sync_to_xmp(
@@ -12001,6 +12007,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     progress_callback=progress_cb,
                     change_ids=change_ids,
                 )
+            finally:
+                app._sync_job_lock.release()
 
         config = {"change_ids": change_ids} if change_ids is not None else {}
         job_id = runner.start("sync", work, config=config, workspace_id=active_ws)
