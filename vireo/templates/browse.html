@@ -3943,7 +3943,17 @@ function updateSelectionPanel(ids) {
   if (summary) summary.classList.add('hidden');
   if (detail) detail.classList.toggle('visible', detailMatchesSelectedPhoto());
   panel.classList.remove('hidden');
-  document.getElementById('selectionCount').textContent = ids.length + ' photos selected';
+  document.getElementById('selectionCount').textContent = ids.length.toLocaleString() + ' photos selected';
+  if (ids.length > 1000) {
+    selectionKeywordKey = selectionIdsKey(ids);
+    selectionKeywordMissingById = {};
+    selectionKeywordRequestSeq++;
+    var list = document.getElementById('selectionKeywordSuggestions');
+    if (list) {
+      list.innerHTML = '<div class="selection-empty">Keyword suggestions are available for selections of 1,000 photos or fewer.</div>';
+    }
+    return;
+  }
   loadSelectionKeywordSuggestions(ids);
 }
 

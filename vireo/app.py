@@ -1258,9 +1258,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             elapsed = time.time() - request._start_time
             if request.method in ("POST", "DELETE"):
                 # Log user actions with details about what changed
-                body = request.get_json(silent=True) or {}
                 detail = ""
                 path = request.path
+                if path in ("/api/capture-time/preview", "/api/jobs/capture-time"):
+                    body = {}
+                else:
+                    body = request.get_json(silent=True) or {}
                 if "/rating" in path:
                     detail = f" rating={body.get('rating')}"
                 elif "/flag" in path:
@@ -11555,7 +11558,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "capture-time",
             work,
             config={
-                "photo_ids": photo_ids,
+                "photo_count": len(photo_ids),
+                "photo_ids_sample": photo_ids[:20],
                 "mode": mode,
                 "target_offset": target_offset,
                 "shift_minutes": shift_minutes,

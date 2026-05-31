@@ -369,6 +369,9 @@ def test_capture_time_job_accepts_large_select_all_payload(client_with_photo, mo
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
     assert job["result"]["updated"] == 1
+    assert job["config"]["photo_count"] == 1
+    assert job["config"]["photo_ids_sample"] == [photo_id]
+    assert "photo_ids" not in job["config"]
     assert commands[0][-1] == path
 
 
