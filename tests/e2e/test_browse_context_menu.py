@@ -19,6 +19,25 @@ def test_right_click_photo_opens_menu(live_server, page):
     expect(menu.locator(".vireo-ctx-item", has_text="Reveal in")).to_be_visible()
     expect(menu.locator(".vireo-ctx-item", has_text="Copy Path")).to_be_visible()
     expect(menu.locator(".vireo-ctx-item", has_text="Delete")).to_be_visible()
+    expect(menu.locator(".vireo-ctx-item", has_text="View on Map")).to_be_visible()
+
+
+def test_view_on_map_context_action_targets_right_clicked_photo(live_server, page):
+    """Browse's right-click View on Map action targets the context photo."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    pid = int(cards.nth(1).get_attribute("data-id"))
+
+    page.evaluate("window.viewPhotoOnMap = id => { window.__mapTarget = id; }")
+    cards.nth(1).click(button="right")
+    menu = page.locator(".vireo-ctx-menu")
+    expect(menu).to_be_visible()
+
+    menu.locator(".vireo-ctx-item", has_text="View on Map").click()
+    assert page.evaluate("window.__mapTarget") == pid
 
 
 def test_browse_selection_opens_burst_review(live_server, page):
