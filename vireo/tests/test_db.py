@@ -1625,6 +1625,10 @@ def test_migrate_default_location_collections_renames_and_fixes_exact_legacy_rul
     db.set_active_workspace(ws_id)
     db.add_collection("Needs Location", json.dumps(GPS_WITHOUT_LOCATION_KEYWORD_RULES))
     db.add_collection(
+        "Needs Location",
+        json.dumps({"mode": "all", "rules": GPS_WITHOUT_LOCATION_KEYWORD_RULES}),
+    )
+    db.add_collection(
         "No Location",
         json.dumps({
             "mode": "all",
@@ -1647,7 +1651,7 @@ def test_migrate_default_location_collections_renames_and_fixes_exact_legacy_rul
         for c in db.get_collections()
         if c["name"] == "No Location"
     ]
-    assert updated == 2
+    assert updated == 3
     assert rows["GPS Without Location Keyword"] == GPS_WITHOUT_LOCATION_KEYWORD_RULES
     assert rows["No Location Information"] == NO_LOCATION_INFORMATION_RULES
     assert custom == [[{"field": "rating", "op": ">=", "value": 3}]]

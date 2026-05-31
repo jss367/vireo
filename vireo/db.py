@@ -9918,7 +9918,13 @@ class Database:
           true ``No Location Information`` collection.
         """
         updated = 0
-        gps_rule = GPS_WITHOUT_LOCATION_KEYWORD_RULES
+        gps_rules = [
+            GPS_WITHOUT_LOCATION_KEYWORD_RULES,
+            {
+                "mode": "all",
+                "rules": GPS_WITHOUT_LOCATION_KEYWORD_RULES,
+            },
+        ]
         no_location_inverse_rules = [
             [{"field": "location_keyword_missing", "op": "equals", "value": 0}],
             {
@@ -9939,10 +9945,14 @@ class Database:
             except (TypeError, ValueError):
                 continue
 
-            if row["name"] == "Needs Location" and current == gps_rule:
+            if row["name"] == "Needs Location" and current in gps_rules:
                 self.conn.execute(
-                    "UPDATE collections SET name = ? WHERE id = ?",
-                    ("GPS Without Location Keyword", row["id"]),
+                    "UPDATE collections SET name = ?, rules = ? WHERE id = ?",
+                    (
+                        "GPS Without Location Keyword",
+                        json.dumps(GPS_WITHOUT_LOCATION_KEYWORD_RULES),
+                        row["id"],
+                    ),
                 )
                 updated += 1
                 continue
