@@ -115,7 +115,7 @@ def test_extract_metadata_retries_failed_batches(monkeypatch):
     def fake_run(file_paths, extra_args=None):
         calls.append(list(file_paths))
         if len(file_paths) > 1:
-            return None
+            return metadata._TIMEOUT
         path = file_paths[0]
         return [{"SourceFile": path, "EXIF:Make": "TestCam"}]
 
@@ -133,6 +133,48 @@ def test_extract_metadata_retries_failed_batches(monkeypatch):
         paths[2:],
         paths[2:3],
         paths[3:],
+    ]
+
+
+def test_extract_metadata_does_not_retry_permanent_failures(monkeypatch):
+    """Permanent ExifTool failures should not split into many retries."""
+    import metadata
+
+    paths = [f"/photos/img{i}.jpg" for i in range(4)]
+    calls = []
+
+    def fake_run(file_paths, extra_args=None):
+        calls.append(list(file_paths))
+        return []
+
+    monkeypatch.setattr(metadata, "_run_exiftool", fake_run)
+
+    assert metadata.extract_metadata(paths) == {}
+    assert calls == [paths]
+
+
+def test_extract_metadata_timeout_retries_are_bounded(monkeypatch):
+    """Repeated ExifTool timeouts stop after the configured split depth."""
+    import metadata
+
+    paths = [f"/photos/img{i}.jpg" for i in range(8)]
+    calls = []
+
+    def fake_run(file_paths, extra_args=None):
+        calls.append(list(file_paths))
+        return metadata._TIMEOUT
+
+    monkeypatch.setattr(metadata, "_run_exiftool", fake_run)
+
+    assert metadata.extract_metadata(paths) == {}
+    assert calls == [
+        paths,
+        paths[:4],
+        paths[:2],
+        paths[2:4],
+        paths[4:],
+        paths[4:6],
+        paths[6:],
     ]
 
 

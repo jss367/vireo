@@ -13,6 +13,8 @@ log = logging.getLogger(__name__)
 # Batch size for ExifTool invocations
 _BATCH_SIZE = 100
 _EXIFTOOL_TIMEOUT = 120
+_MAX_TIMEOUT_SPLIT_DEPTH = 2
+_TIMEOUT = object()
 
 
 def _run_exiftool(file_paths, extra_args=None):
@@ -44,7 +46,7 @@ def _run_exiftool(file_paths, extra_args=None):
         if result.returncode not in (0, 1):
             # returncode 1 = warnings (e.g. minor errors), still has output
             log.warning("exiftool returned %d: %s", result.returncode, result.stderr[:200])
-            return None
+            return []
         if result.stdout.strip():
             return json.loads(result.stdout)
         return []
@@ -52,29 +54,34 @@ def _run_exiftool(file_paths, extra_args=None):
         log.error("exiftool not found — install it with: brew install exiftool")
     except subprocess.TimeoutExpired:
         log.error("exiftool timed out processing %d files", len(file_paths))
+        return _TIMEOUT
     except json.JSONDecodeError as e:
         log.error("Failed to parse exiftool JSON output: %s", e)
 
-    return None
+    return []
 
 
-def _run_exiftool_with_retries(file_paths, extra_args=None):
-    """Run ExifTool, splitting failed batches to salvage per-file metadata."""
+def _run_exiftool_with_retries(file_paths, extra_args=None, depth=0):
+    """Run ExifTool, splitting timed-out batches to salvage metadata."""
     raw = _run_exiftool(file_paths, extra_args=extra_args)
-    if raw is not None:
+    if raw is not _TIMEOUT:
         return raw
 
-    if len(file_paths) <= 1:
+    if len(file_paths) <= 1 or depth >= _MAX_TIMEOUT_SPLIT_DEPTH:
         return []
 
     mid = len(file_paths) // 2
     log.warning(
-        "Retrying failed exiftool batch of %d files as %d + %d",
+        "Retrying timed-out exiftool batch of %d files as %d + %d",
         len(file_paths), mid, len(file_paths) - mid,
     )
     return (
-        _run_exiftool_with_retries(file_paths[:mid], extra_args=extra_args)
-        + _run_exiftool_with_retries(file_paths[mid:], extra_args=extra_args)
+        _run_exiftool_with_retries(
+            file_paths[:mid], extra_args=extra_args, depth=depth + 1
+        )
+        + _run_exiftool_with_retries(
+            file_paths[mid:], extra_args=extra_args, depth=depth + 1
+        )
     )
 
 
