@@ -11984,6 +11984,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 },
             )
             with app._sync_job_lock:
+                if runner.is_cancelled(job["id"]):
+                    return {"synced": 0, "failed": 0, "failures": []}
                 runner.push_event(
                     job["id"],
                     "progress",
