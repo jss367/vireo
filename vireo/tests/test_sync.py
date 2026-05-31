@@ -247,3 +247,180 @@ def test_sync_to_xmp_treats_legacy_null_flag_as_none(tmp_path, monkeypatch):
     )
     pick = desc.get('{http://ns.adobe.com/xmp/1.0/DynamicMedia/}pick')
     assert pick == '0'
+
+
+def test_sync_to_xmp_writes_effective_location(tmp_path, monkeypatch):
+    """location changes write effective coordinates into the sidecar."""
+    from xml.etree import ElementTree as ET
+
+    import config as cfg
+    from db import Database
+    from sync import sync_to_xmp
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    config = cfg.load()
+    config["write_assigned_location_to_xmp"] = True
+    cfg.save(config)
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?)",
+        ("Paris Airbnb", 48.8566, 2.3522),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+    db.queue_change(pid, "location", "effective")
+
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+    assert len(db.get_pending_changes()) == 0
+
+    desc = ET.parse(xmp_path).getroot().find(
+        './/{http://www.w3.org/1999/02/22-rdf-syntax-ns#}Description'
+    )
+    assert desc.get('{http://ns.adobe.com/exif/1.0/}GPSLatitude') == '48,51.396000N'
+    assert desc.get('{http://ns.adobe.com/exif/1.0/}GPSLongitude') == '2,21.132000E'
+    assert desc.get('{https://vireo.app/ns/1.0/}gpsSource') == 'keyword'
+
+
+def test_sync_to_xmp_removes_stale_vireo_location_when_effective_location_missing(tmp_path, monkeypatch):
+    """Clearing a Vireo-assigned location removes only Vireo-authored GPS."""
+    import config as cfg
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import write_gps_location
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    config = cfg.load()
+    config["write_assigned_location_to_xmp"] = True
+    cfg.save(config)
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    write_gps_location(xmp_path, 48.8566, 2.3522, source="keyword")
+    db.queue_change(pid, "location", "effective")
+
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 1
+    with open(xmp_path) as f:
+        content = f.read()
+    assert "GPSLatitude" not in content
+    assert "GPSLongitude" not in content
+    assert "vireo:gpsSource" not in content
+
+
+def test_sync_to_xmp_clears_location_change_without_writing_when_disabled(tmp_path, monkeypatch):
+    """Turning the setting off before sync prevents queued GPS writes."""
+    import config as cfg
+    from db import Database
+    from sync import sync_to_xmp
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    config = cfg.load()
+    config["write_assigned_location_to_xmp"] = False
+    cfg.save(config)
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?)",
+        ("Paris Airbnb", 48.8566, 2.3522),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+    db.queue_change(pid, "location", "effective")
+
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+    assert len(db.get_pending_changes()) == 0
+    with open(xmp_path) as f:
+        content = f.read()
+    assert "GPSLatitude" not in content
+    assert "GPSLongitude" not in content
+
+
+def test_sync_to_xmp_disabled_location_change_removes_stale_vireo_gps(tmp_path, monkeypatch):
+    """Disabling assigned-location writes still cleans up Vireo-authored GPS."""
+    import config as cfg
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import write_gps_location
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    config = cfg.load()
+    config["write_assigned_location_to_xmp"] = False
+    cfg.save(config)
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    write_gps_location(xmp_path, 48.8566, 2.3522, source="keyword")
+    db.queue_change(pid, "location", "effective")
+
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+    assert len(db.get_pending_changes()) == 0
+    with open(xmp_path) as f:
+        content = f.read()
+    assert "GPSLatitude" not in content
+    assert "GPSLongitude" not in content
+    assert "vireo:gpsSource" not in content
+
+
+def test_sync_to_xmp_location_cleanup_does_not_write_exif_fallback(tmp_path, monkeypatch):
+    """Assigned-location sync cleanup should not preserve Vireo GPS via EXIF fallback."""
+    import config as cfg
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import write_gps_location
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    config = cfg.load()
+    config["write_assigned_location_to_xmp"] = True
+    cfg.save(config)
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    db.conn.execute(
+        "UPDATE photos SET latitude=?, longitude=? WHERE id=?",
+        (40.7829, -73.9654, pid),
+    )
+    db.conn.commit()
+    write_gps_location(xmp_path, 48.8566, 2.3522, source="keyword")
+    db.queue_change(pid, "location", "effective")
+
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 1
+    with open(xmp_path) as f:
+        content = f.read()
+    assert "GPSLatitude" not in content
+    assert "GPSLongitude" not in content
+    assert "vireo:gpsSource" not in content

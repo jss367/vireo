@@ -10,6 +10,8 @@ from xmp import (
     read_hierarchical_keywords,
     read_keywords,
     remove_keywords,
+    remove_vireo_gps_location,
+    write_gps_location,
     write_pick_flag,
     write_rating,
     write_sidecar,
@@ -147,6 +149,80 @@ def test_write_pick_flag_rejected_creates_sidecar(missing_xmp):
     with open(missing_xmp) as f:
         content = f.read()
     assert 'xmpDM:pick="-1"' in content
+
+
+# ── write_gps_location / remove_vireo_gps_location ──────────────────────
+
+def test_write_gps_location_writes_exif_gps(sample_xmp):
+    write_gps_location(sample_xmp, 48.8566, 2.3522)
+
+    with open(sample_xmp) as f:
+        content = f.read()
+    assert 'exif:GPSLatitude="48,51.396000N"' in content
+    assert 'exif:GPSLongitude="2,21.132000E"' in content
+    assert 'exif:GPSMapDatum="WGS-84"' in content
+    assert 'vireo:gpsSource="assigned"' in content
+
+
+def test_remove_vireo_gps_location_only_when_marked(sample_xmp):
+    write_gps_location(sample_xmp, 48.8566, 2.3522)
+
+    assert remove_vireo_gps_location(sample_xmp) is True
+
+    with open(sample_xmp) as f:
+        content = f.read()
+    assert "GPSLatitude" not in content
+    assert "GPSLongitude" not in content
+    assert "vireo:gpsSource" not in content
+
+
+def test_remove_vireo_gps_location_preserves_unmarked_gps(sample_xmp):
+    from xml.etree import ElementTree as ET
+
+    ns_rdf = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+    ns_exif = "http://ns.adobe.com/exif/1.0/"
+    tree = ET.parse(sample_xmp)
+    desc = tree.getroot().find(f".//{{{ns_rdf}}}Description")
+    desc.set(f"{{{ns_exif}}}GPSLatitude", "48,51.396000N")
+    desc.set(f"{{{ns_exif}}}GPSLongitude", "2,21.132000E")
+    tree.write(sample_xmp, xml_declaration=True, encoding="unicode")
+
+    assert remove_vireo_gps_location(sample_xmp) is False
+
+    with open(sample_xmp) as f:
+        content = f.read()
+    assert 'exif:GPSLatitude="48,51.396000N"' in content
+    assert 'exif:GPSLongitude="2,21.132000E"' in content
+
+
+def test_remove_vireo_gps_location_restores_previous_gps(sample_xmp):
+    from xml.etree import ElementTree as ET
+
+    ns_rdf = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+    ns_exif = "http://ns.adobe.com/exif/1.0/"
+    tree = ET.parse(sample_xmp)
+    desc = tree.getroot().find(f".//{{{ns_rdf}}}Description")
+    desc.set(f"{{{ns_exif}}}GPSLatitude", "40,46.974000N")
+    desc.set(f"{{{ns_exif}}}GPSLongitude", "73,57.924000W")
+    tree.write(sample_xmp, xml_declaration=True, encoding="unicode")
+
+    write_gps_location(sample_xmp, 48.8566, 2.3522)
+    assert remove_vireo_gps_location(sample_xmp) is True
+
+    with open(sample_xmp) as f:
+        content = f.read()
+    assert 'exif:GPSLatitude="40,46.974000N"' in content
+    assert 'exif:GPSLongitude="73,57.924000W"' in content
+    assert "previousGPSLatitude" not in content
+    assert "previousGPSLongitude" not in content
+    assert "vireo:gpsSource" not in content
+
+
+def test_write_gps_location_rejects_out_of_range_coords(sample_xmp):
+    with pytest.raises(ValueError, match="latitude"):
+        write_gps_location(sample_xmp, 91.0, 2.3522)
+    with pytest.raises(ValueError, match="longitude"):
+        write_gps_location(sample_xmp, 48.8566, 181.0)
 
 
 # ── remove_keywords ─────────────────────────────────────────────────────

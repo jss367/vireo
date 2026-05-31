@@ -64,6 +64,18 @@ NEEDS_IDENTIFICATION_RULES = [
     {"field": "wildlife_excluded", "op": "equals", "value": 0},
 ]
 
+GPS_WITHOUT_LOCATION_KEYWORD_RULES = [
+    {"field": "location_keyword_missing", "op": "equals", "value": 1},
+]
+
+NO_LOCATION_INFORMATION_RULES = {
+    "mode": "all",
+    "rules": [
+        {"field": "has_gps", "op": "equals", "value": 0},
+        {"field": "has_location_keyword", "op": "equals", "value": 0},
+    ],
+}
+
 ALL_NAV_IDS = frozenset({
     "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
     "misses", "highlights", "browse", "map", "variants",
@@ -4637,6 +4649,112 @@ class Database:
             ORDER BY p.timestamp ASC, p.filename ASC, p.id ASC
         """
         return self.conn.execute(query, species_col_params + params).fetchall()
+
+    def get_assigned_photo_location(self, photo_id, verify_workspace=True):
+        """Return linked location-keyword coordinates for one visible photo."""
+        if verify_workspace:
+            self._verify_photo_in_workspace(photo_id)
+
+        row = self.conn.execute(
+            """
+            SELECT p.id,
+                   kl.latitude AS latitude,
+                   kl.longitude AS longitude,
+                   kl.name AS keyword_location_name,
+                   kl.place_id AS place_id
+            FROM photos p
+            LEFT JOIN (
+                SELECT pk_loc.photo_id, k_loc.name, k_loc.place_id,
+                       k_loc.latitude, k_loc.longitude,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY pk_loc.photo_id
+                         ORDER BY (k_loc.parent_id IS NULL) ASC, k_loc.id DESC
+                       ) AS rn
+                FROM photo_keywords pk_loc
+                JOIN keywords k_loc ON k_loc.id = pk_loc.keyword_id
+                WHERE pk_loc.photo_id = ?
+                  AND k_loc.type = 'location'
+                  AND k_loc.latitude IS NOT NULL
+                  AND k_loc.longitude IS NOT NULL
+            ) kl ON kl.photo_id = p.id AND kl.rn = 1
+            WHERE p.id = ?
+            """,
+            (photo_id, photo_id),
+        ).fetchone()
+        if row is None or row["latitude"] is None or row["longitude"] is None:
+            return None
+        return {
+            "photo_id": row["id"],
+            "latitude": row["latitude"],
+            "longitude": row["longitude"],
+            "source": "keyword",
+            "keyword_location_name": row["keyword_location_name"],
+            "place_id": row["place_id"],
+        }
+
+    def get_effective_photo_location(self, photo_id, verify_workspace=True):
+        """Return the coordinates Vireo should use for a single photo.
+
+        EXIF GPS is source metadata and wins when both axes are present. If
+        EXIF GPS is absent or partial, fall back as a pair to the linked
+        ``type='location'`` keyword coordinates. Returns ``None`` when neither
+        source has a complete coordinate pair.
+        """
+        if verify_workspace:
+            self._verify_photo_in_workspace(photo_id)
+
+        row = self.conn.execute(
+            """
+            SELECT p.id,
+                   p.latitude AS photo_latitude,
+                   p.longitude AS photo_longitude,
+                   kl.latitude AS keyword_latitude,
+                   kl.longitude AS keyword_longitude,
+                   kl.name AS keyword_location_name,
+                   kl.place_id AS place_id
+            FROM photos p
+            LEFT JOIN (
+                SELECT pk_loc.photo_id, k_loc.name, k_loc.place_id,
+                       k_loc.latitude, k_loc.longitude,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY pk_loc.photo_id
+                         ORDER BY (k_loc.parent_id IS NULL) ASC, k_loc.id DESC
+                       ) AS rn
+                FROM photo_keywords pk_loc
+                JOIN keywords k_loc ON k_loc.id = pk_loc.keyword_id
+                WHERE pk_loc.photo_id = ?
+                  AND k_loc.type = 'location'
+                  AND k_loc.latitude IS NOT NULL
+                  AND k_loc.longitude IS NOT NULL
+            ) kl ON kl.photo_id = p.id AND kl.rn = 1
+            WHERE p.id = ?
+            """,
+            (photo_id, photo_id),
+        ).fetchone()
+        if row is None:
+            return None
+
+        if row["photo_latitude"] is not None and row["photo_longitude"] is not None:
+            return {
+                "photo_id": row["id"],
+                "latitude": row["photo_latitude"],
+                "longitude": row["photo_longitude"],
+                "source": "exif",
+                "keyword_location_name": None,
+                "place_id": None,
+            }
+
+        if row["keyword_latitude"] is not None and row["keyword_longitude"] is not None:
+            return {
+                "photo_id": row["id"],
+                "latitude": row["keyword_latitude"],
+                "longitude": row["keyword_longitude"],
+                "source": "keyword",
+                "keyword_location_name": row["keyword_location_name"],
+                "place_id": row["place_id"],
+            }
+
+        return None
 
     def get_accepted_species(self):
         """Return distinct marker species from geolocated photos in the active workspace.
@@ -9646,6 +9764,13 @@ class Database:
             if field == "has_gps":
                 has = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
                 return (has if _truthy(value) else f"NOT ({has})"), []
+            if field == "has_location_keyword":
+                has = (
+                    "EXISTS (SELECT 1 FROM photo_keywords pk "
+                    "JOIN keywords k ON k.id = pk.keyword_id "
+                    "WHERE pk.photo_id = p.id AND k.type = 'location')"
+                )
+                return (has if _truthy(value) else f"NOT {has}"), []
             if field == "location_keyword_missing":
                 gps = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
                 no_loc = (
@@ -9869,8 +9994,8 @@ class Database:
                 [{"field": "timestamp", "op": "recent_days", "value": 30}],
             ),
             (
-                "Needs Location",
-                [{"field": "location_keyword_missing", "op": "equals", "value": 1}],
+                "GPS Without Location Keyword",
+                GPS_WITHOUT_LOCATION_KEYWORD_RULES,
             ),
         ]
         for name, rules in defaults:
@@ -9885,6 +10010,73 @@ class Database:
         """Create missing default smart collections in every workspace."""
         for ws in self.get_workspaces():
             self.create_default_collections(workspace_id=ws["id"])
+
+    def migrate_default_location_collections(self):
+        """Clarify default location collection names/rules across workspaces.
+
+        - ``Needs Location`` was the default collection for photos that already
+          have EXIF GPS but lack a structured Vireo location keyword. Rename
+          exact default instances to the more literal
+          ``GPS Without Location Keyword``.
+        - Some workspaces had a hand-built ``No Location`` collection using the
+          inverse of that rule. That actually meant "not GPS-without-keyword",
+          not "has no location". For that exact legacy rule, replace it with a
+          true ``No Location Information`` collection.
+        """
+        updated = 0
+        gps_rules = [
+            GPS_WITHOUT_LOCATION_KEYWORD_RULES,
+            {
+                "mode": "all",
+                "rules": GPS_WITHOUT_LOCATION_KEYWORD_RULES,
+            },
+        ]
+        no_location_inverse_rules = [
+            [{"field": "location_keyword_missing", "op": "equals", "value": 0}],
+            {
+                "mode": "all",
+                "rules": [
+                    {"field": "location_keyword_missing", "op": "equals", "value": 0},
+                ],
+            },
+        ]
+
+        rows = self.conn.execute(
+            "SELECT id, workspace_id, name, rules FROM collections "
+            "WHERE name IN ('Needs Location', 'No Location')"
+        ).fetchall()
+        for row in rows:
+            try:
+                current = json.loads(row["rules"])
+            except (TypeError, ValueError):
+                continue
+
+            if row["name"] == "Needs Location" and current in gps_rules:
+                self.conn.execute(
+                    "UPDATE collections SET name = ?, rules = ? WHERE id = ?",
+                    (
+                        "GPS Without Location Keyword",
+                        json.dumps(GPS_WITHOUT_LOCATION_KEYWORD_RULES),
+                        row["id"],
+                    ),
+                )
+                updated += 1
+                continue
+
+            if row["name"] == "No Location" and current in no_location_inverse_rules:
+                self.conn.execute(
+                    "UPDATE collections SET name = ?, rules = ? WHERE id = ?",
+                    (
+                        "No Location Information",
+                        json.dumps(NO_LOCATION_INFORMATION_RULES),
+                        row["id"],
+                    ),
+                )
+                updated += 1
+
+        if updated:
+            self.conn.commit()
+        return updated
 
     def migrate_default_subject_collection(self):
         """Rename legacy 'Needs Classification' (with rule has_species==0)

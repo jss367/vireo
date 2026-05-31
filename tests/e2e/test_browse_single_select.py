@@ -3,6 +3,17 @@ import json
 from playwright.sync_api import expect
 
 
+def disable_infinite_scroll(page):
+    page.add_init_script("""
+      class NoopIntersectionObserver {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      }
+      window.IntersectionObserver = NoopIntersectionObserver;
+    """)
+
+
 def test_single_click_reveals_batch_bar(live_server, page):
     """Normal-click on one photo reveals the batch bar so Develop/Export/Delete
     are reachable with a single photo selected.
@@ -216,6 +227,98 @@ def test_add_keyword_autocomplete_caches_empty_result(live_server, page):
     assert calls["count"] == 1
 
 
+def test_shift_selected_detail_keyword_add_applies_to_selection(live_server, page):
+    """The visible detail keyword field must honor a shift range selection.
+
+    Regression: after click A -> Shift-click C, the detail pane for A stayed
+    visible. Typing a keyword there posted to /api/photos/<A>/keywords, even
+    though the UI showed three selected photos.
+    """
+    db = live_server["db"]
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.nth(2).wait_for(state="visible")
+
+    cards.nth(0).click()
+    cards.nth(2).click(modifiers=["Shift"])
+
+    selected_ids = page.evaluate(
+        "getActiveSelection().slice().sort((a, b) => a - b)"
+    )
+    assert len(selected_ids) == 3
+    expect(page.locator("#batchCount")).to_have_text("3 selected")
+    expect(page.locator("#addKeywordInput")).to_be_visible()
+
+    keyword_name = "Range Keyword Smoke"
+    keyword_input = page.locator("#addKeywordInput")
+    keyword_input.fill(keyword_name)
+
+    with page.expect_response(
+        lambda r: "/api/batch/keyword" in r.url
+        and r.request.method == "POST"
+        and r.status == 200
+    ):
+        keyword_input.press("Enter")
+
+    rows = db.conn.execute(
+        """
+        SELECT pk.photo_id
+        FROM photo_keywords pk
+        JOIN keywords k ON k.id = pk.keyword_id
+        WHERE k.name = ? AND pk.photo_id IN ({})
+        ORDER BY pk.photo_id
+        """.format(",".join("?" for _ in selected_ids)),
+        [keyword_name] + selected_ids,
+    ).fetchall()
+    assert [row["photo_id"] for row in rows] == selected_ids
+
+
+def test_singleton_multiselect_detail_keyword_add_stays_single_photo(live_server, page):
+    """A one-photo set with a focused detail pane should stay a detail edit."""
+    db = live_server["db"]
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.nth(1).wait_for(state="visible")
+
+    a_id = int(cards.nth(0).get_attribute("data-id"))
+    b_id = int(cards.nth(1).get_attribute("data-id"))
+
+    cards.nth(0).click()
+    cards.nth(1).click(modifiers=["Meta"])
+    cards.nth(1).click(modifiers=["Meta"])
+
+    assert page.evaluate("Array.from(selectedPhotos)") == [a_id]
+    assert page.evaluate("selectedPhotoId") == a_id
+    expect(page.locator("#addKeywordInput")).to_be_visible()
+
+    keyword_name = "Singleton Detail Keyword"
+    keyword_input = page.locator("#addKeywordInput")
+    keyword_input.fill(keyword_name)
+
+    with page.expect_response(
+        lambda r: f"/api/photos/{a_id}/keywords" in r.url
+        and r.request.method == "POST"
+        and r.status == 200
+    ):
+        keyword_input.press("Enter")
+
+    rows = db.conn.execute(
+        """
+        SELECT pk.photo_id
+        FROM photo_keywords pk
+        JOIN keywords k ON k.id = pk.keyword_id
+        WHERE k.name = ? AND pk.photo_id IN (?, ?)
+        ORDER BY pk.photo_id
+        """,
+        (keyword_name, a_id, b_id),
+    ).fetchall()
+    assert [row["photo_id"] for row in rows] == [a_id]
+
+
 def test_cmd_click_toggles_focus_out_of_set_reconciles(live_server, page):
     """click A, cmd-click B, cmd-click A: the focus must not linger on A.
 
@@ -365,6 +468,7 @@ def test_singleton_set_keyboard_shortcut_applies(live_server, page):
 def test_arrow_navigation_loads_next_page_at_loaded_boundary(live_server, page):
     """Keyboard navigation should continue past the currently loaded page."""
     url = live_server["url"]
+    disable_infinite_scroll(page)
     page.route(
         "**/api/config",
         lambda route: route.fulfill(
@@ -386,11 +490,46 @@ def test_arrow_navigation_loads_next_page_at_loaded_boundary(live_server, page):
     assert page.evaluate("selectedPhotoId === photos[2].id")
 
 
+def test_vertical_arrow_navigation_moves_by_rendered_grid_columns(live_server, page):
+    """Up/down should move spatially by one visible grid row, not by one photo."""
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1400, "height": 900})
+    page.goto(f"{url}/browse")
+
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.locator(".grid-card").first.click()
+    columns = page.evaluate("getBrowseGridColumnCount()")
+    assert columns >= 2
+    page.wait_for_function("cols => photos.length > cols", arg=columns)
+
+    page.keyboard.press("ArrowDown")
+    page.wait_for_function("cols => selectedIndex === cols", arg=columns)
+    assert page.evaluate("selectedPhotoId === photos[selectedIndex].id")
+
+    page.keyboard.press("ArrowUp")
+    page.wait_for_function("selectedIndex === 0")
+    assert page.evaluate("selectedPhotoId === photos[0].id")
+
+
+def test_arrow_down_without_selection_starts_at_first_photo(live_server, page):
+    """Starting keyboard navigation with Down should focus the first card."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    page.locator(".grid-card").first.wait_for(state="visible")
+    assert page.evaluate("selectedIndex") == -1
+
+    page.keyboard.press("ArrowDown")
+    page.wait_for_function("selectedIndex === 0")
+    assert page.evaluate("selectedPhotoId === photos[0].id")
+
+
 def test_shift_arrow_navigation_preserves_range_selection_at_loaded_boundary(
     live_server, page
 ):
     """Loading another page for keyboard navigation must preserve modifiers."""
     url = live_server["url"]
+    disable_infinite_scroll(page)
     page.route(
         "**/api/config",
         lambda route: route.fulfill(

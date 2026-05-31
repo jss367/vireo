@@ -1320,7 +1320,7 @@ def test_default_collections_created(tmp_path):
     assert 'Untagged' in names
     assert 'Flagged' in names
     assert 'Recent Import' in names
-    assert 'Needs Location' in names
+    assert 'GPS Without Location Keyword' in names
 
 
 def test_default_collections_idempotent(tmp_path):
@@ -1354,7 +1354,7 @@ def test_default_collections_adds_missing(tmp_path):
     assert 'Needs Identification' in names
     assert 'Untagged' in names
     assert 'Recent Import' in names
-    assert 'Needs Location' in names
+    assert 'GPS Without Location Keyword' in names
     assert len(colls) == 6  # no duplicate Flagged
 
 
@@ -1369,7 +1369,7 @@ def test_default_collections_for_all_workspaces_adds_missing_defaults(tmp_path):
 
     # Simulate an upgraded multi-workspace database where only one workspace
     # already had the older default set. The all-workspaces startup pass should
-    # add the new Needs Location default everywhere without duplicating Flagged.
+    # add the new GPS/location-keyword default everywhere without duplicating Flagged.
     db.conn.execute(
         "INSERT INTO collections (workspace_id, name, rules) VALUES (?, ?, ?)",
         (
@@ -1388,7 +1388,7 @@ def test_default_collections_for_all_workspaces_adds_missing_defaults(tmp_path):
             "SELECT name FROM collections WHERE workspace_id = ?", (ws,),
         ).fetchall()
         names = [r["name"] for r in rows]
-        assert "Needs Location" in names
+        assert "GPS Without Location Keyword" in names
         assert names.count("Flagged") == 1
 
 
@@ -1530,13 +1530,13 @@ def test_upgrade_path_no_duplicate_collection(tmp_path):
     # Sanity: default collections include one Needs Identification, not a
     # duplicate alongside the legacy Needs Classification.
     default_names = {"All Photos", "Needs Identification", "Untagged",
-                     "Flagged", "Recent Import", "Needs Location"}
+                     "Flagged", "Recent Import", "GPS Without Location Keyword"}
     assert default_names.issubset(cols.keys())
 
 
-def test_default_needs_location_collection_matches_gps_without_location_keyword(tmp_path):
-    """The default Needs Location collection surfaces geotagged photos that
-    still need Vireo's structured location keyword."""
+def test_default_gps_without_location_keyword_collection_matches_expected_photos(tmp_path):
+    """The default GPS/location-keyword collection surfaces geotagged photos
+    that still need Vireo's structured location keyword."""
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
@@ -1564,10 +1564,97 @@ def test_default_needs_location_collection_matches_gps_without_location_keyword(
 
     db.create_default_collections()
     cid = next(c["id"] for c in db.get_collections()
-               if c["name"] == "Needs Location")
+               if c["name"] == "GPS Without Location Keyword")
 
     pids = {p["id"] for p in db.get_collection_photos(cid, per_page=999)}
     assert pids == {needs_location}
+
+
+def test_has_location_keyword_rule_and_no_location_information_definition(tmp_path):
+    """No Location Information means no EXIF GPS and no location keyword."""
+    import json
+
+    from db import NO_LOCATION_INFORMATION_RULES, Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    no_location = db.add_photo(
+        folder_id=fid, filename='no-location.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    gps_no_keyword = db.add_photo(
+        folder_id=fid, filename='gps-no-keyword.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    no_gps_with_keyword = db.add_photo(
+        folder_id=fid, filename='keyword-only.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    gps_with_keyword = db.add_photo(
+        folder_id=fid, filename='gps-keyword.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET latitude = 1.0, longitude = 2.0 WHERE id IN (?, ?)",
+        (gps_no_keyword, gps_with_keyword),
+    )
+    loc_kw = db.add_keyword("Yosemite", kw_type="location")
+    db.tag_photo(no_gps_with_keyword, loc_kw)
+    db.tag_photo(gps_with_keyword, loc_kw)
+
+    cid = db.add_collection("No Location Information", json.dumps(NO_LOCATION_INFORMATION_RULES))
+
+    pids = {p["id"] for p in db.get_collection_photos(cid, per_page=999)}
+    assert pids == {no_location}
+
+
+def test_migrate_default_location_collections_renames_and_fixes_exact_legacy_rules(tmp_path):
+    """Clarify old location collection names without touching customized rules."""
+    import json
+
+    from db import (
+        GPS_WITHOUT_LOCATION_KEYWORD_RULES,
+        NO_LOCATION_INFORMATION_RULES,
+        Database,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    db.add_collection("Needs Location", json.dumps(GPS_WITHOUT_LOCATION_KEYWORD_RULES))
+    db.add_collection(
+        "Needs Location",
+        json.dumps({"mode": "all", "rules": GPS_WITHOUT_LOCATION_KEYWORD_RULES}),
+    )
+    db.add_collection(
+        "No Location",
+        json.dumps({
+            "mode": "all",
+            "rules": [
+                {"field": "location_keyword_missing", "op": "equals", "value": 0},
+            ],
+        }),
+    )
+    db.add_collection("No Location", json.dumps([{"field": "rating", "op": ">=", "value": 3}]))
+
+    updated = db.migrate_default_location_collections()
+
+    rows = {
+        c["name"]: json.loads(c["rules"])
+        for c in db.get_collections()
+        if c["name"] != "No Location"
+    }
+    custom = [
+        json.loads(c["rules"])
+        for c in db.get_collections()
+        if c["name"] == "No Location"
+    ]
+    assert updated == 3
+    assert rows["GPS Without Location Keyword"] == GPS_WITHOUT_LOCATION_KEYWORD_RULES
+    assert rows["No Location Information"] == NO_LOCATION_INFORMATION_RULES
+    assert custom == [[{"field": "rating", "op": ">=", "value": 3}]]
 
 
 def test_default_genre_keywords_inserted(tmp_path):
@@ -3173,6 +3260,83 @@ def test_get_geolocated_photos_with_partial_exif_uses_keyword_pair(tmp_path):
     assert r['longitude'] == -73.9654, "expected paired keyword lng, got mixed"
     assert r['coord_source'] == 'keyword'
     assert r['keyword_location_name'] == 'Central Park'
+
+
+def test_get_effective_photo_location_prefers_exif(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='both.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET latitude=?, longitude=? WHERE id=?",
+        (37.7749, -122.4194, pid),
+    )
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?)",
+        ('Paris Airbnb', 48.8566, 2.3522),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+
+    loc = db.get_effective_photo_location(pid)
+    assert loc["source"] == "exif"
+    assert loc["latitude"] == 37.7749
+    assert loc["longitude"] == -122.4194
+    assert loc["keyword_location_name"] is None
+
+
+def test_get_effective_photo_location_falls_back_to_keyword_pair(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='assigned.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET latitude=?, longitude=NULL WHERE id=?",
+        (37.7749, pid),
+    )
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, place_id, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?, ?)",
+        ('Paris Airbnb', 'place_123', 48.8566, 2.3522),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+
+    loc = db.get_effective_photo_location(pid)
+    assert loc["source"] == "keyword"
+    assert loc["latitude"] == 48.8566
+    assert loc["longitude"] == 2.3522
+    assert loc["keyword_location_name"] == "Paris Airbnb"
+    assert loc["place_id"] == "place_123"
+
+
+def test_get_effective_photo_location_enforces_active_workspace(tmp_path):
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='geo.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET latitude=?, longitude=? WHERE id=?",
+        (37.7749, -122.4194, pid),
+    )
+    db.conn.commit()
+
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+
+    with pytest.raises(ValueError, match="active workspace"):
+        db.get_effective_photo_location(pid)
 
 
 def test_get_accepted_species(tmp_path):

@@ -2517,6 +2517,7 @@ var FIELD_OPS = {
   has_mask: ['equals'],
   active_mask_variant: ['is', 'is not', 'contains'],
   has_gps: ['equals'],
+  has_location_keyword: ['equals'],
   wildlife_excluded: ['equals'],
   location_keyword_missing: ['equals'],
   inat_submitted: ['equals'],
@@ -2543,6 +2544,7 @@ var FIELD_LABELS = {
   has_mask: 'Has Mask',
   active_mask_variant: 'Mask Variant',
   has_gps: 'Has GPS',
+  has_location_keyword: 'Has Location Keyword',
   wildlife_excluded: 'Not Wildlife',
   location_keyword_missing: 'GPS Without Location Keyword',
   inat_submitted: 'iNaturalist Submitted',
@@ -2582,8 +2584,8 @@ function defaultValueForRule(field, op) {
   if (field === 'active_mask_variant') return 'sam2-large';
   if (field === 'prediction_status') return 'pending';
   if (field === 'wildlife_excluded') return 0;
-  if (['has_mask', 'has_gps', 'location_keyword_missing', 'inat_submitted',
-       'is_duplicate', 'needs_review'].indexOf(field) !== -1) return 1;
+  if (['has_mask', 'has_gps', 'has_location_keyword', 'location_keyword_missing',
+       'inat_submitted', 'is_duplicate', 'needs_review'].indexOf(field) !== -1) return 1;
   return '';
 }
 
@@ -2814,8 +2816,9 @@ function renderRuleValueInput(r, i) {
   if (r.field === 'all') {
     return '<span style="flex:1;color:var(--text-ghost);font-size:12px;">Matches every photo in this workspace</span>';
   }
-  if (['has_mask', 'has_gps', 'wildlife_excluded', 'location_keyword_missing',
-       'inat_submitted', 'is_duplicate', 'needs_review'].indexOf(r.field) !== -1) {
+  if (['has_mask', 'has_gps', 'has_location_keyword', 'wildlife_excluded',
+       'location_keyword_missing', 'inat_submitted', 'is_duplicate',
+       'needs_review'].indexOf(r.field) !== -1) {
     var boolVal = (r.value === true || r.value === 1 || r.value === '1' || r.value === 'true') ? '1' : '0';
     return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
         '<option value="1"' + (boolVal==='1'?' selected':'') + '>Yes</option>' +
@@ -2973,8 +2976,9 @@ function coerceRuleForSave(node) {
        'noise_estimate', 'crop_complete', 'prediction_confidence'].indexOf(node.field) !== -1) {
     val = parseFloat(val);
     if (isNaN(val)) val = 0;
-  } else if (['has_mask', 'has_gps', 'location_keyword_missing', 'inat_submitted',
-              'is_duplicate', 'needs_review', 'all'].indexOf(node.field) !== -1) {
+  } else if (['has_mask', 'has_gps', 'has_location_keyword',
+              'location_keyword_missing', 'inat_submitted', 'is_duplicate',
+              'needs_review', 'all'].indexOf(node.field) !== -1) {
     val = (val === true || val === 1 || val === '1' || val === 'true') ? 1 : 0;
   } else if (node.field === 'timestamp' && node.op === 'recent_days') {
     val = parseInt(val, 10) || 0;
@@ -3649,6 +3653,10 @@ function getActiveSelection() {
   return [];
 }
 
+function selectionIdsKey(ids) {
+  return ids.slice().sort(function(a, b) { return a - b; }).join(',');
+}
+
 function isBrowseCompareOpen() {
   var overlay = document.getElementById('browseCompareOverlay');
   return !!(overlay && overlay.classList.contains('active'));
@@ -4027,7 +4035,7 @@ async function renderBrowseCompare() {
 }
 
 async function loadSelectionKeywordSuggestions(ids) {
-  var key = ids.slice().sort(function(a, b) { return a - b; }).join(',');
+  var key = selectionIdsKey(ids);
   if (key === selectionKeywordKey) return;
   selectionKeywordKey = key;
   var seq = ++selectionKeywordRequestSeq;
@@ -4995,7 +5003,10 @@ function updateDetailColors() {
 }
 
 async function addKeyword(keyword) {
-  if (!selectedPhotoId) return;
+  var ids = getActiveSelection();
+  var useBatch = ids.length > 1;
+  var batchSelectionKey = selectionIdsKey(ids);
+  if (!selectedPhotoId && !useBatch) return;
   var input = document.getElementById('addKeywordInput');
   var name = input.value.trim();
   if (!name) return;
@@ -5008,8 +5019,12 @@ async function addKeyword(keyword) {
   var payload = selectedKeyword && selectedKeyword.id
     ? { keyword_id: selectedKeyword.id }
     : { name: name };
+  if (useBatch) payload.photo_ids = ids;
   try {
-    await safeFetch('/api/photos/' + selectedPhotoId + '/keywords', {
+    var endpoint = useBatch
+      ? '/api/batch/keyword'
+      : '/api/photos/' + selectedPhotoId + '/keywords';
+    await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -5018,7 +5033,11 @@ async function addKeyword(keyword) {
     state.selectedKeyword = null;
     hideKeywordSuggestions('addKeywordInput');
     if (!selectedKeyword) invalidateKeywordAutocompleteCache();
-    loadDetail(selectedPhotoId);
+    if (selectedPhotoId) loadDetail(selectedPhotoId);
+    if (useBatch && selectionIdsKey(getActiveSelection()) === batchSelectionKey) {
+      selectionKeywordKey = '';
+      loadSelectionKeywordSuggestions(ids);
+    }
     loadKeywords();
     scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();
@@ -5471,13 +5490,21 @@ document.addEventListener('keydown', function(e) {
   }
 
   // Arrow keys: navigate grid (not configurable)
-  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+  if (e.key === 'ArrowRight') {
     e.preventDefault();
     moveBrowseSelection(1, e);
     return;
-  } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+  } else if (e.key === 'ArrowLeft') {
     e.preventDefault();
     moveBrowseSelection(-1, e);
+    return;
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    moveBrowseSelection(getBrowseGridColumnCount(), e);
+    return;
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    moveBrowseSelection(-getBrowseGridColumnCount(), e);
     return;
   }
 
@@ -5541,11 +5568,33 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
+function getBrowseGridColumnCount() {
+  var grid = document.getElementById('grid');
+  if (grid) {
+    var template = window.getComputedStyle(grid).gridTemplateColumns || '';
+    var tracks = template.trim().split(/\s+/).filter(Boolean);
+    if (tracks.length && template !== 'none') return tracks.length;
+  }
+
+  var cards = grid ? grid.querySelectorAll('.grid-card') : document.querySelectorAll('.grid-card');
+  if (!cards.length) return 1;
+
+  var firstTop = cards[0].offsetTop;
+  var count = 0;
+  for (var i = 0; i < cards.length; i++) {
+    if (Math.abs(cards[i].offsetTop - firstTop) > 2) break;
+    count++;
+  }
+  return Math.max(1, count);
+}
+
 async function moveBrowseSelection(delta, e) {
-  var nextIndex = selectedIndex + delta;
-  if (delta > 0 && nextIndex >= photos.length && !allLoaded) {
+  var nextIndex = selectedIndex < 0 && delta > 0 ? 0 : selectedIndex + delta;
+  while (delta > 0 && nextIndex >= photos.length && !allLoaded) {
+    var beforeLength = photos.length;
     await loadPhotos();
-    nextIndex = selectedIndex + delta;
+    if (photos.length === beforeLength) break;
+    nextIndex = selectedIndex < 0 ? 0 : selectedIndex + delta;
   }
   if (nextIndex < 0 || nextIndex >= photos.length || !photos[nextIndex]) return;
   var selectionEvent = {
