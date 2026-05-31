@@ -218,6 +218,13 @@ def test_remove_vireo_gps_location_restores_previous_gps(sample_xmp):
     assert "vireo:gpsSource" not in content
 
 
+def test_write_gps_location_rejects_out_of_range_coords(sample_xmp):
+    with pytest.raises(ValueError, match="latitude"):
+        write_gps_location(sample_xmp, 91.0, 2.3522)
+    with pytest.raises(ValueError, match="longitude"):
+        write_gps_location(sample_xmp, 48.8566, 181.0)
+
+
 # ── remove_keywords ─────────────────────────────────────────────────────
 
 def test_remove_keywords_normal(sample_xmp):

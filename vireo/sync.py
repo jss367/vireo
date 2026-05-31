@@ -39,6 +39,21 @@ def _sync_flags_to_xmp_enabled(db):
         return False
 
 
+def _write_assigned_location_to_xmp_enabled(db):
+    """Return whether the active workspace should write assigned GPS to XMP."""
+    try:
+        import config as cfg
+
+        return bool(
+            db.get_effective_config(cfg.load()).get(
+                "write_assigned_location_to_xmp", False
+            )
+        )
+    except Exception:
+        log.warning("Failed to read write_assigned_location_to_xmp config", exc_info=True)
+        return False
+
+
 def sync_to_xmp(db, progress_callback=None):
     """Write pending changes to XMP sidecars.
 
@@ -59,6 +74,7 @@ def sync_to_xmp(db, progress_callback=None):
         by_photo[c["photo_id"]].append(c)
 
     sync_flags = _sync_flags_to_xmp_enabled(db)
+    sync_locations = _write_assigned_location_to_xmp_enabled(db)
     synced = 0
     failed = 0
     failures = []
@@ -108,8 +124,9 @@ def sync_to_xmp(db, progress_callback=None):
                     else:
                         unsupported_changes.append(c)
                 elif c["change_type"] == "location":
-                    sync_location = True
                     supported_ids.append(c["id"])
+                    if sync_locations:
+                        sync_location = True
 
             # Write keywords
             if keywords_to_add:
@@ -132,7 +149,7 @@ def sync_to_xmp(db, progress_callback=None):
                 write_rating(xmp_path, new_rating)
 
             if sync_location:
-                loc = db.get_effective_photo_location(photo_id)
+                loc = db.get_assigned_photo_location(photo_id)
                 if loc and loc.get("latitude") is not None and loc.get("longitude") is not None:
                     write_gps_location(
                         xmp_path,

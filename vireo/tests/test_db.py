@@ -3232,6 +3232,26 @@ def test_get_effective_photo_location_falls_back_to_keyword_pair(tmp_path):
     assert loc["place_id"] == "place_123"
 
 
+def test_get_effective_photo_location_enforces_active_workspace(tmp_path):
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='geo.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET latitude=?, longitude=? WHERE id=?",
+        (37.7749, -122.4194, pid),
+    )
+    db.conn.commit()
+
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+
+    with pytest.raises(ValueError, match="active workspace"):
+        db.get_effective_photo_location(pid)
+
+
 def test_get_accepted_species(tmp_path):
     """get_accepted_species returns distinct marker species from geolocated photos."""
     from db import Database

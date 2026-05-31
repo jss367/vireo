@@ -200,6 +200,7 @@ def test_api_inat_prepare_uses_assigned_location_coords(app_and_db):
 
     client = app.test_client()
     resp = client.get(f'/api/inat/prepare/{pid}')
+    assert resp.status_code == 200
     data = resp.get_json()
 
     assert data['latitude'] == 48.8566

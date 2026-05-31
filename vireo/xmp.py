@@ -5,6 +5,7 @@ All XMP namespace constants and helpers live here as the single source of truth.
 """
 
 import logging
+import math
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -256,6 +257,13 @@ def write_gps_location(xmp_path, latitude, longitude, source="assigned"):
     so ``remove_vireo_gps_location`` can clear stale assigned-location GPS
     without touching unrelated GPS metadata from another application.
     """
+    lat = float(latitude)
+    lon = float(longitude)
+    if not math.isfinite(lat) or not (-90.0 <= lat <= 90.0):
+        raise ValueError("latitude must be between -90 and 90")
+    if not math.isfinite(lon) or not (-180.0 <= lon <= 180.0):
+        raise ValueError("longitude must be between -180 and 180")
+
     root, tree = _load_or_create_xmp(xmp_path)
     desc = _get_or_create_description(root)
     marker = f"{{{NS_VIREO}}}gpsSource"
@@ -274,8 +282,8 @@ def write_gps_location(xmp_path, latitude, longitude, source="assigned"):
             if attr in desc.attrib:
                 desc.set(f"{{{NS_VIREO}}}previous{name}", desc.attrib[attr])
 
-    desc.set(exif_attrs["GPSLatitude"], _format_gps_coordinate(latitude, "N", "S"))
-    desc.set(exif_attrs["GPSLongitude"], _format_gps_coordinate(longitude, "E", "W"))
+    desc.set(exif_attrs["GPSLatitude"], _format_gps_coordinate(lat, "N", "S"))
+    desc.set(exif_attrs["GPSLongitude"], _format_gps_coordinate(lon, "E", "W"))
     desc.set(exif_attrs["GPSMapDatum"], "WGS-84")
     desc.set(exif_attrs["GPSVersionID"], "2.3.0.0")
     desc.set(marker, source or "assigned")
