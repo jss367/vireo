@@ -35,6 +35,21 @@ def test_api_photos_filter_folder(app_and_db):
     assert data['photos'][0]['filename'] == 'bird2.jpg'
 
 
+def test_api_photo_ids_matches_browse_filters(app_and_db):
+    """GET /api/photos/ids returns every ID matching the current Browse filters."""
+    app, db = app_and_db
+    folders = db.get_folder_tree()
+    jan = [f for f in folders if f['name'] == 'January'][0]
+    expected = [p["id"] for p in db.get_photos(folder_id=jan["id"], sort="name")]
+
+    client = app.test_client()
+    resp = client.get(f'/api/photos/ids?folder_id={jan["id"]}&sort=name')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["photo_ids"] == expected
+    assert data["total"] == len(expected)
+
+
 def test_api_photos_filter_rating(app_and_db):
     """GET /api/photos?rating_min= filters by minimum rating."""
     app, _ = app_and_db

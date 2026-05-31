@@ -3045,6 +3045,28 @@ function resetAndLoad() {
   loadPhotos();
 }
 
+function buildCurrentBrowseParams() {
+  var params = new URLSearchParams();
+  params.set('sort', document.getElementById('sortSelect').value);
+
+  if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (filterRating > 0) params.set('rating_min', filterRating);
+  if (flagFilter) params.set('flag', flagFilter);
+
+  var colorFilter = document.getElementById('colorFilter').value;
+  if (colorFilter) params.set('color_label', colorFilter);
+
+  var dateFrom = document.getElementById('dateFrom').value;
+  var dateTo = document.getElementById('dateTo').value;
+  if (dateFrom) params.set('date_from', dateFrom);
+  if (dateTo) params.set('date_to', dateTo);
+
+  var search = document.getElementById('searchInput').value.trim();
+  if (search) params.set('keyword', search);
+  if (activeKeyword) params.set('keyword', activeKeyword);
+  return params;
+}
+
 async function loadPhotos() {
   if (loading || allLoaded) return;
   loading = true;
@@ -3059,26 +3081,9 @@ async function loadPhotos() {
     cparams.set('per_page', perPage);
     url = '/api/collections/' + activeCollectionId + '/photos?' + cparams.toString();
   } else {
-    var params = new URLSearchParams();
+    var params = buildCurrentBrowseParams();
     params.set('page', currentPage);
     params.set('per_page', perPage);
-    params.set('sort', document.getElementById('sortSelect').value);
-
-    if (activeFolderId) params.set('folder_id', activeFolderId);
-    if (filterRating > 0) params.set('rating_min', filterRating);
-    if (flagFilter) params.set('flag', flagFilter);
-
-    var colorFilter = document.getElementById('colorFilter').value;
-    if (colorFilter) params.set('color_label', colorFilter);
-
-    var dateFrom = document.getElementById('dateFrom').value;
-    var dateTo = document.getElementById('dateTo').value;
-    if (dateFrom) params.set('date_from', dateFrom);
-    if (dateTo) params.set('date_to', dateTo);
-
-    var search = document.getElementById('searchInput').value.trim();
-    if (search) params.set('keyword', search);
-    if (activeKeyword) params.set('keyword', activeKeyword);
     url = '/api/photos?' + params.toString();
   }
 
@@ -3653,6 +3658,39 @@ function getActiveSelection() {
   return [];
 }
 
+async function selectAllMatchingPhotos() {
+  anchorRestoreEpoch++;
+  selectedPhotoId = null;
+  selectedIndex = -1;
+
+  if (clipSearchActive) {
+    photos.forEach(function(p) { selectedPhotos.add(p.id); });
+    renderGrid();
+    updateBatchBar();
+    showToast('Selected ' + selectedPhotos.size.toLocaleString() + ' loaded search result' + (selectedPhotos.size === 1 ? '' : 's'));
+    return;
+  }
+
+  var url;
+  if (activeCollectionId) {
+    url = '/api/collections/' + activeCollectionId + '/photo-ids';
+  } else {
+    url = '/api/photos/ids?' + buildCurrentBrowseParams().toString();
+  }
+
+  showToast('Selecting all matching photos...');
+  try {
+    var data = await safeFetch(url, {}, { toast: false });
+    selectedPhotos.clear();
+    (data.photo_ids || []).forEach(function(id) { selectedPhotos.add(id); });
+    renderGrid();
+    updateBatchBar();
+    showToast('Selected ' + selectedPhotos.size.toLocaleString() + ' photo' + (selectedPhotos.size === 1 ? '' : 's'));
+  } catch(e) {
+    showToast('Could not select all photos: ' + (e.message || e), 'error');
+  }
+}
+
 function selectionIdsKey(ids) {
   return ids.slice().sort(function(a, b) { return a - b; }).join(',');
 }
@@ -3696,7 +3734,7 @@ function updateBatchBar() {
   var ids = getActiveSelection();
   if (ids.length >= 1) {
     bar.style.display = 'flex';
-    document.getElementById('batchCount').textContent = ids.length + ' selected';
+    document.getElementById('batchCount').textContent = ids.length.toLocaleString() + ' selected';
   } else {
     bar.style.display = 'none';
   }
@@ -5506,9 +5544,7 @@ document.addEventListener('keydown', function(e) {
   // Select all
   if (matchesShortcut(e, _shortcuts.select_all)) {
     e.preventDefault();
-    photos.forEach(function(p) { selectedPhotos.add(p.id); });
-    renderGrid();
-    updateBatchBar();
+    selectAllMatchingPhotos();
     return;
   }
 

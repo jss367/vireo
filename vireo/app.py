@@ -2626,6 +2626,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             }
         )
 
+    @app.route("/api/photos/ids")
+    def api_photo_ids():
+        """Return every photo ID matching the current Browse filters."""
+        db = _get_db()
+        sort = request.args.get("sort", "date")
+        folder_id = request.args.get("folder_id", None, type=int)
+        rating_min = request.args.get("rating_min", None, type=int)
+        date_from = request.args.get("date_from", None)
+        date_to = request.args.get("date_to", None)
+        keyword = request.args.get("keyword", None)
+        color_label = request.args.get("color_label", None)
+        try:
+            flag = _request_flag_filter()
+        except ValueError as e:
+            return json_error(str(e), 400)
+
+        photo_ids = db.get_photo_ids(
+            folder_id=folder_id,
+            sort=sort,
+            rating_min=rating_min,
+            date_from=date_from,
+            date_to=date_to,
+            keyword=keyword,
+            color_label=color_label,
+            flag=flag,
+        )
+        return jsonify({"photo_ids": photo_ids, "total": len(photo_ids)})
+
     @app.route("/api/photos/calendar")
     def api_photos_calendar():
         db = _get_db()
@@ -2788,7 +2816,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("photo_ids must be a list", 400)
         if not raw_ids:
             return json_error("photo_ids required", 400)
-        if len(raw_ids) > 500:
+        if len(raw_ids) > 50000:
             return json_error("too many photo_ids", 400)
 
         photo_ids = []
@@ -4942,6 +4970,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "total": total,
             }
         )
+
+    @app.route("/api/collections/<int:collection_id>/photo-ids")
+    def api_collection_photo_ids(collection_id):
+        """Return every photo ID matching a collection."""
+        db = _get_db()
+        photo_ids = db.get_collection_photo_ids(collection_id)
+        return jsonify({"photo_ids": photo_ids, "total": len(photo_ids)})
 
     # -- Highlights --
 
@@ -11459,7 +11494,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("photo_ids must be a list", 400)
         if not raw_ids:
             return json_error("photo_ids required", 400)
-        if len(raw_ids) > 5000:
+        if len(raw_ids) > 50000:
             return json_error("too many photo_ids", 400)
 
         photo_ids = []
