@@ -105,6 +105,37 @@ def test_extract_metadata_empty_list():
     assert extract_metadata([]) == {}
 
 
+def test_extract_metadata_retries_failed_batches(monkeypatch):
+    """A failed ExifTool batch should be split so good files still get metadata."""
+    import metadata
+
+    paths = [f"/photos/img{i}.jpg" for i in range(4)]
+    calls = []
+
+    def fake_run(file_paths, extra_args=None):
+        calls.append(list(file_paths))
+        if len(file_paths) > 1:
+            return None
+        path = file_paths[0]
+        return [{"SourceFile": path, "EXIF:Make": "TestCam"}]
+
+    monkeypatch.setattr(metadata, "_run_exiftool", fake_run)
+
+    results = metadata.extract_metadata(paths)
+
+    assert set(results) == set(paths)
+    assert all(results[p]["EXIF"]["Make"] == "TestCam" for p in paths)
+    assert calls == [
+        paths,
+        paths[:2],
+        paths[:1],
+        paths[1:2],
+        paths[2:],
+        paths[2:3],
+        paths[3:],
+    ]
+
+
 @requires_exiftool
 def test_extract_metadata_with_restricted_tags(tmp_path):
     """extract_metadata can restrict which tags are returned."""
