@@ -3026,6 +3026,11 @@ async function saveCollection() {
 /* ---------- Photo Loading ---------- */
 function resetAndLoad() {
   cancelScheduledSearchFilter();
+  if (clipSearchActive) {
+    clipSearchActive = false;
+    document.getElementById('clipSearchInput').value = '';
+    document.getElementById('clipClearBtn').style.display = 'none';
+  }
   photos = [];
   currentPage = 1;
   allLoaded = false;
