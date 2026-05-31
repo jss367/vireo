@@ -227,6 +227,74 @@ def test_api_photo_best_batch_ranks_filename_sequence(app_and_db):
     assert selected["best_photo_id"] == pids[1]
 
 
+def test_api_best_batch_flags_records_single_undoable_edit(app_and_db):
+    """Best Batch apply updates mixed flags as one atomic undo action."""
+    app, db = app_and_db
+    photos = db.get_photos()
+    photo_ids = [p["id"] for p in photos]
+    best_id, reject_id, keep_reject_id = photo_ids
+    db.update_photo_flag(reject_id, "flagged")
+
+    client = app.test_client()
+    pre_history = db.get_edit_history()
+    resp = client.post(
+        "/api/batch/best-batch-flags",
+        json={
+            "best_photo_id": best_id,
+            "reject_photo_ids": [reject_id, keep_reject_id],
+        },
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["updated"] == 3
+    flags = {
+        row["id"]: row["flag"]
+        for row in db.conn.execute(
+            "SELECT id, flag FROM photos WHERE id IN (?, ?, ?)",
+            (best_id, reject_id, keep_reject_id),
+        )
+    }
+    assert flags == {
+        best_id: "flagged",
+        reject_id: "rejected",
+        keep_reject_id: "rejected",
+    }
+    post_history = db.get_edit_history()
+    assert len(post_history) == len(pre_history) + 1
+    assert post_history[0]["action_type"] == "flag"
+    assert post_history[0]["new_value"] == "best_batch_apply"
+    assert post_history[0]["item_count"] == 3
+
+    undo = client.post("/api/undo")
+
+    assert undo.status_code == 200, undo.get_json()
+    flags = {
+        row["id"]: row["flag"]
+        for row in db.conn.execute(
+            "SELECT id, flag FROM photos WHERE id IN (?, ?, ?)",
+            (best_id, reject_id, keep_reject_id),
+        )
+    }
+    assert flags == {
+        best_id: "none",
+        reject_id: "flagged",
+        keep_reject_id: "none",
+    }
+
+
+def test_api_best_batch_flags_rejects_best_photo_in_rejects(app_and_db):
+    app, db = app_and_db
+    best_id = db.get_photos()[0]["id"]
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/batch/best-batch-flags",
+        json={"best_photo_id": best_id, "reject_photo_ids": [best_id]},
+    )
+
+    assert resp.status_code == 400
+
+
 def test_api_set_flag_queues_xmp_when_enabled(app_and_db):
     """POST /api/photos/<id>/flag queues a flag sync when configured."""
     import config as cfg

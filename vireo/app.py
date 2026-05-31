@@ -3945,6 +3945,77 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                        flag, items, is_batch=True)
         return jsonify({"ok": True, "updated": len(old_values)})
 
+    @app.route("/api/batch/best-batch-flags", methods=["POST"])
+    def api_batch_best_batch_flags():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        best_photo_id = body.get("best_photo_id")
+        reject_photo_ids = body.get("reject_photo_ids", [])
+        if isinstance(best_photo_id, bool) or not isinstance(best_photo_id, int):
+            return json_error("best_photo_id must be an integer")
+        if not isinstance(reject_photo_ids, list):
+            return json_error("reject_photo_ids must be a list")
+        normalized_reject_ids = []
+        seen_reject_ids = set()
+        for pid in reject_photo_ids:
+            if isinstance(pid, bool) or not isinstance(pid, int):
+                return json_error("reject_photo_ids must contain only integers")
+            if pid == best_photo_id:
+                return json_error("best_photo_id cannot also be rejected")
+            if pid not in seen_reject_ids:
+                normalized_reject_ids.append(pid)
+                seen_reject_ids.add(pid)
+
+        desired_flags = {best_photo_id: "flagged"}
+        desired_flags.update({pid: "rejected" for pid in normalized_reject_ids})
+        photo_ids = list(desired_flags.keys())
+        photos_map = db.get_photos_by_ids(photo_ids)
+        if len(photos_map) != len(photo_ids):
+            return json_error("One or more photos were not found", 404)
+        try:
+            for pid in photo_ids:
+                db._verify_photo_in_workspace(pid)
+        except ValueError as e:
+            return json_error(str(e), 403)
+
+        items = []
+        for pid in photo_ids:
+            new_flag = desired_flags[pid]
+            old_flag = photos_map[pid]["flag"]
+            db.conn.execute(
+                "UPDATE photos SET flag = ? WHERE id = ?",
+                (new_flag, pid),
+            )
+            db.queue_flag_change_if_enabled(pid, new_flag, _commit=False)
+            items.append({
+                "photo_id": pid,
+                "old_value": old_flag,
+                "new_value": new_flag,
+            })
+        reject_count = len(normalized_reject_ids)
+        description = (
+            f"Best Batch: flagged best photo and rejected {reject_count} "
+            f"{'photo' if reject_count == 1 else 'photos'}"
+        )
+        db.record_edit(
+            "flag",
+            description,
+            "best_batch_apply",
+            items,
+            is_batch=True,
+            _commit=False,
+        )
+        db.conn.commit()
+        db._prune_edit_history()
+        return jsonify({
+            "ok": True,
+            "updated": len(items),
+            "photos": {
+                str(pid): {"flag": desired_flags[pid]}
+                for pid in photo_ids
+            },
+        })
+
     @app.route("/api/batch/color_label", methods=["POST"])
     def api_batch_color_label():
         db = _get_db()

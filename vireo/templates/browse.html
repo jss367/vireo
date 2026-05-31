@@ -3860,18 +3860,11 @@ async function applyBestBatchPickAndReject() {
   var bestId = bestBatchData.best_photo_id;
   var rejectIds = (bestBatchData.suggested_reject_ids || []).filter(function(id) { return id !== bestId; });
   try {
-    await safeFetch('/api/batch/flag', {
+    await safeFetch('/api/batch/best-batch-flags', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({photo_ids: [bestId], flag: 'flagged'}),
+      body: JSON.stringify({best_photo_id: bestId, reject_photo_ids: rejectIds}),
     });
-    if (rejectIds.length) {
-      await safeFetch('/api/batch/flag', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({photo_ids: rejectIds, flag: 'rejected'}),
-      });
-    }
   } catch(e) { return; }
   [bestId].concat(rejectIds).forEach(function(id) {
     var p = photos.find(function(x) { return x.id === id; });
