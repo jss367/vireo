@@ -3542,6 +3542,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             candidate = body["details"].get("place_id")
         return _coerce_place_id(candidate)
 
+    def _extract_keyword_id(body):
+        """Return an integer keyword_id from a JSON body, or None."""
+        candidate = body.get("keyword_id")
+        if candidate is None:
+            return None
+        if isinstance(candidate, bool):
+            return None
+        if isinstance(candidate, int):
+            return candidate
+        if isinstance(candidate, str):
+            stripped = candidate.strip()
+            if stripped.isdigit():
+                return int(stripped)
+        return None
+
+    def _location_keyword_edit_error(db, keyword_id):
+        """Return an error response unless ``keyword_id`` is a location keyword."""
+        if keyword_id is None:
+            return json_error("invalid keyword_id", 400)
+        row = db.conn.execute(
+            "SELECT id, type FROM keywords WHERE id = ?", (keyword_id,),
+        ).fetchone()
+        if row is None:
+            return json_error("keyword_not_found", 404)
+        if row["type"] != "location":
+            return json_error("keyword is not a location", 400)
+        return None
+
     def _normalize_client_place_details(body):
         """Normalize a Google Maps JS Place payload from the request body.
 
@@ -3726,8 +3754,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ``type='location'`` link).
         """
         body = request.get_json(silent=True) or {}
+        keyword_id = _extract_keyword_id(body)
         place_id = _extract_place_id(body)
-        if not place_id:
+        if keyword_id is None and not place_id:
             return json_error("missing place_id", 400)
 
         db = _get_db()
@@ -3737,6 +3766,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         edit_error = _photo_location_edit_error(db, photo_id)
         if edit_error is not None:
             return edit_error
+
+        if keyword_id is not None:
+            keyword_error = _location_keyword_edit_error(db, keyword_id)
+            if keyword_error is not None:
+                return keyword_error
+            db.set_photo_location(photo_id, keyword_id)
+            _queue_location_sync_if_enabled(photo_id)
+            location = _serialize_photo_location(db, photo_id)
+            db.record_edit(
+                'location_set',
+                f"set location: {location.get('name', 'unknown') if location else 'unknown'}",
+                str(keyword_id),
+                [{'photo_id': photo_id, 'old_value': '', 'new_value': str(keyword_id)}],
+            )
+            return jsonify({"location": location})
 
         details = _normalize_client_place_details(body)
         if details is None:
@@ -3886,8 +3930,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if len(photo_ids) > 1000:
             return json_error("too many photo_ids", 400)
 
+        keyword_id = _extract_keyword_id(body)
         place_id = _extract_place_id(body)
-        if not place_id:
+        if keyword_id is None and not place_id:
             return json_error("missing place_id", 400)
 
         db = _get_db()
@@ -3895,6 +3940,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             edit_error = _photo_location_edit_error(db, pid)
             if edit_error is not None:
                 return edit_error
+
+        if keyword_id is not None:
+            keyword_error = _location_keyword_edit_error(db, keyword_id)
+            if keyword_error is not None:
+                return keyword_error
+
+            location_name = "unknown"
+            items = []
+            for pid in photo_ids:
+                db.set_photo_location(pid, keyword_id)
+                _queue_location_sync_if_enabled(pid, _commit=False)
+                loc = _serialize_photo_location(db, pid)
+                if loc and location_name == "unknown":
+                    location_name = loc.get("name") or "unknown"
+                items.append({
+                    "photo_id": pid,
+                    "old_value": "",
+                    "new_value": str(keyword_id),
+                })
+            if items:
+                db.record_edit(
+                    "location_set",
+                    f"set location: {location_name} on {len(items)} photos",
+                    str(keyword_id),
+                    items,
+                    is_batch=True,
+                    _commit=False,
+                )
+            db.conn.commit()
+            db._prune_edit_history()
+            return jsonify({
+                "ok": True,
+                "updated": len(items),
+                "location": _serialize_photo_location(db, photo_ids[0]),
+            })
 
         details = _normalize_client_place_details(body)
         if details is None:

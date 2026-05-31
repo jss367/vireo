@@ -728,6 +728,11 @@ body {
   padding: 4px 0;
 }
 .keyword-suggestion-list.open { display: block; }
+.location-keyword-suggestion-list {
+  top: auto;
+  bottom: calc(100% + 2px);
+  z-index: 10001;
+}
 .keyword-suggestion-option {
   display: flex;
   align-items: center;
@@ -1503,7 +1508,10 @@ body {
         <div class="detail-section-title">Location</div>
         <div id="locationFilled" hidden></div>
         <div id="locationEmpty">
-          <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..." autocomplete="off">
+          <div class="keyword-autocomplete">
+            <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..." autocomplete="off">
+            <div class="keyword-suggestion-list location-keyword-suggestion-list" id="locationKeywordSuggestions" role="listbox"></div>
+          </div>
           <div id="locationExifSuggestion" class="location-suggestion" hidden></div>
           <div id="locationError" class="location-error" hidden></div>
         </div>
@@ -1755,6 +1763,7 @@ async function loadKeywordAutocompleteOptions(force) {
             id: k.id,
             name: k.name,
             type: k.type || 'general',
+            place_id: k.place_id || null,
             photo_count: k.photo_count || 0,
             search: String(k.name || '').toLowerCase(),
           };
@@ -5151,6 +5160,10 @@ var _locationAutocompleteBound = false;
 // keyboard-selected autocomplete suggestion (where place_changed fires
 // AFTER the keydown event) gets a chance to cancel the text path.
 var _locationPendingTextSubmit = null;
+var _locationKeywordState = {
+  matches: [],
+  activeIndex: -1,
+};
 
 function _showLocationError(msg) {
   var el = document.getElementById('locationError');
@@ -5167,6 +5180,81 @@ function _hideLocationError() {
   if (el) el.hidden = true;
 }
 
+function hideLocationKeywordSuggestions() {
+  var dropdown = document.getElementById('locationKeywordSuggestions');
+  if (dropdown) {
+    dropdown.classList.remove('open');
+    dropdown.innerHTML = '';
+  }
+  _locationKeywordState.matches = [];
+  _locationKeywordState.activeIndex = -1;
+}
+
+function renderLocationKeywordSuggestions() {
+  var input = document.getElementById('locationInput');
+  var dropdown = document.getElementById('locationKeywordSuggestions');
+  if (!input || !dropdown) return;
+  var query = input.value.trim().toLowerCase();
+  if (!query || !keywordAutocompleteCache || !keywordAutocompleteCache.length) {
+    hideLocationKeywordSuggestions();
+    return;
+  }
+
+  _locationKeywordState.matches = keywordAutocompleteCache
+    .filter(function(k) { return k && k.type === 'location'; })
+    .map(function(k) {
+      return { keyword: k, score: keywordMatchScore(k.search, query) };
+    })
+    .filter(function(item) { return item.score < 99; })
+    .sort(function(a, b) {
+      return a.score - b.score || a.keyword.search.localeCompare(b.keyword.search) || a.keyword.id - b.keyword.id;
+    })
+    .slice(0, 6)
+    .map(function(item) { return item.keyword; });
+
+  if (!_locationKeywordState.matches.length) {
+    hideLocationKeywordSuggestions();
+    return;
+  }
+  if (_locationKeywordState.activeIndex < 0 || _locationKeywordState.activeIndex >= _locationKeywordState.matches.length) {
+    _locationKeywordState.activeIndex = 0;
+  }
+
+  dropdown.innerHTML = _locationKeywordState.matches.map(function(k, idx) {
+    var active = idx === _locationKeywordState.activeIndex ? ' active' : '';
+    var count = k.photo_count === 1 ? '1 photo' : k.photo_count + ' photos';
+    var source = k.place_id ? 'Saved Google place' : 'Saved location';
+    return '<div class="keyword-suggestion-option' + active + '" role="option" data-index="' + idx + '">' +
+      '<span class="keyword-suggestion-name">' + escapeHtml(k.name) + '</span>' +
+      '<span class="keyword-suggestion-meta">' + escapeHtml(source + ' · ' + count) + '</span>' +
+      '</div>';
+  }).join('');
+  dropdown.classList.add('open');
+}
+
+function updateLocationKeywordSuggestions() {
+  var input = document.getElementById('locationInput');
+  if (!input || !input.value.trim()) {
+    hideLocationKeywordSuggestions();
+    return;
+  }
+  loadKeywordAutocompleteOptions().then(renderLocationKeywordSuggestions);
+}
+
+function chooseLocationKeywordSuggestion(index) {
+  var keyword = _locationKeywordState.matches[index];
+  if (!keyword) return;
+  var input = document.getElementById('locationInput');
+  if (input) input.value = keyword.name;
+  hideLocationKeywordSuggestions();
+  if (_locationPendingTextSubmit) {
+    clearTimeout(_locationPendingTextSubmit);
+    _locationPendingTextSubmit = null;
+  }
+  _locationLastPickedAt = Date.now();
+  _submitLocationKeyword(keyword);
+}
+
 function _locationApplyPhotoIds() {
   var ids = getActiveSelection();
   if (ids.length > 1) return ids;
@@ -5175,6 +5263,7 @@ function _locationApplyPhotoIds() {
 }
 
 async function _afterLocationMutation(photoIds, detailPhotoId) {
+  invalidateKeywordAutocompleteCache();
   loadKeywords();
   scheduleCollectionCountsRefresh();
   refreshPendingSyncBanner();
@@ -5284,6 +5373,32 @@ async function _submitLocationPlace(placeId, placeDetails) {
   }
 }
 
+async function _submitLocationKeyword(keyword) {
+  var photoId = window._detailPhotoId;
+  if (!photoId || !keyword || !keyword.id) return;
+  _hideLocationError();
+  var ids = _locationApplyPhotoIds();
+  var useBatch = ids.length > 1;
+  var body = { keyword_id: keyword.id };
+  if (useBatch) body.photo_ids = ids;
+  try {
+    var endpoint = useBatch
+      ? '/api/batch/location'
+      : '/api/photos/' + photoId + '/location';
+    var resp = await safeFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (resp && resp.location) {
+      renderLocationFilled(resp.location);
+    }
+    await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
+  } catch(e) {
+    _showLocationError('Could not save location.');
+  }
+}
+
 async function _submitLocationText(name) {
   var photoId = window._detailPhotoId;
   if (!photoId) return;
@@ -5359,6 +5474,7 @@ function renderLocationEmpty() {
   empty.hidden = false;
   var input = document.getElementById('locationInput');
   if (input) input.value = '';
+  hideLocationKeywordSuggestions();
   // Reset any prior EXIF suggestion. The caller (renderDetail) re-runs
   // maybeShowExifSuggestion(photo) after this, which decides whether to
   // populate the line for the new photo.
@@ -5451,10 +5567,40 @@ async function acceptExifSuggestion(placeId) {
 
 function _onLocationInputFocus() {
   bindLocationAutocomplete();
+  updateLocationKeywordSuggestions();
+}
+
+function _onLocationInputInput() {
+  _locationKeywordState.activeIndex = 0;
+  updateLocationKeywordSuggestions();
 }
 
 function _onLocationInputKeydown(e) {
+  var dropdown = document.getElementById('locationKeywordSuggestions');
+  var localOpen = dropdown && dropdown.classList.contains('open') && _locationKeywordState.matches.length > 0;
+  var googlePlacesMayHandleKeyboard = !!(window.GOOGLE_MAPS_API_KEY || '').trim();
+  if (localOpen && !googlePlacesMayHandleKeyboard && e.key === 'ArrowDown') {
+    e.preventDefault();
+    _locationKeywordState.activeIndex = (_locationKeywordState.activeIndex + 1) % _locationKeywordState.matches.length;
+    renderLocationKeywordSuggestions();
+    return;
+  }
+  if (localOpen && !googlePlacesMayHandleKeyboard && e.key === 'ArrowUp') {
+    e.preventDefault();
+    _locationKeywordState.activeIndex = (_locationKeywordState.activeIndex - 1 + _locationKeywordState.matches.length) % _locationKeywordState.matches.length;
+    renderLocationKeywordSuggestions();
+    return;
+  }
+  if (e.key === 'Escape') {
+    hideLocationKeywordSuggestions();
+    return;
+  }
   if (e.key !== 'Enter') return;
+  if (localOpen && !googlePlacesMayHandleKeyboard && _locationKeywordState.activeIndex >= 0) {
+    e.preventDefault();
+    chooseLocationKeywordSuggestion(_locationKeywordState.activeIndex);
+    return;
+  }
   // DO NOT preventDefault — Google's autocomplete listens for Enter to
   // pick the highlighted suggestion. Suppressing the event would block
   // keyboard place selection. The input has no surrounding form, so
@@ -5486,7 +5632,20 @@ document.addEventListener('DOMContentLoaded', function() {
   var input = document.getElementById('locationInput');
   if (input) {
     input.addEventListener('focus', _onLocationInputFocus);
+    input.addEventListener('input', _onLocationInputInput);
     input.addEventListener('keydown', _onLocationInputKeydown);
+    input.addEventListener('blur', function() {
+      setTimeout(hideLocationKeywordSuggestions, 120);
+    });
+  }
+  var locationDropdown = document.getElementById('locationKeywordSuggestions');
+  if (locationDropdown) {
+    locationDropdown.addEventListener('mousedown', function(e) {
+      var option = e.target.closest('.keyword-suggestion-option');
+      if (!option) return;
+      e.preventDefault();
+      chooseLocationKeywordSuggestion(parseInt(option.dataset.index, 10));
+    });
   }
   bindKeywordAutocomplete('addKeywordInput', 'addKeywordSuggestions', addKeyword);
   bindKeywordAutocomplete('batchKeywordInput', 'batchKeywordSuggestions', function() {
