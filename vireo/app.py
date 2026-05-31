@@ -3760,6 +3760,81 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"location": _serialize_photo_location(db, photo_id)})
 
+    @app.route("/api/batch/location", methods=["POST"])
+    def api_batch_set_photo_location():
+        """Attach one Google place location to multiple photos."""
+        body = request.get_json(silent=True) or {}
+        raw_ids = body.get("photo_ids", [])
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return json_error("photo_ids required", 400)
+
+        photo_ids = []
+        seen = set()
+        for raw in raw_ids:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return json_error("photo_ids must contain only integers", 400)
+            if raw not in seen:
+                photo_ids.append(raw)
+                seen.add(raw)
+        if not photo_ids:
+            return json_error("photo_ids required", 400)
+        if len(photo_ids) > 1000:
+            return json_error("too many photo_ids", 400)
+
+        place_id = _extract_place_id(body)
+        if not place_id:
+            return json_error("missing place_id", 400)
+
+        db = _get_db()
+        for pid in photo_ids:
+            edit_error = _photo_location_edit_error(db, pid)
+            if edit_error is not None:
+                return edit_error
+
+        details = _normalize_client_place_details(body)
+        if details is None:
+            import config as cfg
+            key = cfg.load().get("google_maps_api_key", "")
+            if not key:
+                return json_error("no_api_key", 400)
+            details = places.place_details(place_id, key)
+            if details is None:
+                return json_error("place_not_found", 404)
+
+        try:
+            leaf_id = db.upsert_place_chain(details)
+        except RuntimeError as err:
+            return jsonify({
+                "error": "name_conflict",
+                "error_detail": str(err),
+            }), 409
+
+        items = []
+        for pid in photo_ids:
+            db.set_photo_location(pid, leaf_id)
+            _queue_location_sync_if_enabled(pid, _commit=False)
+            items.append({
+                "photo_id": pid,
+                "old_value": "",
+                "new_value": str(leaf_id),
+            })
+        if items:
+            db.record_edit(
+                "location_set",
+                f"set location: {details.get('name', 'unknown')} on {len(items)} photos",
+                str(leaf_id),
+                items,
+                is_batch=True,
+                _commit=False,
+            )
+        db.conn.commit()
+        db._prune_edit_history()
+        return jsonify({
+            "ok": True,
+            "updated": len(items),
+            "location": _serialize_photo_location(db, photo_ids[0]),
+        })
+
     @app.route("/api/photos/<int:photo_id>/location", methods=["DELETE"])
     def api_clear_photo_location(photo_id):
         """Remove all ``type='location'`` keyword links for ``photo_id``."""
