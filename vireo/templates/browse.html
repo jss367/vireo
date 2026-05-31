@@ -5570,13 +5570,14 @@ function _onLocationInputInput() {
 function _onLocationInputKeydown(e) {
   var dropdown = document.getElementById('locationKeywordSuggestions');
   var localOpen = dropdown && dropdown.classList.contains('open') && _locationKeywordState.matches.length > 0;
-  if (localOpen && e.key === 'ArrowDown') {
+  var googlePlacesMayHandleKeyboard = !!(window.GOOGLE_MAPS_API_KEY || '').trim();
+  if (localOpen && !googlePlacesMayHandleKeyboard && e.key === 'ArrowDown') {
     e.preventDefault();
     _locationKeywordState.activeIndex = (_locationKeywordState.activeIndex + 1) % _locationKeywordState.matches.length;
     renderLocationKeywordSuggestions();
     return;
   }
-  if (localOpen && e.key === 'ArrowUp') {
+  if (localOpen && !googlePlacesMayHandleKeyboard && e.key === 'ArrowUp') {
     e.preventDefault();
     _locationKeywordState.activeIndex = (_locationKeywordState.activeIndex - 1 + _locationKeywordState.matches.length) % _locationKeywordState.matches.length;
     renderLocationKeywordSuggestions();
@@ -5587,7 +5588,7 @@ function _onLocationInputKeydown(e) {
     return;
   }
   if (e.key !== 'Enter') return;
-  if (localOpen && _locationKeywordState.activeIndex >= 0) {
+  if (localOpen && !googlePlacesMayHandleKeyboard && _locationKeywordState.activeIndex >= 0) {
     e.preventDefault();
     chooseLocationKeywordSuggestion(_locationKeywordState.activeIndex);
     return;

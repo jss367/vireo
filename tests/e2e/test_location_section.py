@@ -161,6 +161,38 @@ def test_existing_location_keywords_suggest_while_typing(live_server, page):
     assert row is not None
 
 
+def test_saved_location_enter_does_not_steal_google_keyboard_pick(live_server, page):
+    """With a Google key configured, Enter remains available to Google Places."""
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"][:2]
+    existing_location_id = db.get_or_create_text_location("San Diego Airbnb")
+    db.set_photo_location(photo_ids[1], existing_location_id)
+    _set_api_key()
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(f".grid-card[data-id='{photo_ids[0]}']").wait_for(state="visible")
+    page.locator(f".grid-card[data-id='{photo_ids[0]}']").click()
+    _wait_for_detail_loaded(page)
+
+    inp = page.locator("#locationInput")
+    inp.wait_for(state="visible")
+    inp.fill("San")
+    expect(page.locator("#locationKeywordSuggestions")).to_be_visible()
+
+    # Simulate Google place_changed having just handled the keyboard pick.
+    page.evaluate("window._locationLastPickedAt = Date.now();")
+    inp.press("Enter")
+    page.wait_for_timeout(600)
+
+    row = db.conn.execute(
+        "SELECT 1 FROM photo_keywords "
+        "WHERE photo_id = ? AND keyword_id = ?",
+        (photo_ids[0], existing_location_id),
+    ).fetchone()
+    assert row is None
+    expect(page.locator("#locationEmpty")).to_be_visible()
+
+
 def test_enter_after_place_changed_does_not_submit_freetext(live_server, page):
     """Regression for the keyboard-selected-autocomplete race: when the
     user presses Enter to pick a highlighted Google suggestion, the
