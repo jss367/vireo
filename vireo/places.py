@@ -108,7 +108,7 @@ def place_details(place_id: str, api_key: str) -> dict | None:
     params = {
         "place_id": place_id,
         "key": api_key,
-        "fields": "place_id,name,types,geometry/location,address_components",
+        "fields": "place_id,name,type,geometry/location,address_components",
     }
     url = f"{_PLACE_DETAILS_URL}?{urllib.parse.urlencode(params)}"
 

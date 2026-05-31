@@ -10,6 +10,7 @@ patch resolves to the fake.
 import io
 import json
 import urllib.error
+import urllib.parse
 
 import pytest
 
@@ -110,6 +111,9 @@ def test_place_details_parses_response(monkeypatch):
     url = captured[0]
     assert "place_id=ChIJ4zGFAZpYwokRGUGph3Mf37k" in url
     assert "key=FAKE_KEY" in url
+    fields = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["fields"][0]
+    assert "type" in fields.split(",")
+    assert "types" not in fields.split(",")
 
 
 def test_place_details_returns_none_on_zero_results(monkeypatch):
