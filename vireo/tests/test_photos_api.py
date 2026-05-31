@@ -2918,6 +2918,46 @@ def test_post_photo_location_returns_404_on_missing_photo(app_and_db, monkeypatc
     assert resp.get_json()["error"] == "photo_not_found"
 
 
+def _add_out_of_workspace_photo(db):
+    active_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    fid = db.add_folder("/photos/other", name="other")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename="outside.jpg",
+        extension=".jpg",
+        file_size=100,
+        file_mtime=1.0,
+    )
+    db.set_active_workspace(active_ws)
+    return pid
+
+
+def test_post_photo_location_rejects_out_of_workspace_photo(app_and_db):
+    """Location edits must not queue sync changes for hidden workspace photos."""
+    app, db = app_and_db
+    pid = _add_out_of_workspace_photo(db)
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={
+            "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+            "place": _central_park_client_place(),
+        },
+    )
+    assert resp.status_code == 403
+    assert "active workspace" in resp.get_json()["error"]
+
+    assert db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ?", (pid,),
+    ).fetchone() is None
+    assert db.conn.execute(
+        "SELECT 1 FROM pending_changes WHERE photo_id = ?", (pid,),
+    ).fetchone() is None
+
+
 def test_post_photo_location_text_returns_404_on_missing_photo(app_and_db):
     """Same FK guard for the free-text fallback path."""
     app, _ = app_and_db
@@ -2930,6 +2970,26 @@ def test_post_photo_location_text_returns_404_on_missing_photo(app_and_db):
     assert resp.get_json()["error"] == "photo_not_found"
 
 
+def test_post_photo_location_text_rejects_out_of_workspace_photo(app_and_db):
+    app, db = app_and_db
+    pid = _add_out_of_workspace_photo(db)
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "the meadow"},
+    )
+    assert resp.status_code == 403
+    assert "active workspace" in resp.get_json()["error"]
+
+    assert db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ?", (pid,),
+    ).fetchone() is None
+    assert db.conn.execute(
+        "SELECT 1 FROM pending_changes WHERE photo_id = ?", (pid,),
+    ).fetchone() is None
+
+
 def test_delete_photo_location_returns_404_on_missing_photo(app_and_db):
     """DELETE on a missing photo returns 404 for consistency with the
     POST routes (was previously a silent 200 because the underlying
@@ -2939,6 +2999,36 @@ def test_delete_photo_location_returns_404_on_missing_photo(app_and_db):
     resp = client.delete("/api/photos/999999/location")
     assert resp.status_code == 404
     assert resp.get_json()["error"] == "photo_not_found"
+
+
+def test_delete_photo_location_rejects_out_of_workspace_photo(app_and_db):
+    app, db = app_and_db
+    active_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    fid = db.add_folder("/photos/other", name="other")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename="outside.jpg",
+        extension=".jpg",
+        file_size=100,
+        file_mtime=1.0,
+    )
+    leaf_id = db.upsert_place_chain(_central_park_details())
+    db.set_photo_location(pid, leaf_id)
+    db.set_active_workspace(active_ws)
+
+    client = app.test_client()
+    resp = client.delete(f"/api/photos/{pid}/location")
+    assert resp.status_code == 403
+    assert "active workspace" in resp.get_json()["error"]
+
+    assert db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ?", (pid,),
+    ).fetchone() is not None
+    assert db.conn.execute(
+        "SELECT 1 FROM pending_changes WHERE photo_id = ?", (pid,),
+    ).fetchone() is None
 
 
 def test_delete_photo_location_clears_links(app_and_db):

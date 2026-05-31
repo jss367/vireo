@@ -2722,6 +2722,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         enabled = bool(effective_config.get("write_assigned_location_to_xmp", False))
         if not enabled:
             return
+        if workspace_id is None:
+            if not db._photo_in_workspace(photo_id):
+                return
+        elif db.conn.execute(
+            """SELECT 1 FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE p.id = ? AND wf.workspace_id = ?""",
+            (photo_id, workspace_id),
+        ).fetchone() is None:
+            return
         db.remove_pending_changes(
             photo_id, "location", workspace_id=workspace_id, _commit=_commit,
         )
@@ -2729,6 +2739,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photo_id, "location", "effective",
             workspace_id=workspace_id, _commit=_commit,
         )
+
+    def _photo_location_edit_error(db, photo_id):
+        """Return an error response when a photo cannot be edited in this workspace."""
+        if db.conn.execute(
+            "SELECT 1 FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone() is None:
+            return json_error("photo_not_found", 404)
+        if not db._photo_in_workspace(photo_id):
+            return json_error(
+                f"Photo {photo_id} does not belong to the active workspace", 403,
+            )
+        return None
 
     # -- Edit API routes --
 
@@ -3345,10 +3367,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Guard against stale clients (e.g. tab open after photo deleted).
         # Without this, set_photo_location's INSERT into photo_keywords
         # raises a FK IntegrityError that surfaces as a 500.
-        if db.conn.execute(
-            "SELECT 1 FROM photos WHERE id = ?", (photo_id,)
-        ).fetchone() is None:
-            return json_error("photo_not_found", 404)
+        edit_error = _photo_location_edit_error(db, photo_id)
+        if edit_error is not None:
+            return edit_error
 
         details = _normalize_client_place_details(body)
         if details is None:
@@ -3396,10 +3417,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         stripped = name.strip()
 
         db = _get_db()
-        if db.conn.execute(
-            "SELECT 1 FROM photos WHERE id = ?", (photo_id,)
-        ).fetchone() is None:
-            return json_error("photo_not_found", 404)
+        edit_error = _photo_location_edit_error(db, photo_id)
+        if edit_error is not None:
+            return edit_error
         try:
             leaf_id = db.get_or_create_text_location(stripped)
         except ValueError:
@@ -3419,10 +3439,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_clear_photo_location(photo_id):
         """Remove all ``type='location'`` keyword links for ``photo_id``."""
         db = _get_db()
-        if db.conn.execute(
-            "SELECT 1 FROM photos WHERE id = ?", (photo_id,)
-        ).fetchone() is None:
-            return json_error("photo_not_found", 404)
+        edit_error = _photo_location_edit_error(db, photo_id)
+        if edit_error is not None:
+            return edit_error
         db.clear_photo_location(photo_id)
         _queue_location_sync_if_enabled(photo_id)
         db.record_edit(
