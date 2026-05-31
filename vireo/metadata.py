@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 # Batch size for ExifTool invocations
 _BATCH_SIZE = 100
 _EXIFTOOL_TIMEOUT = 120
-_MAX_TIMEOUT_SPLIT_DEPTH = 2
+_MAX_TIMEOUT_SPLIT_ATTEMPTS = 16
 _TIMEOUT = object()
 
 
@@ -61,26 +61,40 @@ def _run_exiftool(file_paths, extra_args=None):
     return []
 
 
-def _run_exiftool_with_retries(file_paths, extra_args=None, depth=0):
+def _run_exiftool_with_retries(file_paths, extra_args=None, split_budget=None):
     """Run ExifTool, splitting timed-out batches to salvage metadata."""
+    if split_budget is None:
+        split_budget = [_MAX_TIMEOUT_SPLIT_ATTEMPTS]
+
     raw = _run_exiftool(file_paths, extra_args=extra_args)
     if raw is not _TIMEOUT:
         return raw
 
-    if len(file_paths) <= 1 or depth >= _MAX_TIMEOUT_SPLIT_DEPTH:
+    if len(file_paths) <= 1:
         return []
 
+    if split_budget[0] <= 0:
+        log.warning(
+            "Stopping exiftool timeout retries for %d files after exhausting split budget",
+            len(file_paths),
+        )
+        return []
+
+    split_budget[0] -= 1
     mid = len(file_paths) // 2
     log.warning(
-        "Retrying timed-out exiftool batch of %d files as %d + %d",
-        len(file_paths), mid, len(file_paths) - mid,
+        "Retrying timed-out exiftool batch of %d files as %d + %d (%d splits left)",
+        len(file_paths),
+        mid,
+        len(file_paths) - mid,
+        split_budget[0],
     )
     return (
         _run_exiftool_with_retries(
-            file_paths[:mid], extra_args=extra_args, depth=depth + 1
+            file_paths[:mid], extra_args=extra_args, split_budget=split_budget
         )
         + _run_exiftool_with_retries(
-            file_paths[mid:], extra_args=extra_args, depth=depth + 1
+            file_paths[mid:], extra_args=extra_args, split_budget=split_budget
         )
     )
 
