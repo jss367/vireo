@@ -51,7 +51,10 @@ class PipelineParams:
     skip_classify: bool = False
     skip_eye_keypoints: bool = False
     download_taxonomy: bool = True
-    preview_max_size: int = 1920
+    # None means "use the workspace-effective preview_max_size setting".
+    # Explicit values are kept for API/back-compat and tests that need to pin
+    # a preview tier.
+    preview_max_size: int | None = None
     exclude_paths: set | None = None
     exclude_photo_ids: set | None = None
     recursive: bool = True
@@ -1336,7 +1339,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
 
-            raw_size = params.preview_max_size
+            effective = thread_db.get_effective_config(cfg.load())
+            raw_size = (
+                params.preview_max_size
+                if params.preview_max_size is not None
+                else effective.get("preview_max_size", 1920)
+            )
             if raw_size == 0:
                 # "Full resolution" — /full redirects to /original, so
                 # there's no size-suffixed file to warm. Skip rather
@@ -1348,7 +1356,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 stages["previews"]["status"] = "completed"
                 return
             max_size = int(raw_size or 1920)
-            preview_quality = cfg.load().get("preview_quality", 90)
+            preview_quality = effective.get("preview_quality", 90)
             base_dir = os.path.dirname(db_path)
             preview_dir = os.path.join(base_dir, "previews")
             os.makedirs(preview_dir, exist_ok=True)

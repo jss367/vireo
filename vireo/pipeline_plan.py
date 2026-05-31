@@ -58,11 +58,10 @@ class PipelinePlanParams:
     # at plan time, since hashing thousands of files synchronously inside
     # a plan request would block the UI on every settings change.
     hash_duplicate_paths: list | None = None
-    # User's currently-selected preview pyramid tier from the cfgPreviewSize
-    # picker. Determines whether the previews substage runs at all (0 =
-    # "serve originals"; the substage no-ops) and which size's
-    # preview_cache rows count as "already done". ``None`` falls back to
-    # the workspace-effective config in ``_previews_plan``.
+    # Optional API override for the preview tier. Normal pipeline runs leave
+    # this unset so the previews substage uses the workspace-effective
+    # preview_max_size setting. Explicit 0 means "serve originals"; the
+    # previews substage no-ops.
     preview_max_size: int | None = None
 
 
@@ -542,10 +541,10 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
 
     The card aggregates two pipeline substages (thumbnails + previews) so
     one plan entry has to answer for both. The accurate signal needs the
-    user's currently-selected preview size (a 1280px run is genuinely
-    "Already done" while the same library at 3840px isn't), so the
-    planner consults ``preview_max_size`` from the plan params (or the
-    workspace-effective config as a fallback).
+    active preview size (a 1280px library policy is genuinely "Already
+    done" while the same library at 3840px isn't), so the planner consults
+    an explicit ``preview_max_size`` API override when present, otherwise
+    the workspace-effective config.
 
     States:
       - ``will-skip``: only when both substages no-op. Today that's

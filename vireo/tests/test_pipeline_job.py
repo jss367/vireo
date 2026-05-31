@@ -89,9 +89,9 @@ def test_pipeline_params_has_preview_max_size():
     assert params.preview_max_size == 2560
 
 
-def test_pipeline_params_preview_max_size_defaults_1920():
+def test_pipeline_params_preview_max_size_defaults_to_config():
     params = PipelineParams(collection_id=1)
-    assert params.preview_max_size == 1920
+    assert params.preview_max_size is None
 
 
 def test_pipeline_params_sources_list():
@@ -122,7 +122,7 @@ def test_pipeline_params_defaults():
     assert params.skip_regroup is False
     assert params.sources is None
     assert params.skip_classify is False
-    assert params.preview_max_size == 1920
+    assert params.preview_max_size is None
 
 
 def test_pipeline_params_all_fields():
