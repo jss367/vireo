@@ -4615,12 +4615,8 @@ async function applyGpsResolve() {
     loadKeywords();
     scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();
-    if (activeCollectionId) {
-      await filterByCollection(activeCollectionId);
-    } else if (updatedIds.length) {
-      refreshGridCards(updatedIds);
-      loadSummary();
-    }
+    var detailPhotoId = updatedIds.indexOf(selectedPhotoId) !== -1 ? selectedPhotoId : null;
+    await _afterLocationMutation(updatedIds, detailPhotoId);
     var errors = (data.group_errors || []).length;
     showToast(
       'Resolved GPS locations for ' + updated.toLocaleString() + ' photo' + (updated === 1 ? '' : 's')

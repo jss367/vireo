@@ -3135,7 +3135,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None, json_error("photo_ids required", 400)
         return photo_ids, None
 
-    def _chunked(values, size=800):
+    def _gps_location_chunks(values, size=800):
         values = list(values)
         for idx in range(0, len(values), size):
             yield values[idx:idx + size]
@@ -3145,7 +3145,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not photo_ids:
             return set()
         found = set()
-        for chunk in _chunked(photo_ids):
+        for chunk in _gps_location_chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = db.conn.execute(
                 "SELECT DISTINCT pk.photo_id "
