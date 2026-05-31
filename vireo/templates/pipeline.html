@@ -1525,6 +1525,7 @@ function showPreviewLoading() {
   _previewLoading = true;
   _previewData = null;
   _previewSelected = {};
+  _planFetchSeq++;
   _pipelinePlan = null;
   updateSamVariantWarning(null);
   refreshPipelineUI();
