@@ -567,27 +567,39 @@ function openReviewBurst() {
 
 async function flagBest() {
   if (!bestBatchData || !bestBatchData.best_photo_id) return;
-  await fetchJson('/api/batch/flag', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({photo_ids: [bestBatchData.best_photo_id], flag: 'flagged'}),
-  });
-  if (window.showUndoToast) showUndoToast();
-  if (window.showToast) showToast('Flagged best photo.', 'success');
+  try {
+    await fetchJson('/api/batch/flag', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [bestBatchData.best_photo_id], flag: 'flagged'}),
+    });
+    if (window.showUndoToast) showUndoToast();
+    if (window.showToast) showToast('Flagged best photo.', 'success');
+  } catch (e) {
+    if (window.showToast) {
+      showToast(e && e.message ? e.message : 'Could not flag best photo.', 'error');
+    }
+  }
 }
 
 async function flagBestRejectRest() {
   if (!bestBatchData || !bestBatchData.best_photo_id) return;
-  await fetchJson('/api/batch/best-batch-flags', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      best_photo_id: bestBatchData.best_photo_id,
-      reject_photo_ids: bestBatchData.suggested_reject_ids || [],
-    }),
-  });
-  if (window.showUndoToast) showUndoToast();
-  if (window.showToast) showToast('Applied best-batch flags.', 'success');
+  try {
+    await fetchJson('/api/batch/best-batch-flags', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        best_photo_id: bestBatchData.best_photo_id,
+        reject_photo_ids: bestBatchData.suggested_reject_ids || [],
+      }),
+    });
+    if (window.showUndoToast) showUndoToast();
+    if (window.showToast) showToast('Applied best-batch flags.', 'success');
+  } catch (e) {
+    if (window.showToast) {
+      showToast(e && e.message ? e.message : 'Could not apply best-batch flags.', 'error');
+    }
+  }
 }
 
 loadBatch();
