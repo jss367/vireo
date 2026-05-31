@@ -278,7 +278,7 @@
   function getFiltered() {
     let list = allKeywords;
     if (filterType === 'unlinked-location') {
-      list = list.filter(k => (k.type || 'general') === 'location' && !k.place_id);
+      list = list.filter(k => isActionableUnlinkedLocation(k));
     } else if (filterType !== 'all') {
       list = list.filter(k => (k.type || 'general') === filterType);
     }
@@ -291,8 +291,16 @@
 
   function unlinkedLocationCount() {
     return allKeywords.reduce(function(n, k) {
-      return n + (((k.type || 'general') === 'location' && !k.place_id) ? 1 : 0);
+      return n + (isActionableUnlinkedLocation(k) ? 1 : 0);
     }, 0);
+  }
+
+  function isActionableUnlinkedLocation(k) {
+    return (
+      (k.type || 'general') === 'location' &&
+      !k.place_id &&
+      (k.direct_photo_count || 0) > 0
+    );
   }
 
   function sortList(list) {
@@ -350,14 +358,15 @@
                        ? k.latitude.toFixed(4) + ', ' + k.longitude.toFixed(4) : '';
 
       // Per-row Link cell:
-      //   * type='location' AND no place_id  -> 📍 Link... button
-      //   * type='location' AND has place_id -> 📍 linked badge
-      //   * other types                      -> empty
+      //   * linked location                 -> 📍 linked badge
+      //   * directly tagged unlinked place  -> 📍 Link... button
+      //   * parent-only chain rows          -> empty
+      //   * other types                     -> empty
       let linkCell = '';
       if (t === 'location') {
         if (k.place_id) {
           linkCell = '<span class="kw-linked-badge" title="Linked to Google place">📍 linked</span>';
-        } else {
+        } else if (isActionableUnlinkedLocation(k)) {
           linkCell = '<button class="kw-link-btn" data-link-id="' + k.id + '" type="button">' +
             '📍 Link…</button>';
         }

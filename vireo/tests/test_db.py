@@ -9690,6 +9690,55 @@ def test_upsert_place_chain_walks_full_parent_chain(db):
     assert chain[-1]["parent_id"] is None
 
 
+def test_upsert_place_chain_filters_address_fragments(db):
+    """Street numbers, routes, and postal codes should not become keywords."""
+    details = {
+        "place_id": "ChIJ_Address_Fragment_Test",
+        "name": "123 Main St",
+        "lat": 37.1,
+        "lng": -122.2,
+        "address_components": [
+            {"name": "123", "short_name": "123", "types": ["street_number"]},
+            {"name": "Main St", "short_name": "Main St", "types": ["route"]},
+            {"name": "Mountain View", "short_name": "Mountain View", "types": ["locality"]},
+            {"name": "Santa Clara County", "short_name": "Santa Clara County",
+             "types": ["administrative_area_level_2"]},
+            {"name": "California", "short_name": "CA",
+             "types": ["administrative_area_level_1"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+            {"name": "94043", "short_name": "94043", "types": ["postal_code"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "123 Main St",
+        "Mountain View",
+        "Santa Clara County",
+        "California",
+        "United States",
+    ]
+    all_location_names = {
+        row["name"]
+        for row in db.conn.execute(
+            "SELECT name FROM keywords WHERE type = 'location'"
+        ).fetchall()
+    }
+    assert "123" not in all_location_names
+    assert "94043" not in all_location_names
+    assert "Main St" not in all_location_names
+
+
 def test_upsert_place_chain_is_idempotent(db):
     details = _central_park_details()
     first_id = db.upsert_place_chain(details)
