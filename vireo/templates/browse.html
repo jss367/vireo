@@ -5225,15 +5225,23 @@ async function _submitLocationText(name) {
   var photoId = window._detailPhotoId;
   if (!photoId) return;
   _hideLocationError();
+  var ids = _locationApplyPhotoIds();
+  var useBatch = ids.length > 1;
   try {
-    var resp = await safeFetch('/api/photos/' + photoId + '/location/text', {
+    var endpoint = useBatch
+      ? '/api/batch/location/text'
+      : '/api/photos/' + photoId + '/location/text';
+    var body = useBatch
+      ? { name: name, photo_ids: ids }
+      : { name: name };
+    var resp = await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name }),
+      body: JSON.stringify(body),
     });
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
-      await _afterLocationMutation([photoId], photoId);
+      await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
     }
   } catch(e) {
     _showLocationError('Could not save location.');
