@@ -753,6 +753,7 @@
         fields: [
           'place_id',
           'name',
+          'types',
           'formatted_address',
           'geometry',
           'address_components'
@@ -794,6 +795,7 @@
     return {
       place_id: place.place_id,
       name: place.name || place.formatted_address || '',
+      types: Array.isArray(place.types) ? place.types : [],
       lat: lat,
       lng: lng,
       address_components: (place.address_components || []).map(function(c) {
