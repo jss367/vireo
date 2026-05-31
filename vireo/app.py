@@ -447,9 +447,11 @@ def _best_batch_scope(db, seed_photo_id, max_gap_seconds=8.0, max_sequence_gap=2
         start = max(0, end - max_photos)
         return rows[start:end]
 
-    def _time_ok(left, right):
+    def _time_ok(left, right, require_timestamps=False):
         gap = _time_gap_seconds(left["timestamp"], right["timestamp"])
-        return gap is None or gap <= max_gap_seconds
+        if gap is None:
+            return not require_timestamps
+        return gap <= max_gap_seconds
 
     if seed_key:
         prefix, _, width, _ = seed_key
@@ -512,10 +514,16 @@ def _best_batch_scope(db, seed_photo_id, max_gap_seconds=8.0, max_sequence_gap=2
     if seed_idx is None:
         return None, "Photo not found"
     left = seed_idx
-    while left > 0 and _time_ok(rows[left - 1], rows[left]):
+    while (
+        left > 0
+        and _time_ok(rows[left - 1], rows[left], require_timestamps=True)
+    ):
         left -= 1
     right = seed_idx
-    while right < len(rows) - 1 and _time_ok(rows[right], rows[right + 1]):
+    while (
+        right < len(rows) - 1
+        and _time_ok(rows[right], rows[right + 1], require_timestamps=True)
+    ):
         right += 1
     batch = rows[left:right + 1]
     if len(batch) < 2:

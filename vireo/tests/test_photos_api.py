@@ -176,6 +176,24 @@ def test_api_photos_rejects_unknown_flag_filter(app_and_db):
     assert resp.status_code == 400
 
 
+def _mark_best_batch_quality(db, photo_id, sharpness):
+    db.conn.execute(
+        """UPDATE photos
+           SET mask_path = 'mask.png',
+               subject_tenengrad = ?,
+               bg_tenengrad = 5,
+               crop_complete = 1,
+               bg_separation = 0,
+               subject_clip_high = 0,
+               subject_clip_low = 0,
+               subject_y_median = 115,
+               subject_size = 0.05,
+               noise_estimate = 1
+           WHERE id = ?""",
+        (sharpness, photo_id),
+    )
+
+
 def test_api_photo_best_batch_ranks_filename_sequence(app_and_db):
     """GET /api/photos/<id>/best-batch finds adjacent camera frames and ranks them."""
     app, db = app_and_db
@@ -192,21 +210,7 @@ def test_api_photo_best_batch_ranks_filename_sequence(app_and_db):
             file_mtime=float(idx),
             timestamp=f"2024-03-01T12:00:0{idx - 3069}",
         )
-        db.conn.execute(
-            """UPDATE photos
-               SET mask_path = 'mask.png',
-                   subject_tenengrad = ?,
-                   bg_tenengrad = 5,
-                   crop_complete = 1,
-                   bg_separation = 0,
-                   subject_clip_high = 0,
-                   subject_clip_low = 0,
-                   subject_y_median = 115,
-                   subject_size = 0.05,
-                   noise_estimate = 1
-               WHERE id = ?""",
-            (sharp, pid),
-        )
+        _mark_best_batch_quality(db, pid, sharp)
         pids.append(pid)
     db.conn.commit()
 
@@ -225,6 +229,65 @@ def test_api_photo_best_batch_ranks_filename_sequence(app_and_db):
     selected = client.post("/api/photos/best-batch", json={"photo_ids": pids}).get_json()
     assert selected["scope_method"] == "selected_photos"
     assert selected["best_photo_id"] == pids[1]
+
+
+def test_api_photo_best_batch_capture_time_requires_real_timestamps(app_and_db):
+    """Timestamp fallback should not group unrelated null-timestamp photos."""
+    app, db = app_and_db
+    folder_id = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", ('/photos/2024',)
+    ).fetchone()["id"]
+    pids = []
+    for filename in ["alpha.jpg", "beta.jpg", "gamma.jpg"]:
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=filename,
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=1.0,
+            timestamp=None,
+        )
+        _mark_best_batch_quality(db, pid, 80)
+        pids.append(pid)
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pids[1]}/best-batch")
+
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "No neighboring batch photos found"
+
+
+def test_api_photo_best_batch_ranks_capture_time_without_sequence(app_and_db):
+    """Timestamp fallback still works for non-sequence filenames with real times."""
+    app, db = app_and_db
+    folder_id = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", ('/photos/2024',)
+    ).fetchone()["id"]
+    pids = []
+    for idx, (filename, sharp) in enumerate(
+        [("alpha.jpg", 10), ("beta.jpg", 90), ("gamma.jpg", 30)]
+    ):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=filename,
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=1.0,
+            timestamp=f"2024-03-01T12:00:0{idx * 3}",
+        )
+        _mark_best_batch_quality(db, pid, sharp)
+        pids.append(pid)
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pids[1]}/best-batch")
+
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert data["scope_method"] == "capture_time"
+    assert data["photo_ids"] == pids
+    assert data["best_photo_id"] == pids[1]
 
 
 def test_api_best_batch_flags_records_single_undoable_edit(app_and_db):
