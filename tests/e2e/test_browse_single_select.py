@@ -419,6 +419,19 @@ def test_vertical_arrow_navigation_moves_by_rendered_grid_columns(live_server, p
     assert page.evaluate("selectedPhotoId === photos[0].id")
 
 
+def test_arrow_down_without_selection_starts_at_first_photo(live_server, page):
+    """Starting keyboard navigation with Down should focus the first card."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    page.locator(".grid-card").first.wait_for(state="visible")
+    assert page.evaluate("selectedIndex") == -1
+
+    page.keyboard.press("ArrowDown")
+    page.wait_for_function("selectedIndex === 0")
+    assert page.evaluate("selectedPhotoId === photos[0].id")
+
+
 def test_shift_arrow_navigation_preserves_range_selection_at_loaded_boundary(
     live_server, page
 ):

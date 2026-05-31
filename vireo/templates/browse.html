@@ -5226,6 +5226,12 @@ document.addEventListener('keydown', function(e) {
 
 function getBrowseGridColumnCount() {
   var grid = document.getElementById('grid');
+  if (grid) {
+    var template = window.getComputedStyle(grid).gridTemplateColumns || '';
+    var tracks = template.trim().split(/\s+/).filter(Boolean);
+    if (tracks.length && template !== 'none') return tracks.length;
+  }
+
   var cards = grid ? grid.querySelectorAll('.grid-card') : document.querySelectorAll('.grid-card');
   if (!cards.length) return 1;
 
@@ -5239,12 +5245,12 @@ function getBrowseGridColumnCount() {
 }
 
 async function moveBrowseSelection(delta, e) {
-  var nextIndex = selectedIndex + delta;
+  var nextIndex = selectedIndex < 0 && delta > 0 ? 0 : selectedIndex + delta;
   while (delta > 0 && nextIndex >= photos.length && !allLoaded) {
     var beforeLength = photos.length;
     await loadPhotos();
     if (photos.length === beforeLength) break;
-    nextIndex = selectedIndex + delta;
+    nextIndex = selectedIndex < 0 ? 0 : selectedIndex + delta;
   }
   if (nextIndex < 0 || nextIndex >= photos.length || !photos[nextIndex]) return;
   var selectionEvent = {
