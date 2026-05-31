@@ -120,3 +120,31 @@ def test_map_photo_id_deep_link_reports_missing_location(live_server, page):
     page.goto(f"{live_server['url']}/map?photo_id={pid}")
 
     expect(page.locator("#mapStatus")).to_contain_text("No map location found for this photo.")
+
+
+def test_map_photo_id_deep_link_is_one_shot_for_later_filters(live_server, page):
+    """Later filter changes should not keep treating the deep-link photo as missing."""
+    linked_pid = live_server["data"]["photos"][0]
+    other_pid = live_server["data"]["photos"][3]
+    live_server["db"].conn.execute(
+        "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+        (37.7749, -122.4194, linked_pid),
+    )
+    live_server["db"].conn.execute(
+        "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+        (40.7128, -74.0060, other_pid),
+    )
+    live_server["db"].conn.commit()
+
+    page.route("https://unpkg.com/**", _stub_leaflet)
+    page.goto(f"{live_server['url']}/map?photo_id={linked_pid}")
+    page.wait_for_function(
+        "pid => window.activePhotoId === pid && !!window.__openedPopup",
+        arg=linked_pid,
+        timeout=3000,
+    )
+
+    page.select_option("#filterSpecies", "American Robin")
+
+    expect(page.locator("#mapStatus")).to_contain_text("Showing 1 of 2 geolocated photos")
+    expect(page.locator("#mapStatus")).not_to_contain_text("No map location found")

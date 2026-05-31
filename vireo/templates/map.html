@@ -548,6 +548,8 @@ markers.on('clusterclick', hideClusterPreview);
 
 /* ── Load photos ── */
 async function loadPhotos() {
+  var focusPhotoId = requestedPhotoId;
+  requestedPhotoId = null;
   var params = new URLSearchParams();
   var folder = document.getElementById('filterFolder').value;
   var rating = document.getElementById('filterRating').value;
@@ -574,7 +576,7 @@ async function loadPhotos() {
 
     if (data.photos.length === 0) {
       renderSidebar([]);
-      document.getElementById('mapStatus').textContent = requestedPhotoId !== null
+      document.getElementById('mapStatus').textContent = focusPhotoId !== null
         ? 'No map location found for this photo.'
         : 'No geolocated photos found. Photos with GPS data in their EXIF metadata will appear here.';
       legendControl.update({});
@@ -625,8 +627,8 @@ async function loadPhotos() {
 
     map.fitBounds(markers.getBounds(), { padding: [30, 30] });
     renderSidebar(data.photos);
-    if (requestedPhotoId !== null) {
-      if (!openPhotoMarker(requestedPhotoId)) {
+    if (focusPhotoId !== null) {
+      if (!openPhotoMarker(focusPhotoId)) {
         document.getElementById('mapStatus').textContent =
           'No map location found for this photo.';
       }
@@ -645,7 +647,7 @@ async function loadPhotos() {
     if (missingGps > 0) {
       parts.push('<a href="/browse?missing_gps=1">' + missingGps + ' missing GPS</a>');
     }
-    if (requestedPhotoId === null || photoMarkers[requestedPhotoId]) {
+    if (focusPhotoId === null || photoMarkers[focusPhotoId]) {
       statusEl.innerHTML = parts.join(' &mdash; ');
     }
   } catch (e) {
