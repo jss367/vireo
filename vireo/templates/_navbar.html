@@ -5076,6 +5076,10 @@ function closePipeline() {
 
 function renderPipeline(data, photoId) {
   var c = document.getElementById('pipelineContent');
+  var diag = data.classification_diagnostics || {};
+  var detectorThreshold = diag.detector_confidence_threshold != null ? diag.detector_confidence_threshold : 0.2;
+  var detectorThresholdPct = Math.round(detectorThreshold * 100);
+  var maxDetectorPct = diag.max_detector_confidence != null ? Math.round(diag.max_detector_confidence * 100) : null;
   var html = '<div class="pipeline-steps">';
 
   // Step 1: Original image
@@ -5106,8 +5110,12 @@ function renderPipeline(data, photoId) {
       '<div class="pipeline-stat">Confidence: <b>' + Math.round(data.detection_conf * 100) + '%</b></div>' +
       '<div class="pipeline-stat">Subject size: <b>' + Math.round((db.w * db.h) * 10000) / 100 + '%</b> of frame</div>' +
     '</div>';
+  } else if ((diag.hidden_detection_count || 0) > 0) {
+    html += '<p style="color:var(--text-dim);font-size:13px;">No subject above the current detector threshold. ' +
+      diag.hidden_detection_count + ' lower-confidence detection' + (diag.hidden_detection_count === 1 ? ' is' : 's are') +
+      ' stored' + (maxDetectorPct != null ? ' (best ' + maxDetectorPct + '%, threshold ' + detectorThresholdPct + '%)' : '') + '.</p>';
   } else {
-    html += '<p style="color:var(--text-dim);font-size:13px;">No subject detected — full image sent to classifier</p>';
+    html += '<p style="color:var(--text-dim);font-size:13px;">No subject detected</p>';
   }
   html += '</div>';
 
@@ -5166,7 +5174,22 @@ function renderPipeline(data, photoId) {
       '</div>';
     }
   } else {
-    html += '<p style="color:var(--text-dim);font-size:13px;">No predictions yet — run classification first</p>';
+    var currentPreds = diag.current_prediction_count || 0;
+    var hiddenPreds = diag.hidden_prediction_count || 0;
+    var classifierRuns = diag.classifier_run_count || 0;
+    if (hiddenPreds > 0) {
+      html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran, but ' +
+        hiddenPreds + ' stored prediction' + (hiddenPreds === 1 ? ' is' : 's are') +
+        ' attached to detection' + (hiddenPreds === 1 ? '' : 's') +
+        ' below the current detector threshold' +
+        (maxDetectorPct != null ? ' (best detection ' + maxDetectorPct + '%, threshold ' + detectorThresholdPct + '%)' : '') + '.</p>';
+    } else if (classifierRuns > 0 && currentPreds === 0) {
+      html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran, but no predictions were stored above the classification threshold.</p>';
+    } else if ((diag.hidden_detection_count || 0) > 0) {
+      html += '<p style="color:var(--text-dim);font-size:13px;">No predictions visible because all stored detections are below the current detector threshold.</p>';
+    } else {
+      html += '<p style="color:var(--text-dim);font-size:13px;">No predictions yet &mdash; run classification first</p>';
+    }
   }
   html += '</div>';
 
