@@ -1375,6 +1375,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # because the target name already exists, leaving a duplicate.
     init_db.migrate_default_subject_collection()
     init_db.migrate_default_needs_identification_collection()
+    init_db.migrate_default_location_collections()
     # One-time rewrite of the previous miss-threshold defaults (0.25 / 0.15)
     # to the new defaults (0.20 / 0.12) in both ~/.vireo/config.json and
     # workspace overrides. Gated by a marker so it runs once; re-saved

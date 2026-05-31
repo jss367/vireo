@@ -64,6 +64,18 @@ NEEDS_IDENTIFICATION_RULES = [
     {"field": "wildlife_excluded", "op": "equals", "value": 0},
 ]
 
+GPS_WITHOUT_LOCATION_KEYWORD_RULES = [
+    {"field": "location_keyword_missing", "op": "equals", "value": 1},
+]
+
+NO_LOCATION_INFORMATION_RULES = {
+    "mode": "all",
+    "rules": [
+        {"field": "has_gps", "op": "equals", "value": 0},
+        {"field": "has_location_keyword", "op": "equals", "value": 0},
+    ],
+}
+
 ALL_NAV_IDS = frozenset({
     "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
     "misses", "highlights", "browse", "map", "variants",
@@ -9646,6 +9658,13 @@ class Database:
             if field == "has_gps":
                 has = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
                 return (has if _truthy(value) else f"NOT ({has})"), []
+            if field == "has_location_keyword":
+                has = (
+                    "EXISTS (SELECT 1 FROM photo_keywords pk "
+                    "JOIN keywords k ON k.id = pk.keyword_id "
+                    "WHERE pk.photo_id = p.id AND k.type = 'location')"
+                )
+                return (has if _truthy(value) else f"NOT {has}"), []
             if field == "location_keyword_missing":
                 gps = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
                 no_loc = (
@@ -9869,8 +9888,8 @@ class Database:
                 [{"field": "timestamp", "op": "recent_days", "value": 30}],
             ),
             (
-                "Needs Location",
-                [{"field": "location_keyword_missing", "op": "equals", "value": 1}],
+                "GPS Without Location Keyword",
+                GPS_WITHOUT_LOCATION_KEYWORD_RULES,
             ),
         ]
         for name, rules in defaults:
@@ -9885,6 +9904,63 @@ class Database:
         """Create missing default smart collections in every workspace."""
         for ws in self.get_workspaces():
             self.create_default_collections(workspace_id=ws["id"])
+
+    def migrate_default_location_collections(self):
+        """Clarify default location collection names/rules across workspaces.
+
+        - ``Needs Location`` was the default collection for photos that already
+          have EXIF GPS but lack a structured Vireo location keyword. Rename
+          exact default instances to the more literal
+          ``GPS Without Location Keyword``.
+        - Some workspaces had a hand-built ``No Location`` collection using the
+          inverse of that rule. That actually meant "not GPS-without-keyword",
+          not "has no location". For that exact legacy rule, replace it with a
+          true ``No Location Information`` collection.
+        """
+        updated = 0
+        gps_rule = GPS_WITHOUT_LOCATION_KEYWORD_RULES
+        no_location_inverse_rules = [
+            [{"field": "location_keyword_missing", "op": "equals", "value": 0}],
+            {
+                "mode": "all",
+                "rules": [
+                    {"field": "location_keyword_missing", "op": "equals", "value": 0},
+                ],
+            },
+        ]
+
+        rows = self.conn.execute(
+            "SELECT id, workspace_id, name, rules FROM collections "
+            "WHERE name IN ('Needs Location', 'No Location')"
+        ).fetchall()
+        for row in rows:
+            try:
+                current = json.loads(row["rules"])
+            except (TypeError, ValueError):
+                continue
+
+            if row["name"] == "Needs Location" and current == gps_rule:
+                self.conn.execute(
+                    "UPDATE collections SET name = ? WHERE id = ?",
+                    ("GPS Without Location Keyword", row["id"]),
+                )
+                updated += 1
+                continue
+
+            if row["name"] == "No Location" and current in no_location_inverse_rules:
+                self.conn.execute(
+                    "UPDATE collections SET name = ?, rules = ? WHERE id = ?",
+                    (
+                        "No Location Information",
+                        json.dumps(NO_LOCATION_INFORMATION_RULES),
+                        row["id"],
+                    ),
+                )
+                updated += 1
+
+        if updated:
+            self.conn.commit()
+        return updated
 
     def migrate_default_subject_collection(self):
         """Rename legacy 'Needs Classification' (with rule has_species==0)
