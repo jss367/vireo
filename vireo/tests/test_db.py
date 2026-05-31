@@ -9739,6 +9739,48 @@ def test_upsert_place_chain_filters_address_fragments(db):
     assert "Main St" not in all_location_names
 
 
+def test_upsert_place_chain_preserves_lower_admin_levels(db):
+    """Administrative levels 6 and 7 are valid location parents."""
+    details = {
+        "place_id": "ChIJ_Admin_Level_7_Test",
+        "name": "Village Square",
+        "lat": 48.1,
+        "lng": 11.2,
+        "address_components": [
+            {"name": "Village Square", "short_name": "Village Square",
+             "types": ["point_of_interest"]},
+            {"name": "Quarter Seven", "short_name": "Q7",
+             "types": ["administrative_area_level_7"]},
+            {"name": "District Six", "short_name": "D6",
+             "types": ["administrative_area_level_6"]},
+            {"name": "Region Five", "short_name": "R5",
+             "types": ["administrative_area_level_5"]},
+            {"name": "Germany", "short_name": "DE", "types": ["country"]},
+            {"name": "12", "short_name": "12", "types": ["street_number"]},
+            {"name": "10115", "short_name": "10115", "types": ["postal_code"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "Village Square",
+        "Quarter Seven",
+        "District Six",
+        "Region Five",
+        "Germany",
+    ]
+
+
 def test_upsert_place_chain_preserves_same_named_admin_parent(db):
     """Leaf-name filtering must not drop broader same-named parents."""
     details = {
