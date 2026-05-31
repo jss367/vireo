@@ -14442,6 +14442,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         limit = min(max(1, request.args.get("limit", 50, type=int)), 1000)
         threshold = request.args.get("threshold", 0.15, type=float)
+        ids_only = request.args.get("ids_only", "").lower() in ("1", "true", "yes")
 
         db = _get_db()
 
@@ -14491,7 +14492,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Top-N by similarity
         if total_matches > 0:
-            top_indices = np.argsort(filtered_sims)[::-1][:limit]
+            ranked_indices = np.argsort(filtered_sims)[::-1]
+            if ids_only:
+                return jsonify({
+                    "photo_ids": [filtered_ids[idx] for idx in ranked_indices],
+                    "total_matches": total_matches,
+                    "model_used": model_name,
+                })
+            top_indices = ranked_indices[:limit]
             top_pids = [filtered_ids[idx] for idx in top_indices]
             top_sims = [float(filtered_sims[idx]) for idx in top_indices]
             photos_map = db.get_photos_by_ids(top_pids)
@@ -14503,6 +14511,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "similarity": round(sim, 4),
                     })
         else:
+            if ids_only:
+                return jsonify({
+                    "photo_ids": [],
+                    "total_matches": 0,
+                    "model_used": model_name,
+                })
             results = []
 
         return jsonify({

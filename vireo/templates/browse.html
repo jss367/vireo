@@ -3372,6 +3372,9 @@ async function runClipSearch() {
     return;
   }
 
+  loadEpoch++;
+  selectAllRequestSeq++;
+  var epoch = loadEpoch;
   photos = [];
   allLoaded = true;
   selectedPhotos.clear();
@@ -3390,6 +3393,7 @@ async function runClipSearch() {
     params.set('limit', 100);
     params.set('threshold', 0.15);
     var data = await safeFetch('/api/photos/search?' + params.toString());
+    if (epoch !== loadEpoch) return;
 
     if (data.reason) {
       var msg = {
@@ -3668,10 +3672,24 @@ async function selectAllMatchingPhotos() {
   var requestEpoch = loadEpoch;
 
   if (clipSearchActive) {
-    photos.forEach(function(p) { selectedPhotos.add(p.id); });
-    renderGrid();
-    updateBatchBar();
-    showToast('Selected ' + selectedPhotos.size.toLocaleString() + ' loaded search result' + (selectedPhotos.size === 1 ? '' : 's'));
+    var query = document.getElementById('clipSearchInput').value.trim();
+    if (!query) return;
+    var searchParams = new URLSearchParams();
+    searchParams.set('q', query);
+    searchParams.set('threshold', 0.15);
+    searchParams.set('ids_only', '1');
+    showToast('Selecting all matching search results...');
+    try {
+      var searchData = await safeFetch('/api/photos/search?' + searchParams.toString(), {}, { toast: false });
+      if (requestSeq !== selectAllRequestSeq || requestEpoch !== loadEpoch) return;
+      selectedPhotos.clear();
+      (searchData.photo_ids || []).forEach(function(id) { selectedPhotos.add(id); });
+      renderGrid();
+      updateBatchBar();
+      showToast('Selected ' + selectedPhotos.size.toLocaleString() + ' search result' + (selectedPhotos.size === 1 ? '' : 's'));
+    } catch(e) {
+      showToast('Could not select all search results: ' + (e.message || e), 'error');
+    }
     return;
   }
 
