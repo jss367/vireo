@@ -176,6 +176,188 @@ def test_api_photos_rejects_unknown_flag_filter(app_and_db):
     assert resp.status_code == 400
 
 
+def _mark_best_batch_quality(db, photo_id, sharpness):
+    db.conn.execute(
+        """UPDATE photos
+           SET mask_path = 'mask.png',
+               subject_tenengrad = ?,
+               bg_tenengrad = 5,
+               crop_complete = 1,
+               bg_separation = 0,
+               subject_clip_high = 0,
+               subject_clip_low = 0,
+               subject_y_median = 115,
+               subject_size = 0.05,
+               noise_estimate = 1
+           WHERE id = ?""",
+        (sharpness, photo_id),
+    )
+
+
+def test_api_photo_best_batch_ranks_filename_sequence(app_and_db):
+    """GET /api/photos/<id>/best-batch finds adjacent camera frames and ranks them."""
+    app, db = app_and_db
+    folder_id = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", ('/photos/2024',)
+    ).fetchone()["id"]
+    pids = []
+    for idx, sharp in enumerate([10, 80, 30], start=3069):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=f"DSC_{idx}.jpg",
+            extension=".jpg",
+            file_size=1000 + idx,
+            file_mtime=float(idx),
+            timestamp=f"2024-03-01T12:00:0{idx - 3069}",
+        )
+        _mark_best_batch_quality(db, pid, sharp)
+        pids.append(pid)
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pids[1]}/best-batch")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["scope_method"] == "filename_sequence"
+    assert data["photo_ids"] == pids
+    assert data["best_photo_id"] == pids[1]
+    assert data["best_filename"] == "DSC_3070.jpg"
+    assert data["sequence_range"] == [3069, 3071]
+    assert data["cards"][0]["role"] == "best"
+
+    selected = client.post("/api/photos/best-batch", json={"photo_ids": pids}).get_json()
+    assert selected["scope_method"] == "selected_photos"
+    assert selected["best_photo_id"] == pids[1]
+
+
+def test_api_photo_best_batch_capture_time_requires_real_timestamps(app_and_db):
+    """Timestamp fallback should not group unrelated null-timestamp photos."""
+    app, db = app_and_db
+    folder_id = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", ('/photos/2024',)
+    ).fetchone()["id"]
+    pids = []
+    for filename in ["alpha.jpg", "beta.jpg", "gamma.jpg"]:
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=filename,
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=1.0,
+            timestamp=None,
+        )
+        _mark_best_batch_quality(db, pid, 80)
+        pids.append(pid)
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pids[1]}/best-batch")
+
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "No neighboring batch photos found"
+
+
+def test_api_photo_best_batch_ranks_capture_time_without_sequence(app_and_db):
+    """Timestamp fallback still works for non-sequence filenames with real times."""
+    app, db = app_and_db
+    folder_id = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", ('/photos/2024',)
+    ).fetchone()["id"]
+    pids = []
+    for idx, (filename, sharp) in enumerate(
+        [("alpha.jpg", 10), ("beta.jpg", 90), ("gamma.jpg", 30)]
+    ):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=filename,
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=1.0,
+            timestamp=f"2024-03-01T12:00:0{idx * 3}",
+        )
+        _mark_best_batch_quality(db, pid, sharp)
+        pids.append(pid)
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pids[1]}/best-batch")
+
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert data["scope_method"] == "capture_time"
+    assert data["photo_ids"] == pids
+    assert data["best_photo_id"] == pids[1]
+
+
+def test_api_best_batch_flags_records_single_undoable_edit(app_and_db):
+    """Best Batch apply updates mixed flags as one atomic undo action."""
+    app, db = app_and_db
+    photos = db.get_photos()
+    photo_ids = [p["id"] for p in photos]
+    best_id, reject_id, keep_reject_id = photo_ids
+    db.update_photo_flag(reject_id, "flagged")
+
+    client = app.test_client()
+    pre_history = db.get_edit_history()
+    resp = client.post(
+        "/api/batch/best-batch-flags",
+        json={
+            "best_photo_id": best_id,
+            "reject_photo_ids": [reject_id, keep_reject_id],
+        },
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["updated"] == 3
+    flags = {
+        row["id"]: row["flag"]
+        for row in db.conn.execute(
+            "SELECT id, flag FROM photos WHERE id IN (?, ?, ?)",
+            (best_id, reject_id, keep_reject_id),
+        )
+    }
+    assert flags == {
+        best_id: "flagged",
+        reject_id: "rejected",
+        keep_reject_id: "rejected",
+    }
+    post_history = db.get_edit_history()
+    assert len(post_history) == len(pre_history) + 1
+    assert post_history[0]["action_type"] == "flag"
+    assert post_history[0]["new_value"] == "best_batch_apply"
+    assert post_history[0]["item_count"] == 3
+
+    undo = client.post("/api/undo")
+
+    assert undo.status_code == 200, undo.get_json()
+    flags = {
+        row["id"]: row["flag"]
+        for row in db.conn.execute(
+            "SELECT id, flag FROM photos WHERE id IN (?, ?, ?)",
+            (best_id, reject_id, keep_reject_id),
+        )
+    }
+    assert flags == {
+        best_id: "none",
+        reject_id: "flagged",
+        keep_reject_id: "none",
+    }
+
+
+def test_api_best_batch_flags_rejects_best_photo_in_rejects(app_and_db):
+    app, db = app_and_db
+    best_id = db.get_photos()[0]["id"]
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/batch/best-batch-flags",
+        json={"best_photo_id": best_id, "reject_photo_ids": [best_id]},
+    )
+
+    assert resp.status_code == 400
+
+
 def test_api_set_flag_queues_xmp_when_enabled(app_and_db):
     """POST /api/photos/<id>/flag queues a flag sync when configured."""
     import config as cfg
