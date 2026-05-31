@@ -411,3 +411,49 @@ def test_exif_accept_batches_selection_and_refreshes_smart_collection(
         assert row is not None
         expect(page.locator(f".grid-card[data-id='{photo_id}']")).to_have_count(0)
     assert db.count_collection_photos(collection_id) == 0
+
+
+def test_freetext_location_batches_selection_and_refreshes_smart_collection(
+    live_server, page
+):
+    """Typing a free-text location applies to the active selection."""
+    photo_ids = live_server["data"]["photos"][:3]
+    _seed_exif_photos(live_server, photo_ids)
+
+    db = live_server["db"]
+    collection_id = next(
+        c["id"]
+        for c in db.get_collections()
+        if c["name"] == "GPS Without Location Keyword"
+    )
+    assert db.count_collection_photos(collection_id) == 3
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.evaluate("(collectionId) => filterByCollection(collectionId)", collection_id)
+    page.wait_for_function(
+        "(collectionId) => activeCollectionId === collectionId && photos.length === 3",
+        arg=collection_id,
+    )
+
+    page.locator(f".grid-card[data-id='{photo_ids[0]}']").click()
+    _wait_for_detail_loaded(page)
+    page.locator(f".grid-card[data-id='{photo_ids[1]}']").click(modifiers=["Meta"])
+    page.locator(f".grid-card[data-id='{photo_ids[2]}']").click(modifiers=["Meta"])
+    page.wait_for_function("() => selectedPhotos.size === 3")
+
+    inp = page.locator("#locationInput")
+    inp.fill("the meadow")
+    inp.press("Enter")
+    page.wait_for_function("() => activeCollectionId !== null && photos.length === 0")
+
+    for photo_id in photo_ids:
+        row = db.conn.execute(
+            "SELECT k.name FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (photo_id,),
+        ).fetchone()
+        assert row["name"] == "the meadow"
+        expect(page.locator(f".grid-card[data-id='{photo_id}']")).to_have_count(0)
+    assert db.count_collection_photos(collection_id) == 0
