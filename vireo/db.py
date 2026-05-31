@@ -6438,7 +6438,7 @@ class Database:
         component type so postal-code placement in Google's response cannot
         become the root of the hierarchy.
         """
-        normalized = []
+        candidates = []
         seen = set()
         leaf_norm = leaf_name.strip().casefold() if isinstance(leaf_name, str) else ""
         for index, comp in enumerate(components or []):
@@ -6447,10 +6447,25 @@ class Database:
             name = (comp.get("name") or comp.get("long_name") or "").strip()
             if not name:
                 continue
-            if leaf_norm and name.casefold() == leaf_norm:
-                continue
             rank = self._location_component_rank(comp)
             if rank is None:
+                continue
+            candidates.append((rank, index, name))
+
+        leaf_component = None
+        if leaf_norm:
+            leaf_matches = [
+                item for item in candidates if item[2].casefold() == leaf_norm
+            ]
+            if leaf_matches:
+                # If a leaf has the same text as multiple admin levels
+                # ("New York" city and state), drop only the narrowest
+                # matching component and keep the broader parent.
+                leaf_component = max(leaf_matches, key=lambda item: item[0])
+
+        normalized = []
+        for rank, index, name in candidates:
+            if leaf_component is not None and (rank, index, name) == leaf_component:
                 continue
             key = (rank, name.casefold())
             if key in seen:

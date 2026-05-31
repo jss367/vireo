@@ -9739,6 +9739,42 @@ def test_upsert_place_chain_filters_address_fragments(db):
     assert "Main St" not in all_location_names
 
 
+def test_upsert_place_chain_preserves_same_named_admin_parent(db):
+    """Leaf-name filtering must not drop broader same-named parents."""
+    details = {
+        "place_id": "ChIJ_New_York_City_Test",
+        "name": "New York",
+        "lat": 40.7128,
+        "lng": -74.0060,
+        "address_components": [
+            {"name": "New York", "short_name": "New York", "types": ["locality"]},
+            {"name": "New York County", "short_name": "New York County",
+             "types": ["administrative_area_level_2"]},
+            {"name": "New York", "short_name": "NY",
+             "types": ["administrative_area_level_1"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "New York",
+        "New York County",
+        "New York",
+        "United States",
+    ]
+
+
 def test_upsert_place_chain_is_idempotent(db):
     details = _central_park_details()
     first_id = db.upsert_place_chain(details)
