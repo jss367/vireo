@@ -23,6 +23,7 @@ live_server/page fixtures and the same real-cache + real-DB assertion style.
 import json
 import os
 import re
+import time
 
 from playwright.sync_api import expect
 
@@ -201,6 +202,38 @@ def test_smart_default_flags_checked_when_moves_pending(live_server, page):
 
     expect(page.locator("#grmApplyFlagsChk")).to_be_checked()
     expect(page.locator("#grmConfirmSpeciesChk")).not_to_be_checked()
+
+
+def test_apply_and_close_is_single_flight_while_request_is_pending(live_server, page):
+    """Repeated Apply invocations while the first write is in flight must not
+    post duplicate group/apply requests."""
+    photo_ids = live_server["data"]["photos"][0:3]
+    _write_single_burst_cache(live_server, photo_ids)
+
+    apply_requests = []
+
+    def delay_apply(route):
+        apply_requests.append(route.request)
+        time.sleep(0.2)
+        route.continue_()
+
+    page.route("**/api/pipeline/group/apply", delay_apply)
+    _open_burst_modal(page, live_server)
+
+    page.keyboard.press("x")
+    expect(page.locator("#grmApplyFlagsChk")).to_be_checked()
+
+    with page.expect_response("**/api/pipeline/group/apply"):
+        page.evaluate(
+            """() => {
+                grmApply();
+                grmApply();
+                grmApply();
+            }"""
+        )
+
+    expect(page.locator("#grmOverlay")).not_to_have_class(re.compile(r"\bopen\b"))
+    assert len(apply_requests) == 1
 
 
 def test_smart_default_species_checked_on_new_species(live_server, page):
