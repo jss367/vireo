@@ -2085,7 +2085,7 @@ function renderPhotoCard(p, idx) {
 
   return '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
     '<div class="grid-card-img-wrap">' +
-      '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
+      '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" decoding="async" alt="' + escapeAttr(p.filename) + '">' +
       clipBadge +
       boxHtml +
       inatBadge +
@@ -3083,12 +3083,17 @@ function buildCurrentBrowseParams() {
   return params;
 }
 
-async function loadPhotos() {
+async function loadPhotos(options) {
   if (loading || allLoaded) return;
   loading = true;
   var epoch = loadEpoch;
   var loadSucceeded = false;
-  document.getElementById('loadingState').style.display = 'block';
+  var showLoading = !(options && options.silent) && photos.length === 0;
+  var loadingState = document.getElementById('loadingState');
+  if (showLoading && loadingState) {
+    loadingState.textContent = 'Loading...';
+    loadingState.style.display = 'block';
+  }
 
   var url;
   if (activeCollectionId) {
@@ -3136,11 +3141,13 @@ async function loadPhotos() {
     loadSucceeded = true;
   } catch(e) {
     if (epoch !== loadEpoch) return;
-    document.getElementById('loadingState').textContent = 'Error loading photos.';
+    if (showLoading && loadingState) {
+      loadingState.textContent = 'Error loading photos.';
+    }
   } finally {
     if (epoch === loadEpoch) {
       loading = false;
-      document.getElementById('loadingState').style.display = 'none';
+      if (showLoading && loadingState) loadingState.style.display = 'none';
       if (loadSucceeded) rearmInfiniteScrollObserver();
     }
   }
@@ -3574,8 +3581,8 @@ function browseKeyMatchesConfiguredShortcut(e) {
 var gridContainer = document.getElementById('gridContainer');
 var infiniteScrollObserverDisconnected = false;
 var observer = new IntersectionObserver(function(entries) {
-  if (entries[0].isIntersecting) loadPhotos();
-}, { root: gridContainer, rootMargin: '1200px 0px' });
+  if (entries[0].isIntersecting) loadPhotos({ silent: photos.length > 0 });
+}, { root: gridContainer, rootMargin: '3200px 0px' });
 
 var _observerObserve = observer.observe.bind(observer);
 var _observerDisconnect = observer.disconnect.bind(observer);

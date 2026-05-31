@@ -397,24 +397,16 @@ def test_pipeline_previews_pill_shows_pending_count(live_server, page):
     expect(page.locator("#summaryPreviews")).to_contain_text("preview")
 
 
-def test_pipeline_previews_pill_full_resolution_skips_previews(live_server, page):
-    """Selecting "Full resolution" disables the previews substage. The pill
-    summary must reflect that — promising N previews that will never run
-    would be a black box.
+def test_pipeline_preview_size_is_library_setting(live_server, page):
+    """Preview size is a library/workspace policy, not a per-run pipeline
+    choice. The pipeline should surface the active value without offering a
+    run-local override.
     """
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("#card-previews .stage-header")
-    page.select_option("#cfgPreviewSize", "0")
-    # The summary updates after the debounced plan refresh fires. In will-run
-    # mode the summary surfaces "previews skipped" so the user sees why no
-    # preview count appears alongside the thumbnail count.
-    expect(page.locator("#summaryPreviews")).to_contain_text("previews skipped")
-    plan = page.evaluate(
-        "() => window._pipelinePlan ? window._pipelinePlan.stages.Previews : null"
-    )
-    assert plan["detail"]["previews_skipped"] is True
-    assert plan["detail"]["preview_pending"] == 0
+    expect(page.locator("#cfgPreviewSize")).to_have_count(0)
+    expect(page.locator("#cfgPreviewSizeSummary")).to_contain_text("px")
 
 
 def test_pipeline_shared_card_not_done_until_all_substages_complete(live_server, page):

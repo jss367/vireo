@@ -242,6 +242,17 @@ body { padding-bottom: 36px; }
   font-size: 12px; color: var(--text-secondary, #8BB8C0);
   margin-top: 6px;
 }
+.setting-static {
+  background: var(--bg-input, #14374E);
+  color: var(--text-primary, #E0F0F0);
+  border: 1px solid var(--border-secondary, #1A4560);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 13px;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+}
 .setting-select {
   background: var(--bg-input, #14374E);
   color: var(--text-primary, #E0F0F0);
@@ -897,16 +908,9 @@ body { padding-bottom: 36px; }
       </p>
       <div class="setting-row">
         <div class="setting-item">
-          <div class="setting-label">Preview size</div>
-          <select class="setting-select" id="cfgPreviewSize"
-                  onchange="schedulePlanRefresh()">
-            <option value="1280">1280px</option>
-            <option value="1920" selected>1920px</option>
-            <option value="2560">2560px</option>
-            <option value="3840">3840px</option>
-            <option value="0">Full resolution</option>
-          </select>
-          <div class="setting-hint">Largest edge for cached previews.</div>
+          <div class="setting-label">Standard preview</div>
+          <div class="setting-static" id="cfgPreviewSizeSummary">1920px</div>
+          <div class="setting-hint">Configured in Settings.</div>
         </div>
       </div>
       <div class="progress-wrap" id="progressPreviews" style="display:none;">
@@ -1161,6 +1165,13 @@ function initPipelinePage() {
       document.getElementById('cfgDinov2').value = cfg.dinov2_variant;
       document.getElementById('cfgProxy').value = cfg.proxy_longest_edge;
       document.getElementById('valProxy').textContent = cfg.proxy_longest_edge;
+      var previewSummary = document.getElementById('cfgPreviewSizeSummary');
+      if (previewSummary) {
+        var previewMax = cfg.preview_max_size;
+        previewSummary.textContent = previewMax === 0
+          ? 'Original files'
+          : ((previewMax || 1920) + 'px');
+      }
 
       // Eye keypoints stage default tracks the global eye_detect_enabled
       // config so users who turned it off in Settings see it unchecked here
@@ -2530,9 +2541,6 @@ async function startPipeline() {
       if (excludedIds.length > 0) body.exclude_photo_ids = excludedIds;
     }
   }
-
-  // Preview size
-  body.preview_max_size = parseInt(document.getElementById('cfgPreviewSize').value);
 
   // Optional stages
   var classifyEnabled = document.getElementById('enableClassify').checked;
@@ -4113,16 +4121,8 @@ function _buildPlanBody() {
   body.skip_eye_keypoints  = !document.getElementById('enableEyeKeypoints').checked;
   body.skip_regroup        = !document.getElementById('enableGroup').checked;
 
-  // Send the user's currently-selected preview tier so the Previews plan
-  // entry counts pending work against the right preview_cache size. A
-  // value of 0 ("Full resolution") tells the backend the previews
-  // substage will skip, so the plan summary doesn't promise N previews
-  // that will never be generated.
-  var prevSelect = document.getElementById('cfgPreviewSize');
-  if (prevSelect) {
-    var pms = parseInt(prevSelect.value, 10);
-    if (!isNaN(pms)) body.preview_max_size = pms;
-  }
+  // Preview size is a workspace/library setting. Omit preview_max_size so
+  // the backend planner and job both use the same workspace-effective value.
 
   if (!body.skip_classify) {
     var modelIds = [];
