@@ -526,6 +526,13 @@ async function loadBatch() {
     setStatus('Go back to Browse and select at least one photo first.');
     return;
   }
+  if (ids.length >= 2 && ids.indexOf(seedId) === -1) {
+    ids = [];
+    try {
+      window.sessionStorage.removeItem('vireo.bestBatchIds');
+      window.sessionStorage.removeItem('vireo.bestBatchSeedId');
+    } catch (e) {}
+  }
   try {
     var data;
     if (ids.length >= 2) {
