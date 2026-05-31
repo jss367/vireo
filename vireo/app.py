@@ -630,6 +630,8 @@ def _build_best_batch_response(db, seed_photo_id, rows):
         cards.append({
             "id": photo["id"],
             "filename": photo.get("filename"),
+            "width": photo.get("width"),
+            "height": photo.get("height"),
             "rank": idx,
             "role": role,
             "label": photo.get("label"),

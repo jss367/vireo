@@ -115,14 +115,23 @@ body {
   position: relative;
   aspect-ratio: 1;
   background-color: #050505;
-  background-repeat: no-repeat;
+  overflow: hidden;
 }
-.focus-crop.eye {
-  background-size: 780% auto;
+.focus-crop img {
+  display: block;
+  position: absolute;
+  max-width: none;
+  max-height: none;
 }
-.focus-crop.subject {
-  background-size: cover;
-  background-position: center center;
+.focus-crop.eye img {
+  width: 780%;
+  height: auto;
+}
+.focus-crop.subject img {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 .crosshair {
   position: absolute;
@@ -377,15 +386,25 @@ function scoreText(card) {
   return parts.join(' · ') || 'No score';
 }
 
-function cropStyle(card) {
-  var url = previewUrl(card.id, 1920);
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function focusImageStyle(card) {
   var hasEye = card.focus_basis === 'eye' && card.eye_x != null && card.eye_y != null;
   if (!hasEye) {
-    return "background-image:url('" + url + "');";
+    return '';
   }
-  var x = Math.max(0, Math.min(100, Number(card.eye_x) * 100));
-  var y = Math.max(0, Math.min(100, Number(card.eye_y) * 100));
-  return "background-image:url('" + url + "');background-position:" + x.toFixed(2) + "% " + y.toFixed(2) + "%;";
+  var zoom = 7.8;
+  var width = Number(card.width) || 1;
+  var height = Number(card.height) || width;
+  var imageWidthPct = zoom * 100;
+  var imageHeightPct = imageWidthPct * (height / width);
+  var x = clamp(Number(card.eye_x), 0, 1);
+  var y = clamp(Number(card.eye_y), 0, 1);
+  var left = clamp(50 - x * imageWidthPct, 100 - imageWidthPct, 0);
+  var top = clamp(50 - y * imageHeightPct, 100 - imageHeightPct, 0);
+  return 'left:' + left.toFixed(2) + '%;top:' + top.toFixed(2) + '%;';
 }
 
 function selectedIdsFromStorage() {
@@ -469,7 +488,8 @@ function renderBatch(data) {
   document.getElementById('focusGrid').innerHTML = cards.map(function(card) {
     var hasEye = card.focus_basis === 'eye' && card.eye_x != null && card.eye_y != null;
     return '<div class="focus-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '" onclick="inspectPhoto(' + card.id + ')">' +
-      '<div class="focus-crop ' + (hasEye ? 'eye' : 'subject') + '" style="' + escapeAttr(cropStyle(card)) + '">' +
+      '<div class="focus-crop ' + (hasEye ? 'eye' : 'subject') + '">' +
+        '<img src="' + previewUrl(card.id, 1920) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy" style="' + escapeAttr(focusImageStyle(card)) + '">' +
         (hasEye ? '<span class="crosshair"></span>' : '') +
       '</div>' +
       '<div class="focus-meta">' +
