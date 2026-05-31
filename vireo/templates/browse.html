@@ -88,6 +88,17 @@ body {
   border-color: var(--border-primary);
   color: var(--text-ghost);
 }
+.collection-resolve-btn {
+  background: var(--bg-tertiary);
+  color: var(--accent);
+  border: 1px solid var(--border-secondary);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.collection-resolve-btn:hover { border-color: var(--accent); }
 .tree-item .folder-status-partial {
   margin-left: 6px;
   font-size: 10px;
@@ -1199,6 +1210,50 @@ body {
 .modal-btn-primary { background: var(--accent); color: var(--bg-primary); }
 .modal-btn-cancel { background: var(--bg-tertiary); color: var(--text-secondary); }
 .modal-preview { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
+.gps-resolve-summary {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+.gps-resolve-list {
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  margin-bottom: 12px;
+}
+.gps-resolve-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.gps-resolve-row:last-child { border-bottom: 0; }
+.gps-resolve-place {
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gps-resolve-samples {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gps-resolve-count {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
 .export-var-pill {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
@@ -1359,6 +1414,7 @@ body {
       <button onclick="batchSetFlag('flagged')" style="background:var(--bg-tertiary);color:var(--accent);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Flag</button>
       <button onclick="batchSetFlag('rejected')" style="background:var(--bg-tertiary);color:var(--danger);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
       <button onclick="batchAddKeyword()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
+      <button id="resolveGpsSelectedBtn" onclick="openGpsResolveForSelection()" style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Resolve GPS</button>
       <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
       <button onclick="openCaptureTimeModal()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Adjust Time</button>
       <button id="compareBtn" onclick="openBrowseCompare()" title="Compare two selected photos side by side" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Compare</button>
@@ -1602,6 +1658,20 @@ body {
     <div class="modal-actions">
       <button class="modal-btn modal-btn-primary" onclick="confirmBatchCollection()">Add</button>
       <button class="modal-btn modal-btn-cancel" onclick="hideBatchCollectionModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Resolve GPS Locations Modal -->
+<div class="modal-overlay" id="gpsResolveModal">
+  <div class="modal" style="width:560px;max-width:calc(100vw - 32px);">
+    <h3>Resolve GPS Locations</h3>
+    <div id="gpsResolveSummary" class="gps-resolve-summary">Loading...</div>
+    <div id="gpsResolveGroups" class="gps-resolve-list"></div>
+    <div class="modal-preview" id="gpsResolveNote"></div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" id="gpsResolveApplyBtn" onclick="applyGpsResolve()">Apply</button>
+      <button class="modal-btn modal-btn-cancel" onclick="hideGpsResolveModal()">Cancel</button>
     </div>
   </div>
 </div>
@@ -2238,9 +2308,13 @@ function renderCollectionList(collections) {
     var canAddPhotos = collectionAcceptsManualPhotos(c);
     var kind = canAddPhotos ? 'manual' : 'smart';
     var kindLabel = canAddPhotos ? 'Manual' : 'Smart';
+    var resolveBtn = (c.name === 'GPS Without Location Keyword')
+      ? '<button class="collection-resolve-btn" type="button" title="Resolve locations from GPS" onclick="event.stopPropagation(); openGpsResolveForCollection(' + c.id + ')">Resolve GPS</button>'
+      : '';
     html += '<div class="tree-item" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '" onclick="filterByCollection(' + c.id + ')">' +
       '<span class="collection-name">' + escapeHtml(c.name) + '</span>' +
       '<span class="collection-kind-badge ' + kind + '">' + kindLabel + '</span>' +
+      resolveBtn +
       '<span class="count">' + count + '</span></div>';
   });
   document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
@@ -4428,6 +4502,141 @@ async function confirmBatchCollection() {
   clearSelection();
 }
 
+var _gpsResolveSource = null;
+var _gpsResolvePreview = null;
+
+function gpsResolveReasonLabel(reason) {
+  var labels = {
+    missing_gps: 'No GPS',
+    invalid_gps: 'Invalid GPS',
+    no_api_key: 'No Google Maps key',
+    no_match: 'No place found',
+    transient_error: 'Temporary lookup failure',
+    already_has_location: 'Already has location',
+  };
+  return labels[reason] || reason || 'Unresolved';
+}
+
+function renderGpsResolvePreview(data) {
+  _gpsResolvePreview = data || {};
+  var total = _gpsResolvePreview.total || 0;
+  var resolvable = _gpsResolvePreview.resolvable || 0;
+  var groups = _gpsResolvePreview.groups || [];
+  var unresolved = _gpsResolvePreview.unresolved || [];
+  var skipped = _gpsResolvePreview.skipped || [];
+  var summary = document.getElementById('gpsResolveSummary');
+  var groupEl = document.getElementById('gpsResolveGroups');
+  var note = document.getElementById('gpsResolveNote');
+  var applyBtn = document.getElementById('gpsResolveApplyBtn');
+
+  summary.textContent = resolvable.toLocaleString() + ' of ' + total.toLocaleString()
+    + ' photos can be assigned across ' + groups.length.toLocaleString()
+    + ' place' + (groups.length === 1 ? '' : 's') + '.';
+
+  groupEl.innerHTML = groups.map(function(g) {
+    var samples = (g.sample_filenames || []).join(', ');
+    return '<div class="gps-resolve-row">' +
+      '<div style="min-width:0;">' +
+        '<div class="gps-resolve-place">' + escapeHtml(g.summary || g.name || g.place_id || 'Unknown place') + '</div>' +
+        (samples ? '<div class="gps-resolve-samples">' + escapeHtml(samples) + '</div>' : '') +
+      '</div>' +
+      '<div class="gps-resolve-count">' + (g.count || 0).toLocaleString() + '</div>' +
+    '</div>';
+  }).join('') || '<div class="gps-resolve-row"><div class="gps-resolve-place">No resolvable GPS locations</div></div>';
+
+  var notes = [];
+  if (unresolved.length) {
+    var reasonCounts = {};
+    unresolved.forEach(function(item) {
+      var reason = item.reason || 'unresolved';
+      reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+    });
+    var reasonText = Object.keys(reasonCounts).map(function(reason) {
+      return reasonCounts[reason].toLocaleString() + ' ' + gpsResolveReasonLabel(reason);
+    }).join(', ');
+    notes.push(unresolved.length.toLocaleString() + ' unresolved: ' + reasonText);
+  }
+  if (skipped.length) {
+    notes.push(skipped.length.toLocaleString() + ' skipped because they already have a location.');
+  }
+  note.textContent = notes.join(' ');
+  applyBtn.disabled = resolvable === 0;
+  applyBtn.style.opacity = resolvable === 0 ? '0.55' : '';
+}
+
+async function openGpsResolve(source) {
+  _gpsResolveSource = source;
+  _gpsResolvePreview = null;
+  document.getElementById('gpsResolveSummary').textContent = 'Loading...';
+  document.getElementById('gpsResolveGroups').innerHTML = '';
+  document.getElementById('gpsResolveNote').textContent = '';
+  document.getElementById('gpsResolveApplyBtn').disabled = true;
+  document.getElementById('gpsResolveModal').classList.add('open');
+  try {
+    var data = await safeFetch('/api/batch/location/from-exif', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(Object.assign({apply: false}, source)),
+    });
+    renderGpsResolvePreview(data);
+  } catch(e) {
+    hideGpsResolveModal();
+  }
+}
+
+function openGpsResolveForCollection(collectionId) {
+  openGpsResolve({collection_id: collectionId});
+}
+
+function openGpsResolveForSelection() {
+  var ids = getActiveSelection();
+  if (!ids.length) return;
+  openGpsResolve({photo_ids: ids});
+}
+
+function hideGpsResolveModal() {
+  document.getElementById('gpsResolveModal').classList.remove('open');
+  _gpsResolveSource = null;
+  _gpsResolvePreview = null;
+  window._vireoNativeMenuPhotoIdsOverride = null;
+}
+
+async function applyGpsResolve() {
+  if (!_gpsResolveSource || !_gpsResolvePreview || !_gpsResolvePreview.resolvable) return;
+  var btn = document.getElementById('gpsResolveApplyBtn');
+  btn.disabled = true;
+  btn.textContent = 'Applying...';
+  try {
+    var data = await safeFetch('/api/batch/location/from-exif', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(Object.assign({apply: true}, _gpsResolveSource)),
+    });
+    var updated = data.updated || 0;
+    var updatedIds = [];
+    (data.groups || []).forEach(function(g) {
+      (g.photo_ids || []).forEach(function(id) { updatedIds.push(id); });
+    });
+    hideGpsResolveModal();
+    invalidateKeywordAutocompleteCache();
+    loadKeywords();
+    scheduleCollectionCountsRefresh();
+    refreshPendingSyncBanner();
+    var detailPhotoId = updatedIds.indexOf(selectedPhotoId) !== -1 ? selectedPhotoId : null;
+    await _afterLocationMutation(updatedIds, detailPhotoId);
+    var errors = (data.group_errors || []).length;
+    showToast(
+      'Resolved GPS locations for ' + updated.toLocaleString() + ' photo' + (updated === 1 ? '' : 's')
+      + (errors ? '; ' + errors + ' place group' + (errors === 1 ? '' : 's') + ' failed' : '')
+    );
+    if (updated > 0) showUndoToast();
+  } catch(e) {
+    btn.disabled = false;
+  } finally {
+    btn.textContent = 'Apply';
+  }
+}
+
 var captureTimePreviewSeq = 0;
 
 function getCaptureTimeMode() {
@@ -6214,9 +6423,17 @@ document.addEventListener('contextmenu', function(e) {
   if (isNaN(cid)) return;
   var nameEl = ti.querySelector('.collection-name');
   var name = nameEl ? nameEl.textContent : '';
-  openContextMenu(e, [
+  var items = [
     { label: 'Filter by this Collection',
       onClick: function() { filterByCollection(cid); } },
+  ];
+  if (name === 'GPS Without Location Keyword') {
+    items.push({
+      label: 'Resolve GPS Locations',
+      onClick: function() { openGpsResolveForCollection(cid); },
+    });
+  }
+  items = items.concat([
     { separator: true },
     { label: 'Edit Rules',
       onClick: function() { editCollection(cid); } },
@@ -6228,6 +6445,7 @@ document.addEventListener('contextmenu', function(e) {
     { label: 'Delete Collection',
       onClick: function() { deleteCollectionById(cid, name); } },
   ]);
+  openContextMenu(e, items);
 });
 
 /* ---------- Deep-link: scroll to photo_id if present in URL ---------- */
