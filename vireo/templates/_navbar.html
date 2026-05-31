@@ -5177,12 +5177,18 @@ function renderPipeline(data, photoId) {
     var currentPreds = diag.current_prediction_count || 0;
     var hiddenPreds = diag.hidden_prediction_count || 0;
     var classifierRuns = diag.classifier_run_count || 0;
+    var fullImagePreds = diag.full_image_prediction_count || 0;
+    var fullImageRuns = diag.full_image_classifier_run_count || 0;
     if (hiddenPreds > 0) {
       html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran, but ' +
         hiddenPreds + ' stored prediction' + (hiddenPreds === 1 ? ' is' : 's are') +
         ' attached to detection' + (hiddenPreds === 1 ? '' : 's') +
         ' below the current detector threshold' +
         (maxDetectorPct != null ? ' (best detection ' + maxDetectorPct + '%, threshold ' + detectorThresholdPct + '%)' : '') + '.</p>';
+    } else if (fullImagePreds > 0) {
+      html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran using the full image because no detector box was available.</p>';
+    } else if (fullImageRuns > 0) {
+      html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran using the full image, but no predictions were stored above the classification threshold.</p>';
     } else if (classifierRuns > 0 && currentPreds === 0) {
       html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran, but no predictions were stored above the classification threshold.</p>';
     } else if ((diag.hidden_detection_count || 0) > 0) {

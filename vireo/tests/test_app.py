@@ -1734,6 +1734,43 @@ def test_api_photo_pipeline_diagnoses_threshold_hidden_predictions(app_and_db):
     assert diag["hidden_classifier_run_count"] == 1
 
 
+def test_api_photo_pipeline_diagnoses_full_image_predictions(app_and_db):
+    """Synthetic full-image anchors are not below-threshold detector boxes."""
+    app, db = app_and_db
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+         "confidence": 0, "category": "animal"},
+    ], detector_model="full-image")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.8, '2026-04-24')",
+        (det_id,),
+    )
+    db.conn.execute(
+        "INSERT INTO classifier_runs (detection_id, classifier_model, "
+        "labels_fingerprint, prediction_count) VALUES (?, 'bioclip-2', 'fp-new', 1)",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pid}/pipeline")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["detections"] == []
+    diag = data["classification_diagnostics"]
+    assert diag["raw_detection_count"] == 0
+    assert diag["hidden_detection_count"] == 0
+    assert diag["current_prediction_count"] == 0
+    assert diag["hidden_prediction_count"] == 0
+    assert diag["classifier_run_count"] == 0
+    assert diag["full_image_prediction_count"] == 1
+    assert diag["full_image_classifier_run_count"] == 1
+
+
 def test_compare_predictions_api_requires_collection(app_and_db):
     """GET /api/predictions/compare without collection_id returns 400."""
     app, _ = app_and_db
