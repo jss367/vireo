@@ -2,6 +2,7 @@
 import logging
 import os
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -320,6 +321,44 @@ def test_ephemeral_job_skips_history_persistence(tmp_path):
         "SELECT * FROM job_history WHERE id = ?", (job_id,)
     ).fetchall()
     assert rows == [], "ephemeral jobs must not be persisted to job_history"
+
+
+def test_jobs_count_for_badge_by_default():
+    """Jobs opt into attention badges unless explicitly marked ambient."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    release = threading.Event()
+
+    def work(job):
+        release.wait(timeout=2)
+
+    job_id = runner.start("scan", work)
+    try:
+        job = runner.get(job_id)
+        assert job["counts_for_badge"] is True
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, job_id)
+
+
+def test_job_can_opt_out_of_badge_counting():
+    """Ambient jobs stay listed but do not contribute to app badges."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    release = threading.Event()
+
+    def work(job):
+        release.wait(timeout=2)
+
+    job_id = runner.start("new_images_walk", work, counts_for_badge=False)
+    try:
+        job = runner.get(job_id)
+        assert job["counts_for_badge"] is False
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, job_id)
 
 
 def test_ephemeral_failed_job_skips_history_persistence(tmp_path):
