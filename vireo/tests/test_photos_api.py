@@ -2990,6 +2990,28 @@ def test_post_photo_location_text_rejects_out_of_workspace_photo(app_and_db):
     ).fetchone() is None
 
 
+def test_post_photo_location_text_queues_cleanup_when_xmp_location_disabled(app_and_db):
+    """Disabled assigned-location writes still need a cleanup sync opportunity."""
+    import config as cfg
+    app, db = app_and_db
+    cfg.save({**cfg.load(), "write_assigned_location_to_xmp": False})
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "the meadow"},
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    row = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ?",
+        (pid,),
+    ).fetchone()
+    assert dict(row) == {"change_type": "location", "value": "effective"}
+
+
 def test_delete_photo_location_returns_404_on_missing_photo(app_and_db):
     """DELETE on a missing photo returns 404 for consistency with the
     POST routes (was previously a silent 200 because the underlying

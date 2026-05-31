@@ -2697,31 +2697,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
 
     def _queue_location_sync_if_enabled(photo_id, workspace_id=None, _commit=True):
-        """Queue GPS sidecar sync for location edits when the setting is enabled."""
+        """Queue GPS sidecar sync or cleanup work for location edits."""
         db = _get_db()
-        import config as cfg
-        from config import _deep_merge
-
-        effective_config = cfg.load()
-        if workspace_id is not None:
-            ws = db.get_workspace(workspace_id)
-            if ws and ws["config_overrides"]:
-                try:
-                    overrides = (
-                        json.loads(ws["config_overrides"])
-                        if isinstance(ws["config_overrides"], str)
-                        else ws["config_overrides"]
-                    )
-                    if isinstance(overrides, dict):
-                        effective_config = _deep_merge(effective_config, overrides)
-                except (json.JSONDecodeError, TypeError):
-                    pass
-        else:
-            effective_config = db.get_effective_config(effective_config)
-
-        enabled = bool(effective_config.get("write_assigned_location_to_xmp", False))
-        if not enabled:
-            return
         if workspace_id is None:
             if not db._photo_in_workspace(photo_id):
                 return
@@ -2732,6 +2709,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             (photo_id, workspace_id),
         ).fetchone() is None:
             return
+        # Queue even when assigned-location writes are disabled so sync can
+        # remove stale Vireo-authored GPS previously written while enabled.
         db.remove_pending_changes(
             photo_id, "location", workspace_id=workspace_id, _commit=_commit,
         )
