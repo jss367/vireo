@@ -475,9 +475,10 @@ def test_cancelled_waiting_sync_does_not_write_xmp(app_and_db, monkeypatch):
     assert cancel.status_code == 200
     assert cancel.get_json()["cancelled"] is True
 
-    release_first.set()
-    wait_for_job_via_runner(app._job_runner, first)
     second_job = wait_for_job_via_runner(app._job_runner, second)
 
     assert second_job["status"] == "cancelled"
     assert len(calls) == 1
+
+    release_first.set()
+    wait_for_job_via_runner(app._job_runner, first)

@@ -11987,7 +11987,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "phase": "Waiting for current XMP sync",
                     },
                 )
-                app._sync_job_lock.acquire()
+                while not lock_acquired:
+                    if runner.is_cancelled(job["id"]):
+                        return {"synced": 0, "failed": 0, "failures": []}
+                    lock_acquired = app._sync_job_lock.acquire(timeout=0.1)
 
             try:
                 if runner.is_cancelled(job["id"]):
