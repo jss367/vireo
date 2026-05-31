@@ -138,7 +138,7 @@ def _photo_shift_minutes(mode, target_minutes, manual_shift, photo):
 
 
 def _offset_tags_already_target(photo, target_offset):
-    """Return True when every present OffsetTime* tag already matches target."""
+    """Return True when all OffsetTime* tags are present and match target."""
     if not target_offset:
         return True
     exif = _exif_group(photo)
@@ -147,8 +147,7 @@ def _offset_tags_already_target(photo, target_offset):
         exif.get("OffsetTimeOriginal"),
         exif.get("OffsetTimeDigitized"),
     ]
-    present = [str(value).strip() for value in values if value]
-    return bool(present) and all(value == target_offset for value in present)
+    return all(value and str(value).strip() == target_offset for value in values)
 
 
 def _is_noop_adjustment(mode, target_offset, photo_shift, photo):

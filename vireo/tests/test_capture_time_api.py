@@ -203,6 +203,81 @@ def test_capture_time_job_skips_already_correct_offset(client_with_photo, monkey
     assert job["result"]["failed"] == 0
 
 
+def test_capture_time_job_writes_missing_offset_tags(client_with_photo, monkeypatch):
+    """A matching OffsetTimeOriginal alone is not enough to skip the file."""
+    import capture_time
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()
+    path = os.path.join(folder["path"], photo["filename"])
+    db.conn.execute(
+        "UPDATE photos SET timestamp = ?, exif_data = ? WHERE id = ?",
+        (
+            "2026-05-22T17:07:23.560000",
+            json.dumps(
+                {
+                    "EXIF": {
+                        "DateTimeOriginal": "2026:05:22 17:07:23",
+                        "SubSecTimeOriginal": "56",
+                        "OffsetTimeOriginal": "-10:00",
+                    }
+                }
+            ),
+            photo_id,
+        ),
+    )
+    db.conn.commit()
+
+    commands = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def fake_extract(paths):
+        assert paths == [path]
+        return {
+            path: {
+                "EXIF": {
+                    "DateTimeOriginal": "2026:05:22 17:07:23",
+                    "SubSecTimeOriginal": "56",
+                    "OffsetTimeOriginal": "-10:00",
+                    "OffsetTime": "-10:00",
+                    "OffsetTimeDigitized": "-10:00",
+                }
+            }
+        }
+
+    monkeypatch.setattr(capture_time.shutil, "which", lambda name: "/usr/bin/exiftool")
+    monkeypatch.setattr(capture_time.subprocess, "run", fake_run)
+    monkeypatch.setattr(capture_time, "extract_metadata", fake_extract)
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/jobs/capture-time",
+        json={
+            "photo_ids": [photo_id],
+            "mode": "preserve_instant",
+            "target_offset": "-10:00",
+            "keep_backups": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+    assert job["result"]["updated"] == 1
+    assert job["result"]["skipped"] == 0
+    assert commands
+    assert "-OffsetTime=-10:00" in commands[0]
+    assert "-OffsetTimeOriginal=-10:00" in commands[0]
+    assert "-OffsetTimeDigitized=-10:00" in commands[0]
+    assert not any(arg.startswith("-AllDates") for arg in commands[0])
+
+
 def test_capture_time_job_does_not_skip_companion_pair_from_primary_cache(
     client_with_photo, monkeypatch
 ):
