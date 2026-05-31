@@ -3493,6 +3493,10 @@ function getActiveSelection() {
   return [];
 }
 
+function selectionIdsKey(ids) {
+  return ids.slice().sort(function(a, b) { return a - b; }).join(',');
+}
+
 function isBrowseCompareOpen() {
   var overlay = document.getElementById('browseCompareOverlay');
   return !!(overlay && overlay.classList.contains('active'));
@@ -3702,7 +3706,7 @@ async function renderBrowseCompare() {
 }
 
 async function loadSelectionKeywordSuggestions(ids) {
-  var key = ids.slice().sort(function(a, b) { return a - b; }).join(',');
+  var key = selectionIdsKey(ids);
   if (key === selectionKeywordKey) return;
   selectionKeywordKey = key;
   var seq = ++selectionKeywordRequestSeq;
@@ -4671,7 +4675,8 @@ function updateDetailColors() {
 
 async function addKeyword(keyword) {
   var ids = getActiveSelection();
-  var useBatch = selectedPhotos.size > 0 && ids.length > 0;
+  var useBatch = ids.length > 1;
+  var batchSelectionKey = selectionIdsKey(ids);
   if (!selectedPhotoId && !useBatch) return;
   var input = document.getElementById('addKeywordInput');
   var name = input.value.trim();
@@ -4700,7 +4705,7 @@ async function addKeyword(keyword) {
     hideKeywordSuggestions('addKeywordInput');
     if (!selectedKeyword) invalidateKeywordAutocompleteCache();
     if (selectedPhotoId) loadDetail(selectedPhotoId);
-    if (useBatch) {
+    if (useBatch && selectionIdsKey(getActiveSelection()) === batchSelectionKey) {
       selectionKeywordKey = '';
       loadSelectionKeywordSuggestions(ids);
     }

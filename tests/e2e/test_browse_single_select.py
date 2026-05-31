@@ -264,6 +264,50 @@ def test_shift_selected_detail_keyword_add_applies_to_selection(live_server, pag
     assert [row["photo_id"] for row in rows] == selected_ids
 
 
+def test_singleton_multiselect_detail_keyword_add_stays_single_photo(live_server, page):
+    """A one-photo set with a focused detail pane should stay a detail edit."""
+    db = live_server["db"]
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.nth(1).wait_for(state="visible")
+
+    a_id = int(cards.nth(0).get_attribute("data-id"))
+    b_id = int(cards.nth(1).get_attribute("data-id"))
+
+    cards.nth(0).click()
+    cards.nth(1).click(modifiers=["Meta"])
+    cards.nth(1).click(modifiers=["Meta"])
+
+    assert page.evaluate("Array.from(selectedPhotos)") == [a_id]
+    assert page.evaluate("selectedPhotoId") == a_id
+    expect(page.locator("#addKeywordInput")).to_be_visible()
+
+    keyword_name = "Singleton Detail Keyword"
+    keyword_input = page.locator("#addKeywordInput")
+    keyword_input.fill(keyword_name)
+
+    with page.expect_response(
+        lambda r: f"/api/photos/{a_id}/keywords" in r.url
+        and r.request.method == "POST"
+        and r.status == 200
+    ):
+        keyword_input.press("Enter")
+
+    rows = db.conn.execute(
+        """
+        SELECT pk.photo_id
+        FROM photo_keywords pk
+        JOIN keywords k ON k.id = pk.keyword_id
+        WHERE k.name = ? AND pk.photo_id IN (?, ?)
+        ORDER BY pk.photo_id
+        """,
+        (keyword_name, a_id, b_id),
+    ).fetchall()
+    assert [row["photo_id"] for row in rows] == [a_id]
+
+
 def test_cmd_click_toggles_focus_out_of_set_reconciles(live_server, page):
     """click A, cmd-click B, cmd-click A: the focus must not linger on A.
 
