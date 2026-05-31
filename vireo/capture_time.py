@@ -137,6 +137,27 @@ def _photo_shift_minutes(mode, target_minutes, manual_shift, photo):
     return target_minutes - current_minutes
 
 
+def _offset_tags_already_target(photo, target_offset):
+    """Return True when all OffsetTime* tags are present and match target."""
+    if not target_offset:
+        return True
+    exif = _exif_group(photo)
+    values = [
+        exif.get("OffsetTime"),
+        exif.get("OffsetTimeOriginal"),
+        exif.get("OffsetTimeDigitized"),
+    ]
+    return all(value and str(value).strip() == target_offset for value in values)
+
+
+def _is_noop_adjustment(mode, target_offset, photo_shift, photo):
+    if photo_shift != 0:
+        return False
+    if mode == "manual":
+        return True
+    return _offset_tags_already_target(photo, target_offset)
+
+
 def format_preview_timestamp(dt):
     if dt is None:
         return None
@@ -287,6 +308,7 @@ def adjust_capture_time(
 
     log.info("Starting capture-time adjustment for %d photo(s)", len(photos))
     written = 0
+    skipped = 0
     failed = 0
     failures = []
     total = len(photos)
@@ -309,6 +331,17 @@ def adjust_capture_time(
             failures.append(
                 {"photo_id": photo["id"], "filename": photo["filename"], "error": str(exc)}
             )
+            if progress_callback:
+                progress_callback(index, total, photo["filename"])
+            continue
+
+        has_companion = _has_key(photo, "companion_path") and bool(photo["companion_path"])
+        if (
+            not has_companion
+            and _is_noop_adjustment(mode, target_offset_str, photo_shift, photo)
+        ):
+            skipped += 1
+            shifts_used.append(photo_shift)
             if progress_callback:
                 progress_callback(index, total, photo["filename"])
             continue
@@ -364,10 +397,16 @@ def adjust_capture_time(
 
     unanimous = bool(shifts_used) and all(s == shifts_used[0] for s in shifts_used)
     summary_shift = shifts_used[0] if unanimous else None
-    log.info("Capture-time adjustment finished: %d updated, %d failed", written, failed)
+    log.info(
+        "Capture-time adjustment finished: %d updated, %d skipped, %d failed",
+        written,
+        skipped,
+        failed,
+    )
 
     return {
         "updated": written,
+        "skipped": skipped,
         "failed": failed,
         "failures": failures[:20],
         "shift_minutes": summary_shift,

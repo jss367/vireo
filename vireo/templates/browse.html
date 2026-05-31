@@ -4570,7 +4570,8 @@ async function startCaptureTimeJob() {
           return;
         }
         var result = done.result || {};
-        showToast('Capture time updated: ' + (result.updated || 0) + ' updated, ' + (result.failed || 0) + ' failed', result.failed ? 'error' : 'success');
+        var skippedText = result.skipped ? ', ' + result.skipped + ' skipped' : '';
+        showToast('Capture time updated: ' + (result.updated || 0) + ' updated' + skippedText + ', ' + (result.failed || 0) + ' failed', result.failed ? 'error' : 'success');
         resetAndLoad();
         loadSummary();
       },
