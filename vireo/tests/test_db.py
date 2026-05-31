@@ -386,6 +386,28 @@ def test_get_photos_sort(tmp_path):
     assert by_date_desc[0]['filename'] == 'b.jpg'
 
 
+def test_get_photos_date_sort_puts_missing_timestamps_last(tmp_path):
+    """Undated photos should not appear before the oldest captured photo."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='undated.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp=None)
+    db.add_photo(folder_id=fid, filename='newer.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-01T00:00:00')
+    db.add_photo(folder_id=fid, filename='older.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-01-01T00:00:00')
+
+    by_date = db.get_photos(sort='date')
+    assert [p['filename'] for p in by_date] == ['older.jpg', 'newer.jpg', 'undated.jpg']
+
+    by_date_desc = db.get_photos(sort='date_desc')
+    assert [p['filename'] for p in by_date_desc] == ['newer.jpg', 'older.jpg', 'undated.jpg']
+
+    ids_by_date = db.get_photo_ids(sort='date')
+    assert ids_by_date == [p['id'] for p in by_date]
+
+
 def test_sort_date_tiebreaker(tmp_path):
     """Photos with identical timestamps sort by filename as tiebreaker."""
     from db import Database
@@ -596,6 +618,30 @@ def test_collection_photos_rating_rule(tmp_path):
     photos = db.get_collection_photos(cid)
     assert len(photos) == 1
     assert photos[0]['filename'] == 'good.jpg'
+
+
+def test_collection_photos_date_sort_puts_missing_timestamps_last(tmp_path):
+    """Collection Browse order follows the main Browse date order."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='undated.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp=None)
+    db.add_photo(folder_id=fid, filename='newer.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-01T00:00:00')
+    db.add_photo(folder_id=fid, filename='older.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-01-01T00:00:00')
+
+    rules = [{"field": "rating", "op": ">=", "value": 0}]
+    cid = db.add_collection('All', json.dumps(rules))
+
+    photos = db.get_collection_photos(cid)
+    assert [p['filename'] for p in photos] == ['older.jpg', 'newer.jpg', 'undated.jpg']
+    assert db.get_collection_photo_ids(cid) == [p['id'] for p in photos]
 
 
 def test_collection_photos_keyword_rule(tmp_path):

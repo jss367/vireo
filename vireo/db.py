@@ -181,6 +181,10 @@ def _inclusive_date_to(date_to):
     return date_to
 
 
+_PHOTO_DATE_ASC_ORDER = "p.timestamp IS NULL, p.timestamp ASC, p.filename ASC, p.id ASC"
+_PHOTO_DATE_DESC_ORDER = "p.timestamp IS NULL, p.timestamp DESC, p.filename ASC, p.id ASC"
+
+
 class Database:
     """Local SQLite database that caches photo metadata from XMP sidecars.
 
@@ -4284,8 +4288,8 @@ class Database:
         where = "WHERE " + " AND ".join(conditions)
 
         sort_map = {
-            "date": "p.timestamp ASC, p.filename ASC, p.id ASC",
-            "date_desc": "p.timestamp DESC, p.filename ASC, p.id ASC",
+            "date": _PHOTO_DATE_ASC_ORDER,
+            "date_desc": _PHOTO_DATE_DESC_ORDER,
             "name": "p.filename ASC, p.id ASC",
             "name_desc": "p.filename DESC, p.id ASC",
             "rating": "p.rating DESC, p.filename ASC, p.id ASC",
@@ -4293,7 +4297,7 @@ class Database:
             "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
             "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
         }
-        order = sort_map.get(sort, "p.timestamp ASC, p.filename ASC, p.id ASC")
+        order = sort_map.get(sort, _PHOTO_DATE_ASC_ORDER)
 
         page = max(1, page)
         offset = (page - 1) * per_page
@@ -4365,8 +4369,8 @@ class Database:
         where = "WHERE " + " AND ".join(conditions)
 
         sort_map = {
-            "date": "p.timestamp ASC, p.filename ASC, p.id ASC",
-            "date_desc": "p.timestamp DESC, p.filename ASC, p.id ASC",
+            "date": _PHOTO_DATE_ASC_ORDER,
+            "date_desc": _PHOTO_DATE_DESC_ORDER,
             "name": "p.filename ASC, p.id ASC",
             "name_desc": "p.filename DESC, p.id ASC",
             "rating": "p.rating DESC, p.filename ASC, p.id ASC",
@@ -4374,7 +4378,7 @@ class Database:
             "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
             "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
         }
-        order = sort_map.get(sort, "p.timestamp ASC, p.filename ASC, p.id ASC")
+        order = sort_map.get(sort, _PHOTO_DATE_ASC_ORDER)
         distinct = "DISTINCT " if keyword is not None else ""
         query = f"""
             SELECT {distinct}p.id FROM photos p
@@ -4741,7 +4745,7 @@ class Database:
             {join_clause}
             {where}
             GROUP BY p.id
-            ORDER BY p.timestamp ASC, p.filename ASC, p.id ASC
+            ORDER BY {_PHOTO_DATE_ASC_ORDER}
         """
         return self.conn.execute(query, species_col_params + params).fetchall()
 
@@ -10039,7 +10043,7 @@ class Database:
             {folder_join}
             {join_clause}
             {where}
-            ORDER BY p.timestamp ASC, p.filename ASC, p.id ASC
+            ORDER BY {_PHOTO_DATE_ASC_ORDER}
             LIMIT ? OFFSET ?
         """
         return self.conn.execute(query, params).fetchall()
@@ -10056,7 +10060,7 @@ class Database:
             {folder_join}
             {join_clause}
             {where}
-            ORDER BY p.timestamp ASC, p.filename ASC, p.id ASC
+            ORDER BY {_PHOTO_DATE_ASC_ORDER}
         """
         return [row["id"] for row in self.conn.execute(query, params).fetchall()]
 
