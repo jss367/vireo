@@ -3119,6 +3119,233 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         return None
 
+    def _normalize_photo_id_list(raw_ids):
+        """Validate and de-dupe a JSON ``photo_ids`` list, preserving order."""
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return None, json_error("photo_ids required", 400)
+        photo_ids = []
+        seen = set()
+        for raw in raw_ids:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return None, json_error("photo_ids must contain only integers", 400)
+            if raw not in seen:
+                photo_ids.append(raw)
+                seen.add(raw)
+        if not photo_ids:
+            return None, json_error("photo_ids required", 400)
+        return photo_ids, None
+
+    def _chunked(values, size=800):
+        values = list(values)
+        for idx in range(0, len(values), size):
+            yield values[idx:idx + size]
+
+    def _location_keyword_photo_ids(db, photo_ids):
+        """Return ids that already have any linked location keyword."""
+        if not photo_ids:
+            return set()
+        found = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                "SELECT DISTINCT pk.photo_id "
+                "FROM photo_keywords pk "
+                "JOIN keywords k ON k.id = pk.keyword_id "
+                f"WHERE k.type = 'location' AND pk.photo_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            found.update(row["photo_id"] for row in rows)
+        return found
+
+    def _resolve_exif_place_for_photo(db, photo, api_key, grid_cache):
+        """Resolve one photo's EXIF coordinates into normalized place details.
+
+        Returns ``(details, reason)`` where ``details`` is the normalized
+        Google-place dict on success and ``reason`` is a short unresolved code
+        on failure. Results are de-duped by the DB's reverse-geocode grid so a
+        burst in the same cell only performs/cache-checks one lookup.
+        """
+        lat = photo["latitude"]
+        lng = photo["longitude"]
+        if lat is None or lng is None:
+            return None, "missing_gps"
+        try:
+            lat = float(lat)
+            lng = float(lng)
+        except (TypeError, ValueError):
+            return None, "invalid_gps"
+        if not (math.isfinite(lat) and math.isfinite(lng)):
+            return None, "invalid_gps"
+
+        grid = Database._reverse_geocode_grid(lat, lng)
+        if grid in grid_cache:
+            return grid_cache[grid]
+
+        cached = db.reverse_geocode_cache_get(lat, lng)
+        if cached is not None:
+            if cached["place_id"] is None:
+                result = (None, "no_match")
+                grid_cache[grid] = result
+                return result
+            try:
+                details = json.loads(cached["response"] or "{}")
+            except (ValueError, TypeError):
+                details = {}
+            if not isinstance(details, dict):
+                details = {}
+            if not details.get("place_id"):
+                details["place_id"] = cached["place_id"]
+            if details.get("place_id"):
+                result = (details, None)
+            else:
+                result = (None, "no_match")
+            grid_cache[grid] = result
+            return result
+
+        if not api_key:
+            result = (None, "no_api_key")
+            grid_cache[grid] = result
+            return result
+
+        try:
+            details = places.reverse_geocode(lat, lng, api_key)
+        except places.PlacesTransientError:
+            app.logger.warning(
+                "bulk reverse_geocode transient failure for photo=%s lat=%s lng=%s",
+                photo["id"],
+                lat,
+                lng,
+            )
+            result = (None, "transient_error")
+            grid_cache[grid] = result
+            return result
+
+        cache_place_id = details.get("place_id") if details else None
+        db.reverse_geocode_cache_put(
+            lat,
+            lng,
+            place_id=cache_place_id,
+            response_json=json.dumps(details or {}),
+        )
+        if not details or not details.get("place_id"):
+            result = (None, "no_match")
+        else:
+            result = (details, None)
+        grid_cache[grid] = result
+        return result
+
+    def _bulk_gps_location_source_ids(db, body):
+        """Return source photo ids from either ``photo_ids`` or ``collection_id``."""
+        raw_ids = body.get("photo_ids")
+        if raw_ids:
+            return _normalize_photo_id_list(raw_ids)
+
+        collection_id = _coerce_collection_id(body.get("collection_id"))
+        if collection_id is False:
+            return None, json_error("collection_id must be an integer", 400)
+        if collection_id is None:
+            return None, json_error("photo_ids or collection_id required", 400)
+
+        row = db.conn.execute(
+            "SELECT id FROM collections WHERE id = ? AND workspace_id = ?",
+            (collection_id, db._ws_id()),
+        ).fetchone()
+        if row is None:
+            return None, json_error("collection not found", 404)
+        return db.get_collection_photo_ids(collection_id), None
+
+    def _bulk_gps_location_payload(db, body):
+        """Build preview/apply data for resolving locations from EXIF GPS."""
+        photo_ids, error = _bulk_gps_location_source_ids(db, body)
+        if error is not None:
+            return None, error
+        if not photo_ids:
+            return {
+                "total": 0,
+                "resolvable": 0,
+                "updated": 0,
+                "groups": [],
+                "unresolved": [],
+                "skipped": [],
+            }, None
+        if len(photo_ids) > 10000:
+            return None, json_error("too many photo_ids", 400)
+
+        photos_map = db.get_photos_by_ids(photo_ids)
+        if len(photos_map) != len(photo_ids):
+            return None, json_error("One or more photos were not found", 404)
+        for pid in photo_ids:
+            edit_error = _photo_location_edit_error(db, pid)
+            if edit_error is not None:
+                return None, edit_error
+
+        assigned_ids = _location_keyword_photo_ids(db, photo_ids)
+        import config as cfg
+        api_key = (cfg.load().get("google_maps_api_key", "") or "").strip()
+
+        grid_cache = {}
+        groups = {}
+        unresolved = []
+        skipped = []
+        ordered_group_keys = []
+        for pid in photo_ids:
+            photo = photos_map[pid]
+            if pid in assigned_ids:
+                skipped.append({
+                    "photo_id": pid,
+                    "filename": photo["filename"],
+                    "reason": "already_has_location",
+                })
+                continue
+            details, reason = _resolve_exif_place_for_photo(
+                db, photo, api_key, grid_cache,
+            )
+            if reason is not None:
+                unresolved.append({
+                    "photo_id": pid,
+                    "filename": photo["filename"],
+                    "reason": reason,
+                })
+                continue
+
+            place_id = details.get("place_id")
+            if place_id not in groups:
+                groups[place_id] = {
+                    "place_id": place_id,
+                    "summary": _summarize_details(details),
+                    "name": details.get("name") or "",
+                    "details": details,
+                    "photo_ids": [],
+                    "sample_filenames": [],
+                }
+                ordered_group_keys.append(place_id)
+            group = groups[place_id]
+            group["photo_ids"].append(pid)
+            if len(group["sample_filenames"]) < 3:
+                group["sample_filenames"].append(photo["filename"])
+
+        group_list = []
+        for place_id in ordered_group_keys:
+            group = groups[place_id]
+            group_list.append({
+                "place_id": group["place_id"],
+                "summary": group["summary"],
+                "name": group["name"],
+                "count": len(group["photo_ids"]),
+                "photo_ids": group["photo_ids"],
+                "sample_filenames": group["sample_filenames"],
+            })
+
+        return {
+            "total": len(photo_ids),
+            "resolvable": sum(group["count"] for group in group_list),
+            "updated": 0,
+            "groups": group_list,
+            "unresolved": unresolved,
+            "skipped": skipped,
+            "_details_by_place_id": {k: v["details"] for k, v in groups.items()},
+        }, None
+
     # -- Edit API routes --
 
     @app.route("/api/photos/<int:photo_id>/rating", methods=["POST"])
@@ -4019,6 +4246,91 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "updated": len(items),
             "location": _serialize_photo_location(db, photo_ids[0]),
         })
+
+    @app.route("/api/batch/location/from-exif", methods=["POST"])
+    def api_batch_set_photo_locations_from_exif():
+        """Resolve each photo's EXIF GPS to a place and optionally apply it.
+
+        Body:
+          - ``{"photo_ids": [1, 2], "apply": false}``
+          - ``{"collection_id": 7, "apply": true}``
+
+        Preview mode performs/caches reverse-geocode lookups and returns
+        grouped assignments without linking keywords. Apply mode reuses the
+        same resolution path, then writes each photo's own resolved place.
+        """
+        body = request.get_json(silent=True) or {}
+        apply_changes = body.get("apply") is True
+        db = _get_db()
+
+        payload, error = _bulk_gps_location_payload(db, body)
+        if error is not None:
+            return error
+        if not apply_changes:
+            payload.pop("_details_by_place_id", None)
+            return jsonify(payload)
+
+        details_by_place_id = payload.pop("_details_by_place_id", {})
+        keyword_id_by_place_id = {}
+        items = []
+        group_errors = []
+        for group in payload["groups"]:
+            place_id = group["place_id"]
+            details = details_by_place_id.get(place_id)
+            if not details:
+                group_errors.append({
+                    "place_id": place_id,
+                    "summary": group.get("summary") or place_id,
+                    "error": "missing_details",
+                })
+                continue
+            try:
+                leaf_id = db.upsert_place_chain(details)
+            except RuntimeError as err:
+                group_errors.append({
+                    "place_id": place_id,
+                    "summary": group.get("summary") or place_id,
+                    "error": "name_conflict",
+                    "error_detail": str(err),
+                })
+                continue
+            keyword_id_by_place_id[place_id] = leaf_id
+
+            for pid in group["photo_ids"]:
+                db.set_photo_location(pid, leaf_id)
+                _queue_location_sync_if_enabled(pid, _commit=False)
+                items.append({
+                    "photo_id": pid,
+                    "old_value": "",
+                    "new_value": str(leaf_id),
+                })
+
+        if items:
+            place_count = len(keyword_id_by_place_id)
+            db.record_edit(
+                "location_set",
+                (
+                    f"resolved GPS locations for {len(items)} "
+                    f"{'photo' if len(items) == 1 else 'photos'} "
+                    f"across {place_count} "
+                    f"{'place' if place_count == 1 else 'places'}"
+                ),
+                "from_exif",
+                items,
+                is_batch=True,
+                _commit=False,
+            )
+        db.conn.commit()
+        if items:
+            db._prune_edit_history()
+
+        payload["updated"] = len(items)
+        payload["group_errors"] = group_errors
+        payload["keyword_ids"] = {
+            place_id: keyword_id
+            for place_id, keyword_id in keyword_id_by_place_id.items()
+        }
+        return jsonify(payload)
 
     @app.route("/api/photos/<int:photo_id>/location", methods=["DELETE"])
     def api_clear_photo_location(photo_id):

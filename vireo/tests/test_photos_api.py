@@ -3858,6 +3858,144 @@ def test_reverse_geocode_400_on_invalid_coords(app_and_db):
     assert r2.get_json()["error"] == "invalid coords"
 
 
+def _yosemite_geocode_response():
+    return {
+        "place_id": "ChIJxeyK9Z3wloAR_gOA7SycJC8",
+        "name": "Yosemite Valley",
+        "lat": 37.7456,
+        "lng": -119.5936,
+        "address_components": [
+            {"name": "Mariposa County", "short_name": "Mariposa County",
+             "types": ["administrative_area_level_2"]},
+            {"name": "California", "short_name": "CA",
+             "types": ["administrative_area_level_1"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+
+def test_batch_location_from_exif_preview_groups_without_linking(
+    app_and_db, monkeypatch,
+):
+    """Preview resolves each photo's own GPS and does not attach locations."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+
+    photos = db.get_photos(sort="name")
+    p1, p2, p3 = [p["id"] for p in photos]
+    db.conn.execute(
+        "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+        (40.7828, -73.9654, p1),
+    )
+    db.conn.execute(
+        "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+        (37.7456, -119.5936, p2),
+    )
+    db.conn.commit()
+
+    def fake_reverse_geocode(lat, lng, key):
+        if lat > 39:
+            return _central_park_geocode_response()
+        return _yosemite_geocode_response()
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/location/from-exif",
+        json={"photo_ids": [p1, p2, p3], "apply": False},
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["total"] == 3
+    assert body["resolvable"] == 2
+    assert {g["name"] for g in body["groups"]} == {"Central Park", "Yosemite Valley"}
+    assert body["unresolved"] == [
+        {"filename": "bird3.jpg", "photo_id": p3, "reason": "missing_gps"}
+    ]
+    assert "_details_by_place_id" not in body
+    # The fixture starts with two taxonomy keyword links. Preview may cache
+    # reverse-geocode results, but it must not create location links.
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE k.type = 'location'"
+    ).fetchone()[0] == 0
+
+
+def test_batch_location_from_exif_apply_assigns_per_photo_places(
+    app_and_db, monkeypatch,
+):
+    """Apply mode assigns different place keywords to different GPS photos."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+
+    photos = db.get_photos(sort="name")
+    p1, p2, p3 = [p["id"] for p in photos]
+    db.conn.execute(
+        "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+        (40.7828, -73.9654, p1),
+    )
+    db.conn.execute(
+        "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+        (37.7456, -119.5936, p2),
+    )
+    db.conn.commit()
+
+    def fake_reverse_geocode(lat, lng, key):
+        if lat > 39:
+            return _central_park_geocode_response()
+        return _yosemite_geocode_response()
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/location/from-exif",
+        json={"photo_ids": [p1, p2, p3], "apply": True},
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["updated"] == 2
+    assert body["resolvable"] == 2
+    assert body["group_errors"] == []
+
+    rows = db.conn.execute(
+        "SELECT pk.photo_id, k.name, k.place_id "
+        "FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE k.type = 'location' "
+        "ORDER BY pk.photo_id"
+    ).fetchall()
+    by_photo = {row["photo_id"]: row for row in rows}
+    assert by_photo[p1]["name"] == "Central Park"
+    assert by_photo[p2]["name"] == "Yosemite Valley"
+    assert p3 not in by_photo
+
+    pending = db.conn.execute(
+        "SELECT photo_id, change_type, value FROM pending_changes "
+        "WHERE change_type = 'location' ORDER BY photo_id"
+    ).fetchall()
+    assert [(r["photo_id"], r["value"]) for r in pending] == [
+        (p1, "effective"),
+        (p2, "effective"),
+    ]
+
+    edit = db.conn.execute(
+        "SELECT action_type, is_batch, description FROM edit_history "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert edit["action_type"] == "location_set"
+    assert edit["is_batch"] == 1
+    assert "resolved GPS locations for 2 photos across 2 places" in edit["description"]
+
+
 # --- POST /api/keywords/<id>/link-place -------------------------------------
 #
 # Attach Google place data to an existing free-text location keyword. Builds
