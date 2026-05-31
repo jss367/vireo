@@ -1394,6 +1394,7 @@ var _sourceFolders = [];
 // -- Import preview state --
 var _previewData = null;       // response from /api/import/folder-preview
 var _previewSelected = {};     // { filePath: true/false }
+var _previewLoading = false;   // true while import/new-images preview scope is unresolved
 var _previewAbort = null;      // AbortController for in-flight request
 var _duplicateResults = {};    // path -> true for duplicates (cache)
 var _duplicateCheckAbort = null;  // AbortController for in-flight check
@@ -1510,7 +1511,9 @@ function showPreviewPlaceholder() {
   document.getElementById('previewContent').style.display = 'none';
   document.getElementById('previewLoading').style.display = 'none';
   document.getElementById('previewError').style.display = 'none';
+  _previewLoading = false;
   _previewData = null;
+  _previewSelected = {};
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 }
 
@@ -1519,6 +1522,13 @@ function showPreviewLoading() {
   document.getElementById('previewContent').style.display = 'none';
   document.getElementById('previewLoading').style.display = '';
   document.getElementById('previewError').style.display = 'none';
+  _previewLoading = true;
+  _previewData = null;
+  _previewSelected = {};
+  _planFetchSeq++;
+  _pipelinePlan = null;
+  updateSamVariantWarning(null);
+  refreshPipelineUI();
   // Cancel any in-flight duplicate check when preview context changes
   if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
@@ -1531,6 +1541,9 @@ function showPreviewError(msg) {
   var errEl = document.getElementById('previewError');
   errEl.style.display = '';
   errEl.textContent = msg;
+  _previewLoading = false;
+  _previewData = null;
+  _previewSelected = {};
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 }
 
@@ -1539,6 +1552,7 @@ function renderPreview() {
   document.getElementById('previewLoading').style.display = 'none';
   document.getElementById('previewError').style.display = 'none';
   document.getElementById('previewContent').style.display = '';
+  _previewLoading = false;
 
   var data = _previewData;
   if (!data) return;
@@ -4129,11 +4143,28 @@ function _buildPlanBody() {
   return body;
 }
 
+function _planIsWaitingForImportPreview() {
+  if (_sourceMode === 'import') {
+    return _sourceFolders.length > 0 && getIngestFileTypes().length > 0
+      && (_previewLoading || !_previewData);
+  }
+  if (_sourceMode === 'new_images') {
+    return newImagesSnapshotId !== null && (_previewLoading || !_previewData);
+  }
+  return false;
+}
+
 async function refreshPipelinePlan() {
   // Don't fetch a plan while a pipeline is running — live state is
   // authoritative, and the running stages would race the plan response.
   if (_pipelineRunning) return;
   var seq = ++_planFetchSeq;
+  if (_planIsWaitingForImportPreview()) {
+    _pipelinePlan = null;
+    updateSamVariantWarning(null);
+    refreshPipelineUI();
+    return;
+  }
   try {
     var data = await safeFetch('/api/pipeline/plan', {
       method: 'POST',

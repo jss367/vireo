@@ -1,3 +1,4 @@
+import json
 import re
 
 from playwright.sync_api import expect
@@ -135,6 +136,63 @@ def test_pipeline_status_pills_visible_for_processing_stages(live_server, page):
     expect(page.locator("#pillClassify")).to_contain_text("Already done")
     # Extract has no seeded masks → "Will run".
     expect(page.locator("#pillExtract")).to_contain_text("Will run")
+
+
+def test_pipeline_import_plan_waits_for_folder_preview_scope(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    expect(page.locator("#pillClassify")).to_contain_text("Already done")
+
+    stale_plan_route = []
+
+    def hold_stale_plan(route):
+        stale_plan_route.append(route)
+
+    page.route("**/api/pipeline/plan", hold_stale_plan)
+    page.evaluate("setTimeout(refreshPipelinePlan, 0)")
+    for _ in range(50):
+        if stale_plan_route:
+            break
+        page.wait_for_timeout(100)
+    assert stale_plan_route
+
+    folder_preview_route = []
+    page.route("**/api/import/folder-preview", lambda route: folder_preview_route.append(route))
+    page.fill("#cfgSourceInput", "/Volumes/Photography/Raw Files/USA/2026/2026-05-30")
+    page.locator("#card-source button", has_text="Add").click()
+    stale_plan_route[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({
+            "stages": {
+                "Previews": {"state": "done-prior", "summary": "stale"},
+                "Classify": {"state": "done-prior", "summary": "stale"},
+                "Extract": {"state": "done-prior", "summary": "stale"},
+                "EyeKeypoints": {"state": "done-prior", "summary": "stale"},
+                "Group": {"state": "done-prior", "summary": "stale"},
+            },
+            "scope": {"collection_id": None, "photo_count": None, "new_count": 0, "known_count": 0},
+        }),
+    )
+
+    expect(page.locator("[data-testid='pipeline-plan-summary'] .plan-loading")).to_be_visible()
+    expect(page.locator("#pillClassify")).not_to_contain_text("Already done")
+    for _ in range(50):
+        if folder_preview_route:
+            break
+        page.wait_for_timeout(100)
+    assert folder_preview_route
+    folder_preview_route[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({
+            "total_count": 0,
+            "total_size": 0,
+            "type_breakdown": {},
+            "duplicate_count": 0,
+            "files": [],
+        }),
+    )
 
 
 def test_pipeline_reclassify_flips_classify_pill_to_will_run(live_server, page):
