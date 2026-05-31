@@ -22,8 +22,14 @@ struct JobInfo {
     status: String,
     started_at: Option<String>,
     progress: Option<JobProgress>,
+    #[serde(default = "default_counts_for_badge")]
+    counts_for_badge: bool,
     #[serde(rename = "type")]
     _job_type: String,
+}
+
+fn default_counts_for_badge() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -360,7 +366,10 @@ pub fn start_job_polling(app: AppHandle, port: u16, stop: Arc<AtomicBool>) {
         let mut last_dock_progress: Option<DockProgress> = None;
         while !stop.load(Ordering::Relaxed) {
             let jobs = fetch_jobs(port);
-            let running: Vec<&JobInfo> = jobs.iter().filter(|j| j.status == "running").collect();
+            let running: Vec<&JobInfo> = jobs
+                .iter()
+                .filter(|j| j.status == "running" && j.counts_for_badge)
+                .collect();
             let count = running.len();
             let dock_progress = dock_progress_for_jobs(&running);
             let count_changed = last_count != Some(count);

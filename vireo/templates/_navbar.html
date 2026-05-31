@@ -5585,6 +5585,14 @@ function isLiveJob(job) {
   );
 }
 
+function countsForBadge(job) {
+  return !job || job.counts_for_badge !== false;
+}
+
+function isAttentionJob(job) {
+  return isLiveJob(job) && countsForBadge(job);
+}
+
 function isWaitingJob(job) {
   return !!job && (job.status === 'queued' || job.status === 'pending');
 }
@@ -5596,7 +5604,7 @@ async function nativeMenuCancelCurrentJob() {
   // the queued path atomically), so the native menu's "cancel current
   // job" should be able to reach them — otherwise a waiting pipeline
   // is stuck if the user closes the pipeline page.
-  var running = list.find(isLiveJob);
+  var running = list.find(isAttentionJob);
   if (!running) {
     nativeMenuInfo('No active job to cancel');
     return;
@@ -6179,10 +6187,9 @@ function formatDuration(seconds) {
       if (lpSource) { lpSource.close(); lpSource = null; }
       // Only warn on actual tab close, not internal navigation
       if (isInternalNav) { isInternalNav = false; return; }
-      // Warn on tab close when ANY live job exists — including queued
-      // or pending jobs. Closing the tab leaves them sitting in the
-      // server-side queue with no UI to manage them from this session.
-      var running = activeJobs.filter(isLiveJob);
+      // Warn on tab close when user-attention work exists, including queued
+      // or pending jobs. Ambient system jobs should not block tab close.
+      var running = activeJobs.filter(isAttentionJob);
       if (running.length > 0) {
         e.preventDefault();
         e.returnValue = '';
@@ -6478,7 +6485,9 @@ function formatDuration(seconds) {
   var _lastDockProgress = { state: null, value: -1 };
   function updateDockProgress() {
     if (!window.__TAURI_INTERNALS__) return;
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var running = activeJobs.filter(function(j) {
+      return j.status === 'running' && countsForBadge(j);
+    });
     var state, value;
     if (running.length === 0) {
       state = 'none'; value = null;
@@ -6516,13 +6525,15 @@ function formatDuration(seconds) {
     // pipeline — there'd be no way to find or cancel the queued run
     // from this surface.
     var allRunning = activeJobs.filter(isLiveJob);
+    var attentionJobs = allRunning.filter(countsForBadge);
     var thisWs = allRunning.filter(function(j) { return j.workspace_id === _activeWsId; });
     var otherWs = allRunning.filter(function(j) { return j.workspace_id !== _activeWsId; });
 
-    // Badges count all active jobs across workspaces
-    document.getElementById('jobsBadge').textContent = allRunning.length;
+    // Badges count attention-worthy work across workspaces. Ambient system
+    // jobs stay visible in the panel without asking for attention.
+    document.getElementById('jobsBadge').textContent = attentionJobs.length;
     var navBadge = document.getElementById('navJobBadge');
-    if (navBadge) navBadge.textContent = allRunning.length > 0 ? ' (' + allRunning.length + ')' : '';
+    if (navBadge) navBadge.textContent = attentionJobs.length > 0 ? ' (' + attentionJobs.length + ')' : '';
 
     if (allRunning.length === 0) {
       // "Last run" fallback must exclude live state — running,
@@ -6590,11 +6601,19 @@ function formatDuration(seconds) {
 
   function updateSummary() {
     var summary = document.getElementById('jobSummary');
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
-    var waiting = activeJobs.filter(isWaitingJob);
+    var liveJobs = activeJobs.filter(isLiveJob);
+    var attentionJobs = liveJobs.filter(countsForBadge);
+    var running = attentionJobs.filter(function(j) { return j.status === 'running'; });
+    var waiting = attentionJobs.filter(isWaitingJob);
 
     if (running.length === 0 && waiting.length === 0) {
-      summary.textContent = 'No active jobs';
+      if (liveJobs.length > 0) {
+        summary.textContent = liveJobs.length === 1
+          ? 'Background: ' + window.formatJobType(liveJobs[0].type)
+          : liveJobs.length + ' background jobs';
+      } else {
+        summary.textContent = 'No active jobs';
+      }
       summary.classList.add('idle');
       summary.classList.remove('active');
       return;
@@ -6643,9 +6662,9 @@ function formatDuration(seconds) {
   }
 
   function updateActivityDot() {
-    // The dot signals "something live is happening" — waiting work counts
-    // because the user has work the system is on the hook to run.
-    var running = activeJobs.filter(isLiveJob);
+    // The dot signals attention-worthy work; ambient system jobs remain in
+    // the Jobs panel without lighting up the navbar.
+    var running = activeJobs.filter(isAttentionJob);
     var dot = document.getElementById('navActivityDot');
     if (dot) dot.classList.toggle('active', running.length > 0);
   }

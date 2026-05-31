@@ -264,6 +264,7 @@ class JobRunner:
                         "workspace_id": ctx["workspace_id"],
                         "steps": [],
                         "ephemeral": False,
+                        "counts_for_badge": True,
                         "runtime_warning": ctx["runtime_warning"],
                     }
                     self._prune_finished_jobs()
@@ -334,6 +335,7 @@ class JobRunner:
             "workspace_id": ctx["workspace_id"],
             "steps": [],
             "ephemeral": False,
+            "counts_for_badge": True,
             "runtime_warning": ctx.get("runtime_warning"),
             "_ended_at": time.time(),
             "_persisted": True,
@@ -345,7 +347,7 @@ class JobRunner:
             self._subscribers.setdefault(job_id, [])
 
     def start(self, job_type, work_fn, config=None, workspace_id=None,
-              ephemeral=False, runtime_warning=None):
+              ephemeral=False, runtime_warning=None, counts_for_badge=True):
         """Start a background job.
 
         Args:
@@ -362,6 +364,8 @@ class JobRunner:
                        it to clutter the history list.
             runtime_warning: optional user-facing warning metadata to expose
                        while the job is running.
+            counts_for_badge: if False, the job remains visible in job lists
+                       but does not contribute to app/Dock attention badges.
 
         Returns:
             job_id string
@@ -382,6 +386,7 @@ class JobRunner:
             "workspace_id": workspace_id,
             "steps": [],
             "ephemeral": ephemeral,
+            "counts_for_badge": counts_for_badge,
             "runtime_warning": runtime_warning,
         }
 
@@ -618,6 +623,7 @@ class JobRunner:
             "workspace_id": ctx["workspace_id"],
             "steps": [],
             "ephemeral": False,
+            "counts_for_badge": True,
             "runtime_warning": ctx.get("runtime_warning"),
         }
 
