@@ -3412,6 +3412,33 @@ def test_batch_photo_location_sets_all_selected_photos(app_and_db, monkeypatch):
     assert entry["item_count"] == len(photo_ids)
 
 
+def test_batch_photo_location_text_sets_all_selected_photos(app_and_db):
+    """Batch free-text location POST stores one location across selected photos."""
+    app, db = app_and_db
+    photo_ids = [p["id"] for p in db.get_photos()[:3]]
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/location/text",
+        json={"photo_ids": photo_ids, "name": "the meadow"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["updated"] == len(photo_ids)
+
+    for pid in photo_ids:
+        row = db.conn.execute(
+            "SELECT k.name, k.place_id FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (pid,),
+        ).fetchone()
+        assert dict(row) == {"name": "the meadow", "place_id": None}
+
+    entry = db.get_edit_history()[0]
+    assert entry["action_type"] == "location_set"
+    assert entry["item_count"] == len(photo_ids)
+
+
 def test_delete_photo_location_records_edit(app_and_db):
     """DELETE adds an entry to the audit log even though it doesn't write a sidecar."""
     app, db = app_and_db
