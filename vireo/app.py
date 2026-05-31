@@ -2696,6 +2696,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 workspace_id=workspace_id, _commit=_commit,
             )
 
+    def _queue_location_sync_if_enabled(photo_id, workspace_id=None, _commit=True):
+        """Queue GPS sidecar sync or cleanup work for location edits."""
+        db = _get_db()
+        if workspace_id is None:
+            if not db._photo_in_workspace(photo_id):
+                return
+        elif db.conn.execute(
+            """SELECT 1 FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE p.id = ? AND wf.workspace_id = ?""",
+            (photo_id, workspace_id),
+        ).fetchone() is None:
+            return
+        # Queue even when assigned-location writes are disabled so sync can
+        # remove stale Vireo-authored GPS previously written while enabled.
+        db.remove_pending_changes(
+            photo_id, "location", workspace_id=workspace_id, _commit=_commit,
+        )
+        db.queue_change(
+            photo_id, "location", "effective",
+            workspace_id=workspace_id, _commit=_commit,
+        )
+
+    def _photo_location_edit_error(db, photo_id):
+        """Return an error response when a photo cannot be edited in this workspace."""
+        if db.conn.execute(
+            "SELECT 1 FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone() is None:
+            return json_error("photo_not_found", 404)
+        if not db._photo_in_workspace(photo_id):
+            return json_error(
+                f"Photo {photo_id} does not belong to the active workspace", 403,
+            )
+        return None
+
     # -- Edit API routes --
 
     @app.route("/api/photos/<int:photo_id>/rating", methods=["POST"])
@@ -3311,10 +3346,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Guard against stale clients (e.g. tab open after photo deleted).
         # Without this, set_photo_location's INSERT into photo_keywords
         # raises a FK IntegrityError that surfaces as a 500.
-        if db.conn.execute(
-            "SELECT 1 FROM photos WHERE id = ?", (photo_id,)
-        ).fetchone() is None:
-            return json_error("photo_not_found", 404)
+        edit_error = _photo_location_edit_error(db, photo_id)
+        if edit_error is not None:
+            return edit_error
 
         details = _normalize_client_place_details(body)
         if details is None:
@@ -3337,6 +3371,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "error_detail": str(err),
             }), 409
         db.set_photo_location(photo_id, leaf_id)
+        _queue_location_sync_if_enabled(photo_id)
         db.record_edit(
             'location_set',
             f"set location: {details.get('name', 'unknown')}",
@@ -3361,16 +3396,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         stripped = name.strip()
 
         db = _get_db()
-        if db.conn.execute(
-            "SELECT 1 FROM photos WHERE id = ?", (photo_id,)
-        ).fetchone() is None:
-            return json_error("photo_not_found", 404)
+        edit_error = _photo_location_edit_error(db, photo_id)
+        if edit_error is not None:
+            return edit_error
         try:
             leaf_id = db.get_or_create_text_location(stripped)
         except ValueError:
             # Defensive: validation above should already catch empty input.
             return json_error("missing name", 400)
         db.set_photo_location(photo_id, leaf_id)
+        _queue_location_sync_if_enabled(photo_id)
         db.record_edit(
             'location_set',
             f"set location: {stripped}",
@@ -3383,11 +3418,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_clear_photo_location(photo_id):
         """Remove all ``type='location'`` keyword links for ``photo_id``."""
         db = _get_db()
-        if db.conn.execute(
-            "SELECT 1 FROM photos WHERE id = ?", (photo_id,)
-        ).fetchone() is None:
-            return json_error("photo_not_found", 404)
+        edit_error = _photo_location_edit_error(db, photo_id)
+        if edit_error is not None:
+            return edit_error
         db.clear_photo_location(photo_id)
+        _queue_location_sync_if_enabled(photo_id)
         db.record_edit(
             'location_clear',
             "cleared location",
@@ -3551,6 +3586,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             str(result['keyword_id']),
             [],
         )
+
+        photo_rows = db.conn.execute(
+            """SELECT DISTINCT pk.photo_id, wf.workspace_id
+               FROM photo_keywords pk
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE pk.keyword_id = ?""",
+            (result["keyword_id"],),
+        ).fetchall()
+        for row in photo_rows:
+            _queue_location_sync_if_enabled(
+                row["photo_id"],
+                workspace_id=row["workspace_id"],
+                _commit=False,
+            )
+        if photo_rows:
+            db.conn.commit()
 
         return jsonify({
             "keyword": _serialize_keyword(db, result["keyword_id"]),
@@ -8592,6 +8644,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ).fetchone()
         if not photo:
             return json_error("Photo not found", 404)
+        if not db._photo_in_workspace(photo_id):
+            return json_error(
+                f"Photo {photo_id} does not belong to the active workspace", 403,
+            )
 
         # Use the current-fingerprint helper so a photo with cached
         # predictions from multiple label sets doesn't prefill iNat with
@@ -8615,9 +8671,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             params.append("taxon_name=" + species)
         if photo["timestamp"]:
             params.append("observed_on=" + photo["timestamp"][:10])
-        lat = photo["latitude"] if "latitude" in photo.keys() else None
-        lng = photo["longitude"] if "longitude" in photo.keys() else None
-        if lat and lng:
+        loc = db.get_effective_photo_location(photo_id)
+        lat = loc["latitude"] if loc else None
+        lng = loc["longitude"] if loc else None
+        if lat is not None and lng is not None:
             params.append("lat=" + str(lat))
             params.append("lng=" + str(lng))
 
@@ -8683,6 +8740,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ).fetchone()
         if not photo:
             return json_error("Photo not found", 404)
+        if not db._photo_in_workspace(photo_id):
+            return json_error(
+                f"Photo {photo_id} does not belong to the active workspace", 403,
+            )
 
         photo_path = os.path.join(photo["folder_path"], photo["filename"])
         if not os.path.isfile(photo_path):
@@ -8703,8 +8764,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         taxon = data.get("taxon_name") or (pred["scientific_name"] if pred else None) or (pred["species"] if pred else None)
         observed_on = data.get("observed_on") or (photo["timestamp"][:10] if photo["timestamp"] else None)
-        photo_lat = photo["latitude"] if "latitude" in photo.keys() else None
-        photo_lng = photo["longitude"] if "longitude" in photo.keys() else None
+        loc = db.get_effective_photo_location(photo_id)
+        photo_lat = loc["latitude"] if loc else None
+        photo_lng = loc["longitude"] if loc else None
         lat = data.get("latitude") if data.get("latitude") is not None else photo_lat
         lng = data.get("longitude") if data.get("longitude") is not None else photo_lng
 
@@ -8760,6 +8822,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not photo:
                 results.append({"photo_id": photo_id, "error": "Photo not found"})
                 continue
+            if not db._photo_in_workspace(photo_id):
+                results.append({
+                    "photo_id": photo_id,
+                    "error": (
+                        f"Photo {photo_id} does not belong to the active workspace"
+                    ),
+                })
+                continue
 
             photo_path = os.path.join(photo["folder_path"], photo["filename"])
             if not os.path.isfile(photo_path):
@@ -8775,8 +8845,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             taxon = sub.get("taxon_name") or (pred["scientific_name"] if pred else None) or (pred["species"] if pred else None)
             observed_on = sub.get("observed_on") or (photo["timestamp"][:10] if photo["timestamp"] else None)
-            photo_lat = photo["latitude"] if "latitude" in photo.keys() else None
-            photo_lng = photo["longitude"] if "longitude" in photo.keys() else None
+            loc = db.get_effective_photo_location(photo_id)
+            photo_lat = loc["latitude"] if loc else None
+            photo_lng = loc["longitude"] if loc else None
             lat = sub.get("latitude") if sub.get("latitude") is not None else photo_lat
             lng = sub.get("longitude") if sub.get("longitude") is not None else photo_lng
 

@@ -4638,6 +4638,112 @@ class Database:
         """
         return self.conn.execute(query, species_col_params + params).fetchall()
 
+    def get_assigned_photo_location(self, photo_id, verify_workspace=True):
+        """Return linked location-keyword coordinates for one visible photo."""
+        if verify_workspace:
+            self._verify_photo_in_workspace(photo_id)
+
+        row = self.conn.execute(
+            """
+            SELECT p.id,
+                   kl.latitude AS latitude,
+                   kl.longitude AS longitude,
+                   kl.name AS keyword_location_name,
+                   kl.place_id AS place_id
+            FROM photos p
+            LEFT JOIN (
+                SELECT pk_loc.photo_id, k_loc.name, k_loc.place_id,
+                       k_loc.latitude, k_loc.longitude,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY pk_loc.photo_id
+                         ORDER BY (k_loc.parent_id IS NULL) ASC, k_loc.id DESC
+                       ) AS rn
+                FROM photo_keywords pk_loc
+                JOIN keywords k_loc ON k_loc.id = pk_loc.keyword_id
+                WHERE pk_loc.photo_id = ?
+                  AND k_loc.type = 'location'
+                  AND k_loc.latitude IS NOT NULL
+                  AND k_loc.longitude IS NOT NULL
+            ) kl ON kl.photo_id = p.id AND kl.rn = 1
+            WHERE p.id = ?
+            """,
+            (photo_id, photo_id),
+        ).fetchone()
+        if row is None or row["latitude"] is None or row["longitude"] is None:
+            return None
+        return {
+            "photo_id": row["id"],
+            "latitude": row["latitude"],
+            "longitude": row["longitude"],
+            "source": "keyword",
+            "keyword_location_name": row["keyword_location_name"],
+            "place_id": row["place_id"],
+        }
+
+    def get_effective_photo_location(self, photo_id, verify_workspace=True):
+        """Return the coordinates Vireo should use for a single photo.
+
+        EXIF GPS is source metadata and wins when both axes are present. If
+        EXIF GPS is absent or partial, fall back as a pair to the linked
+        ``type='location'`` keyword coordinates. Returns ``None`` when neither
+        source has a complete coordinate pair.
+        """
+        if verify_workspace:
+            self._verify_photo_in_workspace(photo_id)
+
+        row = self.conn.execute(
+            """
+            SELECT p.id,
+                   p.latitude AS photo_latitude,
+                   p.longitude AS photo_longitude,
+                   kl.latitude AS keyword_latitude,
+                   kl.longitude AS keyword_longitude,
+                   kl.name AS keyword_location_name,
+                   kl.place_id AS place_id
+            FROM photos p
+            LEFT JOIN (
+                SELECT pk_loc.photo_id, k_loc.name, k_loc.place_id,
+                       k_loc.latitude, k_loc.longitude,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY pk_loc.photo_id
+                         ORDER BY (k_loc.parent_id IS NULL) ASC, k_loc.id DESC
+                       ) AS rn
+                FROM photo_keywords pk_loc
+                JOIN keywords k_loc ON k_loc.id = pk_loc.keyword_id
+                WHERE pk_loc.photo_id = ?
+                  AND k_loc.type = 'location'
+                  AND k_loc.latitude IS NOT NULL
+                  AND k_loc.longitude IS NOT NULL
+            ) kl ON kl.photo_id = p.id AND kl.rn = 1
+            WHERE p.id = ?
+            """,
+            (photo_id, photo_id),
+        ).fetchone()
+        if row is None:
+            return None
+
+        if row["photo_latitude"] is not None and row["photo_longitude"] is not None:
+            return {
+                "photo_id": row["id"],
+                "latitude": row["photo_latitude"],
+                "longitude": row["photo_longitude"],
+                "source": "exif",
+                "keyword_location_name": None,
+                "place_id": None,
+            }
+
+        if row["keyword_latitude"] is not None and row["keyword_longitude"] is not None:
+            return {
+                "photo_id": row["id"],
+                "latitude": row["keyword_latitude"],
+                "longitude": row["keyword_longitude"],
+                "source": "keyword",
+                "keyword_location_name": row["keyword_location_name"],
+                "place_id": row["place_id"],
+            }
+
+        return None
+
     def get_accepted_species(self):
         """Return distinct marker species from geolocated photos in the active workspace.
 
