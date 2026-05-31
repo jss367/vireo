@@ -639,7 +639,12 @@ def _build_best_batch_response(db, seed_photo_id, rows):
                 if photo.get("quality_composite") is not None else None
             ),
             "focus": photo.get("eye_focus_score", photo.get("focus_score")),
+            "focus_basis": "eye" if photo.get("eye_focus_score") is not None else "subject",
             "sharpness": photo.get("subject_tenengrad"),
+            "eye_x": photo.get("eye_x"),
+            "eye_y": photo.get("eye_y"),
+            "eye_conf": photo.get("eye_conf"),
+            "eye_tenengrad": photo.get("eye_tenengrad"),
             "exposure": photo.get("exposure_score"),
             "flag": photo.get("flag") or "none",
             "rating": photo.get("rating"),
@@ -1972,6 +1977,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/browse")
     def browse():
         return render_template("browse.html")
+
+    @app.route("/best-batch")
+    def best_batch_page():
+        return render_template("best_batch.html")
 
     @app.route("/zoom-test")
     def zoom_test_page():
