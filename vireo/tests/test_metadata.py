@@ -105,6 +105,107 @@ def test_extract_metadata_empty_list():
     assert extract_metadata([]) == {}
 
 
+def test_extract_metadata_retries_failed_batches(monkeypatch):
+    """A failed ExifTool batch should be split so good files still get metadata."""
+    import metadata
+
+    paths = [f"/photos/img{i}.jpg" for i in range(4)]
+    calls = []
+
+    def fake_run(file_paths, extra_args=None):
+        calls.append(list(file_paths))
+        if len(file_paths) > 1:
+            return metadata._TIMEOUT
+        path = file_paths[0]
+        return [{"SourceFile": path, "EXIF:Make": "TestCam"}]
+
+    monkeypatch.setattr(metadata, "_run_exiftool", fake_run)
+
+    results = metadata.extract_metadata(paths)
+
+    assert set(results) == set(paths)
+    assert all(results[p]["EXIF"]["Make"] == "TestCam" for p in paths)
+    assert calls == [
+        paths,
+        paths[:2],
+        paths[:1],
+        paths[1:2],
+        paths[2:],
+        paths[2:3],
+        paths[3:],
+    ]
+
+
+def test_extract_metadata_does_not_retry_permanent_failures(monkeypatch):
+    """Permanent ExifTool failures should not split into many retries."""
+    import metadata
+
+    paths = [f"/photos/img{i}.jpg" for i in range(4)]
+    calls = []
+
+    def fake_run(file_paths, extra_args=None):
+        calls.append(list(file_paths))
+        return []
+
+    monkeypatch.setattr(metadata, "_run_exiftool", fake_run)
+
+    assert metadata.extract_metadata(paths) == {}
+    assert calls == [paths]
+
+
+def test_extract_metadata_timeout_retries_isolate_slow_file(monkeypatch):
+    """Timed-out ExifTool batches split until a slow file is isolated."""
+    import metadata
+
+    bad_path = "/photos/bad.jpg"
+    paths = [f"/photos/img{i}.jpg" for i in range(7)] + [bad_path]
+    calls = []
+
+    def fake_run(file_paths, extra_args=None):
+        calls.append(list(file_paths))
+        if bad_path in file_paths:
+            return metadata._TIMEOUT
+        return [
+            {"SourceFile": path, "EXIF:Make": "TestCam"}
+            for path in file_paths
+        ]
+
+    monkeypatch.setattr(metadata, "_run_exiftool", fake_run)
+
+    results = metadata.extract_metadata(paths)
+
+    assert set(results) == set(paths) - {bad_path}
+    assert bad_path not in results
+    assert [bad_path] in calls
+    assert all(results[p]["EXIF"]["Make"] == "TestCam" for p in results)
+
+
+def test_extract_metadata_timeout_retries_are_bounded(monkeypatch):
+    """Repeated ExifTool timeouts stop after the configured split budget."""
+    import metadata
+
+    paths = [f"/photos/img{i}.jpg" for i in range(8)]
+    calls = []
+
+    def fake_run(file_paths, extra_args=None):
+        calls.append(list(file_paths))
+        return metadata._TIMEOUT
+
+    monkeypatch.setattr(metadata, "_MAX_TIMEOUT_SPLIT_ATTEMPTS", 3)
+    monkeypatch.setattr(metadata, "_run_exiftool", fake_run)
+
+    assert metadata.extract_metadata(paths) == {}
+    assert calls == [
+        paths,
+        paths[:4],
+        paths[:2],
+        paths[:1],
+        paths[1:2],
+        paths[2:4],
+        paths[4:],
+    ]
+
+
 @requires_exiftool
 def test_extract_metadata_with_restricted_tags(tmp_path):
     """extract_metadata can restrict which tags are returned."""

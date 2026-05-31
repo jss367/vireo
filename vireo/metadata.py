@@ -12,6 +12,9 @@ log = logging.getLogger(__name__)
 
 # Batch size for ExifTool invocations
 _BATCH_SIZE = 100
+_EXIFTOOL_TIMEOUT = 120
+_MAX_TIMEOUT_SPLIT_ATTEMPTS = 16
+_TIMEOUT = object()
 
 
 def _run_exiftool(file_paths, extra_args=None):
@@ -38,7 +41,7 @@ def _run_exiftool(file_paths, extra_args=None):
             cmd,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=_EXIFTOOL_TIMEOUT,
         )
         if result.returncode not in (0, 1):
             # returncode 1 = warnings (e.g. minor errors), still has output
@@ -46,14 +49,54 @@ def _run_exiftool(file_paths, extra_args=None):
             return []
         if result.stdout.strip():
             return json.loads(result.stdout)
+        return []
     except FileNotFoundError:
         log.error("exiftool not found — install it with: brew install exiftool")
     except subprocess.TimeoutExpired:
         log.error("exiftool timed out processing %d files", len(file_paths))
+        return _TIMEOUT
     except json.JSONDecodeError as e:
         log.error("Failed to parse exiftool JSON output: %s", e)
 
     return []
+
+
+def _run_exiftool_with_retries(file_paths, extra_args=None, split_budget=None):
+    """Run ExifTool, splitting timed-out batches to salvage metadata."""
+    if split_budget is None:
+        split_budget = [_MAX_TIMEOUT_SPLIT_ATTEMPTS]
+
+    raw = _run_exiftool(file_paths, extra_args=extra_args)
+    if raw is not _TIMEOUT:
+        return raw
+
+    if len(file_paths) <= 1:
+        return []
+
+    if split_budget[0] <= 0:
+        log.warning(
+            "Stopping exiftool timeout retries for %d files after exhausting split budget",
+            len(file_paths),
+        )
+        return []
+
+    split_budget[0] -= 1
+    mid = len(file_paths) // 2
+    log.warning(
+        "Retrying timed-out exiftool batch of %d files as %d + %d (%d splits left)",
+        len(file_paths),
+        mid,
+        len(file_paths) - mid,
+        split_budget[0],
+    )
+    return (
+        _run_exiftool_with_retries(
+            file_paths[:mid], extra_args=extra_args, split_budget=split_budget
+        )
+        + _run_exiftool_with_retries(
+            file_paths[mid:], extra_args=extra_args, split_budget=split_budget
+        )
+    )
 
 
 def _group_tags(flat_dict):
@@ -94,7 +137,7 @@ def extract_metadata(file_paths, restricted_tags=None):
     # Process in batches
     for i in range(0, len(file_paths), _BATCH_SIZE):
         batch = file_paths[i:i + _BATCH_SIZE]
-        raw = _run_exiftool(batch, extra_args=restricted_tags)
+        raw = _run_exiftool_with_retries(batch, extra_args=restricted_tags)
         for entry in raw:
             source = entry.get("SourceFile")
             if source:
