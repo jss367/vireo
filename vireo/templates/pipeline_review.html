@@ -3535,7 +3535,8 @@ var grmState = {
   selectedIds: new Set(),
   selectionAnchor: null,
   touched: new Set(), // photo ids changed by the user before DB seeding lands
-  sessionId: 0        // bumped on each openGroupReview; used to drop stale fetches
+  sessionId: 0,       // bumped on each openGroupReview; used to drop stale fetches
+  applying: false
 };
 
 function isBrowseBurstReviewRequest() {
@@ -3829,7 +3830,8 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     seeded: false,
     // null = follow smart default; true/false = user explicitly set it.
     confirmSpeciesOverride: null,
-    applyFlagsOverride: null
+    applyFlagsOverride: null,
+    applying: false
   };
   _grmLoupeLocked = false;
   _grmZoomMultiplier = 1;
@@ -3909,6 +3911,25 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     // the user can either retry by reopening the burst or close out via ×.
     grmShowSeedError(items, selectPhotoId);
   });
+}
+
+function grmSetApplying(isApplying) {
+  if (!grmState) return;
+  grmState.applying = isApplying;
+  var btn = document.getElementById('grmApplyBtn');
+  if (!btn) return;
+  if (isApplying) {
+    btn.disabled = true;
+    btn.style.opacity = '0.7';
+    btn.style.cursor = 'wait';
+    btn.textContent = 'Applying…';
+    btn.title = 'Applying changes';
+  } else if (grmState.seeded) {
+    btn.disabled = false;
+    btn.style.opacity = '';
+    btn.style.cursor = '';
+    grmUpdateApplyLabel();
+  }
 }
 
 // /group/state failed. Render the cards with no flag state so the user can
@@ -4151,6 +4172,7 @@ function grmResolveChecks(diff) {
 function grmUpdateApplyLabel() {
   var btn = document.getElementById('grmApplyBtn');
   if (!btn) return;
+  if (grmState && grmState.applying) return;
   // While the modal is unseeded (loading or seed failed), the button owns
   // its own label/disabled state set by openGroupReview / grmShowSeedError.
   // Don't compute a diff against an empty/unknown dbState — it would
@@ -5233,40 +5255,44 @@ async function grmApply() {
     console.warn('grmApply called before /group/state seed completed; ignoring.');
     return;
   }
-  var diff = grmComputeDiff();
-  var checks = grmResolveChecks(diff);
-  var species = document.getElementById('grmSpecies').value.trim();
+  if (grmState.applying) return;
+  grmSetApplying(true);
 
-  // --- Flags side (picks/rejects/candidates + removed→detach) ---
-  // Only committed when the "Apply picks/rejects" box is checked. Removals are
-  // part of "cull changes", so the removed→detach block is gated here too.
-  if (checks.flags) {
-    var picksArr = Array.from(grmState.picks);
-    var rejectsArr = Array.from(grmState.rejects);
-    var candidatesArr = grmState.items
-      .filter(function(p) {
-        return !grmState.picks.has(p.id) && !grmState.rejects.has(p.id) && !grmState.removed.has(p.id);
-      })
-      .map(function(p) { return p.id; });
+  try {
+    var diff = grmComputeDiff();
+    var checks = grmResolveChecks(diff);
+    var species = document.getElementById('grmSpecies').value.trim();
 
-    // Persist flags to the database first. If this fails we abort so the local
-    // pipeline cache and the DB can't drift apart — the prior fire-and-forget
-    // save-cache + no-DB-write was the bug behind this whole change.
-    var applyResp;
-    try {
-      applyResp = await safeFetch('/api/pipeline/group/apply', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          picks: picksArr,
-          rejects: rejectsArr,
-          candidates: candidatesArr,
-        }),
-      });
-    } catch (e) {
-      console.error('Pipeline group apply failed:', e);
-      return;
-    }
+    // --- Flags side (picks/rejects/candidates + removed→detach) ---
+    // Only committed when the "Apply picks/rejects" box is checked. Removals are
+    // part of "cull changes", so the removed→detach block is gated here too.
+    if (checks.flags) {
+      var picksArr = Array.from(grmState.picks);
+      var rejectsArr = Array.from(grmState.rejects);
+      var candidatesArr = grmState.items
+        .filter(function(p) {
+          return !grmState.picks.has(p.id) && !grmState.rejects.has(p.id) && !grmState.removed.has(p.id);
+        })
+        .map(function(p) { return p.id; });
+
+      // Persist flags to the database first. If this fails we abort so the local
+      // pipeline cache and the DB can't drift apart — the prior fire-and-forget
+      // save-cache + no-DB-write was the bug behind this whole change.
+      var applyResp;
+      try {
+        applyResp = await safeFetch('/api/pipeline/group/apply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            picks: picksArr,
+            rejects: rejectsArr,
+            candidates: candidatesArr,
+          }),
+        });
+      } catch (e) {
+        console.error('Pipeline group apply failed:', e);
+        return;
+      }
 
     // Update local pipelineResults with pick/reject/candidate decisions
     var photoMap = {};
@@ -5392,52 +5418,62 @@ async function grmApply() {
   // /api/encounters/species loads the on-disk cache and re-saves it itself
   // (we adopt resp.encounters after) — so a local save-cache here would be a
   // no-op write on the wire.
-  if (grmState.source !== 'browse-selection' && checks.flags) {
-    await safeFetch('/api/pipeline/save-cache', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(pipelineResults),
-    });
-  }
+    if (grmState.source !== 'browse-selection' && checks.flags) {
+      await safeFetch('/api/pipeline/save-cache', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pipelineResults),
+      });
+    }
 
   // --- Species side ---
   // Server-owned now: tag all remaining (non-removed) burst frames + mark the
   // burst confirmed via the unified endpoint. Removed photos are excluded so
   // they aren't tagged. Skip when the burst no longer exists (emptied by the
   // detach above) or has no members left.
-  if (checks.species) {
-    var burstExists = grmState.source === 'browse-selection' ||
-      (pipelineResults.encounters[grmState.encIdx] &&
-       pipelineResults.encounters[grmState.encIdx].bursts &&
-       pipelineResults.encounters[grmState.encIdx].bursts[grmState.burstIdx]);
-    if (burstExists) {
-      // Post-apply burst members carry the species. Uses the same rule as the
-      // label/tooltip (grmSpeciesMemberItems): a removed photo is excluded only
-      // when its removal actually committed (checks.flags); otherwise it stays a
-      // member and gets tagged.
-      var memberIds = grmSpeciesMemberItems(checks).map(function(p) { return p.id; });
-      // A species-call failure intentionally throws out of grmApply *before*
-      // close, leaving the modal open so the user can retry. Any flags were
-      // already committed idempotently above, so a retry re-runs only the
-      // species side. No try/catch — propagating the throw is the desired
-      // "keep modal open" behavior.
-      await grmConfirmSpeciesCall(species, memberIds);
+    if (checks.species) {
+      var burstExists = grmState.source === 'browse-selection' ||
+        (pipelineResults.encounters[grmState.encIdx] &&
+         pipelineResults.encounters[grmState.encIdx].bursts &&
+         pipelineResults.encounters[grmState.encIdx].bursts[grmState.burstIdx]);
+      if (burstExists) {
+        // Post-apply burst members carry the species. Uses the same rule as the
+        // label/tooltip (grmSpeciesMemberItems): a removed photo is excluded only
+        // when its removal actually committed (checks.flags); otherwise it stays a
+        // member and gets tagged.
+        var memberIds = grmSpeciesMemberItems(checks).map(function(p) { return p.id; });
+        // A species-call failure intentionally throws out of grmApply *before*
+        // close, leaving the modal open so the user can retry. Any flags were
+        // already committed idempotently above, so a retry re-runs only the
+        // species side. No try/catch — propagating the throw is the desired
+        // "keep modal open" behavior.
+        await grmConfirmSpeciesCall(species, memberIds);
+      }
+    }
+
+    // Browse-selection is a one-shot handoff: drop it on close regardless of
+    // which side was committed, so a reload degrades to normal review instead
+    // of reopening a burst whose edits already landed. (Idempotent with the
+    // call inside the flags block above.)
+    if (grmState.source === 'browse-selection') {
+      clearBrowseBurstHandoff();
+    }
+
+    closeGroupReview();
+    // Clear the species input for next use
+    document.getElementById('grmSpecies').value = '';
+    window.requestAnimationFrame(function() {
+      window.setTimeout(function() {
+        renderResults();
+        updateSummaryBar(refreshLocalSummaryCounts());
+      }, 0);
+    });
+  } finally {
+    var overlay = document.getElementById('grmOverlay');
+    if (overlay && overlay.classList.contains('open')) {
+      grmSetApplying(false);
     }
   }
-
-  // Browse-selection is a one-shot handoff: drop it on close regardless of
-  // which side was committed, so a reload degrades to normal review instead
-  // of reopening a burst whose edits already landed. (Idempotent with the
-  // call inside the flags block above.)
-  if (grmState.source === 'browse-selection') {
-    clearBrowseBurstHandoff();
-  }
-
-  closeGroupReview();
-  // Clear the species input for next use
-  document.getElementById('grmSpecies').value = '';
-  renderResults();
-  updateSummaryBar(refreshLocalSummaryCounts());
 }
 
 initPipelineReviewPage();
