@@ -1708,6 +1708,7 @@ var inatSubmitted = {};  // {photo_id: true}
 var colorLabels = {};    // {photo_id: color_string}
 var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch responses
 var loadEpoch = 0;       // bumped on any grid reset; guards against stale loadPhotos responses
+var selectAllRequestSeq = 0; // bumped to ignore stale async select-all responses
 var filterRating = 0;
 var flagFilter = '';
 var activeFolderId = null;
@@ -3025,10 +3026,16 @@ async function saveCollection() {
 /* ---------- Photo Loading ---------- */
 function resetAndLoad() {
   cancelScheduledSearchFilter();
+  if (clipSearchActive) {
+    clipSearchActive = false;
+    document.getElementById('clipSearchInput').value = '';
+    document.getElementById('clipClearBtn').style.display = 'none';
+  }
   photos = [];
   currentPage = 1;
   allLoaded = false;
   loadEpoch++;
+  selectAllRequestSeq++;
   loading = false;
   // Dataset is about to change; any prior selection (multi-select Set or
   // single-focus id) points at photos that may not exist in the new view.
@@ -3045,6 +3052,28 @@ function resetAndLoad() {
   loadPhotos();
 }
 
+function buildCurrentBrowseParams() {
+  var params = new URLSearchParams();
+  params.set('sort', document.getElementById('sortSelect').value);
+
+  if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (filterRating > 0) params.set('rating_min', filterRating);
+  if (flagFilter) params.set('flag', flagFilter);
+
+  var colorFilter = document.getElementById('colorFilter').value;
+  if (colorFilter) params.set('color_label', colorFilter);
+
+  var dateFrom = document.getElementById('dateFrom').value;
+  var dateTo = document.getElementById('dateTo').value;
+  if (dateFrom) params.set('date_from', dateFrom);
+  if (dateTo) params.set('date_to', dateTo);
+
+  var search = document.getElementById('searchInput').value.trim();
+  if (search) params.set('keyword', search);
+  if (activeKeyword) params.set('keyword', activeKeyword);
+  return params;
+}
+
 async function loadPhotos() {
   if (loading || allLoaded) return;
   loading = true;
@@ -3059,26 +3088,9 @@ async function loadPhotos() {
     cparams.set('per_page', perPage);
     url = '/api/collections/' + activeCollectionId + '/photos?' + cparams.toString();
   } else {
-    var params = new URLSearchParams();
+    var params = buildCurrentBrowseParams();
     params.set('page', currentPage);
     params.set('per_page', perPage);
-    params.set('sort', document.getElementById('sortSelect').value);
-
-    if (activeFolderId) params.set('folder_id', activeFolderId);
-    if (filterRating > 0) params.set('rating_min', filterRating);
-    if (flagFilter) params.set('flag', flagFilter);
-
-    var colorFilter = document.getElementById('colorFilter').value;
-    if (colorFilter) params.set('color_label', colorFilter);
-
-    var dateFrom = document.getElementById('dateFrom').value;
-    var dateTo = document.getElementById('dateTo').value;
-    if (dateFrom) params.set('date_from', dateFrom);
-    if (dateTo) params.set('date_to', dateTo);
-
-    var search = document.getElementById('searchInput').value.trim();
-    if (search) params.set('keyword', search);
-    if (activeKeyword) params.set('keyword', activeKeyword);
     url = '/api/photos?' + params.toString();
   }
 
@@ -3365,6 +3377,9 @@ async function runClipSearch() {
     return;
   }
 
+  loadEpoch++;
+  selectAllRequestSeq++;
+  var epoch = loadEpoch;
   photos = [];
   allLoaded = true;
   selectedPhotos.clear();
@@ -3383,6 +3398,7 @@ async function runClipSearch() {
     params.set('limit', 100);
     params.set('threshold', 0.15);
     var data = await safeFetch('/api/photos/search?' + params.toString());
+    if (epoch !== loadEpoch) return;
 
     if (data.reason) {
       var msg = {
@@ -3653,6 +3669,56 @@ function getActiveSelection() {
   return [];
 }
 
+async function selectAllMatchingPhotos() {
+  anchorRestoreEpoch++;
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  var requestSeq = ++selectAllRequestSeq;
+  var requestEpoch = loadEpoch;
+
+  if (clipSearchActive) {
+    var query = document.getElementById('clipSearchInput').value.trim();
+    if (!query) return;
+    var searchParams = new URLSearchParams();
+    searchParams.set('q', query);
+    searchParams.set('threshold', 0.15);
+    searchParams.set('ids_only', '1');
+    showToast('Selecting all matching search results...');
+    try {
+      var searchData = await safeFetch('/api/photos/search?' + searchParams.toString(), {}, { toast: false });
+      if (requestSeq !== selectAllRequestSeq || requestEpoch !== loadEpoch) return;
+      selectedPhotos.clear();
+      (searchData.photo_ids || []).forEach(function(id) { selectedPhotos.add(id); });
+      renderGrid();
+      updateBatchBar();
+      showToast('Selected ' + selectedPhotos.size.toLocaleString() + ' search result' + (selectedPhotos.size === 1 ? '' : 's'));
+    } catch(e) {
+      showToast('Could not select all search results: ' + (e.message || e), 'error');
+    }
+    return;
+  }
+
+  var url;
+  if (activeCollectionId) {
+    url = '/api/collections/' + activeCollectionId + '/photo-ids';
+  } else {
+    url = '/api/photos/ids?' + buildCurrentBrowseParams().toString();
+  }
+
+  showToast('Selecting all matching photos...');
+  try {
+    var data = await safeFetch(url, {}, { toast: false });
+    if (requestSeq !== selectAllRequestSeq || requestEpoch !== loadEpoch) return;
+    selectedPhotos.clear();
+    (data.photo_ids || []).forEach(function(id) { selectedPhotos.add(id); });
+    renderGrid();
+    updateBatchBar();
+    showToast('Selected ' + selectedPhotos.size.toLocaleString() + ' photo' + (selectedPhotos.size === 1 ? '' : 's'));
+  } catch(e) {
+    showToast('Could not select all photos: ' + (e.message || e), 'error');
+  }
+}
+
 function selectionIdsKey(ids) {
   return ids.slice().sort(function(a, b) { return a - b; }).join(',');
 }
@@ -3696,7 +3762,7 @@ function updateBatchBar() {
   var ids = getActiveSelection();
   if (ids.length >= 1) {
     bar.style.display = 'flex';
-    document.getElementById('batchCount').textContent = ids.length + ' selected';
+    document.getElementById('batchCount').textContent = ids.length.toLocaleString() + ' selected';
   } else {
     bar.style.display = 'none';
   }
@@ -3900,7 +3966,17 @@ function updateSelectionPanel(ids) {
   if (summary) summary.classList.add('hidden');
   if (detail) detail.classList.toggle('visible', detailMatchesSelectedPhoto());
   panel.classList.remove('hidden');
-  document.getElementById('selectionCount').textContent = ids.length + ' photos selected';
+  document.getElementById('selectionCount').textContent = ids.length.toLocaleString() + ' photos selected';
+  if (ids.length > 1000) {
+    selectionKeywordKey = selectionIdsKey(ids);
+    selectionKeywordMissingById = {};
+    selectionKeywordRequestSeq++;
+    var list = document.getElementById('selectionKeywordSuggestions');
+    if (list) {
+      list.innerHTML = '<div class="selection-empty">Keyword suggestions are available for selections of 1,000 photos or fewer.</div>';
+    }
+    return;
+  }
   loadSelectionKeywordSuggestions(ids);
 }
 
@@ -5506,9 +5582,7 @@ document.addEventListener('keydown', function(e) {
   // Select all
   if (matchesShortcut(e, _shortcuts.select_all)) {
     e.preventDefault();
-    photos.forEach(function(p) { selectedPhotos.add(p.id); });
-    renderGrid();
-    updateBatchBar();
+    selectAllMatchingPhotos();
     return;
   }
 

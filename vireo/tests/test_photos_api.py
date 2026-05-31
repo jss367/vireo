@@ -1,3 +1,9 @@
+import sys
+import types
+
+import numpy as np
+
+
 def test_api_photos_default(app_and_db):
     """GET /api/photos returns all photos."""
     app, _ = app_and_db
@@ -33,6 +39,62 @@ def test_api_photos_filter_folder(app_and_db):
     data = resp.get_json()
     assert len(data['photos']) == 1
     assert data['photos'][0]['filename'] == 'bird2.jpg'
+
+
+def test_api_photo_ids_matches_browse_filters(app_and_db):
+    """GET /api/photos/ids returns every ID matching the current Browse filters."""
+    app, db = app_and_db
+    folders = db.get_folder_tree()
+    jan = [f for f in folders if f['name'] == 'January'][0]
+    expected = [p["id"] for p in db.get_photos(folder_id=jan["id"], sort="name")]
+
+    client = app.test_client()
+    resp = client.get(f'/api/photos/ids?folder_id={jan["id"]}&sort=name')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["photo_ids"] == expected
+    assert data["total"] == len(expected)
+
+
+def test_api_photo_search_ids_only_returns_all_matches(app_and_db, monkeypatch):
+    """GET /api/photos/search?ids_only=1 returns all CLIP match IDs, not the page."""
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    by_name = {p["filename"]: p["id"] for p in photos}
+    model_name = "test-clip"
+
+    db.upsert_photo_embedding(
+        by_name["bird1.jpg"], model_name, np.array([0.95, 0.0], dtype=np.float32).tobytes()
+    )
+    db.upsert_photo_embedding(
+        by_name["bird2.jpg"], model_name, np.array([0.8, 0.0], dtype=np.float32).tobytes()
+    )
+    db.upsert_photo_embedding(
+        by_name["bird3.jpg"], model_name, np.array([0.1, 0.0], dtype=np.float32).tobytes()
+    )
+
+    import models
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "name": model_name,
+        "model_type": "bioclip",
+        "model_str": "fake",
+        "weights_path": "",
+    })
+    monkeypatch.setitem(
+        sys.modules,
+        "text_encoder",
+        types.SimpleNamespace(
+            encode_text=lambda *_args, **_kwargs: np.array([1.0, 0.0], dtype=np.float32)
+        ),
+    )
+
+    client = app.test_client()
+    resp = client.get('/api/photos/search?q=bird&threshold=0.15&limit=1&ids_only=1')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["photo_ids"] == [by_name["bird1.jpg"], by_name["bird2.jpg"]]
+    assert data["total_matches"] == 2
+    assert "results" not in data
 
 
 def test_api_photos_filter_rating(app_and_db):
