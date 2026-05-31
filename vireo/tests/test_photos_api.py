@@ -176,6 +176,57 @@ def test_api_photos_rejects_unknown_flag_filter(app_and_db):
     assert resp.status_code == 400
 
 
+def test_api_photo_best_batch_ranks_filename_sequence(app_and_db):
+    """GET /api/photos/<id>/best-batch finds adjacent camera frames and ranks them."""
+    app, db = app_and_db
+    folder_id = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", ('/photos/2024',)
+    ).fetchone()["id"]
+    pids = []
+    for idx, sharp in enumerate([10, 80, 30], start=3069):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=f"DSC_{idx}.jpg",
+            extension=".jpg",
+            file_size=1000 + idx,
+            file_mtime=float(idx),
+            timestamp=f"2024-03-01T12:00:0{idx - 3069}",
+        )
+        db.conn.execute(
+            """UPDATE photos
+               SET mask_path = 'mask.png',
+                   subject_tenengrad = ?,
+                   bg_tenengrad = 5,
+                   crop_complete = 1,
+                   bg_separation = 0,
+                   subject_clip_high = 0,
+                   subject_clip_low = 0,
+                   subject_y_median = 115,
+                   subject_size = 0.05,
+                   noise_estimate = 1
+               WHERE id = ?""",
+            (sharp, pid),
+        )
+        pids.append(pid)
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pids[1]}/best-batch")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["scope_method"] == "filename_sequence"
+    assert data["photo_ids"] == pids
+    assert data["best_photo_id"] == pids[1]
+    assert data["best_filename"] == "DSC_3070.jpg"
+    assert data["sequence_range"] == [3069, 3071]
+    assert data["cards"][0]["role"] == "best"
+
+    selected = client.post("/api/photos/best-batch", json={"photo_ids": pids}).get_json()
+    assert selected["scope_method"] == "selected_photos"
+    assert selected["best_photo_id"] == pids[1]
+
+
 def test_api_set_flag_queues_xmp_when_enabled(app_and_db):
     """POST /api/photos/<id>/flag queues a flag sync when configured."""
     import config as cfg

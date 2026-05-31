@@ -416,6 +416,146 @@ body {
 }
 .capture-time-before { color: var(--text-muted); }
 .capture-time-after { color: var(--accent); }
+
+.best-batch-modal {
+  width: min(1120px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+}
+.best-batch-head {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) 1fr;
+  gap: 16px;
+  min-height: 240px;
+}
+.best-batch-pick {
+  position: relative;
+  background: var(--bg-primary);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.best-batch-pick img {
+  width: 100%;
+  aspect-ratio: 3/2;
+  object-fit: cover;
+  display: block;
+  background: var(--bg-tertiary);
+}
+.best-batch-pick-meta {
+  padding: 10px 12px;
+}
+.best-batch-eyebrow {
+  font-size: 10px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}
+.best-batch-title {
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.best-batch-score {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.best-batch-summary {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.best-batch-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+.best-batch-reason {
+  border: 1px solid var(--border-primary);
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  background: var(--bg-tertiary);
+}
+.best-batch-list {
+  margin-top: 16px;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+  padding-right: 4px;
+}
+.best-batch-card {
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+.best-batch-card.best { border-color: var(--accent); }
+.best-batch-card.reject { opacity: 0.72; }
+.best-batch-card img {
+  width: 100%;
+  aspect-ratio: 3/2;
+  object-fit: cover;
+  display: block;
+}
+.best-batch-card-body {
+  padding: 7px 8px;
+  min-height: 88px;
+}
+.best-batch-card-name {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.best-batch-card-line {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.best-batch-role {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.best-batch-role.best { color: var(--accent); }
+.best-batch-role.alternate { color: var(--warning); }
+.best-batch-role.reject { color: var(--danger); }
+.best-batch-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+.best-batch-empty {
+  padding: 28px;
+  text-align: center;
+  color: var(--text-dim);
+}
+@media (max-width: 760px) {
+  .best-batch-head {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+  .best-batch-actions {
+    flex-wrap: wrap;
+    justify-content: stretch;
+  }
+  .best-batch-actions .modal-btn {
+    flex: 1 1 150px;
+  }
+}
+
 .detail-close {
   float: right;
   background: none;
@@ -1217,6 +1357,7 @@ body {
       <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
       <button onclick="openCaptureTimeModal()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Adjust Time</button>
       <button id="compareBtn" onclick="openBrowseCompare()" title="Compare two selected photos side by side" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Compare</button>
+      <button id="bestBatchBtn" onclick="openBestBatch()" title="Find and rank neighboring frames around the selected photo" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Best Batch</button>
       <button id="burstReviewBtn" onclick="openSelectedInBurstReview()" title="Open selected photos in burst review" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Review Burst</button>
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
       <button onclick="openInEditorBatch(event)" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Open in Editor</button>
@@ -1457,6 +1598,20 @@ body {
   </div>
 </div>
 
+<!-- Best Batch Modal -->
+<div class="modal-overlay" id="bestBatchModal">
+  <div class="modal best-batch-modal">
+    <h3>Best Batch</h3>
+    <div id="bestBatchContent" class="best-batch-empty">Loading batch...</div>
+    <div class="best-batch-actions">
+      <button class="modal-btn modal-btn-cancel" onclick="hideBestBatch()">Close</button>
+      <button class="modal-btn" id="bestBatchReviewBtn" onclick="openBestBatchInReview()" style="background:var(--bg-tertiary);color:var(--text-secondary);">Review Burst</button>
+      <button class="modal-btn modal-btn-primary" id="bestBatchFlagBtn" onclick="applyBestBatchPickOnly()">Flag Best</button>
+      <button class="modal-btn" id="bestBatchRejectBtn" onclick="applyBestBatchPickAndReject()" style="background:var(--danger);color:white;">Flag Best + Reject Rest</button>
+    </div>
+  </div>
+</div>
+
 <!-- Capture Time Modal -->
 <div class="modal-overlay" id="captureTimeModal">
   <div class="modal" style="width:720px;max-width:calc(100vw - 32px);">
@@ -1564,6 +1719,7 @@ var selectedDay = null;
 var calendarData = null;
 var clipSearchActive = false;
 var searchFilterTimer = null;
+var bestBatchData = null;
 var keywordAutocompleteCache = null;
 var keywordAutocompletePromise = null;
 var keywordAutocompleteStates = {};
@@ -3506,6 +3662,14 @@ function updateCompareButton(ids) {
   btn.disabled = !canCompare;
 }
 
+function updateBestBatchButton(ids) {
+  var btn = document.getElementById('bestBatchBtn');
+  if (!btn) return;
+  var canFind = ids.length >= 1;
+  btn.style.display = canFind ? '' : 'none';
+  btn.disabled = !canFind;
+}
+
 function updateBurstReviewButton(ids) {
   var btn = document.getElementById('burstReviewBtn');
   if (!btn) return;
@@ -3529,6 +3693,7 @@ function updateBatchBar() {
     bar.style.display = 'none';
   }
   updateCompareButton(ids);
+  updateBestBatchButton(ids);
   updateBurstReviewButton(ids);
   updateSelectionPanel(ids);
 }
@@ -3550,6 +3715,173 @@ function openSelectedInBurstReview() {
     return;
   }
   window.location.href = '/pipeline/review?browse_burst=1';
+}
+
+function bestBatchSeedId() {
+  if (selectedPhotoId != null) return selectedPhotoId;
+  var ids = getActiveSelection();
+  return ids.length ? ids[0] : null;
+}
+
+function hideBestBatch() {
+  var modal = document.getElementById('bestBatchModal');
+  if (modal) modal.classList.remove('open');
+}
+
+function bestBatchRoleLabel(role) {
+  if (role === 'best') return 'Best';
+  if (role === 'alternate') return 'Alt';
+  return 'Reject';
+}
+
+function bestBatchScoreText(card) {
+  var parts = [];
+  if (card.quality_pct != null) parts.push('Q ' + card.quality_pct);
+  if (card.focus != null) parts.push('F ' + Math.round(card.focus * 100));
+  if (card.sharpness != null) parts.push('S ' + Math.round(card.sharpness));
+  return parts.join(' · ') || 'No score';
+}
+
+function renderBestBatch(data) {
+  bestBatchData = data;
+  var content = document.getElementById('bestBatchContent');
+  if (!content) return;
+  var best = (data.cards || []).find(function(c) { return c.id === data.best_photo_id; }) || (data.cards || [])[0];
+  if (!best) {
+    content.className = 'best-batch-empty';
+    content.textContent = 'No scored photos found in this batch.';
+    return;
+  }
+  var countText = data.count + ' photos';
+  if (data.sequence_range) {
+    countText += ' · #' + data.sequence_range[0] + '–' + data.sequence_range[1];
+  }
+  var reasonHtml = (data.best_reasons || []).map(function(r) {
+    return '<span class="best-batch-reason">' + escapeHtml(r) + '</span>';
+  }).join('');
+  var cards = (data.cards || []).map(function(card) {
+    var reasons = (card.reasons || []).slice(0, 2).map(escapeHtml).join(' · ');
+    return '<div class="best-batch-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
+      '<img src="/thumbnails/' + card.id + '.jpg" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
+      '<div class="best-batch-card-body">' +
+        '<div class="best-batch-role ' + escapeAttr(card.role || '') + '">#' + card.rank + ' ' + bestBatchRoleLabel(card.role) + '</div>' +
+        '<div class="best-batch-card-name" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
+        '<div class="best-batch-card-line">' + escapeHtml(bestBatchScoreText(card)) + '</div>' +
+        '<div class="best-batch-card-line">' + reasons + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+  content.className = '';
+  content.innerHTML =
+    '<div class="best-batch-head">' +
+      '<div class="best-batch-pick">' +
+        '<img src="/thumbnails/' + best.id + '.jpg" alt="' + escapeAttr(best.filename || '') + '">' +
+        '<div class="best-batch-pick-meta">' +
+          '<div class="best-batch-eyebrow">Best Pick</div>' +
+          '<div class="best-batch-title">' + escapeHtml(best.filename || '') + '</div>' +
+          '<div class="best-batch-score">' + escapeHtml(bestBatchScoreText(best)) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="best-batch-summary">' +
+        '<div class="best-batch-eyebrow">' + escapeHtml(countText) + '</div>' +
+        '<div>' + escapeHtml(best.filename || 'This photo') + ' is the top-ranked frame in the detected batch.</div>' +
+        '<div class="best-batch-reasons">' + reasonHtml + '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="best-batch-list">' + cards + '</div>';
+}
+
+async function openBestBatch() {
+  var seedId = bestBatchSeedId();
+  var ids = getActiveSelection();
+  if (!seedId) {
+    showToast('Select a photo first.', 'error');
+    return;
+  }
+  bestBatchData = null;
+  var modal = document.getElementById('bestBatchModal');
+  var content = document.getElementById('bestBatchContent');
+  if (content) {
+    content.className = 'best-batch-empty';
+    content.textContent = 'Loading batch...';
+  }
+  if (modal) modal.classList.add('open');
+  try {
+    var data;
+    if (ids.length >= 2) {
+      data = await safeFetch('/api/photos/best-batch', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({photo_ids: ids}),
+      }, { toast: false });
+    } else {
+      data = await safeFetch('/api/photos/' + seedId + '/best-batch', {}, { toast: false });
+    }
+    renderBestBatch(data);
+  } catch (e) {
+    if (content) {
+      content.className = 'best-batch-empty';
+      content.textContent = e && e.message ? e.message : 'Could not rank this batch.';
+    }
+  }
+}
+
+function openBestBatchInReview() {
+  if (!bestBatchData || !bestBatchData.photo_ids || bestBatchData.photo_ids.length < 2) return;
+  try {
+    window.sessionStorage.setItem('vireo.browseBurstReviewIds', JSON.stringify(bestBatchData.photo_ids));
+  } catch (e) {
+    showToast('Could not open burst review for this batch.', 'error');
+    return;
+  }
+  window.location.href = '/pipeline/review?browse_burst=1';
+}
+
+async function applyBestBatchPickOnly() {
+  if (!bestBatchData || !bestBatchData.best_photo_id) return;
+  var bestId = bestBatchData.best_photo_id;
+  try {
+    await safeFetch('/api/batch/flag', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [bestId], flag: 'flagged'}),
+    });
+  } catch(e) { return; }
+  var p = photos.find(function(x) { return x.id === bestId; });
+  if (p) p.flag = 'flagged';
+  refreshGridCards([bestId]);
+  scheduleCollectionCountsRefresh();
+  showUndoToast();
+  showToast('Flagged best photo.', 'success');
+}
+
+async function applyBestBatchPickAndReject() {
+  if (!bestBatchData || !bestBatchData.best_photo_id) return;
+  var bestId = bestBatchData.best_photo_id;
+  var rejectIds = (bestBatchData.suggested_reject_ids || []).filter(function(id) { return id !== bestId; });
+  try {
+    await safeFetch('/api/batch/flag', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [bestId], flag: 'flagged'}),
+    });
+    if (rejectIds.length) {
+      await safeFetch('/api/batch/flag', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({photo_ids: rejectIds, flag: 'rejected'}),
+      });
+    }
+  } catch(e) { return; }
+  [bestId].concat(rejectIds).forEach(function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    if (p) p.flag = id === bestId ? 'flagged' : 'rejected';
+  });
+  refreshGridCards([bestId].concat(rejectIds));
+  scheduleCollectionCountsRefresh();
+  showUndoToast();
+  showToast('Applied best-batch flags.', 'success');
+  hideBestBatch();
 }
 
 function updateSelectionPanel(ids) {
@@ -5398,6 +5730,8 @@ function buildPhotoContextMenu(photoIds) {
       onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
     { label: 'Compare', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openBrowseCompare(); } },
+    { label: 'Best Batch',
+      onClick: function() { openBestBatch(); } },
     { label: 'Review Burst', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openSelectedInBurstReview(); } },
   ].concat(buildOpenInEditorMenuItems(photoIds)).concat([
