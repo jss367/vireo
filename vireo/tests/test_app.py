@@ -591,6 +591,31 @@ def test_encounter_species_confirm(app_and_db):
     assert len(kw_adds) == len(photo_ids)
 
 
+def test_encounter_species_confirm_ignores_corrupt_pipeline_cache(app_and_db):
+    """A bad pipeline cache must not turn species confirmation into a 500."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    photo_id = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 1").fetchone()["id"]
+    cache_dir = os.path.dirname(db._db_path)
+    cache_path = os.path.join(cache_dir, f"pipeline_results_ws{db._active_workspace_id}.json")
+    with open(cache_path, "w") as f:
+        f.write('{"photos": [], "encounters": [{"photo_ids"')
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+
+    assert resp.status_code == 200
+    assert any(t["name"] == "Blue Jay" for t in db.get_photo_keywords(photo_id))
+    assert not os.path.exists(cache_path)
+    assert len([
+        name for name in os.listdir(cache_dir)
+        if name.startswith(f"pipeline_results_ws{db._active_workspace_id}.json.corrupt-")
+    ]) == 1
+
+
 def test_encounter_species_validation(app_and_db):
     """POST /api/encounters/species validates required fields."""
     app, _ = app_and_db

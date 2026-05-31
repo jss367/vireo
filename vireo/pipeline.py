@@ -13,11 +13,73 @@ import json
 import logging
 import math
 import os
+import tempfile
+import time
 from collections import defaultdict
+from contextlib import suppress
 
 import numpy as np
 
 log = logging.getLogger(__name__)
+
+
+def _results_cache_path(cache_dir, workspace_id):
+    return os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
+
+
+def _atomic_json_dump(data, path):
+    """Write JSON via same-directory temp file, then atomically replace."""
+    cache_dir = os.path.dirname(path) or "."
+    os.makedirs(cache_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+        dir=cache_dir,
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp_path, path)
+    except Exception:
+        with suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+
+
+def _quarantine_corrupt_cache(path, exc):
+    backup = f"{path}.corrupt-{int(time.time())}"
+    n = 1
+    while os.path.exists(backup):
+        n += 1
+        backup = f"{path}.corrupt-{int(time.time())}-{n}"
+    try:
+        os.replace(path, backup)
+    except OSError:
+        log.warning(
+            "Pipeline cache at %s is invalid JSON and could not be moved aside: %s",
+            path,
+            exc,
+        )
+        return None
+    log.warning(
+        "Pipeline cache at %s is invalid JSON; moved corrupt file to %s: %s",
+        path,
+        backup,
+        exc,
+    )
+    return backup
+
+
+def _load_results_json(path):
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except json.JSONDecodeError as exc:
+        _quarantine_corrupt_cache(path, exc)
+        return None
 
 # Columns needed from photos table for pipeline stages 2-6
 _PIPELINE_PHOTO_COLS = """
@@ -828,7 +890,7 @@ def save_results(results, cache_dir, workspace_id):
         path to the saved JSON file
     """
     serialized = serialize_results(results)
-    path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
+    path = _results_cache_path(cache_dir, workspace_id)
     # Preserve miss_computed_at across reflow/regroup-live saves: it's
     # written by pipeline_job's miss_stage and gates the review UI's
     # "Review misses" shortcut on whether misses were recomputed in
@@ -836,15 +898,10 @@ def save_results(results, cache_dir, workspace_id):
     # so overwriting this marker with a fresh save would make the
     # shortcut hide itself after every threshold tweak.
     if "miss_computed_at" not in serialized and os.path.exists(path):
-        try:
-            with open(path) as f:
-                existing = json.load(f)
-            if existing.get("miss_computed_at"):
-                serialized["miss_computed_at"] = existing["miss_computed_at"]
-        except (OSError, json.JSONDecodeError):
-            pass
-    with open(path, "w") as f:
-        json.dump(serialized, f)
+        existing = _load_results_json(path)
+        if existing and existing.get("miss_computed_at"):
+            serialized["miss_computed_at"] = existing["miss_computed_at"]
+    _atomic_json_dump(serialized, path)
     log.info("Pipeline results saved to %s", path)
     return path
 
@@ -859,11 +916,10 @@ def load_results(cache_dir, workspace_id):
     Returns:
         dict or None if no cache exists
     """
-    path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
-    if not os.path.exists(path):
+    path = _results_cache_path(cache_dir, workspace_id)
+    data = _load_results_json(path)
+    if data is None:
         return None
-    with open(path) as f:
-        data = json.load(f)
     refresh_serialized_summary(data)
     return data
 
@@ -894,11 +950,10 @@ def prune_missing_photos(cache_dir, workspace_id, db):
 
     Returns True if the cache was rewritten, False otherwise.
     """
-    path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
-    if not os.path.exists(path):
+    path = _results_cache_path(cache_dir, workspace_id)
+    data = _load_results_json(path)
+    if data is None:
         return False
-    with open(path) as f:
-        data = json.load(f)
     cached_ids = [p.get("id") for p in data.get("photos", []) if p.get("id") is not None]
     if not cached_ids:
         return False
@@ -938,11 +993,10 @@ def prune_results(cache_dir, workspace_id, deleted_ids):
     """
     if not deleted_ids:
         return False
-    path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
-    if not os.path.exists(path):
+    path = _results_cache_path(cache_dir, workspace_id)
+    data = _load_results_json(path)
+    if data is None:
         return False
-    with open(path) as f:
-        data = json.load(f)
 
     deleted = set(deleted_ids)
     cached_ids = {p.get("id") for p in data.get("photos", [])}
@@ -983,8 +1037,7 @@ def prune_results(cache_dir, workspace_id, deleted_ids):
 
     refresh_serialized_summary(data)
 
-    with open(path, "w") as f:
-        json.dump(data, f)
+    _atomic_json_dump(data, path)
     log.info(
         "Pipeline cache pruned at %s: removed %d photo(s)",
         path,
@@ -999,11 +1052,8 @@ def load_results_raw(cache_dir, workspace_id):
     Unlike load_results, this returns the dict exactly as stored on disk,
     for in-place mutation by structural edits (detach, species confirm).
     """
-    path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
-    if not os.path.exists(path):
-        return None
-    with open(path) as f:
-        return json.load(f)
+    path = _results_cache_path(cache_dir, workspace_id)
+    return _load_results_json(path)
 
 
 def _count_stage_targets(db):
@@ -1282,9 +1332,8 @@ def rebuild_species_predictions(results, photo_ids):
 def save_results_raw(results, cache_dir, workspace_id):
     """Save an already-serialized results dict back to the JSON cache."""
     refresh_serialized_summary(results)
-    path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
-    with open(path, "w") as f:
-        json.dump(results, f)
+    path = _results_cache_path(cache_dir, workspace_id)
+    _atomic_json_dump(results, path)
     return path
 
 

@@ -3887,10 +3887,9 @@ var _PILL_LABELS = {
 // staleness signal. Returns the literal string to display.
 //
 // The plan endpoint emits `state: 'will-run'` for both fresh and
-// outdated cases; the distinction lives in `detail.fingerprint_outdated`
-// / `detail.fingerprint_invalidated`. We surface that here as a distinct
-// "Outdated" label so users see settings-changed staleness directly,
-// not buried in the summary text.
+// settings-changed cases; the distinction lives in
+// `detail.fingerprint_outdated` / `detail.fingerprint_invalidated`.
+// Classify gets a more specific label when only the BioCLIP label set changed.
 function _formatPillLabel(stage, planEntry, state) {
   // Special-cased states (running/done/failed/will-skip) have static
   // labels — counts during a run come from a separate channel.
@@ -3908,11 +3907,16 @@ function _formatPillLabel(stage, planEntry, state) {
   var pending  = (typeof detail.pending  === 'number') ? detail.pending  : null;
   var eligible = (typeof detail.eligible === 'number') ? detail.eligible : null;
   var outdated = !!(detail.fingerprint_outdated || detail.fingerprint_invalidated);
+  var labelSetChanged = outdated
+    && stage
+    && stage.suffix === 'Classify'
+    && detail.fingerprint_reason === 'label_set_changed';
 
   // No quantifiable work — fall back to the state-only label, but still
   // surface the outdated flag for stages that don't have a per-photo
   // unit (e.g., Group emits fingerprint_outdated with no eligible count).
   if (eligible === null || eligible === 0) {
+    if (state === 'will-run' && labelSetChanged) return 'Different label set';
     if (state === 'will-run' && outdated) return 'Outdated';
     return state === 'done-prior' ? 'Already done' : 'Will run';
   }
@@ -3922,6 +3926,7 @@ function _formatPillLabel(stage, planEntry, state) {
   }
 
   // state === 'will-run' from here on.
+  if (labelSetChanged)           return 'Different label set (' + (pending || eligible) + ' to classify)';
   if (outdated)                  return 'Outdated (' + (pending || eligible) + ' to redo)';
   if (pending !== null && pending > 0 && pending < eligible) {
     return 'Resume (' + pending + ' left)';
