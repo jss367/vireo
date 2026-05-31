@@ -54,6 +54,7 @@ async function checkPendingSync() {
 async function runSync(changeIds) {
   var status = document.getElementById('syncStatus');
   status.textContent = 'Syncing...';
+  status.style.color = 'var(--text-dim)';
   try {
     var requestOptions = {method: 'POST'};
     if (Array.isArray(changeIds)) {
@@ -71,6 +72,8 @@ async function runSync(changeIds) {
       onProgress: function(p) {
         if (p.total > 0) {
           status.textContent = 'Writing XMP: ' + p.current + '/' + p.total;
+        } else if (p.current_file || p.phase) {
+          status.textContent = p.current_file || p.phase;
         }
       },
       onComplete: function(result) {

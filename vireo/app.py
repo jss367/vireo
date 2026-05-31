@@ -1750,6 +1750,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     threading.Thread(target=_folder_health_loop, daemon=True).start()
 
     app._job_runner = JobRunner(db=init_db)
+    # XMP sidecars are read-modify-written files; serialize sync jobs so
+    # repeated clicks cannot race while touching the same sidecar.
+    app._sync_job_lock = threading.Lock()
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
 
@@ -11967,10 +11970,48 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     {
                         "current": current,
                         "total": total,
+                        "current_file": "Writing XMP metadata...",
+                        "phase": "Writing XMP metadata",
                     },
                 )
 
-            return sync_to_xmp(thread_db, progress_callback=progress_cb, change_ids=change_ids)
+            lock_acquired = app._sync_job_lock.acquire(blocking=False)
+            if not lock_acquired:
+                runner.push_event(
+                    job["id"],
+                    "progress",
+                    {
+                        "current": 0,
+                        "total": 0,
+                        "current_file": "Waiting for current XMP sync...",
+                        "phase": "Waiting for current XMP sync",
+                    },
+                )
+                while not lock_acquired:
+                    if runner.is_cancelled(job["id"]):
+                        return {"synced": 0, "failed": 0, "failures": []}
+                    lock_acquired = app._sync_job_lock.acquire(timeout=0.1)
+
+            try:
+                if runner.is_cancelled(job["id"]):
+                    return {"synced": 0, "failed": 0, "failures": []}
+                runner.push_event(
+                    job["id"],
+                    "progress",
+                    {
+                        "current": 0,
+                        "total": 0,
+                        "current_file": "Preparing XMP sync...",
+                        "phase": "Preparing XMP sync",
+                    },
+                )
+                return sync_to_xmp(
+                    thread_db,
+                    progress_callback=progress_cb,
+                    change_ids=change_ids,
+                )
+            finally:
+                app._sync_job_lock.release()
 
         config = {"change_ids": change_ids} if change_ids is not None else {}
         job_id = runner.start("sync", work, config=config, workspace_id=active_ws)

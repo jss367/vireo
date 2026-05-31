@@ -3,11 +3,12 @@
 import json
 import os
 import sys
+import threading
 import time
 from types import SimpleNamespace
 
 from PIL import Image
-from wait import wait_for_job_via_client
+from wait import wait_for_job_via_client, wait_for_job_via_runner
 
 
 def _stub_classify_job(monkeypatch, sleep=0.2):
@@ -360,3 +361,124 @@ def test_job_sync_rejects_empty_selected_change_ids(app_and_db):
 
     assert resp.status_code == 400
     assert "change_ids" in resp.get_json()["error"]
+
+
+def test_job_sync_requests_serialize_xmp_work(app_and_db, monkeypatch):
+    """Repeated sync submissions must not enter sync_to_xmp concurrently."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    import sync as sync_module
+
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+    state_lock = threading.Lock()
+    calls = []
+    active = 0
+    max_active = 0
+
+    def fake_sync_to_xmp(db, progress_callback=None, change_ids=None):
+        nonlocal active, max_active
+        with state_lock:
+            calls.append(change_ids)
+            active += 1
+            max_active = max(max_active, active)
+            call_number = len(calls)
+
+        try:
+            if call_number == 1:
+                first_entered.set()
+                assert release_first.wait(timeout=2), "first sync was not released"
+            else:
+                second_entered.set()
+
+            if progress_callback:
+                progress_callback(1, 1)
+
+            return {"synced": 0, "failed": 0, "failures": []}
+        finally:
+            with state_lock:
+                active -= 1
+
+    monkeypatch.setattr(sync_module, "sync_to_xmp", fake_sync_to_xmp)
+
+    first = client.post("/api/jobs/sync").get_json()["job_id"]
+    assert first_entered.wait(timeout=2), "first sync did not start"
+
+    second = client.post("/api/jobs/sync").get_json()["job_id"]
+
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        job = app._job_runner.get(second)
+        if job and job["progress"].get("phase") == "Waiting for current XMP sync":
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("second sync did not reach the serialized wait point")
+
+    assert not second_entered.is_set(), (
+        "second sync entered sync_to_xmp while the first sync was still running"
+    )
+
+    release_first.set()
+    wait_for_job_via_runner(app._job_runner, first)
+    wait_for_job_via_runner(app._job_runner, second)
+
+    assert second_entered.is_set()
+    assert len(calls) == 2
+    assert max_active == 1
+
+
+def test_cancelled_waiting_sync_does_not_write_xmp(app_and_db, monkeypatch):
+    """A sync cancelled while waiting for the lock must not run sync_to_xmp."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    import sync as sync_module
+
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    state_lock = threading.Lock()
+    calls = []
+
+    def fake_sync_to_xmp(db, progress_callback=None, change_ids=None):
+        with state_lock:
+            calls.append(change_ids)
+            call_number = len(calls)
+
+        if call_number == 1:
+            first_entered.set()
+            assert release_first.wait(timeout=2), "first sync was not released"
+
+        if progress_callback:
+            progress_callback(1, 1)
+
+        return {"synced": 0, "failed": 0, "failures": []}
+
+    monkeypatch.setattr(sync_module, "sync_to_xmp", fake_sync_to_xmp)
+
+    first = client.post("/api/jobs/sync").get_json()["job_id"]
+    assert first_entered.wait(timeout=2), "first sync did not start"
+
+    second = client.post("/api/jobs/sync").get_json()["job_id"]
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        job = app._job_runner.get(second)
+        if job and job["progress"].get("phase") == "Waiting for current XMP sync":
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("second sync did not reach the serialized wait point")
+
+    cancel = client.post(f"/api/jobs/{second}/cancel")
+    assert cancel.status_code == 200
+    assert cancel.get_json()["cancelled"] is True
+
+    second_job = wait_for_job_via_runner(app._job_runner, second)
+
+    assert second_job["status"] == "cancelled"
+    assert len(calls) == 1
+
+    release_first.set()
+    wait_for_job_via_runner(app._job_runner, first)
