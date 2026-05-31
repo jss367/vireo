@@ -4670,7 +4670,9 @@ function updateDetailColors() {
 }
 
 async function addKeyword(keyword) {
-  if (!selectedPhotoId) return;
+  var ids = getActiveSelection();
+  var useBatch = selectedPhotos.size > 0 && ids.length > 0;
+  if (!selectedPhotoId && !useBatch) return;
   var input = document.getElementById('addKeywordInput');
   var name = input.value.trim();
   if (!name) return;
@@ -4683,8 +4685,12 @@ async function addKeyword(keyword) {
   var payload = selectedKeyword && selectedKeyword.id
     ? { keyword_id: selectedKeyword.id }
     : { name: name };
+  if (useBatch) payload.photo_ids = ids;
   try {
-    await safeFetch('/api/photos/' + selectedPhotoId + '/keywords', {
+    var endpoint = useBatch
+      ? '/api/batch/keyword'
+      : '/api/photos/' + selectedPhotoId + '/keywords';
+    await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -4693,7 +4699,11 @@ async function addKeyword(keyword) {
     state.selectedKeyword = null;
     hideKeywordSuggestions('addKeywordInput');
     if (!selectedKeyword) invalidateKeywordAutocompleteCache();
-    loadDetail(selectedPhotoId);
+    if (selectedPhotoId) loadDetail(selectedPhotoId);
+    if (useBatch) {
+      selectionKeywordKey = '';
+      loadSelectionKeywordSuggestions(ids);
+    }
     loadKeywords();
     scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();

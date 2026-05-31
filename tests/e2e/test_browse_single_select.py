@@ -216,6 +216,54 @@ def test_add_keyword_autocomplete_caches_empty_result(live_server, page):
     assert calls["count"] == 1
 
 
+def test_shift_selected_detail_keyword_add_applies_to_selection(live_server, page):
+    """The visible detail keyword field must honor a shift range selection.
+
+    Regression: after click A -> Shift-click C, the detail pane for A stayed
+    visible. Typing a keyword there posted to /api/photos/<A>/keywords, even
+    though the UI showed three selected photos.
+    """
+    db = live_server["db"]
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.nth(2).wait_for(state="visible")
+
+    cards.nth(0).click()
+    cards.nth(2).click(modifiers=["Shift"])
+
+    selected_ids = page.evaluate(
+        "getActiveSelection().slice().sort((a, b) => a - b)"
+    )
+    assert len(selected_ids) == 3
+    expect(page.locator("#batchCount")).to_have_text("3 selected")
+    expect(page.locator("#addKeywordInput")).to_be_visible()
+
+    keyword_name = "Range Keyword Smoke"
+    keyword_input = page.locator("#addKeywordInput")
+    keyword_input.fill(keyword_name)
+
+    with page.expect_response(
+        lambda r: "/api/batch/keyword" in r.url
+        and r.request.method == "POST"
+        and r.status == 200
+    ):
+        keyword_input.press("Enter")
+
+    rows = db.conn.execute(
+        """
+        SELECT pk.photo_id
+        FROM photo_keywords pk
+        JOIN keywords k ON k.id = pk.keyword_id
+        WHERE k.name = ? AND pk.photo_id IN ({})
+        ORDER BY pk.photo_id
+        """.format(",".join("?" for _ in selected_ids)),
+        [keyword_name] + selected_ids,
+    ).fetchall()
+    assert [row["photo_id"] for row in rows] == selected_ids
+
+
 def test_cmd_click_toggles_focus_out_of_set_reconciles(live_server, page):
     """click A, cmd-click B, cmd-click A: the focus must not linger on A.
 
