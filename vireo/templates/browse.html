@@ -5950,6 +5950,10 @@ function revealPhoto(photoId) {
   }, { toast: false }).catch(function(){});
 }
 
+function viewPhotoOnMap(photoId) {
+  window.location.href = '/map?photo_id=' + encodeURIComponent(photoId);
+}
+
 async function copyPhotoPaths(photoIds) {
   var settled = await Promise.allSettled(photoIds.map(function(id) {
     return safeFetch('/api/photos/' + id, {}, { toast: false });
@@ -6037,6 +6041,8 @@ function buildPhotoContextMenu(photoIds) {
     { separator: true },
     { label: 'Find Similar', disabled: !one, disabledHint: hint,
       onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
+    { label: 'View on Map', disabled: !one, disabledHint: hint,
+      onClick: function() { viewPhotoOnMap(photoIds[0]); } },
     { label: 'Compare', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openBrowseCompare(); } },
     { label: 'Best Batch',
