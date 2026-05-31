@@ -3799,39 +3799,26 @@ function renderBestBatch(data) {
     '<div class="best-batch-list">' + cards + '</div>';
 }
 
-async function openBestBatch() {
-  var seedId = bestBatchSeedId();
-  var ids = getActiveSelection();
+function openBestBatchForIds(ids, seedId) {
+  ids = Array.isArray(ids) ? ids.filter(function(id) { return id != null; }) : [];
+  seedId = seedId || (ids.length ? ids[0] : bestBatchSeedId());
   if (!seedId) {
     showToast('Select a photo first.', 'error');
     return;
   }
-  bestBatchData = null;
-  var modal = document.getElementById('bestBatchModal');
-  var content = document.getElementById('bestBatchContent');
-  if (content) {
-    content.className = 'best-batch-empty';
-    content.textContent = 'Loading batch...';
-  }
-  if (modal) modal.classList.add('open');
   try {
-    var data;
-    if (ids.length >= 2) {
-      data = await safeFetch('/api/photos/best-batch', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({photo_ids: ids}),
-      }, { toast: false });
-    } else {
-      data = await safeFetch('/api/photos/' + seedId + '/best-batch', {}, { toast: false });
-    }
-    renderBestBatch(data);
+    window.sessionStorage.setItem('vireo.bestBatchIds', JSON.stringify(ids));
+    window.sessionStorage.setItem('vireo.bestBatchSeedId', String(seedId));
   } catch (e) {
-    if (content) {
-      content.className = 'best-batch-empty';
-      content.textContent = e && e.message ? e.message : 'Could not rank this batch.';
-    }
+    showToast('Could not open Best Batch for this selection.', 'error');
+    return;
   }
+  window.location.href = '/best-batch?photo_id=' + encodeURIComponent(seedId);
+}
+
+function openBestBatch() {
+  var ids = getActiveSelection();
+  openBestBatchForIds(ids, bestBatchSeedId());
 }
 
 function openBestBatchInReview() {
@@ -5809,7 +5796,7 @@ function buildPhotoContextMenu(photoIds) {
     { label: 'Compare', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openBrowseCompare(); } },
     { label: 'Best Batch',
-      onClick: function() { openBestBatch(); } },
+      onClick: function() { openBestBatchForIds(photoIds, photoIds[0]); } },
     { label: 'Review Burst', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openSelectedInBurstReview(); } },
   ].concat(buildOpenInEditorMenuItems(photoIds)).concat([

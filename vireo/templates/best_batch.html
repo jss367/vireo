@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Best Batch</title>
+<style>
+body {
+  min-height: 100vh;
+  background: var(--bg-primary);
+}
+.best-page {
+  padding: 16px 18px 28px;
+}
+.best-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+.best-title h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.best-subtitle {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.best-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.best-btn {
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.best-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+.best-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg-primary);
+}
+.best-btn.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: white;
+}
+.best-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.status {
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  padding: 28px;
+  color: var(--text-muted);
+  text-align: center;
+}
+.focus-section {
+  margin-bottom: 14px;
+}
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.section-title {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.section-note {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.focus-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+.focus-card {
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  border-radius: 7px;
+  overflow: hidden;
+  cursor: pointer;
+}
+.focus-card.best,
+.focus-card.inspecting {
+  border-color: var(--accent);
+}
+.focus-crop {
+  position: relative;
+  aspect-ratio: 1;
+  background-color: #050505;
+  overflow: hidden;
+}
+.focus-crop img {
+  display: block;
+  position: absolute;
+  max-width: none;
+  max-height: none;
+}
+.focus-crop.eye img {
+  width: 780%;
+  height: auto;
+}
+.focus-crop.subject img {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.crosshair {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 24px;
+  height: 24px;
+  transform: translate(-50%, -50%);
+  border: 1px solid color-mix(in srgb, var(--accent) 88%, white);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.7);
+  pointer-events: none;
+}
+.crosshair::before,
+.crosshair::after {
+  content: "";
+  position: absolute;
+  background: color-mix(in srgb, var(--accent) 88%, white);
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.5);
+}
+.crosshair::before {
+  left: 50%;
+  top: -10px;
+  width: 1px;
+  height: 44px;
+}
+.crosshair::after {
+  top: 50%;
+  left: -10px;
+  width: 44px;
+  height: 1px;
+}
+.focus-meta,
+.rank-meta {
+  padding: 8px 9px;
+}
+.role {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.role.best { color: var(--accent); }
+.role.alternate { color: var(--warning); }
+.role.reject { color: var(--danger); }
+.filename {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.score {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.inspect-layout {
+  display: grid;
+  grid-template-columns: minmax(520px, 1.2fr) minmax(320px, 0.8fr);
+  gap: 14px;
+  align-items: start;
+}
+.preview-panel {
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #050505;
+}
+.preview-panel img {
+  display: block;
+  width: 100%;
+  height: min(60vh, 760px);
+  object-fit: contain;
+  cursor: zoom-in;
+}
+.preview-meta {
+  border-top: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  padding: 10px 12px;
+}
+.preview-name {
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.preview-score {
+  margin-top: 5px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.reason-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+.reason {
+  border: 1px solid var(--border-primary);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.rank-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 10px;
+}
+.rank-card {
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  border-radius: 7px;
+  overflow: hidden;
+  cursor: pointer;
+}
+.rank-card.best,
+.rank-card.inspecting {
+  border-color: var(--accent);
+}
+.rank-card.reject {
+  opacity: 0.72;
+}
+.rank-card img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4/3;
+  object-fit: contain;
+  background: #050505;
+}
+@media (max-width: 980px) {
+  .best-toolbar,
+  .inspect-layout {
+    grid-template-columns: 1fr;
+  }
+  .best-actions {
+    justify-content: flex-start;
+  }
+  .preview-panel img {
+    height: 58vh;
+  }
+}
+@media (max-width: 620px) {
+  .best-page {
+    padding: 12px;
+  }
+  .focus-grid,
+  .rank-list {
+    grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  }
+}
+</style>
+</head>
+<body>
+{% include '_navbar.html' %}
+
+<main class="best-page">
+  <div class="best-toolbar">
+    <div class="best-title">
+      <h1>Best Batch</h1>
+      <div id="bestSubtitle" class="best-subtitle">Loading selected photos...</div>
+    </div>
+    <div class="best-actions">
+      <button class="best-btn" onclick="window.location.href='/browse'">Back to Browse</button>
+      <button class="best-btn" id="reviewBtn" onclick="openReviewBurst()" disabled>Review Burst</button>
+      <button class="best-btn primary" id="flagBtn" onclick="flagBest()" disabled>Flag Best</button>
+      <button class="best-btn danger" id="rejectBtn" onclick="flagBestRejectRest()" disabled>Flag Best + Reject Rest</button>
+    </div>
+  </div>
+
+  <div id="bestStatus" class="status">Loading batch...</div>
+  <div id="bestContent" style="display:none;">
+    <section class="focus-section">
+      <div class="section-head">
+        <div class="section-title">Focus Check</div>
+        <div id="focusNote" class="section-note"></div>
+      </div>
+      <div id="focusGrid" class="focus-grid"></div>
+    </section>
+
+    <section class="inspect-layout">
+      <div class="preview-panel">
+        <img id="inspectImg" alt="" onclick="openInspectedLightbox()" title="Open 1:1 zoom">
+        <div class="preview-meta">
+          <div id="inspectRole" class="role"></div>
+          <div id="inspectName" class="preview-name"></div>
+          <div id="inspectScore" class="preview-score"></div>
+          <div id="inspectReasons" class="reason-row"></div>
+        </div>
+      </div>
+
+      <div>
+        <div class="section-head">
+          <div class="section-title">Ranked Frames</div>
+        </div>
+        <div id="rankList" class="rank-list"></div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+var bestBatchData = null;
+var inspectedId = null;
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value);
+}
+
+async function fetchJson(url, options) {
+  var resp = await fetch(url, options || {});
+  var data = null;
+  try { data = await resp.json(); } catch (e) {}
+  if (!resp.ok) {
+    throw new Error((data && data.error) || ('Request failed: ' + resp.status));
+  }
+  return data;
+}
+
+function previewUrl(photoId, size) {
+  return '/photos/' + photoId + '/preview?size=' + (size || 1920);
+}
+
+function thumbnailUrl(photoId) {
+  return '/thumbnails/' + photoId + '.jpg';
+}
+
+function roleLabel(role) {
+  if (role === 'best') return 'Best';
+  if (role === 'alternate') return 'Alt';
+  return 'Reject';
+}
+
+function scoreText(card) {
+  var parts = [];
+  if (card.quality_pct != null) parts.push('Q ' + card.quality_pct);
+  if (card.focus != null) parts.push((card.focus_basis === 'eye' ? 'Eye' : 'Subject') + ' ' + Math.round(card.focus * 100));
+  if (card.sharpness != null) parts.push('Subject S ' + Math.round(card.sharpness));
+  return parts.join(' · ') || 'No score';
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function focusImageStyle(card) {
+  var hasEye = card.focus_basis === 'eye' && card.eye_x != null && card.eye_y != null;
+  if (!hasEye) {
+    return '';
+  }
+  var zoom = 7.8;
+  var width = Number(card.width) || 1;
+  var height = Number(card.height) || width;
+  var imageWidthPct = zoom * 100;
+  var imageHeightPct = imageWidthPct * (height / width);
+  var x = clamp(Number(card.eye_x), 0, 1);
+  var y = clamp(Number(card.eye_y), 0, 1);
+  var left = clamp(50 - x * imageWidthPct, 100 - imageWidthPct, 0);
+  var top = clamp(50 - y * imageHeightPct, 100 - imageHeightPct, 0);
+  return 'left:' + left.toFixed(2) + '%;top:' + top.toFixed(2) + '%;';
+}
+
+function selectedIdsFromStorage() {
+  try {
+    var raw = window.sessionStorage.getItem('vireo.bestBatchIds');
+    var ids = raw ? JSON.parse(raw) : [];
+    return Array.isArray(ids) ? ids.filter(function(id) { return Number.isInteger(id); }) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function seedIdFromRequest(ids) {
+  var params = new URLSearchParams(window.location.search);
+  var queryId = Number(params.get('photo_id'));
+  if (Number.isInteger(queryId) && queryId > 0) return queryId;
+  try {
+    var stored = Number(window.sessionStorage.getItem('vireo.bestBatchSeedId'));
+    if (Number.isInteger(stored) && stored > 0) return stored;
+  } catch (e) {}
+  return ids.length ? ids[0] : null;
+}
+
+function setStatus(message) {
+  var status = document.getElementById('bestStatus');
+  var content = document.getElementById('bestContent');
+  status.textContent = message;
+  status.style.display = '';
+  content.style.display = 'none';
+}
+
+function inspectPhoto(photoId) {
+  if (!bestBatchData || !bestBatchData.cards) return;
+  var card = bestBatchData.cards.find(function(c) { return c.id === photoId; });
+  if (!card) return;
+  inspectedId = card.id;
+
+  var img = document.getElementById('inspectImg');
+  img.onerror = function() {
+    this.onerror = null;
+    this.src = thumbnailUrl(card.id);
+  };
+  img.src = previewUrl(card.id, 1920);
+  img.alt = card.filename || '';
+
+  var role = document.getElementById('inspectRole');
+  role.className = 'role ' + (card.role || '');
+  role.textContent = '#' + card.rank + ' ' + roleLabel(card.role);
+  document.getElementById('inspectName').textContent = card.filename || '';
+  document.getElementById('inspectScore').textContent = scoreText(card);
+  document.getElementById('inspectReasons').innerHTML = (card.reasons || []).map(function(reason) {
+    return '<span class="reason">' + escapeHtml(reason) + '</span>';
+  }).join('');
+
+  document.querySelectorAll('.focus-card,.rank-card').forEach(function(el) {
+    el.classList.toggle('inspecting', Number(el.dataset.photoId) === photoId);
+  });
+}
+
+function renderBatch(data) {
+  bestBatchData = data;
+  var cards = data.cards || [];
+  var best = cards.find(function(c) { return c.id === data.best_photo_id; }) || cards[0];
+  if (!best) {
+    setStatus('No scored photos found in this batch.');
+    return;
+  }
+
+  document.getElementById('bestStatus').style.display = 'none';
+  document.getElementById('bestContent').style.display = '';
+  document.getElementById('bestSubtitle').textContent =
+    data.count + ' photos' + (data.sequence_range ? ' · #' + data.sequence_range[0] + '-' + data.sequence_range[1] : '');
+
+  var hasAnyEye = cards.some(function(card) {
+    return card.focus_basis === 'eye' && card.eye_x != null && card.eye_y != null;
+  });
+  document.getElementById('focusNote').textContent = hasAnyEye
+    ? 'Eye crops are centered on detected keypoints. Click a crop to inspect the full frame.'
+    : 'No eye keypoints found for this batch; focus evidence falls back to subject/full-frame context.';
+
+  document.getElementById('focusGrid').innerHTML = cards.map(function(card) {
+    var hasEye = card.focus_basis === 'eye' && card.eye_x != null && card.eye_y != null;
+    return '<div class="focus-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '" onclick="inspectPhoto(' + card.id + ')">' +
+      '<div class="focus-crop ' + (hasEye ? 'eye' : 'subject') + '">' +
+        '<img src="' + previewUrl(card.id, 1920) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy" style="' + escapeAttr(focusImageStyle(card)) + '">' +
+        (hasEye ? '<span class="crosshair"></span>' : '') +
+      '</div>' +
+      '<div class="focus-meta">' +
+        '<div class="role ' + escapeAttr(card.role || '') + '">#' + card.rank + ' ' + roleLabel(card.role) + '</div>' +
+        '<div class="filename" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
+        '<div class="score">' + escapeHtml(scoreText(card)) + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  document.getElementById('rankList').innerHTML = cards.map(function(card) {
+    var reasons = (card.reasons || []).slice(0, 2).join(' · ');
+    return '<div class="rank-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '" onclick="inspectPhoto(' + card.id + ')">' +
+      '<img src="' + thumbnailUrl(card.id) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
+      '<div class="rank-meta">' +
+        '<div class="role ' + escapeAttr(card.role || '') + '">#' + card.rank + ' ' + roleLabel(card.role) + '</div>' +
+        '<div class="filename" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
+        '<div class="score">' + escapeHtml(scoreText(card)) + '</div>' +
+        '<div class="score">' + escapeHtml(reasons) + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  document.getElementById('reviewBtn').disabled = !data.photo_ids || data.photo_ids.length < 2;
+  document.getElementById('flagBtn').disabled = !data.best_photo_id;
+  document.getElementById('rejectBtn').disabled = !data.best_photo_id;
+  inspectPhoto(best.id);
+}
+
+async function loadBatch() {
+  var ids = selectedIdsFromStorage();
+  var seedId = seedIdFromRequest(ids);
+  if (!seedId) {
+    setStatus('Go back to Browse and select at least one photo first.');
+    return;
+  }
+  if (ids.length >= 2 && ids.indexOf(seedId) === -1) {
+    ids = [];
+    try {
+      window.sessionStorage.removeItem('vireo.bestBatchIds');
+      window.sessionStorage.removeItem('vireo.bestBatchSeedId');
+    } catch (e) {}
+  }
+  try {
+    var data;
+    if (ids.length >= 2) {
+      data = await fetchJson('/api/photos/best-batch', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({photo_ids: ids}),
+      });
+      data.scope_method = data.scope_method || 'selected_photos';
+    } else {
+      data = await fetchJson('/api/photos/' + seedId + '/best-batch');
+    }
+    renderBatch(data);
+  } catch (e) {
+    setStatus(e && e.message ? e.message : 'Could not rank this batch.');
+  }
+}
+
+function openInspectedLightbox() {
+  if (!bestBatchData || !window.openLightbox || !inspectedId) return;
+  var cards = bestBatchData.cards || [];
+  var card = cards.find(function(c) { return c.id === inspectedId; }) || cards[0];
+  if (!card) return;
+  openLightbox(card.id, card.filename || '', cards.map(function(c) {
+    return {id: c.id, filename: c.filename || ''};
+  }));
+}
+
+function openReviewBurst() {
+  if (!bestBatchData || !bestBatchData.photo_ids || bestBatchData.photo_ids.length < 2) return;
+  try {
+    window.sessionStorage.setItem('vireo.browseBurstReviewIds', JSON.stringify(bestBatchData.photo_ids));
+  } catch (e) {
+    if (window.showToast) showToast('Could not open burst review for this batch.', 'error');
+    return;
+  }
+  window.location.href = '/pipeline/review?browse_burst=1';
+}
+
+async function flagBest() {
+  if (!bestBatchData || !bestBatchData.best_photo_id) return;
+  try {
+    await fetchJson('/api/batch/flag', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [bestBatchData.best_photo_id], flag: 'flagged'}),
+    });
+    if (window.showUndoToast) showUndoToast();
+    if (window.showToast) showToast('Flagged best photo.', 'success');
+  } catch (e) {
+    if (window.showToast) {
+      showToast(e && e.message ? e.message : 'Could not flag best photo.', 'error');
+    }
+  }
+}
+
+async function flagBestRejectRest() {
+  if (!bestBatchData || !bestBatchData.best_photo_id) return;
+  try {
+    await fetchJson('/api/batch/best-batch-flags', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        best_photo_id: bestBatchData.best_photo_id,
+        reject_photo_ids: bestBatchData.suggested_reject_ids || [],
+      }),
+    });
+    if (window.showUndoToast) showUndoToast();
+    if (window.showToast) showToast('Applied best-batch flags.', 'success');
+  } catch (e) {
+    if (window.showToast) {
+      showToast(e && e.message ? e.message : 'Could not apply best-batch flags.', 'error');
+    }
+  }
+}
+
+loadBatch();
+</script>
+</body>
+</html>
