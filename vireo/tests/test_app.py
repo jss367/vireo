@@ -1738,6 +1738,9 @@ def test_api_photo_pipeline_diagnoses_full_image_predictions(app_and_db):
     """Synthetic full-image anchors are not below-threshold detector boxes."""
     app, db = app_and_db
     pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.update_workspace(db._active_workspace_id, config_overrides={
+        "detector_confidence": 0.0,
+    })
     det_id = db.save_detections(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0, "category": "animal"},
@@ -1761,6 +1764,7 @@ def test_api_photo_pipeline_diagnoses_full_image_predictions(app_and_db):
     data = resp.get_json()
 
     assert data["detections"] == []
+    assert data["predictions"] == []
     diag = data["classification_diagnostics"]
     assert diag["raw_detection_count"] == 0
     assert diag["hidden_detection_count"] == 0

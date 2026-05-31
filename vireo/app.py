@@ -14046,6 +14046,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                  ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                WHERE d.photo_id = ?
                  AND d.detector_confidence >= ?
+                 AND d.detector_model != 'full-image'
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
                     WHERE pr2.detection_id = pr.detection_id
