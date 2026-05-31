@@ -336,7 +336,11 @@ def adjust_capture_time(
                 progress_callback(index, total, photo["filename"])
             continue
 
-        if _is_noop_adjustment(mode, target_offset_str, photo_shift, photo):
+        has_companion = _has_key(photo, "companion_path") and bool(photo["companion_path"])
+        if (
+            not has_companion
+            and _is_noop_adjustment(mode, target_offset_str, photo_shift, photo)
+        ):
             skipped += 1
             shifts_used.append(photo_shift)
             if progress_callback:
