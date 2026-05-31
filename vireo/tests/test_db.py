@@ -1320,7 +1320,7 @@ def test_default_collections_created(tmp_path):
     assert 'Untagged' in names
     assert 'Flagged' in names
     assert 'Recent Import' in names
-    assert 'Needs Location' in names
+    assert 'GPS Without Location Keyword' in names
 
 
 def test_default_collections_idempotent(tmp_path):
@@ -1354,7 +1354,7 @@ def test_default_collections_adds_missing(tmp_path):
     assert 'Needs Identification' in names
     assert 'Untagged' in names
     assert 'Recent Import' in names
-    assert 'Needs Location' in names
+    assert 'GPS Without Location Keyword' in names
     assert len(colls) == 6  # no duplicate Flagged
 
 
@@ -1369,7 +1369,7 @@ def test_default_collections_for_all_workspaces_adds_missing_defaults(tmp_path):
 
     # Simulate an upgraded multi-workspace database where only one workspace
     # already had the older default set. The all-workspaces startup pass should
-    # add the new Needs Location default everywhere without duplicating Flagged.
+    # add the new GPS/location-keyword default everywhere without duplicating Flagged.
     db.conn.execute(
         "INSERT INTO collections (workspace_id, name, rules) VALUES (?, ?, ?)",
         (
@@ -1388,7 +1388,7 @@ def test_default_collections_for_all_workspaces_adds_missing_defaults(tmp_path):
             "SELECT name FROM collections WHERE workspace_id = ?", (ws,),
         ).fetchall()
         names = [r["name"] for r in rows]
-        assert "Needs Location" in names
+        assert "GPS Without Location Keyword" in names
         assert names.count("Flagged") == 1
 
 
@@ -1530,13 +1530,13 @@ def test_upgrade_path_no_duplicate_collection(tmp_path):
     # Sanity: default collections include one Needs Identification, not a
     # duplicate alongside the legacy Needs Classification.
     default_names = {"All Photos", "Needs Identification", "Untagged",
-                     "Flagged", "Recent Import", "Needs Location"}
+                     "Flagged", "Recent Import", "GPS Without Location Keyword"}
     assert default_names.issubset(cols.keys())
 
 
-def test_default_needs_location_collection_matches_gps_without_location_keyword(tmp_path):
-    """The default Needs Location collection surfaces geotagged photos that
-    still need Vireo's structured location keyword."""
+def test_default_gps_without_location_keyword_collection_matches_expected_photos(tmp_path):
+    """The default GPS/location-keyword collection surfaces geotagged photos
+    that still need Vireo's structured location keyword."""
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
@@ -1564,10 +1564,97 @@ def test_default_needs_location_collection_matches_gps_without_location_keyword(
 
     db.create_default_collections()
     cid = next(c["id"] for c in db.get_collections()
-               if c["name"] == "Needs Location")
+               if c["name"] == "GPS Without Location Keyword")
 
     pids = {p["id"] for p in db.get_collection_photos(cid, per_page=999)}
     assert pids == {needs_location}
+
+
+def test_has_location_keyword_rule_and_no_location_information_definition(tmp_path):
+    """No Location Information means no EXIF GPS and no location keyword."""
+    import json
+
+    from db import NO_LOCATION_INFORMATION_RULES, Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    no_location = db.add_photo(
+        folder_id=fid, filename='no-location.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    gps_no_keyword = db.add_photo(
+        folder_id=fid, filename='gps-no-keyword.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    no_gps_with_keyword = db.add_photo(
+        folder_id=fid, filename='keyword-only.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    gps_with_keyword = db.add_photo(
+        folder_id=fid, filename='gps-keyword.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET latitude = 1.0, longitude = 2.0 WHERE id IN (?, ?)",
+        (gps_no_keyword, gps_with_keyword),
+    )
+    loc_kw = db.add_keyword("Yosemite", kw_type="location")
+    db.tag_photo(no_gps_with_keyword, loc_kw)
+    db.tag_photo(gps_with_keyword, loc_kw)
+
+    cid = db.add_collection("No Location Information", json.dumps(NO_LOCATION_INFORMATION_RULES))
+
+    pids = {p["id"] for p in db.get_collection_photos(cid, per_page=999)}
+    assert pids == {no_location}
+
+
+def test_migrate_default_location_collections_renames_and_fixes_exact_legacy_rules(tmp_path):
+    """Clarify old location collection names without touching customized rules."""
+    import json
+
+    from db import (
+        GPS_WITHOUT_LOCATION_KEYWORD_RULES,
+        NO_LOCATION_INFORMATION_RULES,
+        Database,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    db.add_collection("Needs Location", json.dumps(GPS_WITHOUT_LOCATION_KEYWORD_RULES))
+    db.add_collection(
+        "Needs Location",
+        json.dumps({"mode": "all", "rules": GPS_WITHOUT_LOCATION_KEYWORD_RULES}),
+    )
+    db.add_collection(
+        "No Location",
+        json.dumps({
+            "mode": "all",
+            "rules": [
+                {"field": "location_keyword_missing", "op": "equals", "value": 0},
+            ],
+        }),
+    )
+    db.add_collection("No Location", json.dumps([{"field": "rating", "op": ">=", "value": 3}]))
+
+    updated = db.migrate_default_location_collections()
+
+    rows = {
+        c["name"]: json.loads(c["rules"])
+        for c in db.get_collections()
+        if c["name"] != "No Location"
+    }
+    custom = [
+        json.loads(c["rules"])
+        for c in db.get_collections()
+        if c["name"] == "No Location"
+    ]
+    assert updated == 3
+    assert rows["GPS Without Location Keyword"] == GPS_WITHOUT_LOCATION_KEYWORD_RULES
+    assert rows["No Location Information"] == NO_LOCATION_INFORMATION_RULES
+    assert custom == [[{"field": "rating", "op": ">=", "value": 3}]]
 
 
 def test_default_genre_keywords_inserted(tmp_path):
