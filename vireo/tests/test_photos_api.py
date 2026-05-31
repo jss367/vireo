@@ -3304,6 +3304,52 @@ def test_post_photo_location_records_edit(app_and_db, monkeypatch):
     assert "Central Park" in entry["description"]
 
 
+def test_batch_photo_location_sets_all_selected_photos(app_and_db, monkeypatch):
+    """Batch location POST stores one place keyword across selected photos."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+
+    def fail_place_details(place_id, key):
+        raise AssertionError("client place details should avoid server lookup")
+
+    monkeypatch.setattr(places, "place_details", fail_place_details)
+
+    photo_ids = [p["id"] for p in db.get_photos()[:3]]
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/location",
+        json={
+            "photo_ids": photo_ids,
+            "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+            "place": _central_park_client_place(),
+        },
+    )
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["updated"] == len(photo_ids)
+
+    for pid in photo_ids:
+        row = db.conn.execute(
+            "SELECT k.place_id FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (pid,),
+        ).fetchone()
+        assert row["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+        queued = db.conn.execute(
+            "SELECT value FROM pending_changes "
+            "WHERE photo_id = ? AND change_type = 'location'",
+            (pid,),
+        ).fetchone()
+        assert queued["value"] == "effective"
+
+    entry = db.get_edit_history()[0]
+    assert entry["action_type"] == "location_set"
+    assert entry["item_count"] == len(photo_ids)
+
+
 def test_delete_photo_location_records_edit(app_and_db):
     """DELETE adds an entry to the audit log even though it doesn't write a sidecar."""
     app, db = app_and_db

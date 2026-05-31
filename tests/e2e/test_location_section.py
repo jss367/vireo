@@ -45,6 +45,17 @@ def _seed_exif_photo(live_server, lat=40.785091, lng=-73.968285):
     return photo_id
 
 
+def _seed_exif_photos(live_server, photo_ids, lat=40.785091, lng=-73.968285):
+    """Set lat/lng on the given photos."""
+    db = live_server["db"]
+    with db.conn:
+        for photo_id in photo_ids:
+            db.conn.execute(
+                "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+                (lat, lng, photo_id),
+            )
+
+
 def _seed_reverse_geocode_cache(live_server, lat, lng, place_id, details):
     """Pre-populate `place_reverse_geocode_cache` so the proxy serves a hit."""
     live_server["db"].reverse_geocode_cache_put(
@@ -344,3 +355,59 @@ def test_exif_accept_button_attaches_location(live_server, page, monkeypatch):
         (photo_id, _CANNED_PLACE_ID),
     ).fetchone()
     assert row is not None
+
+
+def test_exif_accept_batches_selection_and_refreshes_smart_collection(
+    live_server, page, monkeypatch
+):
+    """Accepting an EXIF suggestion applies to the active selection and reloads
+    the GPS-without-location smart collection.
+    """
+    photo_ids = live_server["data"]["photos"][:3]
+    _seed_exif_photos(live_server, photo_ids)
+    _seed_reverse_geocode_cache(
+        live_server, 40.785091, -73.968285, _CANNED_PLACE_ID, _CANNED_DETAILS,
+    )
+    _set_api_key()
+
+    import places
+    monkeypatch.setattr(
+        places, "place_details", lambda pid, key: _CANNED_DETAILS,
+    )
+
+    db = live_server["db"]
+    collection_id = next(
+        c["id"]
+        for c in db.get_collections()
+        if c["name"] == "GPS Without Location Keyword"
+    )
+    assert db.count_collection_photos(collection_id) == 3
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.evaluate("(collectionId) => filterByCollection(collectionId)", collection_id)
+    page.wait_for_function(
+        "(collectionId) => activeCollectionId === collectionId && photos.length === 3",
+        arg=collection_id,
+    )
+
+    page.locator(f".grid-card[data-id='{photo_ids[0]}']").click()
+    _wait_for_detail_loaded(page)
+    expect(page.locator("#locationExifSuggestion button.accept-btn")).to_be_visible()
+    page.locator(f".grid-card[data-id='{photo_ids[1]}']").click(modifiers=["Meta"])
+    page.locator(f".grid-card[data-id='{photo_ids[2]}']").click(modifiers=["Meta"])
+    page.wait_for_function("() => selectedPhotos.size === 3")
+
+    page.locator("#locationExifSuggestion button.accept-btn").click()
+    page.wait_for_function("() => activeCollectionId !== null && photos.length === 0")
+
+    for photo_id in photo_ids:
+        row = db.conn.execute(
+            "SELECT 1 FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location' AND k.place_id = ?",
+            (photo_id, _CANNED_PLACE_ID),
+        ).fetchone()
+        assert row is not None
+        expect(page.locator(f".grid-card[data-id='{photo_id}']")).to_have_count(0)
+    assert db.count_collection_photos(collection_id) == 0

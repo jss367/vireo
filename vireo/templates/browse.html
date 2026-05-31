@@ -5104,6 +5104,29 @@ function _hideLocationError() {
   if (el) el.hidden = true;
 }
 
+function _locationApplyPhotoIds() {
+  var ids = getActiveSelection();
+  if (ids.length > 1) return ids;
+  var photoId = window._detailPhotoId;
+  return photoId ? [photoId] : [];
+}
+
+async function _afterLocationMutation(photoIds, detailPhotoId) {
+  loadKeywords();
+  scheduleCollectionCountsRefresh();
+  refreshPendingSyncBanner();
+  if (activeCollectionId) {
+    await filterByCollection(activeCollectionId);
+    return;
+  }
+  if (photoIds && photoIds.length) refreshGridCards(photoIds);
+  if (detailPhotoId && selectedPhotoId === detailPhotoId) {
+    loadDetail(detailPhotoId);
+  } else {
+    loadSummary();
+  }
+}
+
 async function bindLocationAutocomplete() {
   if (_locationAutocompleteBound) return;
   // Wait for the /api/config fetch to resolve so window.GOOGLE_MAPS_API_KEY
@@ -5175,19 +5198,24 @@ async function _submitLocationPlace(placeId, placeDetails) {
   var photoId = window._detailPhotoId;
   if (!photoId) return;
   _hideLocationError();
+  var ids = _locationApplyPhotoIds();
+  var useBatch = ids.length > 1;
   var body = { place_id: placeId };
   if (placeDetails) body.place = placeDetails;
+  if (useBatch) body.photo_ids = ids;
   try {
-    var resp = await safeFetch('/api/photos/' + photoId + '/location', {
+    var endpoint = useBatch
+      ? '/api/batch/location'
+      : '/api/photos/' + photoId + '/location';
+    var resp = await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
-      // The location keyword may also appear in the Keywords list; refresh.
-      loadDetail(photoId);
     }
+    await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
   } catch(e) {
     _showLocationError('Could not save location.');
   }
@@ -5205,7 +5233,7 @@ async function _submitLocationText(name) {
     });
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
-      loadDetail(photoId);
+      await _afterLocationMutation([photoId], photoId);
     }
   } catch(e) {
     _showLocationError('Could not save location.');
@@ -5219,7 +5247,7 @@ async function clearPhotoLocation() {
   try {
     await safeFetch('/api/photos/' + photoId + '/location', { method: 'DELETE' });
     renderLocationEmpty();
-    loadDetail(photoId);
+    await _afterLocationMutation([photoId], photoId);
   } catch(e) {
     _showLocationError('Could not clear location.');
   }
@@ -5322,21 +5350,29 @@ async function acceptExifSuggestion(placeId) {
   var photoId = window._detailPhotoId;
   if (!photoId || !placeId) return;
   _hideLocationError();
+  var ids = _locationApplyPhotoIds();
+  var useBatch = ids.length > 1;
   try {
-    var resp = await safeFetch('/api/photos/' + photoId + '/location', {
+    var endpoint = useBatch
+      ? '/api/batch/location'
+      : '/api/photos/' + photoId + '/location';
+    var body = useBatch
+      ? { place_id: placeId, photo_ids: ids }
+      : { place_id: placeId };
+    var resp = await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ place_id: placeId }),
+      body: JSON.stringify(body),
     });
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
-      loadDetail(photoId);
     }
     var sugg = document.getElementById('locationExifSuggestion');
     if (sugg) {
       sugg.hidden = true;
       sugg.innerHTML = '';
     }
+    await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
   } catch(e) {
     _showLocationError('Could not save location.');
   }
