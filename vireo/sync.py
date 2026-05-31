@@ -104,6 +104,7 @@ def sync_to_xmp(db, progress_callback=None):
             new_rating = None
             new_flag = None
             sync_location = False
+            cleanup_location = False
             supported_ids = []
             unsupported_changes = []
 
@@ -127,6 +128,8 @@ def sync_to_xmp(db, progress_callback=None):
                     supported_ids.append(c["id"])
                     if sync_locations:
                         sync_location = True
+                    else:
+                        cleanup_location = True
 
             # Write keywords
             if keywords_to_add:
@@ -159,6 +162,8 @@ def sync_to_xmp(db, progress_callback=None):
                     )
                 else:
                     remove_vireo_gps_location(xmp_path)
+            elif cleanup_location:
+                remove_vireo_gps_location(xmp_path)
 
             if supported_ids:
                 synced += 1
