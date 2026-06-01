@@ -176,16 +176,40 @@ fn live_gui_client_count() -> usize {
 
 #[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
+    let pid_arg = pid.to_string();
     std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
+        .args(["-0", &pid_arg])
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    let filter = format!("PID eq {}", pid);
+    let Ok(output) = std::process::Command::new("tasklist")
+        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    let pid_arg = pid.to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().any(|line| {
+        line.split(',')
+            .nth(1)
+            .map(|field| field.trim_matches('"') == pid_arg)
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn process_is_alive(_pid: u32) -> bool {
-    true
+    false
 }
 
 /// Spawn the Python sidecar and wait for it to be ready.
