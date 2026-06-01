@@ -1,21 +1,55 @@
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::AppHandle;
-use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::CommandChild;
+use tauri_plugin_shell::ShellExt;
 
 const RUNTIME_HEALTH_TIMEOUT: Duration = Duration::from_millis(500);
+const GUI_CLIENTS_DIR: &str = ".vireo/gui-clients";
 
 /// Holds the sidecar child process so we can shut it down on exit.
 pub struct SidecarState {
     pub child: Mutex<Option<CommandChild>>,
     pub port: u16,
+    shutdown_on_exit: bool,
+    client_marker: Option<std::path::PathBuf>,
+}
+
+impl SidecarState {
+    pub fn unmanaged(port: u16) -> Self {
+        Self {
+            child: Mutex::new(None),
+            port,
+            shutdown_on_exit: false,
+            client_marker: None,
+        }
+    }
+
+    fn owned(child: CommandChild, port: u16) -> Self {
+        Self {
+            child: Mutex::new(Some(child)),
+            port,
+            shutdown_on_exit: true,
+            client_marker: register_gui_client(),
+        }
+    }
+
+    fn attached(runtime: RuntimeInfo) -> Self {
+        let shutdown_on_exit = runtime.mode.as_deref() == Some("gui");
+        Self {
+            child: Mutex::new(None),
+            port: runtime.port,
+            shutdown_on_exit,
+            client_marker: shutdown_on_exit.then(register_gui_client).flatten(),
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
 struct RuntimeInfo {
     port: u16,
     token: String,
+    mode: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -80,27 +114,88 @@ fn runtime_health_is_vireo(port: u16, token: &str, timeout: Duration) -> bool {
     health.service.as_deref() == Some("vireo")
 }
 
-fn existing_runtime_port() -> Option<u16> {
+fn existing_runtime() -> Option<RuntimeInfo> {
     let path = runtime_json_path()?;
     let runtime = read_runtime_json(&path)?;
     if runtime_health_is_vireo(runtime.port, &runtime.token, RUNTIME_HEALTH_TIMEOUT) {
-        Some(runtime.port)
+        Some(runtime)
     } else {
         None
     }
 }
 
+fn gui_clients_dir() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| home.join(GUI_CLIENTS_DIR))
+}
+
+fn register_gui_client() -> Option<std::path::PathBuf> {
+    let dir = gui_clients_dir()?;
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log::warn!("Failed to create Vireo GUI client directory: {}", e);
+        return None;
+    }
+    let marker = dir.join(format!("{}.client", std::process::id()));
+    if let Err(e) = std::fs::write(&marker, b"") {
+        log::warn!("Failed to write Vireo GUI client marker: {}", e);
+        return None;
+    }
+    Some(marker)
+}
+
+fn remove_gui_client(marker: &Option<std::path::PathBuf>) {
+    if let Some(marker) = marker {
+        let _ = std::fs::remove_file(marker);
+    }
+}
+
+fn live_gui_client_count() -> usize {
+    let Some(dir) = gui_clients_dir() else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let pid = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.parse::<u32>().ok())?;
+            if process_is_alive(pid) {
+                Some(())
+            } else {
+                let _ = std::fs::remove_file(path);
+                None
+            }
+        })
+        .count()
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    true
+}
+
 /// Spawn the Python sidecar and wait for it to be ready.
 pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, String> {
-    if let Some(port) = existing_runtime_port() {
+    if let Some(runtime) = existing_runtime() {
         log::info!(
             "Using existing Vireo backend from runtime.json on port {}",
-            port
+            runtime.port
         );
-        return Ok(SidecarState {
-            child: Mutex::new(None),
-            port,
-        });
+        return Ok(SidecarState::attached(runtime));
     }
 
     let port = find_free_port();
@@ -125,9 +220,11 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, String> {
 
     let (mut rx, child) = cmd
         .args([
-            "--port", &port.to_string(),
+            "--port",
+            &port.to_string(),
             "--no-browser",
-            "--db", &dirs::home_dir()
+            "--db",
+            &dirs::home_dir()
                 .unwrap_or_default()
                 .join(".vireo/vireo.db")
                 .to_string_lossy(),
@@ -157,34 +254,39 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, String> {
     // Wait up to 30 seconds for the sidecar to be healthy
     wait_for_health(port, Duration::from_secs(30))?;
 
-    Ok(SidecarState {
-        child: Mutex::new(Some(child)),
-        port,
-    })
+    Ok(SidecarState::owned(child, port))
 }
 
 /// Send POST /api/shutdown to the sidecar for a clean exit.
 /// In dev mode (child is None), this is a no-op — we don't want to
 /// kill the developer's manually-started Flask server.
 pub fn stop_sidecar(state: &SidecarState) {
-    let has_child = state.child
+    if !state.shutdown_on_exit {
+        return;
+    }
+
+    remove_gui_client(&state.client_marker);
+    if live_gui_client_count() > 0 {
+        log::info!("Leaving Vireo backend running for another GUI client");
+        return;
+    }
+
+    let has_child = state
+        .child
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .is_some();
 
-    if !has_child {
-        return;
-    }
-
     let url = format!("http://127.0.0.1:{}/api/shutdown", state.port);
-    let _ = ureq::post(&url)
-        .set("X-Vireo-Shutdown", "1")
-        .call();
+    let _ = ureq::post(&url).set("X-Vireo-Shutdown", "1").call();
     // Give the sidecar a moment to shut down gracefully
     std::thread::sleep(Duration::from_millis(500));
     // Force-kill if still running
-    if let Some(child) = state.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
-        let _ = child.kill();
+    if has_child {
+        let child = state.child.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(child) = child {
+            let _ = child.kill();
+        }
     }
 }
 
@@ -194,10 +296,7 @@ mod tests {
 
     #[test]
     fn read_runtime_json_accepts_valid_payload() {
-        let dir = std::env::temp_dir().join(format!(
-            "vireo-runtime-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("vireo-runtime-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("runtime.json");
         std::fs::write(
@@ -209,6 +308,7 @@ mod tests {
         let runtime = read_runtime_json(&path).unwrap();
         assert_eq!(runtime.port, 8080);
         assert_eq!(runtime.token, "secret");
+        assert_eq!(runtime.mode.as_deref(), None);
 
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir(dir);
@@ -225,6 +325,21 @@ mod tests {
         std::fs::write(&path, r#"{"port":8080}"#).unwrap();
 
         assert!(read_runtime_json(&path).is_none());
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn read_runtime_json_preserves_mode() {
+        let dir =
+            std::env::temp_dir().join(format!("vireo-runtime-test-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runtime.json");
+        std::fs::write(&path, r#"{"port":8080,"token":"secret","mode":"gui"}"#).unwrap();
+
+        let runtime = read_runtime_json(&path).unwrap();
+        assert_eq!(runtime.mode.as_deref(), Some("gui"));
 
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir(dir);
