@@ -5,6 +5,8 @@ use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
 const RUNTIME_HEALTH_TIMEOUT: Duration = Duration::from_millis(500);
+const RUNTIME_BOOT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const RUNTIME_BOOT_WAIT_INTERVAL: Duration = Duration::from_millis(200);
 const GUI_CLIENTS_DIR: &str = ".vireo/gui-clients";
 
 /// Holds the sidecar child process so we can shut it down on exit.
@@ -116,11 +118,17 @@ fn runtime_health_is_vireo(port: u16, token: &str, timeout: Duration) -> bool {
 
 fn existing_runtime() -> Option<RuntimeInfo> {
     let path = runtime_json_path()?;
-    let runtime = read_runtime_json(&path)?;
-    if runtime_health_is_vireo(runtime.port, &runtime.token, RUNTIME_HEALTH_TIMEOUT) {
-        Some(runtime)
-    } else {
-        None
+    let start = std::time::Instant::now();
+
+    loop {
+        let runtime = read_runtime_json(&path)?;
+        if runtime_health_is_vireo(runtime.port, &runtime.token, RUNTIME_HEALTH_TIMEOUT) {
+            return Some(runtime);
+        }
+        if start.elapsed() >= RUNTIME_BOOT_WAIT_TIMEOUT {
+            return None;
+        }
+        std::thread::sleep(RUNTIME_BOOT_WAIT_INTERVAL);
     }
 }
 
