@@ -38,14 +38,19 @@ impl SidecarState {
         }
     }
 
-    fn attached(runtime: RuntimeInfo) -> Self {
+    fn attached(runtime: RuntimeInfo) -> Option<Self> {
         let shutdown_on_exit = runtime.mode.as_deref() == Some("gui");
-        Self {
+        let client_marker = shutdown_on_exit.then(register_gui_client).flatten();
+        if !runtime_health_is_vireo(runtime.port, &runtime.token, RUNTIME_HEALTH_TIMEOUT) {
+            remove_gui_client(&client_marker);
+            return None;
+        }
+        Some(Self {
             child: Mutex::new(None),
             port: runtime.port,
             shutdown_on_exit,
-            client_marker: shutdown_on_exit.then(register_gui_client).flatten(),
-        }
+            client_marker,
+        })
     }
 }
 
@@ -267,7 +272,10 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, String> {
             "Using existing Vireo backend from runtime.json on port {}",
             runtime.port
         );
-        return Ok(SidecarState::attached(runtime));
+        if let Some(state) = SidecarState::attached(runtime) {
+            return Ok(state);
+        }
+        log::info!("Existing Vireo backend stopped while attaching; spawning a new sidecar");
     }
 
     let port = find_free_port();
