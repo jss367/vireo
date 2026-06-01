@@ -40,16 +40,29 @@ impl SidecarState {
 
     fn attached(runtime: RuntimeInfo) -> Option<Self> {
         let shutdown_on_exit = runtime.mode.as_deref() == Some("gui");
-        let client_marker = shutdown_on_exit.then(register_gui_client).flatten();
+        if shutdown_on_exit {
+            return with_gui_clients_lock(|| {
+                let client_marker = register_gui_client_unlocked();
+                if !runtime_health_is_vireo(runtime.port, &runtime.token, RUNTIME_HEALTH_TIMEOUT) {
+                    remove_gui_client(&client_marker);
+                    return None;
+                }
+                Some(Self {
+                    child: Mutex::new(None),
+                    port: runtime.port,
+                    shutdown_on_exit,
+                    client_marker,
+                })
+            });
+        }
         if !runtime_health_is_vireo(runtime.port, &runtime.token, RUNTIME_HEALTH_TIMEOUT) {
-            remove_gui_client(&client_marker);
             return None;
         }
         Some(Self {
             child: Mutex::new(None),
             port: runtime.port,
             shutdown_on_exit,
-            client_marker,
+            client_marker: None,
         })
     }
 }
@@ -181,7 +194,38 @@ fn gui_clients_dir() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|home| home.join(GUI_CLIENTS_DIR))
 }
 
-fn register_gui_client() -> Option<std::path::PathBuf> {
+fn gui_clients_lock_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| home.join(".vireo").join("gui-clients.lock"))
+}
+
+fn with_gui_clients_lock<T>(f: impl FnOnce() -> T) -> T {
+    let Some(path) = gui_clients_lock_path() else {
+        return f();
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::warn!("Failed to create Vireo state directory: {}", e);
+            return f();
+        }
+    }
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+    else {
+        return f();
+    };
+    if let Err(e) = file.lock_exclusive() {
+        log::warn!("Failed to lock Vireo GUI client state: {}", e);
+        return f();
+    }
+    let result = f();
+    let _ = file.unlock();
+    result
+}
+
+fn register_gui_client_unlocked() -> Option<std::path::PathBuf> {
     let dir = gui_clients_dir()?;
     if let Err(e) = std::fs::create_dir_all(&dir) {
         log::warn!("Failed to create Vireo GUI client directory: {}", e);
@@ -193,6 +237,10 @@ fn register_gui_client() -> Option<std::path::PathBuf> {
         return None;
     }
     Some(marker)
+}
+
+fn register_gui_client() -> Option<std::path::PathBuf> {
+    with_gui_clients_lock(register_gui_client_unlocked)
 }
 
 fn remove_gui_client(marker: &Option<std::path::PathBuf>) {
@@ -351,29 +399,31 @@ pub fn stop_sidecar(state: &SidecarState) {
         return;
     }
 
-    remove_gui_client(&state.client_marker);
-    if live_gui_client_count() > 0 {
-        log::info!("Leaving Vireo backend running for another GUI client");
-        return;
-    }
-
-    let has_child = state
-        .child
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_some();
-
-    let url = format!("http://127.0.0.1:{}/api/shutdown", state.port);
-    let _ = ureq::post(&url).set("X-Vireo-Shutdown", "1").call();
-    // Give the sidecar a moment to shut down gracefully
-    std::thread::sleep(Duration::from_millis(500));
-    // Force-kill if still running
-    if has_child {
-        let child = state.child.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(child) = child {
-            let _ = child.kill();
+    with_gui_clients_lock(|| {
+        remove_gui_client(&state.client_marker);
+        if live_gui_client_count() > 0 {
+            log::info!("Leaving Vireo backend running for another GUI client");
+            return;
         }
-    }
+
+        let has_child = state
+            .child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+
+        let url = format!("http://127.0.0.1:{}/api/shutdown", state.port);
+        let _ = ureq::post(&url).set("X-Vireo-Shutdown", "1").call();
+        // Give the sidecar a moment to shut down gracefully
+        std::thread::sleep(Duration::from_millis(500));
+        // Force-kill if still running
+        if has_child {
+            let child = state.child.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(child) = child {
+                let _ = child.kill();
+            }
+        }
+    });
 }
 
 #[cfg(test)]
