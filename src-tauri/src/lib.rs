@@ -101,10 +101,7 @@ pub fn run() {
                         .build(),
                 )?;
                 // Use a placeholder state pointing to the dev server
-                app.manage(SidecarState {
-                    child: std::sync::Mutex::new(None),
-                    port: 8080,
-                });
+                app.manage(SidecarState::unmanaged(8080));
             } else {
                 // Production: spawn the sidecar
                 match sidecar::start_sidecar(app.handle()) {
