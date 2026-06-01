@@ -1,3 +1,4 @@
+use fs2::FileExt;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::AppHandle;
@@ -6,6 +7,7 @@ use tauri_plugin_shell::ShellExt;
 
 const RUNTIME_HEALTH_TIMEOUT: Duration = Duration::from_millis(500);
 const RUNTIME_BOOT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const RUNTIME_LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const RUNTIME_BOOT_WAIT_INTERVAL: Duration = Duration::from_millis(200);
 const GUI_CLIENTS_DIR: &str = ".vireo/gui-clients";
 
@@ -90,6 +92,10 @@ fn runtime_json_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|home| home.join(".vireo").join("runtime.json"))
 }
 
+fn runtime_lock_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| home.join(".vireo").join("runtime.lock"))
+}
+
 fn read_runtime_json(path: &std::path::Path) -> Option<RuntimeInfo> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice::<RuntimeInfo>(&bytes).ok()
@@ -116,18 +122,52 @@ fn runtime_health_is_vireo(port: u16, token: &str, timeout: Duration) -> bool {
     health.service.as_deref() == Some("vireo")
 }
 
+fn runtime_lock_is_held(path: &std::path::Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+    else {
+        return false;
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(_) => true,
+    }
+}
+
 fn existing_runtime() -> Option<RuntimeInfo> {
     let path = runtime_json_path()?;
+    let lock_path = runtime_lock_path()?;
     let start = std::time::Instant::now();
 
     loop {
-        let runtime = read_runtime_json(&path)?;
-        if runtime_health_is_vireo(runtime.port, &runtime.token, RUNTIME_HEALTH_TIMEOUT) {
-            return Some(runtime);
+        if let Some(runtime) = read_runtime_json(&path) {
+            if runtime_health_is_vireo(runtime.port, &runtime.token, RUNTIME_HEALTH_TIMEOUT) {
+                return Some(runtime);
+            }
         }
-        if start.elapsed() >= RUNTIME_BOOT_WAIT_TIMEOUT {
+
+        let lock_held = runtime_lock_is_held(&lock_path);
+        let runtime_present = path.exists();
+        if !runtime_present && !lock_held {
             return None;
         }
+        let timeout = if lock_held {
+            RUNTIME_LOCK_WAIT_TIMEOUT
+        } else {
+            RUNTIME_BOOT_WAIT_TIMEOUT
+        };
+        if start.elapsed() >= timeout {
+            return None;
+        }
+
         std::thread::sleep(RUNTIME_BOOT_WAIT_INTERVAL);
     }
 }
