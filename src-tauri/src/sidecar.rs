@@ -267,7 +267,8 @@ fn process_is_alive(_pid: u32) -> bool {
 
 /// Spawn the Python sidecar and wait for it to be ready.
 pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, String> {
-    if let Some(runtime) = existing_runtime() {
+    let attach_start = std::time::Instant::now();
+    while let Some(runtime) = existing_runtime() {
         log::info!(
             "Using existing Vireo backend from runtime.json on port {}",
             runtime.port
@@ -275,7 +276,12 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, String> {
         if let Some(state) = SidecarState::attached(runtime) {
             return Ok(state);
         }
-        log::info!("Existing Vireo backend stopped while attaching; spawning a new sidecar");
+
+        if attach_start.elapsed() >= RUNTIME_LOCK_WAIT_TIMEOUT {
+            break;
+        }
+        log::info!("Existing Vireo backend stopped while attaching; retrying discovery");
+        std::thread::sleep(RUNTIME_BOOT_WAIT_INTERVAL);
     }
 
     let port = find_free_port();
