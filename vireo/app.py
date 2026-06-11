@@ -10982,7 +10982,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         for h in hashes:
             rows = db.conn.execute(
                 "SELECT id FROM photos "
-                "WHERE file_hash = ? AND flag != 'rejected'",
+                "WHERE file_hash = ? AND (flag IS NULL OR flag != 'rejected')",
                 (h,),
             ).fetchall()
             if len(rows) < 2:
@@ -11192,7 +11192,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         for h in hashes:
             anchor = db.conn.execute(
                 "SELECT 1 FROM photos "
-                "WHERE file_hash = ? AND flag != 'rejected' LIMIT 1",
+                "WHERE file_hash = ? AND (flag IS NULL OR flag != 'rejected') LIMIT 1",
                 (h,),
             ).fetchone()
             if anchor is not None:
@@ -11347,7 +11347,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
               AND p.file_hash IS NOT NULL
               AND EXISTS (
                   SELECT 1 FROM photos q
-                  WHERE q.file_hash = p.file_hash AND q.flag != 'rejected'
+                  WHERE q.file_hash = p.file_hash AND (q.flag IS NULL OR q.flag != 'rejected')
               )
             """
         ).fetchone()

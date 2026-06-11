@@ -605,17 +605,22 @@ def test_update_step_current_file(app_and_db):
     assert runner._jobs[job_id]["steps"][0]["current_file"] == "DSC_0001.NEF"
 
 
-def test_start_job_ids_unique_within_same_millisecond(app_and_db):
+def test_start_job_ids_unique_within_same_millisecond(app_and_db, monkeypatch):
     """start() ids carry a monotonic suffix — two same-type jobs started in
     the same millisecond previously collided, overwriting each other's
     registration and history row."""
     import time as _time
 
+    import jobs as jobs_mod
     from jobs import JobRunner
+    # Freeze the clock so every start() provably lands in the same
+    # millisecond — without this a slow CI worker could space the calls
+    # out and the old (suffix-less) implementation would also pass.
+    frozen = _time.time()
+    monkeypatch.setattr(jobs_mod.time, "time", lambda: frozen)
     runner = JobRunner()
     ids = [runner.start("scan", lambda j: None) for _ in range(10)]
     assert len(set(ids)) == 10
-    _time.sleep(0.05)  # let the trivial workers finish
 
 
 def test_update_step_cancelled_is_terminal(app_and_db):
