@@ -1,4 +1,5 @@
-"""Audit system: detect drift, orphans, and untracked files."""
+"""Audit system: detect drift, orphans, untracked files, stray sidecars,
+and silent file corruption (bit rot)."""
 
 import logging
 import os
@@ -8,6 +9,11 @@ from image_loader import SUPPORTED_EXTENSIONS
 from xmp import read_keywords
 
 log = logging.getLogger(__name__)
+
+# Every check the summary banner aggregates. The banner only shows the
+# green "archive intact" light when ALL of these have run and found
+# nothing — a check that never ran is reported as unverified, not clean.
+AUDIT_CHECKS = ("drift", "orphans", "untracked", "sidecars", "integrity")
 
 
 def check_drift(db):
@@ -148,6 +154,290 @@ def check_untracked(db, root_paths):
 
     log.info("Untracked check: %d untracked files found", len(untracked))
     return untracked
+
+
+def check_stray_sidecars(root_paths):
+    """Find .xmp sidecar files with no corresponding image file on disk.
+
+    Matches both sidecar naming styles: ``bird.xmp`` next to ``bird.jpg``
+    (Vireo/Lightroom) and ``bird.jpg.xmp`` (darktable). A sidecar whose
+    image exists but isn't in the DB is the untracked check's problem,
+    not a stray — import would re-attach it. Comparison is
+    case-insensitive so ``BIRD.JPG`` matches ``bird.xmp``.
+
+    Returns:
+        list of {path, folder}
+    """
+    strays = []
+    for root in root_paths:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            image_names = set()
+            xmps = []
+            for name in filenames:
+                if name.startswith("."):
+                    continue
+                stem, ext = os.path.splitext(name)
+                if ext.lower() == ".xmp":
+                    xmps.append(name)
+                elif ext.lower() in SUPPORTED_EXTENSIONS:
+                    # Both forms so "bird.xmp" and "bird.jpg.xmp" match
+                    image_names.add(name.lower())
+                    image_names.add(stem.lower())
+            for x in xmps:
+                base = os.path.splitext(x)[0].lower()
+                if base not in image_names:
+                    strays.append(
+                        {"path": os.path.join(dirpath, x), "folder": dirpath}
+                    )
+
+    log.info("Stray sidecar check: %d stray sidecars found", len(strays))
+    return strays
+
+
+def _sidecar_has_image(xmp_path):
+    """True if any image file next to ``xmp_path`` matches its base name."""
+    dirpath = os.path.dirname(xmp_path)
+    base = os.path.splitext(os.path.basename(xmp_path))[0].lower()
+    try:
+        names = os.listdir(dirpath)
+    except OSError:
+        return False
+    for name in names:
+        stem, ext = os.path.splitext(name)
+        if ext.lower() in SUPPORTED_EXTENSIONS and (
+            name.lower() == base or stem.lower() == base
+        ):
+            return True
+    return False
+
+
+def delete_stray_sidecars(paths):
+    """Delete sidecar files, re-verifying each is still a stray.
+
+    Each path must end in .xmp and must still have no matching image
+    file beside it at deletion time — the list the client holds may be
+    stale (the user could have restored the photo since the check ran),
+    and a sidecar with a living image is data, not litter.
+
+    Returns the number of files actually deleted.
+    """
+    deleted = 0
+    for p in paths:
+        if os.path.splitext(p)[1].lower() != ".xmp":
+            continue
+        if not os.path.isfile(p):
+            continue
+        if _sidecar_has_image(p):
+            continue
+        try:
+            os.unlink(p)
+            deleted += 1
+        except OSError:
+            log.exception("Failed to delete stray sidecar %s", p)
+    log.info("Deleted %d stray sidecars", deleted)
+    return deleted
+
+
+def verify_hashes(db, progress_cb=None, should_cancel=None):
+    """Re-hash every workspace photo and compare against the stored SHA-256.
+
+    Verdicts per photo (stored in photos.hash_status):
+    - ``ok``: content matches the stored hash.
+    - ``modified``: content differs AND the file's mtime moved — the file
+      was edited outside Vireo since the last scan; a rescan refreshes it.
+    - ``corrupt``: content differs but the mtime is unchanged — nothing
+      legitimately wrote the file, which is the bit-rot signature.
+      Restore from backup, then re-verify or accept.
+    - ``unreadable``: the file exists but could not be read.
+
+    Photos with no stored hash (imported before hashing existed) are
+    baselined: the current content hash is stored and counted separately
+    so the run summary doesn't claim they were "verified" against history.
+    Missing files are skipped — that's the orphans check's report.
+
+    Args:
+        db: Database instance (workspace must be active)
+        progress_cb: optional callable(current, total, filename)
+        should_cancel: optional callable() -> bool, checked per file
+
+    Returns stats dict: {checked, ok, baselined, modified, corrupt,
+    unreadable, missing, cancelled}
+    """
+    from scanner import compute_file_hash
+
+    photos = db.get_integrity_photos()
+    total = len(photos)
+    stats = {
+        "checked": 0, "ok": 0, "baselined": 0, "modified": 0,
+        "corrupt": 0, "unreadable": 0, "missing": 0, "cancelled": False,
+    }
+
+    for i, photo in enumerate(photos):
+        if should_cancel and should_cancel():
+            stats["cancelled"] = True
+            break
+        if progress_cb:
+            progress_cb(i + 1, total, photo["filename"])
+
+        path = os.path.join(photo["folder_path"], photo["filename"])
+        if not os.path.exists(path):
+            stats["missing"] += 1
+            continue
+
+        try:
+            actual = compute_file_hash(path)
+        except OSError:
+            db.update_photo_hash_check(photo["id"], "unreadable",
+                                       commit=False)
+            stats["checked"] += 1
+            stats["unreadable"] += 1
+            continue
+
+        stats["checked"] += 1
+        if not photo["file_hash"]:
+            db.update_photo_hash_check(photo["id"], "ok", file_hash=actual,
+                                       commit=False)
+            stats["baselined"] += 1
+        elif actual == photo["file_hash"]:
+            db.update_photo_hash_check(photo["id"], "ok", commit=False)
+            stats["ok"] += 1
+        else:
+            try:
+                disk_mtime = os.path.getmtime(path)
+            except OSError:
+                disk_mtime = None
+            db_mtime = photo["file_mtime"]
+            # 1s tolerance: FAT/exFAT mtimes have 2s resolution and copies
+            # can round; a sub-second wobble is not evidence of an edit.
+            if (
+                disk_mtime is not None
+                and db_mtime is not None
+                and abs(disk_mtime - db_mtime) > 1.0
+            ):
+                status = "modified"
+            else:
+                status = "corrupt"
+            db.update_photo_hash_check(photo["id"], status, commit=False)
+            stats[status] += 1
+
+        if (i + 1) % 100 == 0:
+            db.conn.commit()
+
+    db.conn.commit()
+
+    # A cancelled run verified only a prefix of the library — recording it
+    # would let the summary banner claim coverage that doesn't exist.
+    if not stats["cancelled"]:
+        problems = stats["modified"] + stats["corrupt"] + stats["unreadable"]
+        db.record_audit_run("integrity", problems)
+
+    log.info(
+        "Hash verification: %d checked, %d ok, %d baselined, %d modified, "
+        "%d corrupt, %d unreadable, %d missing%s",
+        stats["checked"], stats["ok"], stats["baselined"], stats["modified"],
+        stats["corrupt"], stats["unreadable"], stats["missing"],
+        " (cancelled)" if stats["cancelled"] else "",
+    )
+    return stats
+
+
+def check_integrity(db):
+    """Return the current integrity state without re-hashing anything.
+
+    Reads the verdicts stored by the last verify_hashes run plus coverage
+    stats, so the UI can show flagged files (and how stale the check is)
+    without paying for a full re-hash.
+    """
+    return {
+        "flagged": db.get_integrity_flagged(),
+        "stats": db.get_integrity_stats(),
+    }
+
+
+def accept_current_hash(db, photo_ids):
+    """Accept a file's current content as the new baseline hash.
+
+    For files flagged 'modified' (or 'corrupt' if the user decides the
+    change is legitimate): re-hash from disk, store as the new baseline,
+    and clear the flag. The DB's file_mtime is left alone so the scanner's
+    own change detection still reprocesses the file on the next scan.
+
+    Returns the number of photos updated.
+    """
+    from scanner import compute_file_hash
+
+    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    accepted = 0
+    for pid in photo_ids:
+        photo = db.get_photo(pid)
+        if not photo:
+            continue
+        folder_path = folders.get(photo["folder_id"], "")
+        path = os.path.join(folder_path, photo["filename"])
+        try:
+            new_hash = compute_file_hash(path)
+        except OSError:
+            log.warning("Cannot accept hash for unreadable file %s", path)
+            continue
+        db.update_photo_hash_check(pid, "ok", file_hash=new_hash)
+        accepted += 1
+    log.info("Accepted current hash for %d photos", accepted)
+    return accepted
+
+
+def build_summary(db):
+    """Aggregate every audit check into one archive-integrity verdict.
+
+    Statuses:
+    - ``intact``: all checks ran, none found problems, and every photo
+      has been hash-verified at least once.
+    - ``stale``: checks are clean but some photos (e.g. new imports)
+      have never been hash-verified.
+    - ``problems``: at least one check found something.
+    - ``unverified``: at least one check has never run.
+
+    Per-check entries carry ran_at so the UI can show how old each
+    verdict is — the green light means "verified, at these times", never
+    "no evidence of problems".
+    """
+    runs = db.get_audit_runs()
+    stats = db.get_integrity_stats()
+
+    checks = {}
+    for name in ("drift", "orphans", "untracked", "sidecars"):
+        checks[name] = runs.get(name)
+
+    integrity_run = runs.get("integrity")
+    if integrity_run:
+        # problem_count comes live from the photos table, not the recorded
+        # row, so accepting a hash updates the banner without a re-run.
+        checks["integrity"] = {
+            "ran_at": integrity_run["ran_at"],
+            "problem_count": stats["flagged"],
+        }
+    else:
+        checks["integrity"] = None
+
+    ran = [c for c in checks.values() if c is not None]
+    problem_count = sum(c["problem_count"] for c in ran)
+
+    if len(ran) < len(checks):
+        status = "unverified"
+    elif problem_count > 0:
+        status = "problems"
+    elif stats["unchecked"] > 0:
+        status = "stale"
+    else:
+        status = "intact"
+
+    return {
+        "status": status,
+        "problem_count": problem_count,
+        "checks": checks,
+        "integrity": stats,
+    }
 
 
 def resolve_drift(db, photo_id, direction):

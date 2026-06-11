@@ -10,6 +10,34 @@
 <style>
 .content { max-width: 1000px; }
 
+.summary-banner {
+  border: 1px solid var(--border-primary); border-radius: 8px;
+  padding: 16px; margin-bottom: 24px; background: var(--bg-secondary);
+}
+.summary-head { display: flex; align-items: center; gap: 10px; }
+.summary-light {
+  width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0;
+  background: var(--text-dim);
+}
+.summary-light.intact { background: var(--accent); }
+.summary-light.stale { background: var(--warning); }
+.summary-light.problems { background: var(--danger); }
+.summary-light.unverified { background: var(--text-dim); }
+.summary-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+.summary-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.summary-chip {
+  font-size: 12px; padding: 4px 10px; border-radius: 12px; cursor: pointer;
+  background: var(--bg-tertiary); color: var(--text-secondary);
+  border: 1px solid var(--border-subtle); user-select: none;
+}
+.summary-chip:hover { border-color: var(--border-primary); }
+.summary-chip .chip-count { font-weight: 600; }
+.summary-chip.chip-clean .chip-count { color: var(--accent); }
+.summary-chip.chip-problem .chip-count { color: var(--danger); }
+.summary-chip.chip-never { color: var(--text-dim); }
+.summary-chip .chip-time { color: var(--text-dim); margin-left: 4px; }
+.summary-note { margin-top: 10px; font-size: 12px; color: var(--text-muted); }
+
 .tabs { display: flex; gap: 0; margin-bottom: 24px; }
 .tab {
   padding: 10px 20px; cursor: pointer; font-size: 13px; color: var(--text-muted);
@@ -23,7 +51,7 @@
   padding: 2px 7px; border-radius: 10px; font-variant-numeric: tabular-nums;
 }
 
-.action-bar { display: flex; gap: 8px; margin-bottom: 16px; }
+.action-bar { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; }
 
 .audit-table {
   width: 100%; border-collapse: collapse; font-size: 13px;
@@ -39,6 +67,13 @@
 
 .kw-added { color: var(--accent); }
 .kw-removed { color: var(--danger); }
+.hash-corrupt { color: var(--danger); font-weight: 600; }
+.hash-modified { color: var(--warning); }
+.hash-unreadable { color: var(--danger); }
+
+.integrity-stats {
+  font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;
+}
 
 .status-msg { margin-left: 8px; }
 
@@ -53,17 +88,30 @@
 <div class="content">
   <h2 style="margin-bottom: 20px; font-size: 20px;">Audit</h2>
 
+  <!-- Archive integrity summary -->
+  <div class="summary-banner">
+    <div class="summary-head">
+      <span class="summary-light" id="summaryLight"></span>
+      <span class="summary-title" id="summaryTitle">Loading&hellip;</span>
+      <button class="btn btn-primary" id="btnRunAll" onclick="runAllChecks()" style="margin-left:auto;">Run All Checks</button>
+    </div>
+    <div class="summary-chips" id="summaryChips"></div>
+    <div class="summary-note" id="summaryNote"></div>
+  </div>
+
   <div class="tabs">
-    <div class="tab active" onclick="switchTab('drift')">Drift <span class="badge" id="driftBadge">-</span></div>
-    <div class="tab" onclick="switchTab('orphans')">Orphans <span class="badge" id="orphanBadge">-</span></div>
-    <div class="tab" onclick="switchTab('untracked')">Untracked <span class="badge" id="untrackedBadge">-</span></div>
+    <div class="tab active" data-tab="drift" onclick="switchTab('drift')">Drift <span class="badge" id="driftBadge">-</span></div>
+    <div class="tab" data-tab="orphans" onclick="switchTab('orphans')">Orphans <span class="badge" id="orphanBadge">-</span></div>
+    <div class="tab" data-tab="untracked" onclick="switchTab('untracked')">Untracked <span class="badge" id="untrackedBadge">-</span></div>
+    <div class="tab" data-tab="sidecars" onclick="switchTab('sidecars')">Sidecars <span class="badge" id="sidecarBadge">-</span></div>
+    <div class="tab" data-tab="integrity" onclick="switchTab('integrity')">Integrity <span class="badge" id="integrityBadge">-</span></div>
   </div>
 
   <!-- Drift Tab -->
   <div class="tab-panel active" id="panel-drift">
     <div class="section">
       <div class="action-bar">
-        <button class="btn btn-primary" onclick="runDriftCheck()">Check for Drift</button>
+        <button class="btn btn-primary" id="btnDrift" onclick="runDriftCheck()">Check for Drift</button>
         <button class="btn btn-secondary" onclick="resolveAll('use_xmp')">Sync All from XMP</button>
         <button class="btn btn-secondary" onclick="resolveAll('use_db')">Sync All to XMP</button>
         <span class="status-msg" id="driftStatus"></span>
@@ -76,7 +124,7 @@
   <div class="tab-panel" id="panel-orphans">
     <div class="section">
       <div class="action-bar">
-        <button class="btn btn-primary" onclick="runOrphanCheck()">Check for Orphans</button>
+        <button class="btn btn-primary" id="btnOrphans" onclick="runOrphanCheck()">Check for Orphans</button>
         <button class="btn btn-danger" onclick="removeAllOrphans()">Remove All Orphans</button>
         <span class="status-msg" id="orphanStatus"></span>
       </div>
@@ -88,12 +136,36 @@
   <div class="tab-panel" id="panel-untracked">
     <div class="section">
       <div class="action-bar">
-        <button class="btn btn-primary" onclick="runUntrackedCheck()">Check for Untracked</button>
+        <button class="btn btn-primary" id="btnUntracked" onclick="runUntrackedCheck()">Check for Untracked</button>
         <button class="btn btn-secondary" onclick="importAllUntracked()">Import All</button>
         <button class="btn btn-secondary" id="sendToPipelineBtn" onclick="sendToPipeline()" style="display:none;">Send to Pipeline</button>
         <span class="status-msg" id="untrackedStatus"></span>
       </div>
       <div id="untrackedContent"><div class="empty-msg">Click "Check for Untracked" to scan.</div></div>
+    </div>
+  </div>
+
+  <!-- Sidecars Tab -->
+  <div class="tab-panel" id="panel-sidecars">
+    <div class="section">
+      <div class="action-bar">
+        <button class="btn btn-primary" id="btnSidecars" onclick="runSidecarCheck()">Check for Stray Sidecars</button>
+        <button class="btn btn-danger" onclick="deleteAllSidecars()">Delete All Strays</button>
+        <span class="status-msg" id="sidecarStatus"></span>
+      </div>
+      <div id="sidecarContent"><div class="empty-msg">Click "Check for Stray Sidecars" to find .xmp files whose photo is gone.</div></div>
+    </div>
+  </div>
+
+  <!-- Integrity Tab -->
+  <div class="tab-panel" id="panel-integrity">
+    <div class="section">
+      <div class="action-bar">
+        <button class="btn btn-primary" id="btnVerify" onclick="runHashVerify()">Verify File Hashes</button>
+        <span class="status-msg" id="integrityStatus"></span>
+      </div>
+      <div class="integrity-stats" id="integrityStats"></div>
+      <div id="integrityContent"><div class="empty-msg">Loading&hellip;</div></div>
     </div>
   </div>
 </div>
@@ -102,20 +174,121 @@
 var driftData = [];
 var orphanData = [];
 var untrackedData = [];
+var sidecarData = [];
+var integrityData = null;
 
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach(function(t, i) {
-    t.classList.toggle('active', ['drift','orphans','untracked'][i] === name);
+  document.querySelectorAll('.tab').forEach(function(t) {
+    t.classList.toggle('active', t.dataset.tab === name);
   });
   document.querySelectorAll('.tab-panel').forEach(function(p) {
     p.classList.toggle('active', p.id === 'panel-' + name);
   });
 }
 
+function timeAgo(iso) {
+  if (!iso) return '';
+  var secs = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (secs < 60) return 'just now';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+  if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+  return Math.floor(secs / 86400) + 'd ago';
+}
+
+async function getRoots() {
+  var folders = await safeFetch('/api/folders', {}, { toast: false });
+  var roots = [];
+  folders.forEach(function(f) { if (!f.parent_id) roots.push(f.path); });
+  return roots;
+}
+
+/* ---------- Summary banner ---------- */
+var CHECK_LABELS = {
+  drift: 'Drift', orphans: 'Orphans', untracked: 'Untracked',
+  sidecars: 'Sidecars', integrity: 'Integrity',
+};
+
+async function loadSummary() {
+  try {
+    var s = await safeFetch('/api/audit/summary', {}, { toast: false });
+    renderSummary(s);
+  } catch(e) {
+    document.getElementById('summaryTitle').textContent = 'Could not load audit summary: ' + e.message;
+  }
+}
+
+function renderSummary(s) {
+  var light = document.getElementById('summaryLight');
+  var title = document.getElementById('summaryTitle');
+  var note = document.getElementById('summaryNote');
+  light.className = 'summary-light ' + s.status;
+
+  if (s.status === 'intact') {
+    title.textContent = 'Archive intact — all checks ran and found nothing';
+  } else if (s.status === 'stale') {
+    title.textContent = 'Checks clean, but ' + s.integrity.unchecked +
+      ' photo(s) have never been hash-verified';
+  } else if (s.status === 'problems') {
+    title.textContent = s.problem_count + ' problem(s) found — see tabs below';
+  } else {
+    var notRun = [];
+    Object.keys(s.checks).forEach(function(k) {
+      if (!s.checks[k]) notRun.push(CHECK_LABELS[k]);
+    });
+    title.textContent = 'Not yet verified — never run: ' + notRun.join(', ');
+  }
+
+  // All chip content is from fixed label maps, counts, and timeAgo()
+  // output — no user-controlled strings.
+  var chips = '';
+  Object.keys(s.checks).forEach(function(k) {
+    var c = s.checks[k];
+    if (!c) {
+      chips += '<span class="summary-chip chip-never" onclick="switchTab(\'' + k + '\')">' +
+        CHECK_LABELS[k] + ': never run</span>';
+    } else {
+      var cls = c.problem_count > 0 ? 'chip-problem' : 'chip-clean';
+      var count = c.problem_count > 0 ? c.problem_count : '✓';
+      chips += '<span class="summary-chip ' + cls + '" onclick="switchTab(\'' + k + '\')">' +
+        CHECK_LABELS[k] + ': <span class="chip-count">' + count + '</span>' +
+        '<span class="chip-time">' + timeAgo(c.ran_at) + '</span></span>';
+    }
+  });
+  document.getElementById('summaryChips').innerHTML = chips;
+
+  var notes = [];
+  if (s.integrity.total > 0) {
+    notes.push(s.integrity.checked + ' of ' + s.integrity.total +
+      ' photos hash-verified');
+  }
+  note.textContent = notes.join(' · ');
+}
+
+async function runAllChecks() {
+  var btn = document.getElementById('btnRunAll');
+  var note = document.getElementById('summaryNote');
+  btn.disabled = true;
+  try {
+    note.textContent = 'Running drift check…';
+    await runDriftCheck();
+    note.textContent = 'Running orphan check…';
+    await runOrphanCheck();
+    note.textContent = 'Running untracked check…';
+    await runUntrackedCheck();
+    note.textContent = 'Running sidecar check…';
+    await runSidecarCheck();
+    note.textContent = 'Verifying file hashes…';
+    await runHashVerify();
+  } finally {
+    btn.disabled = false;
+  }
+  await loadSummary();
+}
+
 /* ---------- Drift ---------- */
 async function runDriftCheck() {
   var status = document.getElementById('driftStatus');
-  var btn = event.target;
+  var btn = document.getElementById('btnDrift');
   btn.disabled = true;
   status.textContent = 'Scanning all photos for drift between database and XMP files...';
   status.style.color = '';
@@ -136,6 +309,7 @@ async function runDriftCheck() {
     status.style.color = 'var(--danger)';
   }
   btn.disabled = false;
+  loadSummary();
 }
 
 function renderDrift() {
@@ -182,7 +356,7 @@ async function resolveAll(direction) {
 /* ---------- Orphans ---------- */
 async function runOrphanCheck() {
   var status = document.getElementById('orphanStatus');
-  var btn = event.target;
+  var btn = document.getElementById('btnOrphans');
   btn.disabled = true;
   status.textContent = 'Checking for database entries with missing files...';
   status.style.color = '';
@@ -200,6 +374,7 @@ async function runOrphanCheck() {
     status.style.color = 'var(--danger)';
   }
   btn.disabled = false;
+  loadSummary();
 }
 
 function renderOrphans() {
@@ -243,16 +418,13 @@ async function removeAllOrphans() {
 /* ---------- Untracked ---------- */
 async function runUntrackedCheck() {
   var status = document.getElementById('untrackedStatus');
-  var btn = event.target;
+  var btn = document.getElementById('btnUntracked');
   btn.disabled = true;
   status.textContent = 'Scanning folders for untracked files...';
   status.style.color = '';
   await new Promise(function(r) { setTimeout(r, 50); });
   try {
-    var folders = await safeFetch('/api/folders', {}, { toast: false });
-    var roots = [];
-    folders.forEach(function(f) { if (!f.parent_id) roots.push(f.path); });
-
+    var roots = await getRoots();
     var params = roots.map(function(r) { return 'root=' + encodeURIComponent(r); }).join('&');
     untrackedData = await safeFetch('/api/audit/untracked?' + params, {}, { toast: false });
     document.getElementById('untrackedBadge').textContent = untrackedData.length;
@@ -268,6 +440,7 @@ async function runUntrackedCheck() {
     status.style.color = 'var(--danger)';
   }
   btn.disabled = false;
+  loadSummary();
 }
 
 function renderUntracked() {
@@ -318,6 +491,184 @@ function sendToPipeline() {
   window.location.href = '/pipeline?' + params;
 }
 
+/* ---------- Stray Sidecars ---------- */
+async function runSidecarCheck() {
+  var status = document.getElementById('sidecarStatus');
+  var btn = document.getElementById('btnSidecars');
+  btn.disabled = true;
+  status.textContent = 'Scanning folders for .xmp files with no photo...';
+  status.style.color = '';
+  await new Promise(function(r) { setTimeout(r, 50); });
+  try {
+    var roots = await getRoots();
+    var params = roots.map(function(r) { return 'root=' + encodeURIComponent(r); }).join('&');
+    sidecarData = await safeFetch('/api/audit/sidecars?' + params, {}, { toast: false });
+    document.getElementById('sidecarBadge').textContent = sidecarData.length;
+    renderSidecars();
+    status.textContent = sidecarData.length > 0
+      ? sidecarData.length + ' stray sidecar(s) found'
+      : 'No stray sidecars';
+    status.style.color = sidecarData.length > 0 ? 'var(--warning)' : 'var(--accent)';
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--danger)';
+  }
+  btn.disabled = false;
+  loadSummary();
+}
+
+function renderSidecars() {
+  if (sidecarData.length === 0) {
+    document.getElementById('sidecarContent').innerHTML = '<div class="empty-msg">No stray sidecars. Every .xmp file has a matching image next to it.</div>';
+    return;
+  }
+  var html = '<table class="audit-table"><thead><tr><th>Sidecar</th><th>Folder</th><th>Actions</th></tr></thead><tbody>';
+  sidecarData.forEach(function(s) {
+    var fname = s.path.split('/').pop();
+    html += '<tr><td>' + escapeHtml(fname) + '</td><td>' + escapeHtml(s.folder) + '</td>' +
+      '<td><button class="btn btn-danger" onclick="deleteSidecar(\'' + escapeAttr(s.path) + '\')">Delete</button></td></tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('sidecarContent').innerHTML = html;
+}
+
+async function deleteSidecar(path) {
+  try {
+    await safeFetch('/api/audit/delete-sidecars', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({paths: [path]}),
+    });
+  } catch(e) {}
+  runSidecarCheck();
+}
+
+async function deleteAllSidecars() {
+  if (sidecarData.length === 0) return;
+  var paths = sidecarData.map(function(s) { return s.path; });
+  try {
+    await safeFetch('/api/audit/delete-sidecars', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({paths: paths}),
+    });
+  } catch(e) {}
+  runSidecarCheck();
+}
+
+/* ---------- Integrity (hash verification) ---------- */
+async function loadIntegrity() {
+  try {
+    integrityData = await safeFetch('/api/audit/integrity', {}, { toast: false });
+    renderIntegrity();
+  } catch(e) {
+    var el = document.getElementById('integrityContent');
+    el.innerHTML = '<div class="empty-msg"></div>';
+    el.firstChild.textContent = 'Error loading integrity state: ' + e.message;
+  }
+}
+
+var HASH_STATUS_LABELS = {
+  corrupt: {label: 'Possible corruption', cls: 'hash-corrupt',
+            hint: 'content changed but file mtime did not — bit rot or disk fault; restore from backup'},
+  modified: {label: 'Modified outside Vireo', cls: 'hash-modified',
+             hint: 'content and mtime both changed — likely an external edit; rescan or accept'},
+  unreadable: {label: 'Unreadable', cls: 'hash-unreadable',
+               hint: 'the file exists but could not be read'},
+};
+
+function renderIntegrity() {
+  var stats = integrityData.stats;
+  var flagged = integrityData.flagged;
+  document.getElementById('integrityBadge').textContent = flagged.length;
+
+  var statParts = [];
+  statParts.push(stats.checked + ' of ' + stats.total + ' photos verified against their import-time hash');
+  if (stats.unchecked > 0) statParts.push(stats.unchecked + ' never verified');
+  document.getElementById('integrityStats').textContent = statParts.join(' · ');
+
+  if (flagged.length === 0) {
+    var msg = stats.checked === 0
+      ? 'No photos have been hash-verified yet. Click "Verify File Hashes" to re-hash every file and compare against the hash recorded at import.'
+      : 'No integrity problems found in the last verification.';
+    document.getElementById('integrityContent').innerHTML = '<div class="empty-msg">' + msg + '</div>';
+    return;
+  }
+  var html = '<table class="audit-table"><thead><tr><th>File</th><th>Folder</th><th>Status</th><th>Checked</th><th>Actions</th></tr></thead><tbody>';
+  flagged.forEach(function(f) {
+    var st = HASH_STATUS_LABELS[f.hash_status] || {label: f.hash_status, cls: '', hint: ''};
+    html += '<tr><td>' + escapeHtml(f.filename) + '</td><td>' + escapeHtml(f.folder_path) + '</td>' +
+      '<td class="' + st.cls + '" title="' + escapeAttr(st.hint) + '">' + escapeHtml(st.label) + '</td>' +
+      '<td>' + timeAgo(f.hash_checked_at) + '</td>' +
+      '<td><button class="btn btn-secondary" title="Store the file\'s current content as the new baseline hash" ' +
+      'onclick="acceptHash(' + f.photo_id + ')">Accept Current File</button></td></tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('integrityContent').innerHTML = html;
+}
+
+async function acceptHash(photoId) {
+  try {
+    await safeFetch('/api/audit/accept-hash', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [photoId]}),
+    });
+  } catch(e) {}
+  loadIntegrity();
+  loadSummary();
+}
+
+async function runHashVerify() {
+  var status = document.getElementById('integrityStatus');
+  var btn = document.getElementById('btnVerify');
+  btn.disabled = true;
+  status.textContent = 'Starting hash verification...';
+  status.style.color = '';
+  try {
+    var resp = await safeFetch('/api/jobs/verify-hashes', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
+    }, { toast: false });
+    var jobId = resp.job_id;
+    var job = null;
+    while (true) {
+      await new Promise(function(r) { setTimeout(r, 1000); });
+      job = await safeFetch('/api/jobs/' + jobId, {}, { toast: false });
+      if (job.status !== 'running') break;
+      var p = job.progress || {};
+      if (p.total) {
+        status.textContent = 'Hashing ' + p.current + ' / ' + p.total +
+          (p.current_file ? ' — ' + p.current_file : '');
+      }
+    }
+    if (job.status === 'completed' && job.result) {
+      var r = job.result;
+      var problems = (r.modified || 0) + (r.corrupt || 0) + (r.unreadable || 0);
+      var parts = [r.checked + ' file(s) checked'];
+      if (r.baselined) parts.push(r.baselined + ' baselined (no prior hash)');
+      if (r.missing) parts.push(r.missing + ' missing (see Orphans)');
+      parts.push(problems > 0 ? problems + ' problem(s) found' : 'no problems');
+      status.textContent = parts.join(', ');
+      status.style.color = problems > 0 ? 'var(--danger)' : 'var(--accent)';
+    } else {
+      status.textContent = 'Verification ' + job.status;
+      status.style.color = 'var(--warning)';
+    }
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--danger)';
+  }
+  btn.disabled = false;
+  await loadIntegrity();
+  loadSummary();
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  loadSummary();
+  loadIntegrity();
+});
 </script>
 </body>
 </html>

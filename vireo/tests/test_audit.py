@@ -99,6 +99,228 @@ def test_remove_orphans(tmp_path):
     assert photo is None
 
 
+def test_check_stray_sidecars(tmp_path):
+    """check_stray_sidecars flags .xmp files with no matching image,
+    in both bird.xmp and bird.jpg.xmp naming styles."""
+    from audit import check_stray_sidecars
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    # Matched: classic style (bird.jpg + bird.xmp)
+    Image.new('RGB', (50, 50)).save(os.path.join(root, 'bird.jpg'))
+    write_sidecar(os.path.join(root, 'bird.xmp'),
+                  flat_keywords={'Sparrow'}, hierarchical_keywords=set())
+    # Matched: darktable style (owl.jpg + owl.jpg.xmp)
+    Image.new('RGB', (50, 50)).save(os.path.join(root, 'owl.jpg'))
+    write_sidecar(os.path.join(root, 'owl.jpg.xmp'),
+                  flat_keywords={'Owl'}, hierarchical_keywords=set())
+    # Stray: no image anywhere
+    write_sidecar(os.path.join(root, 'ghost.xmp'),
+                  flat_keywords={'Gone'}, hierarchical_keywords=set())
+
+    strays = check_stray_sidecars([root])
+    assert len(strays) == 1
+    assert strays[0]['path'].endswith('ghost.xmp')
+
+
+def test_delete_stray_sidecars_refuses_matched_sidecar(tmp_path):
+    """delete_stray_sidecars re-verifies at deletion time: a sidecar whose
+    image reappeared since the check is kept, and non-xmp paths are
+    never touched."""
+    from audit import delete_stray_sidecars
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    matched = os.path.join(root, 'bird.xmp')
+    stray = os.path.join(root, 'ghost.xmp')
+    not_xmp = os.path.join(root, 'precious.jpg')
+    Image.new('RGB', (50, 50)).save(not_xmp)
+    write_sidecar(matched, flat_keywords={'A'}, hierarchical_keywords=set())
+    write_sidecar(stray, flat_keywords={'B'}, hierarchical_keywords=set())
+    Image.new('RGB', (50, 50)).save(os.path.join(root, 'bird.jpg'))
+
+    deleted = delete_stray_sidecars([matched, stray, not_xmp])
+
+    assert deleted == 1
+    assert os.path.exists(matched), "sidecar with a living image was deleted"
+    assert os.path.exists(not_xmp), "non-xmp file was deleted"
+    assert not os.path.exists(stray)
+
+
+def test_verify_hashes_ok_and_baseline(tmp_path):
+    """Untouched files verify as ok; photos without a stored hash get
+    baselined; the integrity run is recorded for the summary."""
+    from audit import verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'good.jpg'))
+    Image.new('RGB', (70, 70)).save(os.path.join(root, 'nohash.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+    # Simulate a photo imported before hashing existed
+    db.conn.execute(
+        "UPDATE photos SET file_hash = NULL WHERE filename = 'nohash.jpg'")
+    db.conn.commit()
+
+    stats = verify_hashes(db)
+
+    assert stats['ok'] == 1
+    assert stats['baselined'] == 1
+    assert stats['corrupt'] == 0 and stats['modified'] == 0
+    row = db.conn.execute(
+        "SELECT file_hash, hash_status FROM photos "
+        "WHERE filename = 'nohash.jpg'").fetchone()
+    assert row['file_hash'] is not None
+    assert row['hash_status'] == 'ok'
+    runs = db.get_audit_runs()
+    assert runs['integrity']['problem_count'] == 0
+
+
+def test_verify_hashes_flags_corruption_when_mtime_unchanged(tmp_path):
+    """Content change with the original mtime is the bit-rot signature."""
+    from audit import verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, 'rot.jpg')
+    Image.new('RGB', (60, 60)).save(path)
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    # Flip bytes but restore the original mtime: nothing legitimately
+    # wrote this file, yet its content changed.
+    st = os.stat(path)
+    with open(path, 'r+b') as f:
+        f.seek(10)
+        f.write(b'\xde\xad\xbe\xef')
+    os.utime(path, (st.st_atime, st.st_mtime))
+
+    stats = verify_hashes(db)
+
+    assert stats['corrupt'] == 1
+    row = db.conn.execute(
+        "SELECT hash_status FROM photos WHERE filename = 'rot.jpg'"
+    ).fetchone()
+    assert row['hash_status'] == 'corrupt'
+    assert db.get_audit_runs()['integrity']['problem_count'] == 1
+    flagged = db.get_integrity_flagged()
+    assert len(flagged) == 1
+    assert flagged[0]['filename'] == 'rot.jpg'
+
+
+def test_verify_hashes_flags_external_edit_as_modified(tmp_path):
+    """Content change with a moved mtime is an external edit, not rot."""
+    from audit import verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, 'edited.jpg')
+    Image.new('RGB', (60, 60)).save(path)
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    Image.new('RGB', (60, 60), (200, 0, 0)).save(path)
+    st = os.stat(path)
+    os.utime(path, (st.st_atime, st.st_mtime + 10))
+
+    stats = verify_hashes(db)
+
+    assert stats['modified'] == 1
+    row = db.conn.execute(
+        "SELECT hash_status FROM photos WHERE filename = 'edited.jpg'"
+    ).fetchone()
+    assert row['hash_status'] == 'modified'
+
+
+def test_accept_current_hash_clears_flag(tmp_path):
+    """Accepting a flagged file stores its current content as the new
+    baseline and clears the problem flag."""
+    from audit import accept_current_hash, verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, 'edited.jpg')
+    Image.new('RGB', (60, 60)).save(path)
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    Image.new('RGB', (60, 60), (0, 200, 0)).save(path)
+    st = os.stat(path)
+    os.utime(path, (st.st_atime, st.st_mtime + 10))
+    verify_hashes(db)
+    assert len(db.get_integrity_flagged()) == 1
+
+    pid = db.conn.execute(
+        "SELECT id FROM photos WHERE filename = 'edited.jpg'").fetchone()['id']
+    accepted = accept_current_hash(db, [pid])
+
+    assert accepted == 1
+    assert db.get_integrity_flagged() == []
+    # Re-verifying immediately is clean: the new baseline matches disk.
+    stats = verify_hashes(db)
+    assert stats['ok'] == 1 and stats['modified'] == 0
+
+
+def test_build_summary_states(tmp_path):
+    """The green light requires every check to have run AND found nothing
+    AND full hash coverage — never 'no evidence of problems'."""
+    from audit import build_summary, verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'good.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    # Nothing has run: unverified, never intact
+    s = build_summary(db)
+    assert s['status'] == 'unverified'
+
+    # Four checks ran clean but hashes never verified: still not intact
+    for name in ('drift', 'orphans', 'untracked', 'sidecars'):
+        db.record_audit_run(name, 0)
+    s = build_summary(db)
+    assert s['status'] == 'unverified'
+
+    # All five ran, all clean, full coverage: intact
+    verify_hashes(db)
+    s = build_summary(db)
+    assert s['status'] == 'intact'
+    assert s['problem_count'] == 0
+
+    # A new photo lands after the verify run: clean but stale
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'new.jpg'))
+    scan(root, db, incremental=True)
+    db.record_audit_run('untracked', 0)
+    s = build_summary(db)
+    assert s['status'] == 'stale'
+    assert s['integrity']['unchecked'] == 1
+
+    # A check with findings: problems
+    db.record_audit_run('drift', 3)
+    s = build_summary(db)
+    assert s['status'] == 'problems'
+    assert s['problem_count'] == 3
+
+
 def test_remove_orphans_endpoint_unlinks_cached_thumbnail(
     tmp_path, monkeypatch,
 ):

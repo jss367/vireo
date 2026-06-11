@@ -8,6 +8,7 @@ import sqlite3
 import time
 import unicodedata
 import uuid
+from datetime import datetime
 
 from new_images import get_shared_cache
 
@@ -333,6 +334,8 @@ class Database:
                 miss_oof                 INTEGER,
                 miss_computed_at         TEXT,
                 wildlife_excluded        INTEGER NOT NULL DEFAULT 0,
+                hash_checked_at          TEXT,
+                hash_status              TEXT,
                 UNIQUE(folder_id, filename)
             );
 
@@ -617,6 +620,19 @@ class Database:
               PRIMARY KEY (snapshot_id, file_path)
             );
 
+            -- Last-run record per audit check (drift, orphans, untracked,
+            -- sidecars, integrity). One row per (workspace, check); the
+            -- audit page's summary banner reads these so its "archive
+            -- intact" light reflects checks that actually ran, with
+            -- timestamps, rather than assuming absence of evidence.
+            CREATE TABLE IF NOT EXISTS audit_runs (
+                workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                check_name    TEXT NOT NULL,
+                ran_at        TEXT NOT NULL,
+                problem_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (workspace_id, check_name)
+            );
+
             CREATE TABLE IF NOT EXISTS place_reverse_geocode_cache (
                 lat_grid    INTEGER NOT NULL,
                 lng_grid    INTEGER NOT NULL,
@@ -856,6 +872,22 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE photos "
                 "ADD COLUMN wildlife_excluded INTEGER NOT NULL DEFAULT 0"
+            )
+        # Migration: integrity-verification markers. hash_checked_at is when
+        # the file's content was last re-hashed against photos.file_hash;
+        # hash_status records the verdict ('ok', 'modified', 'corrupt',
+        # 'unreadable'). NULL means the file has never been verified.
+        try:
+            self.conn.execute("SELECT hash_checked_at FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos ADD COLUMN hash_checked_at TEXT"
+            )
+        try:
+            self.conn.execute("SELECT hash_status FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos ADD COLUMN hash_status TEXT"
             )
 
         # Backfill pre-existing photos with mask_path set on the photos
@@ -1899,6 +1931,123 @@ class Database:
         if changed:
             self.conn.commit()
         return changed
+
+    # -- Library integrity verification --
+
+    def record_audit_run(self, check_name, problem_count):
+        """Record that an audit check ran now and what it found.
+
+        One row per (workspace, check); re-running a check overwrites its
+        previous row. The audit summary reads these to decide whether the
+        archive can honestly be called intact.
+        """
+        self.conn.execute(
+            "INSERT OR REPLACE INTO audit_runs "
+            "(workspace_id, check_name, ran_at, problem_count) "
+            "VALUES (?, ?, ?, ?)",
+            (self._ws_id(), check_name, datetime.now().isoformat(),
+             int(problem_count)),
+        )
+        self.conn.commit()
+
+    def get_audit_runs(self):
+        """Return {check_name: {ran_at, problem_count}} for this workspace."""
+        rows = self.conn.execute(
+            "SELECT check_name, ran_at, problem_count FROM audit_runs "
+            "WHERE workspace_id = ?",
+            (self._ws_id(),),
+        ).fetchall()
+        return {
+            r["check_name"]: {
+                "ran_at": r["ran_at"],
+                "problem_count": r["problem_count"],
+            }
+            for r in rows
+        }
+
+    def get_integrity_photos(self):
+        """Return workspace photos with the fields hash verification needs."""
+        rows = self.conn.execute(
+            """SELECT p.id, p.filename, p.file_hash, p.file_mtime,
+                      p.hash_status, p.hash_checked_at, f.path AS folder_path
+               FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    AND wf.workspace_id = ?
+               JOIN folders f ON f.id = p.folder_id
+                    AND f.status IN ('ok', 'partial')
+               ORDER BY p.id""",
+            (self._ws_id(),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_integrity_flagged(self):
+        """Return workspace photos whose last hash check found a problem."""
+        rows = self.conn.execute(
+            """SELECT p.id AS photo_id, p.filename, p.hash_status,
+                      p.hash_checked_at, f.path AS folder_path
+               FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    AND wf.workspace_id = ?
+               JOIN folders f ON f.id = p.folder_id
+                    AND f.status IN ('ok', 'partial')
+               WHERE p.hash_status IN ('modified', 'corrupt', 'unreadable')
+               ORDER BY p.hash_status, p.filename""",
+            (self._ws_id(),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_integrity_stats(self):
+        """Return hash-verification coverage for the active workspace.
+
+        ``unchecked`` is load-bearing for the summary banner: photos added
+        after the last verify run have hash_checked_at NULL, so a green
+        light can't silently cover files that were never re-hashed.
+        """
+        row = self.conn.execute(
+            """SELECT COUNT(*) AS total,
+                      SUM(CASE WHEN p.hash_checked_at IS NOT NULL
+                          THEN 1 ELSE 0 END) AS checked,
+                      SUM(CASE WHEN p.hash_status IN
+                          ('modified', 'corrupt', 'unreadable')
+                          THEN 1 ELSE 0 END) AS flagged
+               FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    AND wf.workspace_id = ?
+               JOIN folders f ON f.id = p.folder_id
+                    AND f.status IN ('ok', 'partial')""",
+            (self._ws_id(),),
+        ).fetchone()
+        total = row["total"] or 0
+        checked = row["checked"] or 0
+        return {
+            "total": total,
+            "checked": checked,
+            "unchecked": total - checked,
+            "flagged": row["flagged"] or 0,
+        }
+
+    def update_photo_hash_check(self, photo_id, status, file_hash=None,
+                                commit=True):
+        """Record a hash-verification verdict for one photo.
+
+        When ``file_hash`` is given the stored baseline is replaced too
+        (first-time baselining, or the user accepting an external edit).
+        """
+        now = datetime.now().isoformat()
+        if file_hash is not None:
+            self.conn.execute(
+                "UPDATE photos SET hash_status = ?, hash_checked_at = ?, "
+                "file_hash = ? WHERE id = ?",
+                (status, now, file_hash, photo_id),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE photos SET hash_status = ?, hash_checked_at = ? "
+                "WHERE id = ?",
+                (status, now, photo_id),
+            )
+        if commit:
+            self.conn.commit()
 
     def get_missing_folders(self):
         """Return missing folders in the active workspace with photo counts."""

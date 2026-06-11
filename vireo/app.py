@@ -9238,14 +9238,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         from audit import check_drift
 
-        return jsonify(check_drift(db))
+        drifts = check_drift(db)
+        db.record_audit_run("drift", len(drifts))
+        return jsonify(drifts)
 
     @app.route("/api/audit/orphans")
     def api_audit_orphans():
         db = _get_db()
         from audit import check_orphans
 
-        return jsonify(check_orphans(db))
+        orphans = check_orphans(db)
+        db.record_audit_run("orphans", len(orphans))
+        return jsonify(orphans)
 
     @app.route("/api/audit/untracked")
     def api_audit_untracked():
@@ -9253,7 +9257,103 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         body = request.args.getlist("root") or []
         from audit import check_untracked
 
-        return jsonify(check_untracked(db, body))
+        untracked = check_untracked(db, body)
+        db.record_audit_run("untracked", len(untracked))
+        return jsonify(untracked)
+
+    @app.route("/api/audit/sidecars")
+    def api_audit_sidecars():
+        db = _get_db()
+        roots = request.args.getlist("root") or []
+        from audit import check_stray_sidecars
+
+        strays = check_stray_sidecars(roots)
+        db.record_audit_run("sidecars", len(strays))
+        return jsonify(strays)
+
+    @app.route("/api/audit/delete-sidecars", methods=["POST"])
+    def api_audit_delete_sidecars():
+        body = request.get_json(silent=True) or {}
+        paths = body.get("paths", [])
+        from audit import delete_stray_sidecars
+
+        deleted = delete_stray_sidecars(paths)
+        return jsonify({"ok": True, "deleted": deleted})
+
+    @app.route("/api/audit/integrity")
+    def api_audit_integrity():
+        """Current hash-verification state from the last verify run.
+
+        Read-only: reports stored verdicts and coverage without
+        re-hashing, so the audit page can render instantly. Re-hashing
+        happens in the verify-hashes background job.
+        """
+        db = _get_db()
+        from audit import check_integrity
+
+        return jsonify(check_integrity(db))
+
+    @app.route("/api/audit/accept-hash", methods=["POST"])
+    def api_audit_accept_hash():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        from audit import accept_current_hash
+
+        accepted = accept_current_hash(db, photo_ids)
+        return jsonify({"ok": True, "accepted": accepted})
+
+    @app.route("/api/audit/summary")
+    def api_audit_summary():
+        db = _get_db()
+        from audit import build_summary
+
+        return jsonify(build_summary(db))
+
+    @app.route("/api/jobs/verify-hashes", methods=["POST"])
+    def api_job_verify_hashes():
+        """Re-hash every photo file and compare against the stored SHA-256.
+
+        Background job: flags silent corruption (content changed, mtime
+        unchanged), external edits (content + mtime changed), unreadable
+        files, and baselines photos that have no stored hash yet. Results
+        land in photos.hash_status; the audit page reads them via
+        /api/audit/integrity.
+        """
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            from audit import verify_hashes
+
+            thread_db = Database(db_path)
+            if active_ws is not None:
+                thread_db.set_active_workspace(active_ws)
+
+            def progress_cb(current, total, filename):
+                # Throttle SSE events; hashing is per-file fast on small
+                # files and the stream doesn't need every one.
+                if current % 10 != 0 and current not in (1, total):
+                    return
+                runner.push_event(
+                    job["id"],
+                    "progress",
+                    {
+                        "current": current,
+                        "total": total,
+                        "current_file": filename,
+                        "phase": "Verifying file hashes",
+                    },
+                )
+
+            return verify_hashes(
+                thread_db,
+                progress_cb=progress_cb,
+                should_cancel=lambda: runner.is_cancelled(job["id"]),
+            )
+
+        job_id = runner.start("verify-hashes", work, workspace_id=active_ws)
+        return jsonify({"job_id": job_id})
 
     @app.route("/api/audit/resolve", methods=["POST"])
     def api_audit_resolve():
