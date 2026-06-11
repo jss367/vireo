@@ -903,16 +903,20 @@ def _classify_photos(
     skipped_existing = 0
     total = len(photos)
     batch = []
+    cancelled = False
 
     start_time = time.time()
 
     for i, photo in enumerate(photos):
         if runner.is_cancelled(job["id"]):
-            # The post-loop flush below still commits the pending batch, so
-            # work completed before the cancel is preserved.
+            # Already-classified work is in raw_results (committed via the
+            # in-loop flushes); the pending `batch` is only queued items
+            # that haven't run through the model yet, so it gets dropped
+            # below instead of flushed.
             log.info(
                 "Classify job cancelled during classification (%d/%d)", i, total
             )
+            cancelled = True
             break
         job["progress"]["current"] = i + 1
         job["progress"]["current_file"] = photo["filename"]
@@ -1115,8 +1119,11 @@ def _classify_photos(
                 _record_batch_classifier_runs(db, batch, model_name, fp, raw_results, pre_len)
                 batch = []
 
-    # Flush remaining images
-    if batch:
+    # Flush remaining images — but not on cancel. The pending batch holds
+    # photos that haven't been classified yet; running inference on them
+    # here would write predictions and classifier_runs rows for photos the
+    # user just told us to drop.
+    if batch and not cancelled:
         pre_len = len(raw_results)
         failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
         _record_batch_classifier_runs(db, batch, model_name, fp, raw_results, pre_len)

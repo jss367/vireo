@@ -3062,6 +3062,73 @@ def test_classify_photos_stops_when_cancelled(tmp_path):
     clf.classify_batch_with_embedding.assert_not_called()
 
 
+def test_classify_photos_drops_pending_batch_on_mid_loop_cancel(tmp_path):
+    """A cancel that lands after some photos queued into ``batch`` but
+    before it reaches ``_BATCH_SIZE`` must drop the pending batch — not
+    fall through to the post-loop flush. Otherwise the job runs classifier
+    inference and writes classifier_runs rows for photos the user just
+    cancelled."""
+    from unittest.mock import MagicMock, patch
+
+    from classify_job import _classify_photos
+
+    # Flip cancelled to True after the first photo has been processed
+    # (queued into batch, but batch < _BATCH_SIZE so not yet flushed).
+    class FlipRunner(FakeRunner):
+        def __init__(self):
+            super().__init__()
+            self._calls = 0
+
+        def is_cancelled(self, job_id):
+            self._calls += 1
+            # First call: start of iteration 0 — let it through.
+            # Second call: start of iteration 1 — flip to cancelled.
+            return self._calls >= 2
+
+    runner = FlipRunner()
+    job = _make_job()
+    clf = MagicMock()
+
+    # Two photos, each with a synthetic full-image detection. _BATCH_SIZE
+    # is well over 2, so neither flushes mid-loop — the only flush path is
+    # the post-loop one, which must be skipped on cancel.
+    mock_db = MagicMock()
+    mock_db.get_detections.return_value = []
+    mock_db.save_detections.return_value = [101]
+    mock_db.get_classifier_run_keys.return_value = set()
+    mock_db.get_predictions_for_detection.return_value = []
+
+    photos = [
+        {"id": 1, "filename": "a.jpg", "folder_id": 10, "timestamp": None},
+        {"id": 2, "filename": "b.jpg", "folder_id": 10, "timestamp": None},
+    ]
+    folders = {10: str(tmp_path)}
+
+    # Make _prepare_image succeed without touching disk.
+    with patch("classify_job._prepare_image",
+               return_value=("img-obj", str(tmp_path), "p")):
+        raw_results, failed, skipped = _classify_photos(
+            photos=photos,
+            folders=folders,
+            detection_map={},
+            existing_preds=set(),
+            clf=clf,
+            model_type="bioclip",
+            model_name="test-model",
+            runner=runner,
+            job=job,
+            db=mock_db,
+        )
+
+    # The post-loop flush must be gated on the cancel — classifier inference
+    # never runs, and no classifier_runs rows are written for the pending
+    # batch contents.
+    clf.classify_batch.assert_not_called()
+    clf.classify_batch_with_embedding.assert_not_called()
+    mock_db.record_classifier_run.assert_not_called()
+    assert raw_results == []
+
+
 def test_weights_download_failure_degrades_to_full_image(tmp_path):
     """A failed MegaDetector weights download (e.g. network down) must
     degrade to full-image classification like any other detection failure,
