@@ -6418,9 +6418,16 @@ def test_delete_folder_keeps_descendant_rooted_in_other_workspace(tmp_path):
     pid_other = db.add_photo(folder_id=other, filename="o.jpg", extension=".jpg",
                              file_size=1000, file_mtime=1.0)
 
+    # Prime A's new-images cache: the delete changes what A can see (kept
+    # subtree unlinked), so the cached count must be dropped.
+    db._new_images_cache.set(db._db_path, ws_a, {"new_count": 7})
+
     result = db.delete_folder(parent)
     # Only the photos outside B's root are deleted.
     assert result["deleted_photos"] == 2
+
+    # A's cached new-images payload is invalidated by the delete.
+    assert db._new_images_cache.get(db._db_path, ws_a) is None
 
     # Parent and the unshared sibling are gone, with their photos.
     for fid in (parent, other):
@@ -6473,9 +6480,16 @@ def test_delete_folder_keeps_target_rooted_in_other_workspace(tmp_path):
     pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
                              file_size=1000, file_mtime=1.0)
 
+    # Prime A's new-images cache: the unlink-only path must still drop it,
+    # since the folder no longer contributes to A's backlog.
+    db._new_images_cache.set(db._db_path, ws_a, {"new_count": 7})
+
     result = db.delete_folder(parent)
     assert result["deleted_photos"] == 0
     assert result["files"] == []
+
+    # A's cached new-images payload is invalidated by the unlink.
+    assert db._new_images_cache.get(db._db_path, ws_a) is None
 
     # Folder rows and photos all survive, parent chain intact.
     row = db.conn.execute(

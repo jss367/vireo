@@ -2450,6 +2450,13 @@ class Database:
                 except Exception:
                     self.conn.rollback()
                     raise
+                # The subtree no longer contributes to this workspace's
+                # new-images backlog. Drop the cached payload so the banner
+                # doesn't keep serving the pre-unlink count until the TTL
+                # expires (same as remove_workspace_folder_tree).
+                self._new_images_cache.invalidate_workspaces(
+                    self._db_path, [active_ws]
+                )
             return {"deleted_photos": 0, "files": []}
 
         # BFS so the list is ordered parents-first; deleted in reverse below.
@@ -2542,6 +2549,18 @@ class Database:
             self.conn.rollback()
             raise
         self.prune_pipeline_cache_for_ids(deleted_ids)
+
+        # delete_photos' finally-clause invalidation only covers folders that
+        # had photo rows. Photo-less deleted folders (whose untracked on-disk
+        # files counted as "new") and kept subtrees unlinked from the active
+        # workspace above would otherwise keep serving a stale new-images
+        # count until the TTL expires. Deleted folders are only ever linked
+        # in the active workspace (foreign links protect from deletion), so
+        # invalidating it post-commit covers every affected workspace.
+        if active_ws is not None:
+            self._new_images_cache.invalidate_workspaces(
+                self._db_path, [active_ws]
+            )
 
         return {"deleted_photos": len(deleted_ids), "files": files}
 
