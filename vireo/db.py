@@ -7026,7 +7026,13 @@ class Database:
         genre) are distinct by design. Merging across those slots retags
         photos with the wrong place/kind.
 
-        Only merges keywords that are used by photos in the active workspace.
+        A keyword is in scope when it — or any descendant — is tagged on a
+        photo in the active workspace. XMP import only tags the leaf of a
+        hierarchical keyword ("Birds > Heron" tags Heron, not Birds), so
+        duplicate ancestors usually have no photo_keywords rows of their
+        own; walking up from the tagged leaves brings them in scope while
+        still leaving other workspaces' keywords untouched.
+
         Keeps the lowest ID (earliest created), moves all photo associations,
         reparents any child keywords onto the survivor (the parent_id FK
         would otherwise block the DELETE), and deletes the duplicates.
@@ -7039,15 +7045,28 @@ class Database:
         total_merged = 0
         while True:
             dupes = self.conn.execute(
-                """SELECT LOWER(k.name) as lname, MIN(k.id) as keep_id,
-                          GROUP_CONCAT(DISTINCT k.id) as all_ids
+                """WITH RECURSIVE
+                   tagged AS (
+                       SELECT DISTINCT pk.keyword_id AS id
+                       FROM photo_keywords pk
+                       JOIN photos p ON p.id = pk.photo_id
+                       JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                       WHERE wf.workspace_id = ?
+                   ),
+                   in_scope AS (
+                       SELECT id FROM tagged
+                       UNION
+                       SELECT k.parent_id
+                       FROM keywords k
+                       JOIN in_scope s ON s.id = k.id
+                       WHERE k.parent_id IS NOT NULL
+                   )
+                   SELECT MIN(k.id) as keep_id,
+                          GROUP_CONCAT(k.id) as all_ids
                    FROM keywords k
-                   JOIN photo_keywords pk ON pk.keyword_id = k.id
-                   JOIN photos p ON p.id = pk.photo_id
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                   WHERE wf.workspace_id = ?
+                   JOIN in_scope s ON s.id = k.id
                    GROUP BY LOWER(k.name), k.parent_id, k.type
-                   HAVING COUNT(DISTINCT k.id) > 1""",
+                   HAVING COUNT(k.id) > 1""",
                 (ws,),
             ).fetchall()
             if not dupes:
@@ -7059,43 +7078,53 @@ class Database:
                 remove_ids = [x for x in all_ids if x != keep_id]
 
                 for rid in remove_ids:
-                    # Move photo associations (ignore if already exists for keep_id)
-                    self.conn.execute(
-                        "UPDATE OR IGNORE photo_keywords SET keyword_id = ? WHERE keyword_id = ?",
-                        (keep_id, rid),
-                    )
-                    # Delete orphaned associations
-                    self.conn.execute(
-                        "DELETE FROM photo_keywords WHERE keyword_id = ?", (rid,)
-                    )
-                    # Reparent children onto the survivor before deleting, or
-                    # the keywords.parent_id FK aborts the merge mid-way.
-                    # Per-child so a UNIQUE(name, parent_id) clash with an
-                    # existing child of the survivor disambiguates instead of
-                    # blowing up (same pattern as the place-label merge).
-                    children = self.conn.execute(
-                        "SELECT id, name FROM keywords WHERE parent_id = ?",
-                        (rid,),
-                    ).fetchall()
-                    for child in children:
-                        try:
-                            self.conn.execute(
-                                "UPDATE keywords SET parent_id = ? WHERE id = ?",
-                                (keep_id, child["id"]),
-                            )
-                        except sqlite3.IntegrityError:
-                            disambiguated = f"{child['name']} (id-{child['id']})"
-                            self.conn.execute(
-                                "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
-                                (keep_id, disambiguated, child["id"]),
-                            )
-                    # Delete the duplicate keyword
-                    self.conn.execute("DELETE FROM keywords WHERE id = ?", (rid,))
-                    total_merged += 1
+                    total_merged += self._merge_keyword_into(rid, keep_id)
 
         if total_merged:
             self.conn.commit()
         return total_merged
+
+    def _merge_keyword_into(self, src_id, dst_id):
+        """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
+
+        Moves photo associations, then reparents the source's children onto
+        the destination. A child whose exact name already exists under the
+        destination (UNIQUE(name, parent_id) clash) is itself a duplicate of
+        that sibling, so it merges into it recursively instead of being
+        renamed — "Birds > Heron" and "birds > Heron" must converge on one
+        Heron. Case-variant children don't clash (the UNIQUE index is
+        case-sensitive); they reparent cleanly and collapse on the caller's
+        next convergence pass. Cycles are impossible: parent_id chains are
+        acyclic by construction. Returns the number of keyword rows merged
+        away (>= 1). Caller commits.
+        """
+        merged = 1
+        # Move photo associations (ignore if already exists for dst_id),
+        # then drop the leftovers.
+        self.conn.execute(
+            "UPDATE OR IGNORE photo_keywords SET keyword_id = ? WHERE keyword_id = ?",
+            (dst_id, src_id),
+        )
+        self.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (src_id,))
+        # Reparent children onto the destination before deleting, or the
+        # keywords.parent_id FK aborts the merge mid-way.
+        children = self.conn.execute(
+            "SELECT id, name FROM keywords WHERE parent_id = ?", (src_id,)
+        ).fetchall()
+        for child in children:
+            try:
+                self.conn.execute(
+                    "UPDATE keywords SET parent_id = ? WHERE id = ?",
+                    (dst_id, child["id"]),
+                )
+            except sqlite3.IntegrityError:
+                existing = self.conn.execute(
+                    "SELECT id FROM keywords WHERE parent_id = ? AND name = ?",
+                    (dst_id, child["name"]),
+                ).fetchone()
+                merged += self._merge_keyword_into(child["id"], existing["id"])
+        self.conn.execute("DELETE FROM keywords WHERE id = ?", (src_id,))
+        return merged
 
     def get_keyword_tree(self):
         """Return keywords used by photos in the active workspace, plus ancestors."""

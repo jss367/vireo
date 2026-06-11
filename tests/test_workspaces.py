@@ -905,7 +905,10 @@ def test_merge_duplicate_keywords_respects_parent_and_type(db):
 def test_merge_duplicate_keywords_reparents_children(db):
     """A duplicate with child keywords merges without tripping the
     keywords.parent_id FK; children move to the survivor, and a follow-up
-    pass collapses children that became same-parent case-duplicates."""
+    pass collapses children that became same-parent case-duplicates.
+    Only the leaves are photo-tagged — XMP import never tags ancestors —
+    so the untagged Birds/birds parents must still be found via the
+    descendant walk."""
     ws = db.create_workspace("A")
     fid = db.add_folder("/photos", name="photos")
     db.add_workspace_folder(ws, fid)
@@ -922,8 +925,9 @@ def test_merge_duplicate_keywords_reparents_children(db):
     db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('heron', ?)", (lower,))
     db.conn.commit()
 
+    # Tag only the leaves, mirroring _import_keywords_for_photo
     for row in db.conn.execute(
-        "SELECT id FROM keywords WHERE LOWER(name) IN ('birds', 'heron')"
+        "SELECT id FROM keywords WHERE LOWER(name) = 'heron'"
     ).fetchall():
         db.tag_photo(pid, row[0])
 
@@ -938,11 +942,58 @@ def test_merge_duplicate_keywords_reparents_children(db):
     ).fetchall()
     assert len(birds) == 1 and len(herons) == 1
     assert herons[0]["parent_id"] == birds[0]["id"]
-    # Photo keeps both associations, now on the survivors
+    # Photo keeps its leaf association, now on the surviving heron
     tagged = {r[0] for r in db.conn.execute(
         "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid,)
     ).fetchall()}
-    assert tagged == {birds[0]["id"], herons[0]["id"]}
+    assert tagged == {herons[0]["id"]}
+
+
+def test_merge_duplicate_keywords_merges_exact_name_children(db):
+    """When duplicate parents both have a child with the exact same name,
+    the UNIQUE(name, parent_id) clash on reparenting means the child is a
+    duplicate of the survivor's sibling — it must merge into it (keeping
+    its photo associations), not get renamed to 'Heron (id-N)'."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws, fid)
+    pid1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                        file_size=100, file_mtime=1.0)
+    pid2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                        file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    # Case-duplicate parents, each with an exact-same-name child
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('Birds')")
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('birds')")
+    upper = db.conn.execute("SELECT id FROM keywords WHERE name='Birds'").fetchone()[0]
+    lower = db.conn.execute("SELECT id FROM keywords WHERE name='birds'").fetchone()[0]
+    db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('Heron', ?)", (upper,))
+    db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('Heron', ?)", (lower,))
+    h1 = db.conn.execute(
+        "SELECT id FROM keywords WHERE name='Heron' AND parent_id=?", (upper,)).fetchone()[0]
+    h2 = db.conn.execute(
+        "SELECT id FROM keywords WHERE name='Heron' AND parent_id=?", (lower,)).fetchone()[0]
+    db.conn.commit()
+
+    db.tag_photo(pid1, h1)
+    db.tag_photo(pid2, h2)
+
+    merged = db.merge_duplicate_keywords()
+    assert merged == 2  # birds into Birds, then its Heron into Birds' Heron
+
+    herons = db.conn.execute(
+        "SELECT id, name, parent_id FROM keywords WHERE name LIKE 'Heron%'"
+    ).fetchall()
+    assert len(herons) == 1
+    assert herons[0]["name"] == "Heron"  # no 'Heron (id-N)' mangling
+    assert herons[0]["parent_id"] == upper
+    # Both photos' associations converge on the surviving Heron
+    for pid in (pid1, pid2):
+        tagged = {r[0] for r in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid,)
+        ).fetchall()}
+        assert tagged == {herons[0]["id"]}
 
 
 def test_empty_workspace_labels_does_not_fallback_to_global(db):
