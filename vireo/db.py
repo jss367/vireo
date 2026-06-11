@@ -98,7 +98,7 @@ NO_LOCATION_INFORMATION_RULES = {
 
 ALL_NAV_IDS = frozenset({
     "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
-    "misses", "highlights", "browse", "map", "variants",
+    "misses", "highlights", "life_list", "browse", "map", "variants",
     "dashboard", "audit", "compare",
     "zoom_test", "settings", "workspace", "lightroom", "shortcuts",
     "keywords", "duplicates", "logs",
@@ -7201,6 +7201,77 @@ class Database:
             (ws, ws, *folder_params, min_quality),
         ).fetchall()
         return rows
+
+    def get_life_list_candidates(self):
+        """Return (photo x accepted-species-keyword) rows for the life list.
+
+        Every non-rejected photo in a workspace-visible folder carrying an
+        accepted species keyword (``is_species = 1`` or ``type = 'taxonomy'``)
+        produces one row per species keyword. Taxonomy names ride along from
+        ``taxa`` when the keyword is linked.
+
+        Unlike :meth:`get_highlights_candidates`, photos without a
+        ``quality_score`` are included — a species the user confirmed but
+        never ran through the pipeline still belongs on the life list. The
+        API layer ranks each species' photos with the highlights scorer,
+        which falls back gracefully when metric columns are NULL.
+        """
+        ws = self._ws_id()
+        return self.conn.execute(
+            """SELECT p.id, p.folder_id, p.filename, p.timestamp,
+                      p.rating, p.flag, p.quality_score,
+                      p.subject_sharpness, p.subject_size, p.sharpness,
+                      p.mask_path, p.subject_tenengrad, p.bg_tenengrad,
+                      p.crop_complete, p.bg_separation,
+                      p.subject_clip_high, p.subject_clip_low,
+                      p.subject_y_median, p.noise_estimate,
+                      p.eye_tenengrad,
+                      k.name AS species,
+                      t.name AS scientific_name,
+                      t.common_name
+               FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+                AND (k.is_species = 1 OR k.type = 'taxonomy')
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                AND wf.workspace_id = ?
+               JOIN folders f ON f.id = p.folder_id
+                AND f.status IN ('ok', 'partial')
+               LEFT JOIN taxa t ON t.id = k.taxon_id
+               WHERE COALESCE(p.flag, 'none') != 'rejected'
+               ORDER BY k.name, p.timestamp""",
+            (ws,),
+        ).fetchall()
+
+    def get_life_list_locations(self):
+        """Return {species name: [location keyword names]} for the life list.
+
+        A location is attributed to a species when at least one
+        workspace-visible, non-rejected photo carries both the species
+        keyword and a ``type = 'location'`` keyword.
+        """
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """SELECT DISTINCT k.name AS species, lk.name AS location
+               FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+                AND (k.is_species = 1 OR k.type = 'taxonomy')
+               JOIN photos p ON p.id = pk.photo_id
+                AND COALESCE(p.flag, 'none') != 'rejected'
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                AND wf.workspace_id = ?
+               JOIN folders f ON f.id = p.folder_id
+                AND f.status IN ('ok', 'partial')
+               JOIN photo_keywords plk ON plk.photo_id = p.id
+               JOIN keywords lk ON lk.id = plk.keyword_id
+                AND lk.type = 'location'
+               ORDER BY k.name, lk.name""",
+            (ws,),
+        ).fetchall()
+        result = {}
+        for r in rows:
+            result.setdefault(r["species"], []).append(r["location"])
+        return result
 
     def get_folders_with_quality_data(self):
         """Return folders with at least one scored photo in their subtree.
