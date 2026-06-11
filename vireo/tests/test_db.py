@@ -7096,6 +7096,33 @@ def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path):
     assert db.count_photos_for_rules(under_us) == 1  # not /photos/myXdir
 
 
+def test_folder_under_rule_matches_backslash_paths(tmp_path):
+    """Windows libraries store folder paths with backslash separators
+    (``str(Path(...))`` in scanner.scan). The 'folder under' rule must
+    still match descendants of a backslash-delimited root and exclude
+    siblings; a LIKE pattern that hard-codes '/%' would silently miss
+    every Windows descendant."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    f_root = db.add_folder("C:\\Photos\\2023", name="2023")
+    f_sub = db.add_folder("C:\\Photos\\2023\\trip", name="trip", parent_id=f_root)
+    f_sib = db.add_folder("C:\\Photos\\2023-trip", name="2023-trip")
+    for fid, name in [(f_root, "a"), (f_sub, "b"), (f_sib, "c")]:
+        db.add_photo(folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
+                     file_size=100, file_mtime=1.0)
+
+    # Forward-slash rule value still applies to a Windows library because
+    # both sides are normalized to '/'.
+    under = [{"field": "folder", "op": "under", "value": "C:/Photos/2023"}]
+    assert db.count_photos_for_rules(under) == 2  # root + descendant, not sibling
+
+    not_under = [{"field": "folder", "op": "under", "value": "C:/Photos/2023-trip"}]
+    assert db.count_photos_for_rules(not_under) == 1
+
+
 def test_check_filename_collisions(db):
     """check_filename_collisions detects conflicts at destination folder."""
     fid1 = db.add_folder("/src", name="src")

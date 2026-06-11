@@ -996,6 +996,56 @@ def test_merge_duplicate_keywords_merges_exact_name_children(db):
         assert tagged == {herons[0]["id"]}
 
 
+def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
+    """A pass that contains both duplicate parents AND duplicate children
+    under those parents must not crash when the parent merge recursively
+    deletes one of the child group's ids. Without checking that each
+    group's keep_id still exists, the loop would UPDATE photo_keywords
+    toward a non-existent FK target and trip an IntegrityError."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws, fid)
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    # Parents: Birds (keep) and birds (dup). Birds already has a Heron
+    # child; birds has both 'Heron' and 'heron' children — these form
+    # their own duplicate group under birds, and the parent merge will
+    # collapse 'Heron@birds' into 'Heron@Birds' before that group is
+    # processed.
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('Birds')")
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('birds')")
+    upper = db.conn.execute("SELECT id FROM keywords WHERE name='Birds'").fetchone()[0]
+    lower = db.conn.execute("SELECT id FROM keywords WHERE name='birds'").fetchone()[0]
+    db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('Heron', ?)", (upper,))
+    db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('Heron', ?)", (lower,))
+    db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('heron', ?)", (lower,))
+    db.conn.commit()
+
+    for row in db.conn.execute(
+        "SELECT id FROM keywords WHERE LOWER(name) = 'heron'"
+    ).fetchall():
+        db.tag_photo(pid, row[0])
+
+    # Must not raise; converges to one Birds with one Heron child.
+    db.merge_duplicate_keywords()
+
+    birds = db.conn.execute(
+        "SELECT id FROM keywords WHERE LOWER(name) = 'birds'"
+    ).fetchall()
+    herons = db.conn.execute(
+        "SELECT id, parent_id FROM keywords WHERE LOWER(name) = 'heron'"
+    ).fetchall()
+    assert len(birds) == 1
+    assert len(herons) == 1
+    assert herons[0]["parent_id"] == birds[0]["id"]
+    tagged = {r[0] for r in db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid,)
+    ).fetchall()}
+    assert tagged == {herons[0]["id"]}
+
+
 def test_empty_workspace_labels_does_not_fallback_to_global(db):
     """An explicit empty active_labels [] should NOT fall back to global labels."""
     ws = db.create_workspace("Empty Labels")

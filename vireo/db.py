@@ -7075,7 +7075,25 @@ class Database:
             for d in dupes:
                 keep_id = d["keep_id"]
                 all_ids = [int(x) for x in d["all_ids"].split(",")]
-                remove_ids = [x for x in all_ids if x != keep_id]
+
+                # A prior group in this pass can recursively delete ids
+                # from later groups: merging duplicate parents cascades
+                # into their duplicate children, so a child group whose
+                # keep_id was one of those children is now stale. Skip
+                # groups whose keep_id is gone (the next while iteration
+                # re-queries and picks a fresh survivor) and drop dead
+                # remove_ids so we don't UPDATE photo_keywords toward a
+                # non-existent FK target.
+                placeholders = ",".join("?" * len(all_ids))
+                alive = {
+                    row["id"] for row in self.conn.execute(
+                        f"SELECT id FROM keywords WHERE id IN ({placeholders})",
+                        all_ids,
+                    )
+                }
+                if keep_id not in alive:
+                    continue
+                remove_ids = [x for x in all_ids if x != keep_id and x in alive]
 
                 for rid in remove_ids:
                     total_merged += self._merge_keyword_into(rid, keep_id)
@@ -10144,14 +10162,20 @@ class Database:
                 # Match the folder itself plus separator-delimited descendants.
                 # A bare prefix LIKE would also match siblings ("/photos/2023"
                 # matching "/photos/2023-trip") and treat _/% in the value as
-                # wildcards.
-                base = str(value or "").rstrip("/")
+                # wildcards. Stored folder paths use the platform separator
+                # (``str(Path(...))`` in scanner.scan — backslashes on Windows),
+                # so normalize both sides to forward slashes the same way
+                # ``_folder_subtree_ids_by_path`` does; otherwise a Windows
+                # library's ``C:\Photos\Birds`` row never matches a rule whose
+                # LIKE pattern hard-codes ``C:/Photos/%``.
+                base = _path_for_subtree_match(str(value or ""))
                 subtree_params = [base, _escape_like(base) + "/%"]
+                norm = "REPLACE(f.path, '\\', '/')"
                 if op == "under":
-                    return "(f.path = ? OR f.path LIKE ? ESCAPE '\\')", subtree_params
+                    return f"({norm} = ? OR {norm} LIKE ? ESCAPE '\\')", subtree_params
                 if op == "not_under":
                     return (
-                        "(f.path IS NULL OR (f.path != ? AND f.path NOT LIKE ? ESCAPE '\\'))",
+                        f"(f.path IS NULL OR ({norm} != ? AND {norm} NOT LIKE ? ESCAPE '\\'))",
                         subtree_params,
                     )
             if field == "flag":
