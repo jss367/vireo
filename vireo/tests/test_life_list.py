@@ -193,3 +193,31 @@ def test_workspace_scoping(life_app):
     data = _get_life_list(app)
     assert data["species"] == []
     assert data["meta"]["species_count"] == 0
+
+
+def test_same_named_species_keywords_dedupe_photos(life_app):
+    """A photo tagged with two species keywords sharing a display name
+    (different parents — allowed by UNIQUE(name, parent_id)) must count
+    once: photo_count and the lightbox set both dedupe by photo id."""
+    app, db, ids = life_app
+    # Two parent rows so the children can share a name.
+    parent_a = db.add_keyword("Cardinalidae", kw_type="taxonomy")
+    parent_b = db.add_keyword("Cardinalis", kw_type="taxonomy")
+    twin_a = db.add_keyword(
+        "Northern Cardinal", parent_id=parent_a, is_species=True)
+    twin_b = db.add_keyword(
+        "Northern Cardinal", parent_id=parent_b, is_species=True)
+    assert twin_a != twin_b
+    db.tag_photo(ids["p2"], twin_a)
+    db.tag_photo(ids["p2"], twin_b)
+    db.conn.commit()
+
+    data = _get_life_list(app)
+    cardinal = _entry(data, "Northern Cardinal")
+    # Still two distinct photos (p1, p2) — not four.
+    assert cardinal["photo_count"] == 2
+    photo_ids = [p["id"] for p in cardinal["photos"]]
+    assert sorted(photo_ids) == sorted([ids["p1"], ids["p2"]])
+    assert len(photo_ids) == len(set(photo_ids))
+    # Workspace-wide distinct-photo count is unaffected.
+    assert data["meta"]["photo_count"] == 3

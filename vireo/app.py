@@ -5615,6 +5615,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "scientific_name": None,
                 "common_name": None,
                 "photos": [],
+                "seen_ids": set(),
             })
             # Two keyword rows can share a name (different parents); take
             # the first linked taxon's names for the species entry.
@@ -5622,6 +5623,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 entry["scientific_name"] = r.get("scientific_name")
             if entry["common_name"] is None:
                 entry["common_name"] = r.get("common_name")
+            # A photo tagged with two same-name species keywords would
+            # otherwise be appended once per row, inflating photo_count
+            # and duplicating cards in the lightbox.
+            if r["id"] in entry["seen_ids"]:
+                continue
+            entry["seen_ids"].add(r["id"])
             entry["photos"].append({
                 "id": r["id"],
                 "filename": r["filename"],
