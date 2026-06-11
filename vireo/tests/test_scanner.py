@@ -364,6 +364,61 @@ def test_incremental_scan_converges_after_file_change(tmp_path):
     )
 
 
+def test_incremental_scan_retries_after_hash_failure(tmp_path, monkeypatch):
+    """A changed file whose content hash fails is retried on the next scan.
+
+    When _compute_file_features can't read the file (transient permission /
+    I-O error → file_hash None), the scan loop must NOT advance the stored
+    file_mtime — otherwise the next incremental scan sees the mtime as
+    current and skips the file forever with a stale hash and stale derived
+    caches.
+    """
+    import scanner
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, 'bird.jpg')
+    Image.new('RGB', (100, 100)).save(path)
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    def _row():
+        return db.conn.execute(
+            "SELECT file_hash, file_mtime FROM photos"
+        ).fetchone()
+
+    old_row = _row()
+    assert old_row['file_hash'] is not None
+
+    # Simulate ExifTool having run (it isn't installed in CI) so the
+    # metadata_missing retry path doesn't mask the mtime-based check.
+    db.conn.execute("UPDATE photos SET exif_data = '{}' WHERE exif_data IS NULL")
+    db.conn.commit()
+
+    # Modify the file's content (and mtime)
+    time.sleep(0.05)
+    Image.new('RGB', (150, 150)).save(path)
+
+    # Scan with feature computation failing (simulated unreadable file)
+    monkeypatch.setattr(scanner, '_compute_file_features', lambda p: (None, None))
+    scan(root, db, incremental=True)
+    photo = _row()
+    assert photo['file_hash'] == old_row['file_hash']  # hash untouched
+    # Stored mtime must remain stale so the file is retried next scan
+    assert photo['file_mtime'] == old_row['file_mtime']
+    assert photo['file_mtime'] != os.stat(path).st_mtime
+
+    # With hashing working again, the next incremental scan picks it up
+    monkeypatch.undo()
+    scan(root, db, incremental=True)
+    photo = _row()
+    assert photo['file_hash'] != old_row['file_hash']
+    assert photo['file_mtime'] == os.stat(path).st_mtime
+
+
 def test_incremental_scan_forgets_deleted_xmp(tmp_path):
     """Deleting an XMP sidecar clears the stored xmp_mtime after one
     re-process, so later scans don't re-trip the "XMP changed" check."""

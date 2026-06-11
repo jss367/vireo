@@ -2435,7 +2435,7 @@ class Database:
         by another workspace's link, that's {'deleted_photos': 0,
         'files': []}.
         """
-        active_ws = self._active_workspace_id
+        active_ws = self._ws_id()
         # Everything under the target, by path, including legacy
         # NULL-parent_id descendants a parent_id walk would miss.
         candidates = set(self._folder_subtree_ids_by_path(folder_id))
