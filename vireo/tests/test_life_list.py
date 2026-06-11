@@ -166,6 +166,24 @@ def test_unscored_photo_still_listed(life_app):
     assert sparrow["best"]["quality_score"] is None
 
 
+def test_null_flag_photo_included(life_app):
+    """Older or manually edited databases can have NULL flags; those photos
+    are kept (treated like 'none'), not filtered out as rejected."""
+    app, db, ids = life_app
+    db.conn.execute(
+        "UPDATE photos SET flag = NULL WHERE id IN (?, ?)",
+        (ids["p2"], ids["p3"]))
+    db.conn.commit()
+    data = _get_life_list(app)
+    assert data["meta"]["species_count"] == 2
+    assert data["meta"]["photo_count"] == 3
+    cardinal = _entry(data, "Northern Cardinal")
+    assert cardinal["photo_count"] == 2
+    # p2 (now NULL-flagged) carries the location tag — the locations
+    # query must include it too.
+    assert cardinal["locations"] == ["Backyard"]
+
+
 def test_workspace_scoping(life_app):
     app, db, ids = life_app
     # Hide the folder from the active workspace: the life list empties.

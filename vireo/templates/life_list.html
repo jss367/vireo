@@ -81,7 +81,14 @@ function formatDate(iso) {
 }
 
 async function loadLifeList() {
-  currentData = await safeFetch('/api/life-list');
+  var meta = document.getElementById('meta');
+  meta.textContent = 'Loading life list…';
+  try {
+    currentData = await safeFetch('/api/life-list');
+  } catch (e) {
+    meta.textContent = 'Failed to load life list.';
+    return;
+  }
   render();
 }
 
@@ -116,7 +123,7 @@ function renderCard(entry) {
   return '<div class="species-card" data-species="' + escapeAttr(entry.species) + '" title="'
     + escapeAttr((entry.locations || []).join(', ')) + '">'
     + '<div class="lifer-number">#' + entry.number + '</div>'
-    + (best ? '<img src="' + thumb + '" alt="' + escapeAttr(best.filename) + '" loading="lazy">' : '')
+    + (best ? '<img src="' + escapeAttr(thumb) + '" alt="' + escapeAttr(best.filename) + '" loading="lazy">' : '')
     + '<div class="species-info">'
     + '<div class="species-name">' + escapeAttr(entry.species) + '</div>'
     + sci

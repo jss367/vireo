@@ -7238,7 +7238,7 @@ class Database:
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
                LEFT JOIN taxa t ON t.id = k.taxon_id
-               WHERE p.flag != 'rejected'
+               WHERE COALESCE(p.flag, 'none') != 'rejected'
                ORDER BY k.name, p.timestamp""",
             (ws,),
         ).fetchall()
@@ -7257,7 +7257,7 @@ class Database:
                JOIN keywords k ON k.id = pk.keyword_id
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
                JOIN photos p ON p.id = pk.photo_id
-                AND p.flag != 'rejected'
+                AND COALESCE(p.flag, 'none') != 'rejected'
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
