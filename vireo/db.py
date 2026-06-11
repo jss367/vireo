@@ -5479,7 +5479,6 @@ class Database:
                 rows = list(rows) + list(comp_rows)
 
         all_ids = list({row["id"] for row in rows})
-        ph = ",".join("?" for _ in all_ids)
 
         # Collect file info before deleting
         files = [
@@ -5505,12 +5504,21 @@ class Database:
         # serving the stale pre-delete ``new_count`` until the TTL expired.
         affected_folder_ids = list(folder_counts.keys())
 
+        # Chunk the all_ids IN-clauses. ``include_companions=True`` can double
+        # the id count from the caller's input chunk (companions get merged in
+        # above), so a 900-id outer chunk can reach ~1800 here — past the 999
+        # SQLITE_MAX_VARIABLE_NUMBER on legacy builds. All chunked statements
+        # share the same transaction, so partial-failure rollback still works.
+        id_chunks = list(_chunks(all_ids))
+
         try:
             # Delete associated data (non-cascading FKs)
-            self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", all_ids)
-            self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", all_ids)
-            # Deleting detections cascades to predictions via ON DELETE CASCADE
-            self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", all_ids)
+            for chunk in id_chunks:
+                ph = ",".join("?" for _ in chunk)
+                self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", chunk)
+                self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", chunk)
+                # Deleting detections cascades to predictions via ON DELETE CASCADE
+                self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", chunk)
 
             # Clean collection rules
             import json as _json
@@ -5547,7 +5555,9 @@ class Database:
                     )
 
             # Delete photos (cascades to edit_history_items, inat_submissions)
-            self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", all_ids)
+            for chunk in id_chunks:
+                ph = ",".join("?" for _ in chunk)
+                self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", chunk)
 
             # Update folder counts
             for fid, count in folder_counts.items():
