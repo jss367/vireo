@@ -2408,7 +2408,11 @@ class Database:
         Must cover the whole subtree: folders.parent_id has no ON DELETE
         action and the scanner registers every subdirectory with parent_id
         set, so deleting a non-leaf folder row alone trips the FK — and
-        descendants of a deleted folder would be unreachable anyway.
+        descendants of a deleted folder would be unreachable anyway. The
+        subtree is collected by path prefix (``_folder_subtree_ids_by_path``),
+        not a parent_id walk, so legacy rows whose parent_id is NULL but
+        whose path lives under the target are deleted too — the same shape
+        the workspace link/unlink paths already handle.
 
         A folder with any ``workspace_folders`` link from a workspace
         other than the active one is never deleted — it is only unlinked
@@ -2432,68 +2436,59 @@ class Database:
         'files': []}.
         """
         active_ws = self._active_workspace_id
-        # If the target is linked in another workspace, delete nothing:
-        # just drop the active workspace's links for it and its subtree so
-        # it disappears from this workspace's view. The folder row survives
-        # with its parent chain intact, so no reparenting is needed.
-        if self._folders_linked_in_other_workspace([folder_id], active_ws):
-            if active_ws is not None:
-                try:
-                    for chunk in _chunks(self._folder_subtree_ids_by_path(folder_id)):
-                        placeholders = ",".join("?" for _ in chunk)
-                        self.conn.execute(
-                            f"DELETE FROM workspace_folders WHERE workspace_id = ? "
-                            f"AND folder_id IN ({placeholders})",
-                            [active_ws] + chunk,
-                        )
-                    self.conn.commit()
-                except Exception:
-                    self.conn.rollback()
-                    raise
-                # The subtree no longer contributes to this workspace's
-                # new-images backlog. Drop the cached payload so the banner
-                # doesn't keep serving the pre-unlink count until the TTL
-                # expires (same as remove_workspace_folder_tree).
-                self._new_images_cache.invalidate_workspaces(
-                    self._db_path, [active_ws]
-                )
-            return {"deleted_photos": 0, "files": []}
+        # Everything under the target, by path, including legacy
+        # NULL-parent_id descendants a parent_id walk would miss.
+        candidates = set(self._folder_subtree_ids_by_path(folder_id))
 
-        # BFS so the list is ordered parents-first; deleted in reverse below.
-        subtree_ids = [folder_id]
-        kept_root_ids = []
-        frontier = [folder_id]
-        while frontier:
-            children = []
-            for chunk in _chunks(frontier):
-                placeholders = ",".join("?" for _ in chunk)
-                children.extend(
-                    row["id"]
-                    for row in self.conn.execute(
-                        f"SELECT id FROM folders WHERE parent_id IN ({placeholders})",
-                        chunk,
-                    ).fetchall()
-                )
-            # Prune children that another workspace has a link for: their
-            # subtrees stay. Any foreign link counts — root or
-            # scanner-materialized — since either means the folder is still
-            # visible in that workspace.
-            if children:
-                kept = self._folders_linked_in_other_workspace(children, active_ws)
-                if kept:
-                    kept_root_ids.extend(c for c in children if c in kept)
-                    children = [c for c in children if c not in kept]
-            subtree_ids.extend(children)
-            frontier = children
+        # Candidates that another workspace has a link for are never
+        # deleted, and each protected folder keeps its whole subtree. Any
+        # foreign link counts — root or scanner-materialized — since either
+        # means the folder is still visible in that workspace. When the
+        # target itself is protected, the kept set covers every candidate
+        # and this degenerates to unlink-only: nothing is deleted, no
+        # reparenting happens, and only the active workspace's links go.
+        protected = self._folders_linked_in_other_workspace(candidates, active_ws)
+        kept_subtree_ids = set()
+        for fid in protected:
+            kept_subtree_ids.update(self._folder_subtree_ids_by_path(fid))
+        delete_ids = candidates - kept_subtree_ids
 
-        # Active-workspace links to drop for kept subtrees (they remain
-        # visible only in the other workspaces that link them).
-        kept_subtree_ids = []
-        for kid in kept_root_ids:
-            kept_subtree_ids.extend(self._folder_subtree_ids_by_path(kid))
+        # Kept folders whose parent row is being deleted must be reparented
+        # to NULL before the folder DELETE — folders.parent_id has no ON
+        # DELETE action. (Kept folders whose parent also survives keep
+        # their chain intact.)
+        kept_head_ids = []
+        for chunk in _chunks(kept_subtree_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            kept_head_ids.extend(
+                row["id"]
+                for row in self.conn.execute(
+                    f"SELECT id, parent_id FROM folders WHERE id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                if row["parent_id"] in delete_ids
+            )
+
+        # Delete children before parents, else the multi-statement delete
+        # trips the parent_id FK at the end of an earlier chunk's statement.
+        # Order by path depth descending — a parent's normalized path always
+        # has fewer separators than its child's, and parent_id order can't
+        # be trusted for the legacy path-only rows.
+        depth_by_id = {}
+        for chunk in _chunks(delete_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in self.conn.execute(
+                f"SELECT id, path FROM folders WHERE id IN ({placeholders})",
+                chunk,
+            ).fetchall():
+                path = _path_for_subtree_match(row["path"] or "")
+                depth_by_id[row["id"]] = path.count("/")
+        ordered_delete_ids = sorted(
+            delete_ids, key=lambda fid: depth_by_id.get(fid, 0), reverse=True
+        )
 
         photo_ids = []
-        for chunk in _chunks(subtree_ids):
+        for chunk in _chunks(ordered_delete_ids):
             placeholders = ",".join("?" for _ in chunk)
             photo_ids.extend(
                 row["id"]
@@ -2517,13 +2512,16 @@ class Database:
             # Reparent kept subtree heads before any folder DELETE — their
             # parent_id points at a row being deleted, and the FK has no ON
             # DELETE action.
-            for chunk in _chunks(kept_root_ids):
+            for chunk in _chunks(kept_head_ids):
                 placeholders = ",".join("?" for _ in chunk)
                 self.conn.execute(
                     f"UPDATE folders SET parent_id = NULL "
                     f"WHERE id IN ({placeholders})",
                     chunk,
                 )
+            # Kept subtrees disappear from this workspace's view: drop the
+            # active workspace's links, leaving the other workspaces' links
+            # (and the folder rows and photos) untouched.
             if active_ws is not None:
                 for chunk in _chunks(kept_subtree_ids):
                     placeholders = ",".join("?" for _ in chunk)
@@ -2532,9 +2530,7 @@ class Database:
                         f"AND folder_id IN ({placeholders})",
                         [active_ws] + chunk,
                     )
-            # Children before parents, else the multi-statement delete trips
-            # the parent_id FK at the end of an earlier chunk's statement.
-            for chunk in _chunks(list(reversed(subtree_ids))):
+            for chunk in _chunks(ordered_delete_ids):
                 placeholders = ",".join("?" for _ in chunk)
                 self.conn.execute(
                     f"DELETE FROM workspace_folders WHERE folder_id IN ({placeholders})",

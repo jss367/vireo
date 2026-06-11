@@ -6574,6 +6574,84 @@ def test_delete_folder_keeps_target_covered_by_other_workspace_ancestor_root(tmp
     ).fetchone() is not None
 
 
+def test_delete_folder_includes_path_only_descendants(tmp_path):
+    """Legacy databases can hold descendants whose parent_id is NULL even
+    though their path lives under the deleted folder. The deletion walk
+    must collect the subtree by path (like the workspace link/unlink
+    paths), not by parent_id, or those rows and their photos survive."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("/photos", name="photos")
+    # Legacy shape: path is under /photos but parent_id was never set.
+    child = db.add_folder("/photos/2024", name="2024")
+    assert db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (child,)
+    ).fetchone()["parent_id"] is None
+
+    pids = [
+        db.add_photo(folder_id=fid, filename=f"bird{fid}.jpg", extension=".jpg",
+                     file_size=1000, file_mtime=1.0)
+        for fid in (parent, child)
+    ]
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 2
+
+    for fid in (parent, child):
+        assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+        assert db.conn.execute(
+            "SELECT folder_id FROM workspace_folders WHERE folder_id = ?", (fid,)
+        ).fetchone() is None
+    for pid in pids:
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+
+def test_delete_folder_keeps_path_only_descendant_linked_in_other_workspace(tmp_path):
+    """A path-only legacy descendant that another workspace links must be
+    preserved by the same foreign-link protection as parent_id-linked
+    descendants: its row and photos survive, only the deleting workspace's
+    links go."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    db.set_active_workspace(ws_a)
+
+    parent = db.add_folder("/photos", name="photos")
+    # Legacy shape: under /photos by path, parent_id NULL.
+    child = db.add_folder("/photos/2024", name="2024", workspace_root=False)
+
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_b, child, is_root=True)
+
+    pid_parent = db.add_photo(folder_id=parent, filename="p.jpg", extension=".jpg",
+                              file_size=1000, file_mtime=1.0)
+    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 1
+
+    # /photos and its photo are gone.
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (parent,)).fetchone() is None
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_parent,)).fetchone() is None
+
+    # B's legacy-shaped subtree survives with its photo and link.
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (child,)).fetchone() is not None
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_child,)).fetchone() is not None
+    assert db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, child),
+    ).fetchone()["is_root"] == 1
+
+    # Workspace A no longer sees any of it.
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?", (ws_a,)
+    ).fetchall() == []
+
+
 def test_missing_folder_photos_hidden_from_browse(tmp_path):
     """Photos in missing folders don't appear in get_photos or count_photos."""
     from db import Database
