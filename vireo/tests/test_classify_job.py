@@ -35,6 +35,8 @@ class FakeRunner:
 
     def __init__(self):
         self.events = []
+        self.cancelled = False
+        self.steps = []
 
     def push_event(self, job_id, event_type, data):
         self.events.append((job_id, event_type, data))
@@ -43,7 +45,10 @@ class FakeRunner:
         pass
 
     def update_step(self, job_id, step_id, **kwargs):
-        pass
+        self.steps.append((step_id, kwargs))
+
+    def is_cancelled(self, job_id):
+        return self.cancelled
 
 
 def _make_job(job_id="classify-test"):
@@ -2943,3 +2948,107 @@ def test_run_classifier_retries_on_database_is_locked(tmp_path):
         (det_id,),
     ).fetchone()["n"]
     assert n == 1, "prediction must be persisted after transient lock retries"
+
+
+# ── Cancellation and weights-degrade regressions ────────────────────────────
+
+
+def test_detect_subjects_stops_when_cancelled(tmp_path):
+    """A cancelled job exits the detection loop without processing photos."""
+    from unittest.mock import MagicMock, patch
+
+    from classify_job import _detect_subjects
+
+    runner = FakeRunner()
+    runner.cancelled = True
+    job = _make_job()
+
+    photos = [
+        {"id": 1, "filename": "a.jpg", "folder_id": 10},
+        {"id": 2, "filename": "b.jpg", "folder_id": 10},
+    ]
+    mock_db = MagicMock()
+    # Everything cached → no weights download attempt before the loop.
+    mock_db.get_detector_run_photo_ids.return_value = {1, 2}
+
+    detect = MagicMock()
+    with patch("classify_job.detect_animals", detect), \
+         patch("classify_job.get_primary_detection", MagicMock()):
+        detection_map, detected = _detect_subjects(
+            photos=photos,
+            folders={10: str(tmp_path)},
+            runner=runner,
+            job=job,
+            reclassify=False,
+            db=mock_db,
+        )
+
+    assert detection_map == {}
+    assert detected == 0
+    detect.assert_not_called()
+
+
+def test_classify_photos_stops_when_cancelled(tmp_path):
+    """A cancelled job exits the classification loop without inference."""
+    from unittest.mock import MagicMock, patch
+
+    from classify_job import _classify_photos
+
+    runner = FakeRunner()
+    runner.cancelled = True
+    job = _make_job()
+    clf = MagicMock()
+
+    with patch("classify_job.load_image", MagicMock()):
+        raw_results, failed, skipped = _classify_photos(
+            photos=[{"id": 1, "filename": "a.jpg", "folder_id": 10,
+                     "timestamp": None}],
+            folders={10: str(tmp_path)},
+            detection_map={},
+            existing_preds=set(),
+            clf=clf,
+            model_type="bioclip",
+            model_name="test-model",
+            runner=runner,
+            job=job,
+            db=MagicMock(),
+        )
+
+    assert raw_results == []
+    assert failed == 0
+    clf.classify_batch.assert_not_called()
+    clf.classify_batch_with_embedding.assert_not_called()
+
+
+def test_weights_download_failure_degrades_to_full_image(tmp_path):
+    """A failed MegaDetector weights download (e.g. network down) must
+    degrade to full-image classification like any other detection failure,
+    not propagate and fail the job — on reclassify runs the purge has
+    already happened by then."""
+    from unittest.mock import MagicMock, patch
+
+    from classify_job import _detect_subjects
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    photos = [{"id": 1, "filename": "a.jpg", "folder_id": 10}]
+    mock_db = MagicMock()
+    mock_db.get_detector_run_photo_ids.return_value = set()  # needs download
+
+    with patch("classify_job.detect_animals", MagicMock()), \
+         patch("classify_job.get_primary_detection", MagicMock()), \
+         patch("detector.ensure_megadetector_weights",
+               side_effect=RuntimeError("network down")):
+        detection_map, detected = _detect_subjects(
+            photos=photos,
+            folders={10: str(tmp_path)},
+            runner=runner,
+            job=job,
+            reclassify=False,
+            db=mock_db,
+        )
+
+    assert detection_map == {}
+    assert detected == 0
+    assert any("Detection unavailable" in e for e in job["errors"])

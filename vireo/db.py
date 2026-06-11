@@ -3493,14 +3493,31 @@ class Database:
         Returns (' AND p.id IN (NULL)', []) for an empty set, which is the
         intentional "no photos in scope" sentinel — callers asked for
         "this collection" and the collection resolved to zero photos.
+
+        Scopes larger than one parameter chunk are staged in a
+        connection-local temp table instead of inline placeholders, which
+        would exceed SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds) for
+        big collections. The staged scope is only valid for the query the
+        caller runs immediately after this call — the next large-scope call
+        overwrites it.
         """
         if photo_ids is None:
             return "", []
         ids = list(photo_ids)
         if not ids:
             return f" AND {table_alias}.id IN (NULL)", []
-        placeholders = ",".join("?" for _ in ids)
-        return f" AND {table_alias}.id IN ({placeholders})", ids
+        if len(ids) <= _SQLITE_PARAM_CHUNK_SIZE:
+            placeholders = ",".join("?" for _ in ids)
+            return f" AND {table_alias}.id IN ({placeholders})", ids
+        self.conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS scope_ids (id INTEGER PRIMARY KEY)"
+        )
+        self.conn.execute("DELETE FROM scope_ids")
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO scope_ids (id) VALUES (?)",
+            [(i,) for i in ids],
+        )
+        return f" AND {table_alias}.id IN (SELECT id FROM scope_ids)", []
 
     def count_real_detections_in_scope(self, photo_ids=None, min_conf=None):
         """Count (photos_with_real_dets, total_real_dets) for the workspace.
@@ -5273,11 +5290,14 @@ class Database:
         if verify_workspace:
             for pid in photo_ids:
                 self._verify_photo_in_workspace(pid)
-        placeholders = ",".join("?" for _ in photo_ids)
-        self.conn.execute(
-            f"UPDATE photos SET rating = ? WHERE id IN ({placeholders})",
-            [rating] + list(photo_ids),
-        )
+        # Chunked: a select-all on a large library exceeds SQLite's
+        # bound-parameter cap (999 on legacy builds) in one IN clause.
+        for chunk in _chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"UPDATE photos SET rating = ? WHERE id IN ({placeholders})",
+                [rating] + list(chunk),
+            )
         self.conn.commit()
 
     def update_photo_flag(self, photo_id, flag, verify_workspace=True):
@@ -5314,11 +5334,13 @@ class Database:
         if verify_workspace:
             for pid in photo_ids:
                 self._verify_photo_in_workspace(pid)
-        placeholders = ",".join("?" for _ in photo_ids)
-        self.conn.execute(
-            f"UPDATE photos SET flag = ? WHERE id IN ({placeholders})",
-            [flag] + list(photo_ids),
-        )
+        # Chunked: see batch_update_photo_rating.
+        for chunk in _chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"UPDATE photos SET flag = ? WHERE id IN ({placeholders})",
+                [flag] + list(chunk),
+            )
         self.conn.commit()
 
     VALID_COLOR_LABELS = ('red', 'yellow', 'green', 'blue', 'purple')
@@ -5353,12 +5375,15 @@ class Database:
         """Return a dict of {photo_id: color} for the active workspace."""
         if not photo_ids:
             return {}
-        placeholders = ",".join("?" for _ in photo_ids)
-        rows = self.conn.execute(
-            f"SELECT photo_id, color FROM photo_color_labels WHERE workspace_id = ? AND photo_id IN ({placeholders})",
-            [self._ws_id()] + list(photo_ids),
-        ).fetchall()
-        return {row['photo_id']: row['color'] for row in rows}
+        out = {}
+        for chunk in _chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"SELECT photo_id, color FROM photo_color_labels WHERE workspace_id = ? AND photo_id IN ({placeholders})",
+                [self._ws_id()] + list(chunk),
+            ).fetchall()
+            out.update({row['photo_id']: row['color'] for row in rows})
+        return out
 
     def batch_set_color_label(self, photo_ids, color):
         """Set or remove color label for multiple photos in the active workspace."""
@@ -5366,11 +5391,12 @@ class Database:
             return
         ws_id = self._ws_id()
         if color is None:
-            placeholders = ",".join("?" for _ in photo_ids)
-            self.conn.execute(
-                f"DELETE FROM photo_color_labels WHERE workspace_id = ? AND photo_id IN ({placeholders})",
-                [ws_id] + list(photo_ids),
-            )
+            for chunk in _chunks(photo_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"DELETE FROM photo_color_labels WHERE workspace_id = ? AND photo_id IN ({placeholders})",
+                    [ws_id] + list(chunk),
+                )
         else:
             if color not in self.VALID_COLOR_LABELS:
                 raise ValueError(f"Invalid color label: {color}. Must be one of {self.VALID_COLOR_LABELS}")
@@ -8120,23 +8146,35 @@ class Database:
             extra_conds.append("pr.labels_fingerprint = ?")
             extra_params.append(labels_fingerprint)
 
+        # The photo-id filter is chunked (one DELETE per id chunk) — a
+        # reclassify over a collection larger than SQLite's bound-parameter
+        # cap would otherwise fail with "too many SQL variables" after the
+        # model already loaded. Chunks partition disjoint photo ids, so the
+        # union of chunked DELETEs equals the single big one.
         if collection_photo_ids is not None:
-            placeholders = ",".join("?" for _ in collection_photo_ids)
-            extra_conds.append(f"d.photo_id IN ({placeholders})")
-            extra_params.extend(collection_photo_ids)
+            id_chunks = list(_chunks(collection_photo_ids))
+        else:
+            id_chunks = [None]
 
-        where_clause = (" WHERE " + " AND ".join(extra_conds)) if extra_conds else ""
-        self.conn.execute(
-            f"""DELETE FROM predictions WHERE id IN (
-                SELECT pr.id FROM predictions pr
-                JOIN detections d ON d.id = pr.detection_id
-                JOIN photos ph ON ph.id = d.photo_id
-                JOIN workspace_folders wf
-                  ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
-                {where_clause}
-            )""",
-            [ws, *extra_params],
-        )
+        for chunk in id_chunks:
+            conds = list(extra_conds)
+            params = list(extra_params)
+            if chunk is not None:
+                placeholders = ",".join("?" for _ in chunk)
+                conds.append(f"d.photo_id IN ({placeholders})")
+                params.extend(chunk)
+            where_clause = (" WHERE " + " AND ".join(conds)) if conds else ""
+            self.conn.execute(
+                f"""DELETE FROM predictions WHERE id IN (
+                    SELECT pr.id FROM predictions pr
+                    JOIN detections d ON d.id = pr.detection_id
+                    JOIN photos ph ON ph.id = d.photo_id
+                    JOIN workspace_folders wf
+                      ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                    {where_clause}
+                )""",
+                [ws, *params],
+            )
 
         if not clear_run_keys:
             self.conn.commit()
@@ -8157,20 +8195,15 @@ class Database:
         # built a workspace-wide DELETE on predictions, so leaving the run
         # keys behind would strand those detections (the (detection, model,
         # fingerprint) gate would treat them as already classified).
-        run_conds = []
-        run_params = []
+        base_run_conds = []
+        base_run_params = []
         if model is not None:
-            run_conds.append("cr.classifier_model = ?")
-            run_params.append(model)
+            base_run_conds.append("cr.classifier_model = ?")
+            base_run_params.append(model)
         if labels_fingerprint is not None:
-            run_conds.append("cr.labels_fingerprint = ?")
-            run_params.append(labels_fingerprint)
-        if collection_photo_ids is not None:
-            placeholders = ",".join("?" for _ in collection_photo_ids)
-            run_conds.append(f"d.photo_id IN ({placeholders})")
-            run_params.extend(collection_photo_ids)
-        run_where = (" WHERE " + " AND ".join(run_conds)) if run_conds else ""
-        # Single set-based DELETE via a rowid subquery — the previous
+            base_run_conds.append("cr.labels_fingerprint = ?")
+            base_run_params.append(labels_fingerprint)
+        # Set-based DELETE via a rowid subquery — the previous
         # SELECT + per-row DELETE loop issued one statement per matching
         # run, which on a reclassify of a multi-thousand-detection
         # workspace dominates wall time on the startup-blocking thread.
@@ -8178,19 +8211,28 @@ class Database:
         # (JOIN through detections/photos/workspace_folders, same
         # optional filters), and rowid uniquely identifies each
         # classifier_runs row under the implicit-rowid default.
-        self.conn.execute(
-            f"""DELETE FROM classifier_runs
-                WHERE rowid IN (
-                    SELECT cr.rowid
-                    FROM classifier_runs cr
-                    JOIN detections d ON d.id = cr.detection_id
-                    JOIN photos ph ON ph.id = d.photo_id
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
-                    {run_where}
-                )""",
-            [ws, *run_params],
-        )
+        # Photo-id chunking mirrors the predictions DELETE above.
+        for chunk in id_chunks:
+            run_conds = list(base_run_conds)
+            run_params = list(base_run_params)
+            if chunk is not None:
+                placeholders = ",".join("?" for _ in chunk)
+                run_conds.append(f"d.photo_id IN ({placeholders})")
+                run_params.extend(chunk)
+            run_where = (" WHERE " + " AND ".join(run_conds)) if run_conds else ""
+            self.conn.execute(
+                f"""DELETE FROM classifier_runs
+                    WHERE rowid IN (
+                        SELECT cr.rowid
+                        FROM classifier_runs cr
+                        JOIN detections d ON d.id = cr.detection_id
+                        JOIN photos ph ON ph.id = d.photo_id
+                        JOIN workspace_folders wf
+                          ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                        {run_where}
+                    )""",
+                [ws, *run_params],
+            )
         self.conn.commit()
 
     def get_predictions(self, photo_ids=None, model=None, status=None):

@@ -456,6 +456,39 @@ def test_incremental_scan_forgets_deleted_xmp(tmp_path):
     )
 
 
+def test_scan_survives_file_vanishing_mid_scan(tmp_path):
+    """A file deleted between discovery and processing is skipped — it must
+    not abort the scan and flag every folder in scope 'partial'."""
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (100, 100)).save(os.path.join(root, 'a.jpg'))
+    Image.new('RGB', (100, 100)).save(os.path.join(root, 'b.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+
+    # On the first processed photo, delete the other file — it has been
+    # discovered but not yet processed.
+    deleted = []
+    def cb(photo_id, path_str):
+        if deleted:
+            return
+        other = 'b.jpg' if path_str.endswith('a.jpg') else 'a.jpg'
+        os.remove(os.path.join(root, other))
+        deleted.append(other)
+
+    scan(root, db, photo_callback=cb)
+
+    photos = db.get_photos(per_page=100)
+    assert len(photos) == 1  # only the survivor was ingested
+    status = db.conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (root,)
+    ).fetchone()["status"]
+    assert status == "ok"
+
+
 def test_incremental_scan_detects_xmp_changes(tmp_path):
     """Incremental scan re-reads XMP when xmp_mtime changes."""
     from db import Database

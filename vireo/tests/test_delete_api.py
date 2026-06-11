@@ -590,11 +590,16 @@ def test_api_batch_delete_chunked_success_prunes_pipeline_cache(
 
 
 def test_api_batch_delete_disk_permanent_retry_with_paths(app_and_db, tmp_path):
-    """disk_permanent retry works with paths after DB rows are already gone."""
+    """disk_permanent retry works with paths after DB rows are already gone.
+
+    The photo rows are deleted by the initial call, but their folder rows
+    survive — the retry validates paths against those.
+    """
     app, db = app_and_db
     client = app.test_client()
 
-    # Create files to delete
+    # Create files to delete, inside a Vireo-managed folder
+    db.add_folder(str(tmp_path), name=tmp_path.name)
     file1 = str(tmp_path / "photo1.jpg")
     file2 = str(tmp_path / "photo2.jpg")
     Image.new("RGB", (10, 10)).save(file1)
@@ -614,6 +619,31 @@ def test_api_batch_delete_disk_permanent_retry_with_paths(app_and_db, tmp_path):
     assert data["trashed"] == 2
     assert not os.path.exists(file1)
     assert not os.path.exists(file2)
+
+
+def test_api_batch_delete_retry_refuses_paths_outside_vireo_folders(app_and_db, tmp_path):
+    """The disk_permanent retry must not delete arbitrary client-supplied
+    paths — only files directly inside a known Vireo folder."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    outside = str(tmp_path / "secrets.txt")
+    with open(outside, "w") as f:
+        f.write("not a vireo photo")
+
+    resp = client.post("/api/batch/delete", json={
+        "mode": "disk_permanent",
+        "paths": [outside],
+    })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["trashed"] == 0
+    assert os.path.exists(outside)  # file untouched
+    assert any(
+        t["path"] == outside and "not in a Vireo folder" in t.get("error", "")
+        for t in data["trash_failed"]
+    )
 
 
 def test_api_batch_delete_disk_deletes_companion_file(app_and_db, tmp_path):

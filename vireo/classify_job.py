@@ -545,7 +545,16 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
         db.get_detector_run_photo_ids("megadetector-v6") if not reclassify else set()
     )
 
-    if detect_animals is not None and get_primary_detection is not None:
+    try:
+        if detect_animals is None or get_primary_detection is None:
+            raise ImportError(
+                "MegaDetector ONNX model not available — cannot run detection"
+            )
+
+        # Inside the try so a weights-download failure (e.g. network down)
+        # degrades to full-image classification like every other detection
+        # failure, instead of failing the whole job — which on a reclassify
+        # run would strike after predictions/detections were already purged.
         # Require at least one photo — a no-op reclassify over 0 photos should
         # not trigger a ~300 MB MegaDetector download.
         needs_fresh_detection = bool(photos) and (
@@ -569,12 +578,6 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                 )
 
             ensure_megadetector_weights(progress_callback=_dl_progress)
-
-    try:
-        if detect_animals is None or get_primary_detection is None:
-            raise ImportError(
-                "MegaDetector ONNX model not available — cannot run detection"
-            )
 
         runner.push_event(
             job["id"],
@@ -601,6 +604,11 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
         start_time = job.get("_start_time", time.time())
 
         for i, photo in enumerate(photos):
+            if runner.is_cancelled(job["id"]):
+                log.info(
+                    "Classify job cancelled during detection (%d/%d)", i, total
+                )
+                break
             runner.update_step(
                 job["id"], "detect",
                 progress={"current": i + 1, "total": total},
@@ -888,6 +896,13 @@ def _classify_photos(
     start_time = time.time()
 
     for i, photo in enumerate(photos):
+        if runner.is_cancelled(job["id"]):
+            # The post-loop flush below still commits the pending batch, so
+            # work completed before the cancel is preserved.
+            log.info(
+                "Classify job cancelled during classification (%d/%d)", i, total
+            )
+            break
         job["progress"]["current"] = i + 1
         job["progress"]["current_file"] = photo["filename"]
         runner.update_step(
@@ -1555,6 +1570,21 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                 "failed": 0,
             }
 
+        # Cancellation gate before the expensive phases (model resolution,
+        # weight download, inference). The job loops below also check
+        # per-photo; _run_job flips the terminal status to 'cancelled'.
+        if runner.is_cancelled(job["id"]):
+            log.info("Classify job cancelled before model resolution")
+            return {
+                "total": total,
+                "predictions_stored": 0,
+                "burst_groups": 0,
+                "already_classified": 0,
+                "already_labeled": 0,
+                "detected": 0,
+                "failed": 0,
+            }
+
         # Resolve model (deferred until we know there is work to do)
         if params.model_id:
             all_models = get_models()
@@ -1709,6 +1739,22 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             reclassify=params.reclassify,
             db=thread_db,
         )
+        if runner.is_cancelled(job["id"]):
+            # Detections are committed per-photo, so everything before the
+            # cancel is already cached for the next run; skip classification.
+            runner.update_step(
+                job["id"], "detect", status="cancelled",
+                summary=f"Cancelled ({detected} animals detected so far)",
+            )
+            return {
+                "total": total,
+                "predictions_stored": 0,
+                "burst_groups": 0,
+                "already_classified": 0,
+                "already_labeled": 0,
+                "detected": detected,
+                "failed": 0,
+            }
         runner.update_step(
             job["id"], "detect", status="completed",
             summary=f"{detected} animals detected in {total} photos",
@@ -1751,10 +1797,21 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             parts.append(f"{skipped_existing} cached")
         if failed:
             parts.append(f"{failed} failed")
-        runner.update_step(
-            job["id"], "classify", status="completed",
-            summary=", ".join(parts),
-        )
+        cancelled_mid_classify = runner.is_cancelled(job["id"])
+        if cancelled_mid_classify:
+            # Fall through to finalize: raw_results holds real classifications
+            # for the photos completed before the cancel — storing them
+            # preserves that work (and matches the per-detection cache, which
+            # is already committed).
+            runner.update_step(
+                job["id"], "classify", status="cancelled",
+                summary="Cancelled (" + ", ".join(parts) + ")",
+            )
+        else:
+            runner.update_step(
+                job["id"], "classify", status="completed",
+                summary=", ".join(parts),
+            )
 
         # Phase 7: Group and store predictions
         runner.update_step(job["id"], "finalize", status="running")

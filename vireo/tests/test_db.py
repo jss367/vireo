@@ -7051,6 +7051,40 @@ def test_move_folder_path_cascade(db):
     assert grandchild["path"] == "/nas/photos/2024/march/birds"
 
 
+def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
+    """Select-all on a large library produces id lists beyond
+    SQLITE_MAX_VARIABLE_NUMBER (32766 on modern builds) — every bulk-id
+    API must chunk or stage rather than inline one placeholder per id."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+
+    huge = [pid] + list(range(10_000_000, 10_033_000))  # > 32766 ids
+
+    db.batch_update_photo_rating(huge, 4, verify_workspace=False)
+    db.batch_update_photo_flag(huge, "flagged", verify_workspace=False)
+    # The set path inserts per-id (no IN clause); only the lookup and
+    # removal paths take id lists into one statement.
+    db.batch_set_color_label([pid], "red")
+    labels = db.get_color_labels_for_photos(huge)
+    db.batch_set_color_label(huge, None)
+
+    photo = db.get_photo(pid)
+    assert photo["rating"] == 4
+    assert photo["flag"] == "flagged"
+    assert labels == {pid: "red"}
+    assert db.get_color_labels_for_photos([pid]) == {}  # removal applied
+
+    # Scope-clause consumers and the reclassify purge must not raise either.
+    counts = db.count_real_detections_in_scope(photo_ids=huge, min_conf=0.2)
+    assert counts is not None
+    db.clear_predictions(model="some-model", collection_photo_ids=huge)
+
+
 def test_move_folder_path_does_not_touch_wildcard_siblings(db):
     """LIKE treats _ and % as wildcards — moving /pics/my_dir must not
     rewrite the unrelated sibling /pics/myXdir's children."""
