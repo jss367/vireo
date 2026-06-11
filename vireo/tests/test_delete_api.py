@@ -837,6 +837,7 @@ def test_delete_photos_with_companions_chunks_expanded_ids(tmp_path):
     would exceed it without internal chunking.
     """
     import sqlite3
+
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
@@ -863,7 +864,7 @@ def test_delete_photos_with_companions_chunks_expanded_ids(tmp_path):
     # Link primary → companion so include_companions resolves the sidecar.
     db.conn.executemany(
         "UPDATE photos SET companion_path = ? WHERE id = ?",
-        list(zip(companion_filenames, primary_ids)),
+        list(zip(companion_filenames, primary_ids, strict=True)),
     )
     db.conn.commit()
 
