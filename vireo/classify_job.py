@@ -526,17 +526,19 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
     return detection_map, detected, processed_ids
 
 
-def _detect_subjects(photos, folders, runner, job, reclassify, db,
-                      classifier_model=None):
+def _detect_subjects(photos, folders, runner, job, reclassify, db):
     """Run MegaDetector on photos, storing quality metrics.
 
     Wraps _detect_batch with progress reporting for the standalone classify job.
 
-    When ``reclassify`` is True and ``classifier_model`` is provided, prior
-    predictions and detections for each photo are cleared *just before*
-    that photo is re-detected — not upfront for the whole scope. Cancelling
-    mid-loop therefore leaves the unprocessed tail with its old state
-    intact instead of an empty cache it can't rebuild.
+    When ``reclassify`` is True, each photo's prior detections are cleared
+    *just before* that photo is re-detected — not upfront for the whole
+    scope. Cancelling mid-loop therefore leaves the unprocessed tail with
+    its old state intact instead of an empty cache it can't rebuild. The
+    cascaded predictions purge is handled by ``_classify_photos`` so that a
+    mid-classify cancel (or a detection-setup failure that skips this loop
+    entirely) doesn't strand photos with cleared predictions and no
+    replacement.
 
     Returns:
         (detection_map, detected_count) where detection_map is
@@ -651,18 +653,23 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db,
             )
 
             # Per-photo reclassify purge: wipe this photo's prior
-            # predictions/detections immediately before re-detecting. The
-            # old global-upfront purge wiped the entire scope before
-            # detection started, so a mid-detection cancel stranded the
-            # unprocessed tail with no predictions and no detections.
-            # Doing it per-photo means an early cancel preserves the
-            # untouched photos' cached state.
+            # detections immediately before re-detecting. The old
+            # global-upfront purge wiped the entire scope before detection
+            # started, so a mid-detection cancel stranded the unprocessed
+            # tail with no predictions and no detections. Doing it per-photo
+            # means an early cancel preserves the untouched photos' cached
+            # state.
+            #
+            # The cascaded ``predictions`` clear is deferred to the
+            # classification loop's own per-photo purge: a mid-classify
+            # cancel would otherwise leave the unclassified tail with
+            # fresh detections but zero predictions, and a detection-setup
+            # failure (missing weights, etc.) that skips this loop entirely
+            # would leave stale predictions alongside the fallback
+            # full-image classifier's output. Tying the predictions clear
+            # to the classify loop instead means both cases preserve or
+            # rebuild the predictions in lockstep with the new run.
             if reclassify:
-                if classifier_model:
-                    db.clear_predictions(
-                        model=classifier_model,
-                        collection_photo_ids=[photo["id"]],
-                    )
                 db.clear_detections(photo["id"])
 
             batch_map, batch_detected, _batch_processed = _detect_batch(
@@ -934,12 +941,35 @@ def _classify_photos(
             # Already-classified work is in raw_results (committed via the
             # in-loop flushes); the pending `batch` is only queued items
             # that haven't run through the model yet, so it gets dropped
-            # below instead of flushed.
+            # below instead of flushed. The per-photo reclassify clear
+            # below only fires for photos we actually reach, so the
+            # unclassified tail keeps its old predictions intact.
             log.info(
                 "Classify job cancelled during classification (%d/%d)", i, total
             )
             cancelled = True
             break
+
+        # Per-photo reclassify predictions purge. Lives here (rather than
+        # alongside ``clear_detections`` in the detection loop) so that:
+        #   1. A mid-classify cancel leaves the unprocessed tail with its
+        #      old predictions intact — without this gate they'd already
+        #      be cleared and the cancel would strand them with new
+        #      detections and no predictions.
+        #   2. When detection setup fails (missing weights, etc.) and the
+        #      job degrades to full-image classification, the stale
+        #      detector-based predictions still get replaced rather than
+        #      lingering alongside the fallback model's output.
+        # ``clear_predictions`` also wipes the matching ``classifier_runs``
+        # rows so the per-detection skip gate doesn't short-circuit the
+        # fresh inference about to run.
+        if reclassify:
+            db.clear_predictions(
+                model=model_name,
+                collection_photo_ids=[photo["id"]],
+                labels_fingerprint=fp,
+            )
+
         job["progress"]["current"] = i + 1
         job["progress"]["current_file"] = photo["filename"]
         runner.update_step(
@@ -1790,7 +1820,6 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             job=job,
             reclassify=params.reclassify,
             db=thread_db,
-            classifier_model=effective_name,
         )
         if runner.is_cancelled(job["id"]):
             # Detections are committed per-photo, so everything before the

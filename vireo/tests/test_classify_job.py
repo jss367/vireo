@@ -2763,8 +2763,7 @@ def _run_classify_capturing_photos(db_path, ws, col_id, reclassify):
 
     captured_photos = []
 
-    def _fake_detect_subjects(photos, folders, runner, job, reclassify, db,
-                                classifier_model=None):
+    def _fake_detect_subjects(photos, folders, runner, job, reclassify, db):
         captured_photos.extend([p["id"] for p in photos])
         return ({}, 0)
 
@@ -3124,11 +3123,17 @@ def test_detect_subjects_skips_weight_download_when_cancelled(tmp_path):
 
 def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_path):
     """For reclassify runs, cancellation mid-detection must NOT have wiped
-    the predictions and detections of photos that hadn't been re-detected
-    yet. Doing the clear upfront for the whole scope (the old behavior)
-    stranded the unprocessed tail with empty state — worse than before
-    the run started. The fix clears per-photo immediately before each
-    photo is re-detected, so cancelled photos keep their cache."""
+    the detections of photos that hadn't been re-detected yet. Doing the
+    clear upfront for the whole scope (the old behavior) stranded the
+    unprocessed tail with empty state — worse than before the run started.
+    The fix clears per-photo immediately before each photo is re-detected,
+    so cancelled photos keep their cache.
+
+    The cascaded predictions clear lives in ``_classify_photos`` instead of
+    here, so this test verifies both the touched and untouched photos'
+    predictions survive ``_detect_subjects`` — the classify loop is what
+    rebuilds them.
+    """
     from unittest.mock import patch
 
     from classify_job import _detect_subjects
@@ -3197,7 +3202,6 @@ def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_p
             job=job,
             reclassify=True,
             db=db,
-            classifier_model="BioCLIP",
         )
 
     # The second photo's cached prediction and detection must survive
@@ -3298,8 +3302,9 @@ def test_classify_photos_drops_pending_batch_on_mid_loop_cancel(tmp_path):
     folders = {10: str(tmp_path)}
 
     # Make _prepare_image succeed without touching disk.
+    fake_img = MagicMock()
     with patch("classify_job._prepare_image",
-               return_value=("img-obj", str(tmp_path), "p")):
+               return_value=(fake_img, str(tmp_path), "p")):
         raw_results, failed, skipped = _classify_photos(
             photos=photos,
             folders=folders,
@@ -3354,3 +3359,326 @@ def test_weights_download_failure_degrades_to_full_image(tmp_path):
     assert detection_map == {}
     assert detected == 0
     assert any("Detection unavailable" in e for e in job["errors"])
+
+
+def test_classify_photos_reclassify_clears_predictions_per_photo(tmp_path):
+    """For reclassify runs, _classify_photos must clear each photo's old
+    predictions immediately before classifying it. The clear sits inside
+    the loop so a mid-classify cancel leaves the unprocessed tail's old
+    predictions intact, and a detection-setup failure that skips the
+    detect loop entirely still has its stale predictions replaced by the
+    fallback full-image classifier rather than coexisting with it.
+
+    Verified at the DB API boundary: clear_predictions is called once per
+    photo with the right (model, photo_id, fingerprint) triple.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from classify_job import _classify_photos
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    photos = [
+        {"id": 1, "filename": "a.jpg", "folder_id": 10, "timestamp": None},
+        {"id": 2, "filename": "b.jpg", "folder_id": 10, "timestamp": None},
+    ]
+    folders = {10: str(tmp_path)}
+
+    mock_db = MagicMock()
+    mock_db.get_detections.return_value = []
+    mock_db.save_detections.return_value = [101]
+    mock_db.get_classifier_run_keys.return_value = set()
+    mock_db.get_predictions_for_detection.return_value = []
+
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [
+        ([{"species": "Sparrow", "score": 0.92, "taxonomy": None}], None),
+        ([{"species": "Robin", "score": 0.88, "taxonomy": None}], None),
+    ]
+    fake_img = MagicMock()
+    with patch("classify_job._prepare_image",
+               return_value=(fake_img, str(tmp_path), "p")):
+        _classify_photos(
+            photos=photos,
+            folders=folders,
+            detection_map={},
+            existing_preds=set(),
+            clf=clf,
+            model_type="bioclip",
+            model_name="BioCLIP",
+            runner=runner,
+            job=job,
+            db=mock_db,
+            labels_fingerprint="fp-x",
+            reclassify=True,
+        )
+
+    clear_calls = mock_db.clear_predictions.call_args_list
+    assert len(clear_calls) == 2, (
+        f"clear_predictions must be called once per photo for reclassify; "
+        f"got {len(clear_calls)} calls"
+    )
+    photo_ids_cleared = {
+        call.kwargs["collection_photo_ids"][0] for call in clear_calls
+    }
+    assert photo_ids_cleared == {1, 2}, (
+        f"clear_predictions must target each photo individually; "
+        f"got {photo_ids_cleared}"
+    )
+    for call in clear_calls:
+        assert call.kwargs["model"] == "BioCLIP", (
+            f"clear_predictions must scope to the model being run; got "
+            f"{call.kwargs.get('model')!r}"
+        )
+        assert call.kwargs["labels_fingerprint"] == "fp-x", (
+            "clear_predictions must scope to the labels fingerprint so "
+            "shared-folder workspaces with different label sets don't "
+            "wipe each other's cache"
+        )
+
+
+def test_classify_photos_no_reclassify_skips_predictions_clear(tmp_path):
+    """The per-photo predictions clear must NOT fire for non-reclassify
+    runs — otherwise every cached classification would be invalidated on
+    every normal pass."""
+    from unittest.mock import MagicMock, patch
+
+    from classify_job import _classify_photos
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    photos = [{"id": 1, "filename": "a.jpg", "folder_id": 10, "timestamp": None}]
+    folders = {10: str(tmp_path)}
+
+    mock_db = MagicMock()
+    mock_db.get_detections.return_value = []
+    mock_db.save_detections.return_value = [101]
+    mock_db.get_classifier_run_keys.return_value = set()
+    mock_db.get_predictions_for_detection.return_value = []
+
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [
+        ([{"species": "Sparrow", "score": 0.92, "taxonomy": None}], None),
+    ]
+    fake_img = MagicMock()
+    with patch("classify_job._prepare_image",
+               return_value=(fake_img, str(tmp_path), "p")):
+        _classify_photos(
+            photos=photos,
+            folders=folders,
+            detection_map={},
+            existing_preds=set(),
+            clf=clf,
+            model_type="bioclip",
+            model_name="BioCLIP",
+            runner=runner,
+            job=job,
+            db=mock_db,
+            labels_fingerprint="fp-x",
+            reclassify=False,
+        )
+
+    mock_db.clear_predictions.assert_not_called()
+
+
+def test_classify_photos_reclassify_preserves_unclassified_tail_on_cancel(tmp_path):
+    """For reclassify runs, cancelling mid-classify must leave the
+    unclassified tail's old predictions intact.
+
+    Regression for Codex P1 review on vireo/classify_job.py line 933.
+    Before the fix, the per-photo predictions clear ran in the detection
+    loop, so every photo's old predictions were wiped before any
+    classification happened — a cancel that landed mid-classify stranded
+    the tail with cleared predictions and no replacement. The fix moves
+    the clear into the classify loop so unreached photos never have it
+    fire.
+    """
+    from unittest.mock import patch
+
+    from classify_job import _classify_photos
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder(str(tmp_path), name="p")
+
+    pid_first = db.add_photo(
+        folder_id, "first.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    pid_second = db.add_photo(
+        folder_id, "second.jpg", extension=".jpg",
+        file_size=100, file_mtime=2.0,
+    )
+    det_first = db.save_detections(pid_first, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="megadetector-v6")[0]
+    det_second = db.save_detections(pid_second, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="megadetector-v6")[0]
+    db.add_prediction(det_first, species="Robin", confidence=0.9,
+                      model="BioCLIP", labels_fingerprint="legacy")
+    db.add_prediction(det_second, species="Robin", confidence=0.9,
+                      model="BioCLIP", labels_fingerprint="legacy")
+
+    class FlipRunner(FakeRunner):
+        """Cancel flips on right after the first photo enters the loop."""
+
+        def __init__(self):
+            super().__init__()
+            self._calls = 0
+
+        def is_cancelled(self, job_id):
+            self._calls += 1
+            # First call: top of iteration 0 → not cancelled (process first).
+            # Subsequent calls: top of iteration 1+ → cancelled.
+            return self._calls >= 2
+
+    runner = FlipRunner()
+    job = _make_job()
+    photos = [
+        {"id": pid_first, "filename": "first.jpg", "folder_id": folder_id,
+         "timestamp": None},
+        {"id": pid_second, "filename": "second.jpg", "folder_id": folder_id,
+         "timestamp": None},
+    ]
+    folders = {folder_id: str(tmp_path)}
+
+    detection_map = {
+        pid_first: [{"id": det_first}],
+        pid_second: [{"id": det_second}],
+    }
+
+    from unittest.mock import MagicMock
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [
+        ([{"species": "Sparrow", "score": 0.92, "taxonomy": None}], None),
+    ]
+
+    # _prepare_image returns a dummy so we never touch real image files;
+    # the test is about the clear-call boundary, not classification accuracy.
+    fake_img = MagicMock()
+    with patch("classify_job._prepare_image",
+               return_value=(fake_img, str(tmp_path), "p")):
+        _classify_photos(
+            photos=photos,
+            folders=folders,
+            detection_map=detection_map,
+            existing_preds=set(),
+            clf=clf,
+            model_type="bioclip",
+            model_name="BioCLIP",
+            runner=runner,
+            job=job,
+            db=db,
+            labels_fingerprint="legacy",
+            reclassify=True,
+        )
+
+    # The second photo's cached prediction must survive intact: its
+    # iteration never started, so the per-photo clear never ran.
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    preds_second = db2.conn.execute(
+        "SELECT COUNT(*) AS n FROM predictions WHERE detection_id = ?",
+        (det_second,),
+    ).fetchone()["n"]
+    assert preds_second == 1, (
+        "Mid-classify cancel on a reclassify run wiped the cache of a "
+        "photo whose classify-loop iteration never started — the clear "
+        "leaked out of the loop body."
+    )
+
+
+def test_classify_photos_full_image_fallback_replaces_stale_predictions_on_reclassify(tmp_path):
+    """When MegaDetector setup fails for a reclassify run, ``_classify_photos``
+    runs full-image classification. The stale detector-based predictions
+    must be cleared so they don't coexist with the fallback model's output.
+
+    Regression for Codex P2 review on vireo/classify_job.py line 666.
+    Before the fix, the per-photo clear lived inside ``_detect_subjects``
+    so it was bypassed entirely when the try block raised; the fallback
+    full-image classifier then wrote new predictions alongside the
+    untouched stale rows.
+    """
+    from unittest.mock import patch
+
+    from classify_job import _classify_photos
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder(str(tmp_path), name="p")
+
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Pretend a prior megadetector run left a detection + prediction
+    # behind. The reclassify-with-weights-failure path must not let this
+    # prediction linger alongside the new full-image one.
+    stale_det = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.4, "h": 0.4},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="megadetector-v6")[0]
+    db.add_prediction(stale_det, species="Robin", confidence=0.9,
+                      model="BioCLIP", labels_fingerprint="legacy")
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    from unittest.mock import MagicMock
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [
+        ([{"species": "Sparrow", "score": 0.88, "taxonomy": None}], None),
+    ]
+
+    # detection_map is empty (the simulated setup failure produced
+    # nothing) → the function takes the full-image synthetic branch.
+    fake_img = MagicMock()
+    with patch("classify_job._prepare_image",
+               return_value=(fake_img, str(tmp_path), "p")):
+        raw_results, _, _ = _classify_photos(
+            photos=[{"id": pid, "filename": "a.jpg", "folder_id": folder_id,
+                     "timestamp": None}],
+            folders={folder_id: str(tmp_path)},
+            detection_map={},
+            existing_preds=set(),
+            clf=clf,
+            model_type="bioclip",
+            model_name="BioCLIP",
+            runner=runner,
+            job=job,
+            db=db,
+            labels_fingerprint="legacy",
+            reclassify=True,
+        )
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    # Stale BioCLIP prediction on the old megadetector detection must
+    # be gone. The fallback classifier wrote a new prediction on the
+    # synthetic full-image detection.
+    stale_preds = db2.conn.execute(
+        "SELECT COUNT(*) AS n FROM predictions "
+        "WHERE detection_id = ? AND classifier_model = ?",
+        (stale_det, "BioCLIP"),
+    ).fetchone()["n"]
+    assert stale_preds == 0, (
+        "Stale detector-based predictions must be cleared by the classify "
+        "loop's per-photo purge when reclassify falls back to full-image "
+        "(detection setup failure). Found stale rows still attached to "
+        f"the old megadetector detection ({stale_det})."
+    )
+    # Sanity: the fallback path actually produced a result so the test
+    # didn't pass vacuously.
+    assert len(raw_results) == 1
+    assert raw_results[0]["prediction"] == "Sparrow"
