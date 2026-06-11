@@ -7084,6 +7084,18 @@ def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
     assert counts is not None
     db.clear_predictions(model="some-model", collection_photo_ids=huge)
 
+    # Downstream lookups invoked by export/pipeline jobs after the outer
+    # query/scope chunks must also chunk — the export job feeds the entire
+    # filtered id list into get_photos_by_ids + get_species_keywords_for_photos,
+    # and pipeline.load_photo_features feeds the entire scoped id list into
+    # get_detections_for_photos twice.
+    photos_map = db.get_photos_by_ids(huge)
+    assert pid in photos_map  # the one real row survives the chunked select
+    species_map = db.get_species_keywords_for_photos(huge)
+    assert species_map == {}  # no keywords attached, but no OperationalError
+    det_map = db.get_detections_for_photos(huge, min_conf=0)
+    assert det_map == {}
+
 
 def test_move_folder_path_does_not_touch_wildcard_siblings(db):
     """LIKE treats _ and % as wildcards — moving /pics/my_dir must not

@@ -3156,18 +3156,24 @@ class Database:
         ).fetchone()
 
     def get_photos_by_ids(self, photo_ids):
-        """Return photos for a list of IDs in a single query.
+        """Return photos for a list of IDs.
 
-        Returns a dict mapping photo_id -> Row for efficient lookup.
+        Returns a dict mapping photo_id -> Row for efficient lookup. Large
+        id lists are chunked so the IN-clause stays under SQLite's
+        bound-parameter cap (999 on legacy builds, 32766 modern).
         """
         if not photo_ids:
             return {}
-        placeholders = ",".join("?" for _ in photo_ids)
-        rows = self.conn.execute(
-            f"SELECT {self.PHOTO_COLS} FROM photos WHERE id IN ({placeholders})",
-            photo_ids,
-        ).fetchall()
-        return {row["id"]: row for row in rows}
+        result = {}
+        for chunk in _chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"SELECT {self.PHOTO_COLS} FROM photos WHERE id IN ({placeholders})",
+                list(chunk),
+            ).fetchall()
+            for row in rows:
+                result[row["id"]] = row
+        return result
 
     def count_photos(self):
         """Return photo count for the active workspace.
@@ -7576,19 +7582,20 @@ class Database:
         """
         if not photo_ids:
             return {}
-        placeholders = ",".join("?" for _ in photo_ids)
-        rows = self.conn.execute(
-            f"""SELECT DISTINCT pk.photo_id, k.name
-                FROM photo_keywords pk
-                JOIN keywords k ON k.id = pk.keyword_id
-                WHERE pk.photo_id IN ({placeholders})
-                  AND (k.is_species = 1 OR k.type = 'taxonomy')
-                ORDER BY k.name""",
-            list(photo_ids),
-        ).fetchall()
         result = {}
-        for r in rows:
-            result.setdefault(r["photo_id"], []).append(r["name"])
+        for chunk in _chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT DISTINCT pk.photo_id, k.name
+                    FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id
+                    WHERE pk.photo_id IN ({placeholders})
+                      AND (k.is_species = 1 OR k.type = 'taxonomy')
+                    ORDER BY k.name""",
+                list(chunk),
+            ).fetchall()
+            for r in rows:
+                result.setdefault(r["photo_id"], []).append(r["name"])
         return result
 
     def get_highlights_candidates(self, folder_id, min_quality=0.0):
@@ -9273,30 +9280,31 @@ class Database:
             import config as cfg
             effective = self.get_effective_config(cfg.load())
             min_conf = effective.get("detector_confidence", 0.2)
-        placeholders = ",".join("?" for _ in photo_ids)
-        q = (
-            f"SELECT photo_id, box_x, box_y, box_w, box_h, "
-            f"       detector_confidence, category "
-            f"FROM detections "
-            f"WHERE photo_id IN ({placeholders}) "
-            f"  AND detector_confidence >= ?"
-        )
-        params = [*photo_ids, min_conf]
-        if detector_model is not None:
-            q += " AND detector_model = ?"
-            params.append(detector_model)
-        q += " ORDER BY photo_id, detector_confidence DESC"
-        rows = self.conn.execute(q, params).fetchall()
         result = {}
-        for r in rows:
-            result.setdefault(r["photo_id"], []).append({
-                "x": r["box_x"],
-                "y": r["box_y"],
-                "w": r["box_w"],
-                "h": r["box_h"],
-                "confidence": r["detector_confidence"],
-                "category": r["category"],
-            })
+        for chunk in _chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            q = (
+                f"SELECT photo_id, box_x, box_y, box_w, box_h, "
+                f"       detector_confidence, category "
+                f"FROM detections "
+                f"WHERE photo_id IN ({placeholders}) "
+                f"  AND detector_confidence >= ?"
+            )
+            params = [*chunk, min_conf]
+            if detector_model is not None:
+                q += " AND detector_model = ?"
+                params.append(detector_model)
+            q += " ORDER BY photo_id, detector_confidence DESC"
+            rows = self.conn.execute(q, params).fetchall()
+            for r in rows:
+                result.setdefault(r["photo_id"], []).append({
+                    "x": r["box_x"],
+                    "y": r["box_y"],
+                    "w": r["box_w"],
+                    "h": r["box_h"],
+                    "confidence": r["detector_confidence"],
+                    "category": r["category"],
+                })
         return result
 
     def get_predictions_for_detection(self, detection_id,
