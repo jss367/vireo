@@ -7120,17 +7120,21 @@ class Database:
 
         Moves photo associations, then reparents the source's children onto
         the destination. A child whose exact name already exists under the
-        destination (UNIQUE(name, parent_id) clash) is itself a duplicate of
-        that sibling, so it merges into it recursively instead of being
-        renamed — "Birds > Heron" and "birds > Heron" must converge on one
-        Heron. Case-variant children don't clash (the UNIQUE index is
-        case-sensitive); they reparent cleanly and collapse on the caller's
-        next convergence pass. Cycles are impossible: parent_id chains are
-        acyclic by construction. Non-link metadata (is_species, coordinates,
-        taxon_id) folds into the destination when it lacks its own, so
-        deleting the source can't silently drop species/location info that
-        only the duplicate carried. Returns the number of keyword rows
-        merged away (>= 1). Caller commits.
+        destination (UNIQUE(name, parent_id) clash) merges into that sibling
+        recursively only when both share the same ``type`` — "Birds > Heron"
+        and "birds > Heron" must converge on one Heron. When the existing
+        sibling has a different ``type`` (e.g. a 'general' Macro vs. a
+        'genre' Macro), the dedup boundary is (LOWER(name), parent_id, type),
+        so they are NOT duplicates; preserve both by disambiguating the
+        migrating child's name with an id suffix. Case-variant children
+        don't clash (the UNIQUE index is case-sensitive); they reparent
+        cleanly and collapse on the caller's next convergence pass. Cycles
+        are impossible: parent_id chains are acyclic by construction.
+        Non-link metadata (is_species, coordinates, taxon_id) folds into
+        the destination when it lacks its own, so deleting the source can't
+        silently drop species/location info that only the duplicate carried.
+        Returns the number of keyword rows merged away (>= 1). Caller
+        commits.
         """
         merged = 1
         src = self.conn.execute(
@@ -7159,7 +7163,7 @@ class Database:
         # Reparent children onto the destination before deleting, or the
         # keywords.parent_id FK aborts the merge mid-way.
         children = self.conn.execute(
-            "SELECT id, name FROM keywords WHERE parent_id = ?", (src_id,)
+            "SELECT id, name, type FROM keywords WHERE parent_id = ?", (src_id,)
         ).fetchall()
         for child in children:
             try:
@@ -7169,10 +7173,21 @@ class Database:
                 )
             except sqlite3.IntegrityError:
                 existing = self.conn.execute(
-                    "SELECT id FROM keywords WHERE parent_id = ? AND name = ?",
+                    "SELECT id, type FROM keywords WHERE parent_id = ? AND name = ?",
                     (dst_id, child["name"]),
                 ).fetchone()
-                merged += self._merge_keyword_into(child["id"], existing["id"])
+                if existing["type"] == child["type"]:
+                    merged += self._merge_keyword_into(child["id"], existing["id"])
+                else:
+                    # Same name + parent but different type: outside the
+                    # (LOWER(name), parent_id, type) dedup boundary, so
+                    # preserve both by renaming the migrating child rather
+                    # than retagging photos across types.
+                    disambiguated = f"{child['name']} (id-{child['id']})"
+                    self.conn.execute(
+                        "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
+                        (dst_id, disambiguated, child["id"]),
+                    )
         self.conn.execute("DELETE FROM keywords WHERE id = ?", (src_id,))
         return merged
 

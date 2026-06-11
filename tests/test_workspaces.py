@@ -1058,6 +1058,85 @@ def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
     assert tagged == {herons[0]["id"]}
 
 
+def test_merge_duplicate_keywords_preserves_differently_typed_children(db):
+    """A child name-collision on reparent is only a duplicate when both
+    children share a type. With 'Birds > Macro' (general) under one parent
+    and 'birds > Macro' (genre) under its case-duplicate, the parent merge
+    triggers a UNIQUE(name, parent_id) clash on the migrating Macro. The
+    dedup boundary is (LOWER(name), parent_id, type), so these aren't
+    duplicates; the migrating one must be preserved (disambiguated by
+    name), not silently merged into a different-type sibling — that would
+    retag photos across the type boundary and drop one typed keyword."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws, fid)
+    pid_general = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                               file_size=100, file_mtime=1.0)
+    pid_genre = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                             file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('Birds')")
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('birds')")
+    upper = db.conn.execute("SELECT id FROM keywords WHERE name='Birds'").fetchone()[0]
+    lower = db.conn.execute("SELECT id FROM keywords WHERE name='birds'").fetchone()[0]
+    db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) VALUES ('Macro', ?, 'general')",
+        (upper,),
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) VALUES ('Macro', ?, 'genre')",
+        (lower,),
+    )
+    m_general = db.conn.execute(
+        "SELECT id FROM keywords WHERE name='Macro' AND parent_id=?", (upper,)
+    ).fetchone()[0]
+    m_genre = db.conn.execute(
+        "SELECT id FROM keywords WHERE name='Macro' AND parent_id=?", (lower,)
+    ).fetchone()[0]
+    db.conn.commit()
+
+    db.tag_photo(pid_general, m_general)
+    db.tag_photo(pid_genre, m_genre)
+
+    db.merge_duplicate_keywords()
+
+    # Birds/birds collapsed to one parent.
+    birds = db.conn.execute(
+        "SELECT id FROM keywords WHERE LOWER(name) = 'birds'"
+    ).fetchall()
+    assert len(birds) == 1
+    assert birds[0]["id"] == upper
+
+    # Both typed Macros survive under the survivor parent; the migrating
+    # one was disambiguated rather than merged across the type boundary.
+    macros = db.conn.execute(
+        "SELECT id, name, parent_id, type FROM keywords WHERE LOWER(name) LIKE 'macro%' "
+        "ORDER BY type"
+    ).fetchall()
+    assert len(macros) == 2
+    assert {m["parent_id"] for m in macros} == {upper}
+    assert {m["type"] for m in macros} == {"general", "genre"}
+    # The original general Macro keeps its name; the migrating genre Macro
+    # was disambiguated with an id suffix.
+    by_type = {m["type"]: m for m in macros}
+    assert by_type["general"]["id"] == m_general
+    assert by_type["general"]["name"] == "Macro"
+    assert by_type["genre"]["id"] == m_genre
+    assert by_type["genre"]["name"] == f"Macro (id-{m_genre})"
+
+    # Each photo's association sticks to its own type — neither got
+    # silently retagged onto the other-type Macro.
+    general_tags = {r[0] for r in db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid_general,)
+    ).fetchall()}
+    genre_tags = {r[0] for r in db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid_genre,)
+    ).fetchall()}
+    assert general_tags == {m_general}
+    assert genre_tags == {m_genre}
+
+
 def test_empty_workspace_labels_does_not_fallback_to_global(db):
     """An explicit empty active_labels [] should NOT fall back to global labels."""
     ws = db.create_workspace("Empty Labels")
