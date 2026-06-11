@@ -605,6 +605,18 @@ def test_update_step_current_file(app_and_db):
     assert runner._jobs[job_id]["steps"][0]["current_file"] == "DSC_0001.NEF"
 
 
+def test_start_job_ids_unique_within_same_millisecond(app_and_db):
+    """start() ids carry a monotonic suffix — two same-type jobs started in
+    the same millisecond previously collided, overwriting each other's
+    registration and history row."""
+    import time as _time
+    from jobs import JobRunner
+    runner = JobRunner()
+    ids = [runner.start("scan", lambda j: None) for _ in range(10)]
+    assert len(set(ids)) == 10
+    _time.sleep(0.05)  # let the trivial workers finish
+
+
 def test_update_step_cancelled_is_terminal(app_and_db):
     """status='cancelled' finalizes a step (finished_at + duration), same as
     completed/failed — classify/pipeline steps report it on user cancel."""

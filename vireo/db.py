@@ -2793,7 +2793,7 @@ class Database:
             return None
         try:
             dup_rows = self.conn.execute(
-                "SELECT id FROM photos WHERE file_hash = ? AND flag != 'rejected'",
+                "SELECT id FROM photos WHERE file_hash = ? AND (flag IS NULL OR flag != 'rejected')",
                 (file_hash,),
             ).fetchall()
             if len(dup_rows) > 1:
@@ -2828,7 +2828,7 @@ class Database:
             """
             SELECT file_hash, GROUP_CONCAT(id) AS ids
             FROM photos
-            WHERE file_hash IS NOT NULL AND flag != 'rejected'
+            WHERE file_hash IS NOT NULL AND (flag IS NULL OR flag != 'rejected')
             GROUP BY file_hash
             HAVING COUNT(*) > 1
             """
@@ -2854,7 +2854,7 @@ class Database:
             """
             SELECT file_hash,
                    GROUP_CONCAT(id) AS ids,
-                   SUM(CASE WHEN flag != 'rejected' THEN 1 ELSE 0 END) AS kept,
+                   SUM(CASE WHEN flag IS NULL OR flag != 'rejected' THEN 1 ELSE 0 END) AS kept,
                    SUM(CASE WHEN flag  = 'rejected' THEN 1 ELSE 0 END) AS rejected
             FROM photos
             WHERE file_hash IS NOT NULL
@@ -2897,7 +2897,7 @@ class Database:
                        f.path AS folder_path
                 FROM photos p
                 LEFT JOIN folders f ON f.id = p.folder_id
-                WHERE p.id IN ({placeholders}) AND p.flag != 'rejected'""",
+                WHERE p.id IN ({placeholders}) AND (p.flag IS NULL OR p.flag != 'rejected')""",
             list(photo_ids),
         ).fetchall()
         if len(rows) < 2:
@@ -3035,7 +3035,7 @@ class Database:
                           f.path AS folder_path
                    FROM photos p
                    LEFT JOIN folders f ON f.id = p.folder_id
-                   WHERE p.file_hash = ? AND p.flag != 'rejected'""",
+                   WHERE p.file_hash = ? AND (p.flag IS NULL OR p.flag != 'rejected')""",
                 (file_hash,),
             ).fetchall()
             if not rows:
@@ -7702,7 +7702,7 @@ class Database:
                  {folder_filter}
                  AND p.quality_score IS NOT NULL
                  AND p.quality_score >= ?
-                 AND p.flag != 'rejected'
+                 AND (p.flag IS NULL OR p.flag != 'rejected')
                ORDER BY p.quality_score DESC""",
             (ws, ws, *folder_params, min_quality),
         ).fetchall()
@@ -10600,7 +10600,7 @@ class Database:
                     "JOIN workspace_folders wf2 ON wf2.folder_id = p2.folder_id "
                     "AND wf2.workspace_id = ? "
                     "WHERE p2.id != p.id AND p2.file_hash = p.file_hash "
-                    "AND p2.flag != 'rejected')"
+                    "AND (p2.flag IS NULL OR p2.flag != 'rejected'))"
                 )
                 return (has if _truthy(value) else f"NOT ({has})"), [self._ws_id()]
             raise ValueError(f"unsupported collection rule field/op: {field}/{op}")

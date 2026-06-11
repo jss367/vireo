@@ -518,8 +518,12 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
 
             processed_ids.add(photo["id"])
 
-    except (ImportError, RuntimeError):
-        pass
+    except (ImportError, RuntimeError) as e:
+        # Detection unavailable (missing weights/backend) — non-fatal, the
+        # caller degrades to full-image classification. Previously silenced
+        # entirely, which let the detect stage report success while the
+        # batch's remaining photos were silently skipped.
+        log.warning("Detection unavailable for batch (non-fatal): %s", e)
     except Exception:
         log.warning("Detection failed for batch (non-fatal)", exc_info=True)
 

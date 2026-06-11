@@ -996,9 +996,6 @@ def compute_plan(db, params, db_path):
     if params.collection_id is not None:
         from pipeline import _resolve_collection_photo_ids
         photo_ids = _resolve_collection_photo_ids(db, params.collection_id)
-        if params.exclude_photo_ids:
-            excl = set(params.exclude_photo_ids)
-            photo_ids = {pid for pid in photo_ids if pid not in excl}
     elif params.source_paths is not None:
         if not params.source_paths:
             # Import / new-images mode with every preview file deselected.
@@ -1050,6 +1047,17 @@ def compute_plan(db, params, db_path):
         unlinked_folder_count = db.workspace_unlinked_folder_count(
             {os.path.dirname(p) for p in unique_paths if p not in hash_dup_paths}
         )
+
+    # Exclusions apply in EVERY mode — the running job filters excluded ids
+    # in every stage, so a plan that only honored them for collections
+    # overstated the pending counts (the proxy drift this module forbids).
+    # Whole-workspace scope materializes the id set first so the same
+    # subtraction works; _scope_clause stages large sets in a temp table.
+    if params.exclude_photo_ids:
+        excl = set(params.exclude_photo_ids)
+        if photo_ids is None:
+            photo_ids = set(db.get_photo_ids())
+        photo_ids = {pid for pid in photo_ids if pid not in excl}
 
     classify = _classify_plan(db, params, photo_ids, new_count)
     extract = _extract_plan(db, params, photo_ids, pipeline_cfg, new_count)
