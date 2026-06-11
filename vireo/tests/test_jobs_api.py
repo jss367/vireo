@@ -605,6 +605,33 @@ def test_update_step_current_file(app_and_db):
     assert runner._jobs[job_id]["steps"][0]["current_file"] == "DSC_0001.NEF"
 
 
+def test_update_step_cancelled_is_terminal(app_and_db):
+    """status='cancelled' finalizes a step (finished_at + duration), same as
+    completed/failed — classify/pipeline steps report it on user cancel."""
+    from jobs import JobRunner
+    runner = JobRunner.__new__(JobRunner)
+    runner._jobs = {}
+    runner._subscribers = {}
+    runner._lock = __import__('threading').Lock()
+    runner._history_db_path = None
+
+    job_id = "test-cancel-step"
+    runner._jobs[job_id] = {
+        "id": job_id,
+        "steps": [
+            {"id": "classify", "label": "Classify", "status": "pending",
+             "started_at": None, "finished_at": None, "duration": None},
+        ],
+    }
+    runner.update_step(job_id, "classify", status="running")
+    runner.update_step(job_id, "classify", status="cancelled",
+                       summary="Cancelled (3 of 10 processed)")
+    step = runner._jobs[job_id]["steps"][0]
+    assert step["status"] == "cancelled"
+    assert step["finished_at"] is not None
+    assert step["duration"] is not None
+
+
 def test_scan_step_has_progress(app_and_db, tmp_path):
     """Scan step reports step-level progress with current/total."""
     app, _ = app_and_db

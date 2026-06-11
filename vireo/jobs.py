@@ -806,7 +806,10 @@ class JobRunner:
                     new_status = kwargs.get("status")
                     if new_status == "running" and step["status"] == "pending":
                         step["started_at"] = datetime.now().isoformat()
-                    if new_status in ("completed", "failed") and step["started_at"]:
+                    # "cancelled" is terminal too — classify/pipeline steps
+                    # report it on user cancel; without it here those steps
+                    # persist with no finished_at/duration.
+                    if new_status in ("completed", "failed", "cancelled") and step["started_at"]:
                         step["finished_at"] = datetime.now().isoformat()
                         start = datetime.fromisoformat(step["started_at"])
                         end = datetime.fromisoformat(step["finished_at"])
