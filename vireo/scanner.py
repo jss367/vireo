@@ -1219,6 +1219,16 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                             (xmp_mtime, existing["id"]),
                         )
                         commit_with_retry(db.conn)
+                    elif not xmp_unchanged:
+                        # Sidecar deleted: clear the stored mtime so the row
+                        # converges instead of looking "XMP changed" on every
+                        # later scan (this skip path never reaches the main
+                        # loop, so nothing else would ever reset it).
+                        db.conn.execute(
+                            "UPDATE photos SET xmp_mtime = NULL WHERE id = ?",
+                            (existing["id"],),
+                        )
+                        commit_with_retry(db.conn)
 
                     if file_unchanged and not metadata_missing:
                         processed_count += 1
@@ -1428,6 +1438,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 # extract_full_metadata is off) — prevents perpetual retry
                 updates.append("exif_data=COALESCE(exif_data, ?)")
                 update_params.append("{}")
+            if row_already_existed:
+                # add_photo is INSERT OR IGNORE, so the fresh stat values it
+                # was passed never reach an existing row. Without these the
+                # incremental pre-pass keeps comparing against the stale
+                # stored mtime and re-processes a changed file on every scan
+                # forever. xmp_mtime may be None here — writing NULL is
+                # correct (a deleted sidecar otherwise re-trips the "XMP
+                # changed" check on every scan), and the sidecar's keywords
+                # are re-imported below whenever it exists.
+                updates.extend(["file_mtime=?", "file_size=?", "xmp_mtime=?"])
+                update_params.extend([file_mtime, file_size, xmp_mtime])
             if updates:
                 update_params.append(photo_id)
                 db.conn.execute(

@@ -983,7 +983,9 @@ function renderStats() {
       '<span class="stat accepted-count">' + accepted + ' Accepted</span>' +
       '<span class="stat">' + predictions.length + ' Total</span>';
   } else {
-    el.innerHTML = '<span class="stat">' + allData.photos.length + ' photos</span>';
+    // Browse mode means zero predictions loaded — the grid's empty state
+    // explains the situation, so there's no count worth showing here.
+    el.textContent = '';
   }
 }
 

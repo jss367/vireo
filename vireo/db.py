@@ -2377,7 +2377,12 @@ class Database:
         return [r["id"] for r in rows]
 
     def delete_folder(self, folder_id):
-        """Delete a folder and all its photos/data from the database.
+        """Delete a folder, its descendant folders, and all their photos/data.
+
+        Must cover the whole subtree: folders.parent_id has no ON DELETE
+        action and the scanner registers every subdirectory with parent_id
+        set, so deleting a non-leaf folder row alone trips the FK — and
+        descendants of a deleted folder would be unreachable anyway.
 
         Returns dict with 'deleted_photos' count and 'files' (list from
         delete_photos) so the caller can remove cached thumbnails, previews,
@@ -2385,24 +2390,64 @@ class Database:
         leaves the on-disk files, which would otherwise become untracked
         orphans that eviction can't reclaim.
         """
-        photo_ids = [
-            row["id"]
-            for row in self.conn.execute(
-                "SELECT id FROM photos WHERE folder_id = ?", (folder_id,)
-            ).fetchall()
-        ]
+        # BFS so the list is ordered parents-first; deleted in reverse below.
+        subtree_ids = [folder_id]
+        frontier = [folder_id]
+        while frontier:
+            children = []
+            for chunk in _chunks(frontier):
+                placeholders = ",".join("?" for _ in chunk)
+                children.extend(
+                    row["id"]
+                    for row in self.conn.execute(
+                        f"SELECT id FROM folders WHERE parent_id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                )
+            subtree_ids.extend(children)
+            frontier = children
 
+        photo_ids = []
+        for chunk in _chunks(subtree_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            photo_ids.extend(
+                row["id"]
+                for row in self.conn.execute(
+                    f"SELECT id FROM photos WHERE folder_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+            )
+
+        # One outer transaction so a failure partway can't commit the photo
+        # deletes while leaving the folder rows behind. ``commit=False`` also
+        # defers delete_photos' pipeline-cache prune (a non-transactional
+        # file write) until after the commit succeeds.
         files = []
-        if photo_ids:
-            inner = self.delete_photos(photo_ids)
-            files = inner.get("files", [])
+        deleted_ids = []
+        try:
+            for chunk in _chunks(photo_ids):
+                inner = self.delete_photos(chunk, commit=False)
+                files.extend(inner.get("files", []))
+                deleted_ids.extend(inner.get("ids", []))
+            # Children before parents, else the multi-statement delete trips
+            # the parent_id FK at the end of an earlier chunk's statement.
+            for chunk in _chunks(list(reversed(subtree_ids))):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"DELETE FROM workspace_folders WHERE folder_id IN ({placeholders})",
+                    chunk,
+                )
+                self.conn.execute(
+                    f"DELETE FROM folders WHERE id IN ({placeholders})",
+                    chunk,
+                )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        self.prune_pipeline_cache_for_ids(deleted_ids)
 
-        # Remove folder from workspace_folders and folders
-        self.conn.execute("DELETE FROM workspace_folders WHERE folder_id = ?", (folder_id,))
-        self.conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
-        self.conn.commit()
-
-        return {"deleted_photos": len(photo_ids), "files": files}
+        return {"deleted_photos": len(deleted_ids), "files": files}
 
     # -- Photos --
 

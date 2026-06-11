@@ -6357,6 +6357,36 @@ def test_delete_folder(tmp_path):
     assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
 
 
+def test_delete_folder_with_descendants(tmp_path):
+    """delete_folder removes the whole subtree — folders.parent_id has no ON
+    DELETE action, so deleting a non-leaf folder row alone would trip the FK
+    after its photos were already deleted."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("/tree", name="tree")
+    child = db.add_folder("/tree/sub", name="sub", parent_id=parent)
+    grand = db.add_folder("/tree/sub/deep", name="deep", parent_id=child)
+    pids = [
+        db.add_photo(folder_id=fid, filename=f"bird{fid}.jpg", extension=".jpg",
+                     file_size=1000, file_mtime=1.0)
+        for fid in (parent, child, grand)
+    ]
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 3
+
+    for fid in (parent, child, grand):
+        assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+        assert db.conn.execute(
+            "SELECT folder_id FROM workspace_folders WHERE folder_id = ?", (fid,)
+        ).fetchone() is None
+    for pid in pids:
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+
 def test_missing_folder_photos_hidden_from_browse(tmp_path):
     """Photos in missing folders don't appear in get_photos or count_photos."""
     from db import Database
