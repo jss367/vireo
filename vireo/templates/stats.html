@@ -943,7 +943,7 @@ async function toggleFolderDetail() {
       html += '<div class="folder-row">' +
         '<div class="fhead" onclick="toggleFolderCov(\'' + fid + '\', this)">' +
           '<span class="fchevron">\u25B8</span>' +
-          '<span class="fpath" title="' + escapeHtml(f.path) + '">' + escapeHtml(f.path) + '</span>' +
+          '<span class="fpath" title="' + escapeAttr(f.path) + '">' + escapeHtml(f.path) + '</span>' +
           '<span class="fcount">' + (f.total || 0).toLocaleString() + ' photos</span>' +
         '</div>' +
         '<div id="' + fid + '" style="display:none;">' + renderFolderCoverage(f) + '</div>' +

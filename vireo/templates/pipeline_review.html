@@ -2409,7 +2409,7 @@ function renderPhotoCard(p, encIdx, burstIdx) {
     html += '<button class="detach-btn" onclick="event.stopPropagation();detachPhoto(' + encIdx + ',' + burstIdx + ',' + p.id + ')" title="Detach photo" style="position:absolute;top:2px;right:2px;">&times;</button>';
   }
   html += '<div class="photo-score-bar"><div class="photo-score-fill" style="width:' + qPct + '%"></div></div>';
-  html += '<div class="photo-info">' + (p.filename || '') + ' &middot; Q=' + q.toFixed(2) + '</div>';
+  html += '<div class="photo-info">' + escapeHtml(p.filename || '') + ' &middot; Q=' + q.toFixed(2) + '</div>';
   html += '</div>';
   return html;
 }
@@ -2864,7 +2864,7 @@ function openInspect(photoId) {
   ];
 
   var html = '<button class="inspect-close" onclick="closeInspect()">&times;</button>';
-  html += '<div class="inspect-title">' + (photo.filename || 'Photo ' + photoId) + '</div>';
+  html += '<div class="inspect-title">' + escapeHtml(photo.filename || 'Photo ' + photoId) + '</div>';
 
   // Image with mask toggle
   html += '<div class="inspect-img-wrap">';
@@ -2916,7 +2916,7 @@ function openInspect(photoId) {
   // Encounter context filmstrip
   if (enc) {
     var speciesName = enc.confirmed_species || (enc.species ? (enc.species[0] || 'Unknown') : 'Unknown');
-    html += '<div class="context-label">Encounter: ' + speciesName + ' (' + enc.photo_count + ' photos, ' + (enc.burst_count||0) + ' bursts)</div>';
+    html += '<div class="context-label">Encounter: ' + escapeHtml(speciesName) + ' (' + enc.photo_count + ' photos, ' + (enc.burst_count||0) + ' bursts)</div>';
     html += '<div class="context-filmstrip">';
     (enc.photo_ids || []).forEach(function(pid) {
       var isCurrent = pid === photoId ? ' current' : '';
