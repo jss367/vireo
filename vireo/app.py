@@ -59,6 +59,7 @@ ALL_PAGES = [
     {"id": "cull",            "label": "Cull",            "href": "/cull"},
     {"id": "misses",          "label": "Misses",          "href": "/misses"},
     {"id": "highlights",      "label": "Highlights",      "href": "/highlights"},
+    {"id": "life_list",       "label": "Life List",       "href": "/life-list"},
     {"id": "browse",          "label": "Browse",          "href": "/browse"},
     {"id": "map",             "label": "Map",             "href": "/map"},
     {"id": "variants",        "label": "Variants",        "href": "/variants"},
@@ -2061,6 +2062,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/highlights")
     def highlights_page():
         return render_template("highlights.html")
+
+    @app.route("/life-list")
+    def life_list_page():
+        return render_template("life_list.html")
 
     @app.route("/misses")
     def misses_page():
@@ -5592,6 +5597,100 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "limit_per_bucket": limit_per_bucket,
             },
             "scope": "workspace" if folder_id is None else "folder",
+        })
+
+    @app.route("/api/life-list")
+    def api_life_list():
+        db = _get_db()
+        rows = db.get_life_list_candidates()
+        locations_by_species = db.get_life_list_locations()
+        photos_per_species = max(
+            1, min(request.args.get("photos_per_species", 12, type=int), 100)
+        )
+
+        buckets = {}
+        for row in rows:
+            r = dict(row)
+            entry = buckets.setdefault(r["species"], {
+                "scientific_name": None,
+                "common_name": None,
+                "photos": [],
+            })
+            # Two keyword rows can share a name (different parents); take
+            # the first linked taxon's names for the species entry.
+            if entry["scientific_name"] is None:
+                entry["scientific_name"] = r.get("scientific_name")
+            if entry["common_name"] is None:
+                entry["common_name"] = r.get("common_name")
+            entry["photos"].append({
+                "id": r["id"],
+                "filename": r["filename"],
+                "timestamp": r.get("timestamp"),
+                "rating": r.get("rating") or 0,
+                "flag": r.get("flag") or "none",
+                "quality_score": r.get("quality_score"),
+                "subject_sharpness": r.get("subject_sharpness"),
+                "subject_size": r.get("subject_size"),
+                "sharpness": r.get("sharpness"),
+                "subject_tenengrad": r.get("subject_tenengrad"),
+                "bg_tenengrad": r.get("bg_tenengrad"),
+                "crop_complete": r.get("crop_complete"),
+                "bg_separation": r.get("bg_separation"),
+                "subject_clip_high": r.get("subject_clip_high"),
+                "subject_clip_low": r.get("subject_clip_low"),
+                "subject_y_median": r.get("subject_y_median"),
+                "noise_estimate": r.get("noise_estimate"),
+                "eye_tenengrad": r.get("eye_tenengrad"),
+            })
+
+        def compact(photo):
+            return {
+                "id": photo["id"],
+                "filename": photo["filename"],
+                "timestamp": photo.get("timestamp"),
+                "quality_score": photo.get("quality_score"),
+                "highlight_score": photo.get("highlight_score"),
+                "reasons": photo.get("reasons") or [],
+            }
+
+        species_entries = []
+        distinct_photo_ids = set()
+        for species, entry in buckets.items():
+            photos = entry["photos"]
+            distinct_photo_ids.update(p["id"] for p in photos)
+            timestamps = [p["timestamp"] for p in photos if p.get("timestamp")]
+            _highlight_score_bucket(photos)
+            top = photos[:photos_per_species]
+            species_entries.append({
+                "species": species,
+                "scientific_name": entry["scientific_name"],
+                "common_name": entry["common_name"],
+                "photo_count": len(photos),
+                "first_seen": min(timestamps) if timestamps else None,
+                "last_seen": max(timestamps) if timestamps else None,
+                "locations": locations_by_species.get(species, []),
+                "best": compact(top[0]) if top else None,
+                "photos": [compact(p) for p in top],
+            })
+
+        # Life-list numbering: chronological by first photographed date,
+        # the way birders count lifers. Species with no capture time go
+        # last, alphabetically, so they still get a stable number.
+        species_entries.sort(key=lambda e: (
+            e["first_seen"] is None,
+            e["first_seen"] or "",
+            e["species"].lower(),
+        ))
+        for i, e in enumerate(species_entries, start=1):
+            e["number"] = i
+
+        return jsonify({
+            "species": species_entries,
+            "meta": {
+                "species_count": len(species_entries),
+                "photo_count": len(distinct_photo_ids),
+                "photos_per_species": photos_per_species,
+            },
         })
 
     @app.route("/api/highlights/confirm", methods=["POST"])
