@@ -3682,3 +3682,375 @@ def test_classify_photos_full_image_fallback_replaces_stale_predictions_on_recla
     # didn't pass vacuously.
     assert len(raw_results) == 1
     assert raw_results[0]["prediction"] == "Sparrow"
+
+
+def test_classify_photos_reclassify_flushes_pending_batch_on_cancel(tmp_path):
+    """For reclassify runs, a mid-loop cancel must still flush the pending
+    batch — its queued photos already had their old predictions cleared by
+    the per-photo purge at the top of the iteration, so dropping the batch
+    strands them with no predictions until a manual rerun.
+
+    Regression for Codex P1 review on vireo/classify_job.py line 1178.
+    Before the fix, the post-loop ``if batch and not cancelled`` gate
+    dropped the pending batch on every cancel, including reclassify runs
+    where each batched photo had a destructive ``clear_predictions`` fire
+    just before it was queued.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from classify_job import _classify_photos
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder(str(tmp_path), name="p")
+
+    pid_a = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    pid_b = db.add_photo(
+        folder_id, "b.jpg", extension=".jpg",
+        file_size=100, file_mtime=2.0,
+    )
+    det_a = db.save_detections(pid_a, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="megadetector-v6")[0]
+    det_b = db.save_detections(pid_b, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="megadetector-v6")[0]
+    # Each photo has a prior prediction; the reclassify clear will wipe
+    # them per-photo, and the test asserts the new run replaced them
+    # rather than leaving them empty after the cancel.
+    db.add_prediction(det_a, species="OldA", confidence=0.5,
+                      model="BioCLIP", labels_fingerprint="legacy")
+    db.add_prediction(det_b, species="OldB", confidence=0.5,
+                      model="BioCLIP", labels_fingerprint="legacy")
+
+    class FlipRunner(FakeRunner):
+        """Cancel flips on after the second photo enters the loop."""
+
+        def __init__(self):
+            super().__init__()
+            self._calls = 0
+
+        def is_cancelled(self, job_id):
+            self._calls += 1
+            # Calls 1 + 2: iterations 0 and 1 — let both through so both
+            # land in ``batch``. Calls 3+: cancelled, breaking the loop
+            # without flushing mid-iteration (batch < _BATCH_SIZE).
+            return self._calls >= 3
+
+    runner = FlipRunner()
+    job = _make_job()
+    photos = [
+        {"id": pid_a, "filename": "a.jpg", "folder_id": folder_id,
+         "timestamp": None},
+        {"id": pid_b, "filename": "b.jpg", "folder_id": folder_id,
+         "timestamp": None},
+    ]
+    folders = {folder_id: str(tmp_path)}
+
+    detection_map = {
+        pid_a: [{"id": det_a}],
+        pid_b: [{"id": det_b}],
+    }
+
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [
+        ([{"species": "NewA", "score": 0.92, "taxonomy": None}], None),
+        ([{"species": "NewB", "score": 0.91, "taxonomy": None}], None),
+    ]
+
+    fake_img = MagicMock()
+    with patch("classify_job._prepare_image",
+               return_value=(fake_img, str(tmp_path), "p")):
+        raw_results, _, _ = _classify_photos(
+            photos=photos,
+            folders=folders,
+            detection_map=detection_map,
+            existing_preds=set(),
+            clf=clf,
+            model_type="bioclip",
+            model_name="BioCLIP",
+            runner=runner,
+            job=job,
+            db=db,
+            labels_fingerprint="legacy",
+            reclassify=True,
+        )
+
+    # The pending batch must have flushed: both photos that had their old
+    # predictions cleared got new predictions written, so raw_results
+    # contains them both.
+    assert len(raw_results) == 2, (
+        "Reclassify mid-loop cancel must flush the pending batch — its "
+        "queued photos already had their old predictions cleared and "
+        "would otherwise be stranded empty. "
+        f"Got {len(raw_results)} results."
+    )
+    predictions = {r["photo"]["id"]: r["prediction"] for r in raw_results}
+    assert predictions == {pid_a: "NewA", pid_b: "NewB"}
+
+
+def test_classify_photos_no_reclassify_drops_pending_batch_on_cancel(tmp_path):
+    """The non-reclassify path must still drop the pending batch on cancel.
+
+    Without a reclassify, those photos' cached predictions are untouched,
+    so honoring the cancel signal here just skips wasted inference (and
+    avoids writing classifier_runs rows for photos the user just said
+    they're done with).
+    """
+    from unittest.mock import MagicMock, patch
+
+    from classify_job import _classify_photos
+
+    class FlipRunner(FakeRunner):
+        def __init__(self):
+            super().__init__()
+            self._calls = 0
+
+        def is_cancelled(self, job_id):
+            self._calls += 1
+            return self._calls >= 2
+
+    runner = FlipRunner()
+    job = _make_job()
+    clf = MagicMock()
+
+    mock_db = MagicMock()
+    mock_db.get_detections.return_value = []
+    mock_db.save_detections.return_value = [101]
+    mock_db.get_classifier_run_keys.return_value = set()
+    mock_db.get_predictions_for_detection.return_value = []
+
+    photos = [
+        {"id": 1, "filename": "a.jpg", "folder_id": 10, "timestamp": None},
+        {"id": 2, "filename": "b.jpg", "folder_id": 10, "timestamp": None},
+    ]
+    folders = {10: str(tmp_path)}
+
+    fake_img = MagicMock()
+    with patch("classify_job._prepare_image",
+               return_value=(fake_img, str(tmp_path), "p")):
+        raw_results, _, _ = _classify_photos(
+            photos=photos,
+            folders=folders,
+            detection_map={},
+            existing_preds=set(),
+            clf=clf,
+            model_type="bioclip",
+            model_name="test-model",
+            runner=runner,
+            job=job,
+            db=mock_db,
+            reclassify=False,
+        )
+
+    clf.classify_batch.assert_not_called()
+    clf.classify_batch_with_embedding.assert_not_called()
+    mock_db.record_classifier_run.assert_not_called()
+    assert raw_results == []
+
+
+def test_classify_photos_finish_cleared_only_ignores_cancel(tmp_path):
+    """When ``finish_cleared_only=True`` (set by ``run_classify_job`` after a
+    post-detect cancel landed on a reclassify run), the classify loop must
+    process every photo despite the cancel signal. The photos in this
+    subset already had their old detections + cascaded predictions wiped
+    during detection; bailing now would strand them empty.
+
+    Also asserts the per-photo ``clear_predictions`` is NOT re-run — the
+    cascade in ``_detect_subjects`` already did that, and re-issuing the
+    DELETE would just waste a transaction.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from classify_job import _classify_photos
+
+    runner = FakeRunner()
+    runner.cancelled = True  # post-detect cancel signal already set
+    job = _make_job()
+
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [
+        ([{"species": "Sparrow", "score": 0.92, "taxonomy": None}], None),
+    ]
+
+    mock_db = MagicMock()
+    mock_db.get_classifier_run_keys.return_value = set()
+    mock_db.get_predictions_for_detection.return_value = []
+
+    photos = [{"id": 1, "filename": "a.jpg", "folder_id": 10,
+               "timestamp": None}]
+    # Pre-populated detection_map: detection already done.
+    detection_map = {
+        1: [{"id": 999, "box_x": 0, "box_y": 0, "box_w": 1, "h": 1,
+             "box_h": 1, "confidence": 0.9, "category": "animal"}],
+    }
+    folders = {10: str(tmp_path)}
+
+    fake_img = MagicMock()
+    with patch("classify_job._prepare_image",
+               return_value=(fake_img, str(tmp_path), "p")):
+        raw_results, _, _ = _classify_photos(
+            photos=photos,
+            folders=folders,
+            detection_map=detection_map,
+            existing_preds=set(),
+            clf=clf,
+            model_type="bioclip",
+            model_name="BioCLIP",
+            runner=runner,
+            job=job,
+            db=mock_db,
+            labels_fingerprint="fp-x",
+            reclassify=True,
+            finish_cleared_only=True,
+        )
+
+    # Classification happened despite cancel = True.
+    assert len(raw_results) == 1
+    assert raw_results[0]["prediction"] == "Sparrow"
+    # Per-photo clear must not have re-fired — the detection-loop cascade
+    # already handled it.
+    mock_db.clear_predictions.assert_not_called()
+
+
+def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tmp_path):
+    """End-to-end: a reclassify run cancelled after detection has processed
+    some photos must still classify that processed subset. Without this,
+    the photos with completed detection would be stranded with new
+    detections but no predictions until a manual rerun.
+
+    Regression for Codex P1 review on vireo/classify_job.py line 1824
+    (and the related Iu_1R / IubrR / IupmJ findings that flag the same
+    half-state for the reclassify path).
+    """
+    from unittest.mock import MagicMock, patch
+
+    import numpy as np
+    from classify_job import ClassifyParams, run_classify_job
+
+    # The runner reports "cancelled" only after _detect_subjects returns,
+    # mirroring a real user cancel landing during the detection phase but
+    # only being observed when run_classify_job rechecks afterward.
+    class PostDetectCancelRunner(FakeRunner):
+        def __init__(self):
+            super().__init__()
+            self.flipped = False
+
+        def is_cancelled(self, job_id):
+            return self.flipped
+
+    runner = PostDetectCancelRunner()
+    job = _make_job()
+
+    # Mock DB: two photos in the collection, both with prior detections
+    # and predictions. The "processed" one will be rebuilt via the
+    # cancel-recovery path; the "untouched" one was never reached by
+    # detection so it has no entry in detection_map.
+    mock_db_instance = MagicMock()
+    mock_db_instance.get_collection_photos.return_value = [
+        {"id": 1, "filename": "processed.jpg", "folder_id": 10,
+         "timestamp": "2024-01-15T10:00:00"},
+        {"id": 2, "filename": "untouched.jpg", "folder_id": 10,
+         "timestamp": "2024-01-15T11:00:00"},
+    ]
+    mock_db_instance.get_folder_tree.return_value = [
+        {"id": 10, "path": str(tmp_path), "name": "test"},
+    ]
+    mock_db_instance.get_existing_prediction_photo_ids.return_value = set()
+    mock_db_instance.get_photo_embedding.return_value = None
+    mock_db_instance.get_subject_types.return_value = set()
+    mock_db_instance.filter_out_subject_tagged.side_effect = (
+        lambda pids, _types: list(pids)
+    )
+    # The classify loop uses these to gate-check; empty returns force
+    # full re-classification (which is what reclassify means anyway).
+    mock_db_instance.get_classifier_run_keys.return_value = set()
+    mock_db_instance.get_predictions_for_detection.return_value = []
+    mock_db_instance.get_detections.return_value = []
+
+    fake_model = {
+        "id": "test-model",
+        "name": "TestModel",
+        "model_str": "hf-hub:imageomics/bioclip",
+        "weights_path": "/tmp/weights.bin",
+        "model_type": "bioclip",
+        "downloaded": True,
+    }
+    fake_embedding = np.ones(512, dtype=np.float32)
+    fake_preds = [{"species": "NewProcessed", "score": 0.95, "taxonomy": None}]
+    mock_clf = MagicMock()
+    mock_clf.classify_with_embedding.return_value = (fake_preds, fake_embedding)
+    mock_clf.classify_batch_with_embedding.return_value = [
+        (fake_preds, fake_embedding)
+    ]
+
+    # Stub _detect_subjects: only photo 1 ("processed") completed
+    # detection. Flip cancel on as it returns.
+    detect_called = {"n": 0}
+
+    def fake_detect_subjects(photos, folders, runner, job, reclassify, db):
+        detect_called["n"] += 1
+        assert reclassify is True
+        runner.flipped = True
+        # detection_map only includes the processed photo; the untouched
+        # one was never reached (mid-detection cancel).
+        return ({1: [{"id": 101, "box_x": 0, "box_y": 0,
+                      "box_w": 0.4, "box_h": 0.4, "confidence": 0.85,
+                      "category": "animal",
+                      "detector_model": "megadetector-v6"}]}, 1)
+
+    params = ClassifyParams(
+        collection_id="col-1",
+        labels_file=None,
+        labels_files=None,
+        model_id=None,
+        model_name=None,
+        grouping_window=10,
+        similarity_threshold=0.85,
+        reclassify=True,
+    )
+
+    fake_img = MagicMock()
+    with patch("classify_job.Database", return_value=mock_db_instance), \
+         patch("classify_job.get_active_model", return_value=fake_model), \
+         patch("classify_job.get_models", return_value=[fake_model]), \
+         patch("classify_job._load_taxonomy", return_value=None), \
+         patch("classify_job._load_labels",
+               return_value=(["NewProcessed"], False)), \
+         patch("classify_job.Classifier", return_value=mock_clf), \
+         patch("classify_job._detect_subjects",
+               side_effect=fake_detect_subjects), \
+         patch("classify_job._prepare_image",
+               return_value=(fake_img, str(tmp_path), "p")):
+        result = run_classify_job(job, runner, str(tmp_path / "test.db"),
+                                  1, params)
+
+    assert detect_called["n"] == 1, "_detect_subjects must have been called"
+    # The processed photo's classification was rebuilt despite the cancel —
+    # add_prediction was called for it via finalization.
+    assert mock_db_instance.add_prediction.call_count >= 1, (
+        "Post-detect cancel on reclassify with non-empty detection_map "
+        "must classify the processed subset and store predictions. "
+        "add_prediction was never called — the recovery path bailed "
+        "instead of classifying."
+    )
+    # All add_prediction calls must be for the processed photo (id 1).
+    # The untouched photo (id 2) is not in detection_map and must not
+    # be touched by the recovery path.
+    for call in mock_db_instance.add_prediction.call_args_list:
+        # add_prediction(detection_id, species=..., ...) — detection_id is
+        # the first positional arg. Photo 1's stub detection id is 101.
+        det_id = call.args[0] if call.args else call.kwargs.get("detection_id")
+        assert det_id == 101, (
+            f"Recovery path wrote a prediction for unexpected detection "
+            f"{det_id}; only the processed subset should be classified."
+        )
+    assert result["detected"] == 1
