@@ -141,12 +141,39 @@ def test_delete_stray_sidecars_refuses_matched_sidecar(tmp_path):
     write_sidecar(stray, flat_keywords={'B'}, hierarchical_keywords=set())
     Image.new('RGB', (50, 50)).save(os.path.join(root, 'bird.jpg'))
 
-    deleted = delete_stray_sidecars([matched, stray, not_xmp])
+    deleted = delete_stray_sidecars([matched, stray, not_xmp], [root])
 
     assert deleted == 1
     assert os.path.exists(matched), "sidecar with a living image was deleted"
     assert os.path.exists(not_xmp), "non-xmp file was deleted"
     assert not os.path.exists(stray)
+
+
+def test_delete_stray_sidecars_refuses_paths_outside_roots(tmp_path):
+    """The client path list is untrusted: sidecars outside the allowed
+    roots are refused, including prefix-trap siblings (/root-evil must
+    not match root /root)."""
+    from audit import delete_stray_sidecars
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    evil_sibling = str(tmp_path / "photos-evil")
+    elsewhere = str(tmp_path / "elsewhere")
+    for d in (root, evil_sibling, elsewhere):
+        os.makedirs(d)
+
+    inside = os.path.join(root, 'stray.xmp')
+    sibling = os.path.join(evil_sibling, 'stray.xmp')
+    outside = os.path.join(elsewhere, 'stray.xmp')
+    for p in (inside, sibling, outside):
+        write_sidecar(p, flat_keywords={'X'}, hierarchical_keywords=set())
+
+    deleted = delete_stray_sidecars([inside, sibling, outside], [root])
+
+    assert deleted == 1
+    assert not os.path.exists(inside)
+    assert os.path.exists(sibling), "prefix-trap sibling dir was not refused"
+    assert os.path.exists(outside), "path outside roots was not refused"
 
 
 def test_verify_hashes_ok_and_baseline(tmp_path):

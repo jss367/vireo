@@ -9273,11 +9273,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/audit/delete-sidecars", methods=["POST"])
     def api_audit_delete_sidecars():
+        db = _get_db()
         body = request.get_json(silent=True) or {}
         paths = body.get("paths", [])
         from audit import delete_stray_sidecars
 
-        deleted = delete_stray_sidecars(paths)
+        # Resolve the workspace's root folders server-side — the same
+        # roots the sidecars check scans. Client-supplied paths are
+        # untrusted; anything outside these roots is refused.
+        roots = [
+            f["path"] for f in db.get_folder_tree() if not f["parent_id"]
+        ]
+        deleted = delete_stray_sidecars(paths, roots)
         return jsonify({"ok": True, "deleted": deleted})
 
     @app.route("/api/audit/integrity")

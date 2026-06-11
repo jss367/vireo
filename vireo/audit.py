@@ -213,7 +213,19 @@ def _sidecar_has_image(xmp_path):
     return False
 
 
-def delete_stray_sidecars(paths):
+def _is_under_roots(path, real_roots):
+    """True if ``path`` resolves to a location inside one of the roots.
+
+    ``real_roots`` must already be realpath'd. The trailing-separator
+    prefix check prevents ``/roota-evil`` from matching root ``/roota``.
+    """
+    real = os.path.realpath(path)
+    return any(
+        real.startswith(root.rstrip(os.sep) + os.sep) for root in real_roots
+    )
+
+
+def delete_stray_sidecars(paths, allowed_roots):
     """Delete sidecar files, re-verifying each is still a stray.
 
     Each path must end in .xmp and must still have no matching image
@@ -221,11 +233,23 @@ def delete_stray_sidecars(paths):
     stale (the user could have restored the photo since the check ran),
     and a sidecar with a living image is data, not litter.
 
+    ``allowed_roots`` confines deletions to the audited folders: the
+    client-supplied list is untrusted input, so any path that does not
+    resolve to a location under one of the roots (the same workspace
+    root folders the sidecars check scans) is refused. Both sides are
+    realpath'd so symlinks can't smuggle a path outside the library.
+
     Returns the number of files actually deleted.
     """
+    real_roots = [os.path.realpath(r) for r in allowed_roots]
     deleted = 0
     for p in paths:
         if os.path.splitext(p)[1].lower() != ".xmp":
+            continue
+        if not _is_under_roots(p, real_roots):
+            log.warning(
+                "Refusing to delete sidecar outside library roots: %s", p
+            )
             continue
         if not os.path.isfile(p):
             continue
