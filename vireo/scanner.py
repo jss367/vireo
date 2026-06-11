@@ -1219,6 +1219,16 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                             (xmp_mtime, existing["id"]),
                         )
                         commit_with_retry(db.conn)
+                    elif not xmp_unchanged:
+                        # Sidecar deleted: clear the stored mtime so the row
+                        # converges instead of looking "XMP changed" on every
+                        # later scan (this skip path never reaches the main
+                        # loop, so nothing else would ever reset it).
+                        db.conn.execute(
+                            "UPDATE photos SET xmp_mtime = NULL WHERE id = ?",
+                            (existing["id"],),
+                        )
+                        commit_with_retry(db.conn)
 
                     if file_unchanged and not metadata_missing:
                         processed_count += 1
@@ -1428,6 +1438,28 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 # extract_full_metadata is off) — prevents perpetual retry
                 updates.append("exif_data=COALESCE(exif_data, ?)")
                 update_params.append("{}")
+            if row_already_existed:
+                # add_photo is INSERT OR IGNORE, so the fresh stat values it
+                # was passed never reach an existing row. Without these the
+                # incremental pre-pass keeps comparing against the stale
+                # stored mtime and re-processes a changed file on every scan
+                # forever. Only advance file_mtime/file_size when the content
+                # hash succeeded: _compute_file_features hashes every
+                # processed file, so file_hash is None only when the bytes
+                # couldn't be read (transient permission/I-O error). Marking
+                # such a file's mtime current would make the next incremental
+                # scan skip it forever with a stale hash and stale derived
+                # caches; leaving the old mtime in place retries it instead.
+                if file_hash is not None:
+                    updates.extend(["file_mtime=?", "file_size=?"])
+                    update_params.extend([file_mtime, file_size])
+                # xmp_mtime stays unconditional — the sidecar is a separate
+                # file whose keyword import below runs regardless of image
+                # hash success, and it may be None here: writing NULL is
+                # correct (a deleted sidecar otherwise re-trips the "XMP
+                # changed" check on every scan).
+                updates.append("xmp_mtime=?")
+                update_params.append(xmp_mtime)
             if updates:
                 update_params.append(photo_id)
                 db.conn.execute(

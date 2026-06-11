@@ -6357,6 +6357,301 @@ def test_delete_folder(tmp_path):
     assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
 
 
+def test_delete_folder_with_descendants(tmp_path):
+    """delete_folder removes the whole subtree — folders.parent_id has no ON
+    DELETE action, so deleting a non-leaf folder row alone would trip the FK
+    after its photos were already deleted."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("/tree", name="tree")
+    child = db.add_folder("/tree/sub", name="sub", parent_id=parent)
+    grand = db.add_folder("/tree/sub/deep", name="deep", parent_id=child)
+    pids = [
+        db.add_photo(folder_id=fid, filename=f"bird{fid}.jpg", extension=".jpg",
+                     file_size=1000, file_mtime=1.0)
+        for fid in (parent, child, grand)
+    ]
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 3
+
+    for fid in (parent, child, grand):
+        assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+        assert db.conn.execute(
+            "SELECT folder_id FROM workspace_folders WHERE folder_id = ?", (fid,)
+        ).fetchone() is None
+    for pid in pids:
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+
+def test_delete_folder_keeps_descendant_rooted_in_other_workspace(tmp_path):
+    """Deleting a folder in one workspace must not destroy a descendant that
+    another workspace imported as its own root (is_root = 1) — that subtree
+    is still reachable there. The kept head is reparented to NULL and only
+    unlinked from the deleting workspace."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    db.set_active_workspace(ws_a)
+
+    parent = db.add_folder("/tree", name="tree")
+    child = db.add_folder("/tree/sub", name="sub", parent_id=parent,
+                          workspace_root=False)
+    grand = db.add_folder("/tree/sub/deep", name="deep", parent_id=child,
+                          workspace_root=False)
+    other = db.add_folder("/tree/other", name="other", parent_id=parent,
+                          workspace_root=False)
+
+    # Workspace B imports /tree/sub as its own root.
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_b, child, is_root=True)
+
+    pid_parent = db.add_photo(folder_id=parent, filename="p.jpg", extension=".jpg",
+                              file_size=1000, file_mtime=1.0)
+    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+    pid_grand = db.add_photo(folder_id=grand, filename="g.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+    pid_other = db.add_photo(folder_id=other, filename="o.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+
+    # Prime A's new-images cache: the delete changes what A can see (kept
+    # subtree unlinked), so the cached count must be dropped.
+    db._new_images_cache.set(db._db_path, ws_a, {"new_count": 7})
+
+    result = db.delete_folder(parent)
+    # Only the photos outside B's root are deleted.
+    assert result["deleted_photos"] == 2
+
+    # A's cached new-images payload is invalidated by the delete.
+    assert db._new_images_cache.get(db._db_path, ws_a) is None
+
+    # Parent and the unshared sibling are gone, with their photos.
+    for fid in (parent, other):
+        assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+    for pid in (pid_parent, pid_other):
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+    # B's subtree survives: folder rows, photos, and B's links.
+    row = db.conn.execute("SELECT parent_id FROM folders WHERE id = ?", (child,)).fetchone()
+    assert row is not None
+    assert row["parent_id"] is None  # reparented — old parent row is gone
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (grand,)).fetchone() is not None
+    for pid in (pid_child, pid_grand):
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is not None
+    assert db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, child),
+    ).fetchone()["is_root"] == 1
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, grand),
+    ).fetchone() is not None
+
+    # Workspace A no longer sees any of it.
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?", (ws_a,)
+    ).fetchall() == []
+
+
+def test_delete_folder_keeps_target_rooted_in_other_workspace(tmp_path):
+    """Deleting a folder that another workspace imported as its own root
+    must not delete anything — the folder row, subtree, and photos survive;
+    only the deleting workspace's links are removed."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    db.set_active_workspace(ws_a)
+
+    parent = db.add_folder("/tree", name="tree")
+    child = db.add_folder("/tree/sub", name="sub", parent_id=parent,
+                          workspace_root=False)
+
+    # Workspace B imports /tree itself as its own root.
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_b, parent, is_root=True)
+    db.add_workspace_folder(ws_b, child, is_root=False)
+
+    pid_parent = db.add_photo(folder_id=parent, filename="p.jpg", extension=".jpg",
+                              file_size=1000, file_mtime=1.0)
+    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+
+    # Prime A's new-images cache: the unlink-only path must still drop it,
+    # since the folder no longer contributes to A's backlog.
+    db._new_images_cache.set(db._db_path, ws_a, {"new_count": 7})
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 0
+    assert result["files"] == []
+
+    # A's cached new-images payload is invalidated by the unlink.
+    assert db._new_images_cache.get(db._db_path, ws_a) is None
+
+    # Folder rows and photos all survive, parent chain intact.
+    row = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (child,)
+    ).fetchone()
+    assert row is not None
+    assert row["parent_id"] == parent
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (parent,)).fetchone() is not None
+    for pid in (pid_parent, pid_child):
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is not None
+
+    # B's links survive, including the root flag.
+    assert db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, parent),
+    ).fetchone()["is_root"] == 1
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, child),
+    ).fetchone() is not None
+
+    # Workspace A no longer sees any of it.
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?", (ws_a,)
+    ).fetchall() == []
+
+
+def test_delete_folder_keeps_target_covered_by_other_workspace_ancestor_root(tmp_path):
+    """Deleting a folder whose only foreign link is scanner-materialized
+    (is_root = 0) must not delete anything: that link means another
+    workspace reaches the folder through a root ancestor outside the
+    deleted subtree. Any foreign link protects — not just is_root = 1."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    db.set_active_workspace(ws_a)
+
+    parent = db.add_folder("/photos", name="photos")
+    child = db.add_folder("/photos/2024", name="2024", parent_id=parent,
+                          workspace_root=False)
+
+    # Workspace B imports /photos as its root; the scanner materializes the
+    # descendant /photos/2024 as a non-root link.
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_b, parent, is_root=True)
+    db.add_workspace_folder(ws_b, child, is_root=False)
+
+    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+
+    # Workspace A deletes /photos/2024 — B still sees it via its /photos root.
+    result = db.delete_folder(child)
+    assert result["deleted_photos"] == 0
+    assert result["files"] == []
+
+    # Folder row and photo survive, parent chain intact.
+    row = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (child,)
+    ).fetchone()
+    assert row is not None
+    assert row["parent_id"] == parent
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_child,)).fetchone() is not None
+
+    # B's links survive.
+    assert db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, parent),
+    ).fetchone()["is_root"] == 1
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, child),
+    ).fetchone() is not None
+
+    # Workspace A no longer links the deleted subtree, but keeps /photos.
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_a, child),
+    ).fetchone() is None
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_a, parent),
+    ).fetchone() is not None
+
+
+def test_delete_folder_includes_path_only_descendants(tmp_path):
+    """Legacy databases can hold descendants whose parent_id is NULL even
+    though their path lives under the deleted folder. The deletion walk
+    must collect the subtree by path (like the workspace link/unlink
+    paths), not by parent_id, or those rows and their photos survive."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("/photos", name="photos")
+    # Legacy shape: path is under /photos but parent_id was never set.
+    child = db.add_folder("/photos/2024", name="2024")
+    assert db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (child,)
+    ).fetchone()["parent_id"] is None
+
+    pids = [
+        db.add_photo(folder_id=fid, filename=f"bird{fid}.jpg", extension=".jpg",
+                     file_size=1000, file_mtime=1.0)
+        for fid in (parent, child)
+    ]
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 2
+
+    for fid in (parent, child):
+        assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+        assert db.conn.execute(
+            "SELECT folder_id FROM workspace_folders WHERE folder_id = ?", (fid,)
+        ).fetchone() is None
+    for pid in pids:
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+
+def test_delete_folder_keeps_path_only_descendant_linked_in_other_workspace(tmp_path):
+    """A path-only legacy descendant that another workspace links must be
+    preserved by the same foreign-link protection as parent_id-linked
+    descendants: its row and photos survive, only the deleting workspace's
+    links go."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    db.set_active_workspace(ws_a)
+
+    parent = db.add_folder("/photos", name="photos")
+    # Legacy shape: under /photos by path, parent_id NULL.
+    child = db.add_folder("/photos/2024", name="2024", workspace_root=False)
+
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_b, child, is_root=True)
+
+    pid_parent = db.add_photo(folder_id=parent, filename="p.jpg", extension=".jpg",
+                              file_size=1000, file_mtime=1.0)
+    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 1
+
+    # /photos and its photo are gone.
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (parent,)).fetchone() is None
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_parent,)).fetchone() is None
+
+    # B's legacy-shaped subtree survives with its photo and link.
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (child,)).fetchone() is not None
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_child,)).fetchone() is not None
+    assert db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, child),
+    ).fetchone()["is_root"] == 1
+
+    # Workspace A no longer sees any of it.
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?", (ws_a,)
+    ).fetchall() == []
+
+
 def test_missing_folder_photos_hidden_from_browse(tmp_path):
     """Photos in missing folders don't appear in get_photos or count_photos."""
     from db import Database

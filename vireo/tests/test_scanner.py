@@ -319,6 +319,143 @@ def test_incremental_scan_skips_unchanged(tmp_path):
     assert 'new.jpg' in filenames
 
 
+def test_incremental_scan_converges_after_file_change(tmp_path):
+    """A changed file is re-processed once, then skipped on later scans.
+
+    add_photo is INSERT OR IGNORE, so the scan loop must explicitly persist
+    the fresh file_mtime/file_size onto existing rows — without that, the
+    pre-pass compares against the stale stored mtime and re-hashes the file
+    on every incremental scan forever.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, 'bird.jpg')
+    Image.new('RGB', (100, 100)).save(path)
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    # Modify the file's content (and mtime)
+    time.sleep(0.05)
+    Image.new('RGB', (150, 150)).save(path)
+
+    scan(root, db, incremental=True)
+    photo = db.get_photos()[0]
+    assert photo['width'] == 150  # re-processed
+    assert photo['file_mtime'] == os.stat(path).st_mtime  # fresh mtime stored
+
+    # Simulate ExifTool having run (it isn't installed in CI) — without the
+    # exif_data marker the metadata_missing retry path re-processes the file
+    # regardless of mtime, masking what this test asserts.
+    db.conn.execute("UPDATE photos SET exif_data = '{}' WHERE exif_data IS NULL")
+    db.conn.commit()
+
+    # Next incremental scan must skip the file entirely — metadata
+    # extraction / hashing phases only announce themselves when there is
+    # at least one file to process.
+    statuses = []
+    scan(root, db, incremental=True, status_callback=statuses.append)
+    assert not any(
+        s.startswith('Extracting metadata') or s.startswith('Hashing')
+        for s in statuses
+    )
+
+
+def test_incremental_scan_retries_after_hash_failure(tmp_path, monkeypatch):
+    """A changed file whose content hash fails is retried on the next scan.
+
+    When _compute_file_features can't read the file (transient permission /
+    I-O error → file_hash None), the scan loop must NOT advance the stored
+    file_mtime — otherwise the next incremental scan sees the mtime as
+    current and skips the file forever with a stale hash and stale derived
+    caches.
+    """
+    import scanner
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, 'bird.jpg')
+    Image.new('RGB', (100, 100)).save(path)
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    def _row():
+        return db.conn.execute(
+            "SELECT file_hash, file_mtime FROM photos"
+        ).fetchone()
+
+    old_row = _row()
+    assert old_row['file_hash'] is not None
+
+    # Simulate ExifTool having run (it isn't installed in CI) so the
+    # metadata_missing retry path doesn't mask the mtime-based check.
+    db.conn.execute("UPDATE photos SET exif_data = '{}' WHERE exif_data IS NULL")
+    db.conn.commit()
+
+    # Modify the file's content (and mtime)
+    time.sleep(0.05)
+    Image.new('RGB', (150, 150)).save(path)
+
+    # Scan with feature computation failing (simulated unreadable file)
+    monkeypatch.setattr(scanner, '_compute_file_features', lambda p: (None, None))
+    scan(root, db, incremental=True)
+    photo = _row()
+    assert photo['file_hash'] == old_row['file_hash']  # hash untouched
+    # Stored mtime must remain stale so the file is retried next scan
+    assert photo['file_mtime'] == old_row['file_mtime']
+    assert photo['file_mtime'] != os.stat(path).st_mtime
+
+    # With hashing working again, the next incremental scan picks it up
+    monkeypatch.undo()
+    scan(root, db, incremental=True)
+    photo = _row()
+    assert photo['file_hash'] != old_row['file_hash']
+    assert photo['file_mtime'] == os.stat(path).st_mtime
+
+
+def test_incremental_scan_forgets_deleted_xmp(tmp_path):
+    """Deleting an XMP sidecar clears the stored xmp_mtime after one
+    re-process, so later scans don't re-trip the "XMP changed" check."""
+    from db import Database
+    from scanner import scan
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (100, 100)).save(os.path.join(root, 'bird.jpg'))
+    write_sidecar(
+        os.path.join(root, 'bird.xmp'),
+        flat_keywords={'Sparrow'},
+        hierarchical_keywords=set(),
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+    assert db.get_photos()[0]['xmp_mtime'] is not None
+
+    # Simulate ExifTool having run (it isn't installed in CI) so the
+    # metadata_missing retry path doesn't force re-processing.
+    db.conn.execute("UPDATE photos SET exif_data = '{}' WHERE exif_data IS NULL")
+    db.conn.commit()
+
+    os.remove(os.path.join(root, 'bird.xmp'))
+    scan(root, db, incremental=True)
+    assert db.get_photos()[0]['xmp_mtime'] is None
+
+    statuses = []
+    scan(root, db, incremental=True, status_callback=statuses.append)
+    assert not any(
+        s.startswith('Extracting metadata') or s.startswith('Hashing')
+        for s in statuses
+    )
+
+
 def test_incremental_scan_detects_xmp_changes(tmp_path):
     """Incremental scan re-reads XMP when xmp_mtime changes."""
     from db import Database
