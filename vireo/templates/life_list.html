@@ -99,7 +99,16 @@ function sortedSpecies() {
     if (sort === 'alpha') return a.species.localeCompare(b.species);
     if (sort === 'most-photos') return b.photo_count - a.photo_count;
     if (sort === 'life-order') return a.number - b.number;
-    return b.number - a.number; // 'newest' default
+    // 'newest' default — by first_seen desc, undated species last so they
+    // don't masquerade as the newest lifers (server gives them the highest
+    // life-list numbers for stable numbering, so reversing number is wrong).
+    var af = a.first_seen, bf = b.first_seen;
+    if (!af && !bf) return a.species.localeCompare(b.species);
+    if (!af) return 1;
+    if (!bf) return -1;
+    if (af < bf) return 1;
+    if (af > bf) return -1;
+    return a.species.localeCompare(b.species);
   });
   return list;
 }
