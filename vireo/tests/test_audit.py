@@ -348,6 +348,106 @@ def test_build_summary_states(tmp_path):
     assert s['problem_count'] == 3
 
 
+def test_build_summary_missing_folder_blocks_intact(tmp_path):
+    """A workspace folder marked missing must surface as a problem even
+    when every recorded check is clean: the scoped queries all exclude
+    missing folders, so without this the banner would show green over
+    an entire offline folder of photos."""
+    from audit import build_summary, verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'good.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+    for name in ('drift', 'orphans', 'untracked', 'sidecars'):
+        db.record_audit_run(name, 0)
+    verify_hashes(db)
+    assert build_summary(db)['status'] == 'intact'
+
+    # The folder goes offline and the health loop flags it.
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    s = build_summary(db)
+    assert s['status'] == 'problems'
+    assert s['missing_folders'] == 1
+    assert s['missing_folder_photos'] == 1
+    # Outranks 'unverified' too: a missing folder is direct evidence
+    # of a problem even before any check has run.
+    db.conn.execute("DELETE FROM audit_runs")
+    db.conn.commit()
+    assert build_summary(db)['status'] == 'problems'
+
+
+def test_untracked_and_sidecar_endpoints_use_workspace_roots(
+    tmp_path, monkeypatch,
+):
+    """/api/audit/untracked and /api/audit/sidecars derive their scan
+    roots server-side from the active workspace: a request with no
+    ``root`` params still scans everything, stray client params are
+    ignored, and the recorded audit run reflects the real workspace —
+    a client-scoped request can never certify a clean workspace check.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+    from db import Database
+    from scanner import scan
+    from xmp import write_sidecar
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(
+        models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"),
+    )
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'known.jpg'))
+
+    db_path = str(tmp_path / "vireo.db")
+    db = Database(db_path)
+    scan(root, db)
+
+    # Material that only a real scan of the workspace root would find
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'new.jpg'))
+    write_sidecar(os.path.join(root, 'ghost.xmp'),
+                  flat_keywords={'Gone'}, hierarchical_keywords=set())
+
+    app = create_app(
+        db_path=db_path,
+        thumb_cache_dir=str(tmp_path / "thumbnails"),
+        api_token="test-token-123",
+    )
+    client = app.test_client()
+
+    # No root params: the server derives the workspace roots itself.
+    resp = client.get("/api/audit/untracked")
+    assert resp.status_code == 200
+    untracked = resp.get_json()
+    assert len(untracked) == 1
+    assert untracked[0]['path'].endswith('new.jpg')
+
+    # A stray client root pointing at an empty dir is ignored, not
+    # honored — the workspace root is still what gets scanned.
+    empty = str(tmp_path / "empty")
+    os.makedirs(empty)
+    resp = client.get("/api/audit/sidecars", query_string={"root": empty})
+    assert resp.status_code == 200
+    strays = resp.get_json()
+    assert len(strays) == 1
+    assert strays[0]['path'].endswith('ghost.xmp')
+
+    runs = db.get_audit_runs()
+    assert runs['untracked']['problem_count'] == 1
+    assert runs['sidecars']['problem_count'] == 1
+
+
 def test_remove_orphans_endpoint_unlinks_cached_thumbnail(
     tmp_path, monkeypatch,
 ):

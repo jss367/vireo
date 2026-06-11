@@ -9251,23 +9251,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db.record_audit_run("orphans", len(orphans))
         return jsonify(orphans)
 
+    def _audit_workspace_roots(db):
+        """Root folder paths of the active workspace.
+
+        Audit scans derive their roots server-side: an audit run is
+        recorded as a clean workspace-wide check, so letting the client
+        scope the scan with ``root`` params would let a subset (or
+        empty) request certify the whole workspace. Stray ``root``
+        query params are tolerated and ignored.
+        """
+        return [
+            f["path"] for f in db.get_folder_tree() if not f["parent_id"]
+        ]
+
     @app.route("/api/audit/untracked")
     def api_audit_untracked():
         db = _get_db()
-        body = request.args.getlist("root") or []
         from audit import check_untracked
 
-        untracked = check_untracked(db, body)
+        untracked = check_untracked(db, _audit_workspace_roots(db))
         db.record_audit_run("untracked", len(untracked))
         return jsonify(untracked)
 
     @app.route("/api/audit/sidecars")
     def api_audit_sidecars():
         db = _get_db()
-        roots = request.args.getlist("root") or []
         from audit import check_stray_sidecars
 
-        strays = check_stray_sidecars(roots)
+        strays = check_stray_sidecars(_audit_workspace_roots(db))
         db.record_audit_run("sidecars", len(strays))
         return jsonify(strays)
 
@@ -9278,13 +9289,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         paths = body.get("paths", [])
         from audit import delete_stray_sidecars
 
-        # Resolve the workspace's root folders server-side — the same
-        # roots the sidecars check scans. Client-supplied paths are
-        # untrusted; anything outside these roots is refused.
-        roots = [
-            f["path"] for f in db.get_folder_tree() if not f["parent_id"]
-        ]
-        deleted = delete_stray_sidecars(paths, roots)
+        # Client-supplied paths are untrusted; anything outside the
+        # workspace roots (the same roots the sidecars check scans)
+        # is refused.
+        deleted = delete_stray_sidecars(paths, _audit_workspace_roots(db))
         return jsonify({"ok": True, "deleted": deleted})
 
     @app.route("/api/audit/integrity")

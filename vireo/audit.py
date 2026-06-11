@@ -419,8 +419,16 @@ def build_summary(db):
       has been hash-verified at least once.
     - ``stale``: checks are clean but some photos (e.g. new imports)
       have never been hash-verified.
-    - ``problems``: at least one check found something.
+    - ``problems``: at least one check found something, or a workspace
+      folder is marked missing.
     - ``unverified``: at least one check has never run.
+
+    Missing folders force ``problems`` regardless of check results:
+    every scoped query the checks run on excludes folders flagged
+    ``missing``, so without this an entire offline folder of photos
+    would silently drop out of every check and the banner could show
+    green over a gone library. The payload carries ``missing_folders``
+    and ``missing_folder_photos`` so the UI can say exactly that.
 
     Per-check entries carry ran_at so the UI can show how old each
     verdict is — the green light means "verified, at these times", never
@@ -428,6 +436,7 @@ def build_summary(db):
     """
     runs = db.get_audit_runs()
     stats = db.get_integrity_stats()
+    missing_folders = db.get_missing_folders()
 
     checks = {}
     for name in ("drift", "orphans", "untracked", "sidecars"):
@@ -447,7 +456,11 @@ def build_summary(db):
     ran = [c for c in checks.values() if c is not None]
     problem_count = sum(c["problem_count"] for c in ran)
 
-    if len(ran) < len(checks):
+    if missing_folders:
+        # A missing folder is direct evidence of a problem, even when
+        # checks haven't all run — it outranks "unverified".
+        status = "problems"
+    elif len(ran) < len(checks):
         status = "unverified"
     elif problem_count > 0:
         status = "problems"
@@ -459,6 +472,10 @@ def build_summary(db):
     return {
         "status": status,
         "problem_count": problem_count,
+        "missing_folders": len(missing_folders),
+        "missing_folder_photos": sum(
+            f["photo_count"] for f in missing_folders
+        ),
         "checks": checks,
         "integrity": stats,
     }

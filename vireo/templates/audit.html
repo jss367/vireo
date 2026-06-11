@@ -195,13 +195,6 @@ function timeAgo(iso) {
   return Math.floor(secs / 86400) + 'd ago';
 }
 
-async function getRoots() {
-  var folders = await safeFetch('/api/folders', {}, { toast: false });
-  var roots = [];
-  folders.forEach(function(f) { if (!f.parent_id) roots.push(f.path); });
-  return roots;
-}
-
 /* ---------- Summary banner ---------- */
 var CHECK_LABELS = {
   drift: 'Drift', orphans: 'Orphans', untracked: 'Untracked',
@@ -229,7 +222,15 @@ function renderSummary(s) {
     title.textContent = 'Checks clean, but ' + s.integrity.unchecked +
       ' photo(s) have never been hash-verified';
   } else if (s.status === 'problems') {
-    title.textContent = s.problem_count + ' problem(s) found — see tabs below';
+    var parts = [];
+    if (s.missing_folders > 0) {
+      parts.push(s.missing_folders + ' folder(s) missing — ' +
+        s.missing_folder_photos + ' photo(s) unreachable and excluded from all checks');
+    }
+    if (s.problem_count > 0) {
+      parts.push(s.problem_count + ' problem(s) found — see tabs below');
+    }
+    title.textContent = parts.join(' · ');
   } else {
     var notRun = [];
     Object.keys(s.checks).forEach(function(k) {
@@ -424,9 +425,9 @@ async function runUntrackedCheck() {
   status.style.color = '';
   await new Promise(function(r) { setTimeout(r, 50); });
   try {
-    var roots = await getRoots();
-    var params = roots.map(function(r) { return 'root=' + encodeURIComponent(r); }).join('&');
-    untrackedData = await safeFetch('/api/audit/untracked?' + params, {}, { toast: false });
+    // Scan roots are derived server-side from the active workspace so
+    // the recorded audit run always covers the whole workspace.
+    untrackedData = await safeFetch('/api/audit/untracked', {}, { toast: false });
     document.getElementById('untrackedBadge').textContent = untrackedData.length;
     renderUntracked();
     status.textContent = untrackedData.length > 0
@@ -500,9 +501,8 @@ async function runSidecarCheck() {
   status.style.color = '';
   await new Promise(function(r) { setTimeout(r, 50); });
   try {
-    var roots = await getRoots();
-    var params = roots.map(function(r) { return 'root=' + encodeURIComponent(r); }).join('&');
-    sidecarData = await safeFetch('/api/audit/sidecars?' + params, {}, { toast: false });
+    // Scan roots are derived server-side from the active workspace.
+    sidecarData = await safeFetch('/api/audit/sidecars', {}, { toast: false });
     document.getElementById('sidecarBadge').textContent = sidecarData.length;
     renderSidecars();
     status.textContent = sidecarData.length > 0
