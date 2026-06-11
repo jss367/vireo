@@ -2763,7 +2763,8 @@ def _run_classify_capturing_photos(db_path, ws, col_id, reclassify):
 
     captured_photos = []
 
-    def _fake_detect_subjects(photos, folders, runner, job, reclassify, db):
+    def _fake_detect_subjects(photos, folders, runner, job, reclassify, db,
+                                classifier_model=None):
         captured_photos.extend([p["id"] for p in photos])
         return ({}, 0)
 
@@ -3119,6 +3120,107 @@ def test_detect_subjects_skips_weight_download_when_cancelled(tmp_path):
     assert detected == 0
     weights.assert_not_called()
     detect.assert_not_called()
+
+
+def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_path):
+    """For reclassify runs, cancellation mid-detection must NOT have wiped
+    the predictions and detections of photos that hadn't been re-detected
+    yet. Doing the clear upfront for the whole scope (the old behavior)
+    stranded the unprocessed tail with empty state — worse than before
+    the run started. The fix clears per-photo immediately before each
+    photo is re-detected, so cancelled photos keep their cache."""
+    from unittest.mock import patch
+
+    from classify_job import _detect_subjects
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder(str(tmp_path), name="p")
+
+    pid_first = db.add_photo(
+        folder_id, "first.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    pid_second = db.add_photo(
+        folder_id, "second.jpg", extension=".jpg",
+        file_size=100, file_mtime=2.0,
+    )
+    det_first = db.save_detections(pid_first, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="megadetector-v6")[0]
+    det_second = db.save_detections(pid_second, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="megadetector-v6")[0]
+    db.add_prediction(det_first, species="Robin", confidence=0.9,
+                      model="BioCLIP", labels_fingerprint="legacy")
+    db.add_prediction(det_second, species="Robin", confidence=0.9,
+                      model="BioCLIP", labels_fingerprint="legacy")
+
+    class FlipRunner(FakeRunner):
+        """Cancel flips on right after the first photo has been processed."""
+
+        def __init__(self):
+            super().__init__()
+            self._calls = 0
+
+        def is_cancelled(self, job_id):
+            self._calls += 1
+            # First call: top of iteration 0 → not cancelled (process first).
+            # Subsequent calls (top of iteration 1+) → cancelled (skip rest).
+            return self._calls >= 2
+
+    runner = FlipRunner()
+    job = _make_job()
+    photos = [
+        {"id": pid_first, "filename": "first.jpg", "folder_id": folder_id},
+        {"id": pid_second, "filename": "second.jpg", "folder_id": folder_id},
+    ]
+
+    # detect_animals returns one detection for the first (only) photo
+    # that completes; the second photo is never reached.
+    with patch("classify_job.detect_animals",
+               return_value=[{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+                              "confidence": 0.8, "category": "animal"}]), \
+         patch("classify_job.get_primary_detection",
+               return_value={"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+                             "confidence": 0.8}), \
+         patch("classify_job.compute_sharpness", None):
+        detection_map, detected = _detect_subjects(
+            photos=photos,
+            folders={folder_id: str(tmp_path)},
+            runner=runner,
+            job=job,
+            reclassify=True,
+            db=db,
+            classifier_model="BioCLIP",
+        )
+
+    # The second photo's cached prediction and detection must survive
+    # intact: it was never reached, so the per-photo clear never ran.
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    preds_second = db2.conn.execute(
+        "SELECT COUNT(*) AS n FROM predictions WHERE detection_id = ?",
+        (det_second,),
+    ).fetchone()["n"]
+    dets_second = db2.conn.execute(
+        "SELECT COUNT(*) AS n FROM detections WHERE id = ?",
+        (det_second,),
+    ).fetchone()["n"]
+    assert preds_second == 1, (
+        "Mid-detection cancel on a reclassify run wiped the cache of a "
+        "photo that was never reached — the upfront global purge leaked "
+        "back in."
+    )
+    assert dets_second == 1, (
+        "Mid-detection cancel on a reclassify run cleared detections of "
+        "a photo that was never reached."
+    )
 
 
 def test_classify_photos_stops_when_cancelled(tmp_path):

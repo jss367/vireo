@@ -5298,13 +5298,21 @@ class Database:
                 self._verify_photo_in_workspace(pid)
         # Chunked: a select-all on a large library exceeds SQLite's
         # bound-parameter cap (999 on legacy builds) in one IN clause.
-        for chunk in _chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            self.conn.execute(
-                f"UPDATE photos SET rating = ? WHERE id IN ({placeholders})",
-                [rating] + list(chunk),
-            )
-        self.conn.commit()
+        # Rolled back on error: sqlite3 leaves earlier DML pending in
+        # the open transaction after an exception, so a subsequent
+        # unrelated commit() on this connection would persist a
+        # half-applied batch.
+        try:
+            for chunk in _chunks(photo_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"UPDATE photos SET rating = ? WHERE id IN ({placeholders})",
+                    [rating] + list(chunk),
+                )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def update_photo_flag(self, photo_id, flag, verify_workspace=True):
         """Set photo flag ('none', 'flagged', 'rejected').
@@ -5340,14 +5348,18 @@ class Database:
         if verify_workspace:
             for pid in photo_ids:
                 self._verify_photo_in_workspace(pid)
-        # Chunked: see batch_update_photo_rating.
-        for chunk in _chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            self.conn.execute(
-                f"UPDATE photos SET flag = ? WHERE id IN ({placeholders})",
-                [flag] + list(chunk),
-            )
-        self.conn.commit()
+        # Chunked + rolled back on error: see batch_update_photo_rating.
+        try:
+            for chunk in _chunks(photo_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"UPDATE photos SET flag = ? WHERE id IN ({placeholders})",
+                    [flag] + list(chunk),
+                )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     VALID_COLOR_LABELS = ('red', 'yellow', 'green', 'blue', 'purple')
 
@@ -7582,6 +7594,9 @@ class Database:
         """
         if not photo_ids:
             return {}
+        # Dedup-preserving-order: chunking that re-queries the same id
+        # in a later chunk would double-append it under setdefault.
+        photo_ids = list(dict.fromkeys(photo_ids))
         result = {}
         for chunk in _chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
@@ -9280,6 +9295,9 @@ class Database:
             import config as cfg
             effective = self.get_effective_config(cfg.load())
             min_conf = effective.get("detector_confidence", 0.2)
+        # Dedup-preserving-order: same id appearing in two chunks would
+        # cause setdefault(...).append(...) below to emit each row twice.
+        photo_ids = list(dict.fromkeys(photo_ids))
         result = {}
         for chunk in _chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)

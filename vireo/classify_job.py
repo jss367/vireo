@@ -526,10 +526,17 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
     return detection_map, detected, processed_ids
 
 
-def _detect_subjects(photos, folders, runner, job, reclassify, db):
+def _detect_subjects(photos, folders, runner, job, reclassify, db,
+                      classifier_model=None):
     """Run MegaDetector on photos, storing quality metrics.
 
     Wraps _detect_batch with progress reporting for the standalone classify job.
+
+    When ``reclassify`` is True and ``classifier_model`` is provided, prior
+    predictions and detections for each photo are cleared *just before*
+    that photo is re-detected — not upfront for the whole scope. Cancelling
+    mid-loop therefore leaves the unprocessed tail with its old state
+    intact instead of an empty cache it can't rebuild.
 
     Returns:
         (detection_map, detected_count) where detection_map is
@@ -642,6 +649,21 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                 not reclassify
                 and photo["id"] in already_detected_ids
             )
+
+            # Per-photo reclassify purge: wipe this photo's prior
+            # predictions/detections immediately before re-detecting. The
+            # old global-upfront purge wiped the entire scope before
+            # detection started, so a mid-detection cancel stranded the
+            # unprocessed tail with no predictions and no detections.
+            # Doing it per-photo means an early cancel preserves the
+            # untouched photos' cached state.
+            if reclassify:
+                if classifier_model:
+                    db.clear_predictions(
+                        model=classifier_model,
+                        collection_photo_ids=[photo["id"]],
+                    )
+                db.clear_detections(photo["id"])
 
             batch_map, batch_detected, _batch_processed = _detect_batch(
                 [photo], folders, runner, job, reclassify, db,
@@ -1730,15 +1752,23 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             summary=effective_name,
         )
 
-        # Classifier init succeeded — now it's safe to purge existing
-        # cache for reclassify. Any failure before this point leaves the
-        # cache intact (see comment at the top of this function).
+        # Classifier init succeeded — now it's safe to start the
+        # reclassify purge for any failure before this point would leave
+        # the cache intact (see comment at the top of this function).
         #
-        # A cancel that arrived during taxonomy/label/model init would
-        # otherwise still run the destructive purge below, then the
-        # post-detection cancel gate would return with predictions_stored=0
-        # — leaving the cancelled run with predictions/detections wiped
-        # but not rebuilt. Gate the purge on cancellation explicitly.
+        # The actual destructive clears happen per-photo inside
+        # ``_detect_subjects`` rather than upfront for the whole scope.
+        # An upfront clear over the full collection meant a mid-detection
+        # cancel left the unprocessed tail with both predictions and
+        # detections wiped, since the post-detection return gates
+        # classification off too. Doing the clear immediately before each
+        # photo's re-detection means cancelled photos retain their old
+        # state intact.
+        #
+        # This pre-detection cancel gate still applies: a cancel that
+        # landed during taxonomy/label/model init would otherwise advance
+        # to the detection loop's per-photo clear and start wiping rows
+        # before the user's cancel takes effect.
         if runner.is_cancelled(job["id"]):
             log.info("Classify job cancelled before reclassify purge")
             return {
@@ -1750,19 +1780,6 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                 "detected": 0,
                 "failed": 0,
             }
-        if params.reclassify:
-            photo_ids = [p["id"] for p in photos]
-            thread_db.clear_predictions(
-                model=effective_name, collection_photo_ids=photo_ids,
-            )
-            # Also clear existing detections so they get re-detected.
-            for pid in photo_ids:
-                thread_db.clear_detections(pid)
-            log.info(
-                "Cleared existing predictions and detections for %d photos, "
-                "model=%s (re-classify, post-model-load)",
-                len(photo_ids), effective_name,
-            )
 
         # Phase 5: Detect subjects
         runner.update_step(job["id"], "detect", status="running")
@@ -1773,6 +1790,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             job=job,
             reclassify=params.reclassify,
             db=thread_db,
+            classifier_model=effective_name,
         )
         if runner.is_cancelled(job["id"]):
             # Detections are committed per-photo, so everything before the
