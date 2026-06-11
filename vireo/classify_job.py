@@ -577,6 +577,17 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                     },
                 )
 
+            # Gate the download. The classifier-init phase (run by the
+            # caller before _detect_subjects) has no internal cancel check,
+            # so a cancel during model load would otherwise land here only
+            # to be ignored: hf_hub_download can't be interrupted once it
+            # starts, so the per-photo cancel check below runs too late.
+            if runner.is_cancelled(job["id"]):
+                log.info(
+                    "Classify job cancelled before MegaDetector weights download"
+                )
+                return {}, 0
+
             ensure_megadetector_weights(progress_callback=_dl_progress)
 
         runner.push_event(

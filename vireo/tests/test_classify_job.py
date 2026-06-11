@@ -2988,6 +2988,48 @@ def test_detect_subjects_stops_when_cancelled(tmp_path):
     detect.assert_not_called()
 
 
+def test_detect_subjects_skips_weight_download_when_cancelled(tmp_path):
+    """A cancel landing during classifier-init must skip the ~300 MB
+    MegaDetector weights download. The per-photo cancel check in the
+    detection loop runs too late — hf_hub_download can't be interrupted
+    once started, so the gate has to live before the download call."""
+    from unittest.mock import MagicMock, patch
+
+    from classify_job import _detect_subjects
+
+    runner = FakeRunner()
+    runner.cancelled = True
+    job = _make_job()
+
+    photos = [
+        {"id": 1, "filename": "a.jpg", "folder_id": 10},
+        {"id": 2, "filename": "b.jpg", "folder_id": 10},
+    ]
+    mock_db = MagicMock()
+    # Nothing cached → needs_fresh_detection is True, the un-fixed code
+    # would call ensure_megadetector_weights before noticing the cancel.
+    mock_db.get_detector_run_photo_ids.return_value = set()
+
+    detect = MagicMock()
+    weights = MagicMock()
+    with patch("classify_job.detect_animals", detect), \
+         patch("classify_job.get_primary_detection", MagicMock()), \
+         patch("detector.ensure_megadetector_weights", weights):
+        detection_map, detected = _detect_subjects(
+            photos=photos,
+            folders={10: str(tmp_path)},
+            runner=runner,
+            job=job,
+            reclassify=False,
+            db=mock_db,
+        )
+
+    assert detection_map == {}
+    assert detected == 0
+    weights.assert_not_called()
+    detect.assert_not_called()
+
+
 def test_classify_photos_stops_when_cancelled(tmp_path):
     """A cancelled job exits the classification loop without inference."""
     from unittest.mock import MagicMock, patch
