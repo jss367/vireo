@@ -3010,7 +3010,6 @@ def test_run_classifier_retries_on_database_is_locked(tmp_path):
 
     import classify_job
     from db import Database
-
     from tests.test_scanner import _FlakyConn
 
     db = Database(str(tmp_path / "test.db"))
