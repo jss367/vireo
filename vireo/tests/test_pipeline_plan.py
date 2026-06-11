@@ -2817,3 +2817,25 @@ def test_api_pipeline_plan_rejects_non_string_hash_duplicate_paths_elements(app_
         },
     )
     assert resp.status_code == 400
+
+
+def test_exclusions_apply_in_whole_workspace_mode(tmp_path):
+    """The running job filters exclude_photo_ids in every mode; the plan
+    previously honored them only for collections, overstating pending
+    counts for whole-workspace runs."""
+    from pipeline_plan import PipelinePlanParams, compute_plan
+
+    db, folder_id = _make_db(tmp_path)
+    p1, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    p2, _ = _add_photo_with_detection(db, folder_id, "b.jpg")
+
+    base = compute_plan(db, PipelinePlanParams(), str(tmp_path / "test.db"))
+    assert base["stages"]["Extract"]["detail"]["pending"] == 2
+
+    plan = compute_plan(
+        db,
+        PipelinePlanParams(exclude_photo_ids=[p2]),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["stages"]["Extract"]["detail"]["pending"] == 1
+    assert plan["scope"]["photo_count"] == 1

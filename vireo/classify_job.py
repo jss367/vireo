@@ -518,8 +518,12 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
 
             processed_ids.add(photo["id"])
 
-    except (ImportError, RuntimeError):
-        pass
+    except (ImportError, RuntimeError) as e:
+        # Detection unavailable (missing weights/backend) — non-fatal, the
+        # caller degrades to full-image classification. Previously silenced
+        # entirely, which let the detect stage report success while the
+        # batch's remaining photos were silently skipped.
+        log.warning("Detection unavailable for batch (non-fatal): %s", e)
     except Exception:
         log.warning("Detection failed for batch (non-fatal)", exc_info=True)
 
@@ -1600,7 +1604,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         kept_raw = getattr(
             thread_db, "filter_out_wildlife_excluded", lambda ids: ids
         )(photo_ids)
-        if not isinstance(kept_raw, (list, tuple, set)):
+        if not isinstance(kept_raw, list | tuple | set):
             kept_raw = photo_ids
         kept_ids = set(kept_raw)
         photos = [p for p in photos if p["id"] in kept_ids]

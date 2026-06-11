@@ -494,8 +494,13 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
             # uses clonefile() (copy-on-write metadata-only), so cloning a
             # 1+ GB blob takes milliseconds and shares disk pages with the
             # cache until either side is modified.
-            os.makedirs(local_dir, exist_ok=True)
             dest_path = os.path.join(local_dir, filename)
+            # filename can be repo-relative (e.g. "onnx/model.onnx" for
+            # custom HF repos with the standard onnx/ layout) — create the
+            # full destination directory, not just local_dir, or copy2
+            # raises FileNotFoundError that the retry loop misclassifies
+            # as a connection failure.
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
             if cached_path != dest_path:
                 shutil.copy2(cached_path, dest_path)
 

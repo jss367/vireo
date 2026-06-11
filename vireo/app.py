@@ -10982,7 +10982,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         for h in hashes:
             rows = db.conn.execute(
                 "SELECT id FROM photos "
-                "WHERE file_hash = ? AND flag != 'rejected'",
+                "WHERE file_hash = ? AND (flag IS NULL OR flag != 'rejected')",
                 (h,),
             ).fetchall()
             if len(rows) < 2:
@@ -11192,7 +11192,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         for h in hashes:
             anchor = db.conn.execute(
                 "SELECT 1 FROM photos "
-                "WHERE file_hash = ? AND flag != 'rejected' LIMIT 1",
+                "WHERE file_hash = ? AND (flag IS NULL OR flag != 'rejected') LIMIT 1",
                 (h,),
             ).fetchone()
             if anchor is not None:
@@ -11347,7 +11347,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
               AND p.file_hash IS NOT NULL
               AND EXISTS (
                   SELECT 1 FROM photos q
-                  WHERE q.file_hash = p.file_hash AND q.flag != 'rejected'
+                  WHERE q.file_hash = p.file_hash AND (q.flag IS NULL OR q.flag != 'rejected')
               )
             """
         ).fetchone()
@@ -11711,7 +11711,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # `bool` is a subclass of `int`, and `int(1.9)` silently
             # truncates to `1` — reject both so the wrong photo can't be
             # cached without any client-visible error.
-            if isinstance(pid, (bool, float)):
+            if isinstance(pid, bool | float):
                 return json_error("photo_ids must be integers")
             try:
                 photo_ids.append(int(pid))
@@ -14706,7 +14706,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # bool is an int subclass — reject explicitly so True/False
                 # don't silently succeed for numeric keys.
                 return json_error(f"{k} must be a number, got bool")
-            if not isinstance(raw_v, (int, float)):
+            if not isinstance(raw_v, int | float):
                 return json_error(f"{k} must be a number")
             v = float(raw_v)
             if v != v or v in (float("inf"), float("-inf")):

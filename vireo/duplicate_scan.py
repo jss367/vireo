@@ -59,7 +59,7 @@ def _build_unresolved_proposal(db, group):
         db, group["photo_ids"],
         columns="p.id, p.filename, p.file_mtime, p.rating, p.file_size, "
                 "f.path AS folder_path",
-        where_extra=" AND p.flag != 'rejected'",
+        where_extra=" AND (p.flag IS NULL OR p.flag != 'rejected')",
     )
 
     info_by_id = {r["id"]: _row_to_info(r, r["folder_path"]) for r in rows}

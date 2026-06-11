@@ -5862,19 +5862,19 @@ def test_save_grouping_defaults_rejects_bad_values(tmp_path, monkeypatch):
     saved = cfg.load()
     pipe = saved.get("pipeline", {})
     if "hard_cut_time" in pipe:
-        assert isinstance(pipe["hard_cut_time"], (int, float))
+        assert isinstance(pipe["hard_cut_time"], int | float)
     if "w_species" in pipe:
-        assert isinstance(pipe["w_species"], (int, float))
+        assert isinstance(pipe["w_species"], int | float)
         assert 0.0 <= pipe["w_species"] <= 1.0
     if "hard_cut_score" in pipe:
-        assert isinstance(pipe["hard_cut_score"], (int, float))
+        assert isinstance(pipe["hard_cut_score"], int | float)
         assert 0.0 <= pipe["hard_cut_score"] <= 1.0
     if "w_time" in pipe:
-        assert isinstance(pipe["w_time"], (int, float))
+        assert isinstance(pipe["w_time"], int | float)
         assert pipe["w_time"] is not True  # bool guard
     if "tau_enc" in pipe:
         import math as _math
-        assert isinstance(pipe["tau_enc"], (int, float))
+        assert isinstance(pipe["tau_enc"], int | float)
         assert _math.isfinite(pipe["tau_enc"])
 
 
