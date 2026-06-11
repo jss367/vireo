@@ -6450,6 +6450,59 @@ def test_delete_folder_keeps_descendant_rooted_in_other_workspace(tmp_path):
     ).fetchall() == []
 
 
+def test_delete_folder_keeps_target_rooted_in_other_workspace(tmp_path):
+    """Deleting a folder that another workspace imported as its own root
+    must not delete anything — the folder row, subtree, and photos survive;
+    only the deleting workspace's links are removed."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    db.set_active_workspace(ws_a)
+
+    parent = db.add_folder("/tree", name="tree")
+    child = db.add_folder("/tree/sub", name="sub", parent_id=parent,
+                          workspace_root=False)
+
+    # Workspace B imports /tree itself as its own root.
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_b, parent, is_root=True)
+    db.add_workspace_folder(ws_b, child, is_root=False)
+
+    pid_parent = db.add_photo(folder_id=parent, filename="p.jpg", extension=".jpg",
+                              file_size=1000, file_mtime=1.0)
+    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 0
+    assert result["files"] == []
+
+    # Folder rows and photos all survive, parent chain intact.
+    row = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (child,)
+    ).fetchone()
+    assert row is not None
+    assert row["parent_id"] == parent
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (parent,)).fetchone() is not None
+    for pid in (pid_parent, pid_child):
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is not None
+
+    # B's links survive, including the root flag.
+    assert db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, parent),
+    ).fetchone()["is_root"] == 1
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, child),
+    ).fetchone() is not None
+
+    # Workspace A no longer sees any of it.
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?", (ws_a,)
+    ).fetchall() == []
+
+
 def test_missing_folder_photos_hidden_from_browse(tmp_path):
     """Photos in missing folders don't appear in get_photos or count_photos."""
     from db import Database

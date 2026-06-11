@@ -2376,6 +2376,31 @@ class Database:
         ).fetchall()
         return [r["id"] for r in rows]
 
+    def _folders_rooted_in_other_workspace(self, folder_ids, active_ws):
+        """Return the subset of folder_ids that a workspace other than
+        active_ws explicitly imported as its own root (is_root = 1).
+
+        Scanner-registered links (is_root = 0) don't count — they belong
+        to a shared ancestor root and don't protect the folder on their
+        own. With active_ws None, any is_root = 1 link qualifies.
+        """
+        rooted = set()
+        for chunk in _chunks(folder_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            sql = (
+                f"SELECT DISTINCT folder_id FROM workspace_folders "
+                f"WHERE folder_id IN ({placeholders}) AND is_root = 1"
+            )
+            params = list(chunk)
+            if active_ws is not None:
+                sql += " AND workspace_id != ?"
+                params.append(active_ws)
+            rooted.update(
+                row["folder_id"]
+                for row in self.conn.execute(sql, params).fetchall()
+            )
+        return rooted
+
     def delete_folder(self, folder_id):
         """Delete a folder, its descendant folders, and all their photos/data.
 
@@ -2384,21 +2409,46 @@ class Database:
         set, so deleting a non-leaf folder row alone trips the FK — and
         descendants of a deleted folder would be unreachable anyway.
 
-        Descendants that another workspace imported as its own root
+        A folder that another workspace imported as its own root
         (``workspace_folders.is_root = 1`` for a workspace other than the
-        active one) are preserved along with their entire subtrees and
-        photos — deleting a parent in one workspace must not destroy data
-        still reachable in another. Kept subtree heads are reparented to
-        NULL (their parent row is going away) and unlinked from the active
-        workspace so they stop being visible here.
+        active one) is never deleted — it is only unlinked from the active
+        workspace. That applies to the target folder itself (in which case
+        nothing is deleted at all: the folder, its subtree, and its photos
+        survive untouched and only the active workspace's links are
+        removed) and to any descendant (the descendant's subtree and
+        photos are preserved; its head is reparented to NULL because the
+        parent row is going away). Deleting in one workspace must not
+        destroy data still reachable in another.
 
         Returns dict with 'deleted_photos' count and 'files' (list from
         delete_photos) so the caller can remove cached thumbnails, previews,
         and working copies — the FK cascade drops preview_cache rows but
         leaves the on-disk files, which would otherwise become untracked
-        orphans that eviction can't reclaim.
+        orphans that eviction can't reclaim. When the target is protected
+        by another workspace's root link, that's {'deleted_photos': 0,
+        'files': []}.
         """
         active_ws = self._active_workspace_id
+        # If the target itself is another workspace's root, delete nothing:
+        # just drop the active workspace's links for it and its subtree so
+        # it disappears from this workspace's view. The folder row survives
+        # with its parent chain intact, so no reparenting is needed.
+        if self._folders_rooted_in_other_workspace([folder_id], active_ws):
+            if active_ws is not None:
+                try:
+                    for chunk in _chunks(self._folder_subtree_ids_by_path(folder_id)):
+                        placeholders = ",".join("?" for _ in chunk)
+                        self.conn.execute(
+                            f"DELETE FROM workspace_folders WHERE workspace_id = ? "
+                            f"AND folder_id IN ({placeholders})",
+                            [active_ws] + chunk,
+                        )
+                    self.conn.commit()
+                except Exception:
+                    self.conn.rollback()
+                    raise
+            return {"deleted_photos": 0, "files": []}
+
         # BFS so the list is ordered parents-first; deleted in reverse below.
         subtree_ids = [folder_id]
         kept_root_ids = []
@@ -2419,21 +2469,7 @@ class Database:
             # scanner-registered (is_root = 0) links from other workspaces
             # belong to a shared ancestor root that is itself being deleted.
             if children:
-                kept = set()
-                for chunk in _chunks(children):
-                    placeholders = ",".join("?" for _ in chunk)
-                    sql = (
-                        f"SELECT DISTINCT folder_id FROM workspace_folders "
-                        f"WHERE folder_id IN ({placeholders}) AND is_root = 1"
-                    )
-                    params = list(chunk)
-                    if active_ws is not None:
-                        sql += " AND workspace_id != ?"
-                        params.append(active_ws)
-                    kept.update(
-                        row["folder_id"]
-                        for row in self.conn.execute(sql, params).fetchall()
-                    )
+                kept = self._folders_rooted_in_other_workspace(children, active_ws)
                 if kept:
                     kept_root_ids.extend(c for c in children if c in kept)
                     children = [c for c in children if c not in kept]
