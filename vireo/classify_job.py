@@ -554,6 +554,14 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
         db.get_detector_run_photo_ids("megadetector-v6") if not reclassify else set()
     )
 
+    # Track photos whose state we mutated (clear_detections + write_detection_batch
+    # in reclassify mode). Declared up here so the except handlers and early
+    # returns can stash whatever was accumulated before the failure. The caller
+    # reads ``job["_detect_processed_ids"]`` to decide which photos to classify
+    # on a post-detect cancel — using ``detection_map.keys()`` alone would miss
+    # empty-scene photos whose old predictions were already cascaded away.
+    processed_for_rebuild: set[int] = set()
+
     try:
         if detect_animals is None or get_primary_detection is None:
             raise ImportError(
@@ -595,6 +603,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                 log.info(
                     "Classify job cancelled before MegaDetector weights download"
                 )
+                job["_detect_processed_ids"] = processed_for_rebuild
                 return {}, 0
 
             ensure_megadetector_weights(progress_callback=_dl_progress)
@@ -672,13 +681,25 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
             if reclassify:
                 db.clear_detections(photo["id"])
 
-            batch_map, batch_detected, _batch_processed = _detect_batch(
+            batch_map, batch_detected, batch_processed = _detect_batch(
                 [photo], folders, runner, job, reclassify, db,
                 det_conf_threshold=det_conf_threshold,
                 already_detected_ids=already_detected_ids,
             )
             detection_map.update(batch_map)
             detected += batch_detected
+
+            if reclassify and photo["id"] in batch_processed:
+                # ``_detect_batch.processed_ids`` is the truthful set of
+                # photos whose iteration completed — including empty-scene
+                # ones that recorded a detector_runs row but added nothing
+                # to ``detection_map``. In reclassify mode their old
+                # predictions were cascaded away by ``clear_detections``
+                # above, so the caller must classify them on cancel even
+                # though they have no detection rows to drive a cropped
+                # classifier pass (the full-image fallback in
+                # ``_classify_photos`` handles them).
+                processed_for_rebuild.add(photo["id"])
 
             if was_cached and batch_detected:
                 skipped_det += 1
@@ -746,6 +767,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
         detection_map = {}
         detected = 0
 
+    job["_detect_processed_ids"] = processed_for_rebuild
     return detection_map, detected
 
 
@@ -1848,17 +1870,30 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         # the processed subset with fresh detections but zero predictions
         # until a manual rerun. Fall through to classify just that subset
         # so cancel preserves the rebuild work already in flight. The
-        # unprocessed tail (``photo["id"] not in detection_map``) is
-        # dropped — its old state was never touched, so dropping it keeps
-        # the cached predictions intact.
+        # unprocessed tail is dropped — its old state was never touched,
+        # so dropping it keeps the cached predictions intact.
+        #
+        # The processed subset comes from ``job["_detect_processed_ids"]``,
+        # which is the union of (a) photos with at least one detection and
+        # (b) empty-scene photos that recorded a detector_runs row but
+        # added nothing to ``detection_map``. Using ``detection_map``
+        # alone would miss case (b), stranding empty-scene reclassified
+        # photos with cleared predictions and no replacement. Older test
+        # fakes for ``_detect_subjects`` that don't stash this key fall
+        # back to ``detection_map.keys()`` for backwards compatibility.
         finish_cleared_only = False
         if cancelled_after_detect:
             runner.update_step(
                 job["id"], "detect", status="cancelled",
                 summary=f"Cancelled ({detected} animals detected so far)",
             )
-            if params.reclassify and detection_map:
-                processed = [p for p in photos if p["id"] in detection_map]
+            processed_ids = job.get("_detect_processed_ids")
+            if processed_ids is None:
+                processed_ids = set(detection_map.keys())
+            else:
+                processed_ids = set(processed_ids) | set(detection_map.keys())
+            if params.reclassify and processed_ids:
+                processed = [p for p in photos if p["id"] in processed_ids]
                 if processed:
                     finish_cleared_only = True
                     photos = processed

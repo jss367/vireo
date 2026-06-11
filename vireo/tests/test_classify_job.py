@@ -4054,3 +4054,140 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
             f"{det_id}; only the processed subset should be classified."
         )
     assert result["detected"] == 1
+
+
+def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp_path):
+    """End-to-end: a reclassify run cancelled after detection must still
+    classify photos that were re-detected as empty scenes (no detections
+    in detection_map). Their old detections+predictions were already
+    cascaded away by the per-photo ``clear_detections`` call in
+    ``_detect_subjects``; without a full-image fallback classify pass they
+    would be stranded with cleared predictions and no replacement.
+
+    Regression for the Codex P1 review on commit faa47a43ad
+    (vireo/classify_job.py line 1861 — "Track re-detected empty photos
+    before returning"). The gate uses ``job["_detect_processed_ids"]``
+    rather than ``detection_map.keys()`` so empty-scene photos are
+    included in the rebuild subset.
+    """
+    from unittest.mock import MagicMock, patch
+
+    import numpy as np
+    from classify_job import ClassifyParams, run_classify_job
+
+    class PostDetectCancelRunner(FakeRunner):
+        def __init__(self):
+            super().__init__()
+            self.flipped = False
+
+        def is_cancelled(self, job_id):
+            return self.flipped
+
+    runner = PostDetectCancelRunner()
+    job = _make_job()
+
+    mock_db_instance = MagicMock()
+    # Two photos: photo 1 was re-detected as empty (state mutated),
+    # photo 2 was never reached.
+    mock_db_instance.get_collection_photos.return_value = [
+        {"id": 1, "filename": "empty.jpg", "folder_id": 10,
+         "timestamp": "2024-01-15T10:00:00"},
+        {"id": 2, "filename": "untouched.jpg", "folder_id": 10,
+         "timestamp": "2024-01-15T11:00:00"},
+    ]
+    mock_db_instance.get_folder_tree.return_value = [
+        {"id": 10, "path": str(tmp_path), "name": "test"},
+    ]
+    mock_db_instance.get_existing_prediction_photo_ids.return_value = set()
+    mock_db_instance.get_photo_embedding.return_value = None
+    mock_db_instance.get_subject_types.return_value = set()
+    mock_db_instance.filter_out_subject_tagged.side_effect = (
+        lambda pids, _types: list(pids)
+    )
+    mock_db_instance.get_classifier_run_keys.return_value = set()
+    mock_db_instance.get_predictions_for_detection.return_value = []
+    # No prior full-image synthetic detection exists for photo 1 — the
+    # classifier creates one for the full-image fallback path.
+    mock_db_instance.get_detections.return_value = []
+    # save_detections returns a synthetic detection id for the full-image
+    # fallback that _classify_photos creates for empty-scene photos.
+    mock_db_instance.save_detections.return_value = [201]
+
+    fake_model = {
+        "id": "test-model",
+        "name": "TestModel",
+        "model_str": "hf-hub:imageomics/bioclip",
+        "weights_path": "/tmp/weights.bin",
+        "model_type": "bioclip",
+        "downloaded": True,
+    }
+    fake_embedding = np.ones(512, dtype=np.float32)
+    fake_preds = [{"species": "NewEmpty", "score": 0.95, "taxonomy": None}]
+    mock_clf = MagicMock()
+    mock_clf.classify_with_embedding.return_value = (fake_preds, fake_embedding)
+    mock_clf.classify_batch_with_embedding.return_value = [
+        (fake_preds, fake_embedding)
+    ]
+
+    # Stub _detect_subjects: photo 1 was processed but found empty
+    # (recorded a detector_runs row, no detection_map entry). Photo 2 was
+    # never reached. The processed set is stashed on the job so
+    # run_classify_job's rebuild gate can include the empty-scene photo
+    # — using detection_map.keys() alone would miss it.
+    detect_called = {"n": 0}
+
+    def fake_detect_subjects(photos, folders, runner, job, reclassify, db):
+        detect_called["n"] += 1
+        assert reclassify is True
+        # Mirror what production _detect_subjects does: stash the processed
+        # set on job for run_classify_job to consume on cancel.
+        job["_detect_processed_ids"] = {1}
+        runner.flipped = True
+        return ({}, 0)
+
+    params = ClassifyParams(
+        collection_id="col-1",
+        labels_file=None,
+        labels_files=None,
+        model_id=None,
+        model_name=None,
+        grouping_window=10,
+        similarity_threshold=0.85,
+        reclassify=True,
+    )
+
+    fake_img = MagicMock()
+    with patch("classify_job.Database", return_value=mock_db_instance), \
+         patch("classify_job.get_active_model", return_value=fake_model), \
+         patch("classify_job.get_models", return_value=[fake_model]), \
+         patch("classify_job._load_taxonomy", return_value=None), \
+         patch("classify_job._load_labels",
+               return_value=(["NewEmpty"], False)), \
+         patch("classify_job.Classifier", return_value=mock_clf), \
+         patch("classify_job._detect_subjects",
+               side_effect=fake_detect_subjects), \
+         patch("classify_job._prepare_image",
+               return_value=(fake_img, str(tmp_path), "p")):
+        result = run_classify_job(job, runner, str(tmp_path / "test.db"),
+                                  1, params)
+
+    assert detect_called["n"] == 1, "_detect_subjects must have been called"
+    # The empty-scene photo (id 1) had its predictions cascaded away by
+    # _detect_subjects.clear_detections; the recovery path must classify
+    # it via the full-image fallback so it doesn't end up empty.
+    assert mock_db_instance.add_prediction.call_count >= 1, (
+        "Post-detect cancel on reclassify with an empty-scene processed "
+        "photo must classify it via the full-image fallback. Without the "
+        "_detect_processed_ids tracking, the photo is stranded with "
+        "cleared predictions and no replacement."
+    )
+    # All add_prediction calls must be for the empty-scene photo's
+    # synthetic full-image detection (id 201). Photo 2 was never
+    # processed and must not be touched.
+    for call in mock_db_instance.add_prediction.call_args_list:
+        det_id = call.args[0] if call.args else call.kwargs.get("detection_id")
+        assert det_id == 201, (
+            f"Recovery path wrote a prediction for unexpected detection "
+            f"{det_id}; only the processed empty-scene photo's synthetic "
+            f"full-image detection (201) should be classified."
+        )
