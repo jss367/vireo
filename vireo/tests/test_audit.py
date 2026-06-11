@@ -99,6 +99,443 @@ def test_remove_orphans(tmp_path):
     assert photo is None
 
 
+def test_check_stray_sidecars(tmp_path):
+    """check_stray_sidecars flags .xmp files with no matching image,
+    in both bird.xmp and bird.jpg.xmp naming styles."""
+    from audit import check_stray_sidecars
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    # Matched: classic style (bird.jpg + bird.xmp)
+    Image.new('RGB', (50, 50)).save(os.path.join(root, 'bird.jpg'))
+    write_sidecar(os.path.join(root, 'bird.xmp'),
+                  flat_keywords={'Sparrow'}, hierarchical_keywords=set())
+    # Matched: darktable style (owl.jpg + owl.jpg.xmp)
+    Image.new('RGB', (50, 50)).save(os.path.join(root, 'owl.jpg'))
+    write_sidecar(os.path.join(root, 'owl.jpg.xmp'),
+                  flat_keywords={'Owl'}, hierarchical_keywords=set())
+    # Stray: no image anywhere
+    write_sidecar(os.path.join(root, 'ghost.xmp'),
+                  flat_keywords={'Gone'}, hierarchical_keywords=set())
+
+    strays = check_stray_sidecars([root])
+    assert len(strays) == 1
+    assert strays[0]['path'].endswith('ghost.xmp')
+
+
+def test_delete_stray_sidecars_refuses_matched_sidecar(tmp_path):
+    """delete_stray_sidecars re-verifies at deletion time: a sidecar whose
+    image reappeared since the check is kept, and non-xmp paths are
+    never touched."""
+    from audit import delete_stray_sidecars
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    matched = os.path.join(root, 'bird.xmp')
+    stray = os.path.join(root, 'ghost.xmp')
+    not_xmp = os.path.join(root, 'precious.jpg')
+    Image.new('RGB', (50, 50)).save(not_xmp)
+    write_sidecar(matched, flat_keywords={'A'}, hierarchical_keywords=set())
+    write_sidecar(stray, flat_keywords={'B'}, hierarchical_keywords=set())
+    Image.new('RGB', (50, 50)).save(os.path.join(root, 'bird.jpg'))
+
+    deleted = delete_stray_sidecars([matched, stray, not_xmp], [root])
+
+    assert deleted == 1
+    assert os.path.exists(matched), "sidecar with a living image was deleted"
+    assert os.path.exists(not_xmp), "non-xmp file was deleted"
+    assert not os.path.exists(stray)
+
+
+def test_delete_stray_sidecars_refuses_paths_outside_roots(tmp_path):
+    """The client path list is untrusted: sidecars outside the allowed
+    roots are refused, including prefix-trap siblings (/root-evil must
+    not match root /root)."""
+    from audit import delete_stray_sidecars
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    evil_sibling = str(tmp_path / "photos-evil")
+    elsewhere = str(tmp_path / "elsewhere")
+    for d in (root, evil_sibling, elsewhere):
+        os.makedirs(d)
+
+    inside = os.path.join(root, 'stray.xmp')
+    sibling = os.path.join(evil_sibling, 'stray.xmp')
+    outside = os.path.join(elsewhere, 'stray.xmp')
+    for p in (inside, sibling, outside):
+        write_sidecar(p, flat_keywords={'X'}, hierarchical_keywords=set())
+
+    deleted = delete_stray_sidecars([inside, sibling, outside], [root])
+
+    assert deleted == 1
+    assert not os.path.exists(inside)
+    assert os.path.exists(sibling), "prefix-trap sibling dir was not refused"
+    assert os.path.exists(outside), "path outside roots was not refused"
+
+
+def test_verify_hashes_ok_and_baseline(tmp_path):
+    """Untouched files verify as ok; photos without a stored hash get
+    baselined; the integrity run is recorded for the summary."""
+    from audit import verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'good.jpg'))
+    Image.new('RGB', (70, 70)).save(os.path.join(root, 'nohash.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+    # Simulate a photo imported before hashing existed
+    db.conn.execute(
+        "UPDATE photos SET file_hash = NULL WHERE filename = 'nohash.jpg'")
+    db.conn.commit()
+
+    stats = verify_hashes(db)
+
+    assert stats['ok'] == 1
+    assert stats['baselined'] == 1
+    assert stats['corrupt'] == 0 and stats['modified'] == 0
+    row = db.conn.execute(
+        "SELECT file_hash, hash_status FROM photos "
+        "WHERE filename = 'nohash.jpg'").fetchone()
+    assert row['file_hash'] is not None
+    assert row['hash_status'] == 'ok'
+    runs = db.get_audit_runs()
+    assert runs['integrity']['problem_count'] == 0
+
+
+def test_verify_hashes_flags_corruption_when_mtime_unchanged(tmp_path):
+    """Content change with the original mtime is the bit-rot signature."""
+    from audit import verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, 'rot.jpg')
+    Image.new('RGB', (60, 60)).save(path)
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    # Flip bytes but restore the original mtime: nothing legitimately
+    # wrote this file, yet its content changed.
+    st = os.stat(path)
+    with open(path, 'r+b') as f:
+        f.seek(10)
+        f.write(b'\xde\xad\xbe\xef')
+    os.utime(path, (st.st_atime, st.st_mtime))
+
+    stats = verify_hashes(db)
+
+    assert stats['corrupt'] == 1
+    row = db.conn.execute(
+        "SELECT hash_status FROM photos WHERE filename = 'rot.jpg'"
+    ).fetchone()
+    assert row['hash_status'] == 'corrupt'
+    assert db.get_audit_runs()['integrity']['problem_count'] == 1
+    flagged = db.get_integrity_flagged()
+    assert len(flagged) == 1
+    assert flagged[0]['filename'] == 'rot.jpg'
+
+
+def test_verify_hashes_flags_external_edit_as_modified(tmp_path):
+    """Content change with a moved mtime is an external edit, not rot."""
+    from audit import verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, 'edited.jpg')
+    Image.new('RGB', (60, 60)).save(path)
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    Image.new('RGB', (60, 60), (200, 0, 0)).save(path)
+    st = os.stat(path)
+    os.utime(path, (st.st_atime, st.st_mtime + 10))
+
+    stats = verify_hashes(db)
+
+    assert stats['modified'] == 1
+    row = db.conn.execute(
+        "SELECT hash_status FROM photos WHERE filename = 'edited.jpg'"
+    ).fetchone()
+    assert row['hash_status'] == 'modified'
+
+
+def test_accept_current_hash_clears_flag(tmp_path):
+    """Accepting a flagged file stores its current content as the new
+    baseline and clears the problem flag."""
+    from audit import accept_current_hash, verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, 'edited.jpg')
+    Image.new('RGB', (60, 60)).save(path)
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    Image.new('RGB', (60, 60), (0, 200, 0)).save(path)
+    st = os.stat(path)
+    os.utime(path, (st.st_atime, st.st_mtime + 10))
+    verify_hashes(db)
+    assert len(db.get_integrity_flagged()) == 1
+
+    pid = db.conn.execute(
+        "SELECT id FROM photos WHERE filename = 'edited.jpg'").fetchone()['id']
+    accepted = accept_current_hash(db, [pid])
+
+    assert accepted == 1
+    assert db.get_integrity_flagged() == []
+    # Re-verifying immediately is clean: the new baseline matches disk.
+    stats = verify_hashes(db)
+    assert stats['ok'] == 1 and stats['modified'] == 0
+
+
+def test_rescan_resets_hash_coverage_after_external_edit(tmp_path):
+    """When a rescan replaces the stored baseline hash, the verification
+    markers must be cleared: 'checked' means THIS baseline was verified,
+    not that some earlier content once was. A rescan that recomputes the
+    same hash leaves coverage intact."""
+    from audit import verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, 'edited.jpg')
+    Image.new('RGB', (60, 60)).save(path)
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+    verify_hashes(db)
+    assert db.get_integrity_stats()['unchecked'] == 0
+
+    # Touch-only rescan: mtime moves but bytes are identical, so the
+    # recomputed hash matches the verified baseline — coverage survives.
+    st = os.stat(path)
+    os.utime(path, (st.st_atime, st.st_mtime + 5))
+    scan(root, db)
+    assert db.get_integrity_stats()['unchecked'] == 0
+
+    # External edit + rescan: the scanner adopts a new baseline that this
+    # audit never verified, so the verdict and coverage must reset.
+    Image.new('RGB', (60, 60), (0, 0, 200)).save(path)
+    st = os.stat(path)
+    os.utime(path, (st.st_atime, st.st_mtime + 10))
+    scan(root, db)
+
+    row = db.conn.execute(
+        "SELECT hash_checked_at, hash_status FROM photos "
+        "WHERE filename = 'edited.jpg'").fetchone()
+    assert row['hash_checked_at'] is None
+    assert row['hash_status'] is None
+    stats = db.get_integrity_stats()
+    assert stats['unchecked'] == 1
+    assert stats['checked'] == 0
+
+
+def test_build_summary_states(tmp_path):
+    """The green light requires every check to have run AND found nothing
+    AND full hash coverage — never 'no evidence of problems'."""
+    from audit import build_summary, verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'good.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    # Nothing has run: unverified, never intact
+    s = build_summary(db)
+    assert s['status'] == 'unverified'
+
+    # Four checks ran clean but hashes never verified: still not intact
+    for name in ('drift', 'orphans', 'untracked', 'sidecars'):
+        db.record_audit_run(name, 0)
+    s = build_summary(db)
+    assert s['status'] == 'unverified'
+
+    # All five ran, all clean, full coverage: intact
+    verify_hashes(db)
+    s = build_summary(db)
+    assert s['status'] == 'intact'
+    assert s['problem_count'] == 0
+
+    # A new photo lands after the verify run: clean but stale
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'new.jpg'))
+    scan(root, db, incremental=True)
+    db.record_audit_run('untracked', 0)
+    s = build_summary(db)
+    assert s['status'] == 'stale'
+    assert s['integrity']['unchecked'] == 1
+
+    # A check with findings: problems
+    db.record_audit_run('drift', 3)
+    s = build_summary(db)
+    assert s['status'] == 'problems'
+    assert s['problem_count'] == 3
+
+
+def test_verify_hashes_missing_file_updates_orphans_verdict(tmp_path):
+    """A file deleted after everything ran clean must not leave the banner
+    green when only the hash verifier re-runs: verify_hashes applies the
+    orphans check's exact predicate to its exact population, so a
+    completed run records the orphans result too."""
+    from audit import build_summary, verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'keep.jpg'))
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'gone.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+    for name in ('drift', 'orphans', 'untracked', 'sidecars'):
+        db.record_audit_run(name, 0)
+    verify_hashes(db)
+    assert build_summary(db)['status'] == 'intact'
+
+    # File disappears; only the hash verifier re-runs.
+    os.unlink(os.path.join(root, 'gone.jpg'))
+    stats = verify_hashes(db)
+    assert stats['missing'] == 1
+
+    # The missing file lands on the orphans verdict, not integrity's.
+    runs = db.get_audit_runs()
+    assert runs['orphans']['problem_count'] == 1
+    assert runs['integrity']['problem_count'] == 0
+
+    s = build_summary(db)
+    assert s['status'] == 'problems'
+    assert s['problem_count'] == 1
+
+    # Restoring the file and re-verifying clears the verdict again.
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'gone.jpg'))
+    db.conn.execute(
+        "UPDATE photos SET file_hash = NULL WHERE filename = 'gone.jpg'")
+    db.conn.commit()
+    verify_hashes(db)
+    assert db.get_audit_runs()['orphans']['problem_count'] == 0
+    assert build_summary(db)['status'] == 'intact'
+
+
+def test_build_summary_missing_folder_blocks_intact(tmp_path):
+    """A workspace folder marked missing must surface as a problem even
+    when every recorded check is clean: the scoped queries all exclude
+    missing folders, so without this the banner would show green over
+    an entire offline folder of photos."""
+    from audit import build_summary, verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'good.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+    for name in ('drift', 'orphans', 'untracked', 'sidecars'):
+        db.record_audit_run(name, 0)
+    verify_hashes(db)
+    assert build_summary(db)['status'] == 'intact'
+
+    # The folder goes offline and the health loop flags it.
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    s = build_summary(db)
+    assert s['status'] == 'problems'
+    assert s['missing_folders'] == 1
+    assert s['missing_folder_photos'] == 1
+    # Outranks 'unverified' too: a missing folder is direct evidence
+    # of a problem even before any check has run.
+    db.conn.execute("DELETE FROM audit_runs")
+    db.conn.commit()
+    assert build_summary(db)['status'] == 'problems'
+
+
+def test_untracked_and_sidecar_endpoints_use_workspace_roots(
+    tmp_path, monkeypatch,
+):
+    """/api/audit/untracked and /api/audit/sidecars derive their scan
+    roots server-side from the active workspace: a request with no
+    ``root`` params still scans everything, stray client params are
+    ignored, and the recorded audit run reflects the real workspace —
+    a client-scoped request can never certify a clean workspace check.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+    from db import Database
+    from scanner import scan
+    from xmp import write_sidecar
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(
+        models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"),
+    )
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'known.jpg'))
+
+    db_path = str(tmp_path / "vireo.db")
+    db = Database(db_path)
+    scan(root, db)
+
+    # Material that only a real scan of the workspace root would find
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'new.jpg'))
+    write_sidecar(os.path.join(root, 'ghost.xmp'),
+                  flat_keywords={'Gone'}, hierarchical_keywords=set())
+
+    app = create_app(
+        db_path=db_path,
+        thumb_cache_dir=str(tmp_path / "thumbnails"),
+        api_token="test-token-123",
+    )
+    client = app.test_client()
+
+    # No root params: the server derives the workspace roots itself.
+    resp = client.get("/api/audit/untracked")
+    assert resp.status_code == 200
+    untracked = resp.get_json()
+    assert len(untracked) == 1
+    assert untracked[0]['path'].endswith('new.jpg')
+
+    # A stray client root pointing at an empty dir is ignored, not
+    # honored — the workspace root is still what gets scanned.
+    empty = str(tmp_path / "empty")
+    os.makedirs(empty)
+    resp = client.get("/api/audit/sidecars", query_string={"root": empty})
+    assert resp.status_code == 200
+    strays = resp.get_json()
+    assert len(strays) == 1
+    assert strays[0]['path'].endswith('ghost.xmp')
+
+    runs = db.get_audit_runs()
+    assert runs['untracked']['problem_count'] == 1
+    assert runs['sidecars']['problem_count'] == 1
+
+
 def test_remove_orphans_endpoint_unlinks_cached_thumbnail(
     tmp_path, monkeypatch,
 ):
