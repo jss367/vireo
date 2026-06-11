@@ -602,6 +602,36 @@ def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
     assert "Robin" in kw_names
 
 
+def test_pairing_does_not_copy_rejected_flag_to_raw(tmp_path):
+    """A companion JPEG's 'rejected' flag (e.g. set by the duplicate
+    auto-resolver when the JPEG has a byte-identical twin) must not be
+    stamped onto the unique RAW primary during pairing."""
+    from db import Database
+    from scanner import scan
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+
+    Image.new("RGB", (200, 100), color="green").save(str(img_dir / "IMG_001.jpg"))
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(img_dir), db)
+
+    jpeg_id = db.conn.execute("SELECT id FROM photos").fetchone()["id"]
+    db.conn.execute("UPDATE photos SET flag = 'rejected' WHERE id = ?", (jpeg_id,))
+    db.conn.commit()
+
+    with open(str(img_dir / "IMG_001.cr3"), "wb") as f:
+        f.write(b"\x00" * 200)
+    scan(str(img_dir), db)
+
+    photos = db.conn.execute(
+        "SELECT filename, companion_path, flag FROM photos"
+    ).fetchall()
+    assert len(photos) == 1
+    assert photos[0]["filename"] == "IMG_001.cr3"
+    assert photos[0]["flag"] == "none"
+
+
 def test_pairing_merges_predictions_without_unique_violation(tmp_path):
     """Pairing raw+JPEG deduplicates predictions that would violate UNIQUE(photo_id, model, workspace_id)."""
     from db import Database

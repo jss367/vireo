@@ -251,7 +251,14 @@ def _pair_raw_jpeg_companions(db):
         if primary_full["rating"] == 0 and companion_full["rating"] != 0:
             updates.append("rating = ?")
             params.append(companion_full["rating"])
-        if primary_full["flag"] == "none" and companion_full["flag"] != "none":
+        if (
+            primary_full["flag"] == "none"
+            and companion_full["flag"] not in ("none", "rejected")
+        ):
+            # Never copy 'rejected': the duplicate auto-resolver runs earlier
+            # in the same scan and rejects companion JPEGs that lose to a
+            # byte-identical twin elsewhere — stamping that onto the RAW
+            # would silently hide a unique photo.
             updates.append("flag = ?")
             params.append(companion_full["flag"])
         if primary_full["latitude"] is None and companion_full["latitude"] is not None:

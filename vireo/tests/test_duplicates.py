@@ -36,6 +36,30 @@ def test_resolve_prefers_clean_filename(clean_name, dup_name):
     assert _loser_ids(losers) == [2]
 
 
+@pytest.mark.parametrize("camera_name", [
+    "IMG_1234.jpg",
+    "DSC_0042.jpg",
+    "DJI-0001.jpg",
+])
+def test_camera_filenames_are_not_dup_suffixed(camera_name):
+    """A trailing _N/-N is only a copy marker relative to the group — a
+    camera-named original must not lose rule 1 to a renamed copy."""
+    original = DupCandidate(id=1, path=f"/a/{camera_name}", mtime=100.0)
+    renamed = DupCandidate(id=2, path="/b/heron-blue.jpg", mtime=200.0)
+    winner, losers = resolve_duplicates([renamed, original])
+    reasons = {lid: reason for lid, reason in losers}
+    assert reasons.get(1) != "filename has dup suffix"
+
+
+def test_camera_burst_copy_still_dup_suffixed():
+    """IMG_1234_2.jpg next to IMG_1234.jpg in the group IS a dirty copy."""
+    original = DupCandidate(id=1, path="/a/IMG_1234.jpg", mtime=100.0)
+    copy = DupCandidate(id=2, path="/a/IMG_1234_2.jpg", mtime=100.0)
+    winner, losers = resolve_duplicates([copy, original])
+    assert winner == 1
+    assert losers == [(2, "filename has dup suffix")]
+
+
 def test_resolve_prefers_shorter_path():
     shallow = DupCandidate(id=1, path="/pics/owl.jpg", mtime=100.0)
     deep = DupCandidate(id=2, path="/pics/archive/2024/owl.jpg", mtime=100.0)
