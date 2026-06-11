@@ -2470,8 +2470,11 @@ async function startPipeline() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ current_path: window.location.pathname })
       });
-      // Update the navbar workspace display
-      var wsBtn = document.getElementById('wsDropdownBtn');
+      // Update the navbar workspace display ('wsCurrentName' is the
+      // navbar's actual element — the old 'wsDropdownBtn' id never
+      // existed, so the navbar kept showing the previous workspace for
+      // the whole run).
+      var wsBtn = document.getElementById('wsCurrentName');
       if (wsBtn) wsBtn.textContent = wsName;
       document.getElementById('lblCurrentWsName').textContent = '(' + wsName + ')';
     } catch(e) {

@@ -2619,19 +2619,25 @@ async function grmApply() {
       }),
     });
 
-    // Update local prediction status immediately so cards reflect the change
+    // Update local prediction status immediately so cards reflect the
+    // change — mirroring what the backend just did: picks become accepted,
+    // rejects become rejected, untouched candidates stay pending. Marking
+    // the whole group accepted made rejected photos show as Accepted in
+    // the tabs/badges until a reload.
     var groupId = grmState.groupId;
     var model = grmState.model;
-    allPredictions.forEach(function(p) {
-      if (p.group_id === groupId && p.model === model) {
+    var picks = grmState.picks;
+    var rejects = grmState.rejects;
+    function applyLocalStatus(p) {
+      if (p.group_id !== groupId || p.model !== model) return;
+      if (picks.has(p.photo_id)) {
         p.status = 'accepted';
+      } else if (rejects.has(p.photo_id)) {
+        p.status = 'rejected';
       }
-    });
-    predictions.forEach(function(p) {
-      if (p.group_id === groupId && p.model === model) {
-        p.status = 'accepted';
-      }
-    });
+    }
+    allPredictions.forEach(applyLocalStatus);
+    predictions.forEach(applyLocalStatus);
 
     closeGroupReview();
     renderAll();

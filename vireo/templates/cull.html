@@ -956,8 +956,12 @@ function renderCulling() {
 
         var qScore = photo.quality_score != null ? photo.quality_score.toFixed(2) : (photo.sharpness != null ? Math.round(photo.sharpness) : '-');
 
+        // Filename rides in a data attribute: interpolating it into the
+        // onclick JS string broke on double quotes (attribute terminator,
+        // which escapeHtml doesn't encode) and trailing backslashes.
         html += '<div class="' + cardClass + '" data-photo-id="' + photo.photo_id + '" ' +
-          'onclick="openLightbox(' + photo.photo_id + ',\'' + escapeHtml(photo.filename || '').replace(/'/g, "\\'") + '\', window.' + poseKey + ')" ' +
+          'data-filename="' + escapeAttr(photo.filename || '') + '" ' +
+          'onclick="openLightbox(' + photo.photo_id + ', this.dataset.filename, window.' + poseKey + ')" ' +
           'ondblclick="toggleCullAction(' + si + ',' + pi + ',' + photo.photo_id + ')">' +
           badge +
           '<img src="/thumbnails/' + photo.photo_id + '.jpg" loading="lazy">' +
