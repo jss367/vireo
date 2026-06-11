@@ -783,7 +783,7 @@ def serialize_results(results):
         for k, v in p.items():
             if isinstance(v, np.ndarray):
                 continue  # skip embedding arrays
-            if isinstance(v, (np.floating, np.integer)):
+            if isinstance(v, np.floating | np.integer):
                 cleaned[k] = float(v)
             else:
                 cleaned[k] = v

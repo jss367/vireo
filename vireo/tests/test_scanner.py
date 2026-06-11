@@ -2219,7 +2219,7 @@ def test_preview_sweep_chunks_large_photo_id_sets(tmp_path):
 
         def execute(self, sql, params=()):
             nonlocal max_params_seen
-            if isinstance(params, (list, tuple)):
+            if isinstance(params, list | tuple):
                 max_params_seen = max(max_params_seen, len(params))
             return self._inner.execute(sql, params)
 

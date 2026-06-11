@@ -10321,7 +10321,7 @@ class Database:
             raise ValueError("rules must be a list or group object")
 
         def _is_scalar(value):
-            return value is None or isinstance(value, (str, int, float, bool))
+            return value is None or isinstance(value, str | int | float | bool)
 
         def _validate_node(node):
             if not isinstance(node, dict):

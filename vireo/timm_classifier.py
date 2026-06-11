@@ -188,7 +188,7 @@ class TimmClassifier:
         from PIL import Image as PILImage
         from pipeline_locks import acquire_gpu_if_session_uses_it
 
-        if isinstance(image, (str, os.PathLike)):
+        if isinstance(image, str | os.PathLike):
             with PILImage.open(image) as img:
                 input_arr = self._preprocess(img)
         else:

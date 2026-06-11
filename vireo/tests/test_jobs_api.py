@@ -610,6 +610,7 @@ def test_start_job_ids_unique_within_same_millisecond(app_and_db):
     the same millisecond previously collided, overwriting each other's
     registration and history row."""
     import time as _time
+
     from jobs import JobRunner
     runner = JobRunner()
     ids = [runner.start("scan", lambda j: None) for _ in range(10)]

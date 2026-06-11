@@ -723,7 +723,7 @@ def _coerce(raw, kind):
     if kind == "bool":
         if isinstance(raw, bool):
             return raw
-        if isinstance(raw, (int, float)):
+        if isinstance(raw, int | float):
             return bool(raw)
         if isinstance(raw, str):
             low = raw.strip().lower()

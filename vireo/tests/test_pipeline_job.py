@@ -687,7 +687,7 @@ def test_pipeline_previews_stage_writes_atomically(tmp_path, monkeypatch):
     # preview path; restrict the check to saves inside preview_dir.
     preview_dir_saves = [
         p for p in saved_paths
-        if isinstance(p, (str, bytes)) and str(p).startswith(preview_dir)
+        if isinstance(p, str | bytes) and str(p).startswith(preview_dir)
     ]
     assert preview_dir_saves, "previews_stage should have written at least one file"
     for p in preview_dir_saves:
@@ -1007,8 +1007,8 @@ def test_pipeline_scan_progress_includes_rate_and_eta(tmp_path, monkeypatch):
     last = progress_events[-1]
     assert "rate" in last, "Progress event should include rate"
     assert "eta_seconds" in last, "Progress event should include eta_seconds"
-    assert isinstance(last["rate"], (int, float))
-    assert isinstance(last["eta_seconds"], (int, float))
+    assert isinstance(last["rate"], int | float)
+    assert isinstance(last["eta_seconds"], int | float)
 
 
 def test_pipeline_multi_folder_scan_progress_is_monotonic(tmp_path, monkeypatch):
