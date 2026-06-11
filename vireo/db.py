@@ -41,6 +41,18 @@ def _path_for_subtree_match(value: str) -> str:
     return value.replace("\\", "/").rstrip("/")
 
 
+def _escape_like(s: str) -> str:
+    """Escape SQL LIKE metacharacters so a path is matched literally.
+
+    LIKE treats ``%`` and ``_`` as wildcards unconditionally — an unescaped
+    folder path like ``/pics/my_dir`` also matches ``/pics/myXdir``, which
+    silently corrupts sibling folders in path-cascade UPDATEs. Pair with
+    ``LIKE ? ESCAPE '\\'`` at the call site (same convention as ingest.py
+    and scanner.py).
+    """
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
     values = list(values)
     for idx in range(0, len(values), size):
@@ -2046,8 +2058,8 @@ class Database:
         cascaded = []
         skipped_prefixes = []
         children = self.conn.execute(
-            "SELECT id, path FROM folders WHERE status = 'missing' AND path LIKE ? ORDER BY path",
-            (old_path + "/%",),
+            "SELECT id, path FROM folders WHERE status = 'missing' AND path LIKE ? ESCAPE '\\' ORDER BY path",
+            (_escape_like(old_path) + "/%",),
         ).fetchall()
         for child in children:
             # Skip descendants of conflicted folders
@@ -2168,8 +2180,8 @@ class Database:
         cascaded = []
         skipped_prefixes = []
         children = self.conn.execute(
-            "SELECT id, path FROM folders WHERE status = 'missing' AND path LIKE ? ORDER BY path",
-            (old_path + "/%",),
+            "SELECT id, path FROM folders WHERE status = 'missing' AND path LIKE ? ESCAPE '\\' ORDER BY path",
+            (_escape_like(old_path) + "/%",),
         ).fetchall()
         for child in children:
             if any(child["path"].startswith(p + "/") for p in skipped_prefixes):
@@ -2276,8 +2288,8 @@ class Database:
             "UPDATE folders SET path = ? WHERE id = ?", (new_path, folder_id)
         )
         children = self.conn.execute(
-            "SELECT id, path FROM folders WHERE path LIKE ?",
-            (old_path + "/%",),
+            "SELECT id, path FROM folders WHERE path LIKE ? ESCAPE '\\'",
+            (_escape_like(old_path) + "/%",),
         ).fetchall()
         for child in children:
             child_new = new_path + child["path"][len(old_path):]
@@ -7007,46 +7019,83 @@ class Database:
     def merge_duplicate_keywords(self):
         """Find and merge case-insensitive duplicate keywords in active workspace.
 
+        Duplicates are grouped by (LOWER(name), parent_id, type) — name alone
+        is not identity: the location system deliberately creates same-name
+        keywords under different parents (Springfield under Illinois vs.
+        Missouri), and same-name keywords of different types (species vs.
+        genre) are distinct by design. Merging across those slots retags
+        photos with the wrong place/kind.
+
         Only merges keywords that are used by photos in the active workspace.
         Keeps the lowest ID (earliest created), moves all photo associations,
-        and deletes the duplicates. Returns count of merges performed.
+        reparents any child keywords onto the survivor (the parent_id FK
+        would otherwise block the DELETE), and deletes the duplicates.
+        Runs passes until convergence so case-duplicate parent chains
+        ("Birds">"Heron" vs "birds">"heron") fully collapse: the children
+        only become same-parent duplicates after their parents merge.
+        Returns count of merges performed.
         """
         ws = self._ws_id()
-        dupes = self.conn.execute(
-            """SELECT LOWER(k.name) as lname, MIN(k.id) as keep_id,
-                      GROUP_CONCAT(DISTINCT k.id) as all_ids
-               FROM keywords k
-               JOIN photo_keywords pk ON pk.keyword_id = k.id
-               JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE wf.workspace_id = ?
-               GROUP BY LOWER(k.name) HAVING COUNT(DISTINCT k.id) > 1""",
-            (ws,),
-        ).fetchall()
+        total_merged = 0
+        while True:
+            dupes = self.conn.execute(
+                """SELECT LOWER(k.name) as lname, MIN(k.id) as keep_id,
+                          GROUP_CONCAT(DISTINCT k.id) as all_ids
+                   FROM keywords k
+                   JOIN photo_keywords pk ON pk.keyword_id = k.id
+                   JOIN photos p ON p.id = pk.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   WHERE wf.workspace_id = ?
+                   GROUP BY LOWER(k.name), k.parent_id, k.type
+                   HAVING COUNT(DISTINCT k.id) > 1""",
+                (ws,),
+            ).fetchall()
+            if not dupes:
+                break
 
-        merged = 0
-        for d in dupes:
-            keep_id = d["keep_id"]
-            all_ids = [int(x) for x in d["all_ids"].split(",")]
-            remove_ids = [x for x in all_ids if x != keep_id]
+            for d in dupes:
+                keep_id = d["keep_id"]
+                all_ids = [int(x) for x in d["all_ids"].split(",")]
+                remove_ids = [x for x in all_ids if x != keep_id]
 
-            for rid in remove_ids:
-                # Move photo associations (ignore if already exists for keep_id)
-                self.conn.execute(
-                    "UPDATE OR IGNORE photo_keywords SET keyword_id = ? WHERE keyword_id = ?",
-                    (keep_id, rid),
-                )
-                # Delete orphaned associations
-                self.conn.execute(
-                    "DELETE FROM photo_keywords WHERE keyword_id = ?", (rid,)
-                )
-                # Delete the duplicate keyword
-                self.conn.execute("DELETE FROM keywords WHERE id = ?", (rid,))
-                merged += 1
+                for rid in remove_ids:
+                    # Move photo associations (ignore if already exists for keep_id)
+                    self.conn.execute(
+                        "UPDATE OR IGNORE photo_keywords SET keyword_id = ? WHERE keyword_id = ?",
+                        (keep_id, rid),
+                    )
+                    # Delete orphaned associations
+                    self.conn.execute(
+                        "DELETE FROM photo_keywords WHERE keyword_id = ?", (rid,)
+                    )
+                    # Reparent children onto the survivor before deleting, or
+                    # the keywords.parent_id FK aborts the merge mid-way.
+                    # Per-child so a UNIQUE(name, parent_id) clash with an
+                    # existing child of the survivor disambiguates instead of
+                    # blowing up (same pattern as the place-label merge).
+                    children = self.conn.execute(
+                        "SELECT id, name FROM keywords WHERE parent_id = ?",
+                        (rid,),
+                    ).fetchall()
+                    for child in children:
+                        try:
+                            self.conn.execute(
+                                "UPDATE keywords SET parent_id = ? WHERE id = ?",
+                                (keep_id, child["id"]),
+                            )
+                        except sqlite3.IntegrityError:
+                            disambiguated = f"{child['name']} (id-{child['id']})"
+                            self.conn.execute(
+                                "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
+                                (keep_id, disambiguated, child["id"]),
+                            )
+                    # Delete the duplicate keyword
+                    self.conn.execute("DELETE FROM keywords WHERE id = ?", (rid,))
+                    total_merged += 1
 
-        if merged:
+        if total_merged:
             self.conn.commit()
-        return merged
+        return total_merged
 
     def get_keyword_tree(self):
         """Return keywords used by photos in the active workspace, plus ancestors."""
@@ -10063,10 +10112,19 @@ class Database:
                 if op == "is not":
                     return _keyword_not_exists("k.name = ?", [value])
             if field == "folder":
+                # Match the folder itself plus separator-delimited descendants.
+                # A bare prefix LIKE would also match siblings ("/photos/2023"
+                # matching "/photos/2023-trip") and treat _/% in the value as
+                # wildcards.
+                base = str(value or "").rstrip("/")
+                subtree_params = [base, _escape_like(base) + "/%"]
                 if op == "under":
-                    return "f.path LIKE ?", [f"{value}%"]
+                    return "(f.path = ? OR f.path LIKE ? ESCAPE '\\')", subtree_params
                 if op == "not_under":
-                    return "(f.path IS NULL OR f.path NOT LIKE ?)", [f"{value}%"]
+                    return (
+                        "(f.path IS NULL OR (f.path != ? AND f.path NOT LIKE ? ESCAPE '\\'))",
+                        subtree_params,
+                    )
             if field == "flag":
                 if op in ("equals", "is"):
                     return "p.flag = ?", [value]

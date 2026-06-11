@@ -862,6 +862,89 @@ def test_merge_duplicate_keywords_scoped_by_workspace(db):
     assert sparrows == 2
 
 
+def test_merge_duplicate_keywords_respects_parent_and_type(db):
+    """Same-name keywords under different parents (Springfield, IL vs MO) or
+    with different types are distinct by design and must NOT merge; only
+    case-variants in the same (parent, type) slot are duplicates."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws, fid)
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES ('Illinois', 'location')")
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES ('Missouri', 'location')")
+    il = db.conn.execute("SELECT id FROM keywords WHERE name='Illinois'").fetchone()[0]
+    mo = db.conn.execute("SELECT id FROM keywords WHERE name='Missouri'").fetchone()[0]
+    db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) VALUES ('Springfield', ?, 'location')", (il,))
+    db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) VALUES ('Springfield', ?, 'location')", (mo,))
+    # Same name, same NULL parent, different type — also distinct
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES ('Macro', 'genre')")
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES ('macro', 'general')")
+    db.conn.commit()
+
+    for row in db.conn.execute(
+        "SELECT id FROM keywords WHERE name IN ('Springfield', 'Macro', 'macro')"
+    ).fetchall():
+        db.tag_photo(pid, row[0])
+
+    merged = db.merge_duplicate_keywords()
+    assert merged == 0
+
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE name = 'Springfield'"
+    ).fetchone()[0] == 2
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE LOWER(name) = 'macro'"
+    ).fetchone()[0] == 2
+
+
+def test_merge_duplicate_keywords_reparents_children(db):
+    """A duplicate with child keywords merges without tripping the
+    keywords.parent_id FK; children move to the survivor, and a follow-up
+    pass collapses children that became same-parent case-duplicates."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws, fid)
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    # Case-duplicate parents, each with a case-duplicate child chain
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('Birds')")
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('birds')")
+    upper = db.conn.execute("SELECT id FROM keywords WHERE name='Birds'").fetchone()[0]
+    lower = db.conn.execute("SELECT id FROM keywords WHERE name='birds'").fetchone()[0]
+    db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('Heron', ?)", (upper,))
+    db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('heron', ?)", (lower,))
+    db.conn.commit()
+
+    for row in db.conn.execute(
+        "SELECT id FROM keywords WHERE LOWER(name) IN ('birds', 'heron')"
+    ).fetchall():
+        db.tag_photo(pid, row[0])
+
+    merged = db.merge_duplicate_keywords()
+    assert merged == 2  # Birds/birds, then Heron/heron once same-parent
+
+    birds = db.conn.execute(
+        "SELECT id FROM keywords WHERE LOWER(name) = 'birds'"
+    ).fetchall()
+    herons = db.conn.execute(
+        "SELECT id, parent_id FROM keywords WHERE LOWER(name) = 'heron'"
+    ).fetchall()
+    assert len(birds) == 1 and len(herons) == 1
+    assert herons[0]["parent_id"] == birds[0]["id"]
+    # Photo keeps both associations, now on the survivors
+    tagged = {r[0] for r in db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid,)
+    ).fetchall()}
+    assert tagged == {birds[0]["id"], herons[0]["id"]}
+
+
 def test_empty_workspace_labels_does_not_fallback_to_global(db):
     """An explicit empty active_labels [] should NOT fall back to global labels."""
     ws = db.create_workspace("Empty Labels")

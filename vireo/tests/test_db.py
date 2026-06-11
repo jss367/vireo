@@ -7051,6 +7051,51 @@ def test_move_folder_path_cascade(db):
     assert grandchild["path"] == "/nas/photos/2024/march/birds"
 
 
+def test_move_folder_path_does_not_touch_wildcard_siblings(db):
+    """LIKE treats _ and % as wildcards — moving /pics/my_dir must not
+    rewrite the unrelated sibling /pics/myXdir's children."""
+    fid = db.add_folder("/pics/my_dir", name="my_dir")
+    sib = db.add_folder("/pics/myXdir", name="myXdir")
+    sib_child = db.add_folder("/pics/myXdir/sub", name="sub", parent_id=sib)
+
+    db.move_folder_path(fid, "/dest/dir")
+
+    moved = db.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
+    sibling = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib,)).fetchone()
+    sibling_child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib_child,)).fetchone()
+    assert moved["path"] == "/dest/dir"
+    assert sibling["path"] == "/pics/myXdir"
+    assert sibling_child["path"] == "/pics/myXdir/sub"
+
+
+def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path):
+    """'folder under /photos/2023' must match that folder and its
+    descendants only — not the sibling /photos/2023-trip — and a _ in the
+    value must not act as a LIKE wildcard."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    f_2023 = db.add_folder("/photos/2023", name="2023")
+    f_sub = db.add_folder("/photos/2023/trip", name="trip", parent_id=f_2023)
+    f_sib = db.add_folder("/photos/2023-trip", name="2023-trip")
+    f_us = db.add_folder("/photos/my_dir", name="my_dir")
+    f_usx = db.add_folder("/photos/myXdir", name="myXdir")
+    for fid, name in [(f_2023, "a"), (f_sub, "b"), (f_sib, "c"), (f_us, "d"), (f_usx, "e")]:
+        db.add_photo(folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
+                     file_size=100, file_mtime=1.0)
+
+    under_2023 = [{"field": "folder", "op": "under", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(under_2023) == 2  # folder itself + descendant
+
+    not_under_2023 = [{"field": "folder", "op": "not_under", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(not_under_2023) == 3
+
+    under_us = [{"field": "folder", "op": "under", "value": "/photos/my_dir"}]
+    assert db.count_photos_for_rules(under_us) == 1  # not /photos/myXdir
+
+
 def test_check_filename_collisions(db):
     """check_filename_collisions detects conflicts at destination folder."""
     fid1 = db.add_folder("/src", name="src")

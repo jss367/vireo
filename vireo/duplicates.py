@@ -18,17 +18,32 @@ class DupCandidate:
     exists: bool = True
 
 
-_DUP_SUFFIX_RES = [
+# Unambiguous copy markers — no camera names files this way.
+_ALWAYS_DUP_SUFFIX_RES = [
     re.compile(r" \(\d+\)$", re.IGNORECASE),
     re.compile(r" copy( \d+)?$", re.IGNORECASE),
-    re.compile(r"-\d+$"),
-    re.compile(r"_\d+$"),
+]
+
+# Trailing -N / _N are copy markers only *relative to the group*: nearly
+# every camera original ends in digits (IMG_1234, DSC_0042, DJI-0001), so
+# treating the bare pattern as dirty would invert rule 1 for the most
+# common filenames in the library — the original would lose to a renamed
+# copy. A name is a dirty variant only when stripping the suffix yields
+# another group member's stem (owl_1.jpg next to owl.jpg).
+_RELATIVE_DUP_SUFFIX_RES = [
+    re.compile(r"[-_]\d+$"),
 ]
 
 
-def _has_dup_suffix(path: str) -> bool:
+def _has_dup_suffix(path: str, other_stems=frozenset()) -> bool:
     stem = Path(path).stem
-    return any(r.search(stem) for r in _DUP_SUFFIX_RES)
+    if any(r.search(stem) for r in _ALWAYS_DUP_SUFFIX_RES):
+        return True
+    for r in _RELATIVE_DUP_SUFFIX_RES:
+        m = r.search(stem)
+        if m and stem[: m.start()].lower() in other_stems:
+            return True
+    return False
 
 
 def resolve_duplicates(candidates):
@@ -72,9 +87,17 @@ def resolve_duplicates(candidates):
     else:
         pool = candidates
 
-    # Rule 1: clean filename beats dirty (dup-suffix) filename
-    clean = [c for c in pool if not _has_dup_suffix(c.path)]
-    dirty = [c for c in pool if _has_dup_suffix(c.path)]
+    # Rule 1: clean filename beats dirty (dup-suffix) filename. The -N/_N
+    # suffix check is group-relative (see _RELATIVE_DUP_SUFFIX_RES), so each
+    # candidate is judged against the other members' stems.
+    stems_by_id = {c.id: Path(c.path).stem.lower() for c in pool}
+
+    def _dirty(c):
+        others = frozenset(s for i, s in stems_by_id.items() if i != c.id)
+        return _has_dup_suffix(c.path, others)
+
+    clean = [c for c in pool if not _dirty(c)]
+    dirty = [c for c in pool if _dirty(c)]
     if clean and dirty:
         losers_with_reasons.extend(
             (c.id, "filename has dup suffix") for c in dirty
