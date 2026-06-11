@@ -391,6 +391,51 @@ def test_build_summary_states(tmp_path):
     assert s['problem_count'] == 3
 
 
+def test_verify_hashes_missing_file_updates_orphans_verdict(tmp_path):
+    """A file deleted after everything ran clean must not leave the banner
+    green when only the hash verifier re-runs: verify_hashes applies the
+    orphans check's exact predicate to its exact population, so a
+    completed run records the orphans result too."""
+    from audit import build_summary, verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'keep.jpg'))
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'gone.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+    for name in ('drift', 'orphans', 'untracked', 'sidecars'):
+        db.record_audit_run(name, 0)
+    verify_hashes(db)
+    assert build_summary(db)['status'] == 'intact'
+
+    # File disappears; only the hash verifier re-runs.
+    os.unlink(os.path.join(root, 'gone.jpg'))
+    stats = verify_hashes(db)
+    assert stats['missing'] == 1
+
+    # The missing file lands on the orphans verdict, not integrity's.
+    runs = db.get_audit_runs()
+    assert runs['orphans']['problem_count'] == 1
+    assert runs['integrity']['problem_count'] == 0
+
+    s = build_summary(db)
+    assert s['status'] == 'problems'
+    assert s['problem_count'] == 1
+
+    # Restoring the file and re-verifying clears the verdict again.
+    Image.new('RGB', (60, 60)).save(os.path.join(root, 'gone.jpg'))
+    db.conn.execute(
+        "UPDATE photos SET file_hash = NULL WHERE filename = 'gone.jpg'")
+    db.conn.commit()
+    verify_hashes(db)
+    assert db.get_audit_runs()['orphans']['problem_count'] == 0
+    assert build_summary(db)['status'] == 'intact'
+
+
 def test_build_summary_missing_folder_blocks_intact(tmp_path):
     """A workspace folder marked missing must surface as a problem even
     when every recorded check is clean: the scoped queries all exclude

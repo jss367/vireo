@@ -279,7 +279,13 @@ def verify_hashes(db, progress_cb=None, should_cancel=None):
     Photos with no stored hash (imported before hashing existed) are
     baselined: the current content hash is stored and counted separately
     so the run summary doesn't claim they were "verified" against history.
-    Missing files are skipped — that's the orphans check's report.
+    Missing files are not hashed — they're the orphans check's territory,
+    and since this walk covers exactly the population and existence
+    predicate check_orphans uses, a completed run also records the
+    orphans result. Without that, deleting a file and re-running only
+    this check would leave a stale clean orphans verdict standing and
+    the summary could go green right after the verifier saw a missing
+    file.
 
     Args:
         db: Database instance (workspace must be active)
@@ -356,6 +362,13 @@ def verify_hashes(db, progress_cb=None, should_cancel=None):
     if not stats["cancelled"]:
         problems = stats["modified"] + stats["corrupt"] + stats["unreadable"]
         db.record_audit_run("integrity", problems)
+        # This walk just applied the orphans check's exact predicate to
+        # its exact population, so record that result too. Missing files
+        # stay under the orphans check (where the UI offers the right
+        # remediation) instead of inflating the integrity count, and a
+        # stale clean orphans verdict can't keep the banner green after
+        # this run saw a missing file.
+        db.record_audit_run("orphans", stats["missing"])
 
     log.info(
         "Hash verification: %d checked, %d ok, %d baselined, %d modified, "
