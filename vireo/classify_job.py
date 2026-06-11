@@ -680,26 +680,24 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
             # rebuild the predictions in lockstep with the new run.
             if reclassify:
                 db.clear_detections(photo["id"])
+                # Once the clear has run we own rebuilding this photo on
+                # cancel — including the cases where ``_detect_batch``
+                # doesn't add the id to ``batch_processed`` (e.g.
+                # ``detect_animals`` returns None for a decode failure,
+                # or the batch swallows an exception). Without this the
+                # photo would be left with cleared detections/predictions
+                # and no replacement. The full-image fallback in
+                # ``_classify_photos`` handles photos with no detection
+                # rows, so registering here unconditionally is safe.
+                processed_for_rebuild.add(photo["id"])
 
-            batch_map, batch_detected, batch_processed = _detect_batch(
+            batch_map, batch_detected, _batch_processed = _detect_batch(
                 [photo], folders, runner, job, reclassify, db,
                 det_conf_threshold=det_conf_threshold,
                 already_detected_ids=already_detected_ids,
             )
             detection_map.update(batch_map)
             detected += batch_detected
-
-            if reclassify and photo["id"] in batch_processed:
-                # ``_detect_batch.processed_ids`` is the truthful set of
-                # photos whose iteration completed — including empty-scene
-                # ones that recorded a detector_runs row but added nothing
-                # to ``detection_map``. In reclassify mode their old
-                # predictions were cascaded away by ``clear_detections``
-                # above, so the caller must classify them on cancel even
-                # though they have no detection rows to drive a cropped
-                # classifier pass (the full-image fallback in
-                # ``_classify_photos`` handles them).
-                processed_for_rebuild.add(photo["id"])
 
             if was_cached and batch_detected:
                 skipped_det += 1

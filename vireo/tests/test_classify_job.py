@@ -973,8 +973,13 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
     gate, the post-detection gate returns with predictions_stored=0 but
     the cache is already wiped.
     """
+    import config as cfg
     from classify_job import ClassifyParams, run_classify_job
     from db import Database
+
+    # Hermetic global config so the run doesn't read or write the user's
+    # ~/.vireo/config.json (per repo testing conventions).
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
@@ -3121,7 +3126,7 @@ def test_detect_subjects_skips_weight_download_when_cancelled(tmp_path):
     detect.assert_not_called()
 
 
-def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_path):
+def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_path, monkeypatch):
     """For reclassify runs, cancellation mid-detection must NOT have wiped
     the detections of photos that hadn't been re-detected yet. Doing the
     clear upfront for the whole scope (the old behavior) stranded the
@@ -3136,8 +3141,12 @@ def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_p
     """
     from unittest.mock import patch
 
+    import config as cfg
     from classify_job import _detect_subjects
     from db import Database
+
+    # Hermetic global config (per repo testing conventions).
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
@@ -3187,14 +3196,17 @@ def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_p
     ]
 
     # detect_animals returns one detection for the first (only) photo
-    # that completes; the second photo is never reached.
+    # that completes; the second photo is never reached. compute_sharpness
+    # is patched to a real callable (rather than ``None``) so that a stray
+    # invocation would surface as an assertion failure on the real
+    # behavior, not a ``TypeError`` from calling ``None``.
     with patch("classify_job.detect_animals",
                return_value=[{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
                               "confidence": 0.8, "category": "animal"}]), \
          patch("classify_job.get_primary_detection",
                return_value={"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
                              "confidence": 0.8}), \
-         patch("classify_job.compute_sharpness", None):
+         patch("classify_job.compute_sharpness", return_value=0.0):
         detection_map, detected = _detect_subjects(
             photos=photos,
             folders={folder_id: str(tmp_path)},
@@ -3224,6 +3236,74 @@ def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_p
     assert dets_second == 1, (
         "Mid-detection cancel on a reclassify run cleared detections of "
         "a photo that was never reached."
+    )
+
+
+def test_detect_subjects_reclassify_tracks_clear_when_detect_returns_none(tmp_path, monkeypatch):
+    """For reclassify runs, ``_detect_subjects`` must record a photo for
+    rebuild as soon as its prior detections have been cleared — not only
+    when ``_detect_batch`` reports it processed.
+
+    Regression for Codex P2: if ``detect_animals`` returns ``None`` (image
+    decode failure / ONNX hiccup), ``_detect_batch`` deliberately omits
+    the id from ``processed_ids`` so a future non-reclassify pass retries
+    it. But in reclassify mode the per-photo ``clear_detections`` has
+    already cascaded away the old detections + predictions; if the user
+    then cancels before the next iteration, the run_classify_job cancel
+    path sees an empty processed set and skips classification, leaving
+    the photo with no detections and no predictions.
+
+    The fix marks the photo for rebuild immediately after the clear, so
+    the full-image fallback in ``_classify_photos`` rebuilds it.
+    """
+    from unittest.mock import patch
+
+    import config as cfg
+    from classify_job import _detect_subjects
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder(str(tmp_path), name="p")
+
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="megadetector-v6")
+
+    runner = FakeRunner()
+    job = _make_job()
+    photos = [{"id": pid, "filename": "a.jpg", "folder_id": folder_id}]
+
+    # detect_animals returns None → _detect_batch hits its early-continue
+    # and the id never lands in batch_processed. The clear above still ran.
+    with patch("classify_job.detect_animals", return_value=None), \
+         patch("classify_job.get_primary_detection", return_value=None), \
+         patch("classify_job.compute_sharpness", return_value=0.0):
+        _detect_subjects(
+            photos=photos,
+            folders={folder_id: str(tmp_path)},
+            runner=runner,
+            job=job,
+            reclassify=True,
+            db=db,
+        )
+
+    processed = job.get("_detect_processed_ids")
+    assert processed and pid in processed, (
+        "Reclassify with detect_animals returning None must still mark "
+        "the photo for rebuild — its prior detections were cleared and "
+        "the classify path needs to know to replace them. Without this, "
+        "a post-detect cancel strands the photo with no detections and "
+        "no predictions."
     )
 
 
@@ -3483,7 +3563,7 @@ def test_classify_photos_no_reclassify_skips_predictions_clear(tmp_path):
     mock_db.clear_predictions.assert_not_called()
 
 
-def test_classify_photos_reclassify_preserves_unclassified_tail_on_cancel(tmp_path):
+def test_classify_photos_reclassify_preserves_unclassified_tail_on_cancel(tmp_path, monkeypatch):
     """For reclassify runs, cancelling mid-classify must leave the
     unclassified tail's old predictions intact.
 
@@ -3497,8 +3577,12 @@ def test_classify_photos_reclassify_preserves_unclassified_tail_on_cancel(tmp_pa
     """
     from unittest.mock import patch
 
+    import config as cfg
     from classify_job import _classify_photos
     from db import Database
+
+    # Hermetic global config (per repo testing conventions).
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
@@ -3596,7 +3680,7 @@ def test_classify_photos_reclassify_preserves_unclassified_tail_on_cancel(tmp_pa
     )
 
 
-def test_classify_photos_full_image_fallback_replaces_stale_predictions_on_reclassify(tmp_path):
+def test_classify_photos_full_image_fallback_replaces_stale_predictions_on_reclassify(tmp_path, monkeypatch):
     """When MegaDetector setup fails for a reclassify run, ``_classify_photos``
     runs full-image classification. The stale detector-based predictions
     must be cleared so they don't coexist with the fallback model's output.
@@ -3609,8 +3693,12 @@ def test_classify_photos_full_image_fallback_replaces_stale_predictions_on_recla
     """
     from unittest.mock import patch
 
+    import config as cfg
     from classify_job import _classify_photos
     from db import Database
+
+    # Hermetic global config (per repo testing conventions).
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
