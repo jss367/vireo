@@ -2384,14 +2384,24 @@ class Database:
         set, so deleting a non-leaf folder row alone trips the FK — and
         descendants of a deleted folder would be unreachable anyway.
 
+        Descendants that another workspace imported as its own root
+        (``workspace_folders.is_root = 1`` for a workspace other than the
+        active one) are preserved along with their entire subtrees and
+        photos — deleting a parent in one workspace must not destroy data
+        still reachable in another. Kept subtree heads are reparented to
+        NULL (their parent row is going away) and unlinked from the active
+        workspace so they stop being visible here.
+
         Returns dict with 'deleted_photos' count and 'files' (list from
         delete_photos) so the caller can remove cached thumbnails, previews,
         and working copies — the FK cascade drops preview_cache rows but
         leaves the on-disk files, which would otherwise become untracked
         orphans that eviction can't reclaim.
         """
+        active_ws = self._active_workspace_id
         # BFS so the list is ordered parents-first; deleted in reverse below.
         subtree_ids = [folder_id]
+        kept_root_ids = []
         frontier = [folder_id]
         while frontier:
             children = []
@@ -2404,8 +2414,37 @@ class Database:
                         chunk,
                     ).fetchall()
                 )
+            # Prune children that another workspace explicitly imported as a
+            # root: their subtrees stay. Only is_root = 1 links count —
+            # scanner-registered (is_root = 0) links from other workspaces
+            # belong to a shared ancestor root that is itself being deleted.
+            if children:
+                kept = set()
+                for chunk in _chunks(children):
+                    placeholders = ",".join("?" for _ in chunk)
+                    sql = (
+                        f"SELECT DISTINCT folder_id FROM workspace_folders "
+                        f"WHERE folder_id IN ({placeholders}) AND is_root = 1"
+                    )
+                    params = list(chunk)
+                    if active_ws is not None:
+                        sql += " AND workspace_id != ?"
+                        params.append(active_ws)
+                    kept.update(
+                        row["folder_id"]
+                        for row in self.conn.execute(sql, params).fetchall()
+                    )
+                if kept:
+                    kept_root_ids.extend(c for c in children if c in kept)
+                    children = [c for c in children if c not in kept]
             subtree_ids.extend(children)
             frontier = children
+
+        # Active-workspace links to drop for kept subtrees (they remain
+        # visible only in the workspaces that imported them as roots).
+        kept_subtree_ids = []
+        for kid in kept_root_ids:
+            kept_subtree_ids.extend(self._folder_subtree_ids_by_path(kid))
 
         photo_ids = []
         for chunk in _chunks(subtree_ids):
@@ -2429,6 +2468,24 @@ class Database:
                 inner = self.delete_photos(chunk, commit=False)
                 files.extend(inner.get("files", []))
                 deleted_ids.extend(inner.get("ids", []))
+            # Reparent kept subtree heads before any folder DELETE — their
+            # parent_id points at a row being deleted, and the FK has no ON
+            # DELETE action.
+            for chunk in _chunks(kept_root_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"UPDATE folders SET parent_id = NULL "
+                    f"WHERE id IN ({placeholders})",
+                    chunk,
+                )
+            if active_ws is not None:
+                for chunk in _chunks(kept_subtree_ids):
+                    placeholders = ",".join("?" for _ in chunk)
+                    self.conn.execute(
+                        f"DELETE FROM workspace_folders WHERE workspace_id = ? "
+                        f"AND folder_id IN ({placeholders})",
+                        [active_ws] + chunk,
+                    )
             # Children before parents, else the multi-statement delete trips
             # the parent_id FK at the end of an earlier chunk's statement.
             for chunk in _chunks(list(reversed(subtree_ids))):
