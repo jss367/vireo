@@ -2376,30 +2376,31 @@ class Database:
         ).fetchall()
         return [r["id"] for r in rows]
 
-    def _folders_rooted_in_other_workspace(self, folder_ids, active_ws):
-        """Return the subset of folder_ids that a workspace other than
-        active_ws explicitly imported as its own root (is_root = 1).
+    def _folders_linked_in_other_workspace(self, folder_ids, active_ws):
+        """Return the subset of folder_ids that any workspace other than
+        active_ws has a workspace_folders link for (root or not).
 
-        Scanner-registered links (is_root = 0) don't count — they belong
-        to a shared ancestor root and don't protect the folder on their
-        own. With active_ws None, any is_root = 1 link qualifies.
+        Any foreign link — an explicit root import (is_root = 1) or a
+        scanner-materialized descendant of one (is_root = 0) — is evidence
+        the folder is still visible in that workspace, so it must never be
+        deleted, only unlinked. With active_ws None, any link qualifies.
         """
-        rooted = set()
+        linked = set()
         for chunk in _chunks(folder_ids):
             placeholders = ",".join("?" for _ in chunk)
             sql = (
                 f"SELECT DISTINCT folder_id FROM workspace_folders "
-                f"WHERE folder_id IN ({placeholders}) AND is_root = 1"
+                f"WHERE folder_id IN ({placeholders})"
             )
             params = list(chunk)
             if active_ws is not None:
                 sql += " AND workspace_id != ?"
                 params.append(active_ws)
-            rooted.update(
+            linked.update(
                 row["folder_id"]
                 for row in self.conn.execute(sql, params).fetchall()
             )
-        return rooted
+        return linked
 
     def delete_folder(self, folder_id):
         """Delete a folder, its descendant folders, and all their photos/data.
@@ -2409,31 +2410,33 @@ class Database:
         set, so deleting a non-leaf folder row alone trips the FK — and
         descendants of a deleted folder would be unreachable anyway.
 
-        A folder that another workspace imported as its own root
-        (``workspace_folders.is_root = 1`` for a workspace other than the
-        active one) is never deleted — it is only unlinked from the active
-        workspace. That applies to the target folder itself (in which case
-        nothing is deleted at all: the folder, its subtree, and its photos
-        survive untouched and only the active workspace's links are
-        removed) and to any descendant (the descendant's subtree and
-        photos are preserved; its head is reparented to NULL because the
-        parent row is going away). Deleting in one workspace must not
-        destroy data still reachable in another.
+        A folder with any ``workspace_folders`` link from a workspace
+        other than the active one is never deleted — it is only unlinked
+        from the active workspace. A foreign link, root or
+        scanner-materialized, means the folder is still reachable in that
+        workspace (an is_root = 0 link is always covered by a root
+        ancestor there). That applies to the target folder itself (in
+        which case nothing is deleted at all: the folder, its subtree,
+        and its photos survive untouched and only the active workspace's
+        links are removed) and to any descendant (the descendant's
+        subtree and photos are preserved; its head is reparented to NULL
+        because the parent row is going away). Deleting in one workspace
+        must not destroy data still reachable in another.
 
         Returns dict with 'deleted_photos' count and 'files' (list from
         delete_photos) so the caller can remove cached thumbnails, previews,
         and working copies — the FK cascade drops preview_cache rows but
         leaves the on-disk files, which would otherwise become untracked
         orphans that eviction can't reclaim. When the target is protected
-        by another workspace's root link, that's {'deleted_photos': 0,
+        by another workspace's link, that's {'deleted_photos': 0,
         'files': []}.
         """
         active_ws = self._active_workspace_id
-        # If the target itself is another workspace's root, delete nothing:
+        # If the target is linked in another workspace, delete nothing:
         # just drop the active workspace's links for it and its subtree so
         # it disappears from this workspace's view. The folder row survives
         # with its parent chain intact, so no reparenting is needed.
-        if self._folders_rooted_in_other_workspace([folder_id], active_ws):
+        if self._folders_linked_in_other_workspace([folder_id], active_ws):
             if active_ws is not None:
                 try:
                     for chunk in _chunks(self._folder_subtree_ids_by_path(folder_id)):
@@ -2464,12 +2467,12 @@ class Database:
                         chunk,
                     ).fetchall()
                 )
-            # Prune children that another workspace explicitly imported as a
-            # root: their subtrees stay. Only is_root = 1 links count —
-            # scanner-registered (is_root = 0) links from other workspaces
-            # belong to a shared ancestor root that is itself being deleted.
+            # Prune children that another workspace has a link for: their
+            # subtrees stay. Any foreign link counts — root or
+            # scanner-materialized — since either means the folder is still
+            # visible in that workspace.
             if children:
-                kept = self._folders_rooted_in_other_workspace(children, active_ws)
+                kept = self._folders_linked_in_other_workspace(children, active_ws)
                 if kept:
                     kept_root_ids.extend(c for c in children if c in kept)
                     children = [c for c in children if c not in kept]
@@ -2477,7 +2480,7 @@ class Database:
             frontier = children
 
         # Active-workspace links to drop for kept subtrees (they remain
-        # visible only in the workspaces that imported them as roots).
+        # visible only in the other workspaces that link them).
         kept_subtree_ids = []
         for kid in kept_root_ids:
             kept_subtree_ids.extend(self._folder_subtree_ids_by_path(kid))
