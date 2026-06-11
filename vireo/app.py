@@ -2189,12 +2189,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         results = load_results(cache_dir, db._active_workspace_id)
         if results and results.get("photos"):
             photo_ids = [p["id"] for p in results["photos"]]
-            placeholders = ",".join("?" for _ in photo_ids)
-            rows = db.conn.execute(
-                f"SELECT id, flag, rating FROM photos WHERE id IN ({placeholders})",
-                photo_ids,
-            ).fetchall()
-            flag_map = {r["id"]: (r["flag"], r["rating"]) for r in rows}
+            # Chunked: cached pipeline results can span the whole workspace,
+            # exceeding SQLite's bound-parameter cap in one IN clause.
+            flag_map = {}
+            for chunk in _chunked(photo_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                rows = db.conn.execute(
+                    f"SELECT id, flag, rating FROM photos WHERE id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                flag_map.update({r["id"]: (r["flag"], r["rating"]) for r in rows})
             for p in results["photos"]:
                 f, r = flag_map.get(p["id"], ("none", 0))
                 p["flag"] = f
@@ -4751,10 +4755,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         paths = body.get("paths", [])
 
         if mode == "disk_permanent" and paths:
-            # Retry path: DB already cleaned up, just delete files
+            # Retry path: DB rows were already deleted by the initial
+            # disk-mode call, so the photos table can't vouch for these
+            # paths — but their parent directories still have folders rows.
+            # Only delete files that live directly in a Vireo-managed
+            # folder; anything else (a crafted request naming arbitrary
+            # files) is refused, not removed.
             trashed = 0
             trash_failed = []
             for p in paths:
+                if not isinstance(p, str) or not p:
+                    continue
+                candidates = {os.path.dirname(p), os.path.dirname(os.path.realpath(p))}
+                known = db.conn.execute(
+                    f"SELECT 1 FROM folders WHERE path IN ({','.join('?' for _ in candidates)})",
+                    list(candidates),
+                ).fetchone()
+                if not known:
+                    log.warning(
+                        "Refusing disk_permanent retry for path outside Vireo folders: %s", p
+                    )
+                    trash_failed.append({"path": p, "error": "not in a Vireo folder"})
+                    continue
                 if not os.path.isfile(p):
                     continue
                 try:
@@ -11589,15 +11611,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         active_ws = db._active_workspace_id
 
         # Filter to only photos visible in the active workspace,
-        # preserving the caller's original ordering.
-        placeholders = ",".join("?" for _ in photo_ids)
-        visible = db.conn.execute(
-            f"""SELECT p.id FROM photos p
-                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
-            [active_ws] + list(photo_ids),
-        ).fetchall()
-        visible_set = {r["id"] for r in visible}
+        # preserving the caller's original ordering. Chunked so a large
+        # selection doesn't exceed SQLite's bound-parameter cap.
+        visible_set = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            visible = db.conn.execute(
+                f"""SELECT p.id FROM photos p
+                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
+                [active_ws] + list(chunk),
+            ).fetchall()
+            visible_set.update(r["id"] for r in visible)
         photo_ids = [pid for pid in photo_ids if pid in visible_set]
         if not photo_ids:
             return json_error("no exportable photos in current workspace")

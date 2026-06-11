@@ -189,14 +189,27 @@ def load_photo_features(db, collection_id=None, config=None,
 
     if scoped_photo_ids is not None:
         scoped_photo_ids = sorted(scoped_photo_ids)
-        placeholders = ",".join("?" for _ in scoped_photo_ids)
+        # Stage the scope in a connection-local temp table instead of inline
+        # placeholders — a large collection exceeds SQLite's bound-parameter
+        # cap (999 on legacy builds), and this scope is interpolated into
+        # three queries below.
+        db.conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS pipeline_scope_ids "
+            "(id INTEGER PRIMARY KEY)"
+        )
+        db.conn.execute("DELETE FROM pipeline_scope_ids")
+        db.conn.executemany(
+            "INSERT OR IGNORE INTO pipeline_scope_ids (id) VALUES (?)",
+            [(i,) for i in scoped_photo_ids],
+        )
         rows = db.conn.execute(
             f"""SELECT {_PIPELINE_PHOTO_COLS}
                 FROM photos p
                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                WHERE wf.workspace_id = ? AND p.id IN ({placeholders})
+                WHERE wf.workspace_id = ?
+                  AND p.id IN (SELECT id FROM pipeline_scope_ids)
                 ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
-            (ws_id, *scoped_photo_ids),
+            (ws_id,),
         ).fetchall()
     else:
         rows = db.conn.execute(
@@ -211,9 +224,7 @@ def load_photo_features(db, collection_id=None, config=None,
     scope_sql = ""
     scope_params = ()
     if scoped_photo_ids is not None:
-        scope_placeholders = ",".join("?" for _ in scoped_photo_ids)
-        scope_sql = f" AND p.id IN ({scope_placeholders})"
-        scope_params = tuple(scoped_photo_ids)
+        scope_sql = " AND p.id IN (SELECT id FROM pipeline_scope_ids)"
 
     # Resolve the workspace-effective detector_confidence threshold once.
     # The detections table is global (no workspace_id); threshold filtering

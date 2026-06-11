@@ -1181,10 +1181,25 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
         for image_path in image_files:
             _check_cancelled()
-            stat = image_path.stat()
+            try:
+                stat = image_path.stat()
+            except OSError:
+                # File deleted/renamed between discovery and this pass —
+                # skip it instead of aborting the whole scan (the discovery
+                # walk has the same guard for broken symlinks).
+                log.info("File vanished during scan, skipping: %s", image_path)
+                processed_count += 1
+                if progress_callback:
+                    progress_callback(processed_count, total)
+                continue
             file_mtime = stat.st_mtime
             xmp_path = image_path.with_suffix(".xmp")
-            xmp_mtime = xmp_path.stat().st_mtime if xmp_path.exists() else None
+            try:
+                xmp_mtime = xmp_path.stat().st_mtime
+            except OSError:
+                # Covers both "no sidecar" and a sidecar deleted between
+                # exists() and stat() — same outcome either way.
+                xmp_mtime = None
 
             if incremental:
                 full_path_str = str(image_path)
@@ -1324,17 +1339,30 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     try:
         for image_path, (phash, file_hash) in _iter_features():
             _check_cancelled()
+
+            # File stats — first touch of the path in this loop. A file
+            # deleted/renamed between discovery and here must skip, not
+            # abort the scan and flag every folder in scope 'partial'.
+            try:
+                stat = image_path.stat()
+            except OSError:
+                log.info("File vanished during scan, skipping: %s", image_path)
+                processed_count += 1
+                if progress_callback:
+                    progress_callback(processed_count, total)
+                continue
+
             folder_id = _ensure_folder(image_path.parent)
             touched_folder_ids.add(folder_id)
-
-            # File stats
-            stat = image_path.stat()
             file_size = stat.st_size
             file_mtime = stat.st_mtime
 
             # XMP sidecar
             xmp_path = image_path.with_suffix(".xmp")
-            xmp_mtime = xmp_path.stat().st_mtime if xmp_path.exists() else None
+            try:
+                xmp_mtime = xmp_path.stat().st_mtime
+            except OSError:
+                xmp_mtime = None
 
             # Get pre-extracted metadata for this file
             file_meta = metadata_map.get(str(image_path), {})
