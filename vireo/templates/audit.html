@@ -450,13 +450,22 @@ function renderUntracked() {
     return;
   }
   var html = '<table class="audit-table"><thead><tr><th>File</th><th>Folder</th><th>Actions</th></tr></thead><tbody>';
-  untrackedData.forEach(function(u) {
+  untrackedData.forEach(function(u, i) {
     var fname = u.path.split('/').pop();
     html += '<tr><td>' + escapeHtml(fname) + '</td><td>' + escapeHtml(u.folder) + '</td>' +
-      '<td><button class="btn btn-secondary" onclick="importFile(\'' + escapeAttr(u.path) + '\')">Import</button></td></tr>';
+      '<td><button class="btn btn-secondary" data-idx="' + i + '">Import</button></td></tr>';
   });
   html += '</tbody></table>';
-  document.getElementById('untrackedContent').innerHTML = html;
+  var untrackedContent = document.getElementById('untrackedContent');
+  untrackedContent.innerHTML = html;
+  // Paths are looked up from untrackedData by row index instead of being
+  // interpolated into inline onclick source — a quote or backslash in a
+  // filename would otherwise break (or inject into) the handler.
+  untrackedContent.querySelectorAll('button[data-idx]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      importFile(untrackedData[parseInt(btn.getAttribute('data-idx'), 10)].path);
+    });
+  });
 }
 
 async function importFile(path) {
@@ -523,13 +532,20 @@ function renderSidecars() {
     return;
   }
   var html = '<table class="audit-table"><thead><tr><th>Sidecar</th><th>Folder</th><th>Actions</th></tr></thead><tbody>';
-  sidecarData.forEach(function(s) {
+  sidecarData.forEach(function(s, i) {
     var fname = s.path.split('/').pop();
     html += '<tr><td>' + escapeHtml(fname) + '</td><td>' + escapeHtml(s.folder) + '</td>' +
-      '<td><button class="btn btn-danger" onclick="deleteSidecar(\'' + escapeAttr(s.path) + '\')">Delete</button></td></tr>';
+      '<td><button class="btn btn-danger" data-idx="' + i + '">Delete</button></td></tr>';
   });
   html += '</tbody></table>';
-  document.getElementById('sidecarContent').innerHTML = html;
+  var sidecarContent = document.getElementById('sidecarContent');
+  sidecarContent.innerHTML = html;
+  // Same indirection as renderUntracked: never inline paths into JS.
+  sidecarContent.querySelectorAll('button[data-idx]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      deleteSidecar(sidecarData[parseInt(btn.getAttribute('data-idx'), 10)].path);
+    });
+  });
 }
 
 async function deleteSidecar(path) {

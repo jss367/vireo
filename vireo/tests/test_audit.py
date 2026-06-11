@@ -303,6 +303,49 @@ def test_accept_current_hash_clears_flag(tmp_path):
     assert stats['ok'] == 1 and stats['modified'] == 0
 
 
+def test_rescan_resets_hash_coverage_after_external_edit(tmp_path):
+    """When a rescan replaces the stored baseline hash, the verification
+    markers must be cleared: 'checked' means THIS baseline was verified,
+    not that some earlier content once was. A rescan that recomputes the
+    same hash leaves coverage intact."""
+    from audit import verify_hashes
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, 'edited.jpg')
+    Image.new('RGB', (60, 60)).save(path)
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+    verify_hashes(db)
+    assert db.get_integrity_stats()['unchecked'] == 0
+
+    # Touch-only rescan: mtime moves but bytes are identical, so the
+    # recomputed hash matches the verified baseline — coverage survives.
+    st = os.stat(path)
+    os.utime(path, (st.st_atime, st.st_mtime + 5))
+    scan(root, db)
+    assert db.get_integrity_stats()['unchecked'] == 0
+
+    # External edit + rescan: the scanner adopts a new baseline that this
+    # audit never verified, so the verdict and coverage must reset.
+    Image.new('RGB', (60, 60), (0, 0, 200)).save(path)
+    st = os.stat(path)
+    os.utime(path, (st.st_atime, st.st_mtime + 10))
+    scan(root, db)
+
+    row = db.conn.execute(
+        "SELECT hash_checked_at, hash_status FROM photos "
+        "WHERE filename = 'edited.jpg'").fetchone()
+    assert row['hash_checked_at'] is None
+    assert row['hash_status'] is None
+    stats = db.get_integrity_stats()
+    assert stats['unchecked'] == 1
+    assert stats['checked'] == 0
+
+
 def test_build_summary_states(tmp_path):
     """The green light requires every check to have run AND found nothing
     AND full hash coverage — never 'no evidence of problems'."""

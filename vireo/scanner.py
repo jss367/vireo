@@ -1420,6 +1420,16 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             if file_hash is not None:
                 updates.append("file_hash=?")
                 update_params.append(file_hash)
+                if row_already_existed and prev_file_hash != file_hash:
+                    # The stored baseline is being replaced, so any prior
+                    # integrity verdict applied to bytes that no longer
+                    # exist. Clear the verification markers rather than
+                    # carry them forward — the audit summary must only
+                    # claim "checked" for baselines verify_hashes (or an
+                    # explicit user accept) actually vouched for. A rescan
+                    # that recomputes the same hash leaves coverage intact.
+                    updates.append("hash_checked_at=NULL")
+                    updates.append("hash_status=NULL")
             if file_meta and extract_full_metadata:
                 updates.append("exif_data=?")
                 update_params.append(json.dumps(file_meta))
