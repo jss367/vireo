@@ -998,11 +998,22 @@ def _classify_photos(
         # fresh inference about to run. Skipped in ``finish_cleared_only``
         # mode because the cascade in ``_detect_subjects`` already wiped
         # the prior predictions for these photos.
+        #
+        # No ``labels_fingerprint`` filter: in the normal reclassify path
+        # ``clear_detections`` already cascade-wiped this photo's
+        # predictions (across all fingerprints) before we got here, so a
+        # filtered clear would just be a no-op repeat. In the fallback
+        # path (detection setup failed → empty ``detection_map`` for this
+        # photo, old detector detections still on disk) this clear is the
+        # ONLY purge before the full-image fallback writes new predictions;
+        # scoping it to the current fingerprint would leave predictions
+        # under prior fingerprints intact (e.g. after a workspace
+        # label-set change), and ``get_predictions``' latest-fingerprint
+        # filter would then surface them alongside the new fallback rows.
         if reclassify and not finish_cleared_only:
             db.clear_predictions(
                 model=model_name,
                 collection_photo_ids=[photo["id"]],
-                labels_fingerprint=fp,
             )
 
         job["progress"]["current"] = i + 1

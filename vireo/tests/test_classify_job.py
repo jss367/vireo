@@ -3511,10 +3511,18 @@ def test_classify_photos_reclassify_clears_predictions_per_photo(tmp_path):
             f"clear_predictions must scope to the model being run; got "
             f"{call.kwargs.get('model')!r}"
         )
-        assert call.kwargs["labels_fingerprint"] == "fp-x", (
-            "clear_predictions must scope to the labels fingerprint so "
-            "shared-folder workspaces with different label sets don't "
-            "wipe each other's cache"
+        # No fingerprint filter: stale predictions tagged with prior
+        # fingerprints (e.g. before a workspace label-set change) must
+        # also be wiped in the fallback path, otherwise the
+        # latest-fingerprint-per-detection filter in get_predictions
+        # would surface them alongside the new fallback rows. The
+        # normal reclassify path's per-photo clear_detections cascade
+        # has already wiped predictions across all fingerprints, so an
+        # unfiltered clear here is a no-op repeat in that path.
+        assert call.kwargs.get("labels_fingerprint") is None, (
+            "clear_predictions must NOT scope to the current "
+            "fingerprint: that would leave stale predictions under "
+            f"prior fingerprints visible; got {call.kwargs.get('labels_fingerprint')!r}"
         )
 
 
@@ -3768,6 +3776,104 @@ def test_classify_photos_full_image_fallback_replaces_stale_predictions_on_recla
     )
     # Sanity: the fallback path actually produced a result so the test
     # didn't pass vacuously.
+    assert len(raw_results) == 1
+    assert raw_results[0]["prediction"] == "Sparrow"
+
+
+def test_classify_photos_full_image_fallback_clears_stale_predictions_across_fingerprints(
+    tmp_path, monkeypatch,
+):
+    """Stale detector predictions tagged with a PRIOR ``labels_fingerprint``
+    must also be wiped when the reclassify run falls back to full-image
+    classification under a NEW fingerprint.
+
+    Regression for Codex P2 review on vireo/classify_job.py line 1006.
+    Before the fix, the per-photo purge filtered by the current fingerprint,
+    so a workspace label-set change between runs left stale detector-based
+    predictions under the old fingerprint untouched. ``get_predictions``'
+    latest-fingerprint-per-(detection, classifier_model) filter then surfaces
+    those stale rows for the old detection alongside the new fallback rows
+    for the synthetic full-image detection, leaving users with mixed-model
+    output for the same photo.
+    """
+    from unittest.mock import MagicMock, patch
+
+    import config as cfg
+    from classify_job import _classify_photos
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder(str(tmp_path), name="p")
+
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Prior run: megadetector detection + prediction under the OLD
+    # workspace label fingerprint.
+    stale_det = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.4, "h": 0.4},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="megadetector-v6")[0]
+    db.add_prediction(stale_det, species="Robin", confidence=0.9,
+                      model="BioCLIP", labels_fingerprint="fp-old")
+    db.record_classifier_run(stale_det, "BioCLIP", "fp-old",
+                             prediction_count=1)
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [
+        ([{"species": "Sparrow", "score": 0.88, "taxonomy": None}], None),
+    ]
+
+    # Empty detection_map (setup failure) + new fingerprint = the bug case.
+    fake_img = MagicMock()
+    with patch("classify_job._prepare_image",
+               return_value=(fake_img, str(tmp_path), "p")):
+        raw_results, _, _ = _classify_photos(
+            photos=[{"id": pid, "filename": "a.jpg", "folder_id": folder_id,
+                     "timestamp": None}],
+            folders={folder_id: str(tmp_path)},
+            detection_map={},
+            existing_preds=set(),
+            clf=clf,
+            model_type="bioclip",
+            model_name="BioCLIP",
+            runner=runner,
+            job=job,
+            db=db,
+            labels_fingerprint="fp-new",
+            reclassify=True,
+        )
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    stale_preds = db2.conn.execute(
+        "SELECT COUNT(*) AS n FROM predictions "
+        "WHERE detection_id = ? AND classifier_model = ?",
+        (stale_det, "BioCLIP"),
+    ).fetchone()["n"]
+    assert stale_preds == 0, (
+        "Stale fp-old prediction on the old megadetector detection must be "
+        "cleared even though the current run uses fp-new — otherwise "
+        "get_predictions' latest-fp-per-detection filter still surfaces it "
+        "alongside the new full-image fallback prediction."
+    )
+    # The classifier_runs row under the old fingerprint must also be gone
+    # so the next non-reclassify pass actually re-runs inference for that
+    # detection if it ever reappears in detection_map.
+    run_keys = db2.get_classifier_run_keys(stale_det)
+    assert ("BioCLIP", "fp-old") not in run_keys, (
+        "Stale fp-old classifier_runs row must be cleared alongside the "
+        "stale prediction."
+    )
     assert len(raw_results) == 1
     assert raw_results[0]["prediction"] == "Sparrow"
 
