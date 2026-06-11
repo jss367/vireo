@@ -1733,6 +1733,23 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         # Classifier init succeeded — now it's safe to purge existing
         # cache for reclassify. Any failure before this point leaves the
         # cache intact (see comment at the top of this function).
+        #
+        # A cancel that arrived during taxonomy/label/model init would
+        # otherwise still run the destructive purge below, then the
+        # post-detection cancel gate would return with predictions_stored=0
+        # — leaving the cancelled run with predictions/detections wiped
+        # but not rebuilt. Gate the purge on cancellation explicitly.
+        if runner.is_cancelled(job["id"]):
+            log.info("Classify job cancelled before reclassify purge")
+            return {
+                "total": total,
+                "predictions_stored": 0,
+                "burst_groups": 0,
+                "already_classified": 0,
+                "already_labeled": 0,
+                "detected": 0,
+                "failed": 0,
+            }
         if params.reclassify:
             photo_ids = [p["id"] for p in photos]
             thread_db.clear_predictions(

@@ -966,6 +966,97 @@ def test_reclassify_preserves_cache_on_model_load_failure(tmp_path, monkeypatch)
     )
 
 
+def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monkeypatch):
+    """If the user cancels while model load / embedding computation is
+    running, the destructive reclassify purge (clear_predictions /
+    clear_detections) MUST NOT execute. Without the pre-purge cancel
+    gate, the post-detection gate returns with predictions_stored=0 but
+    the cache is already wiped.
+    """
+    from classify_job import ClassifyParams, run_classify_job
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder("/tmp/p", name="p")
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="megadetector-v6")[0]
+    db.add_prediction(det_id, species="Robin", confidence=0.9,
+                      model="BioCLIP", labels_fingerprint="legacy")
+
+    coll_id = db.add_collection("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
+
+    runner = FakeRunner()
+
+    # Classifier "loads" successfully but flips the runner to cancelled
+    # mid-init, simulating a user clicking cancel during the (otherwise
+    # uninterruptible) embedding computation. classify_job imports
+    # Classifier at module load time, so the patch has to target that
+    # reference rather than classifier.Classifier.
+    import classify_job as cj
+    class CancellingClassifier:
+        def __init__(self, *a, **kw):
+            runner.cancelled = True
+    monkeypatch.setattr(cj, "Classifier", CancellingClassifier)
+
+    # Bypass the on-disk model registry — the test doesn't need weights
+    # since CancellingClassifier ignores its args.
+    monkeypatch.setattr(cj, "get_active_model", lambda: {
+        "id": "BioCLIP",
+        "name": "BioCLIP",
+        "model_str": "hf-hub:imageomics/bioclip",
+        "weights_path": "/dev/null",
+        "model_type": "bioclip",
+        "downloaded": True,
+    })
+
+    job = _make_job()
+    params = ClassifyParams(
+        collection_id=coll_id,
+        labels_files=None,
+        labels_file=None,
+        model_id=None,
+        model_name="BioCLIP",
+        grouping_window=0,
+        similarity_threshold=0.99,
+        reclassify=True,
+    )
+
+    result = run_classify_job(job, runner, db_path, ws, params)
+
+    # The cancel-before-purge gate returns a no-op result.
+    assert result["predictions_stored"] == 0
+    assert result["detected"] == 0
+
+    # And — the whole point of the gate — cached predictions and
+    # detections survive the cancelled run intact.
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    preds_after = db2.conn.execute(
+        "SELECT COUNT(*) AS n FROM predictions WHERE detection_id=?",
+        (det_id,),
+    ).fetchone()["n"]
+    dets_after = db2.conn.execute(
+        "SELECT COUNT(*) AS n FROM detections WHERE id=?",
+        (det_id,),
+    ).fetchone()["n"]
+    assert preds_after == 1, (
+        "Reclassify purge ran despite cancel during model load — "
+        "cached predictions were destroyed without replacement."
+    )
+    assert dets_after == 1, (
+        "Reclassify purge ran despite cancel during model load — "
+        "cached detections were destroyed without replacement."
+    )
+
+
 def test_classify_photos_surfaces_cached_full_image_predictions(tmp_path):
     """When a photo has no real detections and the full-image synthetic
     detection is gated by classifier_runs, the cached top prediction
