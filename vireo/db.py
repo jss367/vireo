@@ -7039,9 +7039,24 @@ class Database:
         Runs passes until convergence so case-duplicate parent chains
         ("Birds">"Heron" vs "birds">"heron") fully collapse: the children
         only become same-parent duplicates after their parents merge.
+        The whole pass is all-or-nothing: an exception rolls back every
+        pending merge instead of leaving a half-merged tree on the
+        connection for a later unrelated commit to persist.
         Returns count of merges performed.
         """
         ws = self._ws_id()
+        total_merged = 0
+        try:
+            total_merged = self._merge_duplicate_keywords_pass(ws)
+        except Exception:
+            self.conn.rollback()
+            raise
+        if total_merged:
+            self.conn.commit()
+        return total_merged
+
+    def _merge_duplicate_keywords_pass(self, ws):
+        """Convergence loop for merge_duplicate_keywords. Caller commits."""
         total_merged = 0
         while True:
             dupes = self.conn.execute(
@@ -7098,8 +7113,6 @@ class Database:
                 for rid in remove_ids:
                     total_merged += self._merge_keyword_into(rid, keep_id)
 
-        if total_merged:
-            self.conn.commit()
         return total_merged
 
     def _merge_keyword_into(self, src_id, dst_id):
@@ -7113,10 +7126,29 @@ class Database:
         Heron. Case-variant children don't clash (the UNIQUE index is
         case-sensitive); they reparent cleanly and collapse on the caller's
         next convergence pass. Cycles are impossible: parent_id chains are
-        acyclic by construction. Returns the number of keyword rows merged
-        away (>= 1). Caller commits.
+        acyclic by construction. Non-link metadata (is_species, coordinates,
+        taxon_id) folds into the destination when it lacks its own, so
+        deleting the source can't silently drop species/location info that
+        only the duplicate carried. Returns the number of keyword rows
+        merged away (>= 1). Caller commits.
         """
         merged = 1
+        src = self.conn.execute(
+            "SELECT is_species, latitude, longitude, taxon_id "
+            "FROM keywords WHERE id = ?",
+            (src_id,),
+        ).fetchone()
+        if src is not None:
+            self.conn.execute(
+                """UPDATE keywords
+                   SET is_species = CASE WHEN ? = 1 THEN 1 ELSE is_species END,
+                       latitude   = COALESCE(latitude, ?),
+                       longitude  = COALESCE(longitude, ?),
+                       taxon_id   = COALESCE(taxon_id, ?)
+                   WHERE id = ?""",
+                (src["is_species"], src["latitude"], src["longitude"],
+                 src["taxon_id"], dst_id),
+            )
         # Move photo associations (ignore if already exists for dst_id),
         # then drop the leftovers.
         self.conn.execute(

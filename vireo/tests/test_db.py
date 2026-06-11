@@ -7068,10 +7068,12 @@ def test_move_folder_path_does_not_touch_wildcard_siblings(db):
     assert sibling_child["path"] == "/pics/myXdir/sub"
 
 
-def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path):
+def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path, monkeypatch):
     """'folder under /photos/2023' must match that folder and its
     descendants only — not the sibling /photos/2023-trip — and a _ in the
     value must not act as a LIKE wildcard."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -7096,12 +7098,14 @@ def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path):
     assert db.count_photos_for_rules(under_us) == 1  # not /photos/myXdir
 
 
-def test_folder_under_rule_matches_backslash_paths(tmp_path):
+def test_folder_under_rule_matches_backslash_paths(tmp_path, monkeypatch):
     """Windows libraries store folder paths with backslash separators
     (``str(Path(...))`` in scanner.scan). The 'folder under' rule must
     still match descendants of a backslash-delimited root and exclude
     siblings; a LIKE pattern that hard-codes '/%' would silently miss
     every Windows descendant."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -7119,8 +7123,15 @@ def test_folder_under_rule_matches_backslash_paths(tmp_path):
     under = [{"field": "folder", "op": "under", "value": "C:/Photos/2023"}]
     assert db.count_photos_for_rules(under) == 2  # root + descendant, not sibling
 
-    not_under = [{"field": "folder", "op": "under", "value": "C:/Photos/2023-trip"}]
-    assert db.count_photos_for_rules(not_under) == 1
+    # Backslash rule values match symmetrically (normalized before escaping).
+    under_bs = [{"field": "folder", "op": "under", "value": "C:\\Photos\\2023"}]
+    assert db.count_photos_for_rules(under_bs) == 2
+
+    not_under = [{"field": "folder", "op": "not_under", "value": "C:/Photos/2023"}]
+    assert db.count_photos_for_rules(not_under) == 1  # only the sibling
+
+    under_sib = [{"field": "folder", "op": "under", "value": "C:/Photos/2023-trip"}]
+    assert db.count_photos_for_rules(under_sib) == 1
 
 
 def test_check_filename_collisions(db):

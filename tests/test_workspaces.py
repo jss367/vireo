@@ -1028,6 +1028,14 @@ def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
     ).fetchall():
         db.tag_photo(pid, row[0])
 
+    # Species/location metadata carried only by the duplicate must fold
+    # into the survivor instead of being deleted with it. (Set after
+    # tagging so the auto-Wildlife rule doesn't muddy the tag assertions.)
+    db.conn.execute(
+        "UPDATE keywords SET is_species = 1, latitude = -33.9, longitude = 18.4 "
+        "WHERE name = 'heron' AND parent_id = ?", (lower,))
+    db.conn.commit()
+
     # Must not raise; converges to one Birds with one Heron child.
     db.merge_duplicate_keywords()
 
@@ -1035,11 +1043,15 @@ def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
         "SELECT id FROM keywords WHERE LOWER(name) = 'birds'"
     ).fetchall()
     herons = db.conn.execute(
-        "SELECT id, parent_id FROM keywords WHERE LOWER(name) = 'heron'"
+        "SELECT id, parent_id, is_species, latitude, longitude "
+        "FROM keywords WHERE LOWER(name) = 'heron'"
     ).fetchall()
     assert len(birds) == 1
     assert len(herons) == 1
     assert herons[0]["parent_id"] == birds[0]["id"]
+    assert herons[0]["is_species"] == 1
+    assert herons[0]["latitude"] == -33.9
+    assert herons[0]["longitude"] == 18.4
     tagged = {r[0] for r in db.conn.execute(
         "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid,)
     ).fetchall()}
