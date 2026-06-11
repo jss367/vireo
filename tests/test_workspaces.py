@@ -1137,6 +1137,94 @@ def test_merge_duplicate_keywords_preserves_differently_typed_children(db):
     assert genre_tags == {m_genre}
 
 
+def test_merge_duplicate_keywords_preserves_distinct_place_children(db):
+    """When duplicate location parents each have a same-display-name
+    child with a different ``place_id`` (two distinct Google places
+    sharing a name under case-variant location chains), the reparent
+    UNIQUE(name, parent_id) clash must NOT merge them — that would
+    silently move one place's photos onto the other. ``place_id`` is
+    part of the dedup boundary too: the source child gets disambiguated
+    by name instead, preserving both place_ids and their photo
+    associations.
+    """
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    # Case-variant location parents (no place_id — parents are coordless
+    # buckets per upsert_place_chain's docstring).
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES ('Illinois', 'location')")
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES ('illinois', 'location')")
+    upper = db.conn.execute(
+        "SELECT id FROM keywords WHERE name='Illinois'"
+    ).fetchone()[0]
+    lower = db.conn.execute(
+        "SELECT id FROM keywords WHERE name='illinois'"
+    ).fetchone()[0]
+    # Same display name, distinct place_ids — two real-world places.
+    db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type, place_id) "
+        "VALUES ('Springfield', ?, 'location', 'PARK_A')",
+        (upper,),
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type, place_id) "
+        "VALUES ('Springfield', ?, 'location', 'PARK_B')",
+        (lower,),
+    )
+    park_a = db.conn.execute(
+        "SELECT id FROM keywords WHERE place_id='PARK_A'"
+    ).fetchone()[0]
+    park_b = db.conn.execute(
+        "SELECT id FROM keywords WHERE place_id='PARK_B'"
+    ).fetchone()[0]
+    db.conn.commit()
+
+    db.tag_photo(pid_a, park_a)
+    db.tag_photo(pid_b, park_b)
+
+    db.merge_duplicate_keywords()
+
+    # Illinois/illinois collapsed to one parent.
+    illinois = db.conn.execute(
+        "SELECT id FROM keywords WHERE LOWER(name) = 'illinois'"
+    ).fetchall()
+    assert len(illinois) == 1
+    assert illinois[0]["id"] == upper
+
+    # Both Springfields survive under the surviving parent, each
+    # keeping its own place_id and photo association. The migrating
+    # one was disambiguated rather than merged across place_ids.
+    springfields = db.conn.execute(
+        "SELECT id, name, parent_id, place_id FROM keywords "
+        "WHERE LOWER(name) LIKE 'springfield%' ORDER BY place_id"
+    ).fetchall()
+    assert len(springfields) == 2
+    assert {s["parent_id"] for s in springfields} == {upper}
+    assert {s["place_id"] for s in springfields} == {"PARK_A", "PARK_B"}
+    by_place = {s["place_id"]: s for s in springfields}
+    assert by_place["PARK_A"]["id"] == park_a
+    assert by_place["PARK_A"]["name"] == "Springfield"
+    assert by_place["PARK_B"]["id"] == park_b
+    assert by_place["PARK_B"]["name"] == f"Springfield (id-{park_b})"
+
+    # Each photo stays on its own real-world place — neither got
+    # silently retagged onto the other Springfield.
+    a_tags = {r[0] for r in db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid_a,)
+    ).fetchall()}
+    b_tags = {r[0] for r in db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid_b,)
+    ).fetchall()}
+    assert a_tags == {park_a}
+    assert b_tags == {park_b}
+
+
 def test_empty_workspace_labels_does_not_fallback_to_global(db):
     """An explicit empty active_labels [] should NOT fall back to global labels."""
     ws = db.create_workspace("Empty Labels")

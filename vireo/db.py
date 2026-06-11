@@ -7121,12 +7121,16 @@ class Database:
         Moves photo associations, then reparents the source's children onto
         the destination. A child whose exact name already exists under the
         destination (UNIQUE(name, parent_id) clash) merges into that sibling
-        recursively only when both share the same ``type`` — "Birds > Heron"
-        and "birds > Heron" must converge on one Heron. When the existing
-        sibling has a different ``type`` (e.g. a 'general' Macro vs. a
-        'genre' Macro), the dedup boundary is (LOWER(name), parent_id, type),
-        so they are NOT duplicates; preserve both by disambiguating the
-        migrating child's name with an id suffix. Case-variant children
+        recursively only when both share the same ``type`` AND the same
+        ``place_id`` — "Birds > Heron" and "birds > Heron" must converge on
+        one Heron. When the existing sibling has a different ``type`` (e.g.
+        a 'general' Macro vs. a 'genre' Macro) the dedup boundary
+        ``(LOWER(name), parent_id, type)`` says they are NOT duplicates;
+        when they have different ``place_id``s (two distinct Google places
+        that happen to share a display name) they are distinct real-world
+        locations that ``upsert_place_chain`` deliberately keeps separate.
+        In both cases preserve both rows by disambiguating the migrating
+        child's name with an id suffix. Case-variant children
         don't clash (the UNIQUE index is case-sensitive); they reparent
         cleanly and collapse on the caller's next convergence pass. Cycles
         are impossible: parent_id chains are acyclic by construction.
@@ -7163,7 +7167,8 @@ class Database:
         # Reparent children onto the destination before deleting, or the
         # keywords.parent_id FK aborts the merge mid-way.
         children = self.conn.execute(
-            "SELECT id, name, type FROM keywords WHERE parent_id = ?", (src_id,)
+            "SELECT id, name, type, place_id FROM keywords WHERE parent_id = ?",
+            (src_id,),
         ).fetchall()
         for child in children:
             try:
@@ -7173,16 +7178,26 @@ class Database:
                 )
             except sqlite3.IntegrityError:
                 existing = self.conn.execute(
-                    "SELECT id, type FROM keywords WHERE parent_id = ? AND name = ?",
+                    "SELECT id, type, place_id FROM keywords "
+                    "WHERE parent_id = ? AND name = ?",
                     (dst_id, child["name"]),
                 ).fetchone()
-                if existing["type"] == child["type"]:
+                # Real duplicate only when both the dedup boundary
+                # (LOWER(name), parent_id, type) AND place_id match —
+                # two distinct Google places that happen to share a
+                # display name under case-variant location parents must
+                # stay separate; upsert_place_chain disambiguates them
+                # for the same reason. NULL place_ids are equivalent so
+                # case-only clashes still converge.
+                if (
+                    existing["type"] == child["type"]
+                    and existing["place_id"] == child["place_id"]
+                ):
                     merged += self._merge_keyword_into(child["id"], existing["id"])
                 else:
-                    # Same name + parent but different type: outside the
-                    # (LOWER(name), parent_id, type) dedup boundary, so
-                    # preserve both by renaming the migrating child rather
-                    # than retagging photos across types.
+                    # Outside the dedup boundary — preserve both by
+                    # renaming the migrating child rather than retagging
+                    # photos across types or merging distinct places.
                     disambiguated = f"{child['name']} (id-{child['id']})"
                     self.conn.execute(
                         "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
