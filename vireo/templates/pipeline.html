@@ -97,6 +97,10 @@ body { padding-bottom: 36px; }
   background: var(--danger, #E74C3C);
   color: #fff;
 }
+.stage-status-pill.cancelled {
+  background: color-mix(in srgb, var(--warning, #F0A030) 20%, transparent);
+  color: var(--warning, #F0A030);
+}
 .stage-progress-bar {
   display: inline-flex;
   width: 80px;
@@ -190,6 +194,7 @@ body { padding-bottom: 36px; }
 }
 .pipeline-plan-summary .plan-stage-row.will-run .plan-stage-pill { color: var(--accent, #24E5CA); }
 .pipeline-plan-summary .plan-stage-row.will-skip .plan-stage-pill { color: var(--text-dim, #5A8890); font-style: italic; }
+.pipeline-plan-summary .plan-stage-row.cancelled .plan-stage-pill { color: var(--warning, #F0A030); }
 .pipeline-plan-summary .plan-stage-row.done-prior .plan-stage-pill {
   color: color-mix(in srgb, var(--accent, #24E5CA) 65%, var(--text-secondary, #B0CCCC));
 }
@@ -2890,8 +2895,11 @@ function _onPipelineComplete(result) {
     ['Source', 'Scan', 'Previews', 'Classify', 'Extract', 'EyeKeypoints', 'Group'].forEach(function(cardSuffix) {
       if (_runningStages[cardSuffix]) {
         delete _runningStages[cardSuffix];
-        _stageOutcomes[cardSuffix] = 'will-skip';
-        _setPill(cardSuffix, 'will-skip', 'Cancelled');
+        // Record a real 'cancelled' outcome so later refreshPipelineUI
+        // calls keep rendering "Cancelled" — a 'will-skip' outcome would
+        // be re-labeled with the future-tense "Will skip" on the next
+        // refresh, which lies about what happened to a mid-run stage.
+        _stageOutcomes[cardSuffix] = 'cancelled';
       }
     });
     refreshPipelineUI();
@@ -3300,18 +3308,28 @@ async function loadLabels() {
     var active = data.active || [];
     var activePaths = new Set(active.map(function(a) { return a.labels_file; }));
 
+    div.textContent = '';
     if (!data.labels || data.labels.length === 0) {
-      div.innerHTML = '<span style="color:var(--text-dim);font-size:12px;">(Tree of Life — all species)</span>';
+      var empty = document.createElement('span');
+      empty.style.cssText = 'color:var(--text-dim);font-size:12px;';
+      empty.textContent = '(Tree of Life — all species)';
+      div.appendChild(empty);
     } else {
-      var html = '';
       data.labels.forEach(function(l) {
         var isActive = activePaths.has(l.labels_file);
-        html += '<label style="display:flex;align-items:center;gap:4px;color:var(--text-secondary);cursor:pointer;padding:2px 0;">' +
-          '<input type="checkbox" class="labels-run-cb" value="' + l.labels_file.replace(/"/g, '&quot;') + '"' +
-          (isActive ? ' checked' : '') + ' onchange="updateReadiness(); schedulePlanRefresh();" style="accent-color:var(--accent);"> ' +
-          l.name + ' (' + (l.species_count || 0) + ')</label>';
+        var label = document.createElement('label');
+        label.style.cssText = 'display:flex;align-items:center;gap:4px;color:var(--text-secondary);cursor:pointer;padding:2px 0;';
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'labels-run-cb';
+        cb.value = l.labels_file;
+        cb.checked = isActive;
+        cb.onchange = function() { updateReadiness(); schedulePlanRefresh(); };
+        cb.style.cssText = 'accent-color:var(--accent);';
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(' ' + l.name + ' (' + (l.species_count || 0) + ')'));
+        div.appendChild(label);
       });
-      div.innerHTML = html;
     }
 
   } catch(e) {}
@@ -3335,9 +3353,9 @@ async function updateReadiness() {
 
     // Model status
     if (r.model_ready) {
-      items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Model: <b>' + r.model_name + '</b> — ready');
+      items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Model: <b>' + escapeHtml(r.model_name) + '</b> — ready');
     } else if (r.needs_download) {
-      items.push('<span style="color:var(--warning,#f0c040);">&#9679;</span> Model: <b>' + r.model_name + '</b> — will download <b>' + (r.model_size_mb >= 1000 ? (r.model_size_mb / 1000).toFixed(1) + ' GB' : r.model_size_mb + ' MB') + '</b> on first run');
+      items.push('<span style="color:var(--warning,#f0c040);">&#9679;</span> Model: <b>' + escapeHtml(r.model_name) + '</b> — will download <b>' + (r.model_size_mb >= 1000 ? (r.model_size_mb / 1000).toFixed(1) + ' GB' : r.model_size_mb + ' MB') + '</b> on first run');
     } else {
       items.push('<span style="color:var(--danger,#e74c3c);">&#10007;</span> No model available — download one in Settings');
     }
@@ -3347,7 +3365,7 @@ async function updateReadiness() {
       items.push('<span style="color:var(--info,#7ec8e3);">&#9679;</span> Labels: <b>Tree of Life</b> — classifying against all species (slower, less accurate than regional labels)');
     } else if (r.labels_count > 0) {
       var labelDisplay = r.labels_name.length > 60 ? r.labels_name.substring(0, 57) + '...' : r.labels_name;
-      items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Labels: <b>' + labelDisplay + '</b> — ' + r.labels_count.toLocaleString() + ' species');
+      items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Labels: <b>' + escapeHtml(labelDisplay) + '</b> — ' + r.labels_count.toLocaleString() + ' species');
     }
 
     // Embeddings status
@@ -3838,7 +3856,7 @@ var _pipelineState = {
 // and a single global would let one stage's status update clobber another's
 // "Running…" pill on the next refresh.
 var _runningStages = {};  // suffix -> true while that stage is running
-var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'will-skip' | 'done-prior'
+var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'cancelled' | 'will-skip' | 'done-prior'
 
 // Plan response from POST /api/pipeline/plan, keyed by stage suffix:
 //   { Classify: { state, summary, detail }, Extract: ..., ... }
@@ -3881,6 +3899,7 @@ var _PILL_LABELS = {
   'running':    'Running…',
   'done':       'Done',
   'failed':     'Failed',
+  'cancelled':  'Cancelled',
   'will-run':   'Will run',
   'will-skip':  'Will skip',
   'done-prior': 'Already done',
@@ -3899,6 +3918,7 @@ function _formatPillLabel(stage, planEntry, state) {
   if (state === 'running')   return 'Running…';
   if (state === 'done')      return 'Done';
   if (state === 'failed')    return 'Failed';
+  if (state === 'cancelled') return 'Cancelled';
   if (state === 'will-skip') return 'Will skip';
 
   if (!planEntry) {
@@ -4013,7 +4033,7 @@ function _renderPlanSummary() {
       '<div class="plan-stage-row ' + state + '">' +
         '<span class="plan-stage-name">' + stage.label + '</span>' +
         '<span class="plan-stage-pill">' + pillLabel + '</span>' +
-        '<span class="plan-stage-summary">' + (summary || '') + '</span>' +
+        '<span class="plan-stage-summary">' + escapeHtml(summary || '') + '</span>' +
       '</div>'
     );
   });
