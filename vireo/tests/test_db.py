@@ -12889,3 +12889,215 @@ def test_get_workspace_extensions_excludes_missing_folders(tmp_path):
 
     # .cr2 lives only in the missing folder — must be filtered out.
     assert db.get_workspace_extensions() == ['.jpg']
+
+
+# -- Regression tests: unbounded IN clauses, inat ordering, override guards --
+
+
+def _cap_sqlite_vars(db, cap=999):
+    """Emulate the historical SQLITE_MAX_VARIABLE_NUMBER=999 cap so an
+    unchunked IN clause fails deterministically even on modern builds."""
+    import sqlite3
+    db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, cap)
+
+
+def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
+    """Pipeline callers pass the full resolved collection scope as
+    photo_ids; a single IN clause would exceed the bind-var cap for big
+    collections. Must route through _scope_clause like its count siblings."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    pids = []
+    for i in range(2):
+        pid = db.add_photo(fid, f"p{i}.jpg", ".jpg", 1000, float(i + 1),
+                           width=800, height=600)
+        db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
+        det_ids = db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
+            detector_model="MegaDetector",
+        )
+        db.add_prediction(
+            det_ids[0], species="Vulpes vulpes", confidence=0.9,
+            model="bioclip-2.5", category="match",
+            taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
+        )
+        pids.append(pid)
+
+    _cap_sqlite_vars(db)
+    scope = pids + list(range(1_000_000, 1_001_200))  # 1202 ids > 999 cap
+    rows = db.list_photos_for_eye_keypoint_stage(photo_ids=scope)
+    assert {r["id"] for r in rows} == set(pids)
+
+
+def test_get_predictions_chunks_large_photo_id_list(tmp_path):
+    """/api/predictions passes full-collection id lists. Chunked queries
+    must merge while preserving the confidence-DESC ordering across
+    chunk boundaries."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+
+    def make_photo(name, conf):
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+        det = db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}],
+            detector_model="MegaDetector",
+        )[0]
+        db.add_prediction(det, species=name, confidence=conf, model="bioclip")
+        return pid
+
+    p_low = make_photo("low.jpg", 0.3)
+    p_high = make_photo("high.jpg", 0.9)
+
+    _cap_sqlite_vars(db)
+    # Put the high-confidence photo in the *last* chunk so an
+    # append-without-resort implementation would order it after p_low.
+    scope = [p_low] + list(range(1_000_000, 1_001_200)) + [p_high]
+    rows = db.get_predictions(photo_ids=scope)
+    assert [r["photo_id"] for r in rows] == [p_high, p_low]
+    confs = [r["confidence"] for r in rows]
+    assert confs == sorted(confs, reverse=True)
+
+
+def test_get_keywords_for_photos_chunks_and_dedups_large_input(tmp_path):
+    """Same /api/predictions source feeds get_keywords_for_photos with the
+    full collection scope; must chunk, and duplicated input ids must not
+    double-append keywords."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    kid = db.add_keyword("Robin", kw_type="general")
+    db.tag_photo(pid, kid)
+
+    _cap_sqlite_vars(db)
+    # pid appears twice, in what would be different chunks.
+    scope = [pid] + list(range(1_000_000, 1_001_200)) + [pid]
+    result = db.get_keywords_for_photos(scope)
+    assert list(result.keys()) == [pid]
+    assert [k["name"] for k in result[pid]] == ["Robin"]
+
+
+def test_delete_photos_chunks_large_resolve_list(tmp_path):
+    """api_audit_remove_missing passes a raw request-body id list straight
+    through; the initial resolve SELECT must chunk like the rest of the
+    method already does."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pids = [
+        db.add_photo(folder_id=fid, filename=f"p{i}.jpg", extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+        for i in range(3)
+    ]
+
+    _cap_sqlite_vars(db)
+    result = db.delete_photos(pids + list(range(1_000_000, 1_001_200)))
+    assert result["deleted"] == 3
+    assert set(result["ids"]) == set(pids)
+
+
+def test_apply_duplicate_resolution_chunks_large_group(tmp_path):
+    """duplicate_scan.py documents that one duplicate group can exceed the
+    bind-var cap and chunks its own reads; the apply path must chunk both
+    the resolve SELECT and the loser-flag UPDATE."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path / "photos"), name='photos')
+    # 1100 photos in one group: 1099 losers > the legacy 999-var cap, so
+    # the rejected-flag UPDATE must chunk too.
+    pids = [
+        db.add_photo(folder_id=fid, filename=f"dup{i:04d}.jpg", extension='.jpg',
+                     file_size=100, file_mtime=float(i + 1))
+        for i in range(1100)
+    ]
+
+    _cap_sqlite_vars(db)
+    result = db.apply_duplicate_resolution(pids)
+    assert result["winner_id"] in pids
+    assert result["rejected"] == 1099
+    flagged = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM photos WHERE flag = 'rejected'"
+    ).fetchone()["n"]
+    assert flagged == 1099
+
+
+def test_collection_photo_ids_rule_supports_large_selection(tmp_path):
+    """A static collection created from a large selection used to bind one
+    parameter per id, making every query against the collection fail
+    permanently. Integer ids are inlined as literals instead."""
+    import json
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                      file_size=100, file_mtime=2.0)
+
+    ids = [p1, p2] + list(range(1_000_000, 1_001_200))
+    cid = db.add_collection(
+        'Big selection', json.dumps([{"field": "photo_ids", "value": ids}])
+    )
+
+    _cap_sqlite_vars(db)
+    assert db.count_collection_photos(cid) == 2
+    assert {p["id"] for p in db.get_collection_photos(cid)} == {p1, p2}
+    # Composability: the leaf still works inside a rule group with siblings.
+    assert db.count_photos_for_rules([
+        {"field": "photo_ids", "value": ids},
+        {"field": "rating", "op": ">=", "value": 0},
+    ]) == 2
+
+
+def test_get_inat_submissions_returns_newest_and_chunks(tmp_path):
+    """Each photo must map to its most recent submission (the old dict
+    comprehension over DESC-ordered rows kept the OLDEST), and the photo_id
+    IN clause must chunk."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "INSERT INTO inat_submissions (photo_id, observation_id, observation_url, submitted_at) "
+        "VALUES (?, 111, 'https://inat/111', '2025-01-01 00:00:00')",
+        (pid,),
+    )
+    db.conn.execute(
+        "INSERT INTO inat_submissions (photo_id, observation_id, observation_url, submitted_at) "
+        "VALUES (?, 222, 'https://inat/222', '2026-01-01 00:00:00')",
+        (pid,),
+    )
+    db.conn.commit()
+
+    subs = db.get_inat_submissions([pid])
+    assert subs[pid]["observation_id"] == 222
+
+    _cap_sqlite_vars(db)
+    subs = db.get_inat_submissions([pid] + list(range(1_000_000, 1_001_200)))
+    assert subs[pid]["observation_id"] == 222
+
+
+def test_workspace_active_labels_survive_non_dict_overrides(tmp_path):
+    """api_update_workspace can persist non-dict config_overrides JSON; the
+    active-labels accessors must fall back like get_effective_config and
+    get_subject_types do, not raise AttributeError/TypeError."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+
+    for bad in (["not", "a", "dict"], "just a string", 42):
+        db.update_workspace(ws_id, config_overrides=bad)
+        assert db.get_workspace_active_labels() is None
+        # Setter must replace the junk rather than crash on item assignment.
+        db.set_workspace_active_labels(["birds.txt"])
+        assert db.get_workspace_active_labels() == ["birds.txt"]

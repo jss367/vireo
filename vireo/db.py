@@ -1251,6 +1251,8 @@ class Database:
             return None
         try:
             overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+            if not isinstance(overrides, dict):
+                return None
             labels = overrides.get("active_labels")
             return labels if isinstance(labels, list) else None
         except (json.JSONDecodeError, TypeError):
@@ -1349,6 +1351,8 @@ class Database:
             try:
                 overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
             except (json.JSONDecodeError, TypeError):
+                overrides = {}
+            if not isinstance(overrides, dict):
                 overrides = {}
         overrides["active_labels"] = labels_files
         self.update_workspace(self._ws_id(), config_overrides=overrides)
@@ -2891,15 +2895,19 @@ class Database:
         if not photo_ids or len(photo_ids) < 2:
             return {"winner_id": None, "loser_ids": [], "rejected": 0}
 
-        placeholders = ",".join("?" * len(photo_ids))
-        rows = self.conn.execute(
-            f"""SELECT p.id, p.filename, p.file_mtime, p.rating, p.flag,
-                       f.path AS folder_path
-                FROM photos p
-                LEFT JOIN folders f ON f.id = p.folder_id
-                WHERE p.id IN ({placeholders}) AND (p.flag IS NULL OR p.flag != 'rejected')""",
-            list(photo_ids),
-        ).fetchall()
+        # Chunked — a single duplicate group can exceed the bound-parameter
+        # cap (see duplicate_scan.py, which chunks its own reads).
+        rows = []
+        for chunk in _chunks(list(dict.fromkeys(photo_ids))):
+            placeholders = ",".join("?" * len(chunk))
+            rows.extend(self.conn.execute(
+                f"""SELECT p.id, p.filename, p.file_mtime, p.rating, p.flag,
+                           f.path AS folder_path
+                    FROM photos p
+                    LEFT JOIN folders f ON f.id = p.folder_id
+                    WHERE p.id IN ({placeholders}) AND (p.flag IS NULL OR p.flag != 'rejected')""",
+                list(chunk),
+            ).fetchall())
         if len(rows) < 2:
             return {"winner_id": None, "loser_ids": [], "rejected": 0}
 
@@ -2980,11 +2988,13 @@ class Database:
             # this transaction. Rare edge case; revisit if product needs it.
             # Collections are rule-based (no junction table) so
             # merge.collection_ids_to_add has nothing to write either.
-            if loser_ids:
-                loser_placeholders = ",".join("?" * len(loser_ids))
+            # Chunked — a single duplicate group's loser list can exceed the
+            # bound-parameter cap.
+            for chunk in _chunks(loser_ids):
+                loser_placeholders = ",".join("?" * len(chunk))
                 self.conn.execute(
                     f"UPDATE photos SET flag = 'rejected' WHERE id IN ({loser_placeholders})",
-                    loser_ids,
+                    list(chunk),
                 )
 
         logging.getLogger(__name__).info(
@@ -5463,14 +5473,18 @@ class Database:
         if not photo_ids:
             return {"deleted": 0, "ids": [], "files": []}
 
-        # Resolve to actual existing photos
-        placeholders = ",".join("?" for _ in photo_ids)
-        rows = self.conn.execute(
-            f"SELECT p.id, p.filename, p.companion_path, p.folder_id, f.path AS folder_path "
-            f"FROM photos p JOIN folders f ON p.folder_id = f.id "
-            f"WHERE p.id IN ({placeholders})",
-            list(photo_ids),
-        ).fetchall()
+        # Resolve to actual existing photos. Chunked — callers like
+        # /api/audit/remove-missing pass arbitrarily large id lists straight
+        # from the request body.
+        rows = []
+        for chunk in _chunks(list(dict.fromkeys(photo_ids))):
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(self.conn.execute(
+                f"SELECT p.id, p.filename, p.companion_path, p.folder_id, f.path AS folder_path "
+                f"FROM photos p JOIN folders f ON p.folder_id = f.id "
+                f"WHERE p.id IN ({placeholders})",
+                list(chunk),
+            ).fetchall())
 
         if not rows:
             return {"deleted": 0, "ids": [], "files": []}
@@ -5487,14 +5501,15 @@ class Database:
                     if comp and comp["id"] not in photo_ids:
                         companion_ids.append(comp["id"])
             if companion_ids:
-                comp_ph = ",".join("?" for _ in companion_ids)
-                comp_rows = self.conn.execute(
-                    f"SELECT p.id, p.filename, p.companion_path, p.folder_id, f.path AS folder_path "
-                    f"FROM photos p JOIN folders f ON p.folder_id = f.id "
-                    f"WHERE p.id IN ({comp_ph})",
-                    companion_ids,
-                ).fetchall()
-                rows = list(rows) + list(comp_rows)
+                rows = list(rows)
+                for chunk in _chunks(dict.fromkeys(companion_ids)):
+                    comp_ph = ",".join("?" for _ in chunk)
+                    rows.extend(self.conn.execute(
+                        f"SELECT p.id, p.filename, p.companion_path, p.folder_id, f.path AS folder_path "
+                        f"FROM photos p JOIN folders f ON p.folder_id = f.id "
+                        f"WHERE p.id IN ({comp_ph})",
+                        list(chunk),
+                    ).fetchall())
 
         all_ids = list({row["id"] for row in rows})
 
@@ -6351,12 +6366,8 @@ class Database:
             photo_ids = list(photo_ids)
             if not photo_ids:
                 return []
-            placeholders = ",".join("?" for _ in photo_ids)
-            extra_where = f" AND p.id IN ({placeholders})"
-            params = (ws_id, min_conf, EYE_KP_FINGERPRINT_VERSION, *photo_ids)
-        else:
-            extra_where = ""
-            params = (ws_id, min_conf, EYE_KP_FINGERPRINT_VERSION)
+        extra_where, scope_params = self._scope_clause(photo_ids)
+        params = (ws_id, min_conf, EYE_KP_FINGERPRINT_VERSION, *scope_params)
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.width, p.height,
                       p.mask_path,
@@ -7565,19 +7576,23 @@ class Database:
         """Return keywords for a batch of photos keyed by photo id."""
         if not photo_ids:
             return {}
-        placeholders = ",".join("?" for _ in photo_ids)
-        rows = self.conn.execute(
-            f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type,
-                       k.is_species
-                FROM photo_keywords pk
-                JOIN keywords k ON k.id = pk.keyword_id
-                WHERE pk.photo_id IN ({placeholders})
-                ORDER BY k.type, k.name""",
-            list(photo_ids),
-        ).fetchall()
+        # Dedup-preserving-order: chunking that re-queries the same id
+        # in a later chunk would double-append it under setdefault.
+        photo_ids = list(dict.fromkeys(photo_ids))
         result = {}
-        for r in rows:
-            result.setdefault(r["photo_id"], []).append(dict(r))
+        for chunk in _chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type,
+                           k.is_species
+                    FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id
+                    WHERE pk.photo_id IN ({placeholders})
+                    ORDER BY k.type, k.name""",
+                list(chunk),
+            ).fetchall()
+            for r in rows:
+                result.setdefault(r["photo_id"], []).append(dict(r))
         return result
 
     def get_species_keywords_for_photos(self, photo_ids):
@@ -8281,48 +8296,67 @@ class Database:
         ``/api/predictions/compare`` after re-classification.
         """
         ws = self._ws_id()
-        conditions = ["wf.workspace_id = ?"]
-        params = [ws, ws]  # first ? = pr_rev.workspace_id, second = wf.workspace_id
-        if photo_ids is not None:
-            placeholders = ",".join("?" for _ in photo_ids)
-            conditions.append(f"d.photo_id IN ({placeholders})")
-            params.extend(photo_ids)
+        base_conditions = ["wf.workspace_id = ?"]
+        base_params = [ws]
         if model:
-            conditions.append("pr.classifier_model = ?")
-            params.append(model)
+            base_conditions.append("pr.classifier_model = ?")
+            base_params.append(model)
         if status:
-            conditions.append("COALESCE(pr_rev.status, 'pending') = ?")
-            params.append(status)
+            base_conditions.append("COALESCE(pr_rev.status, 'pending') = ?")
+            base_params.append(status)
         # Latest-fingerprint-per-(detection, classifier_model) filter — same
         # pattern used by /api/species/summary and get_top_prediction_for_photo.
-        conditions.append(
+        base_conditions.append(
             "pr.labels_fingerprint = ("
             "SELECT pr2.labels_fingerprint FROM predictions pr2 "
             "WHERE pr2.detection_id = pr.detection_id "
             "AND pr2.classifier_model = pr.classifier_model "
             "ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1)"
         )
-        where = "WHERE " + " AND ".join(conditions)
-        return self.conn.execute(
-            f"""SELECT pr.*,
-                       pr.classifier_model AS model,
-                       COALESCE(pr_rev.status, 'pending') AS status,
-                       pr_rev.individual AS individual,
-                       pr_rev.group_id AS group_id,
-                       pr_rev.vote_count AS vote_count,
-                       pr_rev.total_votes AS total_votes,
-                       d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
-                       d.detector_confidence, d.detector_model,
-                       p.filename, p.timestamp
-                FROM predictions pr
-                JOIN detections d ON d.id = pr.detection_id
-                JOIN photos p ON p.id = d.photo_id
-                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                LEFT JOIN prediction_review pr_rev
-                  ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
-                {where} ORDER BY pr.confidence DESC""",
-            params,
-        ).fetchall()
+        # The photo-id filter is chunked — /api/predictions passes the full
+        # resolved collection scope, which can exceed SQLite's bound-parameter
+        # cap. Chunks partition disjoint photo ids; the merged rows are
+        # re-sorted in Python to preserve the single-query ORDER BY.
+        if photo_ids is not None:
+            id_chunks = list(_chunks(list(dict.fromkeys(photo_ids))))
+        else:
+            id_chunks = [None]
+        rows = []
+        for chunk in id_chunks:
+            conditions = list(base_conditions)
+            # first ? = pr_rev.workspace_id, rest = WHERE params
+            params = [ws, *base_params]
+            if chunk is not None:
+                placeholders = ",".join("?" for _ in chunk)
+                conditions.append(f"d.photo_id IN ({placeholders})")
+                params.extend(chunk)
+            where = "WHERE " + " AND ".join(conditions)
+            rows.extend(self.conn.execute(
+                f"""SELECT pr.*,
+                           pr.classifier_model AS model,
+                           COALESCE(pr_rev.status, 'pending') AS status,
+                           pr_rev.individual AS individual,
+                           pr_rev.group_id AS group_id,
+                           pr_rev.vote_count AS vote_count,
+                           pr_rev.total_votes AS total_votes,
+                           d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
+                           d.detector_confidence, d.detector_model,
+                           p.filename, p.timestamp
+                    FROM predictions pr
+                    JOIN detections d ON d.id = pr.detection_id
+                    JOIN photos p ON p.id = d.photo_id
+                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    LEFT JOIN prediction_review pr_rev
+                      ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                    {where} ORDER BY pr.confidence DESC""",
+                params,
+            ).fetchall())
+        if len(id_chunks) > 1:
+            # Match SQL "ORDER BY pr.confidence DESC" (NULLs sort last).
+            rows.sort(
+                key=lambda r: (r["confidence"] is None, -(r["confidence"] or 0))
+            )
+        return rows
 
     def update_prediction_status(self, prediction_id, status, _commit=True):
         """Update per-workspace review status for a prediction.
@@ -10416,8 +10450,36 @@ class Database:
                 ids = value if isinstance(value, list) else []
                 if not ids:
                     return "0", []
-                placeholders = ",".join("?" for _ in ids)
-                return f"p.id IN ({placeholders})", list(ids)
+                # Inline integer ids as SQL literals instead of binding one
+                # parameter per id — a static collection created from a large
+                # selection would otherwise exceed SQLite's bound-parameter
+                # cap on every query against the collection, permanently. A
+                # temp table (as _scope_clause uses) isn't composable here:
+                # the returned clause may be embedded in queries that run
+                # later and repeatedly. Only ints are inlined (injection-safe);
+                # any non-int leftovers (malformed rules, rare) keep the
+                # parameter-binding path so comparison semantics are unchanged.
+                int_ids = [
+                    v for v in ids
+                    if isinstance(v, int) and not isinstance(v, bool)
+                ]
+                other = [
+                    v for v in ids
+                    if not (isinstance(v, int) and not isinstance(v, bool))
+                ]
+                parts = []
+                params = []
+                if int_ids:
+                    parts.append(
+                        "p.id IN (%s)" % ",".join(str(v) for v in int_ids)
+                    )
+                if other:
+                    placeholders = ",".join("?" for _ in other)
+                    parts.append(f"p.id IN ({placeholders})")
+                    params = list(other)
+                if len(parts) == 1:
+                    return parts[0], params
+                return "(" + " OR ".join(parts) + ")", params
             if field in ("rating", "quality_score", "sharpness",
                          "subject_sharpness", "noise_estimate",
                          "crop_complete"):
@@ -11029,9 +11091,19 @@ class Database:
         """Return {photo_id: {observation_id, observation_url, submitted_at}} for given IDs."""
         if not photo_ids:
             return {}
-        placeholders = ",".join("?" * len(photo_ids))
-        rows = self.conn.execute(
-            f"SELECT photo_id, observation_id, observation_url, submitted_at FROM inat_submissions WHERE photo_id IN ({placeholders}) ORDER BY submitted_at DESC",
-            photo_ids,
-        ).fetchall()
-        return {r["photo_id"]: dict(r) for r in rows}
+        result = {}
+        for chunk in _chunks(list(dict.fromkeys(photo_ids))):
+            placeholders = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"SELECT photo_id, observation_id, observation_url, submitted_at"
+                f" FROM inat_submissions WHERE photo_id IN ({placeholders})"
+                f" ORDER BY submitted_at DESC, id DESC",
+                list(chunk),
+            ).fetchall()
+            # Rows arrive newest-first; keep the first seen per photo so each
+            # photo maps to its most recent submission (a dict comprehension
+            # here would let older rows overwrite newer ones).
+            for r in rows:
+                if r["photo_id"] not in result:
+                    result[r["photo_id"]] = dict(r)
+        return result
