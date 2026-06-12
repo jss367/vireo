@@ -375,7 +375,13 @@ def adjust_capture_time(
                 text=True,
                 timeout=120,
             )
-            if result.returncode not in (0, 1):
+            if result.returncode != 0:
+                # ExifTool exits 0 on success (warnings included) and 1 when
+                # any error occurred — e.g. "0 image files updated, 1 files
+                # weren't updated due to errors" for a read-only file. This
+                # is a per-photo write, so exit 1 means the write failed;
+                # don't copy the read path's (0, 1) tolerance from
+                # metadata.py, which only accepts 1 for partial batch output.
                 raise RuntimeError((result.stderr or result.stdout or "ExifTool failed").strip())
             _refresh_photo_metadata(db, photo["id"], paths[0])
             db.conn.commit()

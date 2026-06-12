@@ -1978,9 +1978,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/setup/complete", methods=["POST"])
     def api_setup_complete():
         """Mark first-launch setup as done (called after download or skip)."""
-        user_cfg = cfg.load()
-        user_cfg["setup_complete"] = True
-        cfg.save(user_cfg)
+        # Lock + raw read-modify-write so a concurrent settings PATCH isn't
+        # reverted and we don't pin every DEFAULTS value into the user's
+        # file (see api_pipeline_save_grouping_defaults).
+        with _settings_write_lock:
+            raw = _read_raw_config_file()
+            raw["setup_complete"] = True
+            cfg.save(raw)
         return jsonify({"ok": True})
 
     @app.route("/browse")
@@ -2730,7 +2734,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/photos/<int:photo_id>")
     def api_photo_detail(photo_id):
         db = _get_db()
-        photo = db.get_photo(photo_id)
+        # verify_workspace: this response exposes the absolute path and
+        # xmp_path, so a photo outside the active workspace must 404 —
+        # mirrors serve_thumbnail / api_files_reveal.
+        photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
             return json_error("not found", 404)
 
@@ -3428,6 +3435,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         color = body.get("color")
         if color is not None and color not in db.VALID_COLOR_LABELS:
             return json_error(f"color must be one of {db.VALID_COLOR_LABELS}")
+        # Existence + workspace checks mirror the rating/flag endpoints. A
+        # stale id from an open browse tab would otherwise hit the
+        # photo_color_labels FK and 500.
+        if db.get_photo(photo_id) is None:
+            return json_error("not found", 404)
+        try:
+            db._verify_photo_in_workspace(photo_id)
+        except ValueError as e:
+            return json_error(str(e), 403)
         old_color = db.get_color_label(photo_id) or ''
         new_color = color or ''
         if color:
@@ -4677,14 +4693,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(f"color must be one of {db.VALID_COLOR_LABELS}")
         if not photo_ids:
             return json_error("photo_ids required")
-        old_labels = db.get_color_labels_for_photos(photo_ids)
+        # Filter to photos that exist AND are visible in the active workspace
+        # (mirrors api_batch_rating's stale-id filtering). Stale ids would
+        # otherwise hit the photo_color_labels FK and abort the batch with a
+        # 500 partway through.
+        photos_map = db.get_photos_by_ids(photo_ids)
+        ws_folder_ids = {
+            r["folder_id"] for r in db.conn.execute(
+                "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?",
+                (db._ws_id(),),
+            )
+        }
+        valid_ids = list(dict.fromkeys(
+            pid for pid in photo_ids
+            if pid in photos_map and photos_map[pid]["folder_id"] in ws_folder_ids
+        ))
+        old_labels = db.get_color_labels_for_photos(valid_ids)
         new_color = color or ''
-        db.batch_set_color_label(photo_ids, color)
+        db.batch_set_color_label(valid_ids, color)
         items = [{'photo_id': pid, 'old_value': old_labels.get(pid, ''), 'new_value': new_color}
-                 for pid in photo_ids]
-        db.record_edit('color_label', f'Set color to {color or "none"} on {len(photo_ids)} photos',
-                       new_color, items, is_batch=True)
-        return jsonify({"ok": True, "updated": len(photo_ids)})
+                 for pid in valid_ids]
+        if items:
+            db.record_edit('color_label', f'Set color to {color or "none"} on {len(valid_ids)} photos',
+                           new_color, items, is_batch=True)
+        return jsonify({"ok": True, "updated": len(valid_ids)})
 
     @app.route("/api/batch/keyword", methods=["POST"])
     def api_batch_keyword():
@@ -5256,8 +5288,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                            f'Discarded {len(changes)} pending changes',
                            '', items, is_batch=len(changes) > 1)
 
-        log.info("Discarded %d pending changes", len(change_ids))
-        return jsonify({"ok": True, "discarded": len(change_ids)})
+        # Report what was actually deleted: clear_pending only removes rows
+        # that exist in the active workspace, which is exactly the set the
+        # SELECT above found.
+        log.info("Discarded %d pending changes", len(changes))
+        return jsonify({"ok": True, "discarded": len(changes)})
 
     # -- Collection API routes --
 
@@ -5383,8 +5418,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
+        if not isinstance(photo_ids, list):
+            return json_error("photo_ids must be a list")
         if not photo_ids:
             return json_error("photo_ids required")
+        # Non-int entries would either crash sorted() against the existing
+        # int ids or persist strings that never match `p.id IN (...)` —
+        # mirrors api_photos_by_ids' validation.
+        for pid in photo_ids:
+            if isinstance(pid, bool) or not isinstance(pid, int):
+                return json_error("photo_ids must be integers")
 
         row = db.conn.execute(
             "SELECT rules FROM collections WHERE id = ? AND workspace_id = ?",
@@ -6027,12 +6070,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/workspaces/<int:ws_id>", methods=["PUT"])
     def api_update_workspace(ws_id):
         db = _get_db()
+        if not db.get_workspace(ws_id):
+            return json_error("Workspace not found", 404)
         body = request.get_json(silent=True) or {}
         kwargs = {}
         if "name" in body:
             kwargs["name"] = body["name"]
         if "config_overrides" in body:
-            kwargs["config_overrides"] = body["config_overrides"]
+            overrides = body["config_overrides"]
+            # Anything else would be persisted as-is and crash the labels
+            # accessors that expect a JSON object (or NULL) in this column.
+            if overrides is not None and not isinstance(overrides, dict):
+                return json_error("config_overrides must be an object or null")
+            kwargs["config_overrides"] = overrides
         if "ui_state" in body:
             kwargs["ui_state"] = body["ui_state"]
         db.update_workspace(ws_id, **kwargs)
@@ -6119,6 +6169,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         folder_id = body.get("folder_id")
         if not folder_id:
             return json_error("folder_id is required")
+        # Pre-check both sides of the link — an unknown id would otherwise
+        # hit the workspace_folders FK and 500.
+        if not db.get_workspace(ws_id):
+            return json_error("Workspace not found", 404)
+        if not db.get_folder(folder_id):
+            return json_error("Folder not found", 404)
         db.add_workspace_folder(ws_id, folder_id)
         return jsonify({"ok": True})
 
@@ -7070,6 +7126,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_detections(photo_id):
         """Get all detections for a photo."""
         db = _get_db()
+        # Detections are global, but exposing them for photos outside the
+        # active workspace leaks data the workspace deliberately hides
+        # (mirrors serve_thumbnail's workspace gate).
+        if db.get_photo(photo_id, verify_workspace=True) is None:
+            return json_error("not found", 404)
         dets = db.get_detections(photo_id)
         return jsonify([dict(d) for d in dets])
 
@@ -9398,6 +9459,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         body = request.get_json(silent=True) or {}
         photo_id = body.get("photo_id")
         direction = body.get("direction")
+        # resolve_drift silently no-ops on any other direction value, so a
+        # typo would otherwise return {"ok": true} without resolving anything.
+        if direction not in ("use_db", "use_xmp"):
+            return json_error("direction must be 'use_db' or 'use_xmp'")
+        if isinstance(photo_id, bool) or not isinstance(photo_id, int):
+            return json_error("photo_id must be an integer")
         from audit import resolve_drift
 
         resolve_drift(db, photo_id, direction)
@@ -9408,6 +9475,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         body = request.get_json(silent=True) or {}
         direction = body.get("direction")
+        if direction not in ("use_db", "use_xmp"):
+            return json_error("direction must be 'use_db' or 'use_xmp'")
         from audit import check_drift, resolve_drift
 
         drifts = check_drift(db)
@@ -10816,18 +10885,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
 
         tmp_prefix = os.path.realpath(tempfile.gettempdir())
-        user_cfg = cfg.load()
-        saved_roots = user_cfg.get("scan_roots", [])
-        changed = False
-        for r in roots_list:
-            if os.path.realpath(r).startswith(tmp_prefix):
-                continue
-            if r not in saved_roots:
-                saved_roots.insert(0, r)
-                changed = True
-        if changed:
-            user_cfg["scan_roots"] = saved_roots
-            cfg.save(user_cfg)
+        # Lock + raw read-modify-write so a concurrent settings PATCH isn't
+        # reverted and we don't pin every DEFAULTS value into the user's
+        # file (see api_pipeline_save_grouping_defaults).
+        with _settings_write_lock:
+            raw = _read_raw_config_file()
+            saved_roots = raw.get("scan_roots")
+            if not isinstance(saved_roots, list):
+                saved_roots = []
+            changed = False
+            for r in roots_list:
+                if os.path.realpath(r).startswith(tmp_prefix):
+                    continue
+                if r not in saved_roots:
+                    saved_roots.insert(0, r)
+                    changed = True
+            if changed:
+                raw["scan_roots"] = saved_roots
+                cfg.save(raw)
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
@@ -14002,16 +14077,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if destination:
             try:
                 import config as cfg
-                _cfg = cfg.load()
-                ingest_cfg = dict(_cfg.get("ingest", {}))
-                recents = list(ingest_cfg.get("recent_destinations", []))
-                if destination in recents:
-                    recents.remove(destination)
-                recents.insert(0, destination)
-                recents = recents[:5]
-                ingest_cfg["recent_destinations"] = recents
-                _cfg["ingest"] = ingest_cfg
-                cfg.save(_cfg)
+                # Lock + raw read-modify-write so a concurrent settings PATCH
+                # isn't reverted and we don't pin every DEFAULTS value into
+                # the user's file (see api_pipeline_save_grouping_defaults).
+                with _settings_write_lock:
+                    raw = _read_raw_config_file()
+                    ingest_cfg = raw.get("ingest")
+                    ingest_cfg = dict(ingest_cfg) if isinstance(ingest_cfg, dict) else {}
+                    recents = ingest_cfg.get("recent_destinations")
+                    recents = list(recents) if isinstance(recents, list) else []
+                    if destination in recents:
+                        recents.remove(destination)
+                    recents.insert(0, destination)
+                    recents = recents[:5]
+                    ingest_cfg["recent_destinations"] = recents
+                    raw["ingest"] = ingest_cfg
+                    cfg.save(raw)
             except Exception:
                 log.warning("Failed to save recent destination to config")
 
@@ -14094,12 +14175,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not photo_ids:
             return json_error("photo_ids is required")
 
-        # Validate all photo_ids exist before mutating
-        placeholders = ",".join("?" for _ in photo_ids)
-        found = db.conn.execute(
-            f"SELECT id FROM photos WHERE id IN ({placeholders})", photo_ids
-        ).fetchall()
-        found_ids = {r["id"] for r in found}
+        # Validate all photo_ids exist before mutating. Chunked so the
+        # IN-clause stays under SQLite's bound-parameter cap.
+        found_ids = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"SELECT id FROM photos WHERE id IN ({placeholders})", chunk
+            ).fetchall()
+            found_ids.update(r["id"] for r in rows)
         missing = [pid for pid in photo_ids if pid not in found_ids]
         if missing:
             return json_error(f"Unknown photo_ids: {missing}")
@@ -14112,14 +14196,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
         effective_cfg = db.get_effective_config(cfg.load())
         det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
-        det_rows = db.conn.execute(
-            f"""SELECT photo_id,
-                       MAX(detector_confidence) AS max_conf,
-                       COUNT(*) AS n
-                FROM detections WHERE photo_id IN ({placeholders})
-                GROUP BY photo_id""",
-            photo_ids,
-        ).fetchall()
+        det_rows = []
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            det_rows.extend(db.conn.execute(
+                f"""SELECT photo_id,
+                           MAX(detector_confidence) AS max_conf,
+                           COUNT(*) AS n
+                    FROM detections WHERE photo_id IN ({placeholders})
+                    GROUP BY photo_id""",
+                chunk,
+            ).fetchall())
         low_confidence_photo_ids = [
             r["photo_id"] for r in det_rows
             if r["n"] > 0 and (r["max_conf"] or 0) < det_conf_threshold
@@ -14208,30 +14295,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # edit-history items and sidecar adds — otherwise confirming an
             # already-tagged photo would push a no-op onto the undo stack, and
             # undoing it would destructively remove the pre-existing keyword.
-            # Mirrors the precheck pattern in api_batch_keyword.
-            placeholders_ids = ",".join("?" for _ in photo_ids)
-            already_has_new = {
-                row["photo_id"]
-                for row in db.conn.execute(
-                    f"""SELECT photo_id FROM photo_keywords
-                        WHERE keyword_id = ? AND photo_id IN ({placeholders_ids})""",
-                    [kid] + list(photo_ids),
-                ).fetchall()
-            }
+            # Mirrors the precheck pattern in api_batch_keyword. Chunked so
+            # the IN-clause stays under SQLite's bound-parameter cap.
+            def _photos_with_keyword(keyword_id):
+                hits = set()
+                for chunk in _chunked(photo_ids):
+                    placeholders_ids = ",".join("?" for _ in chunk)
+                    hits.update(
+                        row["photo_id"]
+                        for row in db.conn.execute(
+                            f"""SELECT photo_id FROM photo_keywords
+                                WHERE keyword_id = ? AND photo_id IN ({placeholders_ids})""",
+                            [keyword_id] + list(chunk),
+                        ).fetchall()
+                    )
+                return hits
+
+            already_has_new = _photos_with_keyword(kid)
             newly_tagged = [pid for pid in photo_ids if pid not in already_has_new]
 
             # For a replacement, only photos that actually carry the old
             # species keyword should be untagged / generate a remove.
             had_old = set()
             if is_replacement and old_kid is not None:
-                had_old = {
-                    row["photo_id"]
-                    for row in db.conn.execute(
-                        f"""SELECT photo_id FROM photo_keywords
-                            WHERE keyword_id = ? AND photo_id IN ({placeholders_ids})""",
-                        [old_kid] + list(photo_ids),
-                    ).fetchall()
-                }
+                had_old = _photos_with_keyword(old_kid)
                 for pid in photo_ids:
                     if pid not in had_old:
                         continue
@@ -14742,6 +14829,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         burst_idx = body.get("burst_index")
         if enc_idx is None or burst_idx is None:
             return json_error("encounter_index and burst_index are required")
+        if isinstance(enc_idx, bool) or not isinstance(enc_idx, int):
+            return json_error("Invalid encounter_index")
+        if isinstance(burst_idx, bool) or not isinstance(burst_idx, int):
+            return json_error("Invalid burst_index")
 
         db = _get_db()
         cache_dir = os.path.dirname(db_path)
@@ -14823,6 +14914,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_id = body.get("photo_id")
         if enc_idx is None or burst_idx is None or photo_id is None:
             return json_error("encounter_index, burst_index, and photo_id are required")
+        if isinstance(enc_idx, bool) or not isinstance(enc_idx, int):
+            return json_error("Invalid encounter_index")
+        if isinstance(burst_idx, bool) or not isinstance(burst_idx, int):
+            return json_error("Invalid burst_index")
 
         db = _get_db()
         cache_dir = os.path.dirname(db_path)
@@ -15380,6 +15475,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_photo_pipeline(photo_id):
         """Return full pipeline debug info for a single photo."""
         db = _get_db()
+        # Workspace gate before the raw join below: the response exposes
+        # folder_path and full photo metadata (mirrors serve_thumbnail).
+        if db.get_photo(photo_id, verify_workspace=True) is None:
+            return json_error("Photo not found", 404)
         photo = db.conn.execute(
             """SELECT p.*, f.path as folder_path FROM photos p
                JOIN folders f ON f.id = p.folder_id WHERE p.id = ?""",
@@ -15571,7 +15670,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from PIL import Image
 
         db = _get_db()
-        photo = db.get_photo(photo_id)
+        # verify_workspace: don't serve image bytes for photos hidden from
+        # the active workspace (mirrors serve_thumbnail).
+        photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
             return "Not found", 404
 
@@ -15655,9 +15756,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Confirm the photo still exists before any cache return so that a
         # deleted photo can't be served from a stale per-size cache (and so
-        # SQLite id reuse can't surface the wrong image).
+        # SQLite id reuse can't surface the wrong image). verify_workspace
+        # keeps cross-workspace photos from being served here at all
+        # (mirrors serve_thumbnail).
         db = _get_db()
-        photo = db.get_photo(photo_id)
+        photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
             return "Not found", 404
 
@@ -15804,7 +15907,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from flask import send_file
 
         db = _get_db()
-        photo = db.get_photo(photo_id)
+        # verify_workspace: mirrors serve_thumbnail — full-res bytes must not
+        # leak across workspaces.
+        photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
             return "Not found", 404
 

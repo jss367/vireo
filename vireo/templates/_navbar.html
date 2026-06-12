@@ -4416,6 +4416,8 @@ function lightboxDelete() {
 }
 /* ---------- iNat Submission ---------- */
 var inatQueue = [];  // [{photo_id, taxon_name, observed_on, latitude, longitude, description, geoprivacy, filename, already_submitted, existing_url}]
+var _inatSubmitting = false;  // true while inatDoSubmit's loop is running
+var _inatCancelled = false;   // set by closeInatModal to stop the loop gracefully
 
 async function submitToInat(photoId) {
   try {
@@ -4515,7 +4517,14 @@ function openInatModal() {
 function closeInatModal() {
   if (window._inatEscToken) { Keymap.popEsc(window._inatEscToken); window._inatEscToken = null; }
   document.getElementById('inatModal').classList.remove('open');
-  inatQueue = [];
+  if (_inatSubmitting) {
+    // Cancel/Esc during an in-flight submit: don't clear the queue out from
+    // under the loop — flag it so it stops after the current item and
+    // reports a partial result.
+    _inatCancelled = true;
+  } else {
+    inatQueue = [];
+  }
 }
 
 async function inatDoSubmit() {
@@ -4531,8 +4540,11 @@ async function inatDoSubmit() {
   var total = inatQueue.length;
   var done = 0;
   var succeeded = 0;
+  _inatSubmitting = true;
+  _inatCancelled = false;
 
   for (var i = 0; i < total; i++) {
+    if (_inatCancelled) break;
     var item = inatQueue[i];
     var statusEl = document.getElementById('inatStatus' + i);
 
@@ -4575,6 +4587,15 @@ async function inatDoSubmit() {
     text.textContent = done + ' / ' + total + ' processed (' + succeeded + ' succeeded)';
   }
 
+  _inatSubmitting = false;
+  if (_inatCancelled) {
+    // Modal is already closed (closeInatModal deferred the queue cleanup
+    // to us) — surface the partial result where the user can see it.
+    _inatCancelled = false;
+    inatQueue = [];
+    showToast('iNaturalist: submitted ' + succeeded + ' of ' + total + ', cancelled', 'info');
+    return;
+  }
   btn.textContent = 'Done';
   // Change cancel to Close
   document.querySelector('#inatActions .modal-btn-cancel').textContent = 'Close';
@@ -4591,12 +4612,18 @@ document.addEventListener('keydown', function(e) {
   // listener below still handles arrow keys / +/-/0 / B / Z / F / G while the
   // lightbox is open.
   if (!document.getElementById('lightboxOverlay').classList.contains('active')) return;
-  if (document.querySelector('.pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;
-  if (e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
-  if (e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }
+  // .grm-overlay.open is deliberately NOT in this suppression list: the burst
+  // modal can only sit *underneath* the lightbox (review's "Open in Lightbox"),
+  // so the lightbox keeps keyboard precedence; the burst modal's own keydown
+  // handler bails while the lightbox is open.
+  if (document.querySelector('.pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;
   var tag0 = e.target && e.target.tagName;
   var editable0 = tag0 === 'INPUT' || tag0 === 'TEXTAREA' || tag0 === 'SELECT' ||
     (e.target && e.target.isContentEditable);
+  // Editable check must come before arrow handling so arrows inside form
+  // fields (e.g. the mask-variant <select>) change the value, not the photo.
+  if (!editable0 && e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
+  if (!editable0 && e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }
   if (!editable0 && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !lightboxKeyMatchesConfiguredBrowseShortcut(e)) {
     if (e.key.toLowerCase() === 'f') {
       requestLightboxFullscreen();
@@ -5086,7 +5113,7 @@ function renderPipeline(data, photoId) {
   // Step 1: Original image
   html += '<div class="pipeline-step">' +
     '<div class="pipeline-step-header"><span class="pipeline-step-num">1</span><span class="pipeline-step-title">Original Image</span></div>' +
-    '<div class="pipeline-stat"><b>' + data.filename + '</b></div>' +
+    '<div class="pipeline-stat"><b>' + escapeHtml(data.filename) + '</b></div>' +
     (data.width ? '<div class="pipeline-stat">' + data.width + ' &times; ' + data.height + '</div>' : '') +
     (data.timestamp ? '<div class="pipeline-stat">' + data.timestamp + '</div>' : '') +
     '</div>';
@@ -5254,27 +5281,52 @@ function findSimilar(photoId) {
         content.innerHTML = '<p style="color:var(--warning);">' + escapeHtml(data.error) + '</p>';
         return;
       }
-      var html = '<p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">Compared against ' +
-        data.total_compared.toLocaleString() + ' photos with embeddings</p>';
+      // Filenames are user-controlled: build cards with DOM methods and
+      // closure-bound click handlers instead of interpolating into
+      // HTML/onclick strings — a quote or angle bracket in a filename broke
+      // the inline handler (and could inject markup).
+      content.textContent = '';
+      var summary = document.createElement('p');
+      summary.style.cssText = 'font-size:12px;color:var(--text-dim);margin-bottom:12px;';
+      summary.textContent = 'Compared against ' + data.total_compared.toLocaleString() + ' photos with embeddings';
+      content.appendChild(summary);
 
       if (data.similar.length === 0) {
-        html += '<p style="color:var(--text-dim);">No similar photos found.</p>';
+        var none = document.createElement('p');
+        none.style.color = 'var(--text-dim)';
+        none.textContent = 'No similar photos found.';
+        content.appendChild(none);
       } else {
-        html += '<div class="similar-grid">';
+        var grid = document.createElement('div');
+        grid.className = 'similar-grid';
         data.similar.forEach(function(item) {
           var p = item.photo;
           var pct = Math.round(item.similarity * 100);
-          html += '<div class="similar-card" onclick="closeSimilar(); openLightbox(' + p.id + ',\'' + (p.filename || '').replace(/'/g, "\\'") + '\')">' +
-            '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="">' +
-            '<div class="similar-card-info">' +
-              '<div class="similar-card-name" title="' + (p.filename || '') + '">' + (p.filename || '') + '</div>' +
-              '<div class="similar-card-score">' + pct + '% similar</div>' +
-            '</div>' +
-          '</div>';
+          var card = document.createElement('div');
+          card.className = 'similar-card';
+          card.addEventListener('click', function() {
+            closeSimilar();
+            openLightbox(p.id, p.filename || '');
+          });
+          var img = document.createElement('img');
+          img.src = '/thumbnails/' + p.id + '.jpg';
+          img.loading = 'lazy';
+          img.alt = '';
+          var info = document.createElement('div');
+          info.className = 'similar-card-info';
+          var name = document.createElement('div');
+          name.className = 'similar-card-name';
+          name.title = p.filename || '';
+          name.textContent = p.filename || '';
+          var score = document.createElement('div');
+          score.className = 'similar-card-score';
+          score.textContent = pct + '% similar';
+          info.append(name, score);
+          card.append(img, info);
+          grid.appendChild(card);
         });
-        html += '</div>';
+        content.appendChild(grid);
       }
-      content.innerHTML = html;
     })
     .catch(function(e) {
       content.innerHTML = '<p style="color:var(--danger);">Failed: ' + escapeHtml(e.message) + '</p>';

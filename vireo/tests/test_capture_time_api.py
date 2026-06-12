@@ -676,3 +676,63 @@ def test_capture_time_job_applies_per_photo_shifts(client_with_photo, monkeypatc
         by_file[os.path.basename(target)] = shift_args[0] if shift_args else None
     assert by_file["test.jpg"] == "-AllDates-=0:0:0 3:0:0"
     assert by_file["second.jpg"] == "-AllDates-=0:0:0 2:0:0"
+
+
+def test_capture_time_job_counts_exiftool_write_error_as_failed(client_with_photo, monkeypatch):
+    """ExifTool exits 1 when a write fails — the photo must be counted as
+    failed, not updated, and its metadata must not be refreshed."""
+    import capture_time
+
+    app, db, photo_id = client_with_photo
+    db.conn.execute(
+        "UPDATE photos SET timestamp = ?, exif_data = ? WHERE id = ?",
+        (
+            "2026-05-22T20:07:23.560000",
+            json.dumps(
+                {
+                    "EXIF": {
+                        "DateTimeOriginal": "2026:05:22 20:07:23",
+                        "SubSecTimeOriginal": "56",
+                        "OffsetTimeOriginal": "-07:00",
+                    }
+                }
+            ),
+            photo_id,
+        ),
+    )
+    db.conn.commit()
+
+    def fake_run(cmd, **_kwargs):
+        return SimpleNamespace(
+            returncode=1,
+            stdout="    0 image files updated\n    1 files weren't updated due to errors\n",
+            stderr="Error: File is read-only",
+        )
+
+    def fail_extract(paths):
+        raise AssertionError("metadata must not be refreshed after a failed write")
+
+    monkeypatch.setattr(capture_time.shutil, "which", lambda name: "/usr/bin/exiftool")
+    monkeypatch.setattr(capture_time.subprocess, "run", fake_run)
+    monkeypatch.setattr(capture_time, "extract_metadata", fail_extract)
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/jobs/capture-time",
+        json={
+            "photo_ids": [photo_id],
+            "mode": "preserve_instant",
+            "target_offset": "-10:00",
+            "keep_backups": False,
+        },
+    )
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+    assert job["result"]["updated"] == 0
+    assert job["result"]["failed"] == 1
+    assert "read-only" in job["result"]["failures"][0]["error"]
+
+    # Timestamp untouched — no false "updated" report
+    refreshed = db.get_photo(photo_id)
+    assert refreshed["timestamp"] == "2026-05-22T20:07:23.560000"

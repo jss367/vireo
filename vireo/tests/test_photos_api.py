@@ -4711,3 +4711,133 @@ def test_api_serve_mask_rejects_path_outside_masks_dir(app_and_db, tmp_path):
     client = app.test_client()
     resp = client.get(f"/api/masks/{pid}/sam2-small.png")
     assert resp.status_code == 404
+
+
+# -- Regression tests: workspace verification and payload validation --
+
+
+def _add_other_workspace_photo(db):
+    """Create a photo whose folder is linked only to another workspace."""
+    default_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    fid = db.add_folder('/secret/other', name='secret-other')
+    pid = db.add_photo(folder_id=fid, filename='hidden.jpg', extension='.jpg',
+                       file_size=10, file_mtime=1.0)
+    db.set_active_workspace(default_ws)
+    return pid
+
+
+def test_color_label_unknown_photo_returns_404(app_and_db):
+    """POST /api/photos/<id>/color_label must 404 on a stale id instead of
+    hitting the photo_color_labels FK and 500ing."""
+    app, _db = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/photos/999999/color_label', json={'color': 'red'})
+    assert resp.status_code == 404
+
+
+def test_color_label_rejects_cross_workspace_photo(app_and_db):
+    """POST /api/photos/<id>/color_label must 403 for photos outside the
+    active workspace, matching the rating/flag endpoints."""
+    app, db = app_and_db
+    hidden_pid = _add_other_workspace_photo(db)
+    client = app.test_client()
+    resp = client.post(f'/api/photos/{hidden_pid}/color_label',
+                       json={'color': 'red'})
+    assert resp.status_code == 403
+    assert db.get_color_labels_for_photos([hidden_pid]) == {}
+
+
+def test_batch_color_label_skips_stale_and_cross_workspace_ids(app_and_db):
+    """POST /api/batch/color_label must filter out stale and cross-workspace
+    ids (instead of 500ing mid-batch on the FK) and report what was applied."""
+    app, db = app_and_db
+    hidden_pid = _add_other_workspace_photo(db)
+    valid_pid = db.conn.execute(
+        "SELECT id FROM photos WHERE filename = 'bird1.jpg'").fetchone()["id"]
+    client = app.test_client()
+
+    resp = client.post('/api/batch/color_label',
+                       json={'photo_ids': [valid_pid, 999999, hidden_pid],
+                             'color': 'green'})
+    assert resp.status_code == 200
+    assert resp.get_json()["updated"] == 1
+    assert db.get_color_label(valid_pid) == 'green'
+    assert db.get_color_labels_for_photos([hidden_pid]) == {}
+
+
+def test_photo_detail_rejects_cross_workspace_photo(app_and_db):
+    """GET /api/photos/<id> exposes absolute path/xmp_path — it must 404 for
+    photos hidden from the active workspace (mirrors serve_thumbnail)."""
+    app, db = app_and_db
+    hidden_pid = _add_other_workspace_photo(db)
+    client = app.test_client()
+    resp = client.get(f'/api/photos/{hidden_pid}')
+    assert resp.status_code == 404
+
+
+def test_photo_pipeline_rejects_cross_workspace_photo(app_and_db):
+    """GET /api/photos/<id>/pipeline exposes folder_path — 404 outside ws."""
+    app, db = app_and_db
+    hidden_pid = _add_other_workspace_photo(db)
+    client = app.test_client()
+    resp = client.get(f'/api/photos/{hidden_pid}/pipeline')
+    assert resp.status_code == 404
+
+
+def test_image_routes_reject_cross_workspace_photo(app_and_db):
+    """Image-serving routes must not leak bytes across workspaces."""
+    app, db = app_and_db
+    hidden_pid = _add_other_workspace_photo(db)
+    client = app.test_client()
+    for path in (f'/photos/{hidden_pid}/preview',
+                 f'/photos/{hidden_pid}/full',
+                 f'/photos/{hidden_pid}/original',
+                 f'/photos/{hidden_pid}/crop'):
+        resp = client.get(path)
+        assert resp.status_code == 404, f"expected 404 for {path}"
+
+
+def test_api_detections_rejects_cross_workspace_photo(app_and_db):
+    """GET /api/detections/<id> must 404 for photos outside the workspace."""
+    app, db = app_and_db
+    hidden_pid = _add_other_workspace_photo(db)
+    db.save_detections(hidden_pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    client = app.test_client()
+    resp = client.get(f'/api/detections/{hidden_pid}')
+    assert resp.status_code == 404
+
+
+def test_collection_add_photos_rejects_non_integer_ids(app_and_db):
+    """POST /api/collections/<id>/add-photos must 400 on non-int entries —
+    strings would persist into the photo_ids rule where they never match,
+    and mixed int/str payloads crash sorted()."""
+    import json
+
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/collections', json={'name': 'Static'})
+    cid = resp.get_json()['id']
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    rules_before = db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,)).fetchone()["rules"]
+
+    for bad_ids in (["1", "2"], [pid, str(pid + 1)], [pid, True], "1,2"):
+        resp = client.post(f'/api/collections/{cid}/add-photos',
+                           json={'photo_ids': bad_ids})
+        assert resp.status_code == 400, f"expected 400 for {bad_ids!r}"
+
+    # The collection's rules must be untouched by the rejected requests.
+    rules_after = db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,)).fetchone()["rules"]
+    assert json.loads(rules_after) == json.loads(rules_before)
+
+    # Valid ints still work.
+    resp = client.post(f'/api/collections/{cid}/add-photos',
+                       json={'photo_ids': [pid]})
+    assert resp.status_code == 200
+    assert resp.get_json()["total"] == 1

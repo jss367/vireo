@@ -18,6 +18,31 @@ from image_loader import load_image, load_working_image
 
 log = logging.getLogger(__name__)
 
+_warned_dim_mismatch = False
+
+
+def _embedding_sim(a, b):
+    """Dot-product similarity, 0 if dims don't match.
+
+    Two photos in one species group can carry top predictions from
+    different classifier models (or stale DINOv2 variants), so their
+    embeddings can have different dimensions. Treat that as "no
+    similarity signal" instead of crashing the cull job — same
+    convention as bursts/encounters/selection._cosine_sim.
+    """
+    if a.shape != b.shape:
+        global _warned_dim_mismatch
+        if not _warned_dim_mismatch:
+            log.warning(
+                "Embedding dim mismatch in culling (%s vs %s) — embeddings "
+                "from different models can't be compared; treating as not "
+                "redundant",
+                a.shape, b.shape,
+            )
+            _warned_dim_mismatch = True
+        return 0.0
+    return float(np.dot(a, b))
+
 
 def analyze_for_culling(
     db,
@@ -249,7 +274,7 @@ def analyze_for_culling(
         for i in range(len(emb_pids)):
             for j in range(i + 1, len(emb_pids)):
                 a, b = emb_pids[i], emb_pids[j]
-                sim = float(np.dot(sp_embeddings[a], sp_embeddings[b]))
+                sim = _embedding_sim(sp_embeddings[a], sp_embeddings[b])
                 key = f"{min(a,b)}-{max(a,b)}"
                 embedding_sims[key] = round(sim, 3)
 
@@ -307,7 +332,9 @@ def _build_scene_groups(scene_clusters, redundancy_clusters, photo_data, timesta
         # Group scene pids by their redundancy cluster
         rc_groups = {}
         for pid in scene_pids:
-            rc_idx = pid_to_rc.get(pid, pid)  # fallback to self if not in any cluster
+            # Fallback to a solo group when not in any cluster. The key must
+            # not collide with cluster indices (small ints, like photo ids).
+            rc_idx = pid_to_rc.get(pid, ("solo", pid))
             if rc_idx not in rc_groups:
                 rc_groups[rc_idx] = []
             rc_groups[rc_idx].append(pid)
@@ -511,7 +538,7 @@ def _cluster_photos(embeddings_map, threshold):
         for cluster in clusters:
             for member_pid in cluster:
                 mem_emb = embeddings_map[member_pid]
-                sim = float(np.dot(emb, mem_emb))
+                sim = _embedding_sim(emb, mem_emb)
                 if sim >= threshold:
                     cluster.append(pid)
                     placed = True

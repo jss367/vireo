@@ -1344,7 +1344,12 @@ document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
   if (mode !== 'review') return;
   if (!_shortcuts) return;
-  var pending = predictions.filter(function(p) { return p.status === 'pending'; });
+  // No-op while an overlay owns the keyboard (lightbox, burst modal, etc.) —
+  // otherwise A/S would invisibly accept/reject grid cards behind it.
+  if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;
+  // The toolbar hint promises "first visible card": use the grid's filtered
+  // + sorted view, not the API-ordered raw predictions array.
+  var pending = getVisibleItems().filter(function(p) { return p.status === 'pending'; });
   if (pending.length === 0) return;
   if (matchesShortcut(e, _shortcuts.accept)) { e.preventDefault(); acceptPrediction(pending[0].id); }
   else if (matchesShortcut(e, _shortcuts.skip)) { e.preventDefault(); rejectPrediction(pending[0].id); }
@@ -2649,6 +2654,12 @@ async function grmApply() {
 // Keyboard handling for the modal
 document.addEventListener('keydown', function(e) {
   if (!document.getElementById('grmOverlay').classList.contains('open')) return;
+  // The lightbox can be opened on top of this modal ("Open in Lightbox").
+  // While it's open it owns the keyboard (arrows navigate photos, Esc closes
+  // it via the Keymap stack) — these shortcuts must not also fire underneath,
+  // invisibly moving photos to Picks/Rejects or removing them.
+  var lb = document.getElementById('lightboxOverlay');
+  if (lb && lb.classList.contains('active')) return;
   if (e.target.tagName === 'INPUT') return;
   // The mouse-help control is focusable so keyboard users can read its
   // popover; don't let keystrokes there (e.g. Space) fall through to the
