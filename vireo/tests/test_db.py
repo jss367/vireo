@@ -13035,6 +13035,7 @@ def test_collection_photo_ids_rule_supports_large_selection(tmp_path):
     parameter per id, making every query against the collection fail
     permanently. Integer ids are inlined as literals instead."""
     import json
+
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
