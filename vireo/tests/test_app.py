@@ -6023,3 +6023,167 @@ def test_collection_preview_does_not_mask_db_failures(app_and_db, monkeypatch):
     # is that it's *not* a 400, which would mislabel a backend fault as a
     # client error.
     assert resp.status_code >= 500
+
+
+# -- Regression tests: route hardening (workspace verification, validation,
+# config locking) --
+
+
+def test_update_workspace_unknown_id_returns_404(app_and_db):
+    """PUT /api/workspaces/<id> must 404 for an unknown workspace instead of
+    crashing on dict(None) after update_workspace silently no-ops."""
+    app, _db = app_and_db
+    client = app.test_client()
+    resp = client.put('/api/workspaces/999999', json={"name": "ghost"})
+    assert resp.status_code == 404
+    assert "error" in resp.get_json()
+
+
+def test_update_workspace_rejects_non_dict_config_overrides(app_and_db):
+    """PUT /api/workspaces/<id> must reject non-dict config_overrides —
+    persisting e.g. a list would crash the labels accessors later."""
+    app, db = app_and_db
+    client = app.test_client()
+    ws_id = db._active_workspace_id
+
+    for bad in ([], "x", 5, True):
+        resp = client.put(f'/api/workspaces/{ws_id}',
+                          json={"config_overrides": bad})
+        assert resp.status_code == 400, f"expected 400 for {bad!r}"
+
+    # None (clear) and a dict remain accepted.
+    resp = client.put(f'/api/workspaces/{ws_id}',
+                      json={"config_overrides": {"classification_threshold": 0.5}})
+    assert resp.status_code == 200
+    resp = client.put(f'/api/workspaces/{ws_id}', json={"config_overrides": None})
+    assert resp.status_code == 200
+
+
+def test_add_workspace_folder_unknown_ids_return_404(app_and_db):
+    """POST /api/workspaces/<ws>/folders must 404 for unknown workspace or
+    folder ids instead of hitting the workspace_folders FK and 500ing."""
+    app, db = app_and_db
+    client = app.test_client()
+    ws_id = db._active_workspace_id
+    fid = db.get_folder_tree()[0]["id"]
+
+    resp = client.post(f'/api/workspaces/{ws_id}/folders',
+                       json={"folder_id": 999999})
+    assert resp.status_code == 404
+    assert "Folder" in resp.get_json()["error"]
+
+    resp = client.post('/api/workspaces/999999/folders',
+                       json={"folder_id": fid})
+    assert resp.status_code == 404
+    assert "Workspace" in resp.get_json()["error"]
+
+
+def test_setup_complete_does_not_pin_defaults(app_and_db):
+    """POST /api/setup/complete must persist only setup_complete (plus keys
+    the user already set) — not the full DEFAULTS-merged config."""
+    import json as _json
+
+    import config as cfg
+
+    app, _db = app_and_db
+    with open(cfg.CONFIG_PATH, "w") as f:
+        _json.dump({"inat_token": "abc"}, f)
+
+    client = app.test_client()
+    resp = client.post('/api/setup/complete')
+    assert resp.status_code == 200
+
+    with open(cfg.CONFIG_PATH) as f:
+        raw = _json.load(f)
+    assert raw == {"inat_token": "abc", "setup_complete": True}
+
+
+def test_detach_endpoints_reject_non_integer_indices(app_and_db):
+    """detach-burst/detach-photo must 400 on non-integer indices instead of
+    raising TypeError at the `enc_idx < 0` comparison."""
+    app, _db = app_and_db
+    client = app.test_client()
+
+    resp = client.post('/api/pipeline/detach-burst',
+                       json={"encounter_index": "0", "burst_index": 0})
+    assert resp.status_code == 400
+    assert "encounter_index" in resp.get_json()["error"]
+
+    resp = client.post('/api/pipeline/detach-burst',
+                       json={"encounter_index": 0, "burst_index": [1]})
+    assert resp.status_code == 400
+    assert "burst_index" in resp.get_json()["error"]
+
+    resp = client.post('/api/pipeline/detach-photo',
+                       json={"encounter_index": "0", "burst_index": 0,
+                             "photo_id": 1})
+    assert resp.status_code == 400
+    assert "encounter_index" in resp.get_json()["error"]
+
+    resp = client.post('/api/pipeline/detach-photo',
+                       json={"encounter_index": 0, "burst_index": True,
+                             "photo_id": 1})
+    assert resp.status_code == 400
+    assert "burst_index" in resp.get_json()["error"]
+
+
+def test_sync_discard_reports_true_count(app_and_db):
+    """POST /api/sync/discard must report rows actually deleted, not the
+    request size — stale/foreign ids are silently skipped by clear_pending."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.queue_change(pid, "keyword_add", "Test Bird")
+    change_id = db.get_pending_changes()[0]["id"]
+
+    resp = client.post('/api/sync/discard',
+                       json={"change_ids": [change_id, 999999]})
+    assert resp.status_code == 200
+    assert resp.get_json()["discarded"] == 1
+    assert db.get_pending_changes() == []
+
+
+def test_audit_resolve_validates_direction_and_photo_id(app_and_db):
+    """POST /api/audit/resolve must 400 on unknown directions (resolve_drift
+    silently no-ops on them) and non-integer photo_id."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+
+    resp = client.post('/api/audit/resolve',
+                       json={"photo_id": pid, "direction": "use_database"})
+    assert resp.status_code == 400
+
+    resp = client.post('/api/audit/resolve',
+                       json={"photo_id": "abc", "direction": "use_db"})
+    assert resp.status_code == 400
+
+    resp = client.post('/api/audit/resolve',
+                       json={"photo_id": pid, "direction": "use_db"})
+    assert resp.status_code == 200
+
+    # resolve-all shares the same silent no-op hazard.
+    resp = client.post('/api/audit/resolve-all', json={"direction": "bogus"})
+    assert resp.status_code == 400
+
+
+def test_encounter_species_chunks_large_photo_id_lists(app_and_db):
+    """POST /api/encounters/species must chunk its IN-clause queries so id
+    lists beyond the SQLite bound-parameter cap don't raise OperationalError."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.get_folder_tree()[0]["id"]
+    # More ids than one 900-param chunk so the query must split.
+    photo_ids = [
+        db.add_photo(folder_id=fid, filename=f"chunk{i}.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0)
+        for i in range(950)
+    ]
+
+    resp = client.post('/api/encounters/species',
+                       json={"species": "Chunk Finch", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+    assert resp.get_json()["photo_count"] == len(photo_ids)
+    # Both chunks were validated and tagged.
+    for pid in (photo_ids[0], photo_ids[-1]):
+        assert any(t["name"] == "Chunk Finch" for t in db.get_photo_keywords(pid))
