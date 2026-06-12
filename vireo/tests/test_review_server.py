@@ -318,3 +318,27 @@ def test_batch_accept_coerces_numeric_string_min_confidence():
         resp = client.post('/api/accept-batch', json={'min_confidence': '0.8'})
         assert resp.status_code == 200
         assert resp.get_json()['accepted'] == 1
+
+
+def test_batch_accept_rejects_non_finite_min_confidence():
+    """NaN coerces via float() but every `confidence < NaN` comparison is
+    false, which would silently accept ALL pending photos — so non-finite
+    thresholds must 400 before any sidecar writes."""
+    from review_server import create_app
+    from xmp import read_keywords
+    with tempfile.TemporaryDirectory() as tmpdir:
+        results_path = _create_test_review_data(tmpdir)
+        app = create_app(tmpdir)
+        client = app.test_client()
+
+        for bad in ('nan', 'inf', '-inf'):
+            resp = client.post('/api/accept-batch', json={'min_confidence': bad})
+            assert resp.status_code == 400, bad
+
+        # Nothing was written or accepted
+        with open(results_path) as f:
+            data = json.load(f)
+        assert data['photos'][0]['status'] == 'pending'
+        assert 'Northern cardinal' not in read_keywords(
+            os.path.join(tmpdir, 'bird1.xmp')
+        )
