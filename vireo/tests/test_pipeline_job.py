@@ -9039,3 +9039,264 @@ def test_weights_fingerprint_missing_file_distinguishes_from_present(tmp_path):
     assert partial_fp != full_fp
     # Missing entries collapse to a sentinel so the key still hashes.
     assert any(part[1] is None for part in partial_fp)
+
+
+# ---------------------------------------------------------------------------
+# Thumbnail-stage failure must not deadlock the scanner
+# ---------------------------------------------------------------------------
+
+
+def test_thumbnail_setup_failure_does_not_deadlock_scanner(tmp_path, monkeypatch):
+    """If thumbnail_stage dies BEFORE its drain loop (import, Database(),
+    cfg.load(), os.makedirs can all raise), the scanner's blocking
+    scan_to_thumb.put() would wedge forever once the queue fills — the
+    orchestrator's threads["scanner"].join() then never returns and the
+    job leaks a pipeline slot until restart. The failure path must set
+    abort and drain the queue so the producer can never block forever.
+
+    The scan→thumbnail queue is shrunk to maxsize=2 so a handful of photos
+    reproduces the >maxsize condition; the pipeline runs on a worker thread
+    with a timeout so a regression fails fast instead of hanging pytest.
+    """
+    import queue as queue_mod
+
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for i in range(8):
+        Image.new("RGB", (16, 16), "red").save(str(photo_dir / f"p{i}.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Shrink only the pipeline's scan→thumb queue (created with maxsize=200)
+    # so the scanner outruns the dead consumer after 2 photos.
+    real_queue_cls = queue_mod.Queue
+
+    def small_queue(maxsize=0):
+        return real_queue_cls(maxsize=2 if maxsize == 200 else maxsize)
+
+    monkeypatch.setattr(queue_mod, "Queue", small_queue)
+
+    # Break thumbnail_stage before its drain loop: deleting the symbol makes
+    # `from thumbnails import generate_thumbnail` raise ImportError.
+    import thumbnails as thumbs_mod
+    monkeypatch.delattr(thumbs_mod, "generate_thumbnail")
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    done = threading.Event()
+    outcome = {}
+
+    def _run():
+        try:
+            outcome["result"] = run_pipeline_job(job, runner, db_path, ws_id, params)
+        except Exception as e:  # stage failure propagates as RuntimeError
+            outcome["error"] = e
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    assert done.wait(60), (
+        "run_pipeline_job did not terminate — the scanner is deadlocked on "
+        "scan_to_thumb.put() after the thumbnail consumer died"
+    )
+
+    # The thumbnails stage must end failed and the job must propagate it.
+    thumb_statuses = [
+        kw["status"] for (_, sid, kw) in runner.step_updates
+        if sid == "thumbnails" and "status" in kw
+    ]
+    assert thumb_statuses and thumb_statuses[-1] == "failed"
+    assert isinstance(outcome.get("error"), RuntimeError), (
+        f"expected the thumbnails stage failure to propagate, got {outcome!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Previews must land under the configured thumb dir's parent
+# ---------------------------------------------------------------------------
+
+
+def test_previews_stage_uses_thumb_cache_dir_parent(tmp_path, monkeypatch):
+    """With a custom --thumb-dir, previews_stage must write preview files,
+    preview_cache rows, and run quota eviction under
+    dirname(thumb_cache_dir)/previews — the root app.py serves, reconciles,
+    and evicts. Writing under dirname(db_path)/previews instead leaves
+    warmed previews that are never served, rows reaped as ghosts, and
+    orphan JPEGs outside the quota.
+    """
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    Image.new("RGB", (64, 64), "green").save(str(photo_dir / "a.jpg"))
+
+    db_dir = tmp_path / "dbhome"
+    db_dir.mkdir()
+    db_path = str(db_dir / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Custom cache root, deliberately outside dirname(db_path).
+    custom_root = tmp_path / "custom_cache"
+    thumb_dir = custom_root / "thumbnails"
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+        preview_max_size=1920,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(
+        job, runner, db_path, ws_id, params, thumb_cache_dir=str(thumb_dir),
+    )
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws_id)
+    photo_id = db2.get_photos(per_page=1)[0]["id"]
+
+    served_path = custom_root / "previews" / f"{photo_id}_1920.jpg"
+    assert served_path.is_file(), (
+        "preview must be written under dirname(thumb_cache_dir)/previews "
+        "to match the Flask serve convention"
+    )
+    orphan_path = db_dir / "previews" / f"{photo_id}_1920.jpg"
+    assert not orphan_path.exists(), (
+        "preview must NOT be written under dirname(db_path)/previews when "
+        "a custom thumb_cache_dir is configured"
+    )
+    # The preview_cache row must account for the file the app will serve.
+    assert db2.preview_cache_get(photo_id, 1920) is not None
+
+
+# ---------------------------------------------------------------------------
+# Aborted pipelines must not leave step rows stuck at "pending"
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_abort_finalizes_all_step_rows(tmp_path, monkeypatch):
+    """When the pipeline aborts early (user cancel here), every step row
+    created by runner.set_steps — including previews, extract_masks,
+    eye_keypoints, regroup, and misses — must reach a terminal status.
+    Gating those stage calls on `if not abort.is_set()` left their rows
+    persisted as "pending" with no finished_at, forever (the same defect
+    previously fixed for detect/classify).
+    """
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (16, 16), "blue").save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # All optional stages enabled so their step rows exist; classify is
+    # skipped to keep the test free of model files.
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    # Pre-cancel: the cancel watcher sets the local abort event immediately,
+    # so the post-scan stages all hit their abort skip paths.
+    runner.cancelled_ids.add(job["id"])
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    terminal = {"completed", "failed", "cancelled"}
+    for step in runner.steps_defined:
+        statuses = [
+            kw["status"] for (_, sid, kw) in runner.step_updates
+            if sid == step["id"] and "status" in kw
+        ]
+        final = statuses[-1] if statuses else None
+        assert final in terminal, (
+            f"Step {step['id']!r} must reach a terminal status on an aborted "
+            f"pipeline, got {final!r} (history={statuses})"
+        )
+
+
+def test_pipeline_regroup_failure_finalizes_miss_step_row(tmp_path, monkeypatch):
+    """When regroup_stage fails (without abort), miss_stage must still be
+    invoked so the misses row reaches a terminal "Skipped" state instead of
+    persisting as pending — while still never touching miss_* DB state
+    (regroup's burst_id output is its prerequisite).
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    Image.new("RGB", (16, 16), "black").save(str(photo_dir / "a.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("synthetic regroup failure")
+
+    monkeypatch.setattr(pipeline_mod, "run_full_pipeline", _boom)
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    with contextlib.suppress(Exception):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    miss_statuses = [
+        kw["status"] for (_, sid, kw) in runner.step_updates
+        if sid == "misses" and "status" in kw
+    ]
+    assert miss_statuses, "misses row got no status update after regroup failure"
+    assert miss_statuses[-1] == "completed", (
+        f"misses must finalize as a skipped/completed row, got {miss_statuses}"
+    )
+    # The skip path must not have mutated miss state.
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws_id)
+    rows = db2.conn.execute("SELECT miss_computed_at FROM photos").fetchall()
+    assert rows and all(r["miss_computed_at"] is None for r in rows)

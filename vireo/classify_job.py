@@ -1554,6 +1554,18 @@ def _store_grouped_predictions(
     }
 
 
+def _finalize_remaining_steps(runner, job_id, step_ids, status, summary):
+    """Flip not-yet-run step rows to a terminal status before an early return.
+
+    _persist_job stores whatever statuses are in the step tree at job end;
+    a row left "pending" with no finished_at renders as an indeterminate
+    spinner forever on the jobs page. Early-return paths must call this for
+    every step they are about to skip.
+    """
+    for step_id in step_ids:
+        runner.update_step(job_id, step_id, status=status, summary=summary)
+
+
 def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None):
     """Execute classification job. Called by JobRunner in a background thread.
 
@@ -1685,6 +1697,12 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                     "phase": "Step 1/5: Loading photos",
                 },
             )
+            _finalize_remaining_steps(
+                runner, job["id"],
+                ["load_taxonomy", "load_model", "detect", "classify",
+                 "finalize"],
+                status="completed", summary="Skipped (no photos to classify)",
+            )
             return {
                 "total": 0,
                 "predictions_stored": 0,
@@ -1700,6 +1718,12 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         # per-photo; _run_job flips the terminal status to 'cancelled'.
         if runner.is_cancelled(job["id"]):
             log.info("Classify job cancelled before model resolution")
+            _finalize_remaining_steps(
+                runner, job["id"],
+                ["load_taxonomy", "load_model", "detect", "classify",
+                 "finalize"],
+                status="cancelled", summary="Cancelled before start",
+            )
             return {
                 "total": total,
                 "predictions_stored": 0,
@@ -1856,6 +1880,10 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         # before the user's cancel takes effect.
         if runner.is_cancelled(job["id"]):
             log.info("Classify job cancelled before reclassify purge")
+            _finalize_remaining_steps(
+                runner, job["id"], ["detect", "classify", "finalize"],
+                status="cancelled", summary="Cancelled before start",
+            )
             return {
                 "total": total,
                 "predictions_stored": 0,
@@ -1913,6 +1941,10 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                     total = len(photos)
                     job["progress"]["total"] = total
                 else:
+                    _finalize_remaining_steps(
+                        runner, job["id"], ["classify", "finalize"],
+                        status="cancelled", summary="Cancelled",
+                    )
                     return {
                         "total": total,
                         "predictions_stored": 0,
@@ -1923,6 +1955,10 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                         "failed": 0,
                     }
             else:
+                _finalize_remaining_steps(
+                    runner, job["id"], ["classify", "finalize"],
+                    status="cancelled", summary="Cancelled",
+                )
                 return {
                     "total": total,
                     "predictions_stored": 0,

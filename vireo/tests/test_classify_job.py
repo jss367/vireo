@@ -4385,3 +4385,101 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
             f"{det_id}; only the processed empty-scene photo's synthetic "
             f"full-image detection (201) should be classified."
         )
+
+
+# ---------------------------------------------------------------------------
+# Early returns must not leave step rows stuck at "pending"
+# ---------------------------------------------------------------------------
+
+
+def _final_step_statuses(runner):
+    """Map step_id -> last status reported via update_step."""
+    finals = {}
+    for step_id, kwargs in runner.steps:
+        if "status" in kwargs:
+            finals[step_id] = kwargs["status"]
+    return finals
+
+
+def test_empty_collection_finalizes_all_step_rows(tmp_path):
+    """The total==0 short-circuit returns before model resolution; the
+    load_taxonomy/load_model/detect/classify/finalize rows it skips must
+    be flipped to a terminal status, not left pending forever.
+    """
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    coll_id = db.add_collection("empty", "[]")
+
+    runner = FakeRunner()
+    job = _make_job()
+    params = ClassifyParams(
+        collection_id=coll_id,
+        labels_files=None,
+        labels_file=None,
+        model_id=None,
+        model_name=None,
+        grouping_window=0,
+        similarity_threshold=0.99,
+        reclassify=False,
+    )
+
+    result = run_classify_job(job, runner, db_path, ws, params)
+    assert result["total"] == 0
+
+    finals = _final_step_statuses(runner)
+    terminal = {"completed", "failed", "cancelled"}
+    for step_id in ("load_photos", "load_taxonomy", "load_model",
+                    "detect", "classify", "finalize"):
+        assert finals.get(step_id) in terminal, (
+            f"Step {step_id!r} must reach a terminal status when the job "
+            f"short-circuits with no photos, got {finals.get(step_id)!r}"
+        )
+
+
+def test_precancelled_job_finalizes_all_step_rows(tmp_path):
+    """The pre-model-resolution cancel gate returns early; the remaining
+    rows must be marked cancelled rather than left pending forever.
+    """
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder("/tmp/p", name="p")
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    coll_id = db.add_collection(
+        "c", '[{"field":"photo_ids","value":[' + str(pid) + "]}]",
+    )
+
+    runner = FakeRunner()
+    runner.cancelled = True
+    job = _make_job()
+    params = ClassifyParams(
+        collection_id=coll_id,
+        labels_files=None,
+        labels_file=None,
+        model_id=None,
+        model_name=None,
+        grouping_window=0,
+        similarity_threshold=0.99,
+        reclassify=False,
+    )
+
+    result = run_classify_job(job, runner, db_path, ws, params)
+    assert result["predictions_stored"] == 0
+
+    finals = _final_step_statuses(runner)
+    for step_id in ("load_taxonomy", "load_model", "detect",
+                    "classify", "finalize"):
+        assert finals.get(step_id) == "cancelled", (
+            f"Step {step_id!r} must be marked cancelled on the "
+            f"pre-resolution cancel gate, got {finals.get(step_id)!r}"
+        )
