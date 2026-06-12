@@ -159,8 +159,13 @@ def create_app(data_dir):
     def accept_batch():
         body = request.get_json(silent=True) or {}
         category = body.get("category")
-        min_confidence = body.get("min_confidence", 0.0)
         model = body.get("model")
+        # Coerce before any sidecar writes: a TypeError mid-loop would
+        # desync already-written XMP sidecars from results.json.
+        try:
+            min_confidence = float(body.get("min_confidence", 0.0))
+        except (TypeError, ValueError):
+            return jsonify({"error": "min_confidence must be a number"}), 400
 
         data = _load_results()
         accepted = 0

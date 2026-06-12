@@ -40,6 +40,69 @@ def test_check_drift_detects_xmp_change(tmp_path):
     assert drifts[0]['filename'] == 'bird.jpg'
 
 
+def test_check_drift_ignores_case_only_difference(tmp_path):
+    """A case-only keyword difference is not drift.
+
+    resolve_drift('use_xmp') goes through sync_from_xmp, which reconciles
+    case-insensitively and treats a case-only difference as already in
+    sync — so reporting it here would create a permanently unresolvable
+    drift entry.
+    """
+    from audit import check_drift
+    from db import Database
+    from scanner import scan
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (100, 100)).save(os.path.join(root, 'bird.jpg'))
+    xmp_path = os.path.join(root, 'bird.xmp')
+    write_sidecar(xmp_path, flat_keywords={'Sparrow'}, hierarchical_keywords=set())
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    # Rewrite the sidecar with the same keyword in a different case
+    # (write_sidecar merges, so replace the file outright)
+    os.unlink(xmp_path)
+    write_sidecar(xmp_path, flat_keywords={'SPARROW'}, hierarchical_keywords=set())
+
+    assert check_drift(db) == []
+
+
+def test_check_drift_reports_real_difference_despite_case_noise(tmp_path):
+    """Genuinely different keyword sets still drift; case-only pairs don't
+    inflate the added/removed lists, and reported values keep the actual
+    stored strings."""
+    from audit import check_drift
+    from db import Database
+    from scanner import scan
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (100, 100)).save(os.path.join(root, 'bird.jpg'))
+    xmp_path = os.path.join(root, 'bird.xmp')
+    write_sidecar(xmp_path, flat_keywords={'Sparrow'}, hierarchical_keywords=set())
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    os.unlink(xmp_path)
+    write_sidecar(
+        xmp_path, flat_keywords={'SPARROW', 'Cardinal'}, hierarchical_keywords=set()
+    )
+
+    drifts = check_drift(db)
+    assert len(drifts) == 1
+    assert drifts[0]['added_in_xmp'] == ['Cardinal']
+    assert drifts[0]['removed_in_xmp'] == []
+    assert drifts[0]['direction'] == 'xmp_ahead'
+    # Reported values show the strings as actually stored on each side
+    assert drifts[0]['db_value'] == ['Sparrow']
+    assert drifts[0]['xmp_value'] == ['Cardinal', 'SPARROW']
+
+
 def test_check_orphans_detects_deleted_file(tmp_path):
     """check_orphans finds DB entries with no file on disk."""
     from audit import check_orphans

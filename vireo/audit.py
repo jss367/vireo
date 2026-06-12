@@ -58,9 +58,20 @@ def check_drift(db):
 
         xmp_keywords = read_keywords(xmp_path)
 
-        if xmp_keywords != db_keywords:
-            added_in_xmp = xmp_keywords - db_keywords
-            removed_in_xmp = db_keywords - xmp_keywords
+        # Compare case-insensitively: resolve_drift('use_xmp') reconciles
+        # via sync_from_xmp, which treats keywords differing only by case as
+        # already in sync, so a case-only difference reported here would be
+        # permanently unresolvable. Reported values keep the actual strings.
+        db_by_lower = {k.lower(): k for k in db_keywords}
+        xmp_by_lower = {k.lower(): k for k in xmp_keywords}
+
+        if set(xmp_by_lower) != set(db_by_lower):
+            added_in_xmp = {
+                kw for low, kw in xmp_by_lower.items() if low not in db_by_lower
+            }
+            removed_in_xmp = {
+                kw for low, kw in db_by_lower.items() if low not in xmp_by_lower
+            }
 
             # Determine direction
             if added_in_xmp and not removed_in_xmp:
