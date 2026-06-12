@@ -3365,9 +3365,12 @@ function selectCalendarDay(dateStr, count) {
   document.getElementById('calSelectionText').textContent = formatted + ' \u00b7 ' + count + ' photo' + (count !== 1 ? 's' : '');
   document.getElementById('calSelection').classList.add('active');
 
-  // Update date inputs and reload
+  // Update date inputs and reload. #dateTo is <input type="date">, which
+  // rejects datetime strings (the value would silently blank and the filter
+  // would lose its upper bound). A bare date is correct: the backend pads
+  // date_to to end-of-day (_inclusive_date_to in db.py).
   document.getElementById('dateFrom').value = dateStr;
-  document.getElementById('dateTo').value = dateStr + 'T23:59:59';
+  document.getElementById('dateTo').value = dateStr;
   resetAndLoad();
   renderCalendar(); // update selected state
 }

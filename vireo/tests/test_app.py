@@ -1900,6 +1900,21 @@ def test_pages_no_inline_escapeHtml(app_and_db):
             f"{page} still has inline escapeHtml definition"
 
 
+def test_browse_calendar_day_sets_bare_date(app_and_db):
+    """Heatmap day click must set #dateTo to a bare date.
+
+    #dateTo is <input type="date">: assigning 'YYYY-MM-DDT23:59:59' is
+    rejected and silently blanks the input, so the request went out with
+    no upper bound. The backend pads bare dates to end-of-day
+    (_inclusive_date_to), so the suffix is never needed client-side.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/browse')
+    assert resp.status_code == 200
+    assert "T23:59:59" not in resp.data.decode()
+
+
 def test_health_endpoint(app_and_db):
     """GET /api/health returns 200 with status ok."""
     app, _ = app_and_db
