@@ -6269,7 +6269,7 @@ function buildPhotoContextMenu(photoIds) {
     { label: 'Review Burst', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openSelectedInBurstReview(); } },
   ].concat(buildOpenInEditorMenuItems(photoIds)).concat([
-    { label: 'Reveal in Finder/Folder', disabled: !one, disabledHint: hint,
+    { label: window.VIREO_REVEAL_LABEL, disabled: !one, disabledHint: hint,
       onClick: function() { revealPhoto(photoIds[0]); } },
     { label: 'Copy Path',
       onClick: function() { copyPhotoPaths(photoIds); } },
@@ -6356,7 +6356,7 @@ document.addEventListener('contextmenu', function(e) {
   openContextMenu(e, [
     { label: 'Filter by this folder', onClick: function() { filterByFolder(fid); } },
     { separator: true },
-    { label: 'Reveal in Finder/Folder', onClick: function() { revealFolder(fid); } },
+    { label: window.VIREO_REVEAL_LABEL, onClick: function() { revealFolder(fid); } },
     { label: 'Copy Path', onClick: function() { copyFolderPath(fid); } },
     { separator: true },
     { label: 'Rescan this Folder', onClick: function() { rescanFolder(fid); } },

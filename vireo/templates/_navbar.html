@@ -4211,7 +4211,7 @@ function buildLightboxContextMenu(pid) {
     items = items.concat(window.buildOpenInEditorMenuItems([pid]));
   }
   if (has('revealPhoto')) {
-    items.push({ label: 'Reveal in Finder/Folder',
+    items.push({ label: window.VIREO_REVEAL_LABEL,
       onClick: function() { window.revealPhoto(pid); } });
   }
   if (has('copyPhotoPaths')) {
@@ -5712,7 +5712,7 @@ window.handleNativeMenuCommand = async function(command) {
         nativeMenuOpenBrowse();
         break;
       case 'photo_reveal': {
-        var revealIds = nativeMenuRequirePhotos('Reveal in Finder');
+        var revealIds = nativeMenuRequirePhotos(window.VIREO_REVEAL_LABEL);
         if (!revealIds) break;
         if (typeof revealPhoto === 'function') revealPhoto(revealIds[0]);
         else if (typeof revealReviewPhoto === 'function') revealReviewPhoto(revealIds[0]);

@@ -2024,6 +2024,59 @@ def test_templates_jinja_free_except_includes():
     )
 
 
+def test_file_manager_labels_per_platform(monkeypatch):
+    """Reveal/placeholder wording is OS-appropriate so Linux/Windows users
+    don't see macOS-only 'Finder' terminology."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module.sys, "platform", "linux")
+    linux = app_module._file_manager_labels()
+    assert linux["reveal"] == "Reveal in File Manager"
+    assert linux["editor_placeholder"].startswith("/")
+    assert "Applications" not in linux["editor_placeholder"]
+
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    mac = app_module._file_manager_labels()
+    assert mac["reveal"] == "Reveal in Finder"
+    assert mac["editor_placeholder"].endswith(".app")
+
+    monkeypatch.setattr(app_module.sys, "platform", "win32")
+    win = app_module._file_manager_labels()
+    assert "Explorer" in win["reveal"]
+    assert win["editor_placeholder"].endswith(".exe")
+
+
+def test_config_defaults_js_exposes_platform_globals(app_and_db):
+    """/config-defaults.js publishes the platform-aware globals the templates
+    read (they are Jinja-free, so this is the only injection channel)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    body = client.get('/config-defaults.js').get_data(as_text=True)
+    assert 'window.VIREO_REVEAL_LABEL' in body
+    assert 'window.VIREO_EDITOR_PATH_PLACEHOLDER' in body
+    assert 'window.VIREO_PLATFORM' in body
+
+
+def test_trash_via_finder_guarded_off_mac(monkeypatch):
+    """The AppleScript Finder fallback only runs on macOS; elsewhere it raises
+    instead of spawning a doomed osascript subprocess."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module.sys, "platform", "linux")
+    called = []
+    monkeypatch.setattr(
+        app_module.subprocess, "run",
+        lambda *a, **k: called.append(a) or None,
+    )
+    try:
+        app_module._trash_via_finder("/some/file.jpg")
+        raised = False
+    except OSError:
+        raised = True
+    assert raised, "expected OSError on non-macOS"
+    assert called == [], "osascript must not be spawned off macOS"
+
+
 def test_navbar_js_fallbacks_match_python_constants():
     """The hardcoded fallback lists in _navbar.html must mirror the
     canonical Python lists. The navbar's JS uses these fallbacks when

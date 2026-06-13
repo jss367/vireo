@@ -1540,7 +1540,7 @@ function renderExternalEditors() {
 
     var pathInput = document.createElement('input');
     pathInput.type = 'text';
-    pathInput.placeholder = '/Applications/Adobe Lightroom Classic/Adobe Lightroom Classic.app';
+    pathInput.placeholder = window.VIREO_EDITOR_PATH_PLACEHOLDER || '/usr/bin/darktable';
     pathInput.value = ed.path || '';
     pathInput.style.cssText = inputCss + 'flex:1;min-width:240px;font-family:monospace;';
     pathInput.addEventListener('input', function() {

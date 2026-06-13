@@ -813,6 +813,32 @@ def _record_working_copy_failure(db, photo, source_path=None):
         )
 
 
+def _file_manager_labels():
+    """Friendly OS file-manager wording for UI labels.
+
+    Keeps Linux/Windows users from seeing macOS-only "Finder" terminology in
+    menus and buttons. Keyed off the *server* platform because the reveal
+    action shells out server-side (``open`` / ``explorer`` / ``xdg-open``).
+    """
+    if sys.platform == "darwin":
+        return {
+            "name": "Finder",
+            "reveal": "Reveal in Finder",
+            "editor_placeholder": "/Applications/Adobe Lightroom Classic/Adobe Lightroom Classic.app",
+        }
+    if sys.platform.startswith("win"):
+        return {
+            "name": "File Explorer",
+            "reveal": "Show in File Explorer",
+            "editor_placeholder": r"C:\Program Files\Adobe\Adobe Lightroom Classic\lightroom.exe",
+        }
+    return {
+        "name": "file manager",
+        "reveal": "Reveal in File Manager",
+        "editor_placeholder": "/usr/bin/darktable",
+    }
+
+
 def _ensure_volume_trashes_dir(filepath, ensured_volumes):
     """Make sure ``/Volumes/<X>/.Trashes/<uid>/`` exists when ``filepath`` is on
     an external/network mount. macOS ``send2trash`` legacy mode raises
@@ -844,8 +870,13 @@ def _trash_via_finder(filepath):
     """Trash a file via Finder using AppleScript.
 
     Fallback for when send2trash fails (e.g. external volumes where the
-    legacy Carbon API can't locate .Trashes).
+    legacy Carbon API can't locate .Trashes). macOS-only: on Linux/Windows
+    ``send2trash`` already implements the platform trash spec, so there is no
+    equivalent fallback. Raising here (instead of spawning a doomed
+    ``osascript``) lets the caller surface the original send2trash failure.
     """
+    if sys.platform != "darwin":
+        raise OSError("Finder trash fallback is only available on macOS")
     result = subprocess.run(
         [
             "osascript",
@@ -1948,10 +1979,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/config-defaults.js")
     def config_defaults_js():
-        """Expose backend defaults to browser code without template literals."""
+        """Expose backend defaults to browser code without template literals.
+
+        Templates are kept strictly Jinja-free (see
+        ``test_templates_jinja_free_except_includes``), so platform-aware
+        wording is injected here as ``window.*`` globals. This script is loaded
+        first in ``_navbar.html``, before any inline page script runs.
+        """
+        labels = _file_manager_labels()
         return Response(
             "window.VIREO_CONFIG_DEFAULTS = "
             + json.dumps(cfg.DEFAULTS, separators=(",", ":"))
+            + ";\nwindow.VIREO_PLATFORM = "
+            + json.dumps(sys.platform)
+            + ";\nwindow.VIREO_REVEAL_LABEL = "
+            + json.dumps(labels["reveal"])
+            + ";\nwindow.VIREO_EDITOR_PATH_PLACEHOLDER = "
+            + json.dumps(labels["editor_placeholder"])
             + ";\n",
             mimetype="application/javascript",
         )

@@ -648,7 +648,7 @@
     });
     html += '<button class="keep-btn reveal-btn" onclick="revealBucketFolders(' + bi + ')" ' +
       'title="Open all bucket folders in your OS file manager">' +
-      'Reveal in Finder</button>';
+      escapeHtml(window.VIREO_REVEAL_LABEL) + '</button>';
     html += '<label class="delete-toggle">' +
       '<input type="checkbox" data-bi="' + bi + '" data-delete-toggle> ' +
       'Also move extras to Trash</label>';
