@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import tempfile
 
+from proc import no_window_kwargs
+
 log = logging.getLogger(__name__)
 
 _DIAG_MAX_CHARS = 500
@@ -210,7 +212,9 @@ def convert_to_dng(dng_converter_bin, input_path, output_dir):
 
     cmd = [binary, "-dng1.4", "-d", output_dir, input_path]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=180, **no_window_kwargs()
+        )
         if result.returncode != 0:
             diag = _format_subprocess_diag(result.stdout, result.stderr)
             return {
@@ -289,7 +293,9 @@ def develop_photo(
 
     try:
         log.info("Developing %s -> %s", os.path.basename(input_path), output_path)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120, **no_window_kwargs()
+        )
         if result.returncode != 0:
             # darktable-cli writes init/IO failures to stdout, not stderr.
             diag = _format_subprocess_diag(result.stdout, result.stderr)
