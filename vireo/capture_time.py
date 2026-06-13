@@ -9,6 +9,7 @@ import subprocess
 from datetime import datetime, timedelta
 
 from metadata import extract_metadata
+
 try:
     from .proc import no_window_kwargs
 except ImportError:
