@@ -7,7 +7,10 @@ import shutil
 import subprocess
 import tempfile
 
-from proc import no_window_kwargs
+try:
+    from .proc import no_window_kwargs
+except ImportError:
+    from proc import no_window_kwargs
 
 log = logging.getLogger(__name__)
 

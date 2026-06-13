@@ -9,7 +9,10 @@ import logging
 import subprocess
 import sys
 
-from proc import no_window_kwargs
+try:
+    from .proc import no_window_kwargs
+except ImportError:
+    from proc import no_window_kwargs
 
 log = logging.getLogger(__name__)
 
