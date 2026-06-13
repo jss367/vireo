@@ -9,6 +9,10 @@ import subprocess
 from datetime import datetime, timedelta
 
 from metadata import extract_metadata
+try:
+    from .proc import no_window_kwargs
+except ImportError:
+    from proc import no_window_kwargs
 
 log = logging.getLogger(__name__)
 
@@ -374,6 +378,7 @@ def adjust_capture_time(
                 capture_output=True,
                 text=True,
                 timeout=120,
+                **no_window_kwargs(),
             )
             if result.returncode != 0:
                 # ExifTool exits 0 on success (warnings included) and 1 when

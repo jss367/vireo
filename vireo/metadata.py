@@ -7,6 +7,12 @@ Returns grouped tag dictionaries keyed by ExifTool group (EXIF, GPS, XMP, etc.).
 import json
 import logging
 import subprocess
+import sys
+
+try:
+    from .proc import no_window_kwargs
+except ImportError:
+    from proc import no_window_kwargs
 
 log = logging.getLogger(__name__)
 
@@ -15,6 +21,19 @@ _BATCH_SIZE = 100
 _EXIFTOOL_TIMEOUT = 120
 _MAX_TIMEOUT_SPLIT_ATTEMPTS = 16
 _TIMEOUT = object()
+
+
+def _exiftool_install_hint() -> str:
+    """Platform-appropriate guidance for installing exiftool.
+
+    The macOS-only ``brew install exiftool`` hint is wrong on Windows
+    (no Homebrew) and Linux, so tailor the message per platform.
+    """
+    if sys.platform == "win32":
+        return "download it from https://exiftool.org"
+    if sys.platform == "darwin":
+        return "install it with: brew install exiftool"
+    return "install it with your package manager (e.g. apt install libimage-exiftool-perl)"
 
 
 def _run_exiftool(file_paths, extra_args=None):
@@ -42,6 +61,7 @@ def _run_exiftool(file_paths, extra_args=None):
             capture_output=True,
             text=True,
             timeout=_EXIFTOOL_TIMEOUT,
+            **no_window_kwargs(),
         )
         if result.returncode not in (0, 1):
             # returncode 1 = warnings (e.g. minor errors), still has output
@@ -51,7 +71,7 @@ def _run_exiftool(file_paths, extra_args=None):
             return json.loads(result.stdout)
         return []
     except FileNotFoundError:
-        log.error("exiftool not found — install it with: brew install exiftool")
+        log.error("exiftool not found — %s", _exiftool_install_hint())
     except subprocess.TimeoutExpired:
         log.error("exiftool timed out processing %d files", len(file_paths))
         return _TIMEOUT
