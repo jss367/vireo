@@ -35,7 +35,7 @@ depends on how Vireo was installed:
 
 ```bash
 # macOS (.app bundle)
-/Applications/Vireo.app/Contents/Resources/bin/vireo-server \
+/Applications/Vireo.app/Contents/MacOS/vireo-server \
   --headless --port 0 --db ~/.vireo/vireo.db
 
 # Linux (run the server module directly from a checkout)

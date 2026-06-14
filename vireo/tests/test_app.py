@@ -2051,7 +2051,9 @@ def test_config_defaults_js_exposes_platform_globals(app_and_db):
     read (they are Jinja-free, so this is the only injection channel)."""
     app, _ = app_and_db
     client = app.test_client()
-    body = client.get('/config-defaults.js').get_data(as_text=True)
+    resp = client.get('/config-defaults.js')
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
     assert 'window.VIREO_REVEAL_LABEL' in body
     assert 'window.VIREO_EDITOR_PATH_PLACEHOLDER' in body
     assert 'window.VIREO_PLATFORM' in body
