@@ -4923,13 +4923,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             from send2trash import send2trash as _trash
                             _trash(filepath)
                             trashed += 1
-                        except Exception:
-                            log.debug("send2trash failed for %s, trying Finder", filepath)
-                            try:
-                                _trash_via_finder(filepath)
-                                trashed += 1
-                            except Exception:
-                                log.warning("Trash failed for %s", filepath, exc_info=True)
+                        except Exception as send_err:
+                            # send2trash implements the platform trash spec on
+                            # Linux/Windows; the AppleScript Finder fallback only
+                            # helps on macOS. Off-mac, report the real send2trash
+                            # error instead of masking it with the Finder guard.
+                            if sys.platform == "darwin":
+                                log.debug("send2trash failed for %s, trying Finder", filepath)
+                                try:
+                                    _trash_via_finder(filepath)
+                                    trashed += 1
+                                except Exception:
+                                    log.warning("Trash failed for %s", filepath, exc_info=True)
+                                    trash_failed.append({"path": filepath})
+                            else:
+                                log.warning("Trash failed for %s: %s", filepath, send_err)
                                 trash_failed.append({"path": filepath})
                     else:  # disk_permanent
                         try:
@@ -11353,7 +11361,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 _trash(filepath)
                 trashed += 1
                 trashed_pids.append(pid)
-            except Exception:
+            except Exception as send_err:
+                # send2trash implements the platform trash spec on Linux/Windows;
+                # the AppleScript Finder fallback only helps on macOS. Off-mac,
+                # surface the real send2trash error rather than masking it with
+                # the Finder guard's "only available on macOS" message.
+                if sys.platform != "darwin":
+                    log.warning("Trash failed for %s", filepath, exc_info=True)
+                    failed.append({"id": pid, "path": filepath, "error": str(send_err)})
+                    continue
                 log.debug("send2trash failed for %s, trying Finder", filepath)
                 try:
                     _trash_via_finder(filepath)
