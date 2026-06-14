@@ -1455,7 +1455,7 @@ function buildReviewCardContextMenu(pred) {
     onClick: function() { openReviewLightbox(photoId, pred.filename); },
   });
   items.push({
-    label: 'Reveal in Finder/Folder',
+    label: window.VIREO_REVEAL_LABEL,
     onClick: function() { revealReviewPhoto(photoId); },
   });
   items.push({
@@ -1518,7 +1518,7 @@ function buildBurstGroupContextMenu(photoId, filename) {
     ] },
     { separator: true },
     { label: 'Open in Lightbox',        onClick: function() { openReviewLightbox(photoId, filename); } },
-    { label: 'Reveal in Finder/Folder', onClick: function() { revealReviewPhoto(photoId); } },
+    { label: window.VIREO_REVEAL_LABEL, onClick: function() { revealReviewPhoto(photoId); } },
     { label: 'Copy Path',               onClick: function() { copyReviewPhotoPath(photoId); } },
     { separator: true },
     // Send-elsewhere actions: get the photo into another tool without losing

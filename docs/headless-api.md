@@ -14,7 +14,7 @@ from the command line), it writes `~/.vireo/runtime.json`:
   "port": 54321,
   "pid": 12345,
   "version": "0.8.28",
-  "db_path": "/Users/you/.vireo/vireo.db",
+  "db_path": "/home/you/.vireo/vireo.db",
   "started_at": "2026-04-22T19:30:00Z",
   "mode": "gui",
   "token": "…"
@@ -30,11 +30,16 @@ will replace it automatically.
 
 ## Spawning a headless instance
 
-If no instance is running, spawn one from the installed `.app`:
+If no instance is running, spawn one from the installed binary. The path
+depends on how Vireo was installed:
 
 ```bash
-/Applications/Vireo.app/Contents/Resources/bin/vireo-server \
+# macOS (.app bundle)
+/Applications/Vireo.app/Contents/MacOS/vireo-server \
   --headless --port 0 --db ~/.vireo/vireo.db
+
+# Linux (run the server module directly from a checkout)
+python vireo/app.py --headless --port 0 --db ~/.vireo/vireo.db
 ```
 
 `--port 0` picks a free port. Poll `~/.vireo/runtime.json` until it appears
