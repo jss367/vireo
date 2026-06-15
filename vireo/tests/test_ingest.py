@@ -738,6 +738,15 @@ def test_ingest_duplicate_folders_flat_import_root_duplicate(tmp_path):
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: on Windows, destination ``\"/\"`` is drive-relative "
+    "(resolves to the current drive root, e.g. ``D:\\``), so a library "
+    "scanned on a different drive (e.g. ``C:\\Users\\...\\tmp\\...``) "
+    "is correctly NOT under the root destination. The Windows drive-scope "
+    "branch is covered by "
+    "test_path_under_root_scopes_root_relative_to_current_drive_on_windows.",
+)
 def test_ingest_duplicate_folders_matches_under_posix_root_destination(tmp_path):
     """When destination_dir is the POSIX filesystem root ("/"), the SQL
     prefilter must still match duplicate folders that live anywhere under
@@ -1002,6 +1011,14 @@ def test_path_under_root_scopes_root_relative_to_current_drive_on_windows(
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: monkeypatching ``ingest._WINDOWS = False`` does not "
+    "swap ``os.path`` to ``posixpath``, so the fallback "
+    "``os.path.isabs(\"/foo\")`` still uses Windows semantics — and on "
+    "Python 3.13+ Windows returns False for drive-less paths. The POSIX "
+    "branch is exercised by the Ubuntu leg of the CI matrix.",
+)
 def test_path_under_root_root_slash_still_accepts_absolutes_on_posix(
     monkeypatch,
 ):
