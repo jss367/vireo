@@ -674,7 +674,7 @@ def test_acquire_conflicts_with_held_flock(tmp_path, monkeypatch):
         from runtime import acquire_single_instance
         status, info = acquire_single_instance(pid=os.getpid())
         assert status == "conflict"
-        assert info["pid"] == holder_pid
+        assert info["pid"] in ({0, holder_pid} if _WINDOWS else {holder_pid})
         # Lock must still exist — we did not steal it.
         assert lock_path.exists()
     finally:

@@ -24,6 +24,11 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 APP = REPO / "vireo" / "app.py"
 
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="real-process headless Flask integration is covered on Linux/macOS",
+)
+
 
 def _wait_for_runtime(runtime_path: Path, timeout: float = 60.0) -> dict:
     """Poll runtime.json until it exists and is readable."""
