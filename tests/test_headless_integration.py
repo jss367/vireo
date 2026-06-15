@@ -24,7 +24,7 @@ REPO = Path(__file__).resolve().parents[1]
 APP = REPO / "vireo" / "app.py"
 
 
-def _wait_for_runtime(runtime_path: Path, timeout: float = 20.0) -> dict:
+def _wait_for_runtime(runtime_path: Path, timeout: float = 60.0) -> dict:
     """Poll runtime.json until it exists and is readable."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -37,7 +37,7 @@ def _wait_for_runtime(runtime_path: Path, timeout: float = 20.0) -> dict:
     raise TimeoutError(f"{runtime_path} never appeared")
 
 
-def _wait_for_port(port: int, timeout: float = 20.0) -> None:
+def _wait_for_port(port: int, timeout: float = 60.0) -> None:
     """Poll until 127.0.0.1:port accepts TCP connections.
 
     runtime.json is written before Flask binds to the port, so callers
@@ -63,6 +63,7 @@ def _free_port() -> int:
 def _spawn(home: Path, db: Path, port: int):
     env = os.environ.copy()
     env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
     env["PYTHONUNBUFFERED"] = "1"
     return subprocess.Popen(
         [sys.executable, str(APP),

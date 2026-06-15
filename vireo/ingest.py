@@ -31,7 +31,7 @@ def _is_unsafe_path(s):
         return False
     # Reject backslashes (Windows traversal), absolute paths, '..' segments,
     # and colons (Windows drive-relative paths like C:2026 or C:%Y)
-    if "\\" in s or ":" in s:
+    if s.startswith("/") or "\\" in s or ":" in s:
         return True
     p = Path(s)
     if p.is_absolute():
@@ -251,16 +251,23 @@ def ingest(
         # and symlink expansion, which could diverge from the raw paths
         # stored in ``folders.path``.
         dest_path_str = str(Path(destination_dir))
+        # Strip first so the LIKE prefix for root ("/") becomes "/%"
+        # rather than "//%". The equality side falls back to "/" for root.
+        dest_path_sql_stripped = dest_path_str.replace("\\", "/").rstrip("/")
+        dest_path_sql = dest_path_sql_stripped or "/"
         dest_path_normalized = Path(os.path.normpath(dest_path_str))
-        dest_like_prefix = _escape_sql_like(dest_path_str.rstrip("/")) + "/%"
+        dest_like_prefix = _escape_sql_like(dest_path_sql_stripped) + "/%"
         folder_rows = db.conn.execute(
             """SELECT p.file_hash, f.path AS folder_path
                FROM photos p
                JOIN folders f ON p.folder_id = f.id
                WHERE p.file_hash IS NOT NULL
                  AND f.status IN ('ok', 'partial')
-                 AND (f.path = ? OR f.path LIKE ? ESCAPE '\\')""",
-            (dest_path_str, dest_like_prefix),
+                 AND (
+                   REPLACE(f.path, '\\', '/') = ?
+                   OR REPLACE(f.path, '\\', '/') LIKE ? ESCAPE '\\'
+                 )""",
+            (dest_path_sql, dest_like_prefix),
         ).fetchall()
         for r in folder_rows:
             folder_path = r["folder_path"]
