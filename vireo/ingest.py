@@ -3,6 +3,7 @@
 import contextlib
 import logging
 import os
+import posixpath
 import shutil
 import sys
 from datetime import datetime
@@ -29,7 +30,12 @@ def _escape_sql_like(s):
 
 
 def _slash_normpath(s):
-    normalized = os.path.normpath(str(s)).replace("\\", "/")
+    # Replace backslashes first, then collapse with posixpath.normpath. The
+    # reverse order is unsafe on POSIX hosts: os.path.normpath there doesn't
+    # recognize backslashes as separators, so a stored Windows-style path
+    # like ``C:\dest\sub\..\other`` would survive normalization with its
+    # ``..`` intact and bypass the prefix check in _path_under_root.
+    normalized = posixpath.normpath(str(s).replace("\\", "/"))
     return "" if normalized == "." else normalized.rstrip("/")
 
 

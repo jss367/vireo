@@ -4338,6 +4338,29 @@ function browseTo(path) {
   if (path === '__pictures__') {
     url = '/api/browse?path=' + encodeURIComponent(_fbHomePath + '/Pictures');
   } else if (path === '__volumes__') {
+    // Windows has no single "volumes root" directory — drives live at C:\,
+    // D:\, etc. /api/volumes enumerates them via the Win32 API; render the
+    // drive list directly as a synthetic listing the user can drill into.
+    if (navigator.userAgent.indexOf('Win') >= 0) {
+      fetch('/api/volumes').then(function(r) {
+        if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Failed to enumerate volumes'); });
+        return r.json();
+      }).then(function(volumes) {
+        _fbCurrentPath = '';
+        _fbSelectedDir = '';
+        _fbSelectedDirs = [];
+        _fbSelectAnchorPath = '';
+        document.getElementById('fbSelectedPath').textContent = '';
+        updateFbSelectButtonLabel();
+        var bc = document.getElementById('fbBreadcrumb');
+        bc.innerHTML = '<span class="current">Volumes</span>';
+        bc.onclick = null;
+        renderFolderList(volumes);
+      }).catch(function(err) {
+        listEl.innerHTML = '<div class="folder-browser-error">' + escapeHtml(err.message) + '</div>';
+      });
+      return;
+    }
     var volDir = navigator.userAgent.indexOf('Mac') >= 0 ? '/Volumes' : '/media';
     url = '/api/browse?path=' + encodeURIComponent(volDir);
   } else if (path) {

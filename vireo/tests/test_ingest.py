@@ -883,6 +883,24 @@ def test_path_under_root_is_case_sensitive_on_posix(monkeypatch):
     assert not ingest._path_under_root("/photos/sub", "/Photos")
 
 
+def test_path_under_root_collapses_dotdot_across_separators(monkeypatch):
+    """Stored Windows-style paths with ``..`` segments must not bypass the
+    subtree prefix check on POSIX hosts. ``os.path.normpath`` on POSIX
+    does not treat ``\\`` as a separator, so a candidate like
+    ``C:\\dest\\sub\\..\\other`` would otherwise survive normalization
+    with its ``..`` intact and incorrectly match root ``C:\\dest\\sub``.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", False)
+
+    assert not ingest._path_under_root(r"C:\dest\sub\..\other", r"C:\dest\sub")
+    assert not ingest._path_under_root("/photos/sub/../other", "/photos/sub")
+    # Sanity: the legitimate sibling lookup still resolves under its
+    # actual parent after the ``..`` is collapsed.
+    assert ingest._path_under_root(r"C:\dest\sub\..\other", r"C:\dest")
+
+
 def test_ingest_duplicate_folders_matches_case_variant_destination_on_windows(
     tmp_path, monkeypatch
 ):
