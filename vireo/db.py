@@ -54,13 +54,36 @@ def _escape_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+# Backslash is a directory separator on Windows but a legal filename
+# character on POSIX. The subtree cascade helpers (``_subtree_prefix``,
+# ``_subtree_relative``, and the SQL prefix queries that bind their output)
+# normalize ``\\`` → ``/`` only when running on Windows; on POSIX an
+# unconditional rewrite would let a sibling folder literally named
+# ``a\b`` match as a child of ``a`` and be renamed during cascades.
+_PATH_SEP_IS_BACKSLASH = os.sep == "\\"
+
+
+def _cascade_match_path(value: str) -> str:
+    """Normalize a path for cascade-subtree match, gated to Windows."""
+    if _PATH_SEP_IS_BACKSLASH:
+        value = value.replace("\\", "/")
+    return value.rstrip("/")
+
+
+def _cascade_path_sql() -> str:
+    """SQL expression that mirrors ``_cascade_match_path`` on the ``path`` column."""
+    if _PATH_SEP_IS_BACKSLASH:
+        return "REPLACE(path, '\\', '/')"
+    return "path"
+
+
 def _subtree_prefix(path: str) -> str:
-    return _path_for_subtree_match(path) + "/"
+    return _cascade_match_path(path) + "/"
 
 
 def _subtree_relative(child_path: str, root_path: str) -> str:
-    root = _path_for_subtree_match(root_path)
-    child = _path_for_subtree_match(child_path)
+    root = _cascade_match_path(root_path)
+    child = _cascade_match_path(child_path)
     return child[len(root):].lstrip("/")
 
 
@@ -2225,17 +2248,18 @@ class Database:
         # Check missing children for cascade
         cascaded = []
         skipped_prefixes = []
+        path_expr = _cascade_path_sql()
         children = self.conn.execute(
-            """SELECT id, path FROM folders
+            f"""SELECT id, path FROM folders
                WHERE status = 'missing'
-                 AND substr(REPLACE(path, '\\', '/'), 1, ?) = ?
-               ORDER BY length(REPLACE(path, '\\', '/')),
-                        REPLACE(path, '\\', '/')""",
+                 AND substr({path_expr}, 1, ?) = ?
+               ORDER BY length({path_expr}),
+                        {path_expr}""",
             (len(_subtree_prefix(old_path)), _subtree_prefix(old_path)),
         ).fetchall()
         for child in children:
             # Skip descendants of conflicted folders
-            child_match_path = _path_for_subtree_match(child["path"])
+            child_match_path = _cascade_match_path(child["path"])
             if any(child_match_path.startswith(p + "/") for p in skipped_prefixes):
                 continue
             relative = _subtree_relative(child["path"], old_path)
@@ -2352,16 +2376,17 @@ class Database:
         # Cascade to missing children (same logic as relocate_folder)
         cascaded = []
         skipped_prefixes = []
+        path_expr = _cascade_path_sql()
         children = self.conn.execute(
-            """SELECT id, path FROM folders
+            f"""SELECT id, path FROM folders
                WHERE status = 'missing'
-                 AND substr(REPLACE(path, '\\', '/'), 1, ?) = ?
-               ORDER BY length(REPLACE(path, '\\', '/')),
-                        REPLACE(path, '\\', '/')""",
+                 AND substr({path_expr}, 1, ?) = ?
+               ORDER BY length({path_expr}),
+                        {path_expr}""",
             (len(_subtree_prefix(old_path)), _subtree_prefix(old_path)),
         ).fetchall()
         for child in children:
-            child_match_path = _path_for_subtree_match(child["path"])
+            child_match_path = _cascade_match_path(child["path"])
             if any(child_match_path.startswith(p + "/") for p in skipped_prefixes):
                 continue
             relative = _subtree_relative(child["path"], old_path)
@@ -2465,9 +2490,10 @@ class Database:
         self.conn.execute(
             "UPDATE folders SET path = ? WHERE id = ?", (new_path, folder_id)
         )
+        path_expr = _cascade_path_sql()
         children = self.conn.execute(
-            """SELECT id, path FROM folders
-               WHERE substr(REPLACE(path, '\\', '/'), 1, ?) = ?""",
+            f"""SELECT id, path FROM folders
+               WHERE substr({path_expr}, 1, ?) = ?""",
             (len(_subtree_prefix(old_path)), _subtree_prefix(old_path)),
         ).fetchall()
         for child in children:

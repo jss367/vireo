@@ -6339,8 +6339,15 @@ def test_relocate_folder_cascade_skips_descendants_of_conflict(tmp_path):
         assert row["status"] == "missing"
 
 
-def test_relocate_folder_cascade_skips_mixed_separator_descendants_of_conflict(tmp_path):
-    """Conflicted ancestors must be processed before mixed-separator descendants."""
+def test_relocate_folder_cascade_skips_mixed_separator_descendants_of_conflict(tmp_path, monkeypatch):
+    """Conflicted ancestors must be processed before mixed-separator descendants.
+
+    Mixed ``\\``/``/`` separators only arise on Windows (or migrated DBs
+    opened on Windows), so we force Windows-mode path normalization to
+    exercise the cascade behavior on Linux CI.
+    """
+    import db as db_module
+    monkeypatch.setattr(db_module, "_PATH_SEP_IS_BACKSLASH", True)
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -6368,6 +6375,37 @@ def test_relocate_folder_cascade_skips_mixed_separator_descendants_of_conflict(t
         row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (fid,)).fetchone()
         assert row["path"] == expected_path
         assert row["status"] == "missing"
+
+
+def test_relocate_folder_cascade_treats_posix_backslash_as_filename_char(tmp_path, monkeypatch):
+    """On POSIX, ``\\`` is a legal filename char — never a subtree separator.
+
+    A sibling folder literally named ``a\\b`` must not be matched as a
+    descendant of ``a`` and renamed under the cascade target.
+    """
+    import db as db_module
+    monkeypatch.setattr(db_module, "_PATH_SEP_IS_BACKSLASH", False)
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("/pics/a", name="a")
+    sibling = db.add_folder("/pics/a\\b", name="a\\b")
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    new_root = str(tmp_path / "new_a")
+    os.makedirs(os.path.join(new_root, "b"))
+
+    cascaded = db.relocate_folder(parent, new_root)
+    assert cascaded == []
+
+    row = db.conn.execute(
+        "SELECT path, status FROM folders WHERE id = ?", (sibling,)
+    ).fetchone()
+    assert row["path"] == "/pics/a\\b"
+    assert row["status"] == "missing"
 
 
 def test_delete_folder(tmp_path):
