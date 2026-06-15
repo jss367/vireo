@@ -30,12 +30,18 @@ def _escape_sql_like(s):
 
 
 def _slash_normpath(s):
-    # Replace backslashes first, then collapse with posixpath.normpath. The
-    # reverse order is unsafe on POSIX hosts: os.path.normpath there doesn't
-    # recognize backslashes as separators, so a stored Windows-style path
-    # like ``C:\dest\sub\..\other`` would survive normalization with its
-    # ``..`` intact and bypass the prefix check in _path_under_root.
-    normalized = posixpath.normpath(str(s).replace("\\", "/"))
+    # On Windows, both ``\`` and ``/`` are valid separators and stored paths
+    # may use either; replace backslashes first, then collapse ``..`` segments
+    # with posixpath.normpath so the prefix check in _path_under_root works
+    # regardless of which separator the caller used.
+    #
+    # On POSIX, ``\`` is a valid filename character rather than a separator.
+    # Converting it would conflate a literal sibling like ``/photos\archive``
+    # (one folder whose name happens to contain a backslash) with a child of
+    # ``/photos``, letting it slip through the subtree containment check.
+    # Run posixpath.normpath directly so backslashes stay literal.
+    raw = str(s)
+    normalized = posixpath.normpath(raw.replace("\\", "/") if _WINDOWS else raw)
     return "" if normalized == "." else normalized.rstrip("/")
 
 
@@ -283,19 +289,28 @@ def ingest(
         dest_path_str = str(Path(destination_dir))
         # Strip first so the LIKE prefix for root ("/") becomes "/%"
         # rather than "//%". The equality side falls back to "/" for root.
-        dest_path_sql_stripped = dest_path_str.replace("\\", "/").rstrip("/")
+        # Backslashes are only normalized on Windows, where they are
+        # separators; on POSIX they are literal filename characters and
+        # converting them would match siblings like "/photos\archive"
+        # against destination "/photos".
+        if _WINDOWS:
+            dest_path_sql_stripped = dest_path_str.replace("\\", "/").rstrip("/")
+        else:
+            dest_path_sql_stripped = dest_path_str.rstrip("/")
         dest_path_sql = dest_path_sql_stripped or "/"
         dest_like_prefix = _escape_sql_like(dest_path_sql_stripped) + "/%"
-        # On Windows the filesystem is case-insensitive: a destination passed
-        # as "c:\photos" must still match folder rows scanned as "C:\Photos\..."
-        # to preserve the old Path.is_relative_to behaviour on WindowsPath.
-        # Lower-case both sides on Windows; leave POSIX comparisons untouched.
+        # On Windows the filesystem is case-insensitive AND accepts both
+        # separators, so normalize the stored f.path to forward slashes and
+        # lower-case both sides to preserve the old Path.is_relative_to
+        # behaviour on WindowsPath. On POSIX, do neither: stored paths use
+        # the host's literal byte sequence and a literal sibling whose name
+        # contains "\" must not be folded into a child of the destination.
         if _WINDOWS:
             path_sql_expr = "LOWER(REPLACE(f.path, '\\', '/'))"
             dest_path_sql_param = dest_path_sql.lower()
             dest_like_prefix_param = dest_like_prefix.lower()
         else:
-            path_sql_expr = "REPLACE(f.path, '\\', '/')"
+            path_sql_expr = "f.path"
             dest_path_sql_param = dest_path_sql
             dest_like_prefix_param = dest_like_prefix
         if dest_path_sql_stripped:

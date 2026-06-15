@@ -508,6 +508,57 @@ def test_ingest_duplicate_folders_rejects_sql_like_wildcard_siblings(tmp_path):
         )
 
 
+def test_ingest_duplicate_folders_rejects_posix_backslash_sibling(tmp_path):
+    """duplicate_folders must not leak a literal sibling whose name
+    contains ``\\`` on POSIX hosts.
+
+    Regression for the Codex P2 on PR #977 (discussion r3416819572):
+    the SQL prefilter previously ran ``REPLACE(f.path, '\\', '/')``
+    unconditionally, so a stored row like ``/tmp/photos\\archive``
+    (a sibling literally named ``photos\\archive``) compared equal to
+    the destination ``/tmp/photos``'s LIKE prefix ``/tmp/photos/%``,
+    then passed the ``_path_under_root`` post-filter for the same
+    reason, and ended up in duplicate_folders. The pipeline then walked
+    that out-of-tree sibling as if it were under the destination.
+    """
+    src = tmp_path / "sd_card"
+    dest = tmp_path / "photos"
+    # Literal sibling whose name contains a backslash. On POSIX this is
+    # a single folder, NOT a child of "photos".
+    sibling = tmp_path / "photos\\archive"
+    for d in [src, dest, sibling]:
+        d.mkdir(parents=True)
+
+    img = Image.new("RGB", (100, 100), color="magenta")
+    img.save(str(sibling / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(sibling), db)
+
+    import shutil
+    shutil.copy2(str(sibling / "shot.jpg"), str(src / "shot.jpg"))
+
+    result = ingest(str(src), str(dest), db=db, skip_duplicates=True)
+
+    # The byte-identical file in the sibling counts as a known hash, so
+    # the ingest still skips it as a duplicate — but the sibling folder
+    # must NOT be reported as a destination duplicate_folder.
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(sibling) not in dup_folders, (
+        f"duplicate_folders leaked POSIX backslash-named sibling "
+        f"{str(sibling)!r}; got {dup_folders!r}"
+    )
+    # Defense in depth: nothing outside dest slipped through.
+    for f in dup_folders:
+        assert f == str(dest) or f.startswith(str(dest) + "/"), (
+            f"duplicate_folders contains {f!r} which is not under "
+            f"destination {str(dest)!r}"
+        )
+
+
 def test_ingest_duplicate_folders_excludes_folder_deleted_from_disk(tmp_path):
     """duplicate_folders must not contain folders that no longer exist on
     disk, even if their DB status is stale ('ok').
@@ -883,22 +934,49 @@ def test_path_under_root_is_case_sensitive_on_posix(monkeypatch):
     assert not ingest._path_under_root("/photos/sub", "/Photos")
 
 
-def test_path_under_root_collapses_dotdot_across_separators(monkeypatch):
-    """Stored Windows-style paths with ``..`` segments must not bypass the
-    subtree prefix check on POSIX hosts. ``os.path.normpath`` on POSIX
-    does not treat ``\\`` as a separator, so a candidate like
-    ``C:\\dest\\sub\\..\\other`` would otherwise survive normalization
-    with its ``..`` intact and incorrectly match root ``C:\\dest\\sub``.
+def test_path_under_root_collapses_dotdot(monkeypatch):
+    """``..`` segments must be collapsed before the prefix comparison so a
+    candidate like ``/photos/sub/../other`` is recognised as a sibling of
+    ``/photos/sub`` rather than a child.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", False)
+    # POSIX: forward-slash ``..`` segments collapse via posixpath.normpath.
+    assert not ingest._path_under_root("/photos/sub/../other", "/photos/sub")
+    assert ingest._path_under_root("/photos/sub/../other", "/photos")
+
+    monkeypatch.setattr(ingest, "_WINDOWS", True)
+    # Windows: backslash separators are converted then collapsed.
+    assert not ingest._path_under_root(r"C:\dest\sub\..\other", r"C:\dest\sub")
+    assert ingest._path_under_root(r"C:\dest\sub\..\other", r"C:\dest")
+    # Forward-slash ``..`` segments also collapse on Windows.
+    assert ingest._path_under_root("C:/dest/sub/../other", "C:/dest")
+
+
+def test_path_under_root_treats_backslash_as_literal_on_posix(monkeypatch):
+    """On POSIX, ``\\`` is a valid filename character, not a separator.
+    A stored sibling literally named ``photos\\archive`` at the root of
+    the destination's parent must NOT be classified as a child of
+    ``/photos``; the SQL prefilter would already accept the row, so the
+    post-filter prefix check has to reject it.
+
+    Regression guard for the Codex P2 on PR #977 (discussion r3416819572):
+    unconditionally converting backslashes to forward slashes was letting
+    out-of-tree siblings slip into ``duplicate_folders`` on POSIX hosts.
     """
     import ingest
 
     monkeypatch.setattr(ingest, "_WINDOWS", False)
 
-    assert not ingest._path_under_root(r"C:\dest\sub\..\other", r"C:\dest\sub")
-    assert not ingest._path_under_root("/photos/sub/../other", "/photos/sub")
-    # Sanity: the legitimate sibling lookup still resolves under its
-    # actual parent after the ``..`` is collapsed.
-    assert ingest._path_under_root(r"C:\dest\sub\..\other", r"C:\dest")
+    # Sibling literally named "photos\archive" at the same level as
+    # "photos" must not be treated as a child of "photos".
+    assert not ingest._path_under_root("/photos\\archive", "/photos")
+    assert not ingest._path_under_root(
+        "/dest/photos\\archive/sub", "/dest/photos"
+    )
+    # The legitimate child is still matched.
+    assert ingest._path_under_root("/photos/archive", "/photos")
 
 
 def test_ingest_duplicate_folders_matches_case_variant_destination_on_windows(
