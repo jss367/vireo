@@ -25,6 +25,19 @@ def _escape_sql_like(s):
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _slash_normpath(s):
+    normalized = os.path.normpath(str(s)).replace("\\", "/")
+    return "" if normalized == "." else normalized.rstrip("/")
+
+
+def _path_under_root(candidate, root):
+    candidate_norm = _slash_normpath(candidate)
+    root_norm = _slash_normpath(root)
+    if root_norm in {"", "/"}:
+        return os.path.isabs(os.path.normpath(candidate))
+    return candidate_norm == root_norm or candidate_norm.startswith(root_norm + "/")
+
+
 def _is_unsafe_path(s):
     """Check if a path string could escape the destination directory."""
     if not s:
@@ -219,12 +232,11 @@ def ingest(
         #      library into memory on large DBs. Escaping is required
         #      because destination paths may legally contain SQL LIKE
         #      wildcard characters (``_`` and ``%``).
-        #   3. Python ``Path.is_relative_to`` on lexically-normalized
-        #      paths — strict path-component comparison that catches any
-        #      residual LIKE wildcard leaks. ``os.path.normpath`` is
-        #      applied to both sides first so ``..`` segments in a
-        #      stored folder path can't lexically appear to be under
-        #      the destination while actually resolving outside it.
+        #   3. Python slash-normalized component-prefix comparison — strict
+        #      path-component matching that catches any residual LIKE wildcard
+        #      leaks. ``os.path.normpath`` is applied first so ``..`` segments
+        #      in a stored folder path can't lexically appear to be under the
+        #      destination while actually resolving outside it.
         #   4. Python ``Path.is_dir`` on the raw stored path — catches
         #      stale ``status IN ('ok', 'partial')`` rows when the folder
         #      was deleted since the last scan and the caller didn't
@@ -245,30 +257,33 @@ def ingest(
         # destination (``"/"``) produces LIKE prefix ``"/%"`` rather than
         # ``"//%"``.
         #
-        # ``dest_path_normalized`` is a separate ``Path`` used ONLY by the
-        # Python ``is_relative_to`` guard below. ``os.path.normpath`` is
-        # used instead of ``Path.resolve()`` to avoid filesystem access
-        # and symlink expansion, which could diverge from the raw paths
-        # stored in ``folders.path``.
         dest_path_str = str(Path(destination_dir))
         # Strip first so the LIKE prefix for root ("/") becomes "/%"
         # rather than "//%". The equality side falls back to "/" for root.
         dest_path_sql_stripped = dest_path_str.replace("\\", "/").rstrip("/")
         dest_path_sql = dest_path_sql_stripped or "/"
-        dest_path_normalized = Path(os.path.normpath(dest_path_str))
         dest_like_prefix = _escape_sql_like(dest_path_sql_stripped) + "/%"
-        folder_rows = db.conn.execute(
-            """SELECT p.file_hash, f.path AS folder_path
-               FROM photos p
-               JOIN folders f ON p.folder_id = f.id
-               WHERE p.file_hash IS NOT NULL
-                 AND f.status IN ('ok', 'partial')
-                 AND (
-                   REPLACE(f.path, '\\', '/') = ?
-                   OR REPLACE(f.path, '\\', '/') LIKE ? ESCAPE '\\'
-                 )""",
-            (dest_path_sql, dest_like_prefix),
-        ).fetchall()
+        if dest_path_sql_stripped:
+            folder_rows = db.conn.execute(
+                """SELECT p.file_hash, f.path AS folder_path
+                   FROM photos p
+                   JOIN folders f ON p.folder_id = f.id
+                   WHERE p.file_hash IS NOT NULL
+                     AND f.status IN ('ok', 'partial')
+                     AND (
+                       REPLACE(f.path, '\\', '/') = ?
+                       OR REPLACE(f.path, '\\', '/') LIKE ? ESCAPE '\\'
+                     )""",
+                (dest_path_sql, dest_like_prefix),
+            ).fetchall()
+        else:
+            folder_rows = db.conn.execute(
+                """SELECT p.file_hash, f.path AS folder_path
+                   FROM photos p
+                   JOIN folders f ON p.folder_id = f.id
+                   WHERE p.file_hash IS NOT NULL
+                     AND f.status IN ('ok', 'partial')"""
+            ).fetchall()
         for r in folder_rows:
             folder_path = r["folder_path"]
             # Normalise both sides before the subtree check: a stored path
@@ -276,8 +291,7 @@ def ingest(
             # "/dest/sub" but IS relative to "/dest". Without normpath,
             # is_relative_to gives the wrong answer for paths with ".."
             # segments that happen to share a prefix with dest.
-            candidate_normalized = Path(os.path.normpath(folder_path))
-            if not candidate_normalized.is_relative_to(dest_path_normalized):
+            if not _path_under_root(folder_path, dest_path_str):
                 continue
             if not Path(folder_path).is_dir():
                 continue

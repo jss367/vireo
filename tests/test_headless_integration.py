@@ -7,6 +7,7 @@ guard, runtime.json writer, and `/api/v1/*` auth are load-bearing enough
 to warrant real-process coverage.
 """
 
+import contextlib
 import json
 import os
 import signal
@@ -79,6 +80,18 @@ def _http_get(url: str, token: str, timeout: float = 2.0):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+def _wait_for_http_get(url: str, token: str, timeout: float = 60.0):
+    deadline = time.monotonic() + timeout
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            return _http_get(url, token, timeout=5.0)
+        except (OSError, urllib.error.URLError) as exc:
+            last_error = exc
+            time.sleep(0.25)
+    raise TimeoutError(f"{url} did not return before timeout: {last_error!r}")
+
+
 @pytest.fixture
 def headless_home(tmp_path):
     home = tmp_path / "home"
@@ -100,7 +113,7 @@ def test_headless_spawn_writes_runtime_and_serves_health(headless_home, tmp_path
         assert data["pid"] == proc.pid
         assert len(data["token"]) >= 32
 
-        resp = _http_get(
+        resp = _wait_for_http_get(
             f"http://127.0.0.1:{port}/api/v1/health", data["token"],
         )
         assert resp.status == 200
@@ -138,7 +151,7 @@ def test_second_spawn_refuses_with_already_running(headless_home, tmp_path):
 
         # First instance must still be healthy.
         data = json.loads(runtime.read_text())
-        resp = _http_get(
+        resp = _wait_for_http_get(
             f"http://127.0.0.1:{first_port}/api/v1/health", data["token"],
         )
         assert resp.status == 200
@@ -208,7 +221,11 @@ def test_shutdown_endpoint_removes_runtime_json(headless_home, tmp_path):
             method="POST",
             headers={"X-Vireo-Token": data["token"]},
         )
-        urllib.request.urlopen(req, timeout=3).read()
+        # Windows can tear down the dev server socket before urllib has
+        # consumed the response body. The process exit and runtime cleanup
+        # assertions below are the behavior this test cares about.
+        with contextlib.suppress(ConnectionResetError, urllib.error.URLError):
+            urllib.request.urlopen(req, timeout=10).read()
 
         # Wait for the process to exit (shutdown timer + signal).
         proc.wait(timeout=10)
