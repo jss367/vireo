@@ -251,9 +251,12 @@ def ingest(
         # and symlink expansion, which could diverge from the raw paths
         # stored in ``folders.path``.
         dest_path_str = str(Path(destination_dir))
-        dest_path_sql = dest_path_str.replace("\\", "/").rstrip("/") or "/"
+        # Strip first so the LIKE prefix for root ("/") becomes "/%"
+        # rather than "//%". The equality side falls back to "/" for root.
+        dest_path_sql_stripped = dest_path_str.replace("\\", "/").rstrip("/")
+        dest_path_sql = dest_path_sql_stripped or "/"
         dest_path_normalized = Path(os.path.normpath(dest_path_str))
-        dest_like_prefix = _escape_sql_like(dest_path_sql) + "/%"
+        dest_like_prefix = _escape_sql_like(dest_path_sql_stripped) + "/%"
         folder_rows = db.conn.execute(
             """SELECT p.file_hash, f.path AS folder_path
                FROM photos p
