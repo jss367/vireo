@@ -961,6 +961,63 @@ def test_path_under_root_collapses_dotdot(monkeypatch):
     assert ingest._path_under_root("C:/dest/sub/../other", "C:/dest")
 
 
+def test_path_under_root_scopes_root_relative_to_current_drive_on_windows(
+    monkeypatch,
+):
+    """On Windows, ``/`` and ``\\`` are drive-relative paths meaning the
+    *current* drive root (e.g. ``C:\\``), not every drive or UNC share.
+
+    A duplicate-only ingest into ``/`` previously fell into the
+    ``root_norm in {"", "/"}`` branch and was accepted by
+    ``os.path.isabs(...)`` for any absolute candidate, so folder rows on
+    ``D:\\...`` or ``\\\\server\\share\\...`` leaked into
+    ``duplicate_folders`` and the follow-up restricted scan could link
+    folders outside the selected destination.
+
+    Regression guard for the Codex P2 on PR #977 (discussion r3417096143).
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", True)
+    # Simulate a Windows process whose current drive is C:, so that
+    # ``os.path.abspath('/')`` resolves to ``C:\``. On the POSIX test
+    # host abspath would otherwise return ``/`` (which strips back to
+    # empty and re-enters the fallback we're trying to test around).
+    monkeypatch.setattr(
+        ingest.os.path,
+        "abspath",
+        lambda p: "C:\\" if p in ("/", "\\") else p,
+    )
+
+    # Candidates on the current drive are accepted.
+    assert ingest._path_under_root(r"C:\photos\foo.jpg", "/")
+    assert ingest._path_under_root(r"C:\photos\foo.jpg", "\\")
+    assert ingest._path_under_root(r"C:\\", "/")
+    # Candidates on a different drive must be rejected.
+    assert not ingest._path_under_root(r"D:\photos\foo.jpg", "/")
+    assert not ingest._path_under_root(r"D:\photos\foo.jpg", "\\")
+    # UNC paths must be rejected — they are not on any local drive root.
+    assert not ingest._path_under_root(
+        r"\\server\share\photos\foo.jpg", "/"
+    )
+
+
+def test_path_under_root_root_slash_still_accepts_absolutes_on_posix(
+    monkeypatch,
+):
+    """POSIX behaviour for root ``/`` is unchanged: every absolute path
+    is under it. Only the Windows branch is drive-scoped.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", False)
+
+    assert ingest._path_under_root("/photos/foo.jpg", "/")
+    assert ingest._path_under_root("/anywhere/else", "/")
+    # Relative candidate (no leading slash) is not under root ``/``.
+    assert not ingest._path_under_root("relative/path", "/")
+
+
 def test_path_under_root_treats_backslash_as_literal_on_posix(monkeypatch):
     """On POSIX, ``\\`` is a valid filename character, not a separator.
     A stored sibling literally named ``photos\\archive`` at the root of

@@ -63,6 +63,20 @@ def _path_under_root(candidate, root):
     candidate_norm = _case_fold_path(_slash_normpath(candidate))
     root_norm = _case_fold_path(_slash_normpath(root))
     if root_norm in {"", "/"}:
+        if _WINDOWS:
+            # On Windows, a destination given as ``/`` or ``\`` is
+            # drive-relative: it means the current drive root (e.g. ``C:\``),
+            # not every drive or UNC share. Resolve to the absolute drive
+            # root via ``os.path.abspath`` and recheck containment so a
+            # folder row on ``D:\...`` or ``\\server\share\...`` isn't
+            # accepted into a destination the user gave as ``/`` and then
+            # leaked into ``duplicate_folders`` for the restricted scan.
+            drive_root = _case_fold_path(_slash_normpath(os.path.abspath(root)))
+            if drive_root and drive_root not in {"", "/"}:
+                return (
+                    candidate_norm == drive_root
+                    or candidate_norm.startswith(drive_root + "/")
+                )
         return os.path.isabs(os.path.normpath(candidate))
     return candidate_norm == root_norm or candidate_norm.startswith(root_norm + "/")
 
