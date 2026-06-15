@@ -727,6 +727,62 @@ def test_ingest_duplicate_folders_matches_under_posix_root_destination(tmp_path)
     )
 
 
+def test_ingest_duplicate_folders_matches_anchored_root_destination(tmp_path):
+    """When destination_dir is an anchored root (POSIX "/" or a Windows
+    drive root like "C:\\"), the SQL prefilter must still match a
+    scanned root folder whose stored path normalizes to the destination
+    with the anchored trailing separator preserved.
+
+    Regression: stripping "C:\\" down to "C:" while the stored folder
+    row normalizes to "C:/" makes the equality predicate miss the root
+    row, so duplicate files living directly at the destination root
+    never appear in ``duplicate_folders`` and the post-ingest restricted
+    scan fails to link them into the active workspace.
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    library = tmp_path / "fake_root"
+    for d in [src, library]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="yellow")
+    img.save(str(library / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(library), db)
+
+    # Simulate the way a drive-root scan stores its top-level folder:
+    # with the anchored trailing separator preserved. We can't actually
+    # mount a Windows drive on this Linux test host, so directly mutate
+    # the stored row to the trailing-slash form that ``C:\`` would
+    # produce after ``REPLACE(path, '\\', '/')``.
+    anchored_stored = str(library) + "/"
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE path = ?",
+        (anchored_stored, str(library)),
+    )
+    db.conn.commit()
+
+    shutil.copy2(str(library / "shot.jpg"), str(src / "shot.jpg"))
+
+    # Use the same anchored form for destination_dir so the equality
+    # side of the prefilter has to find the row by its trailing slash.
+    result = ingest(
+        str(src), anchored_stored, db=db,
+        skip_duplicates=True, folder_template="",
+    )
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert anchored_stored in dup_folders, (
+        f"anchored-root ingest should surface the trailing-slash folder "
+        f"{anchored_stored!r}; got duplicate_folders={dup_folders!r}"
+    )
+
+
 def test_ingest_duplicate_folders_matches_unnormalized_stored_path(tmp_path):
     """When the DB holds a folder row whose path contains ``..`` segments
     because a previous scan was run with an unnormalized root, ingesting

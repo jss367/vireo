@@ -252,9 +252,15 @@ def ingest(
         # stored in ``folders.path``.
         dest_path_str = str(Path(destination_dir))
         # Strip first so the LIKE prefix for root ("/") becomes "/%"
-        # rather than "//%". The equality side falls back to "/" for root.
+        # rather than "//%". The equality side falls back to "/" for the
+        # POSIX root and also matches the stripped-plus-trailing-slash
+        # form, since anchored-root scans (POSIX "/" or Windows drive
+        # root "C:\") store the folder row with the trailing separator
+        # preserved and "C:" != "C:/" would otherwise drop root-level
+        # duplicates from the prefilter.
         dest_path_sql_stripped = dest_path_str.replace("\\", "/").rstrip("/")
         dest_path_sql = dest_path_sql_stripped or "/"
+        dest_path_sql_anchored = dest_path_sql_stripped + "/"
         dest_path_normalized = Path(os.path.normpath(dest_path_str))
         dest_like_prefix = _escape_sql_like(dest_path_sql_stripped) + "/%"
         folder_rows = db.conn.execute(
@@ -265,9 +271,10 @@ def ingest(
                  AND f.status IN ('ok', 'partial')
                  AND (
                    REPLACE(f.path, '\\', '/') = ?
+                   OR REPLACE(f.path, '\\', '/') = ?
                    OR REPLACE(f.path, '\\', '/') LIKE ? ESCAPE '\\'
                  )""",
-            (dest_path_sql, dest_like_prefix),
+            (dest_path_sql, dest_path_sql_anchored, dest_like_prefix),
         ).fetchall()
         for r in folder_rows:
             folder_path = r["folder_path"]
