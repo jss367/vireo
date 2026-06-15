@@ -54,8 +54,8 @@ def _escape_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _subtree_like_prefix(path: str) -> str:
-    return _escape_like(_path_for_subtree_match(path)) + "/%"
+def _subtree_prefix(path: str) -> str:
+    return _path_for_subtree_match(path) + "/"
 
 
 def _subtree_relative(child_path: str, root_path: str) -> str:
@@ -2228,9 +2228,10 @@ class Database:
         children = self.conn.execute(
             """SELECT id, path FROM folders
                WHERE status = 'missing'
-                 AND REPLACE(path, '\\', '/') LIKE ? ESCAPE '\\'
-               ORDER BY path""",
-            (_subtree_like_prefix(old_path),),
+                 AND substr(REPLACE(path, '\\', '/'), 1, ?) = ?
+               ORDER BY length(REPLACE(path, '\\', '/')),
+                        REPLACE(path, '\\', '/')""",
+            (len(_subtree_prefix(old_path)), _subtree_prefix(old_path)),
         ).fetchall()
         for child in children:
             # Skip descendants of conflicted folders
@@ -2354,9 +2355,10 @@ class Database:
         children = self.conn.execute(
             """SELECT id, path FROM folders
                WHERE status = 'missing'
-                 AND REPLACE(path, '\\', '/') LIKE ? ESCAPE '\\'
-               ORDER BY path""",
-            (_subtree_like_prefix(old_path),),
+                 AND substr(REPLACE(path, '\\', '/'), 1, ?) = ?
+               ORDER BY length(REPLACE(path, '\\', '/')),
+                        REPLACE(path, '\\', '/')""",
+            (len(_subtree_prefix(old_path)), _subtree_prefix(old_path)),
         ).fetchall()
         for child in children:
             child_match_path = _path_for_subtree_match(child["path"])
@@ -2465,8 +2467,8 @@ class Database:
         )
         children = self.conn.execute(
             """SELECT id, path FROM folders
-               WHERE REPLACE(path, '\\', '/') LIKE ? ESCAPE '\\'""",
-            (_subtree_like_prefix(old_path),),
+               WHERE substr(REPLACE(path, '\\', '/'), 1, ?) = ?""",
+            (len(_subtree_prefix(old_path)), _subtree_prefix(old_path)),
         ).fetchall()
         for child in children:
             child_new = _join_subtree_path(

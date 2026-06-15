@@ -19,7 +19,12 @@ def _expanduser_prefers_test_home(monkeypatch):
     real_expanduser = os.path.expanduser
 
     def expanduser(path):
-        if path == "~" or path.startswith("~/"):
+        if isinstance(path, bytes):
+            if path == b"~" or path.startswith((b"~/", b"~\\")):
+                home = os.environ.get("HOME")
+                if home:
+                    return os.fsencode(home) + path[1:]
+        elif path == "~" or path.startswith(("~/", "~\\")):
             home = os.environ.get("HOME")
             if home:
                 return home + path[1:]
