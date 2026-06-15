@@ -26,6 +26,37 @@ jobs:
           pip install pytest pytest-cov pytest-timeout pytest-xdist
           pip install -e .
 
+      # Cache MegaDetector V6 weights across runs so the Windows/macOS legs
+      # don't restart a cold ~300 MB download for every PR. Without this,
+      # ``-n 2`` xdist workers each kick off their own ``hf_hub_download``
+      # the first time they hit a test that calls ``ensure_megadetector_weights``,
+      # and the resulting bursts of parallel HEAD requests to
+      # ``huggingface.co/jss367/vireo-onnx-models`` get throttled with 429s,
+      # crashing the worker and cascading dozens of unrelated test failures.
+      - name: Cache MegaDetector weights
+        id: cache-mdv6
+        uses: actions/cache@v4
+        with:
+          path: ~/.vireo/models/megadetector-v6
+          key: megadetector-v6-${{ runner.os }}-v1
+
+      # Sequential single-process pre-download. If the cache missed we run
+      # one HEAD+GET against HF Hub before the tests fan out — orders of
+      # magnitude less likely to trip the 429 rate limiter than two xdist
+      # workers each starting their own download simultaneously. Retry a
+      # few times with backoff so a single transient throttle doesn't
+      # poison the whole CI run.
+      - name: Pre-download MegaDetector weights
+        if: steps.cache-mdv6.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          cd vireo
+          for i in 1 2 3 4 5; do
+            python -c "import sys; sys.path.insert(0, '.'); from detector import ensure_megadetector_weights; ensure_megadetector_weights()" && break
+            echo "Pre-download attempt $i failed; sleeping $((i * 15))s before retry"
+            sleep $((i * 15))
+          done
+
       # Linux is the canonical full run and enforces the coverage threshold.
       - name: Run tests with coverage (Linux)
         if: runner.os == 'Linux'
