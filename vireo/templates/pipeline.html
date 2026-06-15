@@ -4395,7 +4395,15 @@ function browseTo(path) {
     document.getElementById('fbSelectedPath').textContent = data.path;
     updateFbSelectButtonLabel();
     renderBreadcrumb(data.path);
-    renderFolderList(data.dirs);
+    // Drilling into a Windows drive root (e.g. C:\, D:/) lists top-level
+    // system directories like Users, Windows, Program Files. Recursive
+    // photo counts on those would scan the entire volume and hang the
+    // UI/server, so skip counts here and resume once the user drills in
+    // one more level. The synthetic Volumes list is handled separately
+    // (with skipCounts:true) above; this guard covers the post-drill
+    // path that /api/browse renders.
+    var isWindowsDriveRoot = /^[A-Za-z]:[\\\/]?$/.test(data.path || '');
+    renderFolderList(data.dirs, { skipCounts: isWindowsDriveRoot });
   }).catch(function(err) {
     listEl.innerHTML = '<div class="folder-browser-error">' + escapeHtml(err.message) + '</div>';
   });
