@@ -12,6 +12,26 @@ from PIL import Image
 
 
 @pytest.fixture(autouse=True)
+def _expanduser_prefers_test_home(monkeypatch):
+    """Make HOME-based tests portable to Windows.
+
+    Windows normally resolves ``~`` from USERPROFILE, while this suite uses
+    HOME to isolate app state. Read HOME dynamically so per-test monkeypatches
+    are honored after fixture setup.
+    """
+    real_expanduser = os.path.expanduser
+
+    def expanduser(path):
+        if path == "~" or path.startswith("~/"):
+            home = os.environ.get("HOME")
+            if home:
+                return home + path[1:]
+        return real_expanduser(path)
+
+    monkeypatch.setattr(os.path, "expanduser", expanduser)
+
+
+@pytest.fixture(autouse=True)
 def _reset_model_cache():
     """Drop the process-wide ModelCache between tests.
 

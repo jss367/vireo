@@ -54,6 +54,21 @@ def _escape_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _subtree_like_prefix(path: str) -> str:
+    return _escape_like(_path_for_subtree_match(path)) + "/%"
+
+
+def _subtree_relative(child_path: str, root_path: str) -> str:
+    root = _path_for_subtree_match(root_path)
+    child = _path_for_subtree_match(child_path)
+    return child[len(root):].lstrip("/")
+
+
+def _join_subtree_path(root_path: str, relative_path: str) -> str:
+    parts = [p for p in relative_path.split("/") if p]
+    return os.path.join(root_path, *parts) if parts else root_path
+
+
 def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
     values = list(values)
     for idx in range(0, len(values), size):
@@ -2211,15 +2226,19 @@ class Database:
         cascaded = []
         skipped_prefixes = []
         children = self.conn.execute(
-            "SELECT id, path FROM folders WHERE status = 'missing' AND path LIKE ? ESCAPE '\\' ORDER BY path",
-            (_escape_like(old_path) + "/%",),
+            """SELECT id, path FROM folders
+               WHERE status = 'missing'
+                 AND REPLACE(path, '\\', '/') LIKE ? ESCAPE '\\'
+               ORDER BY path""",
+            (_subtree_like_prefix(old_path),),
         ).fetchall()
         for child in children:
             # Skip descendants of conflicted folders
-            if any(child["path"].startswith(p + "/") for p in skipped_prefixes):
+            child_match_path = _path_for_subtree_match(child["path"])
+            if any(child_match_path.startswith(p + "/") for p in skipped_prefixes):
                 continue
-            relative = child["path"][len(old_path):]  # e.g. "/sub/dir"
-            candidate = new_path + relative
+            relative = _subtree_relative(child["path"], old_path)
+            candidate = _join_subtree_path(new_path, relative)
             if os.path.exists(candidate):
                 # Skip if another folder already has this path
                 child_conflict = self.conn.execute(
@@ -2227,7 +2246,7 @@ class Database:
                     (candidate, child["id"]),
                 ).fetchone()
                 if child_conflict:
-                    skipped_prefixes.append(child["path"])
+                    skipped_prefixes.append(child_match_path)
                     continue
                 self.conn.execute(
                     "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
@@ -2333,21 +2352,25 @@ class Database:
         cascaded = []
         skipped_prefixes = []
         children = self.conn.execute(
-            "SELECT id, path FROM folders WHERE status = 'missing' AND path LIKE ? ESCAPE '\\' ORDER BY path",
-            (_escape_like(old_path) + "/%",),
+            """SELECT id, path FROM folders
+               WHERE status = 'missing'
+                 AND REPLACE(path, '\\', '/') LIKE ? ESCAPE '\\'
+               ORDER BY path""",
+            (_subtree_like_prefix(old_path),),
         ).fetchall()
         for child in children:
-            if any(child["path"].startswith(p + "/") for p in skipped_prefixes):
+            child_match_path = _path_for_subtree_match(child["path"])
+            if any(child_match_path.startswith(p + "/") for p in skipped_prefixes):
                 continue
-            relative = child["path"][len(old_path):]
-            candidate = new_path + relative
+            relative = _subtree_relative(child["path"], old_path)
+            candidate = _join_subtree_path(new_path, relative)
             if os.path.exists(candidate):
                 child_conflict = self.conn.execute(
                     "SELECT id FROM folders WHERE path = ? AND id != ?",
                     (candidate, child["id"]),
                 ).fetchone()
                 if child_conflict:
-                    skipped_prefixes.append(child["path"])
+                    skipped_prefixes.append(child_match_path)
                     continue
                 self.conn.execute(
                     "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
@@ -2441,11 +2464,14 @@ class Database:
             "UPDATE folders SET path = ? WHERE id = ?", (new_path, folder_id)
         )
         children = self.conn.execute(
-            "SELECT id, path FROM folders WHERE path LIKE ? ESCAPE '\\'",
-            (_escape_like(old_path) + "/%",),
+            """SELECT id, path FROM folders
+               WHERE REPLACE(path, '\\', '/') LIKE ? ESCAPE '\\'""",
+            (_subtree_like_prefix(old_path),),
         ).fetchall()
         for child in children:
-            child_new = new_path + child["path"][len(old_path):]
+            child_new = _join_subtree_path(
+                new_path, _subtree_relative(child["path"], old_path)
+            )
             self.conn.execute(
                 "UPDATE folders SET path = ? WHERE id = ?", (child_new, child["id"])
             )
@@ -3442,11 +3468,14 @@ class Database:
             return {}
         by_dir = {}
         for p in paths:
-            by_dir.setdefault(os.path.dirname(p), []).append(os.path.basename(p))
+            by_dir.setdefault(os.path.dirname(p), {}).setdefault(
+                os.path.basename(p), []
+            ).append(p)
 
         out = {}
         BATCH = 800  # leave headroom under SQLite's default 999-param cap
-        for dir_path, fnames in by_dir.items():
+        for dir_path, originals_by_name in by_dir.items():
+            fnames = list(originals_by_name)
             for i in range(0, len(fnames), BATCH):
                 chunk = fnames[i:i + BATCH]
                 placeholders = ",".join("?" for _ in chunk)
@@ -3458,7 +3487,8 @@ class Database:
                     (dir_path, *chunk),
                 ).fetchall()
                 for r in rows:
-                    out[os.path.join(dir_path, r["filename"])] = r["id"]
+                    for original_path in originals_by_name.get(r["filename"], []):
+                        out[original_path] = r["id"]
         return out
 
     def workspace_unlinked_folder_count(self, folder_paths):
