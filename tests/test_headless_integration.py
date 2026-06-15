@@ -63,6 +63,7 @@ def _free_port() -> int:
 def _spawn(home: Path, db: Path, port: int):
     env = os.environ.copy()
     env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
     env["PYTHONUNBUFFERED"] = "1"
     return subprocess.Popen(
         [sys.executable, str(APP),

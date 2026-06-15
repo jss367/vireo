@@ -6339,6 +6339,37 @@ def test_relocate_folder_cascade_skips_descendants_of_conflict(tmp_path):
         assert row["status"] == "missing"
 
 
+def test_relocate_folder_cascade_skips_mixed_separator_descendants_of_conflict(tmp_path):
+    """Conflicted ancestors must be processed before mixed-separator descendants."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("C:/old/root", name="root")
+    child = db.add_folder("C:\\old\\root\\sub", name="sub", parent_id=parent)
+    grand = db.add_folder("C:/old/root/sub/grand", name="grand", parent_id=child)
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    new_root = str(tmp_path / "new_root")
+    child_target = os.path.join(new_root, "sub")
+    grand_target = os.path.join(new_root, "sub", "grand")
+    os.makedirs(grand_target)
+    db.add_folder(child_target, name="conflict")
+
+    cascaded = db.relocate_folder(parent, new_root)
+    assert cascaded == []
+
+    for fid, expected_path in [
+        (child, "C:\\old\\root\\sub"),
+        (grand, "C:/old/root/sub/grand"),
+    ]:
+        row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (fid,)).fetchone()
+        assert row["path"] == expected_path
+        assert row["status"] == "missing"
+
+
 def test_delete_folder(tmp_path):
     """delete_folder removes folder and its photos from the database."""
     from db import Database
@@ -7112,6 +7143,25 @@ def test_move_folder_path_does_not_touch_wildcard_siblings(db):
     assert moved["path"] == "/dest/dir"
     assert sibling["path"] == "/pics/myXdir"
     assert sibling_child["path"] == "/pics/myXdir/sub"
+
+
+def test_move_folder_path_is_case_sensitive(db):
+    """Path cascades must not use SQLite LIKE's ASCII case folding."""
+    fid = db.add_folder("/Photos/2024", name="2024")
+    child = db.add_folder("/Photos/2024/trip", name="trip", parent_id=fid)
+    sib = db.add_folder("/photos/2024", name="lower-2024")
+    sib_child = db.add_folder("/photos/2024/sibling", name="sibling", parent_id=sib)
+
+    db.move_folder_path(fid, "/Archive/2024")
+
+    moved = db.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
+    moved_child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (child,)).fetchone()
+    sibling = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib,)).fetchone()
+    sibling_child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib_child,)).fetchone()
+    assert moved["path"] == "/Archive/2024"
+    assert moved_child["path"] == "/Archive/2024/trip"
+    assert sibling["path"] == "/photos/2024"
+    assert sibling_child["path"] == "/photos/2024/sibling"
 
 
 def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path, monkeypatch):

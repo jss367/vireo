@@ -680,6 +680,53 @@ def test_ingest_duplicate_folders_flat_import_root_duplicate(tmp_path):
     )
 
 
+def test_ingest_duplicate_folders_matches_under_posix_root_destination(tmp_path):
+    """When destination_dir is the POSIX filesystem root ("/"), the SQL
+    prefilter must still match duplicate folders that live anywhere under
+    root.
+
+    Regression: building the LIKE prefix from the fallback ``"/"`` produces
+    ``"//%"`` which never matches paths beginning with a single ``"/"``.
+    The prefix must instead be derived from the rstrip-ed destination
+    (empty string for root → ``"/%"``).
+    """
+    import shutil
+
+    # tmp_path is itself an absolute POSIX path (e.g. /tmp/pytest-of-.../).
+    # It satisfies all four prefilter guards relative to "/": status=ok
+    # after scan, the SQL prefix "/%" matches, it is_relative_to("/"), and
+    # is_dir() is True.
+    src = tmp_path / "sd_card"
+    library = tmp_path / "library_under_root"
+    for d in [src, library]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="yellow")
+    img.save(str(library / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(library), db)
+
+    shutil.copy2(str(library / "shot.jpg"), str(src / "shot.jpg"))
+
+    # destination_dir="/" — skip_duplicates=True means every source file
+    # is a known duplicate, so ingest never attempts to mkdir or copy
+    # under "/" on the test host.
+    result = ingest(
+        str(src), "/", db=db,
+        skip_duplicates=True, folder_template="",
+    )
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(library) in dup_folders, (
+        f"root-destination ingest should surface duplicate folder "
+        f"{str(library)!r} under '/'; got duplicate_folders={dup_folders!r}"
+    )
+
+
 def test_ingest_duplicate_folders_matches_unnormalized_stored_path(tmp_path):
     """When the DB holds a folder row whose path contains ``..`` segments
     because a previous scan was run with an unnormalized root, ingesting
