@@ -4,6 +4,7 @@ import contextlib
 import logging
 import os
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from image_loader import IMAGE_EXTENSIONS, RAW_EXTENSIONS, SUPPORTED_EXTENSIONS
 from scanner import compute_file_hash
 
 log = logging.getLogger(__name__)
+
+_WINDOWS = sys.platform == "win32"
 
 
 def _escape_sql_like(s):
@@ -30,9 +33,23 @@ def _slash_normpath(s):
     return "" if normalized == "." else normalized.rstrip("/")
 
 
+def _case_fold_path(s):
+    """Case-fold a path for comparison when the host filesystem is
+    case-insensitive (Windows NTFS/FAT). On POSIX hosts this is a no-op,
+    preserving case-sensitive matching.
+
+    The previous ``Path(...).is_relative_to(...)`` containment check was
+    case-insensitive on ``WindowsPath``; the slash-string comparison in
+    ``_path_under_root`` is not, so without this fold a destination passed
+    as ``c:\\photos`` would fail to match folder rows scanned as
+    ``C:\\Photos\\...`` and ``duplicate_folders`` would come back empty.
+    """
+    return s.lower() if _WINDOWS else s
+
+
 def _path_under_root(candidate, root):
-    candidate_norm = _slash_normpath(candidate)
-    root_norm = _slash_normpath(root)
+    candidate_norm = _case_fold_path(_slash_normpath(candidate))
+    root_norm = _case_fold_path(_slash_normpath(root))
     if root_norm in {"", "/"}:
         return os.path.isabs(os.path.normpath(candidate))
     return candidate_norm == root_norm or candidate_norm.startswith(root_norm + "/")
@@ -263,18 +280,30 @@ def ingest(
         dest_path_sql_stripped = dest_path_str.replace("\\", "/").rstrip("/")
         dest_path_sql = dest_path_sql_stripped or "/"
         dest_like_prefix = _escape_sql_like(dest_path_sql_stripped) + "/%"
+        # On Windows the filesystem is case-insensitive: a destination passed
+        # as "c:\photos" must still match folder rows scanned as "C:\Photos\..."
+        # to preserve the old Path.is_relative_to behaviour on WindowsPath.
+        # Lower-case both sides on Windows; leave POSIX comparisons untouched.
+        if _WINDOWS:
+            path_sql_expr = "LOWER(REPLACE(f.path, '\\', '/'))"
+            dest_path_sql_param = dest_path_sql.lower()
+            dest_like_prefix_param = dest_like_prefix.lower()
+        else:
+            path_sql_expr = "REPLACE(f.path, '\\', '/')"
+            dest_path_sql_param = dest_path_sql
+            dest_like_prefix_param = dest_like_prefix
         if dest_path_sql_stripped:
             folder_rows = db.conn.execute(
-                """SELECT p.file_hash, f.path AS folder_path
+                f"""SELECT p.file_hash, f.path AS folder_path
                    FROM photos p
                    JOIN folders f ON p.folder_id = f.id
                    WHERE p.file_hash IS NOT NULL
                      AND f.status IN ('ok', 'partial')
                      AND (
-                       REPLACE(f.path, '\\', '/') = ?
-                       OR REPLACE(f.path, '\\', '/') LIKE ? ESCAPE '\\'
+                       {path_sql_expr} = ?
+                       OR {path_sql_expr} LIKE ? ESCAPE '\\'
                      )""",
-                (dest_path_sql, dest_like_prefix),
+                (dest_path_sql_param, dest_like_prefix_param),
             ).fetchall()
         else:
             folder_rows = db.conn.execute(

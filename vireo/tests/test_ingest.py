@@ -847,6 +847,94 @@ def test_ingest_duplicate_folders_rejects_dot_dot_escape(tmp_path):
         )
 
 
+def test_path_under_root_is_case_insensitive_on_windows(monkeypatch):
+    """On Windows the slash-normalized subtree check must be
+    case-insensitive to preserve the previous ``Path.is_relative_to``
+    behaviour on ``WindowsPath`` (and to match NTFS/FAT semantics).
+
+    Regression guard for the Codex review on PR #977: a destination
+    passed as ``c:\\photos`` must still be recognised as the parent of
+    folder rows scanned as ``C:\\Photos\\sub`` so duplicate-only ingests
+    do not leave ``duplicate_folders`` empty.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", True)
+
+    assert ingest._path_under_root(r"C:\Photos\sub\file.jpg", r"c:\photos")
+    assert ingest._path_under_root(r"c:\PHOTOS", r"C:\photos")
+    assert ingest._path_under_root(r"C:\Photos\Sub", r"c:\photos\sub")
+    # A sibling whose case-folded form differs from root must still be
+    # rejected so the Windows fold does not over-match.
+    assert not ingest._path_under_root(r"C:\Photos2\file.jpg", r"C:\photos")
+
+
+def test_path_under_root_is_case_sensitive_on_posix(monkeypatch):
+    """POSIX hosts keep case-sensitive matching: ``/Photos`` and
+    ``/photos`` are distinct directories and the subtree check must
+    not collapse them.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", False)
+
+    assert ingest._path_under_root("/photos/sub", "/photos")
+    assert not ingest._path_under_root("/Photos/sub", "/photos")
+    assert not ingest._path_under_root("/photos/sub", "/Photos")
+
+
+def test_ingest_duplicate_folders_matches_case_variant_destination_on_windows(
+    tmp_path, monkeypatch
+):
+    """Stored folder rows with one case variant must still match a
+    destination passed with a different case variant when running on
+    Windows. Without case-folding the SQL prefilter (``=`` is
+    case-sensitive on SQLite) and the post-filter
+    ``_path_under_root`` both miss the row and ``duplicate_folders``
+    comes back empty, defeating the restricted scan that links the
+    existing duplicates to the active workspace.
+    """
+    import shutil
+
+    import ingest as ingest_mod
+    from scanner import scan
+
+    monkeypatch.setattr(ingest_mod, "_WINDOWS", True)
+
+    src = tmp_path / "sd_card"
+    library = tmp_path / "Library"
+    for d in [src, library]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="purple")
+    img.save(str(library / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(library), db)
+
+    shutil.copy2(str(library / "shot.jpg"), str(src / "shot.jpg"))
+
+    # Pass the destination with a different case from how the folder
+    # was scanned. On a real Windows host these resolve to the same
+    # NTFS path; on the test host (Linux) the directory still exists
+    # under the original case, so we rely on ``Path(...).is_dir()``
+    # accepting the canonical-case path that came back from the DB.
+    miscased_dst = str(library).lower()
+    result = ingest_mod.ingest(
+        str(src), miscased_dst, db=db,
+        skip_duplicates=True, folder_template="",
+    )
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(library) in dup_folders, (
+        "case-insensitive Windows match should surface duplicate folder "
+        f"{str(library)!r} when destination is passed as {miscased_dst!r}; "
+        f"got duplicate_folders={dup_folders!r}"
+    )
+
+
 def test_ingest_file_types_filter(tmp_path):
     """Only selected file types are copied."""
     src = tmp_path / "sd_card"
