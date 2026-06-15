@@ -804,7 +804,7 @@ body { padding-bottom: 36px; }
             <div class="setting-item">
               <div class="setting-label">Destination</div>
               <div style="display:flex;gap:6px;">
-                <input type="text" class="setting-select" id="cfgDestination"
+                <input type="text" class="setting-select" id="cfgDestination" list="volumeDatalist"
                        placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
                        oninput="updateStartButton();markFolderPreviewStale()">
                 <button onclick="openFolderBrowser('destination')" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
@@ -4352,6 +4352,7 @@ function browseTo(path) {
         _fbSelectAnchorPath = '';
         document.getElementById('fbSelectedPath').textContent = '';
         updateFbSelectButtonLabel();
+        updateNewFolderButton();
         var bc = document.getElementById('fbBreadcrumb');
         bc.innerHTML = '<span class="current">Volumes</span>';
         bc.onclick = null;
@@ -4376,6 +4377,7 @@ function browseTo(path) {
     return r.json();
   }).then(function(data) {
     _fbCurrentPath = data.path;
+    updateNewFolderButton();
     if (!path) _fbHomePath = data.path;
     // Implicit fallback: selectFolder() uses _fbSelectedDir when the user
     // hits Select without clicking any subfolder. Keep _fbSelectedDirs empty
@@ -4591,9 +4593,24 @@ function cancelNewFolder() {
   document.getElementById('fbNewFolderInput').value = '';
 }
 
+function updateNewFolderButton() {
+  // The synthetic Windows Volumes listing leaves _fbCurrentPath empty —
+  // letting users click New Folder there would POST mkdir to '/<name>'
+  // (the current drive root on Windows) instead of a real selected path.
+  var btn = document.getElementById('fbNewFolderBtn');
+  if (!btn) return;
+  btn.disabled = !_fbCurrentPath;
+  btn.style.opacity = _fbCurrentPath ? '' : '0.5';
+  btn.title = _fbCurrentPath ? '' : 'Open a drive to create folders inside it';
+}
+
 function createNewFolder() {
   var name = document.getElementById('fbNewFolderInput').value.trim();
   if (!name) return;
+  if (!_fbCurrentPath) {
+    alert('Open a drive before creating a folder.');
+    return;
+  }
   var newPath = _fbCurrentPath.replace(/\/+$/, '') + '/' + name;
   fetch('/api/browse/mkdir', {
     method: 'POST',
@@ -4635,7 +4652,7 @@ var _fbHomePath = '';
     </div>
     <div class="folder-browser-list" id="fbList"></div>
     <div class="folder-browser-footer">
-      <button class="btn btn-secondary" onclick="showNewFolderInput()" style="font-size:12px;flex-shrink:0;">New Folder</button>
+      <button id="fbNewFolderBtn" class="btn btn-secondary" onclick="showNewFolderInput()" style="font-size:12px;flex-shrink:0;">New Folder</button>
       <div style="display:flex;align-items:center;flex:1;min-width:0;margin-left:12px;">
         <span class="folder-browser-path" id="fbSelectedPath"></span>
         <button class="btn btn-secondary" onclick="closeFolderBrowser()" style="font-size:12px;flex-shrink:0;">Cancel</button>
