@@ -4,14 +4,19 @@ These run on any host (including Linux CI): platform detection and the
 OS-specific syscalls are mocked, so each branch is exercised everywhere.
 """
 
+import os
 from unittest.mock import MagicMock, patch
 
 
 def test_volumes_macos_scans_volumes_dir(app_and_db):
     app, _ = app_and_db
+    # Use os.path.join so the predicate matches whatever separator the
+    # host produces (forward slash on POSIX, backslash on Windows).
+    sd = os.path.join("/Volumes", "SD_CARD")
+    backup = os.path.join("/Volumes", "Backup")
 
     def _isdir(p):
-        return p in ("/Volumes", "/Volumes/SD_CARD", "/Volumes/Backup")
+        return p in ("/Volumes", sd, backup)
 
     with app.test_client() as c, \
          patch("platform.system", return_value="Darwin"), \
@@ -20,14 +25,15 @@ def test_volumes_macos_scans_volumes_dir(app_and_db):
         resp = c.get("/api/volumes")
         assert resp.status_code == 200
         paths = {v["path"] for v in resp.get_json()}
-        assert paths == {"/Volumes/SD_CARD", "/Volumes/Backup"}
+        assert paths == {sd, backup}
 
 
 def test_volumes_linux_scans_media_mounts(app_and_db):
     app, _ = app_and_db
+    sd = os.path.join("/media", "SD_CARD")
 
     def _isdir(p):
-        return p in ("/media", "/media/SD_CARD")
+        return p in ("/media", sd)
 
     def _listdir(p):
         return ["SD_CARD"] if p == "/media" else []
@@ -39,7 +45,7 @@ def test_volumes_linux_scans_media_mounts(app_and_db):
         resp = c.get("/api/volumes")
         assert resp.status_code == 200
         paths = {v["path"] for v in resp.get_json()}
-        assert paths == {"/media/SD_CARD"}
+        assert paths == {sd}
 
 
 def test_volumes_windows_enumerates_drive_letters(app_and_db):
