@@ -4323,6 +4323,12 @@ function closeFolderBrowser() {
 function browseTo(path) {
   var listEl = document.getElementById('fbList');
   listEl.innerHTML = '<div class="folder-browser-loading">Loading\u2026</div>';
+  // Clear _fbCurrentPath before the async fetch resolves so New Folder
+  // cannot target the previous location's path if the user clicks it
+  // while the new browse is still in flight. updateNewFolderButton()
+  // re-disables the button until the fetch sets _fbCurrentPath again.
+  _fbCurrentPath = '';
+  updateNewFolderButton();
   _fbSelectedDir = '';
   _fbSelectedDirs = [];
   _fbSelectAnchorPath = '';
