@@ -1031,6 +1031,60 @@ def test_ingest_duplicate_folders_matches_case_variant_destination_on_windows(
     )
 
 
+def test_ingest_duplicate_folders_matches_non_ascii_case_variant_on_windows(
+    tmp_path, monkeypatch
+):
+    """Windows case-folding for the SQL prefilter must be Unicode-aware.
+
+    SQLite's built-in ``LOWER()`` only folds ASCII characters, so a stored
+    folder row like ``Älbum`` would stay ``Älbum`` while the Python-side
+    destination ``älbum`` lowers via ``str.lower()`` to ``älbum``. Without
+    a Unicode-aware SQL ``LOWER`` the prefilter drops the row before the
+    ``_path_under_root`` post-filter (which uses Python's Unicode-aware
+    folding) ever sees it, leaving ``duplicate_folders`` empty even though
+    the hash is skipped.
+    """
+    import shutil
+
+    import ingest as ingest_mod
+    from scanner import scan
+
+    monkeypatch.setattr(ingest_mod, "_WINDOWS", True)
+
+    src = tmp_path / "sd_card"
+    # Folder name has a non-ASCII character (Ä) that SQLite's ASCII-only
+    # LOWER() would leave untouched.
+    library = tmp_path / "Älbum"
+    for d in [src, library]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="purple")
+    img.save(str(library / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(library), db)
+
+    shutil.copy2(str(library / "shot.jpg"), str(src / "shot.jpg"))
+
+    # Destination passed with the non-ASCII character in lowercase form.
+    # On a case-insensitive Windows filesystem these resolve to the same
+    # path; the prefilter must accept the stored row regardless of case.
+    miscased_dst = str(library).lower()
+    result = ingest_mod.ingest(
+        str(src), miscased_dst, db=db,
+        skip_duplicates=True, folder_template="",
+    )
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(library) in dup_folders, (
+        "Unicode-aware case folding should surface duplicate folder "
+        f"{str(library)!r} when destination is passed as {miscased_dst!r}; "
+        f"got duplicate_folders={dup_folders!r}"
+    )
+
+
 def test_ingest_file_types_filter(tmp_path):
     """Only selected file types are copied."""
     src = tmp_path / "sd_card"

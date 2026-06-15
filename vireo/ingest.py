@@ -305,8 +305,20 @@ def ingest(
         # behaviour on WindowsPath. On POSIX, do neither: stored paths use
         # the host's literal byte sequence and a literal sibling whose name
         # contains "\" must not be folded into a child of the destination.
+        #
+        # SQLite's built-in LOWER() only folds ASCII, but Python's str.lower()
+        # is Unicode-aware: a stored folder row like 'C:\Älbum\2026' would
+        # lower in SQLite to 'c:/Älbum/2026' (Ä stays) while the Python-side
+        # destination 'c:\älbum' lowers to 'c:/älbum', so the prefilter would
+        # drop the row before the _path_under_root post-filter (which uses
+        # Unicode-aware folding via _case_fold_path) ever sees it. Register a
+        # Unicode-aware LOWER function on the connection so both sides agree.
         if _WINDOWS:
-            path_sql_expr = "LOWER(REPLACE(f.path, '\\', '/'))"
+            db.conn.create_function(
+                "LOWER_UNICODE", 1,
+                lambda s: s.lower() if s is not None else None,
+            )
+            path_sql_expr = "LOWER_UNICODE(REPLACE(f.path, '\\', '/'))"
             dest_path_sql_param = dest_path_sql.lower()
             dest_like_prefix_param = dest_like_prefix.lower()
         else:
