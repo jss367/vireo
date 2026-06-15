@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datetime import datetime
 
+import pytest
 from db import Database
 from ingest import build_destination_path, discover_source_files, ingest, preview_destination
 from PIL import Image
@@ -508,6 +509,12 @@ def test_ingest_duplicate_folders_rejects_sql_like_wildcard_siblings(tmp_path):
         )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: ``\\`` is a path separator on Windows, so "
+    "``tmp_path / 'photos\\\\archive'`` parses as a child of dest "
+    "rather than the literal sibling this test exercises.",
+)
 def test_ingest_duplicate_folders_rejects_posix_backslash_sibling(tmp_path):
     """duplicate_folders must not leak a literal sibling whose name
     contains ``\\`` on POSIX hosts.
