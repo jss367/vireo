@@ -4355,7 +4355,11 @@ function browseTo(path) {
         var bc = document.getElementById('fbBreadcrumb');
         bc.innerHTML = '<span class="current">Volumes</span>';
         bc.onclick = null;
-        renderFolderList(volumes);
+        // Skip recursive photo counts on the synthetic drive-root list:
+        // /api/volumes includes the system drive, and counting it would
+        // recursively walk all of C:\ before the user has picked anything.
+        // Counts resume once the user drills into a specific drive.
+        renderFolderList(volumes, { skipCounts: true });
       }).catch(function(err) {
         listEl.innerHTML = '<div class="folder-browser-error">' + escapeHtml(err.message) + '</div>';
       });
@@ -4409,7 +4413,7 @@ function renderBreadcrumb(path) {
   };
 }
 
-function renderFolderList(dirs) {
+function renderFolderList(dirs, opts) {
   var listEl = document.getElementById('fbList');
   if (!dirs.length) {
     listEl.innerHTML = '<div class="folder-browser-empty">No subfolders</div>';
@@ -4424,8 +4428,10 @@ function renderFolderList(dirs) {
   }
   listEl.innerHTML = html;
   // In source mode, asynchronously fetch recursive photo counts for each
-  // subfolder so users can see which ones contain photos.
-  if (_fbMode === 'source') {
+  // subfolder so users can see which ones contain photos. Callers can pass
+  // skipCounts to avoid this for synthetic listings (e.g. Windows drive
+  // roots) where counting would recursively walk an entire volume.
+  if (_fbMode === 'source' && !(opts && opts.skipCounts)) {
     fetchFolderCounts(dirs.map(function(d) { return d.path; }));
   }
   // Event delegation: click to select, double-click to drill in.
