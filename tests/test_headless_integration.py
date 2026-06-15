@@ -24,7 +24,7 @@ REPO = Path(__file__).resolve().parents[1]
 APP = REPO / "vireo" / "app.py"
 
 
-def _wait_for_runtime(runtime_path: Path, timeout: float = 20.0) -> dict:
+def _wait_for_runtime(runtime_path: Path, timeout: float = 60.0) -> dict:
     """Poll runtime.json until it exists and is readable."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -37,7 +37,7 @@ def _wait_for_runtime(runtime_path: Path, timeout: float = 20.0) -> dict:
     raise TimeoutError(f"{runtime_path} never appeared")
 
 
-def _wait_for_port(port: int, timeout: float = 20.0) -> None:
+def _wait_for_port(port: int, timeout: float = 60.0) -> None:
     """Poll until 127.0.0.1:port accepts TCP connections.
 
     runtime.json is written before Flask binds to the port, so callers
@@ -169,7 +169,7 @@ def test_stale_runtime_json_is_replaced(headless_home, tmp_path):
     proc = _spawn(headless_home, db, port)
     try:
         # Poll for the new contents (different port).
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + 60.0
         data = None
         while time.monotonic() < deadline:
             if runtime.exists():

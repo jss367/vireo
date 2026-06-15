@@ -34,9 +34,11 @@ jobs:
       # macOS/Windows verify platform-specific code paths. The coverage gate is
       # skipped here because POSIX-only tests don't run on Windows, which would
       # otherwise push coverage below the threshold for reasons unrelated to the change.
+      # These runners are smaller/slower, so cap xdist workers at 2 to avoid OOM
+      # worker crashes on the heavier ML tests.
       - name: Run tests (macOS / Windows)
         if: runner.os != 'Linux'
-        run: python -m pytest tests/ vireo/tests/ -n auto -v --tb=short
+        run: python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short
 
   lint:
     runs-on: ubuntu-latest
