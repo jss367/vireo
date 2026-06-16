@@ -166,10 +166,15 @@ var speciesSuggestionsLoaded = false;
 var speciesModalPhotoIds = [];
 var activeLightboxPhotoId = null;
 // Photos the user has rejected from the lightbox this session and not since
-// un-rejected. Drives grid removal AND guards reloads: loadHighlights() prunes
-// these after applying its response, so a restore/filter reload issued against
-// backend state from before a (re-)rejection can't reinsert a rejected photo.
+// un-rejected. Drives grid removal AND guards reloads (see loadHighlights).
 var rejectedFromGrid = new Set();
+// Monotonic counter bumped each time a highlights reload is *issued*, plus the
+// counter value captured at each photo's rejection. Together they let the
+// reload prune ONLY photos rejected at/after the in-flight request was sent
+// (whose response predates the rejection) — never photos the backend restored
+// out-of-band (another tab, Undo panel), which it must be trusted to include.
+var highlightsLoadSeq = 0;
+var rejectedAtLoadSeq = {};
 
 function escapeAttr(s) {
   if (s === null || s === undefined) return '';
@@ -205,14 +210,22 @@ async function loadHighlights() {
   params.set('limit_per_bucket', Math.max(20, parseInt(document.getElementById('perRowSlider').value)));
   if (speciesSearch) params.set('species', speciesSearch);
 
+  // Capture the issue-time sequence so the prune below can tell rejections that
+  // happened after this request was sent (response is stale for them) from
+  // older ones the backend already excludes — or out-of-band restores it now
+  // includes and we must not strip.
+  var loadSeq = ++highlightsLoadSeq;
   var data = await safeFetch('/api/highlights?' + params);
   currentData = data;
 
-  // Guard against a reload that was issued against backend state from before a
-  // rejection landed (e.g. un-reject starts a restore reload, then the photo is
-  // rejected again before it returns): drop any still-rejected photo the
-  // response may have reincluded so the grid matches the final flag.
-  rejectedFromGrid.forEach(function(id) { removeRejectedPhotoFromModel(id); });
+  // Guard against a reload issued against backend state from before a rejection
+  // landed (e.g. un-reject starts a restore reload, then the photo is rejected
+  // again before it returns). Only prune photos rejected at/after this request
+  // was issued; a photo restored out-of-band has an older rejection seq, so the
+  // authoritative response that now includes it is left intact.
+  rejectedFromGrid.forEach(function(id) {
+    if ((rejectedAtLoadSeq[id] || 0) >= loadSeq) removeRejectedPhotoFromModel(id);
+  });
 
   // Populate folder dropdown on first load.
   if (!folderSelect.options.length) {
@@ -792,7 +805,10 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     // Track before mutating: during an in-flight restore reload the photo may
     // not be in currentData yet, so removeRejectedPhotoFromModel returns false
     // — but the id must still be remembered so the reload's prune drops it.
+    // Stamp the current load seq so only reloads issued no later than now prune
+    // it (a reload issued afterward already reflects the rejection server-side).
     rejectedFromGrid.add(detail.photoId);
+    rejectedAtLoadSeq[detail.photoId] = highlightsLoadSeq;
     if (removeRejectedPhotoFromModel(detail.photoId)) render();
   } else if (rejectedFromGrid.has(detail.photoId)) {
     // A previously-rejected photo was un-rejected — it re-qualifies for
@@ -800,6 +816,7 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     // in its correct bucket. Tracking the set keeps this scoped to genuine
     // reappearances, not every Pick/Unflag on a photo still in the grid.
     rejectedFromGrid.delete(detail.photoId);
+    delete rejectedAtLoadSeq[detail.photoId];
     loadHighlights();
   }
 });
