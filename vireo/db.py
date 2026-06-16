@@ -7912,6 +7912,28 @@ class Database:
         if _commit:
             self.conn.commit()
 
+    def rename_photo_preferences_species(self, old_species, new_species, _commit=True):
+        """Rename stored representative-photo preferences across workspaces."""
+        if not old_species or not new_species or old_species == new_species:
+            return 0
+        cur = self.conn.execute(
+            """INSERT OR IGNORE INTO photo_preferences
+                  (workspace_id, purpose, species, photo_id,
+                   created_at, updated_at)
+               SELECT workspace_id, purpose, ?, photo_id,
+                      created_at, datetime('now')
+               FROM photo_preferences
+               WHERE species = ?""",
+            (new_species, old_species),
+        )
+        self.conn.execute(
+            "DELETE FROM photo_preferences WHERE species = ?",
+            (old_species,),
+        )
+        if _commit:
+            self.conn.commit()
+        return cur.rowcount
+
     def get_folders_with_quality_data(self):
         """Return folders with at least one scored photo in their subtree.
 

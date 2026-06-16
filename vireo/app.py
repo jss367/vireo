@@ -3779,6 +3779,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), 400)
         # Queue sidecar updates only after successful DB update, for all affected workspaces
         if old_name:
+            db.rename_photo_preferences_species(old_name, new_name)
             affected = db.conn.execute(
                 """SELECT pk.photo_id, wf.workspace_id
                    FROM photo_keywords pk
