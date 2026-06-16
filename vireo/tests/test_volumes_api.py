@@ -6,6 +6,7 @@ OS-specific syscalls are mocked, so each branch is exercised everywhere.
 
 import os
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 
@@ -145,8 +146,21 @@ def test_volumes_windows_serializes_set_error_mode(app_and_db):
         # window where thread 2 would observe thread 1's temporary mode.
         assert inside_critical.wait(timeout=2.0)
         t2.start()
-        # Give thread 2 a moment to race; with the lock it will block on
-        # SetErrorMode until thread 1 releases.
+        # Give thread 2 a real chance to reach the critical section, then
+        # assert no second save has happened *before* releasing thread 1.
+        # This is what actually proves serialization: WITH the lock, thread 2
+        # blocks on lock acquisition (before its save), so only thread 1's
+        # save is recorded; WITHOUT the lock, thread 2 races straight through
+        # and records its save here. The previous version released thread 1
+        # immediately, so the expected (save, restore, save, restore) order
+        # could appear even with no lock — letting a lockless regression pass.
+        time.sleep(0.2)
+        with events_lock:
+            before_release = list(events)
+        assert before_release == [("set", SEM_FAILCRITICALERRORS)], (
+            "a second SetErrorMode ran before thread 1 released its lock — "
+            f"the critical section is not serialized: {before_release!r}"
+        )
         release.set()
         t1.join(timeout=2.0)
         t2.join(timeout=2.0)
