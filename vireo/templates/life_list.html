@@ -21,6 +21,7 @@
   .species-card:hover { border-color:var(--accent); }
   .species-card img { width:100%; aspect-ratio:3/2; object-fit:cover; display:block; background:var(--bg-tertiary); }
   .lifer-number { position:absolute; top:8px; left:8px; padding:2px 8px; border-radius:999px; background:rgba(0,0,0,0.65); color:#fff; font-size:11px; font-weight:700; letter-spacing:0.5px; }
+  .lifelist-ribbon { position:absolute; top:8px; right:8px; padding:2px 7px; border-radius:999px; background:var(--accent); color:var(--accent-text); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; }
   .species-info { padding:10px 12px 12px; }
   .species-name { font-size:15px; font-weight:600; color:var(--text-primary); }
   .species-sci { font-size:12px; font-style:italic; color:var(--text-secondary); margin-top:1px; }
@@ -30,6 +31,9 @@
 
   .lifelist-empty { text-align:center; padding:80px 24px; color:var(--text-secondary); }
   .lifelist-empty a { color:var(--accent); }
+  .lifelist-lb-panel { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:5px 8px; border-radius:4px; background:rgba(0,0,0,0.6); border:1px solid var(--text-faint); color:var(--text-secondary); font-size:12px; }
+  .lifelist-lb-panel button { border:1px solid var(--border-secondary); background:rgba(255,255,255,0.08); color:var(--text-primary); border-radius:4px; padding:4px 9px; cursor:pointer; font-size:12px; }
+  .lifelist-lb-panel button.primary { border-color:var(--accent); color:var(--accent); }
 </style>
 </head>
 <body>
@@ -65,6 +69,7 @@
 <script>
 var currentData = null;
 var debounceTimer = null;
+var activeLightboxPhotoId = null;
 
 // All dynamic values rendered into card HTML pass through escapeAttr —
 // same escaping convention as highlights.html.
@@ -132,6 +137,7 @@ function renderCard(entry) {
   return '<div class="species-card" data-species="' + escapeAttr(entry.species) + '" title="'
     + escapeAttr((entry.locations || []).join(', ')) + '">'
     + '<div class="lifer-number">#' + entry.number + '</div>'
+    + (best && best.is_life_list_photo ? '<div class="lifelist-ribbon">Life List</div>' : '')
     + (best ? '<img src="' + escapeAttr(thumb) + '" alt="' + escapeAttr(best.filename) + '" loading="lazy">' : '')
     + '<div class="species-info">'
     + '<div class="species-name">' + escapeAttr(entry.species) + '</div>'
@@ -181,10 +187,12 @@ function render() {
       if (entry && entry.best && window.openLightbox) {
         // The lightbox set is this species' top photos so the user can
         // flip through their best shots of the lifer.
+        activeLightboxPhotoId = entry.best.id;
         openLightbox(entry.best.id, entry.best.filename, entry.photos || [entry.best]);
       }
     });
   });
+  updateLifeListLightboxControls(activeLightboxPhotoId);
 }
 
 function debounceRender() {
@@ -195,6 +203,73 @@ function debounceRender() {
 document.getElementById('speciesSearch').addEventListener('input', debounceRender);
 document.getElementById('sortSelect').addEventListener('change', function() {
   if (currentData) render();
+});
+
+function findLifeListEntryForPhoto(photoId) {
+  if (!currentData || photoId == null) return null;
+  var entries = currentData.species || [];
+  for (var i = 0; i < entries.length; i++) {
+    var match = (entries[i].photos || []).find(function(p) { return p.id === photoId; });
+    if (match) return { entry: entries[i], photo: match };
+  }
+  return null;
+}
+
+function ensureLifeListLightboxPanel() {
+  var actions = document.getElementById('lightboxActions');
+  if (!actions) return null;
+  var panel = document.getElementById('lifeListLightboxPanel');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'lifeListLightboxPanel';
+    panel.className = 'lifelist-lb-panel';
+    actions.insertBefore(panel, actions.firstChild);
+  }
+  return panel;
+}
+
+async function setLifeListPhoto(species, photoId, button) {
+  if (!species || !photoId) return;
+  if (button) button.disabled = true;
+  try {
+    await safeFetch('/api/photo-preferences', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ purpose: 'life_list', species: species, photo_id: photoId }),
+    });
+    await loadLifeList();
+    updateLifeListLightboxControls(activeLightboxPhotoId);
+    if (typeof showToast === 'function') showToast('Life List photo set', 'success');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function updateLifeListLightboxControls(photoId) {
+  var panel = ensureLifeListLightboxPanel();
+  if (!panel) return;
+  var match = findLifeListEntryForPhoto(photoId);
+  if (!match) {
+    panel.style.display = 'none';
+    panel.innerHTML = '';
+    return;
+  }
+  panel.style.display = '';
+  var selected = !!match.photo.is_life_list_photo;
+  panel.innerHTML = '<span>' + escapeAttr(match.entry.species) + '</span>'
+    + '<button data-lb-action="set-life-list"'
+    + (selected ? ' class="primary"' : '') + '>'
+    + (selected ? 'Life List Photo' : 'Use as Life List') + '</button>';
+  var btn = panel.querySelector('button');
+  btn.addEventListener('click', function(event) {
+    event.stopPropagation();
+    setLifeListPhoto(match.entry.species, match.photo.id, btn);
+  });
+}
+
+document.addEventListener('lightbox:photochanged', function(event) {
+  activeLightboxPhotoId = event.detail ? event.detail.photoId : null;
+  updateLifeListLightboxControls(activeLightboxPhotoId);
 });
 
 loadLifeList();

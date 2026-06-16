@@ -3135,6 +3135,61 @@ def test_rename_keyword_queues_sidecar_changes(app_and_db):
     assert ("keyword_add", "NewBird") in actions
 
 
+def test_rename_keyword_updates_photo_preferences(app_and_db):
+    """Representative-photo preferences follow species keyword renames."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird", is_species=True)
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.set_photo_preference("life_list", "OldBird", p1)
+    db.set_photo_preference("highlights", "OldBird", p1)
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_photo_preferences("life_list") == {"NewBird": p1}
+    assert db.get_photo_preferences("highlights") == {"NewBird": p1}
+
+
+def test_rename_keyword_photo_preferences_keep_existing_target(app_and_db):
+    """Renaming into an existing preference keeps the target preference."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid_old = db.add_keyword("OldBird", is_species=True)
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    p_old = rows[0]["id"]
+    p_new = rows[1]["id"]
+    db.tag_photo(p_old, kid_old)
+    db.set_photo_preference("life_list", "OldBird", p_old)
+    db.set_photo_preference("life_list", "NewBird", p_new)
+
+    resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_photo_preferences("life_list") == {"NewBird": p_new}
+
+
+def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_db):
+    """Renaming an unrelated same-name keyword must not rewrite species prefs."""
+    app, db = app_and_db
+    client = app.test_client()
+    species_kid = db.add_keyword("Robin", is_species=True)
+    parent_kid = db.add_keyword("Places", kw_type="general")
+    place_kid = db.add_keyword("Robin", parent_id=parent_kid, kw_type="general")
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    species_photo = rows[0]["id"]
+    place_photo = rows[1]["id"]
+    db.tag_photo(species_photo, species_kid)
+    db.tag_photo(place_photo, place_kid)
+    db.set_photo_preference("life_list", "Robin", species_photo)
+
+    resp = client.put(f"/api/keywords/{place_kid}", json={"name": "Backyard Robin"})
+    assert resp.status_code == 200
+
+    assert db.get_photo_preferences("life_list") == {"Robin": species_photo}
+
+
 def test_delete_keyword_queues_sidecar_removals(app_and_db):
     """Deleting a keyword queues removal pending changes for affected photos."""
     app, db = app_and_db
