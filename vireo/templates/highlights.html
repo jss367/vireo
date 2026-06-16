@@ -397,7 +397,11 @@ function renderBucket(bucket) {
     + ' · best ' + formatScore(bucket.best_score);
   if (!bucket.is_accepted && bucket.avg_confidence != null) meta += ' · ID ' + formatPercent(bucket.avg_confidence);
   var expandBtn = '';
-  if (bucket.photo_count > perRow) {
+  // Show the affordance whenever photos are hidden (more loaded than one row)
+  // or unloaded (has_more). Gating on photo_count > perRow alone would strand
+  // backend rows after a rejection drops photo_count to perRow while has_more
+  // is still true — leaving no way to load the rest without a refresh.
+  if (bucket.photos.length > perRow || bucket.has_more) {
     expandBtn = '<button class="bucket-expand" data-species="'
       + escapeAttr(bucket.species) + '">'
       + (expanded ? (bucket.has_more ? 'Load more' : 'Show fewer') : '+ ' + remaining + ' more')
@@ -428,7 +432,10 @@ function renderUnidentified() {
   var visible = unidentifiedExpanded ? unid.photos : unid.photos.slice(0, perRow);
   var remaining = unid.photo_count - visible.length;
   var expandBtn = '';
-  if (unid.photo_count > perRow) {
+  // Same as renderBucket: keep the load/expand affordance while photos are
+  // hidden or unloaded, so a rejection that drops photo_count to perRow with
+  // has_more still true doesn't strand the remaining backend rows.
+  if (unid.photos.length > perRow || unid.has_more) {
     expandBtn = '<button class="bucket-expand" data-unid="1">'
       + (unidentifiedExpanded ? (unid.has_more ? 'Load more' : 'Show fewer') : '+ ' + remaining + ' more')
       + '</button>';

@@ -3035,6 +3035,7 @@ var _lbCurrentWildlifeExcluded = false;
 var _lbFlagEditSeq = 0;      // increments for local flag writes so stale metadata fetches cannot overwrite the chip
 var _lbOpenSeq = 0;          // increments for every lightbox open so old metadata fetches cannot reapply after reopen
 var _lbFlagPendingWrites = 0;
+var _lbFlagWriteSeqByPhoto = {};  // latest flag-write seq PER photo, so a stale write only suppresses events for that same photo (not a later edit on a different photo)
 var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated from optimistic page helpers
 var _lbViewportByPhotoId = {};  // per-session lightbox viewport cache keyed by photo id
 var _lbPendingViewportState = null;
@@ -3316,6 +3317,11 @@ function _lbApplyFlag(photoId, flag) {
   if (!normalized || photoId == null) return false;
   var seq = _lbFlagEditSeq + 1;
   _lbFlagEditSeq = seq;
+  // Per-photo write seq: lets us tell whether *this* photo's flag was changed
+  // again after this write was issued, without conflating it with flag edits
+  // the user made on other photos in between (rapid lightbox culling).
+  var photoSeq = (_lbFlagWriteSeqByPhoto[photoId] || 0) + 1;
+  _lbFlagWriteSeqByPhoto[photoId] = photoSeq;
   _lbFlagPendingWrites += 1;
   _lbSetPendingFlagStatus(normalized);
   var write;
@@ -3343,13 +3349,12 @@ function _lbApplyFlag(photoId, flag) {
       return;
     }
     // Notify pages (e.g. Highlights) that a flag write landed so they can
-    // reconcile their grid. Fire only for the latest flag edit: if the user
-    // rapidly changed the flag again (e.g. reject then clear) before this write
-    // resolved, an earlier/superseded write must not drive the grid — otherwise
-    // Highlights could hide a photo whose final backend flag is not 'rejected'.
-    // Arrow-navigating to another photo does not bump _lbFlagEditSeq, so the
-    // event still fires for the photo whose flag was actually changed.
-    if (_lbFlagEditSeq === seq) {
+    // reconcile their grid. Gate on the per-photo write seq, NOT the global
+    // edit seq: fire only when this is the latest write for THIS photo, so a
+    // reject-then-clear on the same photo is suppressed (the later 'kept' write
+    // wins), while rejecting photo A, arrowing to B, then rejecting B still
+    // emits A's event — B's edit bumps the global seq but not A's per-photo seq.
+    if (_lbFlagWriteSeqByPhoto[photoId] === photoSeq) {
       try {
         document.dispatchEvent(new CustomEvent('lightbox:flagchanged', {
           detail: { photoId: photoId, flag: normalized },
