@@ -1,6 +1,7 @@
 """Photo export with resize, quality control, and template-based naming."""
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -111,6 +112,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
 
     photos_map = db.get_photos_by_ids(photo_ids)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    exif_data_map = _get_photo_exif_data(db, photo_ids)
 
     # Get species keywords for all photos in one query
     species_map = db.get_species_keywords_for_photos(photo_ids)
@@ -144,6 +146,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         #   3. original file (default; also used for full-res exports).
         folder_path = folders.get(photo["folder_id"], "")
         recipe = edit_recipes.get(pid)
+        exif_data = exif_data_map.get(pid)
         source_path = _find_developed_output(
             photo["filename"],
             folder_path,
@@ -156,12 +159,12 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         # export size, fall through to the working-copy / original
         # source.
         if source_path and not _developed_can_satisfy_size(
-            source_path, photo, max_size, recipe
+            source_path, photo, max_size, recipe, exif_data=exif_data
         ):
             source_path = None
         if not source_path:
             use_wc = _working_copy_can_satisfy_export(
-                photo, recipe, max_size, wc_max, vireo_dir
+                photo, recipe, max_size, wc_max, vireo_dir, exif_data=exif_data
             )
             source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=use_wc)
         if not source_path or not os.path.isfile(source_path):
@@ -244,6 +247,70 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
 _PREFERRED_DEVELOPED_EXTS = ("jpg", "jpeg", "tiff", "tif")
 
 
+def _get_photo_exif_data(db, photo_ids):
+    """Return a photo_id -> exif_data map without bloating list photo queries."""
+    if not photo_ids or not hasattr(db, "conn"):
+        return {}
+    out = {}
+    for i in range(0, len(photo_ids), 999):
+        chunk = photo_ids[i:i + 999]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = db.conn.execute(
+            f"SELECT id, exif_data FROM photos WHERE id IN ({placeholders})",
+            list(chunk),
+        ).fetchall()
+        for row in rows:
+            out[row["id"]] = row["exif_data"]
+    return out
+
+
+def _recipe_source_dimensions(photo, exif_data=None):
+    """Return original dimensions as load_image sees them after EXIF transpose."""
+    try:
+        width = int(photo["width"] or 0)
+        height = int(photo["height"] or 0)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return 0, 0
+    if width > 0 and height > 0 and _orientation_swaps_axes(_exif_orientation(exif_data)):
+        return height, width
+    return width, height
+
+
+def _exif_orientation(exif_data):
+    if not exif_data:
+        return None
+    if isinstance(exif_data, str):
+        try:
+            metadata = json.loads(exif_data)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(exif_data, dict):
+        metadata = exif_data
+    else:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    for group in ("EXIF", "IFD0", "TIFF", "File"):
+        values = metadata.get(group)
+        if isinstance(values, dict) and "Orientation" in values:
+            return values["Orientation"]
+    return metadata.get("Orientation")
+
+
+def _orientation_swaps_axes(orientation):
+    if orientation is None or isinstance(orientation, bool):
+        return False
+    if isinstance(orientation, (int, float)):
+        return int(orientation) in (5, 6, 7, 8)
+    text = str(orientation).strip().lower()
+    if not text:
+        return False
+    try:
+        return int(text) in (5, 6, 7, 8)
+    except ValueError:
+        return "90" in text or "270" in text
+
+
 def _recipe_result_long_edge(width, height, recipe):
     """Return the rendered long edge after right-angle rotation and crop."""
     rotation = (recipe or {}).get("rotation", 0)
@@ -255,7 +322,7 @@ def _recipe_result_long_edge(width, height, recipe):
     return max(width, height)
 
 
-def _developed_can_satisfy_size(dev_path, photo, max_size, recipe=None):
+def _developed_can_satisfy_size(dev_path, photo, max_size, recipe=None, exif_data=None):
     """Return True if the developed file is large enough for this export.
 
     The develop job may have written a downscaled output (`--width` is
@@ -281,13 +348,7 @@ def _developed_can_satisfy_size(dev_path, photo, max_size, recipe=None):
     except Exception:
         return True
     dev_long = _recipe_result_long_edge(dev_w, dev_h, recipe)
-    try:
-        original_w = photo["width"]
-        original_h = photo["height"]
-    except (KeyError, IndexError):
-        if max_size is not None:
-            return dev_long >= max_size
-        return True
+    original_w, original_h = _recipe_source_dimensions(photo, exif_data)
     if original_w and original_h:
         required_long = _recipe_result_long_edge(original_w, original_h, recipe)
         if max_size is not None:
@@ -495,7 +556,9 @@ def _find_developed_output(filename, folder_path, developed_dir, index=None):
     return None
 
 
-def _working_copy_can_satisfy_export(photo, recipe, max_size, wc_max, vireo_dir):
+def _working_copy_can_satisfy_export(
+    photo, recipe, max_size, wc_max, vireo_dir, exif_data=None
+):
     """Return True when the working copy can preserve requested export pixels."""
     if not max_size or max_size <= 0:
         return False
@@ -517,8 +580,7 @@ def _working_copy_can_satisfy_export(photo, recipe, max_size, wc_max, vireo_dir)
     wc_render_long = _recipe_result_long_edge(wc_w, wc_h, recipe)
     crop = (recipe or {}).get("crop") if recipe else None
 
-    width = photo["width"] or 0
-    height = photo["height"] or 0
+    width, height = _recipe_source_dimensions(photo, exif_data)
     if not crop:
         if width > 0 and height > 0:
             required_long = min(max_size, max(width, height))

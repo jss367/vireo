@@ -1,6 +1,7 @@
 """Tests for photo export operations."""
 
 import contextlib
+import json
 import os
 import sys
 
@@ -283,6 +284,57 @@ def test_export_cropped_recipe_uses_sufficient_developed_output(export_env):
         assert img.size == (800, 600)
         r, g, b = img.resize((1, 1)).getpixel((0, 0))
     assert g > r and g > b
+
+
+def test_export_cropped_recipe_uses_exif_oriented_original_dimensions(export_env):
+    """Crop-aware export sizing must match load_image's EXIF-transposed source."""
+    env = export_env
+    db = env["db"]
+    src_path = env["src"] / "bird1.jpg"
+    original = Image.new("RGB", (600, 400), color="red")
+    exif = original.getexif()
+    exif[0x0112] = 6
+    original.save(str(src_path), "JPEG", quality=95, exif=exif.tobytes())
+    db.conn.execute(
+        "UPDATE photos SET width=?, height=?, exif_data=? WHERE id=?",
+        (
+            600,
+            400,
+            json.dumps({"EXIF": {"Orientation": 6}}),
+            env["p1"],
+        ),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+
+    developed = env["tmp_path"] / "developed"
+    developed_subdir = developed / developed_folder_key(str(env["src"]))
+    developed_subdir.mkdir(parents=True)
+    Image.new("RGB", (400, 400), color="green").save(
+        str(developed_subdir / "bird1.jpg"), "JPEG", quality=95,
+    )
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 500,
+            "developed_dir": str(developed),
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(os.path.join(env["dest"], "bird1.jpg")) as img:
+        assert max(img.size) == 500
+        r, g, b = img.resize((1, 1)).getpixel((0, 0))
+    assert r > g and r > b
 
 
 def test_export_photos_subdirectories(export_env):
