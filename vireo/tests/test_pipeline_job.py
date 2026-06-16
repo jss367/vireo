@@ -1822,6 +1822,84 @@ def test_pipeline_collection_mode_generates_missing_thumbnails(tmp_path, monkeyp
     assert len(thumb_files) == 3
 
 
+def test_pipeline_collection_mode_edited_thumbnail_uses_working_copy(
+    tmp_path, monkeypatch,
+):
+    """Collection thumbnail replay should fall back to usable working copies."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    original = photo_dir / "a.jpg"
+    Image.new("RGB", (100, 100), "red").save(str(original))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    runner = FakeRunner()
+    job = _make_job()
+    result = run_pipeline_job(
+        job,
+        runner,
+        db_path,
+        ws_id,
+        PipelineParams(
+            source=str(photo_dir),
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        ),
+    )
+    coll_id = result["collection_id"]
+
+    photo = db.get_collection_photos(coll_id, per_page=999999)[0]
+    working_dir = tmp_path / "working"
+    working_dir.mkdir()
+    Image.new("RGB", (100, 100), "blue").save(str(working_dir / f"{photo['id']}.jpg"))
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{photo['id']}.jpg", photo["id"]),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo["id"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+    os.remove(original)
+
+    thumb_dir = os.path.join(os.path.dirname(db_path), "thumbnails")
+    for f in os.listdir(thumb_dir):
+        os.remove(os.path.join(thumb_dir, f))
+
+    runner2 = FakeRunner()
+    job2 = _make_job()
+    result2 = run_pipeline_job(
+        job2,
+        runner2,
+        db_path,
+        ws_id,
+        PipelineParams(
+            collection_id=coll_id,
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        ),
+    )
+
+    thumb_result = result2["stages"].get("thumbnails", {})
+    assert thumb_result.get("failed") == 0
+    assert thumb_result.get("generated") == 1
+    with Image.open(os.path.join(thumb_dir, f"{photo['id']}.jpg")) as thumb:
+        r, g, b = thumb.resize((1, 1)).getpixel((0, 0))
+    assert b > r and b > g
+
+
 # ---------------------------------------------------------------------------
 # Stage failure propagation (fixes the silent model-loader failure incident)
 # ---------------------------------------------------------------------------

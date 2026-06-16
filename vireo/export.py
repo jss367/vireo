@@ -281,16 +281,20 @@ def _developed_can_satisfy_size(dev_path, photo, max_size, recipe=None):
     except Exception:
         return True
     dev_long = _recipe_result_long_edge(dev_w, dev_h, recipe)
-    if max_size is not None:
-        return dev_long >= max_size
     try:
         original_w = photo["width"]
         original_h = photo["height"]
     except (KeyError, IndexError):
+        if max_size is not None:
+            return dev_long >= max_size
         return True
     if original_w and original_h:
         required_long = _recipe_result_long_edge(original_w, original_h, recipe)
+        if max_size is not None:
+            required_long = min(max_size, required_long)
         return dev_long >= required_long
+    if max_size is not None:
+        return dev_long >= max_size
     return True
 
 
