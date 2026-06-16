@@ -65,9 +65,16 @@ async function openExternal(url) {
       return false;
     }
   }
-  // Browser: window.open returns null if a popup blocker stopped it.
-  var win = window.open(url, '_blank', 'noopener');
-  return !!win;
+  // Browser fallback. We deliberately omit the 'noopener' window feature: with
+  // it, window.open returns null even on a *successful* open (MDN), which would
+  // make us report a false "could not open". Instead open about:blank first so
+  // we can null the opener same-origin, then navigate — this keeps popup-block
+  // detection (a real null return) and still prevents reverse-tabnabbing.
+  var win = window.open('about:blank', '_blank');
+  if (!win) return false;
+  try { win.opener = null; } catch (e) {}
+  win.location = url;
+  return true;
 }
 
 /**
