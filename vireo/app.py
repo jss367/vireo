@@ -1381,6 +1381,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             g.db = Database(db_path)
         return g.db
 
+    def _invalidate_photo_render_cache(db, photo_ids):
+        """Drop cached rendered derivatives after an edit recipe changes."""
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        preview_dir = os.path.join(vireo_dir, "previews")
+        originals_dir = os.path.join(vireo_dir, "originals")
+        for pid in photo_ids:
+            for row in db.conn.execute(
+                "SELECT size FROM preview_cache WHERE photo_id = ?",
+                (pid,),
+            ).fetchall():
+                path = os.path.join(preview_dir, f"{pid}_{row['size']}.jpg")
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    log.warning("Failed to remove stale preview cache %s", path)
+            db.conn.execute("DELETE FROM preview_cache WHERE photo_id = ?", (pid,))
+            original_cache = os.path.join(originals_dir, f"{pid}.jpg")
+            try:
+                if os.path.exists(original_cache):
+                    os.remove(original_cache)
+            except OSError:
+                log.warning("Failed to remove stale original cache %s", original_cache)
+        db.conn.commit()
+
     _ACCELERATED_RUNTIME_PROVIDERS = {
         "ACLExecutionProvider",
         "ArmNNExecutionProvider",
@@ -2803,6 +2828,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Location section: pre-resolved leaf + parent chain so the photo
         # detail panel can render the filled state without a second roundtrip.
         result["location"] = _serialize_photo_location(db, photo_id)
+        result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
 
         # Read XMP sidecar keywords
         folder = db.conn.execute(
@@ -3497,6 +3523,68 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db.record_edit('color_label', f'Set color to {color or "none"}', new_color,
                        [{'photo_id': photo_id, 'old_value': old_color, 'new_value': new_color}])
         return jsonify({"ok": True})
+
+    @app.route("/api/photos/<int:photo_id>/edit-recipe", methods=["GET"])
+    def api_get_photo_edit_recipe(photo_id):
+        db = _get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return json_error("not found", 404)
+        return jsonify({
+            "photo_id": photo_id,
+            "recipe": db.get_photo_edit_recipe(photo_id),
+        })
+
+    @app.route("/api/photos/<int:photo_id>/edit-recipe", methods=["PUT", "POST"])
+    def api_set_photo_edit_recipe(photo_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        recipe = body.get("recipe", body)
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return json_error("not found", 404)
+        from image_edits import RecipeError, recipe_to_json
+        old_recipe = db.get_photo_edit_recipe(photo_id)
+        try:
+            old_value = recipe_to_json(old_recipe) or ""
+            new_recipe = db.set_photo_edit_recipe(photo_id, recipe, verify_workspace=True)
+            new_value = recipe_to_json(new_recipe) or ""
+        except RecipeError as e:
+            return json_error(str(e))
+        except ValueError as e:
+            return json_error(str(e), 403)
+        _invalidate_photo_render_cache(db, [photo_id])
+        if old_value != new_value:
+            db.record_edit(
+                "edit_recipe",
+                "Updated photo edit recipe",
+                new_value,
+                [{"photo_id": photo_id, "old_value": old_value, "new_value": new_value}],
+            )
+        return jsonify({"ok": True, "recipe": new_recipe})
+
+    @app.route("/api/photos/<int:photo_id>/edit-recipe", methods=["DELETE"])
+    def api_clear_photo_edit_recipe(photo_id):
+        db = _get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return json_error("not found", 404)
+        from image_edits import recipe_to_json
+        old_recipe = db.get_photo_edit_recipe(photo_id)
+        old_value = recipe_to_json(old_recipe) or ""
+        try:
+            db.clear_photo_edit_recipe(photo_id, verify_workspace=True)
+        except ValueError as e:
+            return json_error(str(e), 403)
+        _invalidate_photo_render_cache(db, [photo_id])
+        if old_value:
+            db.record_edit(
+                "edit_recipe",
+                "Cleared photo edit recipe",
+                "",
+                [{"photo_id": photo_id, "old_value": old_value, "new_value": ""}],
+            )
+        return jsonify({"ok": True, "recipe": None})
 
     @app.route("/api/files/reveal", methods=["POST"])
     def api_files_reveal():
@@ -4962,6 +5050,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = db.undo_last_edit()
         if result is None:
             return json_error("nothing to undo")
+        if result.get("action_type") == "edit_recipe":
+            rows = db.conn.execute(
+                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
+                (result["id"],),
+            ).fetchall()
+            _invalidate_photo_render_cache(db, [r["photo_id"] for r in rows])
         return jsonify({"ok": True, "undone": result["description"]})
 
     @app.route("/api/undo/status")
@@ -4993,6 +5087,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = db.redo_last_undo()
         if result is None:
             return json_error("nothing to redo")
+        if result.get("action_type") == "edit_recipe":
+            rows = db.conn.execute(
+                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
+                (result["id"],),
+            ).fetchall()
+            _invalidate_photo_render_cache(db, [r["photo_id"] for r in rows])
         return jsonify({"ok": True, "redone": result["description"]})
 
     @app.route("/api/redo/status")
@@ -15937,10 +16037,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "Could not load image", 500
 
         canonical = get_canonical_image_path(photo, vireo_dir, folders)
-        img = load_image(canonical, max_size=size)
+        recipe = db.get_photo_edit_recipe(photo_id)
+        img = load_image(canonical, max_size=None if recipe else size)
         if img is None:
             _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500
+        if recipe:
+            from image_edits import apply_recipe_to_loaded_image
+            img = apply_recipe_to_loaded_image(img, recipe, max_size=size)
 
         preview_quality = cfg.load().get("preview_quality", 90)
 
@@ -16022,6 +16126,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "Not found", 404
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        recipe = db.get_photo_edit_recipe(photo_id)
+
+        if recipe:
+            folder = db.conn.execute(
+                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+            ).fetchone()
+            if not folder:
+                return "Not found", 404
+            from offline_cache import resolve_original_path
+            image_path, _using_offline_cache = resolve_original_path(
+                db,
+                photo,
+                vireo_dir,
+                {photo["folder_id"]: folder["path"]},
+            )
+            from image_loader import load_image
+            img = load_image(image_path, max_size=None)
+            if img is None:
+                _record_working_copy_failure(db, photo, image_path)
+                return "Could not load image", 500
+            from image_edits import apply_recipe
+            img = apply_recipe(img, recipe)
+            originals_dir = os.path.join(vireo_dir, "originals")
+            cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
+            os.makedirs(originals_dir, exist_ok=True)
+            quality = cfg.load().get("working_copy_quality", 92)
+            img.save(cache_path, format="JPEG", quality=quality)
+            img.close()
+            return send_file(cache_path, mimetype="image/jpeg")
 
         # Decide whether to trust the working copy as the full-res asset
         # by reading its actual on-disk dimensions, NOT the current

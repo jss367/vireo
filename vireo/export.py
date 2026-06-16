@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 
+from image_edits import apply_recipe_to_loaded_image
 from image_loader import load_image
 
 log = logging.getLogger(__name__)
@@ -113,6 +114,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
 
     # Get species keywords for all photos in one query
     species_map = db.get_species_keywords_for_photos(photo_ids)
+    edit_recipes = db.get_photo_edit_recipes(photo_ids)
 
     # Track sequence numbers per subdirectory
     seq_counters = {}
@@ -215,12 +217,15 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
 
         # Load, resize, and save
         try:
-            img = load_image(source_path, max_size=max_size or None)
+            recipe = edit_recipes.get(pid)
+            img = load_image(source_path, max_size=None if recipe else (max_size or None))
             if img is None:
                 errors.append(f"{photo['filename']}: failed to load image")
                 if progress_cb:
                     progress_cb(i + 1, len(photo_ids), photo["filename"])
                 continue
+            if recipe:
+                img = apply_recipe_to_loaded_image(img, recipe, max_size=max_size)
             img.save(out_path, "JPEG", quality=quality)
             img.close()
             exported += 1

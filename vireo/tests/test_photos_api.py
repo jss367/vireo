@@ -1363,6 +1363,68 @@ def test_preview_cache_hit_updates_last_access(client_with_photo):
     assert row2["last_access_at"] > row1["last_access_at"]
 
 
+def test_edit_recipe_api_invalidates_preview_cache_and_renders(client_with_photo):
+    import io
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    assert client.get(f"/photos/{photo_id}/preview?size=1920").status_code == 200
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_path = os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
+    assert os.path.exists(preview_path)
+    assert db.preview_cache_get(photo_id, 1920) is not None
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 90}},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["recipe"] == {"version": 1, "rotation": 90}
+    assert db.preview_cache_get(photo_id, 1920) is None
+    assert not os.path.exists(preview_path)
+
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
+
+
+def test_edit_recipe_api_rejects_invalid_recipe(client_with_photo):
+    app, _db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 45}},
+    )
+    assert resp.status_code == 400
+    assert "rotation" in resp.get_json()["error"]
+
+
+def test_edit_recipe_api_undo_redo(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 180}},
+    )
+    assert resp.status_code == 200
+    assert db.get_photo_edit_recipe(photo_id)["rotation"] == 180
+
+    undo = client.post("/api/undo")
+    assert undo.status_code == 200
+    assert db.get_photo_edit_recipe(photo_id) is None
+
+    redo = client.post("/api/redo")
+    assert redo.status_code == 200
+    assert db.get_photo_edit_recipe(photo_id)["rotation"] == 180
+
+
 def test_preview_adopts_existing_file_on_first_access(client_with_photo):
     """A cached file left over from the old scheme is adopted into the LRU."""
     import os

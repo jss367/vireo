@@ -144,6 +144,31 @@ def test_export_photos_resize(export_env):
         assert max(img.size) <= 400
 
 
+def test_export_photos_applies_edit_recipe(export_env):
+    """export_photos applies the stored non-destructive edit recipe."""
+    env = export_env
+    env["db"].set_photo_edit_recipe(
+        env["p1"],
+        {
+            "rotation": 90,
+            "crop": {"x": 0, "y": 0, "w": 0.5, "h": 1},
+        },
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(os.path.join(env["dest"], "bird1.jpg")) as img:
+        assert img.size == (300, 800)
+
+
 def test_export_photos_subdirectories(export_env):
     """export_photos creates subdirectories from template."""
     env = export_env
