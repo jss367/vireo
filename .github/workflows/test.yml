@@ -4,41 +4,157 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      website: ${{ steps.filter.outputs.website }}
+      build: ${{ steps.filter.outputs.build }}
+
+    steps:
+      - name: Classify changed files
+        id: filter
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              per_page: 100,
+            });
+
+            const paths = files.map((file) => file.filename);
+            const touchesTestWorkflow = paths.includes(".github/workflows/test.yml");
+
+            const python = touchesTestWorkflow || paths.some((path) =>
+              path.startsWith("vireo/") ||
+              path.startsWith("tests/") ||
+              (path.startsWith("scripts/") && path.endsWith(".py")) ||
+              ["pyproject.toml", "uv.lock"].includes(path)
+            );
+
+            const website = touchesTestWorkflow || paths.some((path) =>
+              path.startsWith("website/") ||
+              path === "vireo/static/help.json" ||
+              path === ".github/workflows/deploy-website.yml"
+            );
+
+            const build = paths.some((path) =>
+              path.startsWith("src-tauri/") ||
+              path === "package.json" ||
+              path === "package-lock.json" ||
+              path === ".github/workflows/build-release.yml"
+            );
+
+            core.setOutput("python", String(python));
+            core.setOutput("website", String(website));
+            core.setOutput("build", String(build));
+
+            await core.summary
+              .addHeading("Change classification")
+              .addList([
+                `Python tests: ${python ? "run" : "skip"}`,
+                `Website build: ${website ? "run" : "skip"}`,
+                `Build-only paths changed: ${build ? "yes" : "no"}`,
+              ])
+              .write();
+
   test:
     runs-on: ubuntu-latest
+    needs: changes
     timeout-minutes: 60
 
     steps:
+      - name: Skip Python tests
+        if: needs.changes.outputs.python != 'true'
+        run: |
+          echo "No Python application, script, or test files changed."
+          echo "Build-only paths changed: ${{ needs.changes.outputs.build }}"
+
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.python == 'true'
 
       - name: Set up Python
+        if: needs.changes.outputs.python == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
 
       - name: Install dependencies
+        if: needs.changes.outputs.python == 'true'
         run: |
           pip install pytest pytest-cov pytest-timeout pytest-xdist
           pip install -e .
 
       - name: Run tests with coverage
+        if: needs.changes.outputs.python == 'true'
         run: python -m pytest tests/ vireo/tests/ -n auto -v --tb=short --cov=vireo --cov-report=term-missing --cov-fail-under=40
 
   lint:
     runs-on: ubuntu-latest
+    needs: changes
     timeout-minutes: 5
 
     steps:
+      - name: Skip Python lint
+        if: needs.changes.outputs.python != 'true'
+        run: echo "No Python application, script, or test files changed."
+
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.python == 'true'
 
       - name: Set up Python
+        if: needs.changes.outputs.python == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
 
       - name: Install ruff
+        if: needs.changes.outputs.python == 'true'
         run: pip install ruff
 
       - name: Run ruff check
+        if: needs.changes.outputs.python == 'true'
         run: ruff check vireo/ tests/
+
+  website:
+    runs-on: ubuntu-latest
+    needs: changes
+    timeout-minutes: 10
+
+    steps:
+      - name: Skip website build
+        if: needs.changes.outputs.website != 'true'
+        run: echo "No website files changed."
+
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.website == 'true'
+
+      - name: Set up Node.js
+        if: needs.changes.outputs.website == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install website dependencies
+        if: needs.changes.outputs.website == 'true'
+        working-directory: website
+        run: npm ci
+
+      - name: Build website
+        if: needs.changes.outputs.website == 'true'
+        working-directory: website
+        run: npm run build
