@@ -5,6 +5,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import json
 import logging
 import logging.handlers
@@ -45,6 +46,7 @@ from werkzeug.exceptions import BadRequest
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
+_EXIF_ORIENTATION_TAG = 274
 
 
 # Stable ordering and labels for the palette + nav rendering.
@@ -1523,6 +1525,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return height, width
         return width, height
 
+    def _image_size_after_exif_orientation(img):
+        width, height = img.size
+        orientation = None
+        with contextlib.suppress(Exception):
+            orientation = img.getexif().get(_EXIF_ORIENTATION_TAG)
+        if _orientation_swaps_axes(orientation):
+            return height, width
+        return width, height
+
     def _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
         if not recipe or not recipe.get("crop"):
             return True
@@ -1535,7 +1546,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             from PIL import Image as _PILImage
             with _PILImage.open(wc_path) as wc_img:
-                wc_w, wc_h = wc_img.size
+                wc_w, wc_h = _image_size_after_exif_orientation(wc_img)
         except Exception:
             return False
         original_w, original_h = _recipe_source_dimensions(photo)
@@ -1553,7 +1564,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             from PIL import Image as _PILImage
             with _PILImage.open(path) as img:
-                width, height = img.size
+                width, height = _image_size_after_exif_orientation(img)
         except Exception:
             return False
         original_render_long = _rendered_recipe_long_edge(

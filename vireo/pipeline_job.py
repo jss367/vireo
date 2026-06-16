@@ -27,6 +27,7 @@ from pipeline_locks import acquire_photo_mask, acquire_workspace_regroup
 log = logging.getLogger(__name__)
 
 _SENTINEL = object()  # unique end-of-stream marker
+_EXIF_ORIENTATION_TAG = 274
 
 
 @dataclass
@@ -134,6 +135,16 @@ def _recipe_source_dimensions(photo):
     return width, height
 
 
+def _image_size_after_exif_orientation(img):
+    width, height = img.size
+    orientation = None
+    with contextlib.suppress(Exception):
+        orientation = img.getexif().get(_EXIF_ORIENTATION_TAG)
+    if _orientation_swaps_axes(orientation):
+        return height, width
+    return width, height
+
+
 def _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
     if not recipe or not recipe.get("crop"):
         return True
@@ -146,7 +157,7 @@ def _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
     try:
         from PIL import Image as _PILImage
         with _PILImage.open(wc_path) as wc_img:
-            wc_w, wc_h = wc_img.size
+            wc_w, wc_h = _image_size_after_exif_orientation(wc_img)
     except Exception:
         return False
     original_w, original_h = _recipe_source_dimensions(photo)
@@ -165,7 +176,7 @@ def _path_satisfies_recipe_render(path, photo, recipe, max_size):
     try:
         from PIL import Image as _PILImage
         with _PILImage.open(path) as img:
-            width, height = img.size
+            width, height = _image_size_after_exif_orientation(img)
     except Exception:
         return False
     original_render_long = _rendered_recipe_long_edge(

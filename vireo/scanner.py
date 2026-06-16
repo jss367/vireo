@@ -194,7 +194,7 @@ def _extract_timestamp(exif_group):
         return None
 
 
-def _pair_raw_jpeg_companions(db):
+def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     """Find raw+JPEG pairs in the same folder and merge them.
 
     When both IMG_001.cr3 and IMG_001.jpg exist in the same folder,
@@ -433,7 +433,7 @@ def _pair_raw_jpeg_companions(db):
         )
         # Preserve non-destructive edits when a JPEG companion is folded into
         # a RAW primary. If both already have recipes, the primary wins.
-        db.conn.execute(
+        transferred_recipe = db.conn.execute(
             """INSERT OR IGNORE INTO photo_edit_recipes
                    (photo_id, recipe_json, updated_at)
                SELECT ?, recipe_json, updated_at
@@ -441,6 +441,21 @@ def _pair_raw_jpeg_companions(db):
                WHERE photo_id = ?""",
             (primary["id"], companion["id"]),
         )
+        if transferred_recipe.rowcount:
+            if vireo_dir:
+                _invalidate_derived_caches(
+                    db, vireo_dir, primary["id"],
+                    thumb_cache_dir=thumb_cache_dir,
+                )
+            else:
+                db.conn.execute(
+                    "UPDATE photos SET thumb_path = NULL WHERE id = ?",
+                    (primary["id"],),
+                )
+                db.conn.execute(
+                    "DELETE FROM preview_cache WHERE photo_id = ?",
+                    (primary["id"],),
+                )
         # Remove keyword associations then the duplicate JPEG record
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
         db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
@@ -1597,7 +1612,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # counts — otherwise update_folder_counts()'s commit would persist
     # half-applied pairing or working-copy records.
     try:
-        _pair_raw_jpeg_companions(db)
+        _pair_raw_jpeg_companions(
+            db, vireo_dir=vireo_dir, thumb_cache_dir=thumb_cache_dir,
+        )
 
         # Extract working copies for RAW photos (after pairing so companion is known).
         # Scope to the folders the caller just scanned so a fresh import doesn't

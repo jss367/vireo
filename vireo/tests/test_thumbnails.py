@@ -93,6 +93,18 @@ def test_recipe_source_path_uses_exif_oriented_dimensions(tmp_path):
         photo, recipe, 500, str(vireo_dir), folders,
     ) == str(original)
 
+    exif = Image.Exif()
+    exif[274] = 6
+    oriented_working = working_dir / "2.jpg"
+    Image.new("RGB", (600, 400), color="blue").save(oriented_working, exif=exif)
+
+    assert thumbnails._path_satisfies_recipe_render(
+        str(oriented_working), photo, recipe, 500,
+    )
+    assert pipeline_job._path_satisfies_recipe_render(
+        str(oriented_working), photo, recipe, 500,
+    )
+
 
 def test_generate_thumbnail_skips_existing(tmp_path):
     """generate_thumbnail skips if thumbnail already exists."""

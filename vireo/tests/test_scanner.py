@@ -649,20 +649,29 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
         folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0,
     )
-    db.add_photo(
+    raw_id = db.add_photo(
         folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
         file_size=2000, file_mtime=1.0,
     )
     db.set_photo_edit_recipe(jpeg_id, {"rotation": 90})
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        ("thumbnails/raw.jpg", raw_id),
+    )
+    db.preview_cache_insert(raw_id, 800, 1234)
 
     _pair_raw_jpeg_companions(db)
 
-    photo = db.conn.execute("SELECT id, filename FROM photos").fetchone()
+    photo = db.conn.execute(
+        "SELECT id, filename, thumb_path FROM photos",
+    ).fetchone()
     assert photo["filename"] == "IMG_001.cr3"
     assert db.get_photo_edit_recipe(photo["id"]) == {
         "rotation": 90,
         "version": 1,
     }
+    assert photo["thumb_path"] is None
+    assert db.preview_cache_get(photo["id"], 800) is None
 
 
 def test_pairing_does_not_copy_rejected_flag_to_raw(tmp_path):

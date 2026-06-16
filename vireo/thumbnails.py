@@ -12,6 +12,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_CACHE_DIR = os.path.expanduser("~/.vireo/thumbnails")
 THUMB_SIZE = 400
+_EXIF_ORIENTATION_TAG = 274
 
 
 def _rendered_recipe_long_edge(width, height, recipe):
@@ -83,6 +84,16 @@ def _recipe_source_dimensions(photo):
     return width, height
 
 
+def _image_size_after_exif_orientation(img):
+    width, height = img.size
+    orientation = None
+    with contextlib.suppress(Exception):
+        orientation = img.getexif().get(_EXIF_ORIENTATION_TAG)
+    if _orientation_swaps_axes(orientation):
+        return height, width
+    return width, height
+
+
 def _path_satisfies_recipe_render(path, photo, recipe, max_size):
     original_w, original_h = _recipe_source_dimensions(photo)
     if original_w <= 0 or original_h <= 0:
@@ -90,7 +101,7 @@ def _path_satisfies_recipe_render(path, photo, recipe, max_size):
     try:
         from PIL import Image as _PILImage
         with _PILImage.open(path) as img:
-            width, height = img.size
+            width, height = _image_size_after_exif_orientation(img)
     except Exception:
         return False
     original_render_long = _rendered_recipe_long_edge(
