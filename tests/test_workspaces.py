@@ -1217,6 +1217,25 @@ def test_move_folders_moves_pending_changes(db_with_workspace):
     assert len(db.get_pending_changes()) == 0
 
 
+def test_move_folders_moves_photo_preferences(db_with_workspace):
+    """Representative Life List / Highlights choices follow moved photos."""
+    db, ws1, folder_id, photo_id = db_with_workspace
+    db.set_photo_preference("life_list", "Robin", photo_id)
+    db.set_photo_preference("highlights", "Robin", photo_id)
+
+    ws2 = db.create_workspace("Target")
+    result = db.move_folders_to_workspace(ws1, ws2, [folder_id])
+
+    assert result["photo_preferences_moved"] == 2
+    db.set_active_workspace(ws2)
+    assert db.get_photo_preferences("life_list") == {"Robin": photo_id}
+    assert db.get_photo_preferences("highlights") == {"Robin": photo_id}
+
+    db.set_active_workspace(ws1)
+    assert db.get_photo_preferences("life_list") == {}
+    assert db.get_photo_preferences("highlights") == {}
+
+
 def test_move_folders_collections_stay_behind(db_with_workspace):
     """Collections in the source workspace are NOT moved."""
     db, ws1, folder_id, photo_id = db_with_workspace
