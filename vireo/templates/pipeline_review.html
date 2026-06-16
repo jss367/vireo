@@ -5196,15 +5196,15 @@ function buildPipelinePhotoContextMenu(photoId) {
   return [
     {
       label: 'Open in Browse Mode',
-      onClick: function() { window.open('/browse?photo_id=' + photoId, '_blank', 'noopener'); },
+      onClick: function() { window.openInBrowse(photoId); },
     },
   ];
 }
 
 /* --- Right-click menu ---
  * Catches contextmenu on photo cards (main grid) and grm-cards (group review
- * modal). Browse opens in a new tab so the user keeps their pipeline-review
- * state intact. */
+ * modal). Browse opens in a new tab (browser) or navigates in place (Tauri app
+ * window) via openInBrowse, so the user reaches the photo either way. */
 document.addEventListener('contextmenu', function(e) {
   var card = e.target.closest('.photo-card[data-photo-id], .grm-card[data-photo-id]');
   if (!card) return;
@@ -5214,7 +5214,7 @@ document.addEventListener('contextmenu', function(e) {
   if (typeof openContextMenu === 'function') {
     openContextMenu(e, buildPipelinePhotoContextMenu(pid));
   } else {
-    window.open('/browse?photo_id=' + pid, '_blank', 'noopener');
+    window.openInBrowse(pid);
   }
 });
 

@@ -1720,6 +1720,20 @@ function sendReport() {
     }
     return Array.from(selectionSet);
   };
+
+  // Open Browse mode focused on a photo. In a real browser we open a new tab so
+  // the caller (pipeline review, group review, etc.) keeps its state. Inside the
+  // Tauri app window there are no tabs and the webview ignores
+  // window.open(_, '_blank'), so navigate the single window in place instead —
+  // matching how the native View menu switches pages.
+  window.openInBrowse = function(photoId){
+    var url = '/browse?photo_id=' + photoId;
+    if (typeof isTauri === 'function' && isTauri()) {
+      window.location.href = url;
+    } else {
+      window.open(url, '_blank', 'noopener');
+    }
+  };
 })();
 </script>
 
