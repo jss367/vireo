@@ -15376,6 +15376,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         limit = min(max(1, request.args.get("limit", 50, type=int)), 1000)
         threshold = request.args.get("threshold", 0.15, type=float)
+        folder_id = request.args.get("folder_id", None, type=int)
+        rating_min = request.args.get("rating_min", None, type=int)
+        date_from = request.args.get("date_from", None)
+        date_to = request.args.get("date_to", None)
+        keyword = request.args.get("keyword", None)
+        color_label = request.args.get("color_label", None)
+        collection_id = request.args.get("collection_id", None, type=int)
+        try:
+            flag = _request_flag_filter()
+        except ValueError as e:
+            return json_error(str(e), 400)
         ids_only = request.args.get("ids_only", "").lower() in ("1", "true", "yes")
 
         db = _get_db()
@@ -15395,8 +15406,37 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return jsonify({"results": [], "total_matches": 0, "model_used": model_name,
                             "reason": "model_no_text_search"})
 
+        candidate_photo_ids = None
+        if collection_id is not None:
+            candidate_photo_ids = db.get_collection_photo_ids(collection_id)
+        elif any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag]):
+            candidate_photo_ids = db.get_photo_ids(
+                folder_id=folder_id,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                color_label=color_label,
+                flag=flag,
+            )
+
+        if candidate_photo_ids == []:
+            if ids_only:
+                return jsonify({
+                    "photo_ids": [],
+                    "total_matches": 0,
+                    "model_used": model_name,
+                })
+            return jsonify({
+                "results": [],
+                "total_matches": 0,
+                "model_used": model_name,
+            })
+
         # Load embeddings for current model
-        emb_pairs = db.get_photos_with_embedding(model_name)
+        emb_pairs = db.get_photos_with_embedding(
+            model_name, photo_ids=candidate_photo_ids
+        )
         if not emb_pairs:
             return jsonify({"results": [], "total_matches": 0, "model_used": model_name,
                             "reason": "no_embeddings"})
@@ -15437,13 +15477,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             top_pids = [filtered_ids[idx] for idx in top_indices]
             top_sims = [float(filtered_sims[idx]) for idx in top_indices]
             photos_map = db.get_photos_by_ids(top_pids)
-            results = []
+            photo_dicts = []
+            sims_by_pid = {}
             for pid, sim in zip(top_pids, top_sims, strict=False):
                 if pid in photos_map:
-                    results.append({
-                        "photo": dict(photos_map[pid]),
-                        "similarity": round(sim, 4),
-                    })
+                    photo_dicts.append(dict(photos_map[pid]))
+                    sims_by_pid[pid] = round(sim, 4)
+            _attach_species(db, photo_dicts)
+            _attach_detections(db, photo_dicts)
+            results = [
+                {
+                    "photo": photo,
+                    "similarity": sims_by_pid[photo["id"]],
+                }
+                for photo in photo_dicts
+            ]
         else:
             if ids_only:
                 return jsonify({

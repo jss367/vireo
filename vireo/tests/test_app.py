@@ -2202,6 +2202,128 @@ def test_text_search_no_embeddings_returns_reason(app_and_db, monkeypatch):
     assert data.get("reason") == "no_embeddings"
 
 
+def test_text_search_returns_ranked_enriched_results(app_and_db, monkeypatch):
+    """Text search ranks by embedding similarity and returns browse card metadata."""
+    import numpy as np
+
+    app, db = app_and_db
+    client = app.test_client()
+    monkeypatch.setattr(
+        "models.get_active_model",
+        lambda: {
+            "name": "BioCLIP-2",
+            "model_type": "bioclip",
+            "model_str": "hf-hub:imageomics/bioclip-2",
+            "downloaded": True,
+        },
+    )
+    monkeypatch.setattr(
+        "text_encoder.encode_text",
+        lambda query, model_str, pretrained_str=None: np.array([1.0, 0.0], dtype=np.float32),
+    )
+
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY id"
+    ).fetchall()
+    by_name = {row["filename"]: row["id"] for row in rows}
+    p1 = by_name["bird1.jpg"]
+    p2 = by_name["bird2.jpg"]
+    p3 = by_name["bird3.jpg"]
+    for pid, emb in [
+        (p1, [1.0, 0.0]),
+        (p2, [0.6, 0.8]),
+        (p3, [0.0, 1.0]),
+    ]:
+        db.upsert_photo_embedding(
+            pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
+        )
+    db.save_detections(
+        p1,
+        [{"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+          "confidence": 0.91, "category": "bird"}],
+        detector_model="test-detector",
+    )
+    species_id = db.add_keyword("Search Cardinal", is_species=True)
+    db.tag_photo(p1, species_id)
+
+    resp = client.get("/api/photos/search?q=bird&threshold=0.15")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert [r["photo"]["id"] for r in data["results"]] == [p1, p2]
+    assert data["total_matches"] == 2
+    first = data["results"][0]["photo"]
+    assert first["species"] == ["Search Cardinal"]
+    assert first["detections"][0]["category"] == "bird"
+
+
+def test_text_search_applies_browse_scope_filters(app_and_db, monkeypatch):
+    """Text search honors normal browse filters, collections, and visible folders."""
+    import json
+
+    import numpy as np
+
+    app, db = app_and_db
+    client = app.test_client()
+    monkeypatch.setattr(
+        "models.get_active_model",
+        lambda: {
+            "name": "BioCLIP-2",
+            "model_type": "bioclip",
+            "model_str": "hf-hub:imageomics/bioclip-2",
+            "downloaded": True,
+        },
+    )
+    monkeypatch.setattr(
+        "text_encoder.encode_text",
+        lambda query, model_str, pretrained_str=None: np.array([1.0, 0.0], dtype=np.float32),
+    )
+
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY id"
+    ).fetchall()
+    by_name = {row["filename"]: row["id"] for row in rows}
+    p1 = by_name["bird1.jpg"]
+    p2 = by_name["bird2.jpg"]
+    p3 = by_name["bird3.jpg"]
+    missing_fid = db.add_folder("/photos/missing", name="missing")
+    missing_pid = db.add_photo(
+        folder_id=missing_fid,
+        filename="missing.jpg",
+        extension=".jpg",
+        file_size=1,
+        file_mtime=1.0,
+        timestamp="2024-01-01T00:00:00",
+    )
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (missing_fid,)
+    )
+    db.conn.commit()
+    for pid, emb in [
+        (p1, [1.0, 0.0]),
+        (p2, [0.6, 0.8]),
+        (p3, [0.0, 1.0]),
+        (missing_pid, [2.0, 0.0]),
+    ]:
+        db.upsert_photo_embedding(
+            pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
+        )
+
+    rating_resp = client.get("/api/photos/search?q=bird&threshold=-1&rating_min=5")
+    assert rating_resp.status_code == 200
+    assert [r["photo"]["id"] for r in rating_resp.get_json()["results"]] == [p3]
+
+    cid = db.add_collection(
+        "Search Scope",
+        json.dumps([{"field": "photo_ids", "value": [p2, p3, missing_pid]}]),
+    )
+    collection_resp = client.get(
+        f"/api/photos/search?q=bird&threshold=-1&collection_id={cid}"
+    )
+    assert collection_resp.status_code == 200
+    assert [r["photo"]["id"] for r in collection_resp.get_json()["results"]] == [p2, p3]
+
+
 def test_settings_has_edit_history_config(app_and_db):
     """Settings page includes the max_edit_history config field."""
     app, _ = app_and_db

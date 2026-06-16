@@ -8705,6 +8705,7 @@ class Database:
         sql = (
             "SELECT pe.photo_id, pe.embedding FROM photo_embeddings pe "
             "JOIN photos p ON p.id = pe.photo_id "
+            "JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial') "
             "JOIN workspace_folders wf "
             "  ON wf.folder_id = p.folder_id AND wf.workspace_id = ? "
             "WHERE pe.model = ? AND pe.variant = ?"
