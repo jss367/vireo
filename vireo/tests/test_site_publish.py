@@ -21,6 +21,7 @@ def _seed_publish_app(tmp_path, monkeypatch):
     photos_dir.mkdir()
     Image.new("RGB", (1200, 800), (180, 30, 40)).save(photos_dir / "cardinal.jpg")
     Image.new("RGB", (900, 900), (90, 120, 40)).save(photos_dir / "sparrow.jpg")
+    Image.new("RGB", (1000, 700), (40, 80, 150)).save(photos_dir / "mystery.jpg")
 
     vireo_dir = tmp_path / "vireo"
     thumb_dir = vireo_dir / "thumbs"
@@ -48,8 +49,17 @@ def _seed_publish_app(tmp_path, monkeypatch):
         file_mtime=2.0,
         timestamp="2024-02-01T10:00:00",
     )
+    p3 = db.add_photo(
+        folder_id=fid,
+        filename="mystery.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=3.0,
+        timestamp="2024-03-01T10:00:00",
+    )
     db.conn.execute("UPDATE photos SET quality_score = 0.9 WHERE id = ?", (p1,))
     db.conn.execute("UPDATE photos SET quality_score = 0.7 WHERE id = ?", (p2,))
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (p3,))
 
     cardinal = db.add_keyword("Northern Cardinal", is_species=True)
     sparrow = db.add_keyword("House Sparrow", is_species=True)
@@ -78,7 +88,7 @@ def test_publish_site_job_writes_life_list_highlights_and_images(tmp_path, monke
 
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
-    assert job["result"]["exported_images"] == 2
+    assert job["result"]["exported_images"] == 3
     assert job["result"]["errors"] == []
 
     site = json.loads((dest / "data" / "site.json").read_text())
@@ -96,6 +106,9 @@ def test_publish_site_job_writes_life_list_highlights_and_images(tmp_path, monke
         "Northern Cardinal",
         "House Sparrow",
     ]
+    unidentified = highlights["unidentified"]["photos"][0]
+    assert unidentified["image"].startswith("images/photos/unidentified-")
+    assert (dest / unidentified["image"]).exists()
 
     db.close()
 

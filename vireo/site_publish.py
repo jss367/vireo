@@ -45,6 +45,10 @@ def _photo_refs(life_list, highlights):
         for photo in bucket.get("photos") or []:
             add(photo, context)
 
+    unidentified = highlights.get("unidentified") or {}
+    for photo in unidentified.get("photos") or []:
+        add(photo, "unidentified")
+
     return refs
 
 
