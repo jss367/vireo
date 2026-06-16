@@ -72,9 +72,11 @@
   .species-modal-actions button { padding:6px 16px; border-radius:4px; border:1px solid var(--border-secondary); background:var(--bg-secondary); color:var(--text-primary); cursor:pointer; font-size:13px; }
   .species-modal-actions .primary { background:var(--accent); color:var(--accent-text); border-color:var(--accent); }
 
-  .highlight-lb-panel { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:5px 8px; border-radius:4px; background:rgba(0,0,0,0.6); border:1px solid var(--text-faint); color:var(--text-secondary); font-size:12px; }
-  .highlight-lb-panel button { border:1px solid var(--border-secondary); background:rgba(255,255,255,0.08); color:var(--text-primary); border-radius:4px; padding:4px 9px; cursor:pointer; font-size:12px; }
-  .highlight-lb-panel button.primary { border-color:var(--accent); color:var(--accent); }
+  .highlight-lb-panel { display:flex; align-items:center; gap:8px; flex-wrap:wrap; min-height:32px; padding:4px 8px; border-radius:4px; background:rgba(12,14,16,0.88); border:1px solid rgba(255,255,255,0.42); color:#f4f7f8; font-size:12px; font-weight:650; text-shadow:0 1px 1px rgba(0,0,0,0.75); }
+  .highlight-lb-panel button { min-height:24px; border:1px solid rgba(255,255,255,0.42); background:rgba(255,255,255,0.12); color:#fff; border-radius:4px; padding:4px 9px; cursor:pointer; font-size:12px; font-weight:650; }
+  .highlight-lb-panel button:hover { background:rgba(255,255,255,0.2); border-color:rgba(255,255,255,0.72); }
+  .highlight-lb-panel button:disabled { color:rgba(255,255,255,0.48); border-color:rgba(255,255,255,0.22); background:rgba(255,255,255,0.06); cursor:default; }
+  .highlight-lb-panel button.primary { border-color:rgba(255,224,102,0.84); color:#ffe066; }
 </style>
 </head>
 <body>
