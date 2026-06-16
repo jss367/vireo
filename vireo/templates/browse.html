@@ -2512,7 +2512,7 @@ function scheduleCollectionCountsRefresh() {
 
 function refreshActiveCollectionAfterMembershipChange() {
   if (!activeCollectionId) return;
-  filterByCollection(activeCollectionId);
+  filterByCollection(activeCollectionId, { preserveAnchor: false });
 }
 
 function refreshBrowseSidebarCounts() {
@@ -2521,9 +2521,10 @@ function refreshBrowseSidebarCounts() {
   loadCollectionCounts();
 }
 
-async function filterByCollection(id) {
+async function filterByCollection(id, options) {
   cancelScheduledSearchFilter();
-  var anchor = captureSelectedPhotoAnchor();
+  var preserveAnchor = !(options && options.preserveAnchor === false);
+  var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
   var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
   activeFolderId = null;
   activeKeyword = null;
