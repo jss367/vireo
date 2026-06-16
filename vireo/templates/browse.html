@@ -2510,6 +2510,11 @@ function scheduleCollectionCountsRefresh() {
   }, 150);
 }
 
+function refreshActiveCollectionAfterMembershipChange() {
+  if (!activeCollectionId) return;
+  filterByCollection(activeCollectionId);
+}
+
 function refreshBrowseSidebarCounts() {
   loadFolders();
   loadKeywords();
@@ -4251,6 +4256,8 @@ async function applySelectionKeyword(keywordId) {
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
+  scheduleCollectionCountsRefresh();
+  refreshActiveCollectionAfterMembershipChange();
   refreshPendingSyncBanner();
   showUndoToast();
 }
@@ -4351,6 +4358,7 @@ async function confirmBatchKeyword() {
   loadSelectionKeywordSuggestions(ids);
   loadKeywords();
   scheduleCollectionCountsRefresh();
+  refreshActiveCollectionAfterMembershipChange();
   refreshPendingSyncBanner();
   showUndoToast();
 }
@@ -5332,6 +5340,7 @@ async function addKeyword(keyword) {
     }
     loadKeywords();
     scheduleCollectionCountsRefresh();
+    refreshActiveCollectionAfterMembershipChange();
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -5344,6 +5353,7 @@ async function removeKeyword(photoId, keywordId) {
     loadDetail(photoId);
     loadKeywords();
     scheduleCollectionCountsRefresh();
+    refreshActiveCollectionAfterMembershipChange();
     refreshPendingSyncBanner();
   } catch(e) {}
 }
