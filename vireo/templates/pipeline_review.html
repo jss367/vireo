@@ -1154,6 +1154,7 @@ input[type="range"]::-moz-range-thumb {
   min-height: 200px;
   max-height: 50vh;
 }
+.grm-loupe-img.align-dragging { cursor: grabbing; }
 .grm-loupe-img img {
   width: 100%;
   height: 100%;
@@ -1550,8 +1551,8 @@ input[type="range"]::-moz-range-thumb {
       </div>
     </div>
     <div class="grm-loupe" id="grmLoupe">
-      <div class="grm-loupe-img" id="grmLoupeImg" onmousemove="grmLoupeMove(event)" onmouseleave="grmLoupeReset()" onclick="grmLoupeToggleLock(event)" onwheel="grmLoupeZoom(event)">
-        <img id="grmLoupePhoto" alt="" onload="grmLoupeImgLoaded(this)">
+      <div class="grm-loupe-img" id="grmLoupeImg" onmousedown="grmLoupeMouseDown(event)" onmousemove="grmLoupeMove(event)" onmouseleave="grmLoupeReset()" onclick="grmLoupeToggleLock(event)" onwheel="grmLoupeZoom(event)">
+        <img id="grmLoupePhoto" alt="" onload="grmLoupeImgLoaded(this)" draggable="false">
         <div class="grm-loupe-crosshair-h" id="grmCrosshairH"></div>
         <div class="grm-loupe-crosshair-v" id="grmCrosshairV"></div>
       </div>
@@ -1609,6 +1610,7 @@ input[type="range"]::-moz-range-thumb {
       <span class="grm-mouse-pop">
         <strong>Mouse</strong>
         Click the preview to lock/unlock zoom<br>
+        Drag the preview to nudge selected thumbnails<br>
         Drag a thumbnail to pan it<br>
         Double-click a thumbnail to reset pan
       </span>
@@ -3842,7 +3844,11 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   _grmLastHoverY = null;
   _grmOffsets = {};
   _grmDragging = null;
+  _grmLoupeAlignDragging = null;
+  document.removeEventListener('mousemove', grmLoupeMouseMove);
+  document.removeEventListener('mouseup', grmLoupeMouseUp);
   _grmSuppressNextClick = false;
+  _grmSuppressLoupeClick = false;
   grmRefreshResetAllVisibility();
 
   document.getElementById('grmOverlay').classList.add('open');
@@ -3996,6 +4002,9 @@ function closeGroupReview() {
   document.getElementById('grmOverlay').classList.remove('open');
   _grmOffsets = {};
   _grmDragging = null;
+  _grmLoupeAlignDragging = null;
+  document.removeEventListener('mousemove', grmLoupeMouseMove);
+  document.removeEventListener('mouseup', grmLoupeMouseUp);
   grmRefreshResetAllVisibility();
 }
 
@@ -4645,7 +4654,9 @@ var _grmLastHoverY = null;
 // space — so offsets stay correct as the shared zoom changes between frames.
 var _grmOffsets = {};
 var _grmDragging = null;
+var _grmLoupeAlignDragging = null;
 var _grmSuppressNextClick = false;
+var _grmSuppressLoupeClick = false;
 
 function _grmInitialThumbSize() {
   try {
@@ -4710,6 +4721,12 @@ function grmCardCoverFit(card) {
   var W = parseFloat(card.dataset.natW) || GRM_CARD_W;
   var H = parseFloat(card.dataset.natH) || GRM_CARD_H;
   return Math.max(GRM_CARD_W / W, GRM_CARD_H / H);
+}
+
+function _grmCardDisplayedScale(card) {
+  var coverFit = grmCardCoverFit(card);
+  var hovering = _grmLastHoverX != null;
+  return hovering ? Math.max(coverFit, _grmZoomMultiplier) : coverFit;
 }
 
 // Effective max for `_grmZoomMultiplier`. Since the <img> is laid out at
@@ -4832,6 +4849,10 @@ function grmPositionCrosshair(x, y) {
 }
 
 function grmLoupeToggleLock(e) {
+  if (_grmSuppressLoupeClick) {
+    _grmSuppressLoupeClick = false;
+    return;
+  }
   _grmLoupeLocked = !_grmLoupeLocked;
   var ch = document.getElementById('grmCrosshairH');
   var cv = document.getElementById('grmCrosshairV');
@@ -4846,6 +4867,7 @@ function grmLoupeToggleLock(e) {
 }
 
 function grmLoupeMove(e) {
+  if (_grmLoupeAlignDragging) return;
   if (_grmLoupeLocked) return;
 
   var rect = e.currentTarget.getBoundingClientRect();
@@ -4858,6 +4880,84 @@ function grmLoupeMove(e) {
   grmApplyLoupeZoom();
 
   grmApplyCardTransforms();
+}
+
+function _grmSelectedOffsetTargets() {
+  var ids = [];
+  if (grmState && grmState.selectedIds && grmState.selectedIds.size) {
+    ids = Array.from(grmState.selectedIds);
+  } else if (grmState && grmState.selected) {
+    ids = [grmState.selected];
+  }
+  var seen = {};
+  return ids.map(function(pid) {
+    var key = String(pid);
+    if (seen[key]) return null;
+    seen[key] = true;
+    var targetCard = document.querySelector('#grmOverlay .grm-card[data-photo-id="' + key + '"]');
+    if (!targetCard) return null;
+    var cur = _grmOffsets[key] || _grmOffsets[pid] || { tx: 0, ty: 0 };
+    return { card: targetCard, photoId: key, origTx: cur.tx, origTy: cur.ty };
+  }).filter(Boolean);
+}
+
+function grmLoupeMouseDown(e) {
+  if (e.button !== 0) return;
+  var targets = _grmSelectedOffsetTargets();
+  if (!targets.length) return;
+  _grmLoupeAlignDragging = {
+    targets: targets,
+    startX: e.clientX,
+    startY: e.clientY,
+    moved: false,
+  };
+  document.addEventListener('mousemove', grmLoupeMouseMove);
+  document.addEventListener('mouseup', grmLoupeMouseUp);
+  e.preventDefault();
+}
+
+function grmLoupeMouseMove(e) {
+  if (!_grmLoupeAlignDragging) return;
+  if ((e.buttons & 1) === 0) {
+    grmLoupeMouseUp(e);
+    return;
+  }
+  var dx = e.clientX - _grmLoupeAlignDragging.startX;
+  var dy = e.clientY - _grmLoupeAlignDragging.startY;
+  if (!_grmLoupeAlignDragging.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+    _grmLoupeAlignDragging.moved = true;
+    var loupe = document.getElementById('grmLoupeImg');
+    if (loupe) loupe.classList.add('align-dragging');
+    _grmLoupeAlignDragging.targets.forEach(function(target) {
+      target.card.classList.add('dragging');
+    });
+  }
+  if (!_grmLoupeAlignDragging.moved) return;
+  _grmLoupeAlignDragging.targets.forEach(function(target) {
+    var scale = _grmCardDisplayedScale(target.card);
+    var z = scale > 0.01 ? scale : 1;
+    var newTx = target.origTx + dx / z;
+    var newTy = target.origTy + dy / z;
+    _grmOffsets[target.photoId] = { tx: newTx, ty: newTy };
+    _grmApplyCardTransform(target.card);
+    _grmUpdateIndicator(target.card);
+  });
+  e.preventDefault();
+}
+
+function grmLoupeMouseUp(e) {
+  if (!_grmLoupeAlignDragging) return;
+  var moved = _grmLoupeAlignDragging.moved;
+  _grmLoupeAlignDragging.targets.forEach(function(target) {
+    target.card.classList.remove('dragging');
+  });
+  var loupe = document.getElementById('grmLoupeImg');
+  if (loupe) loupe.classList.remove('align-dragging');
+  document.removeEventListener('mousemove', grmLoupeMouseMove);
+  document.removeEventListener('mouseup', grmLoupeMouseUp);
+  _grmLoupeAlignDragging = null;
+  if (moved) _grmSuppressLoupeClick = true;
+  grmRefreshResetAllVisibility();
 }
 
 function grmLoupeZoom(e) {
@@ -4880,6 +4980,7 @@ function grmLoupeZoom(e) {
 function grmLoupeReset() {
   if (_grmLoupeLocked) return;
   if (_grmDragging) return;
+  if (_grmLoupeAlignDragging) return;
   _grmLastHoverX = null;
   _grmLastHoverY = null;
   // Re-apply transforms in their default (non-hovered, cover-fit, centred)
@@ -4941,14 +5042,7 @@ function grmCardMouseMove(e) {
   // Use each card's actual displayed scale so the same screen drag produces
   // the same visible pan on every selected photo, even across mixed sizes.
   _grmDragging.targets.forEach(function(target) {
-    // Must mirror _grmComputeCardTransform's hover/non-hover branch: after a
-    // zoom-in followed by mouseleave (grmLoupeReset clears _grmLastHoverX) the
-    // card is displayed at cover-fit while _grmZoomMultiplier stays at its
-    // hovered value, so the denominator must match what's actually on screen
-    // or pans would jump when hover resumes.
-    var coverFit = grmCardCoverFit(target.card);
-    var hovering = _grmLastHoverX != null;
-    var scale = hovering ? Math.max(coverFit, _grmZoomMultiplier) : coverFit;
+    var scale = _grmCardDisplayedScale(target.card);
     var z = scale > 0.01 ? scale : 1;
     var newTx = target.origTx + dx / z;
     var newTy = target.origTy + dy / z;
