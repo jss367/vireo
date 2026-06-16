@@ -10236,19 +10236,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species = pred["species"] if pred else ""
         scientific = pred["scientific_name"] if pred else ""
 
+        # Percent-encode every value: scientific names contain spaces, and an
+        # unencoded space makes the URL invalid, so the desktop opener plugin
+        # rejects it and nothing opens.
         params = []
         if scientific:
-            params.append("taxon_name=" + scientific)
+            params.append("taxon_name=" + quote(scientific))
         elif species:
-            params.append("taxon_name=" + species)
+            params.append("taxon_name=" + quote(species))
         if photo["timestamp"]:
-            params.append("observed_on=" + photo["timestamp"][:10])
+            params.append("observed_on=" + quote(photo["timestamp"][:10]))
         loc = db.get_effective_photo_location(photo_id)
         lat = loc["latitude"] if loc else None
         lng = loc["longitude"] if loc else None
         if lat is not None and lng is not None:
-            params.append("lat=" + str(lat))
-            params.append("lng=" + str(lng))
+            params.append("lat=" + quote(str(lat)))
+            params.append("lng=" + quote(str(lng)))
 
         upload_url = "https://www.inaturalist.org/observations/upload"
         if params:
