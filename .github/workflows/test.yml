@@ -111,7 +111,6 @@ jobs:
       # ``huggingface.co/jss367/vireo-onnx-models`` get throttled with 429s,
       # crashing the worker and cascading dozens of unrelated test failures.
       - name: Cache MegaDetector weights
-        if: needs.changes.outputs.python == 'true'
         id: cache-mdv6
         if: needs.changes.outputs.python == 'true'
         uses: actions/cache@v4
