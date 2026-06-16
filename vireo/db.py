@@ -611,6 +611,16 @@ class Database:
                 PRIMARY KEY (photo_id, workspace_id)
             );
 
+            CREATE TABLE IF NOT EXISTS photo_preferences (
+                workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                purpose       TEXT NOT NULL,
+                species       TEXT NOT NULL,
+                photo_id      INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                created_at    TEXT DEFAULT (datetime('now')),
+                updated_at    TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (workspace_id, purpose, species)
+            );
+
             CREATE TABLE IF NOT EXISTS preview_cache (
                 photo_id INTEGER NOT NULL,
                 size INTEGER NOT NULL,
@@ -691,6 +701,8 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_keyword ON photo_keywords(keyword_id);
             CREATE INDEX IF NOT EXISTS idx_photo_color_labels_ws
                 ON photo_color_labels(workspace_id);
+            CREATE INDEX IF NOT EXISTS idx_photo_preferences_photo
+                ON photo_preferences(photo_id);
             CREATE INDEX IF NOT EXISTS preview_cache_last_access
                 ON preview_cache(last_access_at);
             CREATE INDEX IF NOT EXISTS idx_offline_originals_status
@@ -7825,6 +7837,43 @@ class Database:
         for r in rows:
             result.setdefault(r["species"], []).append(r["location"])
         return result
+
+    def get_photo_preferences(self, purpose):
+        """Return {species: photo_id} preferences for the active workspace."""
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """SELECT species, photo_id
+               FROM photo_preferences
+               WHERE workspace_id = ? AND purpose = ?""",
+            (ws, purpose),
+        ).fetchall()
+        return {r["species"]: r["photo_id"] for r in rows}
+
+    def set_photo_preference(self, purpose, species, photo_id, _commit=True):
+        """Set the preferred photo for a species/purpose in this workspace."""
+        ws = self._ws_id()
+        self.conn.execute(
+            """INSERT INTO photo_preferences
+                   (workspace_id, purpose, species, photo_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+               ON CONFLICT(workspace_id, purpose, species) DO UPDATE SET
+                   photo_id = excluded.photo_id,
+                   updated_at = excluded.updated_at""",
+            (ws, purpose, species, photo_id),
+        )
+        if _commit:
+            self.conn.commit()
+
+    def clear_photo_preference(self, purpose, species, _commit=True):
+        """Clear the preferred photo for a species/purpose in this workspace."""
+        ws = self._ws_id()
+        self.conn.execute(
+            """DELETE FROM photo_preferences
+               WHERE workspace_id = ? AND purpose = ? AND species = ?""",
+            (ws, purpose, species),
+        )
+        if _commit:
+            self.conn.commit()
 
     def get_folders_with_quality_data(self):
         """Return folders with at least one scored photo in their subtree.

@@ -244,8 +244,11 @@ function renderCard(p, idx) {
     return '<span class="card-chip reason">' + escapeAttr(r) + '</span>';
   }).join('');
   var title = (p.reasons || []).join(', ');
+  var ribbon = p.is_highlights_photo
+    ? '<div class="best-ribbon">Highlight</div>'
+    : (idx === 0 ? '<div class="best-ribbon">Best</div>' : '');
   return '<div class="highlights-card' + (idx === 0 ? ' best-card' : '') + '" data-photo-id="' + p.id + '" title="' + escapeAttr(title) + '">'
-    + (idx === 0 ? '<div class="best-ribbon">Best</div>' : '')
+    + ribbon
     + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
     + '<div class="card-info"><span class="card-chip score">' + formatScore(p.highlight_score) + '</span>' + conf + reasons + '</div>'
     + '</div>';
@@ -380,6 +383,25 @@ async function submitSpeciesModal() {
     if (typeof showToast === 'function') showToast('Species updated', 'success');
   } finally {
     submit.disabled = false;
+  }
+}
+
+async function setPhotoPreference(purpose, species, photoId, button) {
+  if (!purpose || !species || !photoId) return;
+  if (button) button.disabled = true;
+  try {
+    await safeFetch('/api/photo-preferences', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ purpose: purpose, species: species, photo_id: photoId }),
+    });
+    await loadHighlights();
+    updateHighlightsLightboxControls(activeLightboxPhotoId);
+    if (typeof showToast === 'function') {
+      showToast(purpose === 'life_list' ? 'Life List photo set' : 'Highlights photo set', 'success');
+    }
+  } finally {
+    if (button) button.disabled = false;
   }
 }
 
@@ -593,6 +615,15 @@ function updateHighlightsLightboxControls(photoId) {
   }
   panel.style.display = '';
   var html = '<span>' + escapeAttr(photoCurrentLabel(photo)) + '</span>';
+  var highlightSpecies = photoSpeciesName(photo);
+  if (highlightSpecies) {
+    html += '<button data-lb-action="set-highlight"'
+      + (photo.is_highlights_photo ? ' class="primary"' : '') + '>'
+      + (photo.is_highlights_photo ? 'Highlights Photo' : 'Use as Highlights') + '</button>';
+  }
+  if (photo.has_accepted_species && photo.species) {
+    html += '<button data-lb-action="set-life-list">Use as Life List</button>';
+  }
   if (photo.is_confirmable_prediction) {
     html += '<button class="primary" data-lb-action="confirm">Confirm</button>';
   }
@@ -601,8 +632,13 @@ function updateHighlightsLightboxControls(photoId) {
   panel.querySelectorAll('button').forEach(function(btn) {
     btn.addEventListener('click', function(event) {
       event.stopPropagation();
-      if (btn.getAttribute('data-lb-action') === 'confirm') {
+      var action = btn.getAttribute('data-lb-action');
+      if (action === 'confirm') {
         confirmPhotoIds([photo.id], btn);
+      } else if (action === 'set-highlight') {
+        setPhotoPreference('highlights', photoSpeciesName(photo), photo.id, btn);
+      } else if (action === 'set-life-list') {
+        setPhotoPreference('life_list', photo.species, photo.id, btn);
       } else {
         var modalTitle = (photo.is_confirmable_prediction || photo.has_accepted_species)
           ? 'Change species'

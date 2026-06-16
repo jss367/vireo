@@ -260,6 +260,35 @@ def _highlight_score_bucket(photos):
     )
 
 
+def _apply_preferred_photo(photos, preferred_photo_id, marker_key):
+    """Move a valid preferred photo to the front of an already-ranked list."""
+    for p in photos:
+        p[marker_key] = False
+    if preferred_photo_id is None:
+        return False
+    for idx, photo in enumerate(photos):
+        if photo.get("id") == preferred_photo_id:
+            photo[marker_key] = True
+            if idx:
+                photos.insert(0, photos.pop(idx))
+            return True
+    return False
+
+
+def _apply_highlight_preferences(db, buckets):
+    preferences = db.get_photo_preferences("highlights")
+    for bucket in buckets:
+        preferred_id = preferences.get(bucket["species"])
+        applied = _apply_preferred_photo(
+            bucket["photos"], preferred_id, "is_highlights_photo"
+        )
+        best = bucket["photos"][0] if bucket["photos"] else {}
+        bucket["preferred_photo_id"] = preferred_id
+        bucket["has_preferred_photo"] = applied
+        bucket["best_quality"] = best.get("quality_score")
+        bucket["best_score"] = best.get("highlight_score")
+
+
 def _highlight_confidence_label(confidence, is_accepted):
     if is_accepted:
         return "confirmed"
@@ -5649,6 +5678,99 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 results[row["photo_id"]] = row
         return results
 
+    def _parse_photo_preference_body(body, require_photo=True):
+        purpose = body.get("purpose", "")
+        species = body.get("species", "")
+        purpose = purpose.strip() if isinstance(purpose, str) else ""
+        species = species.strip() if isinstance(species, str) else ""
+        if purpose not in {"life_list", "highlights"}:
+            return None, "purpose must be life_list or highlights"
+        if not species:
+            return None, "species required"
+
+        photo_id = body.get("photo_id")
+        if require_photo:
+            if isinstance(photo_id, bool) or not isinstance(photo_id, int):
+                return None, "photo_id must be an integer"
+        else:
+            photo_id = None
+
+        return {
+            "purpose": purpose,
+            "species": species,
+            "photo_id": photo_id,
+        }, None
+
+    def _photo_can_be_life_list_preference(db, species, photo_id):
+        ws = db._ws_id()
+        row = db.conn.execute(
+            """SELECT 1
+               FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+                AND (k.is_species = 1 OR k.type = 'taxonomy')
+               JOIN photos p ON p.id = pk.photo_id
+                AND COALESCE(p.flag, 'none') != 'rejected'
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                AND wf.workspace_id = ?
+               JOIN folders f ON f.id = p.folder_id
+                AND f.status IN ('ok', 'partial')
+               WHERE pk.photo_id = ? AND k.name = ?
+               LIMIT 1""",
+            (ws, photo_id, species),
+        ).fetchone()
+        return row is not None
+
+    def _photo_can_be_highlights_preference(db, species, photo_id):
+        candidates = db.get_highlights_candidates(None, min_quality=0.0)
+        buckets, _unidentified = _collect_highlight_buckets(
+            candidates, confidence_threshold=0.0
+        )
+        for bucket in buckets:
+            if bucket["species"] != species:
+                continue
+            return any(p["id"] == photo_id for p in bucket["photos"])
+        return False
+
+    def _photo_can_be_preference(db, purpose, species, photo_id):
+        if purpose == "life_list":
+            return _photo_can_be_life_list_preference(db, species, photo_id)
+        return _photo_can_be_highlights_preference(db, species, photo_id)
+
+    @app.route("/api/photo-preferences", methods=["POST"])
+    def api_photo_preferences_set():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        parsed, error = _parse_photo_preference_body(body)
+        if error:
+            return json_error(error)
+        error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if error:
+            return json_error(error, status)
+        if not _photo_can_be_preference(
+            db, parsed["purpose"], parsed["species"], parsed["photo_id"]
+        ):
+            return json_error(
+                "photo_id is not eligible for that purpose/species", 400,
+            )
+        db.set_photo_preference(
+            parsed["purpose"], parsed["species"], parsed["photo_id"]
+        )
+        return jsonify({"ok": True, **parsed})
+
+    @app.route("/api/photo-preferences", methods=["DELETE"])
+    def api_photo_preferences_clear():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        parsed, error = _parse_photo_preference_body(body, require_photo=False)
+        if error:
+            return json_error(error)
+        db.clear_photo_preference(parsed["purpose"], parsed["species"])
+        return jsonify({
+            "ok": True,
+            "purpose": parsed["purpose"],
+            "species": parsed["species"],
+        })
+
     @app.route("/api/highlights")
     def api_highlights():
         db = _get_db()
@@ -5677,6 +5799,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         buckets, unidentified_photos = _collect_highlight_buckets(
             candidates, confidence_threshold
         )
+        _apply_highlight_preferences(db, buckets)
         if species_filter:
             buckets = [
                 b for b in buckets if species_filter in b["species"].lower()
@@ -5775,15 +5898,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "quality_score": photo.get("quality_score"),
                 "highlight_score": photo.get("highlight_score"),
                 "reasons": photo.get("reasons") or [],
+                "is_life_list_photo": bool(photo.get("is_life_list_photo")),
             }
 
         species_entries = []
         distinct_photo_ids = set()
+        life_list_preferences = db.get_photo_preferences("life_list")
         for species, entry in buckets.items():
             photos = entry["photos"]
             distinct_photo_ids.update(p["id"] for p in photos)
             timestamps = [p["timestamp"] for p in photos if p.get("timestamp")]
             _highlight_score_bucket(photos)
+            preferred_id = life_list_preferences.get(species)
+            preferred_applied = _apply_preferred_photo(
+                photos, preferred_id, "is_life_list_photo"
+            )
             top = photos[:photos_per_species]
             species_entries.append({
                 "species": species,
@@ -5793,6 +5922,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "first_seen": min(timestamps) if timestamps else None,
                 "last_seen": max(timestamps) if timestamps else None,
                 "locations": locations_by_species.get(species, []),
+                "preferred_photo_id": preferred_id,
+                "has_preferred_photo": preferred_applied,
                 "best": compact(top[0]) if top else None,
                 "photos": [compact(p) for p in top],
             })
@@ -6039,6 +6170,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         buckets, unidentified_photos = _collect_highlight_buckets(
             candidates, confidence_threshold
         )
+        _apply_highlight_preferences(db, buckets)
         if species == "__unidentified__":
             photos = unidentified_photos
             label = "Unidentified"
