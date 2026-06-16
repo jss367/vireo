@@ -13506,6 +13506,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             source, _using_working_copy = _recipe_render_source(
                 photo, recipe, thumb_size, vireo_dir, folders,
             )
+            if (
+                not _using_working_copy
+                and _has_current_working_copy_failure(
+                    photo,
+                    vireo_dir,
+                    trust_existing_working_copy=False,
+                    live_source_path=live_source,
+                    folder_path=folder_row["path"],
+                )
+            ):
+                log.info(
+                    "Skipping thumbnail self-heal for photo %s; selected source "
+                    "would retry a RAW decode that already failed for current "
+                    "source mtime",
+                    photo_id,
+                )
+                return "", 404
             result = generate_thumbnail(
                 photo_id,
                 source,

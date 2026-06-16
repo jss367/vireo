@@ -746,6 +746,56 @@ def test_serve_thumbnail_skips_recent_failed_raw_working_copy(
     assert called["generate"] is False
 
 
+def test_serve_thumbnail_skips_failed_raw_after_crop_rejects_working_copy(
+    tmp_path, monkeypatch,
+):
+    """A crop-insufficient WC must not mask a current RAW failure marker."""
+    import thumbnails
+
+    app, db, pid, thumb_dir = _make_app_with_real_photo(
+        tmp_path, monkeypatch, filename="bad.NEF",
+    )
+    vireo_dir = os.path.dirname(thumb_dir)
+    wc_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(wc_dir, exist_ok=True)
+    wc_path = os.path.join(wc_dir, f"{pid}.jpg")
+    Image.new("RGB", (200, 150), (50, 200, 50)).save(wc_path, "JPEG")
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET extension='.nef',
+               width=800,
+               height=600,
+               working_copy_path=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (f"working/{pid}.jpg", file_mtime, pid),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        pid,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+
+    called = {"generate": False}
+
+    def fail_if_called(*_args, **_kwargs):
+        called["generate"] = True
+        raise AssertionError("thumbnail request retried failed RAW decode")
+
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fail_if_called)
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 404
+    assert called["generate"] is False
+
+
 def test_serve_thumbnail_refreshes_failure_marker_when_stale_retry_fails(
     tmp_path, monkeypatch,
 ):
