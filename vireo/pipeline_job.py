@@ -102,6 +102,24 @@ def _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
     return wc_render_long >= required_long
 
 
+def _path_satisfies_recipe_render(path, photo, recipe, max_size):
+    original_w = photo["width"] or 0
+    original_h = photo["height"] or 0
+    if original_w <= 0 or original_h <= 0:
+        return False
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(path) as img:
+            width, height = img.size
+    except Exception:
+        return False
+    original_render_long = _rendered_recipe_long_edge(
+        original_w, original_h, recipe,
+    )
+    required_long = min(max_size, original_render_long) if max_size else original_render_long
+    return _rendered_recipe_long_edge(width, height, recipe) >= required_long
+
+
 def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
     from image_loader import get_canonical_image_path
 
@@ -117,6 +135,14 @@ def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
             if os.path.exists(wc_path):
                 return wc_path
         return ""
+    companion_path = photo["companion_path"]
+    if companion_path:
+        companion = os.path.join(folder_path, companion_path)
+        if (
+            os.path.exists(companion)
+            and _path_satisfies_recipe_render(companion, photo, recipe, max_size)
+        ):
+            return companion
     original = os.path.join(
         folder_path,
         photo["filename"],

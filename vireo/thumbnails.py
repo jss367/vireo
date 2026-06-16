@@ -13,6 +13,72 @@ DEFAULT_CACHE_DIR = os.path.expanduser("~/.vireo/thumbnails")
 THUMB_SIZE = 400
 
 
+def _rendered_recipe_long_edge(width, height, recipe):
+    rotation = (recipe or {}).get("rotation", 0)
+    if rotation in (90, 270):
+        width, height = height, width
+    crop = (recipe or {}).get("crop") if recipe else None
+    if crop:
+        return max(float(crop["w"]) * width, float(crop["h"]) * height)
+    return max(width, height)
+
+
+def _path_satisfies_recipe_render(path, photo, recipe, max_size):
+    original_w = photo["width"] or 0
+    original_h = photo["height"] or 0
+    if original_w <= 0 or original_h <= 0:
+        return False
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(path) as img:
+            width, height = img.size
+    except Exception:
+        return False
+    original_render_long = _rendered_recipe_long_edge(
+        original_w, original_h, recipe,
+    )
+    required_long = min(max_size, original_render_long) if max_size else original_render_long
+    return _rendered_recipe_long_edge(width, height, recipe) >= required_long
+
+
+def _recipe_source_path(photo, recipe, max_size, vireo_dir, folders):
+    if not vireo_dir or not recipe or not recipe.get("crop"):
+        if vireo_dir:
+            return get_canonical_image_path(photo, vireo_dir, folders)
+        return os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
+
+    wc_rel = photo["working_copy_path"]
+    if wc_rel:
+        wc_path = os.path.join(vireo_dir, wc_rel)
+        if (
+            os.path.exists(wc_path)
+            and _path_satisfies_recipe_render(wc_path, photo, recipe, max_size)
+        ):
+            return get_canonical_image_path(photo, vireo_dir, folders)
+
+    folder_path = folders.get(photo["folder_id"])
+    if not folder_path:
+        if wc_rel:
+            wc_path = os.path.join(vireo_dir, wc_rel)
+            if os.path.exists(wc_path):
+                return wc_path
+        return ""
+    companion_path = photo["companion_path"]
+    if companion_path:
+        companion = os.path.join(folder_path, companion_path)
+        if (
+            os.path.exists(companion)
+            and _path_satisfies_recipe_render(companion, photo, recipe, max_size)
+        ):
+            return companion
+    original = os.path.join(folder_path, photo["filename"])
+    if not os.path.exists(original) and wc_rel:
+        wc_path = os.path.join(vireo_dir, wc_rel)
+        if os.path.exists(wc_path):
+            return wc_path
+    return original
+
+
 def generate_thumbnail(
     photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85, recipe=None,
 ):
@@ -115,17 +181,15 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
         # Resolve source via the single canonical-path helper when we
         # have a vireo_dir; fall back to a raw folder+filename join for
         # callers that don't pass it.
-        if vireo_dir:
-            source_path = get_canonical_image_path(photo, vireo_dir, folders)
-        else:
-            folder_path = folders.get(photo["folder_id"], "")
-            source_path = os.path.join(folder_path, photo["filename"])
+        recipe = db.get_photo_edit_recipe(photo["id"])
+        source_path = _recipe_source_path(
+            photo, recipe, thumb_size, vireo_dir, folders,
+        )
         # generate_thumbnail decodes the source image (slow for RAW). Run
         # it before any UPDATE so no transaction is open while it runs;
         # then commit per photo to release the writer lock between
         # iterations and avoid blocking concurrent jobs (a parallel scan's
         # add_photo INSERT) past the 30s busy_timeout.
-        recipe = db.get_photo_edit_recipe(photo["id"])
         recipe_kwargs = {"recipe": recipe} if recipe else {}
         if generate_thumbnail(
             photo["id"],
