@@ -160,6 +160,39 @@ def test_add_keyword_input_suggests_existing_keyword(live_server, page):
     expect(page.locator("#detailKeywords")).to_contain_text("Alan's Hummingbird")
 
 
+def test_needs_identification_refreshes_after_identification_added(live_server, page):
+    """A photo should leave the active Needs Identification grid after tagging."""
+    db = live_server["db"]
+    target_id = live_server["data"]["photos"][1]
+    collection = db.conn.execute(
+        "SELECT id FROM collections WHERE name = 'Needs Identification'"
+    ).fetchone()
+    assert collection is not None
+    collection_id = collection["id"]
+
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate("(id) => filterByCollection(id)", collection_id)
+
+    target_card = page.locator(f'.grid-card[data-id="{target_id}"]').first
+    expect(target_card).to_be_visible()
+    target_card.click()
+
+    keyword_input = page.locator("#addKeywordInput")
+    keyword_input.fill("Red-tailed Hawk")
+
+    with page.expect_response(
+        lambda r: f"/api/photos/{target_id}/keywords" in r.url
+        and r.request.method == "POST"
+        and r.status == 200
+    ), page.expect_response(
+        lambda r: f"/api/collections/{collection_id}/photos" in r.url
+        and r.status == 200
+    ):
+        keyword_input.press("Enter")
+
+    expect(page.locator(f'.grid-card[data-id="{target_id}"]')).to_have_count(0)
+
+
 def test_add_keyword_autocomplete_retries_after_fetch_failure(live_server, page):
     """A transient keyword suggestion fetch failure must not poison the cache."""
     db = live_server["db"]
