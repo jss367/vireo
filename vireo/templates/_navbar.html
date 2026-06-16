@@ -4425,8 +4425,17 @@ async function submitToInat(photoId) {
     if (data.error) { alert(data.error); return; }
 
     if (data.mode === 'quick') {
-      // Fallback: open iNat in browser
-      window.open(data.upload_url, '_blank');
+      // No API token configured: open the iNaturalist upload page (prefilled
+      // with taxon/date/location) in the user's browser. A bare window.open is
+      // silently dropped inside the desktop webview, so route through
+      // openExternal and tell the user if nothing opened instead of failing
+      // invisibly.
+      var opened = await openExternal(data.upload_url);
+      if (opened) {
+        showToast('Opening iNaturalist in your browser…', 'info');
+      } else {
+        showToast('Could not open iNaturalist. Add an API token in Settings to submit directly from Vireo.', 'error');
+      }
       return;
     }
 
@@ -4488,7 +4497,7 @@ function openInatModal() {
   inatQueue.forEach(function(item, idx) {
     var warn = '';
     if (item.already_submitted) {
-      warn = '<div class="inat-card-status warning">&#9888; Already submitted: <a href="' + escapeAttr(item.existing_url) + '" target="_blank" style="color:var(--warning);">' + escapeHtml(item.existing_url) + '</a></div>';
+      warn = '<div class="inat-card-status warning">&#9888; Already submitted: <a href="' + escapeAttr(item.existing_url) + '" target="_blank" onclick="return openExternalLink(event, this.href)" style="color:var(--warning);">' + escapeHtml(item.existing_url) + '</a></div>';
     }
     html += '<div class="inat-card" id="inatCard' + idx + '">' +
       '<div class="inat-card-header">' +
@@ -4574,7 +4583,7 @@ async function inatDoSubmit() {
         statusEl.textContent = '✗ ' + result.error;
       } else {
         statusEl.className = 'inat-card-status success';
-        statusEl.innerHTML = '&#10003; Submitted — <a href="' + escapeAttr(result.observation_url) + '" target="_blank" style="color:var(--accent);">View on iNaturalist</a>';
+        statusEl.innerHTML = '&#10003; Submitted — <a href="' + escapeAttr(result.observation_url) + '" target="_blank" onclick="return openExternalLink(event, this.href)" style="color:var(--accent);">View on iNaturalist</a>';
         succeeded++;
       }
     } catch(e) {
@@ -5409,6 +5418,19 @@ function showToast(msg, type) {
     toast.style.opacity = '0';
     setTimeout(function() { toast.remove(); }, 200);
   }, 5000);
+}
+
+/* ---------- External links ---------- */
+// Click handler for external (http/https) links. Inside the desktop webview a
+// plain `target="_blank"` anchor does nothing, so route the open through the
+// OS browser via openExternal (tauri-bridge.js) and prevent the dead in-app
+// navigation. Use on <a> tags as: onclick="return openExternalLink(event, this.href)".
+function openExternalLink(event, url) {
+  if (event) event.preventDefault();
+  openExternal(url).then(function(ok) {
+    if (!ok) showToast('Could not open link: ' + url, 'error');
+  });
+  return false;
 }
 
 /* ---------- Safe Fetch ---------- */

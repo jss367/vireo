@@ -44,6 +44,33 @@ async function pickFile(opts) {
 }
 
 /**
+ * Open an external URL in the user's default browser.
+ *
+ * Inside the Tauri desktop webview a bare `window.open(url, '_blank')` is
+ * silently dropped — no tab opens and no error fires — so external links must
+ * be routed through the opener plugin instead. In a normal browser we fall
+ * back to window.open (which also lets us detect a popup blocker).
+ *
+ * @param {string} url - The http(s) URL to open
+ * @returns {Promise<boolean>} true if the open was dispatched successfully
+ */
+async function openExternal(url) {
+  if (!url) return false;
+  if (isTauri()) {
+    try {
+      await window.__TAURI_INTERNALS__.invoke('plugin:opener|open_url', { url: url, with: null });
+      return true;
+    } catch (e) {
+      console.error('openExternal failed:', e);
+      return false;
+    }
+  }
+  // Browser: window.open returns null if a popup blocker stopped it.
+  var win = window.open(url, '_blank', 'noopener');
+  return !!win;
+}
+
+/**
  * Check for an available update via the Rust command.
  * @returns {Promise<{available: boolean, version: string|null, notes: string|null, date: string|null}|null>}
  *   Returns null if not running in Tauri or on error.
