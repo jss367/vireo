@@ -1459,6 +1459,60 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 log.warning("Failed to remove stale original cache %s", original_cache)
         db.conn.commit()
 
+    def _rendered_recipe_long_edge(width, height, recipe):
+        rotation = (recipe or {}).get("rotation", 0)
+        if rotation in (90, 270):
+            width, height = height, width
+        crop = (recipe or {}).get("crop") if recipe else None
+        if crop:
+            return max(float(crop["w"]) * width, float(crop["h"]) * height)
+        return max(width, height)
+
+    def _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
+        if not recipe or not recipe.get("crop"):
+            return True
+        wc_rel = photo["working_copy_path"]
+        if not wc_rel:
+            return False
+        wc_path = os.path.join(vireo_dir, wc_rel)
+        if not os.path.exists(wc_path):
+            return False
+        original_w = photo["width"] or 0
+        original_h = photo["height"] or 0
+        if original_w <= 0 or original_h <= 0:
+            return False
+        try:
+            from PIL import Image as _PILImage
+            with _PILImage.open(wc_path) as wc_img:
+                wc_w, wc_h = wc_img.size
+        except Exception:
+            return False
+        original_render_long = _rendered_recipe_long_edge(
+            original_w, original_h, recipe,
+        )
+        required_long = min(max_size, original_render_long) if max_size else original_render_long
+        wc_render_long = _rendered_recipe_long_edge(wc_w, wc_h, recipe)
+        return wc_render_long >= required_long
+
+    def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
+        from image_loader import get_canonical_image_path
+
+        if not recipe or not recipe.get("crop"):
+            return get_canonical_image_path(photo, vireo_dir, folders), True
+
+        if _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
+            return get_canonical_image_path(photo, vireo_dir, folders), True
+
+        original = os.path.join(
+            folders.get(photo["folder_id"], ""),
+            photo["filename"],
+        )
+        if not os.path.exists(original) and photo["working_copy_path"]:
+            wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
+            if os.path.exists(wc_path):
+                return wc_path, True
+        return original, False
+
     _ACCELERATED_RUNTIME_PROVIDERS = {
         "ACLExecutionProvider",
         "ArmNNExecutionProvider",
@@ -11780,7 +11834,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             import config as cfg
             from image_edits import apply_recipe_to_loaded_image
-            from image_loader import get_canonical_image_path, load_image
+            from image_loader import load_image
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
@@ -11834,13 +11888,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 photo["id"], max_size, os.path.getsize(cache_path),
                             )
                 else:
-                    if recipe and recipe.get("crop"):
-                        canonical = os.path.join(
-                            folders.get(photo["folder_id"], ""),
-                            photo["filename"],
-                        )
-                    else:
-                        canonical = get_canonical_image_path(photo, vireo_dir, folders)
+                    canonical, _using_working_copy = _recipe_render_source(
+                        photo, recipe, max_size, vireo_dir, folders,
+                    )
                     img = load_image(canonical, max_size=None if recipe else max_size)
                     if img:
                         if recipe:
@@ -16221,7 +16271,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return Response(data, mimetype="image/jpeg")
 
         # Cache miss: generate, insert, evict-if-over-quota, serve.
-        from image_loader import get_canonical_image_path, load_image
+        from image_loader import load_image
 
         folder_row = db.conn.execute(
             "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
@@ -16242,24 +16292,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             return "Could not load image", 500
 
-        use_original_for_crop = bool(recipe and recipe.get("crop"))
-        if use_original_for_crop:
-            if _has_current_working_copy_failure(
-                photo,
-                vireo_dir,
-                trust_existing_working_copy=False,
-                live_source_path=live_source,
-                folder_path=folder_row["path"],
-            ):
-                log.info(
-                    "Skipping cropped preview generation for photo %s; RAW "
-                    "working-copy extraction already failed for current source mtime",
-                    photo_id,
-                )
-                return "Could not load image", 500
-            canonical = live_source
-        else:
-            canonical = get_canonical_image_path(photo, vireo_dir, folders)
+        canonical, using_working_copy = _recipe_render_source(
+            photo, recipe, size, vireo_dir, folders,
+        )
+        if not using_working_copy and _has_current_working_copy_failure(
+            photo,
+            vireo_dir,
+            trust_existing_working_copy=False,
+            live_source_path=live_source,
+            folder_path=folder_row["path"],
+        ):
+            log.info(
+                "Skipping cropped preview generation for photo %s; RAW "
+                "working-copy extraction already failed for current source mtime",
+                photo_id,
+            )
+            return "Could not load image", 500
         img = load_image(canonical, max_size=None if recipe else size)
         if img is None:
             _record_working_copy_failure(db, photo, canonical)

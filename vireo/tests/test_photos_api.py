@@ -1521,6 +1521,43 @@ def test_cropped_preview_uses_original_when_working_copy_is_too_small(
         assert img.size == (400, 300)
 
 
+def test_cropped_preview_keeps_full_size_working_copy_fallback(
+    client_with_photo,
+):
+    import io
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (30, 120, 200)).save(working_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    folder = db.conn.execute(
+        "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    os.remove(os.path.join(folder["path"], folder["filename"]))
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (400, 300)
+
+
 def test_edit_recipe_api_rejects_invalid_recipe(client_with_photo):
     app, _db, photo_id = client_with_photo
     client = app.test_client()

@@ -126,13 +126,14 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
         # iterations and avoid blocking concurrent jobs (a parallel scan's
         # add_photo INSERT) past the 30s busy_timeout.
         recipe = db.get_photo_edit_recipe(photo["id"])
+        recipe_kwargs = {"recipe": recipe} if recipe else {}
         if generate_thumbnail(
             photo["id"],
             source_path,
             cache_dir,
             size=thumb_size,
             quality=thumb_quality,
-            recipe=recipe,
+            **recipe_kwargs,
         ) is not None:
             generated += 1
             # Record on-disk presence in the photos table so the dashboard's

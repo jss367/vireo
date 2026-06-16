@@ -65,6 +65,62 @@ def _should_abort(abort_event):
     return abort_event.is_set()
 
 
+def _rendered_recipe_long_edge(width, height, recipe):
+    rotation = (recipe or {}).get("rotation", 0)
+    if rotation in (90, 270):
+        width, height = height, width
+    crop = (recipe or {}).get("crop") if recipe else None
+    if crop:
+        return max(float(crop["w"]) * width, float(crop["h"]) * height)
+    return max(width, height)
+
+
+def _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
+    if not recipe or not recipe.get("crop"):
+        return True
+    wc_rel = photo["working_copy_path"]
+    if not wc_rel:
+        return False
+    wc_path = os.path.join(vireo_dir, wc_rel)
+    if not os.path.exists(wc_path):
+        return False
+    original_w = photo["width"] or 0
+    original_h = photo["height"] or 0
+    if original_w <= 0 or original_h <= 0:
+        return False
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(wc_path) as wc_img:
+            wc_w, wc_h = wc_img.size
+    except Exception:
+        return False
+    original_render_long = _rendered_recipe_long_edge(
+        original_w, original_h, recipe,
+    )
+    required_long = min(max_size, original_render_long) if max_size else original_render_long
+    wc_render_long = _rendered_recipe_long_edge(wc_w, wc_h, recipe)
+    return wc_render_long >= required_long
+
+
+def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
+    from image_loader import get_canonical_image_path
+
+    if not recipe or not recipe.get("crop"):
+        return get_canonical_image_path(photo, vireo_dir, folders)
+    if _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
+        return get_canonical_image_path(photo, vireo_dir, folders)
+
+    original = os.path.join(
+        folders.get(photo["folder_id"], ""),
+        photo["filename"],
+    )
+    if not os.path.exists(original) and photo["working_copy_path"]:
+        wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
+        if os.path.exists(wc_path):
+            return wc_path
+    return original
+
+
 def _incomplete_model_message(model_name, is_custom=False):
     if is_custom:
         return (
@@ -1219,7 +1275,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 try:
                     thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
                     already_exists = os.path.exists(thumb_path)
-                    result_path = generate_thumbnail(photo_id, photo_path, cache_dir, size=thumb_size)
+                    recipe = thread_db.get_photo_edit_recipe(photo_id)
+                    recipe_kwargs = {"recipe": recipe} if recipe else {}
+                    result_path = generate_thumbnail(
+                        photo_id,
+                        photo_path,
+                        cache_dir,
+                        size=thumb_size,
+                        **recipe_kwargs,
+                    )
                     if result_path is None:
                         failed += 1
                     elif already_exists:
@@ -1274,8 +1338,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
                     already_exists = os.path.exists(thumb_path)
                     try:
+                        recipe = thread_db.get_photo_edit_recipe(photo_id)
+                        recipe_kwargs = {"recipe": recipe} if recipe else {}
                         result_path = generate_thumbnail(
-                            photo_id, photo_path, cache_dir, size=thumb_size,
+                            photo_id,
+                            photo_path,
+                            cache_dir,
+                            size=thumb_size,
+                            **recipe_kwargs,
                         )
                         if result_path is None:
                             failed += 1
@@ -1370,7 +1440,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         try:
             import config as cfg
             from image_edits import apply_recipe_to_loaded_image
-            from image_loader import get_canonical_image_path, load_image
+            from image_loader import load_image
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
@@ -1440,13 +1510,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     except Exception:
                         pass  # photo may have been deleted mid-pipeline
                 else:
-                    if recipe and recipe.get("crop"):
-                        canonical = os.path.join(
-                            folders.get(photo["folder_id"], ""),
-                            photo["filename"],
-                        )
-                    else:
-                        canonical = get_canonical_image_path(photo, base_dir, folders)
+                    canonical = _recipe_render_source(
+                        photo, recipe, max_size, base_dir, folders,
+                    )
                     img = load_image(canonical, max_size=None if recipe else max_size)
                     if img:
                         if recipe:
