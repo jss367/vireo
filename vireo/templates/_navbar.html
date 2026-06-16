@@ -3824,13 +3824,17 @@ function openLightbox(photoId, filename, photoList, options) {
       pending1To1: true,
     };
   }
+  if (preserveOneToOne && restoreViewportState) {
+    restoreViewportState.oneToOne = true;
+    restoreViewportState.pending1To1 = true;
+  }
   var restoreWantsOneToOne = !!(
     restoreViewportState &&
     (restoreViewportState.oneToOne || restoreViewportState.pending1To1)
   );
   if (restoreWantsOneToOne && restoreViewportState.zoom <= 1.001) {
     restoreViewportState.zoom = Math.max(
-      1.0,
+      1.002,
       fallbackViewportState && fallbackViewportState.zoom || 1.0,
       _lbZoom || 1.0,
       _lbNativeZoom || 1.0

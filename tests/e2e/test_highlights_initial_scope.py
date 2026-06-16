@@ -176,9 +176,17 @@ def test_highlights_lightbox_next_preserves_pending_one_to_one_zoom(live_server,
 
     page.evaluate(
         """() => {
+            const next = window._lightboxPhotoList[1];
             window._lbNativeZoom = 2;
-            window._lbZoom = 1;
-            window._lbPending1To1 = true;
+            window._lbZoom = 2;
+            window._lbPending1To1 = false;
+            window._lbViewportByPhotoId[String(next.id)] = {
+                zoom: 1,
+                centerX: 0.5,
+                centerY: 0.5,
+                oneToOne: false,
+                pending1To1: false,
+            };
         }"""
     )
 
