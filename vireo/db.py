@@ -1574,13 +1574,15 @@ class Database:
     def move_folders_to_workspace(self, source_ws_id, target_ws_id, folder_ids):
         """Move folders and their workspace-scoped data to another workspace.
 
-        Moves: workspace_folders rows and pending_changes. Detections and
-        predictions are global (no workspace_id), so they follow the folder
-        via workspace_folders membership rather than being reassigned.
-        Collections and edit_history stay behind.
+        Moves: workspace_folders rows, pending_changes, prediction_review,
+        and photo_preferences. Detections and predictions are global (no
+        workspace_id), so they follow the folder via workspace_folders
+        membership rather than being reassigned. Collections and edit_history
+        stay behind.
 
         Returns:
-            dict with keys: folders_moved, pending_changes_moved
+            dict with keys: folders_moved, pending_changes_moved,
+            photo_preferences_moved
         """
         if not self.get_workspace(source_ws_id):
             raise ValueError(f"Source workspace {source_ws_id} not found")
@@ -1598,7 +1600,11 @@ class Database:
                 )
 
         if not folder_ids:
-            return {"folders_moved": 0, "pending_changes_moved": 0}
+            return {
+                "folders_moved": 0,
+                "pending_changes_moved": 0,
+                "photo_preferences_moved": 0,
+            }
 
         selected_folder_ids = set(folder_ids)
         source_folder_paths = {
@@ -1687,6 +1693,36 @@ class Database:
                     [source_ws_id, source_ws_id] + chunk,
                 )
 
+            # Move manually selected Life List / Highlights representative
+            # photos with the folder. If the target already has a preference
+            # for the same (purpose, species), keep the target value and drop
+            # the now-stale source row.
+            photo_preferences_moved = 0
+            for chunk in _chunks(moved_folder_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                cur = self.conn.execute(
+                    f"""INSERT OR IGNORE INTO photo_preferences
+                          (workspace_id, purpose, species, photo_id,
+                           created_at, updated_at)
+                        SELECT ?, purpose, species, photo_id,
+                               created_at, updated_at
+                        FROM photo_preferences
+                        WHERE workspace_id = ?
+                          AND photo_id IN (
+                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                          )""",
+                    [target_ws_id, source_ws_id] + chunk,
+                )
+                photo_preferences_moved += cur.rowcount
+                self.conn.execute(
+                    f"""DELETE FROM photo_preferences
+                        WHERE workspace_id = ?
+                          AND photo_id IN (
+                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                          )""",
+                    [source_ws_id] + chunk,
+                )
+
             # Move workspace_folders: remove from source, add to target
             for chunk in _chunks(moved_folder_ids):
                 placeholders = ",".join("?" for _ in chunk)
@@ -1724,6 +1760,7 @@ class Database:
         return {
             "folders_moved": len(folder_ids),
             "pending_changes_moved": pending_changes_moved,
+            "photo_preferences_moved": photo_preferences_moved,
         }
 
     def ensure_default_workspace(self):
