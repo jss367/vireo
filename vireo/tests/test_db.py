@@ -7078,8 +7078,8 @@ def test_move_folder_path_cascade(db):
     child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (cid,)).fetchone()
     grandchild = db.conn.execute("SELECT path FROM folders WHERE id = ?", (gcid,)).fetchone()
     assert parent["path"] == "/nas/photos/2024"
-    assert child["path"] == "/nas/photos/2024/march"
-    assert grandchild["path"] == "/nas/photos/2024/march/birds"
+    assert os.path.normpath(child["path"]) == os.path.normpath("/nas/photos/2024/march")
+    assert os.path.normpath(grandchild["path"]) == os.path.normpath("/nas/photos/2024/march/birds")
 
 
 def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
@@ -7159,7 +7159,7 @@ def test_move_folder_path_is_case_sensitive(db):
     sibling = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib,)).fetchone()
     sibling_child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib_child,)).fetchone()
     assert moved["path"] == "/Archive/2024"
-    assert moved_child["path"] == "/Archive/2024/trip"
+    assert os.path.normpath(moved_child["path"]) == os.path.normpath("/Archive/2024/trip")
     assert sibling["path"] == "/photos/2024"
     assert sibling_child["path"] == "/photos/2024/sibling"
 

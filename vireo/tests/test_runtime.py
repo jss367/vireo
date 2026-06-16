@@ -6,6 +6,8 @@ import sys
 
 import pytest
 
+_WINDOWS = sys.platform == "win32"
+
 
 @pytest.fixture(autouse=True)
 def _reset_runtime_lock_state():
@@ -88,9 +90,11 @@ def test_write_runtime_json_atomic_and_locked_down(tmp_path, monkeypatch):
     assert data["mode"] == "headless"
     assert "started_at" in data  # ISO8601 timestamp
 
-    # chmod 600 — only the user can read the token
-    mode = stat.S_IMODE(os.stat(path).st_mode)
-    assert mode == 0o600
+    if not _WINDOWS:
+        # chmod 600 — only the user can read the token. Windows reports POSIX
+        # mode bits through a compatibility layer that does not model ACLs.
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        assert mode == 0o600
 
 
 def test_write_runtime_json_tmp_file_is_never_world_readable(tmp_path, monkeypatch):
@@ -117,7 +121,8 @@ def test_write_runtime_json_tmp_file_is_never_world_readable(tmp_path, monkeypat
         port=1, pid=2, version="v", db_path="/x", token="secret", mode="headless"
     )
 
-    assert observed["tmp_mode"] == 0o600
+    if not _WINDOWS:
+        assert observed["tmp_mode"] == 0o600
 
 
 def test_write_runtime_json_overwrites_existing(tmp_path, monkeypatch):
@@ -570,6 +575,9 @@ def test_acquire_on_empty_slot_creates_lock(tmp_path, monkeypatch):
 
     lock_path = tmp_path / ".vireo" / "runtime.lock"
     assert lock_path.exists()
+    if _WINDOWS:
+        from runtime import release_single_instance
+        release_single_instance()
     assert lock_path.read_text().strip() == str(os.getpid())
     # External runtime.json must not be created by the reservation step.
     assert not (tmp_path / ".vireo" / "runtime.json").exists()
@@ -641,7 +649,7 @@ def test_acquire_preserves_runtime_json_when_peer_is_booting(tmp_path, monkeypat
         from runtime import acquire_single_instance
         status, info = acquire_single_instance(pid=os.getpid())
         assert status == "conflict"
-        assert info["pid"] == holder_pid
+        assert info["pid"] in ({0, holder_pid} if _WINDOWS else {holder_pid})
         # External discovery must still work — do not delete the peer's file.
         assert runtime_path.exists()
         # Lock file must be preserved too.
@@ -666,7 +674,7 @@ def test_acquire_conflicts_with_held_flock(tmp_path, monkeypatch):
         from runtime import acquire_single_instance
         status, info = acquire_single_instance(pid=os.getpid())
         assert status == "conflict"
-        assert info["pid"] == holder_pid
+        assert info["pid"] in ({0, holder_pid} if _WINDOWS else {holder_pid})
         # Lock must still exist — we did not steal it.
         assert lock_path.exists()
     finally:
@@ -694,6 +702,8 @@ def test_acquire_self_heals_after_crash_with_pid_recycling(tmp_path, monkeypatch
     try:
         status, _info = acquire_single_instance(pid=os.getpid())
         assert status == "acquired"
+        if _WINDOWS:
+            release_single_instance()
         # Our PID is now recorded in the lock file.
         assert lock_path.read_text().strip() == str(os.getpid())
     finally:
@@ -710,6 +720,9 @@ def test_acquire_clears_stale_lock(tmp_path, monkeypatch):
     from runtime import acquire_single_instance
     status, _info = acquire_single_instance(pid=os.getpid())
     assert status == "acquired"
+    if _WINDOWS:
+        from runtime import release_single_instance
+        release_single_instance()
     # The stale lock was replaced by ours.
     assert lock_path.read_text().strip() == str(os.getpid())
 

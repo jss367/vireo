@@ -55,6 +55,9 @@ def test_open_external_success(app_and_db, monkeypatch):
     """POST /api/photos/open-external opens photos and returns count."""
     app, db = app_and_db
     client = app.test_client()
+    client.post('/api/config',
+                data=json.dumps({"external_editor": sys.executable}),
+                content_type='application/json')
     launched = _patch_launchers(monkeypatch)
 
     resp = client.post('/api/photos/open-external',
@@ -530,4 +533,4 @@ def test_open_external_expands_user_in_editor_path(app_and_db, monkeypatch, tmp_
                        data=json.dumps({"photo_ids": [1]}),
                        content_type='application/json')
     assert resp.status_code == 200
-    assert launched[0][1][2] == str(bundle)
+    assert os.path.normpath(launched[0][1][2]) == os.path.normpath(str(bundle))

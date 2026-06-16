@@ -286,10 +286,11 @@ def test_job_history_persistence(tmp_path):
 
     job_id = runner.start('scan', work, config={'root': '/photos'})
 
-    wait_for_job_via_runner(runner, job_id)
-
-    # Give it a moment to persist
-    time.sleep(0.1)
+    # wait_for_history=True blocks until the worker thread has flushed the
+    # row to SQLite (job["_persisted"]). The previous fixed time.sleep(0.1)
+    # was too short on slow Windows CI runners, where the worker thread had
+    # not yet committed by the time db.conn read the row.
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
 
     rows = db.conn.execute("SELECT * FROM job_history WHERE id = ?", (job_id,)).fetchall()
     assert len(rows) == 1

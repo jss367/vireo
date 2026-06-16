@@ -411,7 +411,7 @@ def test_get_canonical_image_path_prefers_working_copy(tmp_path):
     folders = {1: "/some/folder"}
 
     result = get_canonical_image_path(photo, str(vireo_dir), folders)
-    assert result == str(wc)
+    assert os.path.normpath(result) == os.path.normpath(str(wc))
 
 
 def test_get_canonical_image_path_falls_back_to_source(tmp_path):
@@ -422,7 +422,7 @@ def test_get_canonical_image_path_falls_back_to_source(tmp_path):
     folders = {1: "/some/folder"}
 
     result = get_canonical_image_path(photo, str(tmp_path), folders)
-    assert result == "/some/folder/src.jpg"
+    assert os.path.normpath(result) == os.path.normpath("/some/folder/src.jpg")
 
 
 def test_get_canonical_image_path_wc_missing_falls_back(tmp_path, caplog):
@@ -437,7 +437,7 @@ def test_get_canonical_image_path_wc_missing_falls_back(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         result = get_canonical_image_path(photo, str(tmp_path), folders)
 
-    assert result == "/some/folder/src.jpg"
+    assert os.path.normpath(result) == os.path.normpath("/some/folder/src.jpg")
     assert any("working copy missing" in r.message.lower() for r in caplog.records)
 
 

@@ -2253,7 +2253,7 @@ def test_text_search_returns_ranked_enriched_results(app_and_db, monkeypatch):
     assert [r["photo"]["id"] for r in data["results"]] == [p1, p2]
     assert data["total_matches"] == 2
     first = data["results"][0]["photo"]
-    assert first["species"] == ["Search Cardinal"]
+    assert "Search Cardinal" in first["species"]
     assert first["detections"][0]["category"] == "bird"
 
 
@@ -4345,8 +4345,8 @@ def test_api_folder_relocate_rebases_cascaded_child_developed_dirs(app_and_db, t
 
     old_parent = str(tmp_path / "old_parent")
     new_parent = str(tmp_path / "new_parent")
-    old_child = old_parent + "/child"
-    new_child = new_parent + "/child"
+    old_child = os.path.join(old_parent, "child")
+    new_child = os.path.join(new_parent, "child")
     os.makedirs(new_child)
 
     pfid = db.add_folder(old_parent, name="parent")

@@ -14,6 +14,7 @@ import queue
 import re
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 from datetime import UTC, datetime
@@ -45,6 +46,11 @@ from werkzeug.exceptions import BadRequest
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
+
+# Serializes Windows SetErrorMode calls. SetErrorMode is process-wide, so
+# concurrent /api/volumes requests could otherwise interleave save/restore
+# and leave the process in the wrong mode mid-probe.
+_WIN_ERROR_MODE_LOCK = threading.Lock()
 
 
 # Stable ordering and labels for the palette + nav rendering.
@@ -9007,7 +9013,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/volumes", methods=["GET"])
     def api_volumes():
-        """List mounted volumes (macOS/Linux) to help find SD cards."""
+        """List mounted volumes (macOS/Windows/Linux) to help find SD cards."""
         import platform
         volumes = []
         seen_paths: set[str] = set()
@@ -9027,8 +9033,51 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 for name in entries:
                     _add_volume(name, os.path.join(vol_dir, name))
 
+        def _scan_windows_drives() -> None:
+            """Enumerate mounted drive letters via the Win32 API."""
+            import ctypes
+            import string
+
+            kernel32 = ctypes.windll.kernel32
+            # Suppress the "no disk in drive" hardware error dialog that can
+            # otherwise pop up when probing not-ready removable drives.
+            # SetErrorMode is process-wide, so the save/probe/restore must
+            # be serialized — without the lock, concurrent /api/volumes
+            # requests can interleave and leave the process in the wrong
+            # mode mid-probe.
+            SEM_FAILCRITICALERRORS = 0x0001
+            with _WIN_ERROR_MODE_LOCK:
+                old_mode = kernel32.SetErrorMode(SEM_FAILCRITICALERRORS)
+                try:
+                    bitmask = kernel32.GetLogicalDrives()
+                    for i, letter in enumerate(string.ascii_uppercase):
+                        if not (bitmask >> i) & 1:
+                            continue
+                        root = f"{letter}:\\"
+                        # Skip drives with no media inserted (empty card
+                        # readers, optical drives) — only ready drives are
+                        # real volumes.
+                        if not os.path.isdir(root):
+                            continue
+                        label = None
+                        try:
+                            buf = ctypes.create_unicode_buffer(261)
+                            if kernel32.GetVolumeInformationW(
+                                ctypes.c_wchar_p(root), buf, len(buf),
+                                None, None, None, None, 0,
+                            ):
+                                label = buf.value or None
+                        except Exception:
+                            label = None
+                        name = f"{label} ({letter}:)" if label else f"{letter}:"
+                        _add_volume(name, root)
+                finally:
+                    kernel32.SetErrorMode(old_mode)
+
         if platform.system() == "Darwin":
             _scan_dir("/Volumes")
+        elif platform.system() == "Windows":
+            _scan_windows_drives()
         else:
             # /media — flat list of mount points
             _scan_dir("/media")
