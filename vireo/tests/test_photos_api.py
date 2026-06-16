@@ -1471,6 +1471,46 @@ def test_edit_recipe_api_invalidates_thumbnail_and_renders_edit(client_with_phot
         assert img.size == (300, 400)
 
 
+def test_edit_recipe_keeps_thumb_path_when_stale_thumbnail_unlink_fails(
+    client_with_photo, monkeypatch,
+):
+    import os
+
+    import app as app_module
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    thumb_dir = app.config["THUMB_CACHE_DIR"]
+    thumb_path = os.path.join(thumb_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (400, 300), "green").save(thumb_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (f"{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    original_remove = app_module.os.remove
+
+    def locked_remove(path):
+        if path == thumb_path:
+            raise OSError("locked")
+        return original_remove(path)
+
+    monkeypatch.setattr(app_module.os, "remove", locked_remove)
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 90}},
+    )
+
+    assert resp.status_code == 200
+    assert os.path.exists(thumb_path)
+    row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id = ?", (photo_id,),
+    ).fetchone()
+    assert row["thumb_path"] == f"{photo_id}.jpg"
+
+
 def test_cropped_thumbnail_uses_original_when_working_copy_is_too_small(
     client_with_photo,
 ):
@@ -1562,7 +1602,11 @@ def test_edited_original_prefers_full_res_companion_before_raw_decode(
            SET filename='source.NEF', extension='.nef',
                companion_path='test.jpg',
                working_copy_path=NULL,
-               width=800, height=600
+               width=800, height=600,
+               file_mtime=1234.0,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=1234.0,
+               working_copy_failed_source='source'
            WHERE id=?""",
         (photo_id,),
     )

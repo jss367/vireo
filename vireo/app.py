@@ -1420,12 +1420,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         originals_dir = os.path.join(vireo_dir, "originals")
         for pid in photo_ids:
             thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
+            clear_thumb_path = True
             try:
                 if os.path.exists(thumb_cache):
                     os.remove(thumb_cache)
             except OSError:
-                log.warning("Failed to remove stale thumbnail cache %s", thumb_cache)
-            db.conn.execute("UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,))
+                clear_thumb_path = not os.path.exists(thumb_cache)
+                log.warning(
+                    "Failed to remove stale thumbnail cache %s", thumb_cache,
+                    exc_info=True,
+                )
+            if clear_thumb_path:
+                db.conn.execute(
+                    "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
+                )
             tracked_sizes = set()
             for row in db.conn.execute(
                 "SELECT size FROM preview_cache WHERE photo_id = ?",
@@ -16635,7 +16643,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             resolved_ext = os.path.splitext(image_path)[1].lower()
             if (
                 trusted_wc_path is None
-                and (not using_offline_cache or resolved_ext in RAW_EXTENSIONS)
+                and resolved_ext in RAW_EXTENSIONS
                 and _has_current_working_copy_failure(
                     photo,
                     vireo_dir,
