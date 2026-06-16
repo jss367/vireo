@@ -751,10 +751,13 @@ function removeRejectedPhotoFromModel(photoId) {
   pruneSection(currentData.unidentified);
 
   if (changed) {
-    // Drop buckets emptied by the rejection.
+    // Drop only buckets fully emptied by the rejection. A large bucket may
+    // still have eligible photos behind `has_more` even after every loaded
+    // card is rejected (photo_count stays positive), so keep it — its expand
+    // button is the user's only way to load the rest without a refresh.
     if (currentData.buckets) {
       currentData.buckets = currentData.buckets.filter(function(b) {
-        return (b.photo_count || 0) > 0 && (b.photos || []).length > 0;
+        return (b.photo_count || 0) > 0 || (b.photos || []).length > 0;
       });
     }
     if (currentData.meta && typeof currentData.meta.eligible === 'number') {

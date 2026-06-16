@@ -3343,13 +3343,19 @@ function _lbApplyFlag(photoId, flag) {
       return;
     }
     // Notify pages (e.g. Highlights) that a flag write landed so they can
-    // reconcile their grid — fire even when the user has navigated to another
-    // photo, since the write still succeeded for `photoId`.
-    try {
-      document.dispatchEvent(new CustomEvent('lightbox:flagchanged', {
-        detail: { photoId: photoId, flag: normalized },
-      }));
-    } catch (_) {}
+    // reconcile their grid. Fire only for the latest flag edit: if the user
+    // rapidly changed the flag again (e.g. reject then clear) before this write
+    // resolved, an earlier/superseded write must not drive the grid — otherwise
+    // Highlights could hide a photo whose final backend flag is not 'rejected'.
+    // Arrow-navigating to another photo does not bump _lbFlagEditSeq, so the
+    // event still fires for the photo whose flag was actually changed.
+    if (_lbFlagEditSeq === seq) {
+      try {
+        document.dispatchEvent(new CustomEvent('lightbox:flagchanged', {
+          detail: { photoId: photoId, flag: normalized },
+        }));
+      } catch (_) {}
+    }
     if (_lightboxCurrentId !== photoId) return;
     if (_lbFlagEditSeq === seq || _lbFlagPendingWrites === 0) {
       _lbRecordFlag(photoId, normalized);
