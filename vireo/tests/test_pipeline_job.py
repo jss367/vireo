@@ -4965,6 +4965,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
 
     monkeypatch.setenv("HOME", str(tmp_path))
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    _stub_extract_masks_heavy_ops(monkeypatch)
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
