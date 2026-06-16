@@ -99,7 +99,8 @@ def generate_thumbnail(
     if os.path.exists(thumb_path):
         return thumb_path
 
-    img = load_image(source_path, max_size=None if recipe else size)
+    load_max_size = None if recipe and recipe.get("crop") else size
+    img = load_image(source_path, max_size=load_max_size)
     if img is None:
         log.warning("Could not load image for thumbnail: %s", source_path)
         return None

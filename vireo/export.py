@@ -223,7 +223,10 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
 
         # Load, resize, and save
         try:
-            img = load_image(source_path, max_size=None if recipe else (max_size or None))
+            load_max_size = (
+                None if recipe and recipe.get("crop") else (max_size or None)
+            )
+            img = load_image(source_path, max_size=load_max_size)
             if img is None:
                 errors.append(f"{photo['filename']}: failed to load image")
                 if progress_cb:

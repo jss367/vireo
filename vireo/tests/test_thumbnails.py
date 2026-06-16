@@ -32,6 +32,30 @@ def test_generate_thumbnail_creates_jpeg(tmp_path):
         assert max(img.size) <= 400
 
 
+def test_generate_thumbnail_bounds_non_crop_recipe_load(tmp_path, monkeypatch):
+    import thumbnails
+    from thumbnails import generate_thumbnail
+
+    src = str(tmp_path / "source.jpg")
+    Image.new("RGB", (2000, 1500), color="red").save(src)
+
+    cache_dir = str(tmp_path / "thumbs")
+    os.makedirs(cache_dir)
+    original_load_image = thumbnails.load_image
+    seen_max_sizes = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        seen_max_sizes.append(max_size)
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
+
+    result = generate_thumbnail(1, src, cache_dir, recipe={"rotation": 90})
+
+    assert result is not None
+    assert seen_max_sizes == [400]
+
+
 def test_generate_thumbnail_skips_existing(tmp_path):
     """generate_thumbnail skips if thumbnail already exists."""
     from thumbnails import generate_thumbnail

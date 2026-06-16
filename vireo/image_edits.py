@@ -53,7 +53,7 @@ def normalize_recipe(recipe):
     if rotation:
         out["rotation"] = rotation
 
-    flip = recipe.get("flip") or {}
+    flip = recipe.get("flip")
     if flip is None:
         flip = {}
     if not isinstance(flip, dict):
@@ -98,7 +98,7 @@ def normalize_recipe(recipe):
                 "h": round(h, 6),
             }
 
-    adjustments = recipe.get("adjustments") or {}
+    adjustments = recipe.get("adjustments")
     if adjustments is None:
         adjustments = {}
     if not isinstance(adjustments, dict):

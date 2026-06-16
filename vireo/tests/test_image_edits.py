@@ -29,6 +29,18 @@ def test_normalize_recipe_rejects_non_boolean_flip():
         normalize_recipe({"flip": {"horizontal": "false"}})
 
 
+@pytest.mark.parametrize(
+    ("recipe", "message"),
+    [
+        ({"flip": []}, "flip must be an object"),
+        ({"adjustments": []}, "adjustments must be an object"),
+    ],
+)
+def test_normalize_recipe_rejects_falsey_non_object_sections(recipe, message):
+    with pytest.raises(RecipeError, match=message):
+        normalize_recipe(recipe)
+
+
 def test_recipe_json_is_canonical():
     assert recipe_to_json({"flip": {"vertical": True}, "rotation": 90}) == (
         '{"flip":{"vertical":true},"rotation":90,"version":1}'

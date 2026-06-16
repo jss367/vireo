@@ -170,6 +170,32 @@ def test_export_photos_applies_edit_recipe(export_env):
         assert img.size == (300, 800)
 
 
+def test_export_non_crop_recipe_loads_with_requested_size(export_env, monkeypatch):
+    import export as export_module
+
+    env = export_env
+    env["db"].set_photo_edit_recipe(env["p2"], {"rotation": 90})
+    original_load_image = export_module.load_image
+    seen_max_sizes = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        seen_max_sizes.append(max_size)
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(export_module, "load_image", tracking_load_image)
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p2"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "max_size": 400},
+    )
+
+    assert result["exported"] == 1
+    assert seen_max_sizes == [400]
+
+
 def test_export_cropped_recipe_avoids_undersized_working_copy(export_env):
     """Cropped resized exports use the original when a capped WC is too small."""
     env = export_env
