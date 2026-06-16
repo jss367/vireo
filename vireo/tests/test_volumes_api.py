@@ -5,6 +5,7 @@ OS-specific syscalls are mocked, so each branch is exercised everywhere.
 """
 
 import os
+import threading
 from unittest.mock import MagicMock, patch
 
 
@@ -83,6 +84,85 @@ def test_volumes_windows_enumerates_drive_letters(app_and_db):
         assert by_path == {"C:\\": "C:", "D:\\": "SD_CARD (D:)"}
         # The error-mode dialog suppression is restored after probing.
         assert kernel32.SetErrorMode.call_count == 2
+
+
+def test_volumes_windows_serializes_set_error_mode(app_and_db):
+    """Concurrent /api/volumes requests must not interleave SetErrorMode
+    save/restore. The call must be ``(save, restore, save, restore)`` —
+    never ``(save, save, restore, restore)`` — otherwise one request
+    saves the other's temporary mode and restores the wrong value at the
+    end, leaving the process in the wrong error-dialog state.
+    """
+    app, _ = app_and_db
+
+    SEM_FAILCRITICALERRORS = 0x0001
+    BASE_MODE = 0x0000
+    events = []
+    events_lock = threading.Lock()
+    inside_critical = threading.Event()
+    release = threading.Event()
+    first_call = threading.Event()
+
+    def _set_error_mode(new_mode):
+        with events_lock:
+            events.append(("set", new_mode))
+            is_first = not first_call.is_set()
+            if is_first:
+                first_call.set()
+        if is_first:
+            # Hold the first thread inside the critical section so the
+            # second thread has a chance to race in without the lock.
+            inside_critical.set()
+            release.wait(timeout=2.0)
+        # Real SetErrorMode returns the previous mode. With the lock,
+        # the only previous mode any caller observes is BASE_MODE.
+        return BASE_MODE
+
+    kernel32 = MagicMock()
+    kernel32.GetLogicalDrives.return_value = 1 << 2  # just C:
+    kernel32.GetVolumeInformationW.return_value = 0
+    kernel32.SetErrorMode.side_effect = _set_error_mode
+    windll = MagicMock()
+    windll.kernel32 = kernel32
+
+    def _isdir(p):
+        return p == "C:\\"
+
+    results = []
+
+    def _hit():
+        with app.test_client() as c:
+            results.append(c.get("/api/volumes").status_code)
+
+    with patch("platform.system", return_value="Windows"), \
+         patch("ctypes.windll", windll, create=True), \
+         patch("vireo.app.os.path.isdir", side_effect=_isdir):
+        t1 = threading.Thread(target=_hit)
+        t2 = threading.Thread(target=_hit)
+        t1.start()
+        # Wait until thread 1 is inside the protected section before
+        # starting thread 2 — without the lock this is the interleaving
+        # window where thread 2 would observe thread 1's temporary mode.
+        assert inside_critical.wait(timeout=2.0)
+        t2.start()
+        # Give thread 2 a moment to race; with the lock it will block on
+        # SetErrorMode until thread 1 releases.
+        release.set()
+        t1.join(timeout=2.0)
+        t2.join(timeout=2.0)
+
+    assert results == [200, 200]
+    # Four calls total: two save-restore pairs. With the lock, the calls
+    # are strictly ordered (set, restore, set, restore) — not (set, set,
+    # restore, restore) which would happen if both threads raced through
+    # the block. Both restores see BASE_MODE because the lock prevents
+    # thread 2 from observing thread 1's temporary mode.
+    assert [kind for kind, _ in events] == ["set", "set", "set", "set"]
+    new_modes = [m for _, m in events]
+    assert new_modes[0] == SEM_FAILCRITICALERRORS  # thread 1 save
+    assert new_modes[1] == BASE_MODE               # thread 1 restore
+    assert new_modes[2] == SEM_FAILCRITICALERRORS  # thread 2 save
+    assert new_modes[3] == BASE_MODE               # thread 2 restore
 
 
 def test_volumes_windows_skips_not_ready_drives(app_and_db):
