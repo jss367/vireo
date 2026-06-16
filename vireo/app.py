@@ -3766,12 +3766,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Capture old name before update for sidecar queuing
         new_name = body.get("name")
         old_name = None
+        old_is_species_keyword = False
         if new_name:
             old_row = db.conn.execute(
-                "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+                """SELECT name, is_species, type
+                   FROM keywords WHERE id = ?""",
+                (keyword_id,),
             ).fetchone()
             if old_row and old_row["name"] != new_name:
                 old_name = old_row["name"]
+                old_is_species_keyword = (
+                    old_row["is_species"] == 1 or old_row["type"] == "taxonomy"
+                )
         # Apply the update first — if it raises, no sidecar changes are queued
         try:
             db.update_keyword(keyword_id, **body)
@@ -3779,7 +3785,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), 400)
         # Queue sidecar updates only after successful DB update, for all affected workspaces
         if old_name:
-            db.rename_photo_preferences_species(old_name, new_name)
             affected = db.conn.execute(
                 """SELECT pk.photo_id, wf.workspace_id
                    FROM photo_keywords pk
@@ -3788,6 +3793,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                    WHERE pk.keyword_id = ?""",
                 (keyword_id,),
             ).fetchall()
+            new_row = db.conn.execute(
+                """SELECT is_species, type
+                   FROM keywords WHERE id = ?""",
+                (keyword_id,),
+            ).fetchone()
+            new_is_species_keyword = (
+                new_row is not None
+                and (new_row["is_species"] == 1 or new_row["type"] == "taxonomy")
+            )
+            if old_is_species_keyword and new_is_species_keyword:
+                db.rename_photo_preferences_species(
+                    old_name,
+                    new_name,
+                    [(row["photo_id"], row["workspace_id"]) for row in affected],
+                )
             for row in affected:
                 _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
                 _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])

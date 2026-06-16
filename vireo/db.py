@@ -7912,10 +7912,44 @@ class Database:
         if _commit:
             self.conn.commit()
 
-    def rename_photo_preferences_species(self, old_species, new_species, _commit=True):
+    def rename_photo_preferences_species(
+        self, old_species, new_species, photo_workspace_pairs=None, _commit=True,
+    ):
         """Rename stored representative-photo preferences across workspaces."""
         if not old_species or not new_species or old_species == new_species:
             return 0
+        if photo_workspace_pairs is not None:
+            moved = 0
+            seen = set()
+            for photo_id, workspace_id in photo_workspace_pairs:
+                key = (photo_id, workspace_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                cur = self.conn.execute(
+                    """INSERT OR IGNORE INTO photo_preferences
+                          (workspace_id, purpose, species, photo_id,
+                           created_at, updated_at)
+                       SELECT workspace_id, purpose, ?, photo_id,
+                              created_at, datetime('now')
+                       FROM photo_preferences
+                       WHERE workspace_id = ?
+                         AND species = ?
+                         AND photo_id = ?""",
+                    (new_species, workspace_id, old_species, photo_id),
+                )
+                moved += cur.rowcount
+                self.conn.execute(
+                    """DELETE FROM photo_preferences
+                       WHERE workspace_id = ?
+                         AND species = ?
+                         AND photo_id = ?""",
+                    (workspace_id, old_species, photo_id),
+                )
+            if _commit:
+                self.conn.commit()
+            return moved
+
         cur = self.conn.execute(
             """INSERT OR IGNORE INTO photo_preferences
                   (workspace_id, purpose, species, photo_id,
