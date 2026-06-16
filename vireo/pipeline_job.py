@@ -1440,7 +1440,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     except Exception:
                         pass  # photo may have been deleted mid-pipeline
                 else:
-                    canonical = get_canonical_image_path(photo, base_dir, folders)
+                    if recipe and recipe.get("crop"):
+                        canonical = os.path.join(
+                            folders.get(photo["folder_id"], ""),
+                            photo["filename"],
+                        )
+                    else:
+                        canonical = get_canonical_image_path(photo, base_dir, folders)
                     img = load_image(canonical, max_size=None if recipe else max_size)
                     if img:
                         if recipe:

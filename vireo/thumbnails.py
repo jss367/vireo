@@ -13,7 +13,9 @@ DEFAULT_CACHE_DIR = os.path.expanduser("~/.vireo/thumbnails")
 THUMB_SIZE = 400
 
 
-def generate_thumbnail(photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85):
+def generate_thumbnail(
+    photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85, recipe=None,
+):
     """Generate a JPEG thumbnail for a photo.
 
     Args:
@@ -31,10 +33,13 @@ def generate_thumbnail(photo_id, source_path, cache_dir, size=THUMB_SIZE, qualit
     if os.path.exists(thumb_path):
         return thumb_path
 
-    img = load_image(source_path, max_size=size)
+    img = load_image(source_path, max_size=None if recipe else size)
     if img is None:
         log.warning("Could not load image for thumbnail: %s", source_path)
         return None
+    if recipe:
+        from image_edits import apply_recipe_to_loaded_image
+        img = apply_recipe_to_loaded_image(img, recipe, max_size=size)
 
     os.makedirs(cache_dir, exist_ok=True)
     # Atomic write: two concurrent jobs (or two iterations of the same job
@@ -120,7 +125,15 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
         # then commit per photo to release the writer lock between
         # iterations and avoid blocking concurrent jobs (a parallel scan's
         # add_photo INSERT) past the 30s busy_timeout.
-        if generate_thumbnail(photo["id"], source_path, cache_dir, size=thumb_size, quality=thumb_quality) is not None:
+        recipe = db.get_photo_edit_recipe(photo["id"])
+        if generate_thumbnail(
+            photo["id"],
+            source_path,
+            cache_dir,
+            size=thumb_size,
+            quality=thumb_quality,
+            recipe=recipe,
+        ) is not None:
             generated += 1
             # Record on-disk presence in the photos table so the dashboard's
             # coverage query (`thumb_path IS NOT NULL`) reflects this run.

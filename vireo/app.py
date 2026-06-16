@@ -1413,9 +1413,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _invalidate_photo_render_cache(db, photo_ids):
         """Drop cached rendered derivatives after an edit recipe changes."""
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        thumb_dir = app.config["THUMB_CACHE_DIR"]
         preview_dir = os.path.join(vireo_dir, "previews")
         originals_dir = os.path.join(vireo_dir, "originals")
         for pid in photo_ids:
+            thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
+            try:
+                if os.path.exists(thumb_cache):
+                    os.remove(thumb_cache)
+            except OSError:
+                log.warning("Failed to remove stale thumbnail cache %s", thumb_cache)
+            db.conn.execute("UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,))
             tracked_sizes = set()
             for row in db.conn.execute(
                 "SELECT size FROM preview_cache WHERE photo_id = ?",
@@ -11826,7 +11834,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 photo["id"], max_size, os.path.getsize(cache_path),
                             )
                 else:
-                    canonical = get_canonical_image_path(photo, vireo_dir, folders)
+                    if recipe and recipe.get("crop"):
+                        canonical = os.path.join(
+                            folders.get(photo["folder_id"], ""),
+                            photo["filename"],
+                        )
+                    else:
+                        canonical = get_canonical_image_path(photo, vireo_dir, folders)
                     img = load_image(canonical, max_size=None if recipe else max_size)
                     if img:
                         if recipe:
@@ -13397,8 +13411,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             {folder_row["id"]: folder_row["path"]} if folder_row else {}
         )
         try:
+            recipe = db.get_photo_edit_recipe(photo_id)
             source = get_canonical_image_path(photo, vireo_dir, folders)
-            result = generate_thumbnail(photo_id, source, thumb_dir)
+            result = generate_thumbnail(photo_id, source, thumb_dir, recipe=recipe)
         except Exception:
             log.exception(
                 "Thumbnail self-heal failed for photo %s (source=%s)",
@@ -16227,7 +16242,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             return "Could not load image", 500
 
-        canonical = get_canonical_image_path(photo, vireo_dir, folders)
+        use_original_for_crop = bool(recipe and recipe.get("crop"))
+        if use_original_for_crop:
+            if _has_current_working_copy_failure(
+                photo,
+                vireo_dir,
+                trust_existing_working_copy=False,
+                live_source_path=live_source,
+                folder_path=folder_row["path"],
+            ):
+                log.info(
+                    "Skipping cropped preview generation for photo %s; RAW "
+                    "working-copy extraction already failed for current source mtime",
+                    photo_id,
+                )
+                return "Could not load image", 500
+            canonical = live_source
+        else:
+            canonical = get_canonical_image_path(photo, vireo_dir, folders)
         img = load_image(canonical, max_size=None if recipe else size)
         if img is None:
             _record_working_copy_failure(db, photo, canonical)

@@ -209,7 +209,7 @@ def test_generate_all_does_not_record_thumb_path_on_failure(tmp_path, monkeypatc
 
     monkeypatch.setattr(
         thumbnails_mod, "generate_thumbnail",
-        lambda photo_id, src, cache_dir, size=400, quality=85: None,
+        lambda photo_id, src, cache_dir, size=400, quality=85, recipe=None: None,
     )
 
     cache_dir = str(tmp_path / "thumbs")

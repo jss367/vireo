@@ -1416,6 +1416,41 @@ def test_edit_recipe_api_invalidates_untracked_preview_file(client_with_photo):
     assert not os.path.exists(untracked_path)
 
 
+def test_edit_recipe_api_invalidates_thumbnail_and_renders_edit(client_with_photo):
+    import io
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    thumb_dir = app.config["THUMB_CACHE_DIR"]
+    thumb_path = os.path.join(thumb_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (400, 300), "green").save(thumb_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (f"{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 90}},
+    )
+
+    assert resp.status_code == 200
+    assert not os.path.exists(thumb_path)
+    row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id = ?", (photo_id,),
+    ).fetchone()
+    assert row["thumb_path"] is None
+
+    rendered = client.get(f"/thumbnails/{photo_id}.jpg")
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (300, 400)
+
+
 def test_edited_original_uses_trusted_working_copy_when_source_missing(
     client_with_photo,
 ):
@@ -1452,6 +1487,38 @@ def test_edited_original_uses_trusted_working_copy_when_source_missing(
     assert rendered.status_code == 200
     with Image.open(io.BytesIO(rendered.data)) as img:
         assert img.size == (600, 800)
+
+
+def test_cropped_preview_uses_original_when_working_copy_is_too_small(
+    client_with_photo,
+):
+    import io
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (400, 300), (30, 120, 200)).save(working_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (400, 300)
 
 
 def test_edit_recipe_api_rejects_invalid_recipe(client_with_photo):
