@@ -1369,6 +1369,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         try:
             import config as cfg
+            from image_edits import apply_recipe_to_loaded_image
             from image_loader import get_canonical_image_path, load_image
 
             thread_db = Database(db_path)
@@ -1423,6 +1424,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 if _should_abort(abort):
                     break
                 cache_path = os.path.join(preview_dir, f'{photo["id"]}_{max_size}.jpg')
+                recipe = thread_db.get_photo_edit_recipe(photo["id"])
+                if recipe and os.path.exists(cache_path):
+                    with contextlib.suppress(OSError):
+                        os.remove(cache_path)
+                    with contextlib.suppress(Exception):
+                        thread_db.preview_cache_delete(photo["id"], max_size)
                 if os.path.exists(cache_path):
                     skipped += 1
                     try:
@@ -1434,8 +1441,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         pass  # photo may have been deleted mid-pipeline
                 else:
                     canonical = get_canonical_image_path(photo, base_dir, folders)
-                    img = load_image(canonical, max_size=max_size)
+                    img = load_image(canonical, max_size=None if recipe else max_size)
                     if img:
+                        if recipe:
+                            img = apply_recipe_to_loaded_image(
+                                img, recipe, max_size=max_size,
+                            )
                         # Atomic write: with SLOT_CAP > 1 two pipelines
                         # processing the same photo can both miss the
                         # os.path.exists() check above and race here on the

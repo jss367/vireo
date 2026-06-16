@@ -143,6 +143,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         #   2. working copy when resizing to a size it can satisfy.
         #   3. original file (default; also used for full-res exports).
         folder_path = folders.get(photo["folder_id"], "")
+        recipe = edit_recipes.get(pid)
         source_path = _find_developed_output(
             photo["filename"],
             folder_path,
@@ -155,10 +156,9 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         # export size, fall through to the working-copy / original
         # source.
         if source_path and not _developed_can_satisfy_size(
-            source_path, photo, max_size
+            source_path, photo, max_size, recipe
         ):
             source_path = None
-        recipe = edit_recipes.get(pid)
         if not source_path:
             use_wc = _working_copy_can_satisfy_export(
                 photo, recipe, max_size, wc_max
@@ -244,7 +244,18 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
 _PREFERRED_DEVELOPED_EXTS = ("jpg", "jpeg", "tiff", "tif")
 
 
-def _developed_can_satisfy_size(dev_path, photo, max_size):
+def _recipe_result_long_edge(width, height, recipe):
+    """Return the rendered long edge after right-angle rotation and crop."""
+    rotation = (recipe or {}).get("rotation", 0)
+    if rotation in (90, 270):
+        width, height = height, width
+    crop = (recipe or {}).get("crop") if recipe else None
+    if crop:
+        return max(float(crop["w"]) * width, float(crop["h"]) * height)
+    return max(width, height)
+
+
+def _developed_can_satisfy_size(dev_path, photo, max_size, recipe=None):
     """Return True if the developed file is large enough for this export.
 
     The develop job may have written a downscaled output (`--width` is
@@ -266,9 +277,10 @@ def _developed_can_satisfy_size(dev_path, photo, max_size):
 
     try:
         with Image.open(dev_path) as img:
-            dev_long = max(img.size)
+            dev_w, dev_h = img.size
     except Exception:
         return True
+    dev_long = _recipe_result_long_edge(dev_w, dev_h, recipe)
     if max_size is not None:
         return dev_long >= max_size
     try:
@@ -277,7 +289,8 @@ def _developed_can_satisfy_size(dev_path, photo, max_size):
     except (KeyError, IndexError):
         return True
     if original_w and original_h:
-        return dev_long >= max(original_w, original_h)
+        required_long = _recipe_result_long_edge(original_w, original_h, recipe)
+        return dev_long >= required_long
     return True
 
 
@@ -495,11 +508,8 @@ def _working_copy_can_satisfy_export(photo, recipe, max_size, wc_max):
         # cropped derivative from an undersized working copy.
         return False
 
-    rotation = (recipe or {}).get("rotation", 0)
-    if rotation in (90, 270):
-        width, height = height, width
-    source_long = max(width, height)
-    crop_long = max(float(crop["w"]) * width, float(crop["h"]) * height)
+    source_long = _recipe_result_long_edge(width, height, None)
+    crop_long = _recipe_result_long_edge(width, height, recipe)
     if crop_long <= 0:
         return False
     required_source_long = max_size * (source_long / crop_long)

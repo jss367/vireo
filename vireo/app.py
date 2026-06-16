@@ -11771,6 +11771,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             import contextlib
 
             import config as cfg
+            from image_edits import apply_recipe_to_loaded_image
             from image_loader import get_canonical_image_path, load_image
 
             thread_db = Database(db_path)
@@ -11808,6 +11809,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             for i, photo in enumerate(photos):
                 cache_path = os.path.join(preview_dir, f'{photo["id"]}_{max_size}.jpg')
+                recipe = thread_db.get_photo_edit_recipe(photo["id"])
+                if recipe and os.path.exists(cache_path):
+                    with contextlib.suppress(OSError):
+                        os.remove(cache_path)
+                    with contextlib.suppress(Exception):
+                        thread_db.preview_cache_delete(photo["id"], max_size)
                 if os.path.exists(cache_path):
                     skipped += 1
                     # Adopt any untracked file so precompute output is
@@ -11820,8 +11827,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             )
                 else:
                     canonical = get_canonical_image_path(photo, vireo_dir, folders)
-                    img = load_image(canonical, max_size=max_size)
+                    img = load_image(canonical, max_size=None if recipe else max_size)
                     if img:
+                        if recipe:
+                            img = apply_recipe_to_loaded_image(
+                                img, recipe, max_size=max_size,
+                            )
                         img.save(cache_path, format="JPEG", quality=preview_quality)
                         with contextlib.suppress(Exception):
                             thread_db.preview_cache_insert(
@@ -16144,6 +16155,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         preview_dir = os.path.join(vireo_dir, "previews")
         cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
+        recipe = db.get_photo_edit_recipe(photo_id)
 
         # Reject corrupt zero-byte cache files (prior write interrupted).
         # Treat them as a miss so the regeneration path below produces a
@@ -16154,6 +16166,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except OSError:
                 pass
             db.preview_cache_delete(photo_id, size)  # no-op if no row
+
+        if (
+            recipe
+            and os.path.exists(cache_path)
+            and not db.preview_cache_get(photo_id, size)
+        ):
+            try:
+                os.remove(cache_path)
+            except OSError:
+                pass
 
         # Cache hit (tracked): touch and serve. The touch is best-effort
         # bookkeeping — under concurrent traffic SQLite can raise
@@ -16206,7 +16228,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "Could not load image", 500
 
         canonical = get_canonical_image_path(photo, vireo_dir, folders)
-        recipe = db.get_photo_edit_recipe(photo_id)
         img = load_image(canonical, max_size=None if recipe else size)
         if img is None:
             _record_working_copy_failure(db, photo, canonical)
@@ -16355,15 +16376,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not folder:
                 return "Not found", 404
             image_path = trusted_wc_path
+            using_offline_cache = False
             if image_path is None:
                 from offline_cache import resolve_original_path
-                image_path, _using_offline_cache = resolve_original_path(
+                image_path, using_offline_cache = resolve_original_path(
                     db,
                     photo,
                     vireo_dir,
                     {photo["folder_id"]: folder["path"]},
                 )
-            from image_loader import load_image
+            from image_loader import RAW_EXTENSIONS, load_image
+            resolved_ext = os.path.splitext(image_path)[1].lower()
+            if (
+                trusted_wc_path is None
+                and (not using_offline_cache or resolved_ext in RAW_EXTENSIONS)
+                and _has_current_working_copy_failure(
+                    photo,
+                    vireo_dir,
+                    trust_existing_working_copy=False,
+                    live_source_path=image_path,
+                    folder_path=folder["path"],
+                )
+            ):
+                log.info(
+                    "Skipping edited original-image extraction for photo %s; "
+                    "RAW working-copy extraction already failed for current source mtime",
+                    photo_id,
+                )
+                return "Could not load image", 500
             img = load_image(image_path, max_size=None)
             if img is None:
                 _record_working_copy_failure(db, photo, image_path)

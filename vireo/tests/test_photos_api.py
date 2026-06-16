@@ -1929,6 +1929,43 @@ def test_original_skips_recent_failed_raw_working_copy(
     assert called["extract"] is False
 
 
+def test_edited_original_skips_recent_failed_raw_before_decode(
+    client_with_photo, monkeypatch,
+):
+    """Edited originals should honor RAW failure markers before load_image."""
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"load": False}
+
+    def fail_if_called(*_args, **_kwargs):
+        called["load"] = True
+        raise AssertionError("edited original retried failed RAW decode")
+
+    monkeypatch.setattr(image_loader, "load_image", fail_if_called)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 500
+    assert called["load"] is False
+
+
 def test_original_skips_recent_failed_raw_after_rejecting_small_working_copy(
     client_with_photo, monkeypatch,
 ):
@@ -2345,6 +2382,43 @@ def test_preview_job_writes_sized_filename_and_tracks(client_with_photo):
 
     # Legacy naming NOT produced
     assert not os.path.exists(os.path.join(preview_dir, f"{photo_id}.jpg"))
+
+
+def test_preview_job_applies_edit_recipe_to_warmed_file(client_with_photo):
+    import os
+    import time
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    preview_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    Image.new("RGB", (800, 600), "green").save(preview_path, "JPEG")
+    db.preview_cache_insert(photo_id, 1920, os.path.getsize(preview_path))
+
+    resp = client.post("/api/jobs/previews", json={})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status_resp = client.get(f"/api/jobs/{job_id}")
+        if status_resp.status_code != 200:
+            time.sleep(0.05)
+            continue
+        data = status_resp.get_json()
+        if data.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert data["status"] == "completed"
+
+    assert db.preview_cache_get(photo_id, 1920) is not None
+    with Image.open(preview_path) as img:
+        assert img.size == (600, 800)
 
 
 def test_eviction_keeps_row_when_unlink_fails(client_with_photo, monkeypatch):
