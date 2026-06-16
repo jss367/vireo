@@ -1011,6 +1011,54 @@ def test_path_under_root_scopes_root_relative_to_current_drive_on_windows(
     )
 
 
+def test_path_under_root_distinguishes_drive_relative_root_on_windows(
+    monkeypatch,
+):
+    """On Windows, ``C:`` (drive letter and colon, no separator) is a
+    drive-relative path meaning the current directory on drive C —
+    NOT the root of C drive. Folder rows on ``C:\\Photos\\...`` must
+    only be classified as inside a destination given as ``C:`` when
+    they actually live under that per-drive cwd. ``C:\\`` (drive root)
+    keeps its previous "all of C:" semantics.
+
+    Previously both ``C:`` and ``C:\\`` collapsed to ``c:`` after
+    ``posixpath.normpath`` stripped the trailing slash, so the SQL
+    prefilter plus ``_path_under_root`` treated rows like
+    ``C:\\Photos\\...`` as inside a destination the user gave as ``C:``,
+    and duplicate-only imports could return ``duplicate_folders`` from
+    the whole C: drive.
+
+    Regression guard for the Codex P2 on PR #977 (discussion r3417302365).
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", True)
+    # Simulate a Windows process whose per-drive cwd on C: is
+    # ``C:\Users\me``. On the POSIX test host abspath would otherwise
+    # return ``{cwd}/C:``, which doesn't model the real Windows
+    # drive-relative resolution.
+    def fake_abspath(p):
+        if p == "C:":
+            return r"C:\Users\me"
+        if p in ("/", "\\"):
+            return "C:\\"
+        return p
+    monkeypatch.setattr(ingest.os.path, "abspath", fake_abspath)
+
+    # ``C:`` resolves to the per-drive cwd; only paths under it are inside.
+    assert ingest._path_under_root(r"C:\Users\me\photos\foo.jpg", "C:")
+    assert ingest._path_under_root(r"C:\Users\Me\Photos\foo.jpg", "c:")
+    # A sibling on the same drive but outside the cwd must be rejected.
+    assert not ingest._path_under_root(r"C:\photos\foo.jpg", "C:")
+    assert not ingest._path_under_root(r"C:\Users\other\foo.jpg", "C:")
+
+    # ``C:\`` keeps drive-root semantics — every path on C: is inside.
+    assert ingest._path_under_root(r"C:\photos\foo.jpg", "C:\\")
+    assert ingest._path_under_root(r"C:\Users\me\photos\foo.jpg", "C:\\")
+    # But a different drive is still rejected.
+    assert not ingest._path_under_root(r"D:\photos\foo.jpg", "C:\\")
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX-only: monkeypatching ``ingest._WINDOWS = False`` does not "

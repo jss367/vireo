@@ -41,6 +41,14 @@ def _slash_normpath(s):
     # ``/photos``, letting it slip through the subtree containment check.
     # Run posixpath.normpath directly so backslashes stay literal.
     raw = str(s)
+    if _WINDOWS and len(raw) == 2 and raw[1] == ":" and raw[0].isalpha():
+        # ``C:`` (drive letter and colon, no separator) is drive-relative:
+        # it means the current directory on drive C, NOT the root of C
+        # drive. Resolve via os.path.abspath so the prefix check
+        # distinguishes ``C:`` from ``C:\`` — without this, both collapse
+        # to ``c:`` and every ``C:\...`` row is wrongly accepted as inside
+        # a destination given as ``C:``.
+        raw = os.path.abspath(raw)
     normalized = posixpath.normpath(raw.replace("\\", "/") if _WINDOWS else raw)
     return "" if normalized == "." else normalized.rstrip("/")
 
