@@ -72,7 +72,7 @@ jobs:
               ])
               .write();
 
-  test:
+  test-os:
     needs: changes
     strategy:
       fail-fast: false
@@ -162,6 +162,27 @@ jobs:
       - name: Run tests (macOS / Windows)
         if: needs.changes.outputs.python == 'true' && runner.os != 'Linux'
         run: python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short
+
+  # Aggregate gate: a single check named ``test`` that branch protection can
+  # require, independent of how many OS legs the matrix above runs. A matrix
+  # job reports per-leg checks (``test-os (ubuntu-latest)`` …), so a bare
+  # ``test`` required context would never report and would block every PR.
+  # This job collapses the matrix result into one stable ``test`` check.
+  test:
+    needs: test-os
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Verify all OS test legs succeeded
+        run: |
+          result='${{ needs.test-os.result }}'
+          echo "test-os matrix result: $result"
+          if [ "$result" != "success" ]; then
+            echo "One or more OS test legs did not succeed."
+            exit 1
+          fi
 
   lint:
     runs-on: ubuntu-latest
