@@ -4289,6 +4289,65 @@ class Database:
         """
         return self.conn.execute(query, params).fetchall()
 
+    def get_filtered_photo_ids(
+        self,
+        folder_id=None,
+        rating_min=None,
+        date_from=None,
+        date_to=None,
+        keyword=None,
+        color_label=None,
+        flag=None,
+    ):
+        """Return visible photo ids matching the browse filters."""
+        conditions = ["wf.workspace_id = ?"]
+        where_params = [self._ws_id()]
+        join_params = []
+
+        if folder_id is not None:
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            where_params.extend(subtree)
+        if rating_min is not None:
+            conditions.append("p.rating >= ?")
+            where_params.append(rating_min)
+        if date_from is not None:
+            conditions.append("p.timestamp >= ?")
+            where_params.append(date_from)
+        if date_to is not None:
+            conditions.append("p.timestamp <= ?")
+            where_params.append(_inclusive_date_to(date_to))
+        if flag is not None:
+            conditions.append("COALESCE(p.flag, 'none') = ?")
+            where_params.append(flag)
+
+        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+                       "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
+        if keyword is not None:
+            join_clause += """
+                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
+                LEFT JOIN keywords k ON k.id = pk.keyword_id
+            """
+            conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
+            where_params.append(f"%{keyword}%")
+            where_params.append(f"%{keyword}%")
+
+        if color_label is not None:
+            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
+            join_params.append(self._ws_id())
+            conditions.append("pcl.color = ?")
+            where_params.append(color_label)
+
+        params = join_params + where_params
+        where = "WHERE " + " AND ".join(conditions)
+        query = f"""
+            SELECT DISTINCT p.id FROM photos p
+            {join_clause}
+            {where}
+        """
+        return [row["id"] for row in self.conn.execute(query, params).fetchall()]
+
     def count_filtered_photos(
         self,
         folder_id=None,
@@ -7848,6 +7907,7 @@ class Database:
         sql = (
             "SELECT pe.photo_id, pe.embedding FROM photo_embeddings pe "
             "JOIN photos p ON p.id = pe.photo_id "
+            "JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial') "
             "JOIN workspace_folders wf "
             "  ON wf.folder_id = p.folder_id AND wf.workspace_id = ? "
             "WHERE pe.model = ? AND pe.variant = ?"
@@ -9849,6 +9909,21 @@ class Database:
             LIMIT ? OFFSET ?
         """
         return self.conn.execute(query, params).fetchall()
+
+    def get_collection_photo_ids(self, collection_id):
+        """Return visible photo ids matching a collection's rules."""
+        parts = self._build_collection_query(collection_id)
+        if parts is None:
+            return []
+
+        folder_join, join_clause, where, params = parts
+        query = f"""
+            SELECT DISTINCT p.id FROM photos p
+            {folder_join}
+            {join_clause}
+            {where}
+        """
+        return [row["id"] for row in self.conn.execute(query, params).fetchall()]
 
     def count_collection_photos(self, collection_id):
         """Return total count of photos matching collection rules."""
