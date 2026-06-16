@@ -16297,19 +16297,72 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         recipe = db.get_photo_edit_recipe(photo_id)
 
+        # Decide whether to trust the working copy as the full-res asset
+        # by reading its actual on-disk dimensions, NOT the current
+        # ``working_copy_max_size`` config — the cap may have changed
+        # since the wc was generated, leaving stale capped wcs that
+        # config-based logic would misclassify as full-res.
+        #
+        # PIL.Image.open is lazy: it reads the JPEG SOF marker for
+        # ``.size`` without decoding pixels (sub-millisecond), so this
+        # is safe to do per request even during burst-review zoom. The
+        # expensive path we must avoid is the RAW re-extract below
+        # (5–7s per photo), not the header read.
+        def _trusted_full_res_working_copy_path():
+            if not photo["working_copy_path"]:
+                return None
+            wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
+            if not os.path.exists(wc_path):
+                return None
+            from PIL import Image as _PILImage
+            try:
+                with _PILImage.open(wc_path) as _wc_img:
+                    wc_w, wc_h = _wc_img.size
+            except Exception:
+                wc_w = wc_h = 0
+            orig_w = photo["width"] or 0
+            orig_h = photo["height"] or 0
+            # Trust the wc when it meets/exceeds the believed original dims,
+            # or when those dims are unknown (no basis to declare the wc stale
+            # and a speculative RAW re-extract would just thrash the disk).
+            if wc_w and wc_h and (
+                (wc_w >= orig_w and wc_h >= orig_h) or not (orig_w and orig_h)
+            ):
+                return wc_path
+            # The wc is smaller than the believed original. For RAW sources
+            # this often means rawpy.postprocess() failed and we fell back to
+            # the embedded JPEG, which can be a few pixels shy of the full
+            # sensor area. Re-extracting would yield the same fallback image,
+            # just slower — so trust the wc when it is within 1% of the
+            # believed dims. This tolerance is RAW-only: for JPEG/PNG/etc.,
+            # the wc being smaller means the cap downsized it, and re-extracting
+            # WILL produce more pixels.
+            from image_loader import RAW_EXTENSIONS
+            ext = os.path.splitext(photo["filename"])[1].lower()
+            if ext in RAW_EXTENSIONS and wc_w and wc_h:
+                wc_long = max(wc_w, wc_h)
+                orig_long = max(orig_w, orig_h)
+                if orig_long and wc_long >= orig_long * 0.99:
+                    return wc_path
+            return None
+
+        trusted_wc_path = _trusted_full_res_working_copy_path()
+
         if recipe:
             folder = db.conn.execute(
                 "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
             ).fetchone()
             if not folder:
                 return "Not found", 404
-            from offline_cache import resolve_original_path
-            image_path, _using_offline_cache = resolve_original_path(
-                db,
-                photo,
-                vireo_dir,
-                {photo["folder_id"]: folder["path"]},
-            )
+            image_path = trusted_wc_path
+            if image_path is None:
+                from offline_cache import resolve_original_path
+                image_path, _using_offline_cache = resolve_original_path(
+                    db,
+                    photo,
+                    vireo_dir,
+                    {photo["folder_id"]: folder["path"]},
+                )
             from image_loader import load_image
             img = load_image(image_path, max_size=None)
             if img is None:
@@ -16325,56 +16378,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             img.close()
             return send_file(cache_path, mimetype="image/jpeg")
 
-        # Decide whether to trust the working copy as the full-res asset
-        # by reading its actual on-disk dimensions, NOT the current
-        # ``working_copy_max_size`` config — the cap may have changed
-        # since the wc was generated, leaving stale capped wcs that
-        # config-based logic would misclassify as full-res.
-        #
-        # PIL.Image.open is lazy: it reads the JPEG SOF marker for
-        # ``.size`` without decoding pixels (sub-millisecond), so this
-        # is safe to do per request even during burst-review zoom. The
-        # expensive path we must avoid is the RAW re-extract below
-        # (5–7s per photo), not the header read.
-        if photo["working_copy_path"]:
-            wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
-            if os.path.exists(wc_path):
-                from PIL import Image as _PILImage
-                try:
-                    with _PILImage.open(wc_path) as _wc_img:
-                        wc_w, wc_h = _wc_img.size
-                except Exception:
-                    wc_w = wc_h = 0
-                orig_w = photo["width"] or 0
-                orig_h = photo["height"] or 0
-                # Trust the wc when it meets/exceeds the believed
-                # original dims, or when those dims are unknown (no
-                # basis to declare the wc stale and a speculative RAW
-                # re-extract would just thrash the disk).
-                if wc_w and wc_h and (
-                    (wc_w >= orig_w and wc_h >= orig_h)
-                    or not (orig_w and orig_h)
-                ):
-                    return send_file(wc_path, mimetype="image/jpeg")
-                # The wc is smaller than the believed original. For RAW
-                # sources this often means rawpy.postprocess() failed
-                # and we fell back to the embedded JPEG, which can be a
-                # few pixels shy of the full sensor area (e.g. Nikon
-                # NEFs report 8280×5520 but the embedded JPEG is
-                # 8256×5504). Re-extracting would yield the same
-                # fallback image, just slower — so trust the wc when
-                # it is within 1% of the believed dims. This tolerance
-                # is RAW-only: for JPEG/PNG/etc., the wc being smaller
-                # means the cap downsized it, and re-extracting WILL
-                # produce more pixels.
-                from image_loader import RAW_EXTENSIONS
-                ext = os.path.splitext(photo["filename"])[1].lower()
-                if ext in RAW_EXTENSIONS and wc_w and wc_h:
-                    wc_long = max(wc_w, wc_h)
-                    orig_long = max(orig_w, orig_h)
-                    if orig_long and wc_long >= orig_long * 0.99:
-                        return send_file(wc_path, mimetype="image/jpeg")
-                # Fall through to on-demand re-extract.
+        if trusted_wc_path:
+            return send_file(trusted_wc_path, mimetype="image/jpeg")
 
         # Resolve original file path
         folder = db.conn.execute(
