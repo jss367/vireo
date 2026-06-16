@@ -3049,6 +3049,7 @@ var _lbCurrentWildlifeExcluded = false;
 var _lbFlagEditSeq = 0;      // increments for local flag writes so stale metadata fetches cannot overwrite the chip
 var _lbOpenSeq = 0;          // increments for every lightbox open so old metadata fetches cannot reapply after reopen
 var _lbFlagPendingWrites = 0;
+var _lbFlagPendingByPhoto = {};  // count of in-flight flag writes PER photo; lightbox:flagchanged is emitted once a photo's count hits 0 so listeners see its settled flag, not a guessed per-write one
 var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated from optimistic page helpers
 var _lbViewportByPhotoId = {};  // per-session lightbox viewport cache keyed by photo id
 var _lbPendingViewportState = null;
@@ -3331,6 +3332,7 @@ function _lbApplyFlag(photoId, flag) {
   var seq = _lbFlagEditSeq + 1;
   _lbFlagEditSeq = seq;
   _lbFlagPendingWrites += 1;
+  _lbFlagPendingByPhoto[photoId] = (_lbFlagPendingByPhoto[photoId] || 0) + 1;
   _lbSetPendingFlagStatus(normalized);
   var write;
 
@@ -3348,24 +3350,43 @@ function _lbApplyFlag(photoId, flag) {
     return false;
   }
 
-  Promise.resolve(write).then(function(ok) {
+  // Resolve both success and rejection through one settle path so the per-photo
+  // pending count is always balanced and the quiescence event always fires.
+  function settle(landed) {
     _lbFlagPendingWrites = Math.max(0, _lbFlagPendingWrites - 1);
-    if (_lightboxCurrentId !== photoId) return;
-    if (ok === false) {
-      if (_lbFlagEditSeq === seq) _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
-      return;
-    }
-    if (_lbFlagEditSeq === seq || _lbFlagPendingWrites === 0) {
-      _lbRecordFlag(photoId, normalized);
-    } else {
+    var remaining = (_lbFlagPendingByPhoto[photoId] || 1) - 1;
+    if (remaining > 0) _lbFlagPendingByPhoto[photoId] = remaining;
+    else delete _lbFlagPendingByPhoto[photoId];
+
+    if (landed) {
+      // Cache the confirmed flag even if the user has navigated away, so the
+      // quiescence emit below reflects what actually landed for this photo.
       _lbCacheFlag(photoId, normalized);
-    }
-  }).catch(function() {
-    _lbFlagPendingWrites = Math.max(0, _lbFlagPendingWrites - 1);
-    if (_lbFlagEditSeq === seq && _lightboxCurrentId === photoId) {
+      if (_lightboxCurrentId === photoId && (_lbFlagEditSeq === seq || _lbFlagPendingWrites === 0)) {
+        _lbSetFlagStatus(normalized);
+      }
+    } else if (_lightboxCurrentId === photoId && _lbFlagEditSeq === seq) {
+      // Write failed: the prior confirmed flag stands; restore the chip to it.
       _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
     }
-  });
+
+    // Once every in-flight write for THIS photo has settled, tell listeners
+    // (e.g. Highlights) the photo's final confirmed flag. Emitting on
+    // quiescence — rather than per write — means a landed reject whose
+    // superseding clear/flag write later FAILED is still reflected, and rapid
+    // same-photo toggling collapses to one correct event instead of a guess.
+    if (!Object.prototype.hasOwnProperty.call(_lbFlagPendingByPhoto, photoId)) {
+      try {
+        document.dispatchEvent(new CustomEvent('lightbox:flagchanged', {
+          detail: { photoId: photoId, flag: _lbConfirmedFlagFor(photoId) },
+        }));
+      } catch (_) {}
+    }
+  }
+
+  Promise.resolve(write)
+    .then(function(ok) { settle(ok !== false); })
+    .catch(function() { settle(false); });
 
   return true;
 }
