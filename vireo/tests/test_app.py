@@ -2202,6 +2202,128 @@ def test_text_search_no_embeddings_returns_reason(app_and_db, monkeypatch):
     assert data.get("reason") == "no_embeddings"
 
 
+def test_text_search_returns_ranked_enriched_results(app_and_db, monkeypatch):
+    """Text search ranks by embedding similarity and returns browse card metadata."""
+    import numpy as np
+
+    app, db = app_and_db
+    client = app.test_client()
+    monkeypatch.setattr(
+        "models.get_active_model",
+        lambda: {
+            "name": "BioCLIP-2",
+            "model_type": "bioclip",
+            "model_str": "hf-hub:imageomics/bioclip-2",
+            "downloaded": True,
+        },
+    )
+    monkeypatch.setattr(
+        "text_encoder.encode_text",
+        lambda query, model_str, pretrained_str=None: np.array([1.0, 0.0], dtype=np.float32),
+    )
+
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY id"
+    ).fetchall()
+    by_name = {row["filename"]: row["id"] for row in rows}
+    p1 = by_name["bird1.jpg"]
+    p2 = by_name["bird2.jpg"]
+    p3 = by_name["bird3.jpg"]
+    for pid, emb in [
+        (p1, [1.0, 0.0]),
+        (p2, [0.6, 0.8]),
+        (p3, [0.0, 1.0]),
+    ]:
+        db.upsert_photo_embedding(
+            pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
+        )
+    db.save_detections(
+        p1,
+        [{"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+          "confidence": 0.91, "category": "bird"}],
+        detector_model="test-detector",
+    )
+    species_id = db.add_keyword("Search Cardinal", is_species=True)
+    db.tag_photo(p1, species_id)
+
+    resp = client.get("/api/photos/search?q=bird&threshold=0.15")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert [r["photo"]["id"] for r in data["results"]] == [p1, p2]
+    assert data["total_matches"] == 2
+    first = data["results"][0]["photo"]
+    assert "Search Cardinal" in first["species"]
+    assert first["detections"][0]["category"] == "bird"
+
+
+def test_text_search_applies_browse_scope_filters(app_and_db, monkeypatch):
+    """Text search honors normal browse filters, collections, and visible folders."""
+    import json
+
+    import numpy as np
+
+    app, db = app_and_db
+    client = app.test_client()
+    monkeypatch.setattr(
+        "models.get_active_model",
+        lambda: {
+            "name": "BioCLIP-2",
+            "model_type": "bioclip",
+            "model_str": "hf-hub:imageomics/bioclip-2",
+            "downloaded": True,
+        },
+    )
+    monkeypatch.setattr(
+        "text_encoder.encode_text",
+        lambda query, model_str, pretrained_str=None: np.array([1.0, 0.0], dtype=np.float32),
+    )
+
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY id"
+    ).fetchall()
+    by_name = {row["filename"]: row["id"] for row in rows}
+    p1 = by_name["bird1.jpg"]
+    p2 = by_name["bird2.jpg"]
+    p3 = by_name["bird3.jpg"]
+    missing_fid = db.add_folder("/photos/missing", name="missing")
+    missing_pid = db.add_photo(
+        folder_id=missing_fid,
+        filename="missing.jpg",
+        extension=".jpg",
+        file_size=1,
+        file_mtime=1.0,
+        timestamp="2024-01-01T00:00:00",
+    )
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (missing_fid,)
+    )
+    db.conn.commit()
+    for pid, emb in [
+        (p1, [1.0, 0.0]),
+        (p2, [0.6, 0.8]),
+        (p3, [0.0, 1.0]),
+        (missing_pid, [2.0, 0.0]),
+    ]:
+        db.upsert_photo_embedding(
+            pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
+        )
+
+    rating_resp = client.get("/api/photos/search?q=bird&threshold=-1&rating_min=5")
+    assert rating_resp.status_code == 200
+    assert [r["photo"]["id"] for r in rating_resp.get_json()["results"]] == [p3]
+
+    cid = db.add_collection(
+        "Search Scope",
+        json.dumps([{"field": "photo_ids", "value": [p2, p3, missing_pid]}]),
+    )
+    collection_resp = client.get(
+        f"/api/photos/search?q=bird&threshold=-1&collection_id={cid}"
+    )
+    assert collection_resp.status_code == 200
+    assert [r["photo"]["id"] for r in collection_resp.get_json()["results"]] == [p2, p3]
+
+
 def test_settings_has_edit_history_config(app_and_db):
     """Settings page includes the max_edit_history config field."""
     app, _ = app_and_db
@@ -3011,6 +3133,61 @@ def test_rename_keyword_queues_sidecar_changes(app_and_db):
     actions = [(c["change_type"], c["value"]) for c in changes]
     assert ("keyword_remove", "OldBird") in actions
     assert ("keyword_add", "NewBird") in actions
+
+
+def test_rename_keyword_updates_photo_preferences(app_and_db):
+    """Representative-photo preferences follow species keyword renames."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird", is_species=True)
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.set_photo_preference("life_list", "OldBird", p1)
+    db.set_photo_preference("highlights", "OldBird", p1)
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_photo_preferences("life_list") == {"NewBird": p1}
+    assert db.get_photo_preferences("highlights") == {"NewBird": p1}
+
+
+def test_rename_keyword_photo_preferences_keep_existing_target(app_and_db):
+    """Renaming into an existing preference keeps the target preference."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid_old = db.add_keyword("OldBird", is_species=True)
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    p_old = rows[0]["id"]
+    p_new = rows[1]["id"]
+    db.tag_photo(p_old, kid_old)
+    db.set_photo_preference("life_list", "OldBird", p_old)
+    db.set_photo_preference("life_list", "NewBird", p_new)
+
+    resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_photo_preferences("life_list") == {"NewBird": p_new}
+
+
+def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_db):
+    """Renaming an unrelated same-name keyword must not rewrite species prefs."""
+    app, db = app_and_db
+    client = app.test_client()
+    species_kid = db.add_keyword("Robin", is_species=True)
+    parent_kid = db.add_keyword("Places", kw_type="general")
+    place_kid = db.add_keyword("Robin", parent_id=parent_kid, kw_type="general")
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    species_photo = rows[0]["id"]
+    place_photo = rows[1]["id"]
+    db.tag_photo(species_photo, species_kid)
+    db.tag_photo(place_photo, place_kid)
+    db.set_photo_preference("life_list", "Robin", species_photo)
+
+    resp = client.put(f"/api/keywords/{place_kid}", json={"name": "Backyard Robin"})
+    assert resp.status_code == 200
+
+    assert db.get_photo_preferences("life_list") == {"Robin": species_photo}
 
 
 def test_delete_keyword_queues_sidecar_removals(app_and_db):

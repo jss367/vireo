@@ -1797,6 +1797,7 @@ var calendarYear = new Date().getFullYear();
 var selectedDay = null;
 var calendarData = null;
 var clipSearchActive = false;
+var clipSearchSeq = 0;
 var searchFilterTimer = null;
 var bestBatchData = null;
 var keywordAutocompleteCache = null;
@@ -2398,7 +2399,7 @@ function filterByFolder(folderId) {
   }
   activeCollectionId = null;
   if (timelineMode) loadCalendarData();
-  resetAndLoad();
+  reloadBrowseResults();
   // Update active state
   document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
     el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
@@ -2463,7 +2464,7 @@ function filterByKeyword(name) {
   activeCollectionId = null;
   document.getElementById('searchInput').value = activeKeyword || '';
   if (timelineMode) loadCalendarData();
-  resetAndLoad();
+  reloadBrowseResults();
   document.querySelectorAll('#keywordTree .tree-item').forEach(function(el) {
     el.classList.toggle('active', el.dataset.keyword === activeKeyword);
   });
@@ -2523,6 +2524,17 @@ async function filterByCollection(id) {
   activeFolderId = null;
   activeKeyword = null;
   activeCollectionId = id;
+  if (clipSearchActive && getClipSearchQuery()) {
+    selectedPhotos.clear();
+    selectedPhotoId = null;
+    selectedIndex = -1;
+    closeDetail();
+    refreshCardSelectionVisuals();
+    updateBatchBar();
+    document.getElementById('gridContainer').scrollTop = 0;
+    await runClipSearch();
+    return;
+  }
   photos = [];
   currentPage = 1;
   allLoaded = false;
@@ -3371,7 +3383,8 @@ function selectCalendarDay(dateStr, count) {
   // date_to to end-of-day (_inclusive_date_to in db.py).
   document.getElementById('dateFrom').value = dateStr;
   document.getElementById('dateTo').value = dateStr;
-  resetAndLoad();
+  activeCollectionId = null;
+  reloadBrowseResults();
   renderCalendar(); // update selected state
 }
 
@@ -3380,7 +3393,8 @@ function clearCalendarSelection() {
   document.getElementById('calSelection').classList.remove('active');
   document.getElementById('dateFrom').value = '';
   document.getElementById('dateTo').value = '';
-  resetAndLoad();
+  activeCollectionId = null;
+  reloadBrowseResults();
   if (calendarData) renderCalendar();
 }
 
@@ -3393,12 +3407,14 @@ function calendarChangeYear(delta) {
   document.getElementById('dateFrom').value = '';
   document.getElementById('dateTo').value = '';
   loadCalendarData();
-  resetAndLoad();
+  activeCollectionId = null;
+  reloadBrowseResults();
 }
 
 function applyFilters() {
   if (timelineMode) loadCalendarData();
-  resetAndLoad();
+  activeCollectionId = null;
+  reloadBrowseResults();
 }
 
 function scheduleSearchFilter() {
@@ -3430,14 +3446,16 @@ function setFilterRating(val) {
   document.querySelectorAll('.rating-filter .rating-star').forEach(function(el) {
     el.classList.toggle('active', parseInt(el.dataset.val) <= filterRating);
   });
-  resetAndLoad();
+  activeCollectionId = null;
+  reloadBrowseResults();
 }
 
 function setFlagFilter(flag) {
   flagFilter = flagFilter === flag ? '' : flag;
   updateFlagFilterButtons();
   if (timelineMode) loadCalendarData();
-  resetAndLoad();
+  activeCollectionId = null;
+  reloadBrowseResults();
 }
 
 function updateFlagFilterButtons() {
@@ -3463,16 +3481,53 @@ function toggleDetectionBoxes() {
   renderGrid();
 }
 
+function getClipSearchQuery() {
+  var input = document.getElementById('clipSearchInput');
+  return input ? input.value.trim() : '';
+}
+
+function appendClipSearchScopeParams(params) {
+  if (activeCollectionId) {
+    params.set('collection_id', activeCollectionId);
+    return;
+  }
+  if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (filterRating > 0) params.set('rating_min', filterRating);
+  if (flagFilter) params.set('flag', flagFilter);
+
+  var colorFilter = document.getElementById('colorFilter').value;
+  if (colorFilter) params.set('color_label', colorFilter);
+
+  var dateFrom = document.getElementById('dateFrom').value;
+  var dateTo = document.getElementById('dateTo').value;
+  if (dateFrom) params.set('date_from', dateFrom);
+  if (dateTo) params.set('date_to', dateTo);
+
+  var search = document.getElementById('searchInput').value.trim();
+  if (search) params.set('keyword', search);
+  if (activeKeyword) params.set('keyword', activeKeyword);
+}
+
+function reloadBrowseResults() {
+  if (clipSearchActive && getClipSearchQuery()) {
+    runClipSearch();
+  } else {
+    resetAndLoad();
+  }
+}
+
 async function runClipSearch() {
-  var query = document.getElementById('clipSearchInput').value.trim();
+  var query = getClipSearchQuery();
   if (!query) {
     if (clipSearchActive) clearClipSearch();
     return;
   }
 
+  var searchSeq = ++clipSearchSeq;
   loadEpoch++;
   selectAllRequestSeq++;
   var epoch = loadEpoch;
+  loading = false;
   photos = [];
   allLoaded = true;
   selectedPhotos.clear();
@@ -3484,14 +3539,16 @@ async function runClipSearch() {
   document.getElementById('loadingState').textContent = 'Searching...';
   clipSearchActive = true;
   document.getElementById('clipClearBtn').style.display = '';
+  var keepLoadingMessage = false;
 
   try {
     var params = new URLSearchParams();
     params.set('q', query);
     params.set('limit', 100);
     params.set('threshold', 0.15);
+    appendClipSearchScopeParams(params);
     var data = await safeFetch('/api/photos/search?' + params.toString());
-    if (epoch !== loadEpoch) return;
+    if (searchSeq !== clipSearchSeq || epoch !== loadEpoch) return;
 
     if (data.reason) {
       var msg = {
@@ -3500,6 +3557,7 @@ async function runClipSearch() {
         'no_model': 'No model available. Download one in Settings.'
       }[data.reason] || 'Search returned no results.';
       document.getElementById('loadingState').textContent = msg;
+      keepLoadingMessage = true;
       return;
     }
 
@@ -3512,17 +3570,29 @@ async function runClipSearch() {
     allLoaded = true;
 
     renderGrid();
+    var refreshIds = photos.map(function(p) { return p.id; });
+    loadInatStatus(refreshIds).then(function() {
+      if (searchSeq === clipSearchSeq && epoch === loadEpoch) refreshGridCards(refreshIds);
+    });
+    fetchColorLabels(refreshIds).then(function() {
+      if (searchSeq === clipSearchSeq && epoch === loadEpoch) refreshGridCards(refreshIds);
+    });
     var summary = document.getElementById('filterSummary');
     summary.textContent = data.total_matches + ' matches' + (data.model_used ? ' (' + data.model_used + ')' : '');
   } catch(e) {
+    if (searchSeq !== clipSearchSeq || epoch !== loadEpoch) return;
     document.getElementById('loadingState').textContent = 'Search failed: ' + (e.message || e);
+    keepLoadingMessage = true;
     return;
+  } finally {
+    if (searchSeq === clipSearchSeq && epoch === loadEpoch && !keepLoadingMessage) {
+      document.getElementById('loadingState').style.display = 'none';
+    }
   }
-
-  document.getElementById('loadingState').style.display = 'none';
 }
 
 function clearClipSearch() {
+  clipSearchSeq++;
   clipSearchActive = false;
   document.getElementById('clipSearchInput').value = '';
   document.getElementById('clipClearBtn').style.display = 'none';
@@ -3776,6 +3846,7 @@ async function selectAllMatchingPhotos() {
     searchParams.set('q', query);
     searchParams.set('threshold', 0.15);
     searchParams.set('ids_only', '1');
+    appendClipSearchScopeParams(searchParams);
     showToast('Selecting all matching search results...');
     try {
       var searchData = await safeFetch('/api/photos/search?' + searchParams.toString(), {}, { toast: false });

@@ -112,9 +112,11 @@ def test_volumes_windows_serializes_set_error_mode(app_and_db):
                 first_call.set()
         if is_first:
             # Hold the first thread inside the critical section so the
-            # second thread has a chance to race in without the lock.
+            # second thread has a chance to race in without the lock. Keep
+            # this much longer than the assertion sleep so slow test hosts do
+            # not release thread 1 by timeout before the check runs.
             inside_critical.set()
-            release.wait(timeout=2.0)
+            release.wait(timeout=30.0)
         # Real SetErrorMode returns the previous mode. With the lock,
         # the only previous mode any caller observes is BASE_MODE.
         return BASE_MODE
