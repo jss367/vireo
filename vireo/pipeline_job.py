@@ -110,8 +110,15 @@ def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
     if _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
         return get_canonical_image_path(photo, vireo_dir, folders)
 
+    folder_path = folders.get(photo["folder_id"])
+    if not folder_path:
+        if photo["working_copy_path"]:
+            wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
+            if os.path.exists(wc_path):
+                return wc_path
+        return ""
     original = os.path.join(
-        folders.get(photo["folder_id"], ""),
+        folder_path,
         photo["filename"],
     )
     if not os.path.exists(original) and photo["working_copy_path"]:

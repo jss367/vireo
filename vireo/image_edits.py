@@ -45,6 +45,8 @@ def normalize_recipe(recipe):
     rotation = recipe.get("rotation", 0)
     if isinstance(rotation, bool) or not isinstance(rotation, (int, float)):
         raise RecipeError("rotation must be one of 0, 90, 180, or 270")
+    if isinstance(rotation, float) and not rotation.is_integer():
+        raise RecipeError("rotation must be one of 0, 90, 180, or 270")
     rotation = int(rotation)
     if rotation not in (0, 90, 180, 270):
         raise RecipeError("rotation must be one of 0, 90, 180, or 270")
@@ -57,10 +59,14 @@ def normalize_recipe(recipe):
     if not isinstance(flip, dict):
         raise RecipeError("flip must be an object")
     normalized_flip = {}
-    if bool(flip.get("horizontal")):
-        normalized_flip["horizontal"] = True
-    if bool(flip.get("vertical")):
-        normalized_flip["vertical"] = True
+    for axis in ("horizontal", "vertical"):
+        if axis not in flip:
+            continue
+        value = flip[axis]
+        if not isinstance(value, bool):
+            raise RecipeError(f"flip.{axis} must be a boolean")
+        if value:
+            normalized_flip[axis] = True
     if normalized_flip:
         out["flip"] = normalized_flip
 

@@ -161,7 +161,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             source_path = None
         if not source_path:
             use_wc = _working_copy_can_satisfy_export(
-                photo, recipe, max_size, wc_max
+                photo, recipe, max_size, wc_max, vireo_dir
             )
             source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=use_wc)
         if not source_path or not os.path.isfile(source_path):
@@ -491,29 +491,47 @@ def _find_developed_output(filename, folder_path, developed_dir, index=None):
     return None
 
 
-def _working_copy_can_satisfy_export(photo, recipe, max_size, wc_max):
+def _working_copy_can_satisfy_export(photo, recipe, max_size, wc_max, vireo_dir):
     """Return True when the working copy can preserve requested export pixels."""
     if not max_size or max_size <= 0:
         return False
     if max_size > wc_max:
         return False
+    wc_rel = photo["working_copy_path"]
+    if not wc_rel:
+        return False
+    wc_path = os.path.join(vireo_dir, wc_rel)
+    if not os.path.exists(wc_path):
+        return False
+    try:
+        from PIL import Image
+        with Image.open(wc_path) as wc_img:
+            wc_w, wc_h = wc_img.size
+    except Exception:
+        return False
+
+    wc_render_long = _recipe_result_long_edge(wc_w, wc_h, recipe)
     crop = (recipe or {}).get("crop") if recipe else None
-    if not crop:
-        return True
 
     width = photo["width"] or 0
     height = photo["height"] or 0
+    if not crop:
+        if width > 0 and height > 0:
+            required_long = min(max_size, max(width, height))
+        else:
+            required_long = max_size
+        return wc_render_long >= required_long
+
     if width <= 0 or height <= 0:
         # Missing dimensions: prefer the original over silently exporting a
         # cropped derivative from an undersized working copy.
         return False
 
-    source_long = _recipe_result_long_edge(width, height, None)
-    crop_long = _recipe_result_long_edge(width, height, recipe)
-    if crop_long <= 0:
+    original_render_long = _recipe_result_long_edge(width, height, recipe)
+    if original_render_long <= 0:
         return False
-    required_source_long = max_size * (source_long / crop_long)
-    return required_source_long <= wc_max
+    required_long = min(max_size, original_render_long)
+    return wc_render_long >= required_long
 
 
 def _resolve_source(photo, vireo_dir, folders, use_working_copy=False):

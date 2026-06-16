@@ -195,7 +195,6 @@ def test_export_cropped_recipe_avoids_undersized_working_copy(export_env):
         options={
             "naming_template": "{original}",
             "max_size": 300,
-            "working_copy_max_size": 400,
         },
     )
 

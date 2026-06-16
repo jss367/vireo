@@ -19,6 +19,16 @@ def test_normalize_recipe_rejects_out_of_bounds_crop():
         normalize_recipe({"crop": {"x": 0.5, "y": 0.5, "w": 0.6, "h": 0.6}})
 
 
+def test_normalize_recipe_rejects_fractional_rotation():
+    with pytest.raises(RecipeError, match="rotation"):
+        normalize_recipe({"rotation": 90.9})
+
+
+def test_normalize_recipe_rejects_non_boolean_flip():
+    with pytest.raises(RecipeError, match="flip.horizontal"):
+        normalize_recipe({"flip": {"horizontal": "false"}})
+
+
 def test_recipe_json_is_canonical():
     assert recipe_to_json({"flip": {"vertical": True}, "rotation": 90}) == (
         '{"flip":{"vertical":true},"rotation":90,"version":1}'
