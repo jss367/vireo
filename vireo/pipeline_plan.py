@@ -58,11 +58,10 @@ class PipelinePlanParams:
     # at plan time, since hashing thousands of files synchronously inside
     # a plan request would block the UI on every settings change.
     hash_duplicate_paths: list | None = None
-    # User's currently-selected preview pyramid tier from the cfgPreviewSize
-    # picker. Determines whether the previews substage runs at all (0 =
-    # "serve originals"; the substage no-ops) and which size's
-    # preview_cache rows count as "already done". ``None`` falls back to
-    # the workspace-effective config in ``_previews_plan``.
+    # Optional API override for the preview tier. Normal pipeline runs leave
+    # this unset so the previews substage uses the workspace-effective
+    # preview_max_size setting. Explicit 0 means "serve originals"; the
+    # previews substage no-ops.
     preview_max_size: int | None = None
 
 
@@ -200,6 +199,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
             )
     # Reclassify is a user override, not a settings-change signal.
     fingerprint_outdated = stale_total > 0 and not params.reclassify
+    fingerprint_reason = "label_set_changed" if fingerprint_outdated else None
 
     if total_dets == 0:
         if new_count > 0:
@@ -224,6 +224,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 "new_photos": new_count,
                 "stale": stale_total,
                 "fingerprint_outdated": fingerprint_outdated,
+                "fingerprint_reason": fingerprint_reason,
             },
         }
 
@@ -266,6 +267,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 "eligible": 0,
                 "stale": stale_total,
                 "fingerprint_outdated": fingerprint_outdated,
+                "fingerprint_reason": fingerprint_reason,
             },
         }
 
@@ -291,6 +293,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                     "new_photos": new_count,
                     "stale": stale_total,
                     "fingerprint_outdated": fingerprint_outdated,
+                    "fingerprint_reason": fingerprint_reason,
                 },
             }
         return {
@@ -308,6 +311,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 "eligible": eligible,
                 "stale": stale_total,
                 "fingerprint_outdated": fingerprint_outdated,
+                "fingerprint_reason": fingerprint_reason,
             },
         }
 
@@ -322,10 +326,17 @@ def _classify_plan(db, params, photo_ids, new_count=0):
         breakdown = ", ".join(
             f"{n} for {name}" for name, n in pending_per_model.items()
         )
-        summary = (
-            f"Will classify {pending_total} new "
-            f"pair{_plural(pending_total)} ({breakdown})"
-        )
+        if fingerprint_outdated:
+            summary = (
+                f"Current label set differs from cached classifications — "
+                f"will classify {pending_total} "
+                f"pair{_plural(pending_total)} ({breakdown})"
+            )
+        else:
+            summary = (
+                f"Will classify {pending_total} new "
+                f"pair{_plural(pending_total)} ({breakdown})"
+            )
     if new_count > 0:
         # Mixed scope: some existing detections still to classify *and*
         # N new photos coming in (each will get its own detections + class).
@@ -342,6 +353,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
         "eligible": eligible + new_count,
         "stale": stale_total,
         "fingerprint_outdated": fingerprint_outdated,
+        "fingerprint_reason": fingerprint_reason,
     }
     if new_count > 0:
         detail["new_photos"] = new_count
@@ -542,10 +554,10 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
 
     The card aggregates two pipeline substages (thumbnails + previews) so
     one plan entry has to answer for both. The accurate signal needs the
-    user's currently-selected preview size (a 1280px run is genuinely
-    "Already done" while the same library at 3840px isn't), so the
-    planner consults ``preview_max_size`` from the plan params (or the
-    workspace-effective config as a fallback).
+    active preview size (a 1280px library policy is genuinely "Already
+    done" while the same library at 3840px isn't), so the planner consults
+    an explicit ``preview_max_size`` API override when present, otherwise
+    the workspace-effective config.
 
     States:
       - ``will-skip``: only when both substages no-op. Today that's
@@ -984,9 +996,6 @@ def compute_plan(db, params, db_path):
     if params.collection_id is not None:
         from pipeline import _resolve_collection_photo_ids
         photo_ids = _resolve_collection_photo_ids(db, params.collection_id)
-        if params.exclude_photo_ids:
-            excl = set(params.exclude_photo_ids)
-            photo_ids = {pid for pid in photo_ids if pid not in excl}
     elif params.source_paths is not None:
         if not params.source_paths:
             # Import / new-images mode with every preview file deselected.
@@ -1038,6 +1047,17 @@ def compute_plan(db, params, db_path):
         unlinked_folder_count = db.workspace_unlinked_folder_count(
             {os.path.dirname(p) for p in unique_paths if p not in hash_dup_paths}
         )
+
+    # Exclusions apply in EVERY mode — the running job filters excluded ids
+    # in every stage, so a plan that only honored them for collections
+    # overstated the pending counts (the proxy drift this module forbids).
+    # Whole-workspace scope materializes the id set first so the same
+    # subtraction works; _scope_clause stages large sets in a temp table.
+    if params.exclude_photo_ids:
+        excl = set(params.exclude_photo_ids)
+        if photo_ids is None:
+            photo_ids = set(db.get_photo_ids())
+        photo_ids = {pid for pid in photo_ids if pid not in excl}
 
     classify = _classify_plan(db, params, photo_ids, new_count)
     extract = _extract_plan(db, params, photo_ids, pipeline_cfg, new_count)

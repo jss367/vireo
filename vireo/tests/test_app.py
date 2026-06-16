@@ -591,6 +591,31 @@ def test_encounter_species_confirm(app_and_db):
     assert len(kw_adds) == len(photo_ids)
 
 
+def test_encounter_species_confirm_ignores_corrupt_pipeline_cache(app_and_db):
+    """A bad pipeline cache must not turn species confirmation into a 500."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    photo_id = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 1").fetchone()["id"]
+    cache_dir = os.path.dirname(db._db_path)
+    cache_path = os.path.join(cache_dir, f"pipeline_results_ws{db._active_workspace_id}.json")
+    with open(cache_path, "w") as f:
+        f.write('{"photos": [], "encounters": [{"photo_ids"')
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+
+    assert resp.status_code == 200
+    assert any(t["name"] == "Blue Jay" for t in db.get_photo_keywords(photo_id))
+    assert not os.path.exists(cache_path)
+    assert len([
+        name for name in os.listdir(cache_dir)
+        if name.startswith(f"pipeline_results_ws{db._active_workspace_id}.json.corrupt-")
+    ]) == 1
+
+
 def test_encounter_species_validation(app_and_db):
     """POST /api/encounters/species validates required fields."""
     app, _ = app_and_db
@@ -1875,6 +1900,21 @@ def test_pages_no_inline_escapeHtml(app_and_db):
             f"{page} still has inline escapeHtml definition"
 
 
+def test_browse_calendar_day_sets_bare_date(app_and_db):
+    """Heatmap day click must set #dateTo to a bare date.
+
+    #dateTo is <input type="date">: assigning 'YYYY-MM-DDT23:59:59' is
+    rejected and silently blanks the input, so the request went out with
+    no upper bound. The backend pads bare dates to end-of-day
+    (_inclusive_date_to), so the suffix is never needed client-side.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/browse')
+    assert resp.status_code == 200
+    assert "T23:59:59" not in resp.data.decode()
+
+
 def test_health_endpoint(app_and_db):
     """GET /api/health returns 200 with status ok."""
     app, _ = app_and_db
@@ -1982,6 +2022,61 @@ def test_templates_jinja_free_except_includes():
         "Jinja2 syntax found in templates (only {% include '...' %} is allowed):\n"
         + "\n".join(violations)
     )
+
+
+def test_file_manager_labels_per_platform(monkeypatch):
+    """Reveal/placeholder wording is OS-appropriate so Linux/Windows users
+    don't see macOS-only 'Finder' terminology."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module.sys, "platform", "linux")
+    linux = app_module._file_manager_labels()
+    assert linux["reveal"] == "Reveal in File Manager"
+    assert linux["editor_placeholder"].startswith("/")
+    assert "Applications" not in linux["editor_placeholder"]
+
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    mac = app_module._file_manager_labels()
+    assert mac["reveal"] == "Reveal in Finder"
+    assert mac["editor_placeholder"].endswith(".app")
+
+    monkeypatch.setattr(app_module.sys, "platform", "win32")
+    win = app_module._file_manager_labels()
+    assert "Explorer" in win["reveal"]
+    assert win["editor_placeholder"].endswith(".exe")
+
+
+def test_config_defaults_js_exposes_platform_globals(app_and_db):
+    """/config-defaults.js publishes the platform-aware globals the templates
+    read (they are Jinja-free, so this is the only injection channel)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/config-defaults.js')
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert 'window.VIREO_REVEAL_LABEL' in body
+    assert 'window.VIREO_EDITOR_PATH_PLACEHOLDER' in body
+    assert 'window.VIREO_PLATFORM' in body
+
+
+def test_trash_via_finder_guarded_off_mac(monkeypatch):
+    """The AppleScript Finder fallback only runs on macOS; elsewhere it raises
+    instead of spawning a doomed osascript subprocess."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module.sys, "platform", "linux")
+    called = []
+    monkeypatch.setattr(
+        app_module.subprocess, "run",
+        lambda *a, **k: called.append(a) or None,
+    )
+    try:
+        app_module._trash_via_finder("/some/file.jpg")
+        raised = False
+    except OSError:
+        raised = True
+    assert raised, "expected OSError on non-macOS"
+    assert called == [], "osascript must not be spawned off macOS"
 
 
 def test_navbar_js_fallbacks_match_python_constants():
@@ -2824,10 +2919,12 @@ def test_all_keywords_scoped_by_workspace(app_and_db):
         names = [k["name"] for k in data]
         # Child keyword tagged in workspace A — present
         assert "Hawk" in names
-        # Parent keyword not tagged but is ancestor of Hawk — present with photo_count=0
+        # Parent keyword not tagged but is ancestor of Hawk — present with
+        # descendant photo count, plus direct count for callers that need it.
         assert "Birds" in names
         birds = next(k for k in data if k["name"] == "Birds")
-        assert birds["photo_count"] == 0
+        assert birds["photo_count"] == 1
+        assert birds["direct_photo_count"] == 0
         # Keyword only in workspace B — absent
         assert "Penguin" not in names
 
@@ -5957,19 +6054,19 @@ def test_save_grouping_defaults_rejects_bad_values(tmp_path, monkeypatch):
     saved = cfg.load()
     pipe = saved.get("pipeline", {})
     if "hard_cut_time" in pipe:
-        assert isinstance(pipe["hard_cut_time"], (int, float))
+        assert isinstance(pipe["hard_cut_time"], int | float)
     if "w_species" in pipe:
-        assert isinstance(pipe["w_species"], (int, float))
+        assert isinstance(pipe["w_species"], int | float)
         assert 0.0 <= pipe["w_species"] <= 1.0
     if "hard_cut_score" in pipe:
-        assert isinstance(pipe["hard_cut_score"], (int, float))
+        assert isinstance(pipe["hard_cut_score"], int | float)
         assert 0.0 <= pipe["hard_cut_score"] <= 1.0
     if "w_time" in pipe:
-        assert isinstance(pipe["w_time"], (int, float))
+        assert isinstance(pipe["w_time"], int | float)
         assert pipe["w_time"] is not True  # bool guard
     if "tau_enc" in pipe:
         import math as _math
-        assert isinstance(pipe["tau_enc"], (int, float))
+        assert isinstance(pipe["tau_enc"], int | float)
         assert _math.isfinite(pipe["tau_enc"])
 
 
@@ -6103,3 +6200,167 @@ def test_collection_preview_does_not_mask_db_failures(app_and_db, monkeypatch):
     # is that it's *not* a 400, which would mislabel a backend fault as a
     # client error.
     assert resp.status_code >= 500
+
+
+# -- Regression tests: route hardening (workspace verification, validation,
+# config locking) --
+
+
+def test_update_workspace_unknown_id_returns_404(app_and_db):
+    """PUT /api/workspaces/<id> must 404 for an unknown workspace instead of
+    crashing on dict(None) after update_workspace silently no-ops."""
+    app, _db = app_and_db
+    client = app.test_client()
+    resp = client.put('/api/workspaces/999999', json={"name": "ghost"})
+    assert resp.status_code == 404
+    assert "error" in resp.get_json()
+
+
+def test_update_workspace_rejects_non_dict_config_overrides(app_and_db):
+    """PUT /api/workspaces/<id> must reject non-dict config_overrides —
+    persisting e.g. a list would crash the labels accessors later."""
+    app, db = app_and_db
+    client = app.test_client()
+    ws_id = db._active_workspace_id
+
+    for bad in ([], "x", 5, True):
+        resp = client.put(f'/api/workspaces/{ws_id}',
+                          json={"config_overrides": bad})
+        assert resp.status_code == 400, f"expected 400 for {bad!r}"
+
+    # None (clear) and a dict remain accepted.
+    resp = client.put(f'/api/workspaces/{ws_id}',
+                      json={"config_overrides": {"classification_threshold": 0.5}})
+    assert resp.status_code == 200
+    resp = client.put(f'/api/workspaces/{ws_id}', json={"config_overrides": None})
+    assert resp.status_code == 200
+
+
+def test_add_workspace_folder_unknown_ids_return_404(app_and_db):
+    """POST /api/workspaces/<ws>/folders must 404 for unknown workspace or
+    folder ids instead of hitting the workspace_folders FK and 500ing."""
+    app, db = app_and_db
+    client = app.test_client()
+    ws_id = db._active_workspace_id
+    fid = db.get_folder_tree()[0]["id"]
+
+    resp = client.post(f'/api/workspaces/{ws_id}/folders',
+                       json={"folder_id": 999999})
+    assert resp.status_code == 404
+    assert "Folder" in resp.get_json()["error"]
+
+    resp = client.post('/api/workspaces/999999/folders',
+                       json={"folder_id": fid})
+    assert resp.status_code == 404
+    assert "Workspace" in resp.get_json()["error"]
+
+
+def test_setup_complete_does_not_pin_defaults(app_and_db):
+    """POST /api/setup/complete must persist only setup_complete (plus keys
+    the user already set) — not the full DEFAULTS-merged config."""
+    import json as _json
+
+    import config as cfg
+
+    app, _db = app_and_db
+    with open(cfg.CONFIG_PATH, "w") as f:
+        _json.dump({"inat_token": "abc"}, f)
+
+    client = app.test_client()
+    resp = client.post('/api/setup/complete')
+    assert resp.status_code == 200
+
+    with open(cfg.CONFIG_PATH) as f:
+        raw = _json.load(f)
+    assert raw == {"inat_token": "abc", "setup_complete": True}
+
+
+def test_detach_endpoints_reject_non_integer_indices(app_and_db):
+    """detach-burst/detach-photo must 400 on non-integer indices instead of
+    raising TypeError at the `enc_idx < 0` comparison."""
+    app, _db = app_and_db
+    client = app.test_client()
+
+    resp = client.post('/api/pipeline/detach-burst',
+                       json={"encounter_index": "0", "burst_index": 0})
+    assert resp.status_code == 400
+    assert "encounter_index" in resp.get_json()["error"]
+
+    resp = client.post('/api/pipeline/detach-burst',
+                       json={"encounter_index": 0, "burst_index": [1]})
+    assert resp.status_code == 400
+    assert "burst_index" in resp.get_json()["error"]
+
+    resp = client.post('/api/pipeline/detach-photo',
+                       json={"encounter_index": "0", "burst_index": 0,
+                             "photo_id": 1})
+    assert resp.status_code == 400
+    assert "encounter_index" in resp.get_json()["error"]
+
+    resp = client.post('/api/pipeline/detach-photo',
+                       json={"encounter_index": 0, "burst_index": True,
+                             "photo_id": 1})
+    assert resp.status_code == 400
+    assert "burst_index" in resp.get_json()["error"]
+
+
+def test_sync_discard_reports_true_count(app_and_db):
+    """POST /api/sync/discard must report rows actually deleted, not the
+    request size — stale/foreign ids are silently skipped by clear_pending."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.queue_change(pid, "keyword_add", "Test Bird")
+    change_id = db.get_pending_changes()[0]["id"]
+
+    resp = client.post('/api/sync/discard',
+                       json={"change_ids": [change_id, 999999]})
+    assert resp.status_code == 200
+    assert resp.get_json()["discarded"] == 1
+    assert db.get_pending_changes() == []
+
+
+def test_audit_resolve_validates_direction_and_photo_id(app_and_db):
+    """POST /api/audit/resolve must 400 on unknown directions (resolve_drift
+    silently no-ops on them) and non-integer photo_id."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+
+    resp = client.post('/api/audit/resolve',
+                       json={"photo_id": pid, "direction": "use_database"})
+    assert resp.status_code == 400
+
+    resp = client.post('/api/audit/resolve',
+                       json={"photo_id": "abc", "direction": "use_db"})
+    assert resp.status_code == 400
+
+    resp = client.post('/api/audit/resolve',
+                       json={"photo_id": pid, "direction": "use_db"})
+    assert resp.status_code == 200
+
+    # resolve-all shares the same silent no-op hazard.
+    resp = client.post('/api/audit/resolve-all', json={"direction": "bogus"})
+    assert resp.status_code == 400
+
+
+def test_encounter_species_chunks_large_photo_id_lists(app_and_db):
+    """POST /api/encounters/species must chunk its IN-clause queries so id
+    lists beyond the SQLite bound-parameter cap don't raise OperationalError."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.get_folder_tree()[0]["id"]
+    # More ids than one 900-param chunk so the query must split.
+    photo_ids = [
+        db.add_photo(folder_id=fid, filename=f"chunk{i}.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0)
+        for i in range(950)
+    ]
+
+    resp = client.post('/api/encounters/species',
+                       json={"species": "Chunk Finch", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+    assert resp.get_json()["photo_count"] == len(photo_ids)
+    # Both chunks were validated and tagged.
+    for pid in (photo_ids[0], photo_ids[-1]):
+        assert any(t["name"] == "Chunk Finch" for t in db.get_photo_keywords(pid))

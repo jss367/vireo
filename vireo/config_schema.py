@@ -232,10 +232,10 @@ SCHEMA = {
 
     # --- Preview ----------------------------------------------------------
     "preview_max_size": {
-        "type": "int", "min": 512, "max": 8192,
+        "type": "int", "min": 0, "max": 8192,
         "category": "Preview", "scope": "global",
         "label": "Preview max size (px)",
-        "desc": "Largest dimension for inline preview images.",
+        "desc": "Largest dimension for inline preview images. Set to 0 to serve originals instead of cached previews.",
     },
     "preview_quality": {
         "type": "int", "min": 1, "max": 100,
@@ -723,7 +723,7 @@ def _coerce(raw, kind):
     if kind == "bool":
         if isinstance(raw, bool):
             return raw
-        if isinstance(raw, (int, float)):
+        if isinstance(raw, int | float):
             return bool(raw)
         if isinstance(raw, str):
             low = raw.strip().lower()

@@ -126,6 +126,73 @@ def test_freetext_enter_creates_location(live_server, page):
     expect(page.locator("#locationEmpty")).to_be_hidden()
 
 
+def test_existing_location_keywords_suggest_while_typing(live_server, page):
+    """The Location input shows saved location keywords separately from Google."""
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"][:2]
+    existing_location_id = db.get_or_create_text_location("San Diego Airbnb")
+    db.set_photo_location(photo_ids[1], existing_location_id)
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(f".grid-card[data-id='{photo_ids[0]}']").wait_for(state="visible")
+    page.locator(f".grid-card[data-id='{photo_ids[0]}']").click()
+    _wait_for_detail_loaded(page)
+
+    inp = page.locator("#locationInput")
+    inp.wait_for(state="visible")
+    inp.fill("SA")
+
+    suggestions = page.locator("#locationKeywordSuggestions")
+    expect(suggestions).to_be_visible()
+    expect(suggestions).to_contain_text("San Diego Airbnb")
+    expect(suggestions).to_contain_text("Saved location")
+
+    suggestions.locator(".keyword-suggestion-option", has_text="San Diego Airbnb").click()
+
+    expect(page.locator("#locationFilled")).to_be_visible()
+    expect(page.locator("#locationFilled .filled-place")).to_have_text(
+        "San Diego Airbnb"
+    )
+    row = db.conn.execute(
+        "SELECT 1 FROM photo_keywords "
+        "WHERE photo_id = ? AND keyword_id = ?",
+        (photo_ids[0], existing_location_id),
+    ).fetchone()
+    assert row is not None
+
+
+def test_saved_location_enter_does_not_steal_google_keyboard_pick(live_server, page):
+    """With a Google key configured, Enter remains available to Google Places."""
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"][:2]
+    existing_location_id = db.get_or_create_text_location("San Diego Airbnb")
+    db.set_photo_location(photo_ids[1], existing_location_id)
+    _set_api_key()
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(f".grid-card[data-id='{photo_ids[0]}']").wait_for(state="visible")
+    page.locator(f".grid-card[data-id='{photo_ids[0]}']").click()
+    _wait_for_detail_loaded(page)
+
+    inp = page.locator("#locationInput")
+    inp.wait_for(state="visible")
+    inp.fill("San")
+    expect(page.locator("#locationKeywordSuggestions")).to_be_visible()
+
+    # Simulate Google place_changed having just handled the keyboard pick.
+    page.evaluate("window._locationLastPickedAt = Date.now();")
+    inp.press("Enter")
+    page.wait_for_timeout(600)
+
+    row = db.conn.execute(
+        "SELECT 1 FROM photo_keywords "
+        "WHERE photo_id = ? AND keyword_id = ?",
+        (photo_ids[0], existing_location_id),
+    ).fetchone()
+    assert row is None
+    expect(page.locator("#locationEmpty")).to_be_visible()
+
+
 def test_enter_after_place_changed_does_not_submit_freetext(live_server, page):
     """Regression for the keyboard-selected-autocomplete race: when the
     user presses Enter to pick a highlighted Google suggestion, the
@@ -409,5 +476,51 @@ def test_exif_accept_batches_selection_and_refreshes_smart_collection(
             (photo_id, _CANNED_PLACE_ID),
         ).fetchone()
         assert row is not None
+        expect(page.locator(f".grid-card[data-id='{photo_id}']")).to_have_count(0)
+    assert db.count_collection_photos(collection_id) == 0
+
+
+def test_freetext_location_batches_selection_and_refreshes_smart_collection(
+    live_server, page
+):
+    """Typing a free-text location applies to the active selection."""
+    photo_ids = live_server["data"]["photos"][:3]
+    _seed_exif_photos(live_server, photo_ids)
+
+    db = live_server["db"]
+    collection_id = next(
+        c["id"]
+        for c in db.get_collections()
+        if c["name"] == "GPS Without Location Keyword"
+    )
+    assert db.count_collection_photos(collection_id) == 3
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.evaluate("(collectionId) => filterByCollection(collectionId)", collection_id)
+    page.wait_for_function(
+        "(collectionId) => activeCollectionId === collectionId && photos.length === 3",
+        arg=collection_id,
+    )
+
+    page.locator(f".grid-card[data-id='{photo_ids[0]}']").click()
+    _wait_for_detail_loaded(page)
+    page.locator(f".grid-card[data-id='{photo_ids[1]}']").click(modifiers=["Meta"])
+    page.locator(f".grid-card[data-id='{photo_ids[2]}']").click(modifiers=["Meta"])
+    page.wait_for_function("() => selectedPhotos.size === 3")
+
+    inp = page.locator("#locationInput")
+    inp.fill("the meadow")
+    inp.press("Enter")
+    page.wait_for_function("() => activeCollectionId !== null && photos.length === 0")
+
+    for photo_id in photo_ids:
+        row = db.conn.execute(
+            "SELECT k.name FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (photo_id,),
+        ).fetchone()
+        assert row["name"] == "the meadow"
         expect(page.locator(f".grid-card[data-id='{photo_id}']")).to_have_count(0)
     assert db.count_collection_photos(collection_id) == 0

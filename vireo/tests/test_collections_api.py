@@ -118,6 +118,30 @@ def test_browse_init_marks_manual_photo_targets(app_and_db):
     assert by_name["Smart"]["can_add_photos"] is False
 
 
+def test_collection_photo_ids_returns_all_matching_ids(app_and_db):
+    """Collection select-all support returns all matching IDs without pagination."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/collections",
+        json={
+            "name": "Four Stars",
+            "rules": [{"field": "rating", "op": ">=", "value": 4}],
+        },
+    )
+    assert resp.status_code == 200
+    collection_id = resp.get_json()["id"]
+    expected = [p["id"] for p in db.get_collection_photos(collection_id, per_page=999999)]
+
+    resp = client.get(f"/api/collections/{collection_id}/photo-ids")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["photo_ids"] == expected
+    assert data["total"] == len(expected)
+
+
 def test_delete_collection(app_and_db):
     """DELETE /api/collections/<id> removes it."""
     app, db = app_and_db

@@ -51,7 +51,10 @@ class PipelineParams:
     skip_classify: bool = False
     skip_eye_keypoints: bool = False
     download_taxonomy: bool = True
-    preview_max_size: int = 1920
+    # None means "use the workspace-effective preview_max_size setting".
+    # Explicit values are kept for API/back-compat and tests that need to pin
+    # a preview tier.
+    preview_max_size: int | None = None
     exclude_paths: set | None = None
     exclude_photo_ids: set | None = None
     recursive: bool = True
@@ -661,7 +664,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
             def photo_cb(photo_id, path):
                 collected_photo_ids.append(photo_id)
-                scan_to_thumb.put((photo_id, path))
+                # Abort-aware put: a blocking no-timeout put would wedge the
+                # scanner forever if the thumbnail consumer died with a full
+                # queue (its setup can fail before its drain loop starts).
+                # On abort the item is dropped — the consumer is gone and the
+                # pipeline is tearing down anyway.
+                while not _should_abort(abort):
+                    try:
+                        scan_to_thumb.put((photo_id, path), timeout=0.5)
+                        break
+                    except queue.Full:
+                        continue
                 stages["scan"]["count"] = len(collected_photo_ids)
                 runner.update_step(job["id"], "scan",
                                    current_file=os.path.basename(path))
@@ -1321,10 +1334,35 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             log.exception("Pipeline thumbnail stage failed")
             stages["thumbnails"]["status"] = "failed"
             runner.update_step(job["id"], "thumbnails", status="failed", error=str(e))
+            # This stage is the sole consumer of scan_to_thumb. Anything
+            # above can raise BEFORE the drain loop (import, Database(),
+            # cfg.load(), os.makedirs) — if we just returned, the scanner
+            # would eventually block forever in put() once the queue fills,
+            # wedging threads["scanner"].join() and leaking a pipeline slot
+            # until restart. Set abort so the scanner stops producing, then
+            # drain whatever is already queued. Stop at the sentinel, or
+            # when the queue stays empty (the sentinel may already have
+            # been consumed by the main loop before a late failure; with
+            # abort set, photo_cb no longer blocks, so breaking on Empty
+            # is safe).
+            abort.set()
+            while True:
+                try:
+                    item = scan_to_thumb.get(timeout=1.0)
+                except queue.Empty:
+                    break
+                if item is _SENTINEL:
+                    break
         _update_stages(runner, job["id"], stages)
 
     def previews_stage():
         """Generate preview images for browsed photos."""
+        if abort.is_set():
+            stages["previews"]["status"] = "skipped"
+            runner.update_step(job["id"], "previews", status="completed",
+                               summary="Skipped")
+            return
+
         stages["previews"]["status"] = "running"
         runner.update_step(job["id"], "previews", status="running")
         _update_stages(runner, job["id"], stages)
@@ -1336,7 +1374,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
 
-            raw_size = params.preview_max_size
+            effective = thread_db.get_effective_config(cfg.load())
+            raw_size = (
+                params.preview_max_size
+                if params.preview_max_size is not None
+                else effective.get("preview_max_size", 1920)
+            )
             if raw_size == 0:
                 # "Full resolution" — /full redirects to /original, so
                 # there's no size-suffixed file to warm. Skip rather
@@ -1348,8 +1391,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 stages["previews"]["status"] = "completed"
                 return
             max_size = int(raw_size or 1920)
-            preview_quality = cfg.load().get("preview_quality", 90)
-            base_dir = os.path.dirname(db_path)
+            preview_quality = effective.get("preview_quality", 90)
+            # Must match the Flask serve convention — app.py reads, reaps,
+            # and evicts previews under dirname(THUMB_CACHE_DIR)/previews.
+            # Using dirname(db_path) here would, with a custom --thumb-dir,
+            # warm previews (and preview_cache rows) under a root the app
+            # never serves from.
+            base_dir = effective_vireo_dir
             preview_dir = os.path.join(base_dir, "previews")
             os.makedirs(preview_dir, exist_ok=True)
 
@@ -3588,11 +3636,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # detections/classifications written by the classify stage, and
         # without them it would mass-flag "no_subject" on photos whose
         # subjects simply weren't re-evaluated this run.
+        #
+        # Also skip when regroup failed: miss classification depends on
+        # regroup's burst_id output, so running here after a regroup
+        # failure would overwrite miss_* flags with stale context during
+        # an already-failing job. regroup_stage marks itself "failed"
+        # without setting abort, so check the stage status explicitly.
         if (
             params.skip_regroup
             or params.skip_classify
             or abort.is_set()
             or not collection_id
+            or stages["regroup"].get("status") == "failed"
         ):
             stages["misses"]["status"] = "skipped"
             runner.update_step(job["id"], "misses", status="completed",
@@ -3675,9 +3730,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     threads["thumbnail"].join()
     threads["model_loader"].join()
 
-    # Phase 1.5: previews (needs scan complete, runs before classify)
-    if not abort.is_set():
-        previews_stage()
+    # Phase 1.5: previews (needs scan complete, runs before classify).
+    #
+    # This and every later stage are always invoked — even when `abort`
+    # is set — so their step rows reach a terminal status. Gating the
+    # call on abort would leave the runner.set_steps-created rows
+    # persisted as "pending" with no finished_at, forever. Each stage
+    # checks abort internally and marks itself "Skipped".
+    previews_stage()
 
     # Phase 2: detect (needs collection; runs MegaDetector once across all
     # photos so each per-model classify step reuses cached detections
@@ -3696,14 +3756,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     classify_stage()
 
     # Phase 3: extract-masks (needs classify output)
-    if not abort.is_set():
-        extract_masks_stage()
+    extract_masks_stage()
 
     # Phase 3.5: eye keypoints (needs masks + classifier output). No-op when
     # SuperAnimal weights are absent — users opt in on the pipeline models
     # card. Per-photo failures log and continue rather than abort the stage.
-    if not abort.is_set():
-        eye_keypoints_stage()
+    eye_keypoints_stage()
 
     # Phases 4 + 5: regroup and miss detection. Held under the
     # per-workspace regroup lock TOGETHER so a concurrent same-workspace
@@ -3713,21 +3771,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     # (burst_id / pipeline_results_ws*.json) the miss computation never
     # saw. Pipelines targeting different workspaces share neither
     # stage's state and don't contend here.
-    if not abort.is_set():
+    #
+    # miss_stage's own gate covers the regroup-failed and abort cases, so
+    # both stages can be invoked unconditionally and still reach a
+    # terminal step status.
+    if abort.is_set():
+        # Both stages early-return as "Skipped" without touching grouping
+        # state, so the lock isn't needed — and skipping the calls would
+        # leave their step rows pending forever. Staying outside the lock
+        # also keeps an aborted/cancelled run from blocking behind a
+        # concurrent pipeline's regroup.
+        regroup_stage()
+        miss_stage()
+    else:
         with acquire_workspace_regroup(workspace_id):
             regroup_stage()
-            # Skip miss when regroup failed: miss classification depends
-            # on regroup's burst_id output, so running here after a
-            # regroup failure would overwrite miss_* flags with stale
-            # context during an already-failing job. regroup_stage marks
-            # itself "failed" without setting abort, so check the stage
-            # status explicitly. abort.is_set() is re-checked too — a
-            # user cancel between regroup and miss should skip miss.
-            if (
-                not abort.is_set()
-                and stages["regroup"].get("status") != "failed"
-            ):
-                miss_stage()
+            miss_stage()
 
     cancel_watcher_stop.set()
 

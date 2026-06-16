@@ -209,6 +209,12 @@ def test_validate_int_enforces_range():
         validate_value("photos_per_page", 5000)
 
 
+def test_preview_max_size_allows_zero_for_originals():
+    from config_schema import validate_value
+
+    assert validate_value("preview_max_size", 0) == 0
+
+
 def test_validate_int_rejects_fractional_float():
     from config_schema import ValidationError, validate_value
 
@@ -390,4 +396,3 @@ def test_schema_parent_prefixes_covers_dotted_namespaces():
     # Known dotted namespaces in DEFAULTS show up.
     assert "pipeline" in prefixes
     assert "ingest" in prefixes
-

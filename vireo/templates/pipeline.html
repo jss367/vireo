@@ -97,6 +97,10 @@ body { padding-bottom: 36px; }
   background: var(--danger, #E74C3C);
   color: #fff;
 }
+.stage-status-pill.cancelled {
+  background: color-mix(in srgb, var(--warning, #F0A030) 20%, transparent);
+  color: var(--warning, #F0A030);
+}
 .stage-progress-bar {
   display: inline-flex;
   width: 80px;
@@ -190,6 +194,7 @@ body { padding-bottom: 36px; }
 }
 .pipeline-plan-summary .plan-stage-row.will-run .plan-stage-pill { color: var(--accent, #24E5CA); }
 .pipeline-plan-summary .plan-stage-row.will-skip .plan-stage-pill { color: var(--text-dim, #5A8890); font-style: italic; }
+.pipeline-plan-summary .plan-stage-row.cancelled .plan-stage-pill { color: var(--warning, #F0A030); }
 .pipeline-plan-summary .plan-stage-row.done-prior .plan-stage-pill {
   color: color-mix(in srgb, var(--accent, #24E5CA) 65%, var(--text-secondary, #B0CCCC));
 }
@@ -241,6 +246,17 @@ body { padding-bottom: 36px; }
 .setting-hint {
   font-size: 12px; color: var(--text-secondary, #8BB8C0);
   margin-top: 6px;
+}
+.setting-static {
+  background: var(--bg-input, #14374E);
+  color: var(--text-primary, #E0F0F0);
+  border: 1px solid var(--border-secondary, #1A4560);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 13px;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
 }
 .setting-select {
   background: var(--bg-input, #14374E);
@@ -897,16 +913,9 @@ body { padding-bottom: 36px; }
       </p>
       <div class="setting-row">
         <div class="setting-item">
-          <div class="setting-label">Preview size</div>
-          <select class="setting-select" id="cfgPreviewSize"
-                  onchange="schedulePlanRefresh()">
-            <option value="1280">1280px</option>
-            <option value="1920" selected>1920px</option>
-            <option value="2560">2560px</option>
-            <option value="3840">3840px</option>
-            <option value="0">Full resolution</option>
-          </select>
-          <div class="setting-hint">Largest edge for cached previews.</div>
+          <div class="setting-label">Standard preview</div>
+          <div class="setting-static" id="cfgPreviewSizeSummary">1920px</div>
+          <div class="setting-hint">Configured in Settings.</div>
         </div>
       </div>
       <div class="progress-wrap" id="progressPreviews" style="display:none;">
@@ -1161,6 +1170,13 @@ function initPipelinePage() {
       document.getElementById('cfgDinov2').value = cfg.dinov2_variant;
       document.getElementById('cfgProxy').value = cfg.proxy_longest_edge;
       document.getElementById('valProxy').textContent = cfg.proxy_longest_edge;
+      var previewSummary = document.getElementById('cfgPreviewSizeSummary');
+      if (previewSummary) {
+        var previewMax = cfg.preview_max_size;
+        previewSummary.textContent = previewMax === 0
+          ? 'Original files'
+          : ((previewMax || 1920) + 'px');
+      }
 
       // Eye keypoints stage default tracks the global eye_detect_enabled
       // config so users who turned it off in Settings see it unchecked here
@@ -1394,6 +1410,7 @@ var _sourceFolders = [];
 // -- Import preview state --
 var _previewData = null;       // response from /api/import/folder-preview
 var _previewSelected = {};     // { filePath: true/false }
+var _previewLoading = false;   // true while import/new-images preview scope is unresolved
 var _previewAbort = null;      // AbortController for in-flight request
 var _duplicateResults = {};    // path -> true for duplicates (cache)
 var _duplicateCheckAbort = null;  // AbortController for in-flight check
@@ -1510,7 +1527,9 @@ function showPreviewPlaceholder() {
   document.getElementById('previewContent').style.display = 'none';
   document.getElementById('previewLoading').style.display = 'none';
   document.getElementById('previewError').style.display = 'none';
+  _previewLoading = false;
   _previewData = null;
+  _previewSelected = {};
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 }
 
@@ -1519,6 +1538,13 @@ function showPreviewLoading() {
   document.getElementById('previewContent').style.display = 'none';
   document.getElementById('previewLoading').style.display = '';
   document.getElementById('previewError').style.display = 'none';
+  _previewLoading = true;
+  _previewData = null;
+  _previewSelected = {};
+  _planFetchSeq++;
+  _pipelinePlan = null;
+  updateSamVariantWarning(null);
+  refreshPipelineUI();
   // Cancel any in-flight duplicate check when preview context changes
   if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
@@ -1531,6 +1557,9 @@ function showPreviewError(msg) {
   var errEl = document.getElementById('previewError');
   errEl.style.display = '';
   errEl.textContent = msg;
+  _previewLoading = false;
+  _previewData = null;
+  _previewSelected = {};
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 }
 
@@ -1539,6 +1568,7 @@ function renderPreview() {
   document.getElementById('previewLoading').style.display = 'none';
   document.getElementById('previewError').style.display = 'none';
   document.getElementById('previewContent').style.display = '';
+  _previewLoading = false;
 
   var data = _previewData;
   if (!data) return;
@@ -2445,8 +2475,11 @@ async function startPipeline() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ current_path: window.location.pathname })
       });
-      // Update the navbar workspace display
-      var wsBtn = document.getElementById('wsDropdownBtn');
+      // Update the navbar workspace display ('wsCurrentName' is the
+      // navbar's actual element — the old 'wsDropdownBtn' id never
+      // existed, so the navbar kept showing the previous workspace for
+      // the whole run).
+      var wsBtn = document.getElementById('wsCurrentName');
       if (wsBtn) wsBtn.textContent = wsName;
       document.getElementById('lblCurrentWsName').textContent = '(' + wsName + ')';
     } catch(e) {
@@ -2516,9 +2549,6 @@ async function startPipeline() {
       if (excludedIds.length > 0) body.exclude_photo_ids = excludedIds;
     }
   }
-
-  // Preview size
-  body.preview_max_size = parseInt(document.getElementById('cfgPreviewSize').value);
 
   // Optional stages
   var classifyEnabled = document.getElementById('enableClassify').checked;
@@ -2865,8 +2895,11 @@ function _onPipelineComplete(result) {
     ['Source', 'Scan', 'Previews', 'Classify', 'Extract', 'EyeKeypoints', 'Group'].forEach(function(cardSuffix) {
       if (_runningStages[cardSuffix]) {
         delete _runningStages[cardSuffix];
-        _stageOutcomes[cardSuffix] = 'will-skip';
-        _setPill(cardSuffix, 'will-skip', 'Cancelled');
+        // Record a real 'cancelled' outcome so later refreshPipelineUI
+        // calls keep rendering "Cancelled" — a 'will-skip' outcome would
+        // be re-labeled with the future-tense "Will skip" on the next
+        // refresh, which lies about what happened to a mid-run stage.
+        _stageOutcomes[cardSuffix] = 'cancelled';
       }
     });
     refreshPipelineUI();
@@ -3275,18 +3308,28 @@ async function loadLabels() {
     var active = data.active || [];
     var activePaths = new Set(active.map(function(a) { return a.labels_file; }));
 
+    div.textContent = '';
     if (!data.labels || data.labels.length === 0) {
-      div.innerHTML = '<span style="color:var(--text-dim);font-size:12px;">(Tree of Life — all species)</span>';
+      var empty = document.createElement('span');
+      empty.style.cssText = 'color:var(--text-dim);font-size:12px;';
+      empty.textContent = '(Tree of Life — all species)';
+      div.appendChild(empty);
     } else {
-      var html = '';
       data.labels.forEach(function(l) {
         var isActive = activePaths.has(l.labels_file);
-        html += '<label style="display:flex;align-items:center;gap:4px;color:var(--text-secondary);cursor:pointer;padding:2px 0;">' +
-          '<input type="checkbox" class="labels-run-cb" value="' + l.labels_file.replace(/"/g, '&quot;') + '"' +
-          (isActive ? ' checked' : '') + ' onchange="updateReadiness(); schedulePlanRefresh();" style="accent-color:var(--accent);"> ' +
-          l.name + ' (' + (l.species_count || 0) + ')</label>';
+        var label = document.createElement('label');
+        label.style.cssText = 'display:flex;align-items:center;gap:4px;color:var(--text-secondary);cursor:pointer;padding:2px 0;';
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'labels-run-cb';
+        cb.value = l.labels_file;
+        cb.checked = isActive;
+        cb.onchange = function() { updateReadiness(); schedulePlanRefresh(); };
+        cb.style.cssText = 'accent-color:var(--accent);';
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(' ' + l.name + ' (' + (l.species_count || 0) + ')'));
+        div.appendChild(label);
       });
-      div.innerHTML = html;
     }
 
   } catch(e) {}
@@ -3310,9 +3353,9 @@ async function updateReadiness() {
 
     // Model status
     if (r.model_ready) {
-      items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Model: <b>' + r.model_name + '</b> — ready');
+      items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Model: <b>' + escapeHtml(r.model_name) + '</b> — ready');
     } else if (r.needs_download) {
-      items.push('<span style="color:var(--warning,#f0c040);">&#9679;</span> Model: <b>' + r.model_name + '</b> — will download <b>' + (r.model_size_mb >= 1000 ? (r.model_size_mb / 1000).toFixed(1) + ' GB' : r.model_size_mb + ' MB') + '</b> on first run');
+      items.push('<span style="color:var(--warning,#f0c040);">&#9679;</span> Model: <b>' + escapeHtml(r.model_name) + '</b> — will download <b>' + (r.model_size_mb >= 1000 ? (r.model_size_mb / 1000).toFixed(1) + ' GB' : r.model_size_mb + ' MB') + '</b> on first run');
     } else {
       items.push('<span style="color:var(--danger,#e74c3c);">&#10007;</span> No model available — download one in Settings');
     }
@@ -3322,7 +3365,7 @@ async function updateReadiness() {
       items.push('<span style="color:var(--info,#7ec8e3);">&#9679;</span> Labels: <b>Tree of Life</b> — classifying against all species (slower, less accurate than regional labels)');
     } else if (r.labels_count > 0) {
       var labelDisplay = r.labels_name.length > 60 ? r.labels_name.substring(0, 57) + '...' : r.labels_name;
-      items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Labels: <b>' + labelDisplay + '</b> — ' + r.labels_count.toLocaleString() + ' species');
+      items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Labels: <b>' + escapeHtml(labelDisplay) + '</b> — ' + r.labels_count.toLocaleString() + ' species');
     }
 
     // Embeddings status
@@ -3813,7 +3856,7 @@ var _pipelineState = {
 // and a single global would let one stage's status update clobber another's
 // "Running…" pill on the next refresh.
 var _runningStages = {};  // suffix -> true while that stage is running
-var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'will-skip' | 'done-prior'
+var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'cancelled' | 'will-skip' | 'done-prior'
 
 // Plan response from POST /api/pipeline/plan, keyed by stage suffix:
 //   { Classify: { state, summary, detail }, Extract: ..., ... }
@@ -3856,6 +3899,7 @@ var _PILL_LABELS = {
   'running':    'Running…',
   'done':       'Done',
   'failed':     'Failed',
+  'cancelled':  'Cancelled',
   'will-run':   'Will run',
   'will-skip':  'Will skip',
   'done-prior': 'Already done',
@@ -3865,16 +3909,16 @@ var _PILL_LABELS = {
 // staleness signal. Returns the literal string to display.
 //
 // The plan endpoint emits `state: 'will-run'` for both fresh and
-// outdated cases; the distinction lives in `detail.fingerprint_outdated`
-// / `detail.fingerprint_invalidated`. We surface that here as a distinct
-// "Outdated" label so users see settings-changed staleness directly,
-// not buried in the summary text.
+// settings-changed cases; the distinction lives in
+// `detail.fingerprint_outdated` / `detail.fingerprint_invalidated`.
+// Classify gets a more specific label when only the BioCLIP label set changed.
 function _formatPillLabel(stage, planEntry, state) {
   // Special-cased states (running/done/failed/will-skip) have static
   // labels — counts during a run come from a separate channel.
   if (state === 'running')   return 'Running…';
   if (state === 'done')      return 'Done';
   if (state === 'failed')    return 'Failed';
+  if (state === 'cancelled') return 'Cancelled';
   if (state === 'will-skip') return 'Will skip';
 
   if (!planEntry) {
@@ -3886,11 +3930,16 @@ function _formatPillLabel(stage, planEntry, state) {
   var pending  = (typeof detail.pending  === 'number') ? detail.pending  : null;
   var eligible = (typeof detail.eligible === 'number') ? detail.eligible : null;
   var outdated = !!(detail.fingerprint_outdated || detail.fingerprint_invalidated);
+  var labelSetChanged = outdated
+    && stage
+    && stage.suffix === 'Classify'
+    && detail.fingerprint_reason === 'label_set_changed';
 
   // No quantifiable work — fall back to the state-only label, but still
   // surface the outdated flag for stages that don't have a per-photo
   // unit (e.g., Group emits fingerprint_outdated with no eligible count).
   if (eligible === null || eligible === 0) {
+    if (state === 'will-run' && labelSetChanged) return 'Different label set';
     if (state === 'will-run' && outdated) return 'Outdated';
     return state === 'done-prior' ? 'Already done' : 'Will run';
   }
@@ -3900,6 +3949,7 @@ function _formatPillLabel(stage, planEntry, state) {
   }
 
   // state === 'will-run' from here on.
+  if (labelSetChanged)           return 'Different label set (' + (pending || eligible) + ' to classify)';
   if (outdated)                  return 'Outdated (' + (pending || eligible) + ' to redo)';
   if (pending !== null && pending > 0 && pending < eligible) {
     return 'Resume (' + pending + ' left)';
@@ -3983,7 +4033,7 @@ function _renderPlanSummary() {
       '<div class="plan-stage-row ' + state + '">' +
         '<span class="plan-stage-name">' + stage.label + '</span>' +
         '<span class="plan-stage-pill">' + pillLabel + '</span>' +
-        '<span class="plan-stage-summary">' + (summary || '') + '</span>' +
+        '<span class="plan-stage-summary">' + escapeHtml(summary || '') + '</span>' +
       '</div>'
     );
   });
@@ -4099,16 +4149,8 @@ function _buildPlanBody() {
   body.skip_eye_keypoints  = !document.getElementById('enableEyeKeypoints').checked;
   body.skip_regroup        = !document.getElementById('enableGroup').checked;
 
-  // Send the user's currently-selected preview tier so the Previews plan
-  // entry counts pending work against the right preview_cache size. A
-  // value of 0 ("Full resolution") tells the backend the previews
-  // substage will skip, so the plan summary doesn't promise N previews
-  // that will never be generated.
-  var prevSelect = document.getElementById('cfgPreviewSize');
-  if (prevSelect) {
-    var pms = parseInt(prevSelect.value, 10);
-    if (!isNaN(pms)) body.preview_max_size = pms;
-  }
+  // Preview size is a workspace/library setting. Omit preview_max_size so
+  // the backend planner and job both use the same workspace-effective value.
 
   if (!body.skip_classify) {
     var modelIds = [];
@@ -4129,11 +4171,28 @@ function _buildPlanBody() {
   return body;
 }
 
+function _planIsWaitingForImportPreview() {
+  if (_sourceMode === 'import') {
+    return _sourceFolders.length > 0 && getIngestFileTypes().length > 0
+      && (_previewLoading || !_previewData);
+  }
+  if (_sourceMode === 'new_images') {
+    return newImagesSnapshotId !== null && (_previewLoading || !_previewData);
+  }
+  return false;
+}
+
 async function refreshPipelinePlan() {
   // Don't fetch a plan while a pipeline is running — live state is
   // authoritative, and the running stages would race the plan response.
   if (_pipelineRunning) return;
   var seq = ++_planFetchSeq;
+  if (_planIsWaitingForImportPreview()) {
+    _pipelinePlan = null;
+    updateSamVariantWarning(null);
+    refreshPipelineUI();
+    return;
+  }
   try {
     var data = await safeFetch('/api/pipeline/plan', {
       method: 'POST',

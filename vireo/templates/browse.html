@@ -88,6 +88,17 @@ body {
   border-color: var(--border-primary);
   color: var(--text-ghost);
 }
+.collection-resolve-btn {
+  background: var(--bg-tertiary);
+  color: var(--accent);
+  border: 1px solid var(--border-secondary);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.collection-resolve-btn:hover { border-color: var(--accent); }
 .tree-item .folder-status-partial {
   margin-left: 6px;
   font-size: 10px;
@@ -728,6 +739,11 @@ body {
   padding: 4px 0;
 }
 .keyword-suggestion-list.open { display: block; }
+.location-keyword-suggestion-list {
+  top: auto;
+  bottom: calc(100% + 2px);
+  z-index: 10001;
+}
 .keyword-suggestion-option {
   display: flex;
   align-items: center;
@@ -1194,6 +1210,50 @@ body {
 .modal-btn-primary { background: var(--accent); color: var(--bg-primary); }
 .modal-btn-cancel { background: var(--bg-tertiary); color: var(--text-secondary); }
 .modal-preview { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
+.gps-resolve-summary {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+.gps-resolve-list {
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  margin-bottom: 12px;
+}
+.gps-resolve-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.gps-resolve-row:last-child { border-bottom: 0; }
+.gps-resolve-place {
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gps-resolve-samples {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gps-resolve-count {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
 .export-var-pill {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
@@ -1354,6 +1414,7 @@ body {
       <button onclick="batchSetFlag('flagged')" style="background:var(--bg-tertiary);color:var(--accent);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Flag</button>
       <button onclick="batchSetFlag('rejected')" style="background:var(--bg-tertiary);color:var(--danger);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
       <button onclick="batchAddKeyword()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
+      <button id="resolveGpsSelectedBtn" onclick="openGpsResolveForSelection()" style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Resolve GPS</button>
       <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
       <button onclick="openCaptureTimeModal()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Adjust Time</button>
       <button id="compareBtn" onclick="openBrowseCompare()" title="Compare two selected photos side by side" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Compare</button>
@@ -1503,7 +1564,10 @@ body {
         <div class="detail-section-title">Location</div>
         <div id="locationFilled" hidden></div>
         <div id="locationEmpty">
-          <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..." autocomplete="off">
+          <div class="keyword-autocomplete">
+            <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..." autocomplete="off">
+            <div class="keyword-suggestion-list location-keyword-suggestion-list" id="locationKeywordSuggestions" role="listbox"></div>
+          </div>
           <div id="locationExifSuggestion" class="location-suggestion" hidden></div>
           <div id="locationError" class="location-error" hidden></div>
         </div>
@@ -1594,6 +1658,20 @@ body {
     <div class="modal-actions">
       <button class="modal-btn modal-btn-primary" onclick="confirmBatchCollection()">Add</button>
       <button class="modal-btn modal-btn-cancel" onclick="hideBatchCollectionModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Resolve GPS Locations Modal -->
+<div class="modal-overlay" id="gpsResolveModal">
+  <div class="modal" style="width:560px;max-width:calc(100vw - 32px);">
+    <h3>Resolve GPS Locations</h3>
+    <div id="gpsResolveSummary" class="gps-resolve-summary">Loading...</div>
+    <div id="gpsResolveGroups" class="gps-resolve-list"></div>
+    <div class="modal-preview" id="gpsResolveNote"></div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" id="gpsResolveApplyBtn" onclick="applyGpsResolve()">Apply</button>
+      <button class="modal-btn modal-btn-cancel" onclick="hideGpsResolveModal()">Cancel</button>
     </div>
   </div>
 </div>
@@ -1708,6 +1786,7 @@ var inatSubmitted = {};  // {photo_id: true}
 var colorLabels = {};    // {photo_id: color_string}
 var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch responses
 var loadEpoch = 0;       // bumped on any grid reset; guards against stale loadPhotos responses
+var selectAllRequestSeq = 0; // bumped to ignore stale async select-all responses
 var filterRating = 0;
 var flagFilter = '';
 var activeFolderId = null;
@@ -1755,6 +1834,7 @@ async function loadKeywordAutocompleteOptions(force) {
             id: k.id,
             name: k.name,
             type: k.type || 'general',
+            place_id: k.place_id || null,
             photo_count: k.photo_count || 0,
             search: String(k.name || '').toLowerCase(),
           };
@@ -2076,7 +2156,7 @@ function renderPhotoCard(p, idx) {
 
   return '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
     '<div class="grid-card-img-wrap">' +
-      '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
+      '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" decoding="async" alt="' + escapeAttr(p.filename) + '">' +
       clipBadge +
       boxHtml +
       inatBadge +
@@ -2229,9 +2309,13 @@ function renderCollectionList(collections) {
     var canAddPhotos = collectionAcceptsManualPhotos(c);
     var kind = canAddPhotos ? 'manual' : 'smart';
     var kindLabel = canAddPhotos ? 'Manual' : 'Smart';
+    var resolveBtn = (c.name === 'GPS Without Location Keyword')
+      ? '<button class="collection-resolve-btn" type="button" title="Resolve locations from GPS" onclick="event.stopPropagation(); openGpsResolveForCollection(' + c.id + ')">Resolve GPS</button>'
+      : '';
     html += '<div class="tree-item" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '" onclick="filterByCollection(' + c.id + ')">' +
       '<span class="collection-name">' + escapeHtml(c.name) + '</span>' +
       '<span class="collection-kind-badge ' + kind + '">' + kindLabel + '</span>' +
+      resolveBtn +
       '<span class="count">' + count + '</span></div>';
   });
   document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
@@ -3037,10 +3121,16 @@ async function saveCollection() {
 /* ---------- Photo Loading ---------- */
 function resetAndLoad() {
   cancelScheduledSearchFilter();
+  if (clipSearchActive) {
+    clipSearchActive = false;
+    document.getElementById('clipSearchInput').value = '';
+    document.getElementById('clipClearBtn').style.display = 'none';
+  }
   photos = [];
   currentPage = 1;
   allLoaded = false;
   loadEpoch++;
+  selectAllRequestSeq++;
   loading = false;
   // Dataset is about to change; any prior selection (multi-select Set or
   // single-focus id) points at photos that may not exist in the new view.
@@ -3057,12 +3147,39 @@ function resetAndLoad() {
   loadPhotos();
 }
 
-async function loadPhotos() {
+function buildCurrentBrowseParams() {
+  var params = new URLSearchParams();
+  params.set('sort', document.getElementById('sortSelect').value);
+
+  if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (filterRating > 0) params.set('rating_min', filterRating);
+  if (flagFilter) params.set('flag', flagFilter);
+
+  var colorFilter = document.getElementById('colorFilter').value;
+  if (colorFilter) params.set('color_label', colorFilter);
+
+  var dateFrom = document.getElementById('dateFrom').value;
+  var dateTo = document.getElementById('dateTo').value;
+  if (dateFrom) params.set('date_from', dateFrom);
+  if (dateTo) params.set('date_to', dateTo);
+
+  var search = document.getElementById('searchInput').value.trim();
+  if (search) params.set('keyword', search);
+  if (activeKeyword) params.set('keyword', activeKeyword);
+  return params;
+}
+
+async function loadPhotos(options) {
   if (loading || allLoaded) return;
   loading = true;
   var epoch = loadEpoch;
   var loadSucceeded = false;
-  document.getElementById('loadingState').style.display = 'block';
+  var showLoading = !(options && options.silent) && photos.length === 0;
+  var loadingState = document.getElementById('loadingState');
+  if (showLoading && loadingState) {
+    loadingState.textContent = 'Loading...';
+    loadingState.style.display = 'block';
+  }
 
   var url;
   if (activeCollectionId) {
@@ -3071,26 +3188,9 @@ async function loadPhotos() {
     cparams.set('per_page', perPage);
     url = '/api/collections/' + activeCollectionId + '/photos?' + cparams.toString();
   } else {
-    var params = new URLSearchParams();
+    var params = buildCurrentBrowseParams();
     params.set('page', currentPage);
     params.set('per_page', perPage);
-    params.set('sort', document.getElementById('sortSelect').value);
-
-    if (activeFolderId) params.set('folder_id', activeFolderId);
-    if (filterRating > 0) params.set('rating_min', filterRating);
-    if (flagFilter) params.set('flag', flagFilter);
-
-    var colorFilter = document.getElementById('colorFilter').value;
-    if (colorFilter) params.set('color_label', colorFilter);
-
-    var dateFrom = document.getElementById('dateFrom').value;
-    var dateTo = document.getElementById('dateTo').value;
-    if (dateFrom) params.set('date_from', dateFrom);
-    if (dateTo) params.set('date_to', dateTo);
-
-    var search = document.getElementById('searchInput').value.trim();
-    if (search) params.set('keyword', search);
-    if (activeKeyword) params.set('keyword', activeKeyword);
     url = '/api/photos?' + params.toString();
   }
 
@@ -3127,11 +3227,13 @@ async function loadPhotos() {
     loadSucceeded = true;
   } catch(e) {
     if (epoch !== loadEpoch) return;
-    document.getElementById('loadingState').textContent = 'Error loading photos.';
+    if (showLoading && loadingState) {
+      loadingState.textContent = 'Error loading photos.';
+    }
   } finally {
     if (epoch === loadEpoch) {
       loading = false;
-      document.getElementById('loadingState').style.display = 'none';
+      if (showLoading && loadingState) loadingState.style.display = 'none';
       if (loadSucceeded) rearmInfiniteScrollObserver();
     }
   }
@@ -3275,9 +3377,12 @@ function selectCalendarDay(dateStr, count) {
   document.getElementById('calSelectionText').textContent = formatted + ' \u00b7 ' + count + ' photo' + (count !== 1 ? 's' : '');
   document.getElementById('calSelection').classList.add('active');
 
-  // Update date inputs and reload
+  // Update date inputs and reload. #dateTo is <input type="date">, which
+  // rejects datetime strings (the value would silently blank and the filter
+  // would lose its upper bound). A bare date is correct: the backend pads
+  // date_to to end-of-day (_inclusive_date_to in db.py).
   document.getElementById('dateFrom').value = dateStr;
-  document.getElementById('dateTo').value = dateStr + 'T23:59:59';
+  document.getElementById('dateTo').value = dateStr;
   activeCollectionId = null;
   reloadBrowseResults();
   renderCalendar(); // update selected state
@@ -3420,6 +3525,8 @@ async function runClipSearch() {
 
   var searchSeq = ++clipSearchSeq;
   loadEpoch++;
+  selectAllRequestSeq++;
+  var epoch = loadEpoch;
   loading = false;
   photos = [];
   allLoaded = true;
@@ -3441,7 +3548,7 @@ async function runClipSearch() {
     params.set('threshold', 0.15);
     appendClipSearchScopeParams(params);
     var data = await safeFetch('/api/photos/search?' + params.toString());
-    if (searchSeq !== clipSearchSeq) return;
+    if (searchSeq !== clipSearchSeq || epoch !== loadEpoch) return;
 
     if (data.reason) {
       var msg = {
@@ -3465,20 +3572,20 @@ async function runClipSearch() {
     renderGrid();
     var refreshIds = photos.map(function(p) { return p.id; });
     loadInatStatus(refreshIds).then(function() {
-      if (searchSeq === clipSearchSeq) refreshGridCards(refreshIds);
+      if (searchSeq === clipSearchSeq && epoch === loadEpoch) refreshGridCards(refreshIds);
     });
     fetchColorLabels(refreshIds).then(function() {
-      if (searchSeq === clipSearchSeq) refreshGridCards(refreshIds);
+      if (searchSeq === clipSearchSeq && epoch === loadEpoch) refreshGridCards(refreshIds);
     });
     var summary = document.getElementById('filterSummary');
     summary.textContent = data.total_matches + ' matches' + (data.model_used ? ' (' + data.model_used + ')' : '');
   } catch(e) {
-    if (searchSeq !== clipSearchSeq) return;
+    if (searchSeq !== clipSearchSeq || epoch !== loadEpoch) return;
     document.getElementById('loadingState').textContent = 'Search failed: ' + (e.message || e);
     keepLoadingMessage = true;
     return;
   } finally {
-    if (searchSeq === clipSearchSeq && !keepLoadingMessage) {
+    if (searchSeq === clipSearchSeq && epoch === loadEpoch && !keepLoadingMessage) {
       document.getElementById('loadingState').style.display = 'none';
     }
   }
@@ -3621,8 +3728,8 @@ function browseKeyMatchesConfiguredShortcut(e) {
 var gridContainer = document.getElementById('gridContainer');
 var infiniteScrollObserverDisconnected = false;
 var observer = new IntersectionObserver(function(entries) {
-  if (entries[0].isIntersecting) loadPhotos();
-}, { root: gridContainer, rootMargin: '1200px 0px' });
+  if (entries[0].isIntersecting) loadPhotos({ silent: photos.length > 0 });
+}, { root: gridContainer, rootMargin: '3200px 0px' });
 
 var _observerObserve = observer.observe.bind(observer);
 var _observerDisconnect = observer.disconnect.bind(observer);
@@ -3725,6 +3832,57 @@ function getActiveSelection() {
   return [];
 }
 
+async function selectAllMatchingPhotos() {
+  anchorRestoreEpoch++;
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  var requestSeq = ++selectAllRequestSeq;
+  var requestEpoch = loadEpoch;
+
+  if (clipSearchActive) {
+    var query = document.getElementById('clipSearchInput').value.trim();
+    if (!query) return;
+    var searchParams = new URLSearchParams();
+    searchParams.set('q', query);
+    searchParams.set('threshold', 0.15);
+    searchParams.set('ids_only', '1');
+    appendClipSearchScopeParams(searchParams);
+    showToast('Selecting all matching search results...');
+    try {
+      var searchData = await safeFetch('/api/photos/search?' + searchParams.toString(), {}, { toast: false });
+      if (requestSeq !== selectAllRequestSeq || requestEpoch !== loadEpoch) return;
+      selectedPhotos.clear();
+      (searchData.photo_ids || []).forEach(function(id) { selectedPhotos.add(id); });
+      renderGrid();
+      updateBatchBar();
+      showToast('Selected ' + selectedPhotos.size.toLocaleString() + ' search result' + (selectedPhotos.size === 1 ? '' : 's'));
+    } catch(e) {
+      showToast('Could not select all search results: ' + (e.message || e), 'error');
+    }
+    return;
+  }
+
+  var url;
+  if (activeCollectionId) {
+    url = '/api/collections/' + activeCollectionId + '/photo-ids';
+  } else {
+    url = '/api/photos/ids?' + buildCurrentBrowseParams().toString();
+  }
+
+  showToast('Selecting all matching photos...');
+  try {
+    var data = await safeFetch(url, {}, { toast: false });
+    if (requestSeq !== selectAllRequestSeq || requestEpoch !== loadEpoch) return;
+    selectedPhotos.clear();
+    (data.photo_ids || []).forEach(function(id) { selectedPhotos.add(id); });
+    renderGrid();
+    updateBatchBar();
+    showToast('Selected ' + selectedPhotos.size.toLocaleString() + ' photo' + (selectedPhotos.size === 1 ? '' : 's'));
+  } catch(e) {
+    showToast('Could not select all photos: ' + (e.message || e), 'error');
+  }
+}
+
 function selectionIdsKey(ids) {
   return ids.slice().sort(function(a, b) { return a - b; }).join(',');
 }
@@ -3768,7 +3926,7 @@ function updateBatchBar() {
   var ids = getActiveSelection();
   if (ids.length >= 1) {
     bar.style.display = 'flex';
-    document.getElementById('batchCount').textContent = ids.length + ' selected';
+    document.getElementById('batchCount').textContent = ids.length.toLocaleString() + ' selected';
   } else {
     bar.style.display = 'none';
   }
@@ -3972,7 +4130,17 @@ function updateSelectionPanel(ids) {
   if (summary) summary.classList.add('hidden');
   if (detail) detail.classList.toggle('visible', detailMatchesSelectedPhoto());
   panel.classList.remove('hidden');
-  document.getElementById('selectionCount').textContent = ids.length + ' photos selected';
+  document.getElementById('selectionCount').textContent = ids.length.toLocaleString() + ' photos selected';
+  if (ids.length > 1000) {
+    selectionKeywordKey = selectionIdsKey(ids);
+    selectionKeywordMissingById = {};
+    selectionKeywordRequestSeq++;
+    var list = document.getElementById('selectionKeywordSuggestions');
+    if (list) {
+      list.innerHTML = '<div class="selection-empty">Keyword suggestions are available for selections of 1,000 photos or fewer.</div>';
+    }
+    return;
+  }
   loadSelectionKeywordSuggestions(ids);
 }
 
@@ -4408,6 +4576,141 @@ async function confirmBatchCollection() {
   clearSelection();
 }
 
+var _gpsResolveSource = null;
+var _gpsResolvePreview = null;
+
+function gpsResolveReasonLabel(reason) {
+  var labels = {
+    missing_gps: 'No GPS',
+    invalid_gps: 'Invalid GPS',
+    no_api_key: 'No Google Maps key',
+    no_match: 'No place found',
+    transient_error: 'Temporary lookup failure',
+    already_has_location: 'Already has location',
+  };
+  return labels[reason] || reason || 'Unresolved';
+}
+
+function renderGpsResolvePreview(data) {
+  _gpsResolvePreview = data || {};
+  var total = _gpsResolvePreview.total || 0;
+  var resolvable = _gpsResolvePreview.resolvable || 0;
+  var groups = _gpsResolvePreview.groups || [];
+  var unresolved = _gpsResolvePreview.unresolved || [];
+  var skipped = _gpsResolvePreview.skipped || [];
+  var summary = document.getElementById('gpsResolveSummary');
+  var groupEl = document.getElementById('gpsResolveGroups');
+  var note = document.getElementById('gpsResolveNote');
+  var applyBtn = document.getElementById('gpsResolveApplyBtn');
+
+  summary.textContent = resolvable.toLocaleString() + ' of ' + total.toLocaleString()
+    + ' photos can be assigned across ' + groups.length.toLocaleString()
+    + ' place' + (groups.length === 1 ? '' : 's') + '.';
+
+  groupEl.innerHTML = groups.map(function(g) {
+    var samples = (g.sample_filenames || []).join(', ');
+    return '<div class="gps-resolve-row">' +
+      '<div style="min-width:0;">' +
+        '<div class="gps-resolve-place">' + escapeHtml(g.summary || g.name || g.place_id || 'Unknown place') + '</div>' +
+        (samples ? '<div class="gps-resolve-samples">' + escapeHtml(samples) + '</div>' : '') +
+      '</div>' +
+      '<div class="gps-resolve-count">' + (g.count || 0).toLocaleString() + '</div>' +
+    '</div>';
+  }).join('') || '<div class="gps-resolve-row"><div class="gps-resolve-place">No resolvable GPS locations</div></div>';
+
+  var notes = [];
+  if (unresolved.length) {
+    var reasonCounts = {};
+    unresolved.forEach(function(item) {
+      var reason = item.reason || 'unresolved';
+      reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+    });
+    var reasonText = Object.keys(reasonCounts).map(function(reason) {
+      return reasonCounts[reason].toLocaleString() + ' ' + gpsResolveReasonLabel(reason);
+    }).join(', ');
+    notes.push(unresolved.length.toLocaleString() + ' unresolved: ' + reasonText);
+  }
+  if (skipped.length) {
+    notes.push(skipped.length.toLocaleString() + ' skipped because they already have a location.');
+  }
+  note.textContent = notes.join(' ');
+  applyBtn.disabled = resolvable === 0;
+  applyBtn.style.opacity = resolvable === 0 ? '0.55' : '';
+}
+
+async function openGpsResolve(source) {
+  _gpsResolveSource = source;
+  _gpsResolvePreview = null;
+  document.getElementById('gpsResolveSummary').textContent = 'Loading...';
+  document.getElementById('gpsResolveGroups').innerHTML = '';
+  document.getElementById('gpsResolveNote').textContent = '';
+  document.getElementById('gpsResolveApplyBtn').disabled = true;
+  document.getElementById('gpsResolveModal').classList.add('open');
+  try {
+    var data = await safeFetch('/api/batch/location/from-exif', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(Object.assign({apply: false}, source)),
+    });
+    renderGpsResolvePreview(data);
+  } catch(e) {
+    hideGpsResolveModal();
+  }
+}
+
+function openGpsResolveForCollection(collectionId) {
+  openGpsResolve({collection_id: collectionId});
+}
+
+function openGpsResolveForSelection() {
+  var ids = getActiveSelection();
+  if (!ids.length) return;
+  openGpsResolve({photo_ids: ids});
+}
+
+function hideGpsResolveModal() {
+  document.getElementById('gpsResolveModal').classList.remove('open');
+  _gpsResolveSource = null;
+  _gpsResolvePreview = null;
+  window._vireoNativeMenuPhotoIdsOverride = null;
+}
+
+async function applyGpsResolve() {
+  if (!_gpsResolveSource || !_gpsResolvePreview || !_gpsResolvePreview.resolvable) return;
+  var btn = document.getElementById('gpsResolveApplyBtn');
+  btn.disabled = true;
+  btn.textContent = 'Applying...';
+  try {
+    var data = await safeFetch('/api/batch/location/from-exif', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(Object.assign({apply: true}, _gpsResolveSource)),
+    });
+    var updated = data.updated || 0;
+    var updatedIds = [];
+    (data.groups || []).forEach(function(g) {
+      (g.photo_ids || []).forEach(function(id) { updatedIds.push(id); });
+    });
+    hideGpsResolveModal();
+    invalidateKeywordAutocompleteCache();
+    loadKeywords();
+    scheduleCollectionCountsRefresh();
+    refreshPendingSyncBanner();
+    var detailPhotoId = updatedIds.indexOf(selectedPhotoId) !== -1 ? selectedPhotoId : null;
+    await _afterLocationMutation(updatedIds, detailPhotoId);
+    var errors = (data.group_errors || []).length;
+    showToast(
+      'Resolved GPS locations for ' + updated.toLocaleString() + ' photo' + (updated === 1 ? '' : 's')
+      + (errors ? '; ' + errors + ' place group' + (errors === 1 ? '' : 's') + ' failed' : '')
+    );
+    if (updated > 0) showUndoToast();
+  } catch(e) {
+    btn.disabled = false;
+  } finally {
+    btn.textContent = 'Apply';
+  }
+}
+
 var captureTimePreviewSeq = 0;
 
 function getCaptureTimeMode() {
@@ -4557,7 +4860,8 @@ async function startCaptureTimeJob() {
           return;
         }
         var result = done.result || {};
-        showToast('Capture time updated: ' + (result.updated || 0) + ' updated, ' + (result.failed || 0) + ' failed', result.failed ? 'error' : 'success');
+        var skippedText = result.skipped ? ', ' + result.skipped + ' skipped' : '';
+        showToast('Capture time updated: ' + (result.updated || 0) + ' updated' + skippedText + ', ' + (result.failed || 0) + ' failed', result.failed ? 'error' : 'success');
         resetAndLoad();
         loadSummary();
       },
@@ -5147,6 +5451,10 @@ var _locationAutocompleteBound = false;
 // keyboard-selected autocomplete suggestion (where place_changed fires
 // AFTER the keydown event) gets a chance to cancel the text path.
 var _locationPendingTextSubmit = null;
+var _locationKeywordState = {
+  matches: [],
+  activeIndex: -1,
+};
 
 function _showLocationError(msg) {
   var el = document.getElementById('locationError');
@@ -5163,6 +5471,81 @@ function _hideLocationError() {
   if (el) el.hidden = true;
 }
 
+function hideLocationKeywordSuggestions() {
+  var dropdown = document.getElementById('locationKeywordSuggestions');
+  if (dropdown) {
+    dropdown.classList.remove('open');
+    dropdown.innerHTML = '';
+  }
+  _locationKeywordState.matches = [];
+  _locationKeywordState.activeIndex = -1;
+}
+
+function renderLocationKeywordSuggestions() {
+  var input = document.getElementById('locationInput');
+  var dropdown = document.getElementById('locationKeywordSuggestions');
+  if (!input || !dropdown) return;
+  var query = input.value.trim().toLowerCase();
+  if (!query || !keywordAutocompleteCache || !keywordAutocompleteCache.length) {
+    hideLocationKeywordSuggestions();
+    return;
+  }
+
+  _locationKeywordState.matches = keywordAutocompleteCache
+    .filter(function(k) { return k && k.type === 'location'; })
+    .map(function(k) {
+      return { keyword: k, score: keywordMatchScore(k.search, query) };
+    })
+    .filter(function(item) { return item.score < 99; })
+    .sort(function(a, b) {
+      return a.score - b.score || a.keyword.search.localeCompare(b.keyword.search) || a.keyword.id - b.keyword.id;
+    })
+    .slice(0, 6)
+    .map(function(item) { return item.keyword; });
+
+  if (!_locationKeywordState.matches.length) {
+    hideLocationKeywordSuggestions();
+    return;
+  }
+  if (_locationKeywordState.activeIndex < 0 || _locationKeywordState.activeIndex >= _locationKeywordState.matches.length) {
+    _locationKeywordState.activeIndex = 0;
+  }
+
+  dropdown.innerHTML = _locationKeywordState.matches.map(function(k, idx) {
+    var active = idx === _locationKeywordState.activeIndex ? ' active' : '';
+    var count = k.photo_count === 1 ? '1 photo' : k.photo_count + ' photos';
+    var source = k.place_id ? 'Saved Google place' : 'Saved location';
+    return '<div class="keyword-suggestion-option' + active + '" role="option" data-index="' + idx + '">' +
+      '<span class="keyword-suggestion-name">' + escapeHtml(k.name) + '</span>' +
+      '<span class="keyword-suggestion-meta">' + escapeHtml(source + ' · ' + count) + '</span>' +
+      '</div>';
+  }).join('');
+  dropdown.classList.add('open');
+}
+
+function updateLocationKeywordSuggestions() {
+  var input = document.getElementById('locationInput');
+  if (!input || !input.value.trim()) {
+    hideLocationKeywordSuggestions();
+    return;
+  }
+  loadKeywordAutocompleteOptions().then(renderLocationKeywordSuggestions);
+}
+
+function chooseLocationKeywordSuggestion(index) {
+  var keyword = _locationKeywordState.matches[index];
+  if (!keyword) return;
+  var input = document.getElementById('locationInput');
+  if (input) input.value = keyword.name;
+  hideLocationKeywordSuggestions();
+  if (_locationPendingTextSubmit) {
+    clearTimeout(_locationPendingTextSubmit);
+    _locationPendingTextSubmit = null;
+  }
+  _locationLastPickedAt = Date.now();
+  _submitLocationKeyword(keyword);
+}
+
 function _locationApplyPhotoIds() {
   var ids = getActiveSelection();
   if (ids.length > 1) return ids;
@@ -5171,6 +5554,7 @@ function _locationApplyPhotoIds() {
 }
 
 async function _afterLocationMutation(photoIds, detailPhotoId) {
+  invalidateKeywordAutocompleteCache();
   loadKeywords();
   scheduleCollectionCountsRefresh();
   refreshPendingSyncBanner();
@@ -5204,6 +5588,7 @@ async function bindLocationAutocomplete() {
       fields: [
         'place_id',
         'name',
+        'types',
         'formatted_address',
         'geometry',
         'address_components'
@@ -5241,6 +5626,7 @@ function normalizeGooglePlaceForSubmit(place) {
   return {
     place_id: place.place_id,
     name: place.name || place.formatted_address || '',
+    types: Array.isArray(place.types) ? place.types : [],
     lat: lat,
     lng: lng,
     address_components: (place.address_components || []).map(function(c) {
@@ -5280,19 +5666,53 @@ async function _submitLocationPlace(placeId, placeDetails) {
   }
 }
 
+async function _submitLocationKeyword(keyword) {
+  var photoId = window._detailPhotoId;
+  if (!photoId || !keyword || !keyword.id) return;
+  _hideLocationError();
+  var ids = _locationApplyPhotoIds();
+  var useBatch = ids.length > 1;
+  var body = { keyword_id: keyword.id };
+  if (useBatch) body.photo_ids = ids;
+  try {
+    var endpoint = useBatch
+      ? '/api/batch/location'
+      : '/api/photos/' + photoId + '/location';
+    var resp = await safeFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (resp && resp.location) {
+      renderLocationFilled(resp.location);
+    }
+    await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
+  } catch(e) {
+    _showLocationError('Could not save location.');
+  }
+}
+
 async function _submitLocationText(name) {
   var photoId = window._detailPhotoId;
   if (!photoId) return;
   _hideLocationError();
+  var ids = _locationApplyPhotoIds();
+  var useBatch = ids.length > 1;
   try {
-    var resp = await safeFetch('/api/photos/' + photoId + '/location/text', {
+    var endpoint = useBatch
+      ? '/api/batch/location/text'
+      : '/api/photos/' + photoId + '/location/text';
+    var body = useBatch
+      ? { name: name, photo_ids: ids }
+      : { name: name };
+    var resp = await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name }),
+      body: JSON.stringify(body),
     });
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
-      await _afterLocationMutation([photoId], photoId);
+      await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
     }
   } catch(e) {
     _showLocationError('Could not save location.');
@@ -5347,6 +5767,7 @@ function renderLocationEmpty() {
   empty.hidden = false;
   var input = document.getElementById('locationInput');
   if (input) input.value = '';
+  hideLocationKeywordSuggestions();
   // Reset any prior EXIF suggestion. The caller (renderDetail) re-runs
   // maybeShowExifSuggestion(photo) after this, which decides whether to
   // populate the line for the new photo.
@@ -5439,10 +5860,40 @@ async function acceptExifSuggestion(placeId) {
 
 function _onLocationInputFocus() {
   bindLocationAutocomplete();
+  updateLocationKeywordSuggestions();
+}
+
+function _onLocationInputInput() {
+  _locationKeywordState.activeIndex = 0;
+  updateLocationKeywordSuggestions();
 }
 
 function _onLocationInputKeydown(e) {
+  var dropdown = document.getElementById('locationKeywordSuggestions');
+  var localOpen = dropdown && dropdown.classList.contains('open') && _locationKeywordState.matches.length > 0;
+  var googlePlacesMayHandleKeyboard = !!(window.GOOGLE_MAPS_API_KEY || '').trim();
+  if (localOpen && !googlePlacesMayHandleKeyboard && e.key === 'ArrowDown') {
+    e.preventDefault();
+    _locationKeywordState.activeIndex = (_locationKeywordState.activeIndex + 1) % _locationKeywordState.matches.length;
+    renderLocationKeywordSuggestions();
+    return;
+  }
+  if (localOpen && !googlePlacesMayHandleKeyboard && e.key === 'ArrowUp') {
+    e.preventDefault();
+    _locationKeywordState.activeIndex = (_locationKeywordState.activeIndex - 1 + _locationKeywordState.matches.length) % _locationKeywordState.matches.length;
+    renderLocationKeywordSuggestions();
+    return;
+  }
+  if (e.key === 'Escape') {
+    hideLocationKeywordSuggestions();
+    return;
+  }
   if (e.key !== 'Enter') return;
+  if (localOpen && !googlePlacesMayHandleKeyboard && _locationKeywordState.activeIndex >= 0) {
+    e.preventDefault();
+    chooseLocationKeywordSuggestion(_locationKeywordState.activeIndex);
+    return;
+  }
   // DO NOT preventDefault — Google's autocomplete listens for Enter to
   // pick the highlighted suggestion. Suppressing the event would block
   // keyboard place selection. The input has no surrounding form, so
@@ -5474,7 +5925,20 @@ document.addEventListener('DOMContentLoaded', function() {
   var input = document.getElementById('locationInput');
   if (input) {
     input.addEventListener('focus', _onLocationInputFocus);
+    input.addEventListener('input', _onLocationInputInput);
     input.addEventListener('keydown', _onLocationInputKeydown);
+    input.addEventListener('blur', function() {
+      setTimeout(hideLocationKeywordSuggestions, 120);
+    });
+  }
+  var locationDropdown = document.getElementById('locationKeywordSuggestions');
+  if (locationDropdown) {
+    locationDropdown.addEventListener('mousedown', function(e) {
+      var option = e.target.closest('.keyword-suggestion-option');
+      if (!option) return;
+      e.preventDefault();
+      chooseLocationKeywordSuggestion(parseInt(option.dataset.index, 10));
+    });
   }
   bindKeywordAutocomplete('addKeywordInput', 'addKeywordSuggestions', addKeyword);
   bindKeywordAutocomplete('batchKeywordInput', 'batchKeywordSuggestions', function() {
@@ -5578,9 +6042,7 @@ document.addEventListener('keydown', function(e) {
   // Select all
   if (matchesShortcut(e, _shortcuts.select_all)) {
     e.preventDefault();
-    photos.forEach(function(p) { selectedPhotos.add(p.id); });
-    renderGrid();
-    updateBatchBar();
+    selectAllMatchingPhotos();
     return;
   }
 
@@ -5778,6 +6240,10 @@ function revealPhoto(photoId) {
   }, { toast: false }).catch(function(){});
 }
 
+function viewPhotoOnMap(photoId) {
+  window.location.href = '/map?photo_id=' + encodeURIComponent(photoId);
+}
+
 async function copyPhotoPaths(photoIds) {
   var settled = await Promise.allSettled(photoIds.map(function(id) {
     return safeFetch('/api/photos/' + id, {}, { toast: false });
@@ -5865,6 +6331,8 @@ function buildPhotoContextMenu(photoIds) {
     { separator: true },
     { label: 'Find Similar', disabled: !one, disabledHint: hint,
       onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
+    { label: 'View on Map', disabled: !one, disabledHint: hint,
+      onClick: function() { viewPhotoOnMap(photoIds[0]); } },
     { label: 'Compare', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openBrowseCompare(); } },
     { label: 'Best Batch',
@@ -5872,7 +6340,7 @@ function buildPhotoContextMenu(photoIds) {
     { label: 'Review Burst', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openSelectedInBurstReview(); } },
   ].concat(buildOpenInEditorMenuItems(photoIds)).concat([
-    { label: 'Reveal in Finder/Folder', disabled: !one, disabledHint: hint,
+    { label: window.VIREO_REVEAL_LABEL, disabled: !one, disabledHint: hint,
       onClick: function() { revealPhoto(photoIds[0]); } },
     { label: 'Copy Path',
       onClick: function() { copyPhotoPaths(photoIds); } },
@@ -5959,7 +6427,7 @@ document.addEventListener('contextmenu', function(e) {
   openContextMenu(e, [
     { label: 'Filter by this folder', onClick: function() { filterByFolder(fid); } },
     { separator: true },
-    { label: 'Reveal in Finder/Folder', onClick: function() { revealFolder(fid); } },
+    { label: window.VIREO_REVEAL_LABEL, onClick: function() { revealFolder(fid); } },
     { label: 'Copy Path', onClick: function() { copyFolderPath(fid); } },
     { separator: true },
     { label: 'Rescan this Folder', onClick: function() { rescanFolder(fid); } },
@@ -6029,9 +6497,17 @@ document.addEventListener('contextmenu', function(e) {
   if (isNaN(cid)) return;
   var nameEl = ti.querySelector('.collection-name');
   var name = nameEl ? nameEl.textContent : '';
-  openContextMenu(e, [
+  var items = [
     { label: 'Filter by this Collection',
       onClick: function() { filterByCollection(cid); } },
+  ];
+  if (name === 'GPS Without Location Keyword') {
+    items.push({
+      label: 'Resolve GPS Locations',
+      onClick: function() { openGpsResolveForCollection(cid); },
+    });
+  }
+  items = items.concat([
     { separator: true },
     { label: 'Edit Rules',
       onClick: function() { editCollection(cid); } },
@@ -6043,6 +6519,7 @@ document.addEventListener('contextmenu', function(e) {
     { label: 'Delete Collection',
       onClick: function() { deleteCollectionById(cid, name); } },
   ]);
+  openContextMenu(e, items);
 });
 
 /* ---------- Deep-link: scroll to photo_id if present in URL ---------- */

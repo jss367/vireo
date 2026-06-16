@@ -1,3 +1,4 @@
+import json
 import re
 
 from playwright.sync_api import expect
@@ -135,6 +136,63 @@ def test_pipeline_status_pills_visible_for_processing_stages(live_server, page):
     expect(page.locator("#pillClassify")).to_contain_text("Already done")
     # Extract has no seeded masks → "Will run".
     expect(page.locator("#pillExtract")).to_contain_text("Will run")
+
+
+def test_pipeline_import_plan_waits_for_folder_preview_scope(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    expect(page.locator("#pillClassify")).to_contain_text("Already done")
+
+    stale_plan_route = []
+
+    def hold_stale_plan(route):
+        stale_plan_route.append(route)
+
+    page.route("**/api/pipeline/plan", hold_stale_plan)
+    page.evaluate("setTimeout(refreshPipelinePlan, 0)")
+    for _ in range(50):
+        if stale_plan_route:
+            break
+        page.wait_for_timeout(100)
+    assert stale_plan_route
+
+    folder_preview_route = []
+    page.route("**/api/import/folder-preview", lambda route: folder_preview_route.append(route))
+    page.fill("#cfgSourceInput", "/Volumes/Photography/Raw Files/USA/2026/2026-05-30")
+    page.locator("#card-source button", has_text="Add").click()
+    stale_plan_route[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({
+            "stages": {
+                "Previews": {"state": "done-prior", "summary": "stale"},
+                "Classify": {"state": "done-prior", "summary": "stale"},
+                "Extract": {"state": "done-prior", "summary": "stale"},
+                "EyeKeypoints": {"state": "done-prior", "summary": "stale"},
+                "Group": {"state": "done-prior", "summary": "stale"},
+            },
+            "scope": {"collection_id": None, "photo_count": None, "new_count": 0, "known_count": 0},
+        }),
+    )
+
+    expect(page.locator("[data-testid='pipeline-plan-summary'] .plan-loading")).to_be_visible()
+    expect(page.locator("#pillClassify")).not_to_contain_text("Already done")
+    for _ in range(50):
+        if folder_preview_route:
+            break
+        page.wait_for_timeout(100)
+    assert folder_preview_route
+    folder_preview_route[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({
+            "total_count": 0,
+            "total_size": 0,
+            "type_breakdown": {},
+            "duplicate_count": 0,
+            "files": [],
+        }),
+    )
 
 
 def test_pipeline_reclassify_flips_classify_pill_to_will_run(live_server, page):
@@ -339,24 +397,16 @@ def test_pipeline_previews_pill_shows_pending_count(live_server, page):
     expect(page.locator("#summaryPreviews")).to_contain_text("preview")
 
 
-def test_pipeline_previews_pill_full_resolution_skips_previews(live_server, page):
-    """Selecting "Full resolution" disables the previews substage. The pill
-    summary must reflect that — promising N previews that will never run
-    would be a black box.
+def test_pipeline_preview_size_is_library_setting(live_server, page):
+    """Preview size is a library/workspace policy, not a per-run pipeline
+    choice. The pipeline should surface the active value without offering a
+    run-local override.
     """
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("#card-previews .stage-header")
-    page.select_option("#cfgPreviewSize", "0")
-    # The summary updates after the debounced plan refresh fires. In will-run
-    # mode the summary surfaces "previews skipped" so the user sees why no
-    # preview count appears alongside the thumbnail count.
-    expect(page.locator("#summaryPreviews")).to_contain_text("previews skipped")
-    plan = page.evaluate(
-        "() => window._pipelinePlan ? window._pipelinePlan.stages.Previews : null"
-    )
-    assert plan["detail"]["previews_skipped"] is True
-    assert plan["detail"]["preview_pending"] == 0
+    expect(page.locator("#cfgPreviewSize")).to_have_count(0)
+    expect(page.locator("#cfgPreviewSizeSummary")).to_contain_text("px")
 
 
 def test_pipeline_shared_card_not_done_until_all_substages_complete(live_server, page):

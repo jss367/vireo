@@ -1056,7 +1056,10 @@ def test_classify_plan_exposes_pending_and_eligible_mixed_blocked_and_done(
 def test_classify_plan_emits_fingerprint_outdated_when_stale(
     tmp_path, monkeypatch,
 ):
-    """A detection classified under fp_old + no current-fp row → outdated."""
+    """A detection classified under fp_old + no current-fp row needs the
+    current label set, and the plan should explain that without implying
+    the old classifications or user's keywords are bad.
+    """
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
     _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
@@ -1074,8 +1077,10 @@ def test_classify_plan_emits_fingerprint_outdated_when_stale(
 
     plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
     detail = plan["stages"]["Classify"]["detail"]
+    assert "Current label set differs" in plan["stages"]["Classify"]["summary"]
     assert detail["stale"] == 1
     assert detail["fingerprint_outdated"] is True
+    assert detail["fingerprint_reason"] == "label_set_changed"
 
 
 def test_classify_plan_no_outdated_flag_when_current(
@@ -2812,3 +2817,25 @@ def test_api_pipeline_plan_rejects_non_string_hash_duplicate_paths_elements(app_
         },
     )
     assert resp.status_code == 400
+
+
+def test_exclusions_apply_in_whole_workspace_mode(tmp_path):
+    """The running job filters exclude_photo_ids in every mode; the plan
+    previously honored them only for collections, overstating pending
+    counts for whole-workspace runs."""
+    from pipeline_plan import PipelinePlanParams, compute_plan
+
+    db, folder_id = _make_db(tmp_path)
+    p1, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    p2, _ = _add_photo_with_detection(db, folder_id, "b.jpg")
+
+    base = compute_plan(db, PipelinePlanParams(), str(tmp_path / "test.db"))
+    assert base["stages"]["Extract"]["detail"]["pending"] == 2
+
+    plan = compute_plan(
+        db,
+        PipelinePlanParams(exclude_photo_ids=[p2]),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["stages"]["Extract"]["detail"]["pending"] == 1
+    assert plan["scope"]["photo_count"] == 1

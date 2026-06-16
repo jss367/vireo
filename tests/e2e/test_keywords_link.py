@@ -218,15 +218,12 @@ def test_link_attaches_place_id_via_test_hook(live_server, page, monkeypatch):
     expect(
         page.locator(f"tr[data-id='{kw_id}'] .kw-link-btn")
     ).to_have_count(0)
-    # Linking the leaf decreases the unlinked count by one (the original
-    # free-text leaf was the only unlinked location pre-link). The parent
-    # chain spawns its own location rows (California, USA), but those are
-    # not visible in /api/keywords/all unless they're ancestors of a tagged
-    # keyword. Since the leaf is tagged, its parents ARE ancestors — so the
-    # chip count rises again. The user-facing invariant we DO care about is
-    # that the originally-linked row is no longer counted.
-    final_count = int(page.locator("#kwUnlinkedCount").inner_text())
-    assert final_count == 2, f"expected 2 (parent chain), got {final_count}"
+    # Linking the leaf decreases the unlinked count by one. Parent-chain rows
+    # are visible as ancestors, but they are not directly tagged on photos and
+    # should not be counted as user-actionable unlinked locations.
+    expect(page.locator("#kwUnlinkedCount")).to_have_text("0")
+    page.locator("#kwFilterUnlinked").click()
+    expect(page.locator("tr[data-id]:visible")).to_have_count(0)
 
     # Sanity-check the DB row got place_id + coords.
     row_db = live_server["db"].conn.execute(

@@ -9,6 +9,10 @@ import subprocess
 from datetime import datetime, timedelta
 
 from metadata import extract_metadata
+try:
+    from .proc import no_window_kwargs
+except ImportError:
+    from proc import no_window_kwargs
 
 log = logging.getLogger(__name__)
 
@@ -135,6 +139,27 @@ def _photo_shift_minutes(mode, target_minutes, manual_shift, photo):
     if current_minutes is None:
         raise ValueError("current offset not found; use a manual time shift")
     return target_minutes - current_minutes
+
+
+def _offset_tags_already_target(photo, target_offset):
+    """Return True when all OffsetTime* tags are present and match target."""
+    if not target_offset:
+        return True
+    exif = _exif_group(photo)
+    values = [
+        exif.get("OffsetTime"),
+        exif.get("OffsetTimeOriginal"),
+        exif.get("OffsetTimeDigitized"),
+    ]
+    return all(value and str(value).strip() == target_offset for value in values)
+
+
+def _is_noop_adjustment(mode, target_offset, photo_shift, photo):
+    if photo_shift != 0:
+        return False
+    if mode == "manual":
+        return True
+    return _offset_tags_already_target(photo, target_offset)
 
 
 def format_preview_timestamp(dt):
@@ -287,6 +312,7 @@ def adjust_capture_time(
 
     log.info("Starting capture-time adjustment for %d photo(s)", len(photos))
     written = 0
+    skipped = 0
     failed = 0
     failures = []
     total = len(photos)
@@ -309,6 +335,17 @@ def adjust_capture_time(
             failures.append(
                 {"photo_id": photo["id"], "filename": photo["filename"], "error": str(exc)}
             )
+            if progress_callback:
+                progress_callback(index, total, photo["filename"])
+            continue
+
+        has_companion = _has_key(photo, "companion_path") and bool(photo["companion_path"])
+        if (
+            not has_companion
+            and _is_noop_adjustment(mode, target_offset_str, photo_shift, photo)
+        ):
+            skipped += 1
+            shifts_used.append(photo_shift)
             if progress_callback:
                 progress_callback(index, total, photo["filename"])
             continue
@@ -341,8 +378,15 @@ def adjust_capture_time(
                 capture_output=True,
                 text=True,
                 timeout=120,
+                **no_window_kwargs(),
             )
-            if result.returncode not in (0, 1):
+            if result.returncode != 0:
+                # ExifTool exits 0 on success (warnings included) and 1 when
+                # any error occurred — e.g. "0 image files updated, 1 files
+                # weren't updated due to errors" for a read-only file. This
+                # is a per-photo write, so exit 1 means the write failed;
+                # don't copy the read path's (0, 1) tolerance from
+                # metadata.py, which only accepts 1 for partial batch output.
                 raise RuntimeError((result.stderr or result.stdout or "ExifTool failed").strip())
             _refresh_photo_metadata(db, photo["id"], paths[0])
             db.conn.commit()
@@ -364,10 +408,16 @@ def adjust_capture_time(
 
     unanimous = bool(shifts_used) and all(s == shifts_used[0] for s in shifts_used)
     summary_shift = shifts_used[0] if unanimous else None
-    log.info("Capture-time adjustment finished: %d updated, %d failed", written, failed)
+    log.info(
+        "Capture-time adjustment finished: %d updated, %d skipped, %d failed",
+        written,
+        skipped,
+        failed,
+    )
 
     return {
         "updated": written,
+        "skipped": skipped,
         "failed": failed,
         "failures": failures[:20],
         "shift_minutes": summary_shift,

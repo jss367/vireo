@@ -1,3 +1,9 @@
+import sys
+import types
+
+import numpy as np
+
+
 def test_api_photos_default(app_and_db):
     """GET /api/photos returns all photos."""
     app, _ = app_and_db
@@ -33,6 +39,62 @@ def test_api_photos_filter_folder(app_and_db):
     data = resp.get_json()
     assert len(data['photos']) == 1
     assert data['photos'][0]['filename'] == 'bird2.jpg'
+
+
+def test_api_photo_ids_matches_browse_filters(app_and_db):
+    """GET /api/photos/ids returns every ID matching the current Browse filters."""
+    app, db = app_and_db
+    folders = db.get_folder_tree()
+    jan = [f for f in folders if f['name'] == 'January'][0]
+    expected = [p["id"] for p in db.get_photos(folder_id=jan["id"], sort="name")]
+
+    client = app.test_client()
+    resp = client.get(f'/api/photos/ids?folder_id={jan["id"]}&sort=name')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["photo_ids"] == expected
+    assert data["total"] == len(expected)
+
+
+def test_api_photo_search_ids_only_returns_all_matches(app_and_db, monkeypatch):
+    """GET /api/photos/search?ids_only=1 returns all CLIP match IDs, not the page."""
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    by_name = {p["filename"]: p["id"] for p in photos}
+    model_name = "test-clip"
+
+    db.upsert_photo_embedding(
+        by_name["bird1.jpg"], model_name, np.array([0.95, 0.0], dtype=np.float32).tobytes()
+    )
+    db.upsert_photo_embedding(
+        by_name["bird2.jpg"], model_name, np.array([0.8, 0.0], dtype=np.float32).tobytes()
+    )
+    db.upsert_photo_embedding(
+        by_name["bird3.jpg"], model_name, np.array([0.1, 0.0], dtype=np.float32).tobytes()
+    )
+
+    import models
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "name": model_name,
+        "model_type": "bioclip",
+        "model_str": "fake",
+        "weights_path": "",
+    })
+    monkeypatch.setitem(
+        sys.modules,
+        "text_encoder",
+        types.SimpleNamespace(
+            encode_text=lambda *_args, **_kwargs: np.array([1.0, 0.0], dtype=np.float32)
+        ),
+    )
+
+    client = app.test_client()
+    resp = client.get('/api/photos/search?q=bird&threshold=0.15&limit=1&ids_only=1')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["photo_ids"] == [by_name["bird1.jpg"], by_name["bird2.jpg"]]
+    assert data["total_matches"] == 2
+    assert "results" not in data
 
 
 def test_api_photos_filter_rating(app_and_db):
@@ -2980,6 +3042,50 @@ def test_post_photo_location_normalizes_non_string_client_place_id(app_and_db):
     assert loc["place_id"] == "12345"
 
 
+def test_post_photo_location_client_place_types_drops_same_named_leaf_parent(
+    app_and_db,
+):
+    """Client autocomplete must forward `place.types` so a locality named the
+    same as a higher administrative area (e.g. city `New York` inside state
+    `New York`) does not get duplicated as its own parent in the chain.
+    """
+    import config as cfg
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+
+    new_york_city_place = {
+        "place_id": "ChIJOwg_06VPwokRYv534QaPC8g",
+        "name": "New York",
+        "types": ["locality", "political"],
+        "geometry": {"location": {"lat": 40.7128, "lng": -74.006}},
+        "address_components": [
+            {"long_name": "New York", "short_name": "New York",
+             "types": ["locality", "political"]},
+            {"long_name": "New York", "short_name": "NY",
+             "types": ["administrative_area_level_1", "political"]},
+            {"long_name": "United States", "short_name": "US",
+             "types": ["country", "political"]},
+        ],
+    }
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={"place": new_york_city_place},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    loc = resp.get_json()["location"]
+    assert loc["name"] == "New York"
+    # Parent chain (broadest -> narrowest, excluding leaf) must NOT include a
+    # second "New York" — only the country and the state level.
+    parent_names = [p["name"] for p in loc["parent_chain"]]
+    assert parent_names == ["United States", "New York"]
+
+
 def test_post_photo_location_returns_400_on_missing_place_id(app_and_db):
     """Empty body / missing place_id is a 400 — never reaches Google."""
     app, db = app_and_db
@@ -3344,6 +3450,33 @@ def test_batch_photo_location_sets_all_selected_photos(app_and_db, monkeypatch):
             (pid,),
         ).fetchone()
         assert queued["value"] == "effective"
+
+    entry = db.get_edit_history()[0]
+    assert entry["action_type"] == "location_set"
+    assert entry["item_count"] == len(photo_ids)
+
+
+def test_batch_photo_location_text_sets_all_selected_photos(app_and_db):
+    """Batch free-text location POST stores one location across selected photos."""
+    app, db = app_and_db
+    photo_ids = [p["id"] for p in db.get_photos()[:3]]
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/location/text",
+        json={"photo_ids": photo_ids, "name": "the meadow"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["updated"] == len(photo_ids)
+
+    for pid in photo_ids:
+        row = db.conn.execute(
+            "SELECT k.name, k.place_id FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (pid,),
+        ).fetchone()
+        assert dict(row) == {"name": "the meadow", "place_id": None}
 
     entry = db.get_edit_history()[0]
     assert entry["action_type"] == "location_set"
@@ -3767,6 +3900,144 @@ def test_reverse_geocode_400_on_invalid_coords(app_and_db):
     r2 = client.get("/api/places/reverse-geocode?lat=foo&lng=1.0")
     assert r2.status_code == 400
     assert r2.get_json()["error"] == "invalid coords"
+
+
+def _yosemite_geocode_response():
+    return {
+        "place_id": "ChIJxeyK9Z3wloAR_gOA7SycJC8",
+        "name": "Yosemite Valley",
+        "lat": 37.7456,
+        "lng": -119.5936,
+        "address_components": [
+            {"name": "Mariposa County", "short_name": "Mariposa County",
+             "types": ["administrative_area_level_2"]},
+            {"name": "California", "short_name": "CA",
+             "types": ["administrative_area_level_1"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+
+def test_batch_location_from_exif_preview_groups_without_linking(
+    app_and_db, monkeypatch,
+):
+    """Preview resolves each photo's own GPS and does not attach locations."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+
+    photos = db.get_photos(sort="name")
+    p1, p2, p3 = [p["id"] for p in photos]
+    db.conn.execute(
+        "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+        (40.7828, -73.9654, p1),
+    )
+    db.conn.execute(
+        "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+        (37.7456, -119.5936, p2),
+    )
+    db.conn.commit()
+
+    def fake_reverse_geocode(lat, lng, key):
+        if lat > 39:
+            return _central_park_geocode_response()
+        return _yosemite_geocode_response()
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/location/from-exif",
+        json={"photo_ids": [p1, p2, p3], "apply": False},
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["total"] == 3
+    assert body["resolvable"] == 2
+    assert {g["name"] for g in body["groups"]} == {"Central Park", "Yosemite Valley"}
+    assert body["unresolved"] == [
+        {"filename": "bird3.jpg", "photo_id": p3, "reason": "missing_gps"}
+    ]
+    assert "_details_by_place_id" not in body
+    # The fixture starts with two taxonomy keyword links. Preview may cache
+    # reverse-geocode results, but it must not create location links.
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE k.type = 'location'"
+    ).fetchone()[0] == 0
+
+
+def test_batch_location_from_exif_apply_assigns_per_photo_places(
+    app_and_db, monkeypatch,
+):
+    """Apply mode assigns different place keywords to different GPS photos."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+
+    photos = db.get_photos(sort="name")
+    p1, p2, p3 = [p["id"] for p in photos]
+    db.conn.execute(
+        "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+        (40.7828, -73.9654, p1),
+    )
+    db.conn.execute(
+        "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+        (37.7456, -119.5936, p2),
+    )
+    db.conn.commit()
+
+    def fake_reverse_geocode(lat, lng, key):
+        if lat > 39:
+            return _central_park_geocode_response()
+        return _yosemite_geocode_response()
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/location/from-exif",
+        json={"photo_ids": [p1, p2, p3], "apply": True},
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["updated"] == 2
+    assert body["resolvable"] == 2
+    assert body["group_errors"] == []
+
+    rows = db.conn.execute(
+        "SELECT pk.photo_id, k.name, k.place_id "
+        "FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE k.type = 'location' "
+        "ORDER BY pk.photo_id"
+    ).fetchall()
+    by_photo = {row["photo_id"]: row for row in rows}
+    assert by_photo[p1]["name"] == "Central Park"
+    assert by_photo[p2]["name"] == "Yosemite Valley"
+    assert p3 not in by_photo
+
+    pending = db.conn.execute(
+        "SELECT photo_id, change_type, value FROM pending_changes "
+        "WHERE change_type = 'location' ORDER BY photo_id"
+    ).fetchall()
+    assert [(r["photo_id"], r["value"]) for r in pending] == [
+        (p1, "effective"),
+        (p2, "effective"),
+    ]
+
+    edit = db.conn.execute(
+        "SELECT action_type, is_batch, description FROM edit_history "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert edit["action_type"] == "location_set"
+    assert edit["is_batch"] == 1
+    assert "resolved GPS locations for 2 photos across 2 places" in edit["description"]
 
 
 # --- POST /api/keywords/<id>/link-place -------------------------------------
@@ -4440,3 +4711,133 @@ def test_api_serve_mask_rejects_path_outside_masks_dir(app_and_db, tmp_path):
     client = app.test_client()
     resp = client.get(f"/api/masks/{pid}/sam2-small.png")
     assert resp.status_code == 404
+
+
+# -- Regression tests: workspace verification and payload validation --
+
+
+def _add_other_workspace_photo(db):
+    """Create a photo whose folder is linked only to another workspace."""
+    default_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    fid = db.add_folder('/secret/other', name='secret-other')
+    pid = db.add_photo(folder_id=fid, filename='hidden.jpg', extension='.jpg',
+                       file_size=10, file_mtime=1.0)
+    db.set_active_workspace(default_ws)
+    return pid
+
+
+def test_color_label_unknown_photo_returns_404(app_and_db):
+    """POST /api/photos/<id>/color_label must 404 on a stale id instead of
+    hitting the photo_color_labels FK and 500ing."""
+    app, _db = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/photos/999999/color_label', json={'color': 'red'})
+    assert resp.status_code == 404
+
+
+def test_color_label_rejects_cross_workspace_photo(app_and_db):
+    """POST /api/photos/<id>/color_label must 403 for photos outside the
+    active workspace, matching the rating/flag endpoints."""
+    app, db = app_and_db
+    hidden_pid = _add_other_workspace_photo(db)
+    client = app.test_client()
+    resp = client.post(f'/api/photos/{hidden_pid}/color_label',
+                       json={'color': 'red'})
+    assert resp.status_code == 403
+    assert db.get_color_labels_for_photos([hidden_pid]) == {}
+
+
+def test_batch_color_label_skips_stale_and_cross_workspace_ids(app_and_db):
+    """POST /api/batch/color_label must filter out stale and cross-workspace
+    ids (instead of 500ing mid-batch on the FK) and report what was applied."""
+    app, db = app_and_db
+    hidden_pid = _add_other_workspace_photo(db)
+    valid_pid = db.conn.execute(
+        "SELECT id FROM photos WHERE filename = 'bird1.jpg'").fetchone()["id"]
+    client = app.test_client()
+
+    resp = client.post('/api/batch/color_label',
+                       json={'photo_ids': [valid_pid, 999999, hidden_pid],
+                             'color': 'green'})
+    assert resp.status_code == 200
+    assert resp.get_json()["updated"] == 1
+    assert db.get_color_label(valid_pid) == 'green'
+    assert db.get_color_labels_for_photos([hidden_pid]) == {}
+
+
+def test_photo_detail_rejects_cross_workspace_photo(app_and_db):
+    """GET /api/photos/<id> exposes absolute path/xmp_path — it must 404 for
+    photos hidden from the active workspace (mirrors serve_thumbnail)."""
+    app, db = app_and_db
+    hidden_pid = _add_other_workspace_photo(db)
+    client = app.test_client()
+    resp = client.get(f'/api/photos/{hidden_pid}')
+    assert resp.status_code == 404
+
+
+def test_photo_pipeline_rejects_cross_workspace_photo(app_and_db):
+    """GET /api/photos/<id>/pipeline exposes folder_path — 404 outside ws."""
+    app, db = app_and_db
+    hidden_pid = _add_other_workspace_photo(db)
+    client = app.test_client()
+    resp = client.get(f'/api/photos/{hidden_pid}/pipeline')
+    assert resp.status_code == 404
+
+
+def test_image_routes_reject_cross_workspace_photo(app_and_db):
+    """Image-serving routes must not leak bytes across workspaces."""
+    app, db = app_and_db
+    hidden_pid = _add_other_workspace_photo(db)
+    client = app.test_client()
+    for path in (f'/photos/{hidden_pid}/preview',
+                 f'/photos/{hidden_pid}/full',
+                 f'/photos/{hidden_pid}/original',
+                 f'/photos/{hidden_pid}/crop'):
+        resp = client.get(path)
+        assert resp.status_code == 404, f"expected 404 for {path}"
+
+
+def test_api_detections_rejects_cross_workspace_photo(app_and_db):
+    """GET /api/detections/<id> must 404 for photos outside the workspace."""
+    app, db = app_and_db
+    hidden_pid = _add_other_workspace_photo(db)
+    db.save_detections(hidden_pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    client = app.test_client()
+    resp = client.get(f'/api/detections/{hidden_pid}')
+    assert resp.status_code == 404
+
+
+def test_collection_add_photos_rejects_non_integer_ids(app_and_db):
+    """POST /api/collections/<id>/add-photos must 400 on non-int entries —
+    strings would persist into the photo_ids rule where they never match,
+    and mixed int/str payloads crash sorted()."""
+    import json
+
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/collections', json={'name': 'Static'})
+    cid = resp.get_json()['id']
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    rules_before = db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,)).fetchone()["rules"]
+
+    for bad_ids in (["1", "2"], [pid, str(pid + 1)], [pid, True], "1,2"):
+        resp = client.post(f'/api/collections/{cid}/add-photos',
+                           json={'photo_ids': bad_ids})
+        assert resp.status_code == 400, f"expected 400 for {bad_ids!r}"
+
+    # The collection's rules must be untouched by the rejected requests.
+    rules_after = db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,)).fetchone()["rules"]
+    assert json.loads(rules_after) == json.loads(rules_before)
+
+    # Valid ints still work.
+    resp = client.post(f'/api/collections/{cid}/add-photos',
+                       json={'photo_ids': [pid]})
+    assert resp.status_code == 200
+    assert resp.get_json()["total"] == 1

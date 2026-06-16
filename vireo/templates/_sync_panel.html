@@ -22,7 +22,7 @@
     <div id="syncPreviewContent">Loading...</div>
     <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;">
       <button onclick="discardAllChanges()" style="background:none;color:var(--danger);border:1px solid var(--danger);border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Discard All</button>
-      <button onclick="closeSyncPreview(); runSync();" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;">Sync to XMP</button>
+      <button onclick="runVisibleSync()" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;">Sync to XMP</button>
     </div>
   </div>
 </div>
@@ -51,16 +51,29 @@ async function checkPendingSync() {
   } catch(e) {}
 }
 
-async function runSync() {
+async function runSync(changeIds) {
   var status = document.getElementById('syncStatus');
   status.textContent = 'Syncing...';
+  status.style.color = 'var(--text-dim)';
   try {
-    var data = await safeFetch('/api/jobs/sync', {method: 'POST'}, { toast: false });
+    var requestOptions = {method: 'POST'};
+    if (Array.isArray(changeIds)) {
+      if (changeIds.length === 0) {
+        status.textContent = 'No checked changes to sync.';
+        status.style.color = 'var(--text-dim)';
+        return;
+      }
+      requestOptions.headers = {'Content-Type': 'application/json'};
+      requestOptions.body = JSON.stringify({change_ids: changeIds});
+    }
+    var data = await safeFetch('/api/jobs/sync', requestOptions, { toast: false });
 
     safeEventSource('/api/jobs/' + data.job_id + '/stream', {
       onProgress: function(p) {
         if (p.total > 0) {
           status.textContent = 'Writing XMP: ' + p.current + '/' + p.total;
+        } else if (p.current_file || p.phase) {
+          status.textContent = p.current_file || p.phase;
         }
       },
       onComplete: function(result) {
@@ -127,7 +140,7 @@ function renderSyncPreview() {
   }
 
   var html = '<div style="display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">';
-  html += '<span style="font-size:12px;color:var(--text-dim);">Show:</span>';
+  html += '<span style="font-size:12px;color:var(--text-dim);">Include:</span>';
   typeList.forEach(function(t) {
     var label = t.replace(/_/g, ' ');
     var color = t === 'keyword_add' ? 'var(--accent)' : t === 'keyword_remove' ? 'var(--danger)' : 'var(--warning)';
@@ -149,9 +162,9 @@ function renderSyncPreview() {
   });
 
   html += '<div style="display:flex;gap:8px;margin-bottom:12px;">' +
-    '<span style="font-size:12px;color:var(--text-dim);flex:1;">' + visibleCount + ' change(s) across ' + visiblePhotos + ' photo(s)</span>' +
+    '<span style="font-size:12px;color:var(--text-dim);flex:1;">' + visibleCount + ' checked change(s) across ' + visiblePhotos + ' photo(s)</span>' +
     '<button onclick="discardAllChanges()" style="background:none;color:var(--danger);border:1px solid var(--danger);border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Discard All</button>' +
-    '<button onclick="closeSyncPreview(); runSync();" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:500;">Sync All to XMP</button>' +
+    '<button onclick="runVisibleSync()" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:500;">Sync to XMP</button>' +
   '</div>';
 
   data.photos.forEach(function(p) {
@@ -213,6 +226,29 @@ function closeSyncPreview() {
   _syncModalOpen = false;
   _syncDestroyLightboxPanel();
   checkPendingSync();
+}
+
+function getVisibleSyncChangeIds() {
+  var ids = [];
+  if (!_syncPreviewData || !_syncPreviewData.photos || !_syncActiveFilters) return ids;
+  _syncPreviewData.photos.forEach(function(p) {
+    p.changes.forEach(function(c) {
+      if (_syncActiveFilters.has(c.type)) ids.push(c.id);
+    });
+  });
+  return ids;
+}
+
+function runVisibleSync() {
+  var changeIds = getVisibleSyncChangeIds();
+  if (changeIds.length === 0) {
+    var status = document.getElementById('syncStatus');
+    status.textContent = 'No checked changes to sync.';
+    status.style.color = 'var(--text-dim)';
+    return;
+  }
+  closeSyncPreview();
+  runSync(changeIds);
 }
 
 function _syncFindPhotoData(photoId) {

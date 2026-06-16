@@ -136,6 +136,31 @@ def test_cluster_photos_single_linkage():
     assert set(clusters[0]) == {1, 2, 3}
 
 
+def test_cluster_photos_mixed_dims_does_not_crash():
+    """Embeddings from different models (different dims) must not crash.
+
+    Two photos in one species group can carry top predictions from
+    different classifier models, so their embeddings can have different
+    dimensions. Mismatched shapes count as similarity 0 (separate clusters).
+    """
+    e1 = np.ones(128, dtype=np.float32)
+    e1 /= np.linalg.norm(e1)
+    e2 = np.ones(256, dtype=np.float32)
+    e2 /= np.linalg.norm(e2)
+
+    clusters = _cluster_photos({1: e1, 2: e2}, threshold=0.88)
+    assert len(clusters) == 2
+
+
+def test_embedding_sim_mismatched_dims_returns_zero():
+    from culling import _embedding_sim
+
+    a = np.ones(4, dtype=np.float32)
+    b = np.ones(8, dtype=np.float32)
+    assert _embedding_sim(a, b) == 0.0
+    assert _embedding_sim(a, a) > 0.0
+
+
 # ---------------------------------------------------------------------------
 # _phash_merge  (perceptual hash single-linkage within a group)
 # ---------------------------------------------------------------------------
@@ -412,6 +437,35 @@ def test_build_scene_groups_no_redundancy():
 
     assert keepers == 3
     assert rejects == 0
+
+
+def test_build_scene_groups_no_embedding_photo_id_colliding_with_cluster_index():
+    """A no-embedding photo whose id equals a cluster index stays solo.
+
+    pid_to_rc values are cluster indices 0..N-1 — small integers, like
+    photo ids. The fallback key for photos absent from every redundancy
+    cluster must not collide with those indices, or the photo gets merged
+    into an unrelated cluster and can be rejected as redundant with a
+    photo it has no similarity to.
+    """
+    scene_clusters = [[0, 10, 11]]
+    redundancy_clusters = [[10, 11]]  # cluster index 0; photo 0 has no embedding
+    photo_data = [
+        {"photo_id": 0, "quality": 0.1, "filename": "a.jpg", "timestamp": None, "phash": None},
+        {"photo_id": 10, "quality": 0.9, "filename": "b.jpg", "timestamp": None, "phash": None},
+        {"photo_id": 11, "quality": 0.5, "filename": "c.jpg", "timestamp": None, "phash": None},
+    ]
+
+    groups, keepers, rejects = _build_scene_groups(
+        scene_clusters, redundancy_clusters, photo_data, {}, {}
+    )
+
+    by_id = {p["photo_id"]: p for p in groups[0]["photos"]}
+    assert by_id[0]["action"] == "keep"
+    assert by_id[0]["redundant_with"] is None
+    assert keepers == 2  # photo 0 solo + photo 10 keeps its cluster
+    assert rejects == 1  # only photo 11 is redundant (with 10)
+    assert by_id[11]["redundant_with"] == 10
 
 
 # ---------------------------------------------------------------------------

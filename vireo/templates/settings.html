@@ -1464,15 +1464,27 @@ function saveWsConfig() {
   clearTimeout(_wsSaveTimer);
   _wsSaveTimer = setTimeout(async function() {
     var overrides = {};
+    var needsResync = false;
     ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold', 'detector_confidence'].forEach(function(key) {
       var checkbox = document.getElementById('wsOverride_' + key);
       var input = document.getElementById('wsVal_' + key);
       if (!checkbox || !input) return;
       if (checkbox.checked) {
+        var parsed = parseInt(input.value, 10);
+        if (isNaN(parsed)) {
+          // Cleared/invalid number field: JSON.stringify turns NaN into
+          // null, which the backend reads as "delete this override" while
+          // the checkbox stays checked — the UI would claim an override
+          // that no longer exists. Omit the key instead (the backend
+          // preserves omitted keys) and resync the input from the server
+          // afterwards so it shows the value that is actually in effect.
+          needsResync = true;
+          return;
+        }
         if (key === 'classification_threshold' || key === 'similarity_threshold' || key === 'detector_confidence') {
-          overrides[key] = parseInt(input.value) / 100;
+          overrides[key] = parsed / 100;
         } else {
-          overrides[key] = parseInt(input.value);
+          overrides[key] = parsed;
         }
       } else {
         // Explicit null tells the backend to clear this override.
@@ -1487,6 +1499,9 @@ function saveWsConfig() {
         body: JSON.stringify(overrides)
       });
     } catch(e) {}
+    // Restore any field left empty/invalid to the server's persisted value
+    // (or uncheck it if no override actually exists server-side).
+    if (needsResync) loadWsOverrides();
   }, 500);
 }
 
@@ -1525,7 +1540,7 @@ function renderExternalEditors() {
 
     var pathInput = document.createElement('input');
     pathInput.type = 'text';
-    pathInput.placeholder = '/Applications/Adobe Lightroom Classic/Adobe Lightroom Classic.app';
+    pathInput.placeholder = window.VIREO_EDITOR_PATH_PLACEHOLDER || '/usr/bin/darktable';
     pathInput.value = ed.path || '';
     pathInput.style.cssText = inputCss + 'flex:1;min-width:240px;font-family:monospace;';
     pathInput.addEventListener('input', function() {

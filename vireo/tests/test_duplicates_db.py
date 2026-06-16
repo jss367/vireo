@@ -849,3 +849,32 @@ def test_run_duplicate_scan_all_missing_flag(tmp_path):
     assert prop["all_missing"] is True
     assert prop["winner"]["exists"] is False
     assert all(l["exists"] is False for l in prop["losers"])
+
+
+# -----------------------------------------------------------------------------
+# NULL-flag visibility
+# -----------------------------------------------------------------------------
+
+def test_null_flag_photos_participate_in_duplicate_resolution(tmp_path):
+    """Photos with a NULL flag (undo paths restore them) were invisible to
+    duplicate resolution: `flag != 'rejected'` is NULL-false, so a NULL-flag
+    twin was treated as if rejected and never resolved."""
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    p1 = _add(db, fid, "owl.jpg", file_hash="HASHN")
+    p2 = _add(db, fid, "owl (2).jpg", file_hash="HASHN")
+    # Simulate the undo path: restore both flags to NULL.
+    db.conn.execute("UPDATE photos SET flag = NULL WHERE file_hash = 'HASHN'")
+    db.conn.commit()
+
+    groups = db.find_duplicate_groups()
+    unresolved_hashes = {g["file_hash"] for g in groups}
+    assert "HASHN" in unresolved_hashes
+
+    result = db.apply_duplicate_resolution([p1, p2])
+    assert result["winner_id"] == p1
+    assert result["loser_ids"] == [p2]
+    flag = db.conn.execute(
+        "SELECT flag FROM photos WHERE id = ?", (p2,)
+    ).fetchone()["flag"]
+    assert flag == "rejected"

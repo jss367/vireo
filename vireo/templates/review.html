@@ -983,7 +983,9 @@ function renderStats() {
       '<span class="stat accepted-count">' + accepted + ' Accepted</span>' +
       '<span class="stat">' + predictions.length + ' Total</span>';
   } else {
-    el.innerHTML = '<span class="stat">' + allData.photos.length + ' photos</span>';
+    // Browse mode means zero predictions loaded — the grid's empty state
+    // explains the situation, so there's no count worth showing here.
+    el.textContent = '';
   }
 }
 
@@ -1342,7 +1344,12 @@ document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
   if (mode !== 'review') return;
   if (!_shortcuts) return;
-  var pending = predictions.filter(function(p) { return p.status === 'pending'; });
+  // No-op while an overlay owns the keyboard (lightbox, burst modal, etc.) —
+  // otherwise A/S would invisibly accept/reject grid cards behind it.
+  if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;
+  // The toolbar hint promises "first visible card": use the grid's filtered
+  // + sorted view, not the API-ordered raw predictions array.
+  var pending = getVisibleItems().filter(function(p) { return p.status === 'pending'; });
   if (pending.length === 0) return;
   if (matchesShortcut(e, _shortcuts.accept)) { e.preventDefault(); acceptPrediction(pending[0].id); }
   else if (matchesShortcut(e, _shortcuts.skip)) { e.preventDefault(); rejectPrediction(pending[0].id); }
@@ -1448,7 +1455,7 @@ function buildReviewCardContextMenu(pred) {
     onClick: function() { openReviewLightbox(photoId, pred.filename); },
   });
   items.push({
-    label: 'Reveal in Finder/Folder',
+    label: window.VIREO_REVEAL_LABEL,
     onClick: function() { revealReviewPhoto(photoId); },
   });
   items.push({
@@ -1511,7 +1518,7 @@ function buildBurstGroupContextMenu(photoId, filename) {
     ] },
     { separator: true },
     { label: 'Open in Lightbox',        onClick: function() { openReviewLightbox(photoId, filename); } },
-    { label: 'Reveal in Finder/Folder', onClick: function() { revealReviewPhoto(photoId); } },
+    { label: window.VIREO_REVEAL_LABEL, onClick: function() { revealReviewPhoto(photoId); } },
     { label: 'Copy Path',               onClick: function() { copyReviewPhotoPath(photoId); } },
     { separator: true },
     // Send-elsewhere actions: get the photo into another tool without losing
@@ -2617,19 +2624,25 @@ async function grmApply() {
       }),
     });
 
-    // Update local prediction status immediately so cards reflect the change
+    // Update local prediction status immediately so cards reflect the
+    // change — mirroring what the backend just did: picks become accepted,
+    // rejects become rejected, untouched candidates stay pending. Marking
+    // the whole group accepted made rejected photos show as Accepted in
+    // the tabs/badges until a reload.
     var groupId = grmState.groupId;
     var model = grmState.model;
-    allPredictions.forEach(function(p) {
-      if (p.group_id === groupId && p.model === model) {
+    var picks = grmState.picks;
+    var rejects = grmState.rejects;
+    function applyLocalStatus(p) {
+      if (p.group_id !== groupId || p.model !== model) return;
+      if (picks.has(p.photo_id)) {
         p.status = 'accepted';
+      } else if (rejects.has(p.photo_id)) {
+        p.status = 'rejected';
       }
-    });
-    predictions.forEach(function(p) {
-      if (p.group_id === groupId && p.model === model) {
-        p.status = 'accepted';
-      }
-    });
+    }
+    allPredictions.forEach(applyLocalStatus);
+    predictions.forEach(applyLocalStatus);
 
     closeGroupReview();
     renderAll();
@@ -2641,6 +2654,12 @@ async function grmApply() {
 // Keyboard handling for the modal
 document.addEventListener('keydown', function(e) {
   if (!document.getElementById('grmOverlay').classList.contains('open')) return;
+  // The lightbox can be opened on top of this modal ("Open in Lightbox").
+  // While it's open it owns the keyboard (arrows navigate photos, Esc closes
+  // it via the Keymap stack) — these shortcuts must not also fire underneath,
+  // invisibly moving photos to Picks/Rejects or removing them.
+  var lb = document.getElementById('lightboxOverlay');
+  if (lb && lb.classList.contains('active')) return;
   if (e.target.tagName === 'INPUT') return;
   // The mouse-help control is focusable so keyboard users can read its
   // popover; don't let keystrokes there (e.g. Space) fall through to the

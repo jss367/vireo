@@ -236,6 +236,47 @@ def test_delete_loser_files_trashes_loser_and_keeps_winner(app_and_db, tmp_path)
     assert winner_row is not None
 
 
+def test_delete_loser_files_reports_send2trash_error_off_mac(
+    app_and_db, tmp_path, monkeypatch
+):
+    """Off macOS, a send2trash failure surfaces its real error to the client
+    rather than the macOS-only Finder fallback guard message.
+
+    Regression: guarding _trash_via_finder to raise on non-mac meant the
+    caller's except reported "Finder trash fallback is only available on
+    macOS" in failed[].error, hiding the actionable send2trash cause.
+    """
+    import os
+    import sys
+
+    import send2trash as s2t
+
+    app, db = app_and_db
+    _w, l, _wp, loser_path = _seed_pair_with_real_files(db, tmp_path, "TRASHERR")
+
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    def boom(path):
+        raise OSError("Permission denied: read-only file system")
+
+    monkeypatch.setattr(s2t, "send2trash", boom)
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/duplicates/delete-loser-files",
+        json={"photo_ids": [l]},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["trashed"] == 0
+    assert len(body["failed"]) == 1
+    err = body["failed"][0]["error"]
+    assert "Permission denied" in err
+    assert "Finder" not in err
+    # Trash failed, so the file must still be on disk.
+    assert os.path.isfile(loser_path)
+
+
 def test_delete_loser_files_drops_summary_count_after_trash(app_and_db, tmp_path):
     """After a successful trash, /disk-cleanup-summary count must drop.
 

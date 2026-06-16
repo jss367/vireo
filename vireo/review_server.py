@@ -7,6 +7,7 @@ Usage:
 import argparse
 import json
 import logging
+import math
 import os
 import webbrowser
 
@@ -159,8 +160,17 @@ def create_app(data_dir):
     def accept_batch():
         body = request.get_json(silent=True) or {}
         category = body.get("category")
-        min_confidence = body.get("min_confidence", 0.0)
         model = body.get("model")
+        # Coerce before any sidecar writes: a TypeError mid-loop would
+        # desync already-written XMP sidecars from results.json. NaN must be
+        # rejected too — every `confidence < NaN` comparison is false, which
+        # would silently accept ALL pending photos.
+        try:
+            min_confidence = float(body.get("min_confidence", 0.0))
+        except (TypeError, ValueError):
+            return jsonify({"error": "min_confidence must be a number"}), 400
+        if not math.isfinite(min_confidence):
+            return jsonify({"error": "min_confidence must be a finite number"}), 400
 
         data = _load_results()
         accepted = 0

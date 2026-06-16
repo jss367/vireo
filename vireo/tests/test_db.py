@@ -386,6 +386,28 @@ def test_get_photos_sort(tmp_path):
     assert by_date_desc[0]['filename'] == 'b.jpg'
 
 
+def test_get_photos_date_sort_puts_missing_timestamps_last(tmp_path):
+    """Undated photos should not appear before the oldest captured photo."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='undated.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp=None)
+    db.add_photo(folder_id=fid, filename='newer.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-01T00:00:00')
+    db.add_photo(folder_id=fid, filename='older.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-01-01T00:00:00')
+
+    by_date = db.get_photos(sort='date')
+    assert [p['filename'] for p in by_date] == ['older.jpg', 'newer.jpg', 'undated.jpg']
+
+    by_date_desc = db.get_photos(sort='date_desc')
+    assert [p['filename'] for p in by_date_desc] == ['newer.jpg', 'older.jpg', 'undated.jpg']
+
+    ids_by_date = db.get_photo_ids(sort='date')
+    assert ids_by_date == [p['id'] for p in by_date]
+
+
 def test_sort_date_tiebreaker(tmp_path):
     """Photos with identical timestamps sort by filename as tiebreaker."""
     from db import Database
@@ -596,6 +618,30 @@ def test_collection_photos_rating_rule(tmp_path):
     photos = db.get_collection_photos(cid)
     assert len(photos) == 1
     assert photos[0]['filename'] == 'good.jpg'
+
+
+def test_collection_photos_date_sort_puts_missing_timestamps_last(tmp_path):
+    """Collection Browse order follows the main Browse date order."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='undated.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp=None)
+    db.add_photo(folder_id=fid, filename='newer.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-01T00:00:00')
+    db.add_photo(folder_id=fid, filename='older.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-01-01T00:00:00')
+
+    rules = [{"field": "rating", "op": ">=", "value": 0}]
+    cid = db.add_collection('All', json.dumps(rules))
+
+    photos = db.get_collection_photos(cid)
+    assert [p['filename'] for p in photos] == ['older.jpg', 'newer.jpg', 'undated.jpg']
+    assert db.get_collection_photo_ids(cid) == [p['id'] for p in photos]
 
 
 def test_collection_photos_keyword_rule(tmp_path):
@@ -6293,6 +6339,37 @@ def test_relocate_folder_cascade_skips_descendants_of_conflict(tmp_path):
         assert row["status"] == "missing"
 
 
+def test_relocate_folder_cascade_skips_mixed_separator_descendants_of_conflict(tmp_path):
+    """Conflicted ancestors must be processed before mixed-separator descendants."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("C:/old/root", name="root")
+    child = db.add_folder("C:\\old\\root\\sub", name="sub", parent_id=parent)
+    grand = db.add_folder("C:/old/root/sub/grand", name="grand", parent_id=child)
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    new_root = str(tmp_path / "new_root")
+    child_target = os.path.join(new_root, "sub")
+    grand_target = os.path.join(new_root, "sub", "grand")
+    os.makedirs(grand_target)
+    db.add_folder(child_target, name="conflict")
+
+    cascaded = db.relocate_folder(parent, new_root)
+    assert cascaded == []
+
+    for fid, expected_path in [
+        (child, "C:\\old\\root\\sub"),
+        (grand, "C:/old/root/sub/grand"),
+    ]:
+        row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (fid,)).fetchone()
+        assert row["path"] == expected_path
+        assert row["status"] == "missing"
+
+
 def test_delete_folder(tmp_path):
     """delete_folder removes folder and its photos from the database."""
     from db import Database
@@ -6309,6 +6386,301 @@ def test_delete_folder(tmp_path):
 
     assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
     assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+
+def test_delete_folder_with_descendants(tmp_path):
+    """delete_folder removes the whole subtree — folders.parent_id has no ON
+    DELETE action, so deleting a non-leaf folder row alone would trip the FK
+    after its photos were already deleted."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("/tree", name="tree")
+    child = db.add_folder("/tree/sub", name="sub", parent_id=parent)
+    grand = db.add_folder("/tree/sub/deep", name="deep", parent_id=child)
+    pids = [
+        db.add_photo(folder_id=fid, filename=f"bird{fid}.jpg", extension=".jpg",
+                     file_size=1000, file_mtime=1.0)
+        for fid in (parent, child, grand)
+    ]
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 3
+
+    for fid in (parent, child, grand):
+        assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+        assert db.conn.execute(
+            "SELECT folder_id FROM workspace_folders WHERE folder_id = ?", (fid,)
+        ).fetchone() is None
+    for pid in pids:
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+
+def test_delete_folder_keeps_descendant_rooted_in_other_workspace(tmp_path):
+    """Deleting a folder in one workspace must not destroy a descendant that
+    another workspace imported as its own root (is_root = 1) — that subtree
+    is still reachable there. The kept head is reparented to NULL and only
+    unlinked from the deleting workspace."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    db.set_active_workspace(ws_a)
+
+    parent = db.add_folder("/tree", name="tree")
+    child = db.add_folder("/tree/sub", name="sub", parent_id=parent,
+                          workspace_root=False)
+    grand = db.add_folder("/tree/sub/deep", name="deep", parent_id=child,
+                          workspace_root=False)
+    other = db.add_folder("/tree/other", name="other", parent_id=parent,
+                          workspace_root=False)
+
+    # Workspace B imports /tree/sub as its own root.
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_b, child, is_root=True)
+
+    pid_parent = db.add_photo(folder_id=parent, filename="p.jpg", extension=".jpg",
+                              file_size=1000, file_mtime=1.0)
+    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+    pid_grand = db.add_photo(folder_id=grand, filename="g.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+    pid_other = db.add_photo(folder_id=other, filename="o.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+
+    # Prime A's new-images cache: the delete changes what A can see (kept
+    # subtree unlinked), so the cached count must be dropped.
+    db._new_images_cache.set(db._db_path, ws_a, {"new_count": 7})
+
+    result = db.delete_folder(parent)
+    # Only the photos outside B's root are deleted.
+    assert result["deleted_photos"] == 2
+
+    # A's cached new-images payload is invalidated by the delete.
+    assert db._new_images_cache.get(db._db_path, ws_a) is None
+
+    # Parent and the unshared sibling are gone, with their photos.
+    for fid in (parent, other):
+        assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+    for pid in (pid_parent, pid_other):
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+    # B's subtree survives: folder rows, photos, and B's links.
+    row = db.conn.execute("SELECT parent_id FROM folders WHERE id = ?", (child,)).fetchone()
+    assert row is not None
+    assert row["parent_id"] is None  # reparented — old parent row is gone
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (grand,)).fetchone() is not None
+    for pid in (pid_child, pid_grand):
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is not None
+    assert db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, child),
+    ).fetchone()["is_root"] == 1
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, grand),
+    ).fetchone() is not None
+
+    # Workspace A no longer sees any of it.
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?", (ws_a,)
+    ).fetchall() == []
+
+
+def test_delete_folder_keeps_target_rooted_in_other_workspace(tmp_path):
+    """Deleting a folder that another workspace imported as its own root
+    must not delete anything — the folder row, subtree, and photos survive;
+    only the deleting workspace's links are removed."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    db.set_active_workspace(ws_a)
+
+    parent = db.add_folder("/tree", name="tree")
+    child = db.add_folder("/tree/sub", name="sub", parent_id=parent,
+                          workspace_root=False)
+
+    # Workspace B imports /tree itself as its own root.
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_b, parent, is_root=True)
+    db.add_workspace_folder(ws_b, child, is_root=False)
+
+    pid_parent = db.add_photo(folder_id=parent, filename="p.jpg", extension=".jpg",
+                              file_size=1000, file_mtime=1.0)
+    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+
+    # Prime A's new-images cache: the unlink-only path must still drop it,
+    # since the folder no longer contributes to A's backlog.
+    db._new_images_cache.set(db._db_path, ws_a, {"new_count": 7})
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 0
+    assert result["files"] == []
+
+    # A's cached new-images payload is invalidated by the unlink.
+    assert db._new_images_cache.get(db._db_path, ws_a) is None
+
+    # Folder rows and photos all survive, parent chain intact.
+    row = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (child,)
+    ).fetchone()
+    assert row is not None
+    assert row["parent_id"] == parent
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (parent,)).fetchone() is not None
+    for pid in (pid_parent, pid_child):
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is not None
+
+    # B's links survive, including the root flag.
+    assert db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, parent),
+    ).fetchone()["is_root"] == 1
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, child),
+    ).fetchone() is not None
+
+    # Workspace A no longer sees any of it.
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?", (ws_a,)
+    ).fetchall() == []
+
+
+def test_delete_folder_keeps_target_covered_by_other_workspace_ancestor_root(tmp_path):
+    """Deleting a folder whose only foreign link is scanner-materialized
+    (is_root = 0) must not delete anything: that link means another
+    workspace reaches the folder through a root ancestor outside the
+    deleted subtree. Any foreign link protects — not just is_root = 1."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    db.set_active_workspace(ws_a)
+
+    parent = db.add_folder("/photos", name="photos")
+    child = db.add_folder("/photos/2024", name="2024", parent_id=parent,
+                          workspace_root=False)
+
+    # Workspace B imports /photos as its root; the scanner materializes the
+    # descendant /photos/2024 as a non-root link.
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_b, parent, is_root=True)
+    db.add_workspace_folder(ws_b, child, is_root=False)
+
+    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+
+    # Workspace A deletes /photos/2024 — B still sees it via its /photos root.
+    result = db.delete_folder(child)
+    assert result["deleted_photos"] == 0
+    assert result["files"] == []
+
+    # Folder row and photo survive, parent chain intact.
+    row = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (child,)
+    ).fetchone()
+    assert row is not None
+    assert row["parent_id"] == parent
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_child,)).fetchone() is not None
+
+    # B's links survive.
+    assert db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, parent),
+    ).fetchone()["is_root"] == 1
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, child),
+    ).fetchone() is not None
+
+    # Workspace A no longer links the deleted subtree, but keeps /photos.
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_a, child),
+    ).fetchone() is None
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_a, parent),
+    ).fetchone() is not None
+
+
+def test_delete_folder_includes_path_only_descendants(tmp_path):
+    """Legacy databases can hold descendants whose parent_id is NULL even
+    though their path lives under the deleted folder. The deletion walk
+    must collect the subtree by path (like the workspace link/unlink
+    paths), not by parent_id, or those rows and their photos survive."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("/photos", name="photos")
+    # Legacy shape: path is under /photos but parent_id was never set.
+    child = db.add_folder("/photos/2024", name="2024")
+    assert db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (child,)
+    ).fetchone()["parent_id"] is None
+
+    pids = [
+        db.add_photo(folder_id=fid, filename=f"bird{fid}.jpg", extension=".jpg",
+                     file_size=1000, file_mtime=1.0)
+        for fid in (parent, child)
+    ]
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 2
+
+    for fid in (parent, child):
+        assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+        assert db.conn.execute(
+            "SELECT folder_id FROM workspace_folders WHERE folder_id = ?", (fid,)
+        ).fetchone() is None
+    for pid in pids:
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+
+def test_delete_folder_keeps_path_only_descendant_linked_in_other_workspace(tmp_path):
+    """A path-only legacy descendant that another workspace links must be
+    preserved by the same foreign-link protection as parent_id-linked
+    descendants: its row and photos survive, only the deleting workspace's
+    links go."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    db.set_active_workspace(ws_a)
+
+    parent = db.add_folder("/photos", name="photos")
+    # Legacy shape: under /photos by path, parent_id NULL.
+    child = db.add_folder("/photos/2024", name="2024", workspace_root=False)
+
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_b, child, is_root=True)
+
+    pid_parent = db.add_photo(folder_id=parent, filename="p.jpg", extension=".jpg",
+                              file_size=1000, file_mtime=1.0)
+    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 1
+
+    # /photos and its photo are gone.
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (parent,)).fetchone() is None
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_parent,)).fetchone() is None
+
+    # B's legacy-shaped subtree survives with its photo and link.
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (child,)).fetchone() is not None
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_child,)).fetchone() is not None
+    assert db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, child),
+    ).fetchone()["is_root"] == 1
+
+    # Workspace A no longer sees any of it.
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?", (ws_a,)
+    ).fetchall() == []
 
 
 def test_missing_folder_photos_hidden_from_browse(tmp_path):
@@ -6708,6 +7080,154 @@ def test_move_folder_path_cascade(db):
     assert parent["path"] == "/nas/photos/2024"
     assert child["path"] == "/nas/photos/2024/march"
     assert grandchild["path"] == "/nas/photos/2024/march/birds"
+
+
+def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
+    """Select-all on a large library produces id lists beyond
+    SQLITE_MAX_VARIABLE_NUMBER (32766 on modern builds) — every bulk-id
+    API must chunk or stage rather than inline one placeholder per id."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+
+    huge = [pid] + list(range(10_000_000, 10_033_000))  # > 32766 ids
+
+    db.batch_update_photo_rating(huge, 4, verify_workspace=False)
+    db.batch_update_photo_flag(huge, "flagged", verify_workspace=False)
+    # The set path inserts per-id (no IN clause); only the lookup and
+    # removal paths take id lists into one statement.
+    db.batch_set_color_label([pid], "red")
+    labels = db.get_color_labels_for_photos(huge)
+    db.batch_set_color_label(huge, None)
+
+    photo = db.get_photo(pid)
+    assert photo["rating"] == 4
+    assert photo["flag"] == "flagged"
+    assert labels == {pid: "red"}
+    assert db.get_color_labels_for_photos([pid]) == {}  # removal applied
+
+    # Scope-clause consumers and the reclassify purge must not raise either.
+    counts = db.count_real_detections_in_scope(photo_ids=huge, min_conf=0.2)
+    assert counts is not None
+    db.clear_predictions(model="some-model", collection_photo_ids=huge)
+
+    # Downstream lookups invoked by export/pipeline jobs after the outer
+    # query/scope chunks must also chunk — the export job feeds the entire
+    # filtered id list into get_photos_by_ids + get_species_keywords_for_photos,
+    # and pipeline.load_photo_features feeds the entire scoped id list into
+    # get_detections_for_photos twice.
+    photos_map = db.get_photos_by_ids(huge)
+    assert pid in photos_map  # the one real row survives the chunked select
+    species_map = db.get_species_keywords_for_photos(huge)
+    assert species_map == {}  # no keywords attached, but no OperationalError
+    det_map = db.get_detections_for_photos(huge, min_conf=0)
+    assert det_map == {}
+
+
+def test_move_folder_path_does_not_touch_wildcard_siblings(db):
+    """LIKE treats _ and % as wildcards — moving /pics/my_dir must not
+    rewrite the unrelated sibling /pics/myXdir's children."""
+    fid = db.add_folder("/pics/my_dir", name="my_dir")
+    sib = db.add_folder("/pics/myXdir", name="myXdir")
+    sib_child = db.add_folder("/pics/myXdir/sub", name="sub", parent_id=sib)
+
+    db.move_folder_path(fid, "/dest/dir")
+
+    moved = db.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
+    sibling = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib,)).fetchone()
+    sibling_child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib_child,)).fetchone()
+    assert moved["path"] == "/dest/dir"
+    assert sibling["path"] == "/pics/myXdir"
+    assert sibling_child["path"] == "/pics/myXdir/sub"
+
+
+def test_move_folder_path_is_case_sensitive(db):
+    """Path cascades must not use SQLite LIKE's ASCII case folding."""
+    fid = db.add_folder("/Photos/2024", name="2024")
+    child = db.add_folder("/Photos/2024/trip", name="trip", parent_id=fid)
+    sib = db.add_folder("/photos/2024", name="lower-2024")
+    sib_child = db.add_folder("/photos/2024/sibling", name="sibling", parent_id=sib)
+
+    db.move_folder_path(fid, "/Archive/2024")
+
+    moved = db.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
+    moved_child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (child,)).fetchone()
+    sibling = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib,)).fetchone()
+    sibling_child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib_child,)).fetchone()
+    assert moved["path"] == "/Archive/2024"
+    assert moved_child["path"] == "/Archive/2024/trip"
+    assert sibling["path"] == "/photos/2024"
+    assert sibling_child["path"] == "/photos/2024/sibling"
+
+
+def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path, monkeypatch):
+    """'folder under /photos/2023' must match that folder and its
+    descendants only — not the sibling /photos/2023-trip — and a _ in the
+    value must not act as a LIKE wildcard."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    f_2023 = db.add_folder("/photos/2023", name="2023")
+    f_sub = db.add_folder("/photos/2023/trip", name="trip", parent_id=f_2023)
+    f_sib = db.add_folder("/photos/2023-trip", name="2023-trip")
+    f_us = db.add_folder("/photos/my_dir", name="my_dir")
+    f_usx = db.add_folder("/photos/myXdir", name="myXdir")
+    for fid, name in [(f_2023, "a"), (f_sub, "b"), (f_sib, "c"), (f_us, "d"), (f_usx, "e")]:
+        db.add_photo(folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
+                     file_size=100, file_mtime=1.0)
+
+    under_2023 = [{"field": "folder", "op": "under", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(under_2023) == 2  # folder itself + descendant
+
+    not_under_2023 = [{"field": "folder", "op": "not_under", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(not_under_2023) == 3
+
+    under_us = [{"field": "folder", "op": "under", "value": "/photos/my_dir"}]
+    assert db.count_photos_for_rules(under_us) == 1  # not /photos/myXdir
+
+
+def test_folder_under_rule_matches_backslash_paths(tmp_path, monkeypatch):
+    """Windows libraries store folder paths with backslash separators
+    (``str(Path(...))`` in scanner.scan). The 'folder under' rule must
+    still match descendants of a backslash-delimited root and exclude
+    siblings; a LIKE pattern that hard-codes '/%' would silently miss
+    every Windows descendant."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    f_root = db.add_folder("C:\\Photos\\2023", name="2023")
+    f_sub = db.add_folder("C:\\Photos\\2023\\trip", name="trip", parent_id=f_root)
+    f_sib = db.add_folder("C:\\Photos\\2023-trip", name="2023-trip")
+    for fid, name in [(f_root, "a"), (f_sub, "b"), (f_sib, "c")]:
+        db.add_photo(folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
+                     file_size=100, file_mtime=1.0)
+
+    # Forward-slash rule value still applies to a Windows library because
+    # both sides are normalized to '/'.
+    under = [{"field": "folder", "op": "under", "value": "C:/Photos/2023"}]
+    assert db.count_photos_for_rules(under) == 2  # root + descendant, not sibling
+
+    # Backslash rule values match symmetrically (normalized before escaping).
+    under_bs = [{"field": "folder", "op": "under", "value": "C:\\Photos\\2023"}]
+    assert db.count_photos_for_rules(under_bs) == 2
+
+    not_under = [{"field": "folder", "op": "not_under", "value": "C:/Photos/2023"}]
+    assert db.count_photos_for_rules(not_under) == 1  # only the sibling
+
+    under_sib = [{"field": "folder", "op": "under", "value": "C:/Photos/2023-trip"}]
+    assert db.count_photos_for_rules(under_sib) == 1
 
 
 def test_check_filename_collisions(db):
@@ -9690,6 +10210,173 @@ def test_upsert_place_chain_walks_full_parent_chain(db):
     assert chain[-1]["parent_id"] is None
 
 
+def test_upsert_place_chain_filters_address_fragments(db):
+    """Street numbers, routes, and postal codes should not become keywords."""
+    details = {
+        "place_id": "ChIJ_Address_Fragment_Test",
+        "name": "123 Main St",
+        "lat": 37.1,
+        "lng": -122.2,
+        "address_components": [
+            {"name": "123", "short_name": "123", "types": ["street_number"]},
+            {"name": "Main St", "short_name": "Main St", "types": ["route"]},
+            {"name": "Mountain View", "short_name": "Mountain View", "types": ["locality"]},
+            {"name": "Santa Clara County", "short_name": "Santa Clara County",
+             "types": ["administrative_area_level_2"]},
+            {"name": "California", "short_name": "CA",
+             "types": ["administrative_area_level_1"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+            {"name": "94043", "short_name": "94043", "types": ["postal_code"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "123 Main St",
+        "Mountain View",
+        "Santa Clara County",
+        "California",
+        "United States",
+    ]
+    all_location_names = {
+        row["name"]
+        for row in db.conn.execute(
+            "SELECT name FROM keywords WHERE type = 'location'"
+        ).fetchall()
+    }
+    assert "123" not in all_location_names
+    assert "94043" not in all_location_names
+    assert "Main St" not in all_location_names
+
+
+def test_upsert_place_chain_preserves_lower_admin_levels(db):
+    """Administrative levels 6 and 7 are valid location parents."""
+    details = {
+        "place_id": "ChIJ_Admin_Level_7_Test",
+        "name": "Village Square",
+        "lat": 48.1,
+        "lng": 11.2,
+        "address_components": [
+            {"name": "Village Square", "short_name": "Village Square",
+             "types": ["point_of_interest"]},
+            {"name": "Quarter Seven", "short_name": "Q7",
+             "types": ["administrative_area_level_7"]},
+            {"name": "District Six", "short_name": "D6",
+             "types": ["administrative_area_level_6"]},
+            {"name": "Region Five", "short_name": "R5",
+             "types": ["administrative_area_level_5"]},
+            {"name": "Germany", "short_name": "DE", "types": ["country"]},
+            {"name": "12", "short_name": "12", "types": ["street_number"]},
+            {"name": "10115", "short_name": "10115", "types": ["postal_code"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "Village Square",
+        "Quarter Seven",
+        "District Six",
+        "Region Five",
+        "Germany",
+    ]
+
+
+def test_upsert_place_chain_preserves_same_named_admin_parent(db):
+    """Leaf-name filtering must not drop broader same-named parents."""
+    details = {
+        "place_id": "ChIJ_New_York_City_Test",
+        "name": "New York",
+        "types": ["locality", "political"],
+        "lat": 40.7128,
+        "lng": -74.0060,
+        "address_components": [
+            {"name": "New York", "short_name": "New York", "types": ["locality"]},
+            {"name": "New York County", "short_name": "New York County",
+             "types": ["administrative_area_level_2"]},
+            {"name": "New York", "short_name": "NY",
+             "types": ["administrative_area_level_1"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "New York",
+        "New York County",
+        "New York",
+        "United States",
+    ]
+
+
+def test_upsert_place_chain_preserves_same_named_poi_parent(db):
+    """POI leaves should not remove same-named geographic parents."""
+    details = {
+        "place_id": "ChIJ_Manhattan_Venue_Test",
+        "name": "Manhattan",
+        "types": ["point_of_interest", "establishment"],
+        "lat": 40.75,
+        "lng": -73.99,
+        "address_components": [
+            {"name": "Manhattan", "short_name": "Manhattan",
+             "types": ["sublocality_level_1", "sublocality", "political"]},
+            {"name": "New York", "short_name": "New York",
+             "types": ["locality", "political"]},
+            {"name": "New York", "short_name": "NY",
+             "types": ["administrative_area_level_1", "political"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "Manhattan",
+        "Manhattan",
+        "New York",
+        "New York",
+        "United States",
+    ]
+
+
 def test_upsert_place_chain_is_idempotent(db):
     details = _central_park_details()
     first_id = db.upsert_place_chain(details)
@@ -10991,7 +11678,7 @@ def test_all_nav_ids_covers_every_page():
     from db import ALL_NAV_IDS
     expected = {
         "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
-        "misses", "highlights", "browse", "map", "variants",
+        "misses", "highlights", "life_list", "browse", "map", "variants",
         "dashboard", "audit", "compare",
         "zoom_test", "settings", "workspace", "lightroom", "shortcuts",
         "keywords", "duplicates", "logs",
@@ -12252,3 +12939,216 @@ def test_get_workspace_extensions_excludes_missing_folders(tmp_path):
 
     # .cr2 lives only in the missing folder — must be filtered out.
     assert db.get_workspace_extensions() == ['.jpg']
+
+
+# -- Regression tests: unbounded IN clauses, inat ordering, override guards --
+
+
+def _cap_sqlite_vars(db, cap=999):
+    """Emulate the historical SQLITE_MAX_VARIABLE_NUMBER=999 cap so an
+    unchunked IN clause fails deterministically even on modern builds."""
+    import sqlite3
+    db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, cap)
+
+
+def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
+    """Pipeline callers pass the full resolved collection scope as
+    photo_ids; a single IN clause would exceed the bind-var cap for big
+    collections. Must route through _scope_clause like its count siblings."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    pids = []
+    for i in range(2):
+        pid = db.add_photo(fid, f"p{i}.jpg", ".jpg", 1000, float(i + 1),
+                           width=800, height=600)
+        db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
+        det_ids = db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
+            detector_model="MegaDetector",
+        )
+        db.add_prediction(
+            det_ids[0], species="Vulpes vulpes", confidence=0.9,
+            model="bioclip-2.5", category="match",
+            taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
+        )
+        pids.append(pid)
+
+    _cap_sqlite_vars(db)
+    scope = pids + list(range(1_000_000, 1_001_200))  # 1202 ids > 999 cap
+    rows = db.list_photos_for_eye_keypoint_stage(photo_ids=scope)
+    assert {r["id"] for r in rows} == set(pids)
+
+
+def test_get_predictions_chunks_large_photo_id_list(tmp_path):
+    """/api/predictions passes full-collection id lists. Chunked queries
+    must merge while preserving the confidence-DESC ordering across
+    chunk boundaries."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+
+    def make_photo(name, conf):
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+        det = db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}],
+            detector_model="MegaDetector",
+        )[0]
+        db.add_prediction(det, species=name, confidence=conf, model="bioclip")
+        return pid
+
+    p_low = make_photo("low.jpg", 0.3)
+    p_high = make_photo("high.jpg", 0.9)
+
+    _cap_sqlite_vars(db)
+    # Put the high-confidence photo in the *last* chunk so an
+    # append-without-resort implementation would order it after p_low.
+    scope = [p_low] + list(range(1_000_000, 1_001_200)) + [p_high]
+    rows = db.get_predictions(photo_ids=scope)
+    assert [r["photo_id"] for r in rows] == [p_high, p_low]
+    confs = [r["confidence"] for r in rows]
+    assert confs == sorted(confs, reverse=True)
+
+
+def test_get_keywords_for_photos_chunks_and_dedups_large_input(tmp_path):
+    """Same /api/predictions source feeds get_keywords_for_photos with the
+    full collection scope; must chunk, and duplicated input ids must not
+    double-append keywords."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    kid = db.add_keyword("Robin", kw_type="general")
+    db.tag_photo(pid, kid)
+
+    _cap_sqlite_vars(db)
+    # pid appears twice, in what would be different chunks.
+    scope = [pid] + list(range(1_000_000, 1_001_200)) + [pid]
+    result = db.get_keywords_for_photos(scope)
+    assert list(result.keys()) == [pid]
+    assert [k["name"] for k in result[pid]] == ["Robin"]
+
+
+def test_delete_photos_chunks_large_resolve_list(tmp_path):
+    """api_audit_remove_missing passes a raw request-body id list straight
+    through; the initial resolve SELECT must chunk like the rest of the
+    method already does."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pids = [
+        db.add_photo(folder_id=fid, filename=f"p{i}.jpg", extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+        for i in range(3)
+    ]
+
+    _cap_sqlite_vars(db)
+    result = db.delete_photos(pids + list(range(1_000_000, 1_001_200)))
+    assert result["deleted"] == 3
+    assert set(result["ids"]) == set(pids)
+
+
+def test_apply_duplicate_resolution_chunks_large_group(tmp_path):
+    """duplicate_scan.py documents that one duplicate group can exceed the
+    bind-var cap and chunks its own reads; the apply path must chunk both
+    the resolve SELECT and the loser-flag UPDATE."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path / "photos"), name='photos')
+    # 1100 photos in one group: 1099 losers > the legacy 999-var cap, so
+    # the rejected-flag UPDATE must chunk too.
+    pids = [
+        db.add_photo(folder_id=fid, filename=f"dup{i:04d}.jpg", extension='.jpg',
+                     file_size=100, file_mtime=float(i + 1))
+        for i in range(1100)
+    ]
+
+    _cap_sqlite_vars(db)
+    result = db.apply_duplicate_resolution(pids)
+    assert result["winner_id"] in pids
+    assert result["rejected"] == 1099
+    flagged = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM photos WHERE flag = 'rejected'"
+    ).fetchone()["n"]
+    assert flagged == 1099
+
+
+def test_collection_photo_ids_rule_supports_large_selection(tmp_path):
+    """A static collection created from a large selection used to bind one
+    parameter per id, making every query against the collection fail
+    permanently. Integer ids are inlined as literals instead."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                      file_size=100, file_mtime=2.0)
+
+    ids = [p1, p2] + list(range(1_000_000, 1_001_200))
+    cid = db.add_collection(
+        'Big selection', json.dumps([{"field": "photo_ids", "value": ids}])
+    )
+
+    _cap_sqlite_vars(db)
+    assert db.count_collection_photos(cid) == 2
+    assert {p["id"] for p in db.get_collection_photos(cid)} == {p1, p2}
+    # Composability: the leaf still works inside a rule group with siblings.
+    assert db.count_photos_for_rules([
+        {"field": "photo_ids", "value": ids},
+        {"field": "rating", "op": ">=", "value": 0},
+    ]) == 2
+
+
+def test_get_inat_submissions_returns_newest_and_chunks(tmp_path):
+    """Each photo must map to its most recent submission (the old dict
+    comprehension over DESC-ordered rows kept the OLDEST), and the photo_id
+    IN clause must chunk."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "INSERT INTO inat_submissions (photo_id, observation_id, observation_url, submitted_at) "
+        "VALUES (?, 111, 'https://inat/111', '2025-01-01 00:00:00')",
+        (pid,),
+    )
+    db.conn.execute(
+        "INSERT INTO inat_submissions (photo_id, observation_id, observation_url, submitted_at) "
+        "VALUES (?, 222, 'https://inat/222', '2026-01-01 00:00:00')",
+        (pid,),
+    )
+    db.conn.commit()
+
+    subs = db.get_inat_submissions([pid])
+    assert subs[pid]["observation_id"] == 222
+
+    _cap_sqlite_vars(db)
+    subs = db.get_inat_submissions([pid] + list(range(1_000_000, 1_001_200)))
+    assert subs[pid]["observation_id"] == 222
+
+
+def test_workspace_active_labels_survive_non_dict_overrides(tmp_path):
+    """api_update_workspace can persist non-dict config_overrides JSON; the
+    active-labels accessors must fall back like get_effective_config and
+    get_subject_types do, not raise AttributeError/TypeError."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+
+    for bad in (["not", "a", "dict"], "just a string", 42):
+        db.update_workspace(ws_id, config_overrides=bad)
+        assert db.get_workspace_active_labels() is None
+        # Setter must replace the junk rather than crash on item assignment.
+        db.set_workspace_active_labels(["birds.txt"])
+        assert db.get_workspace_active_labels() == ["birds.txt"]

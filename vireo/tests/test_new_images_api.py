@@ -245,6 +245,7 @@ def test_api_new_images_registers_ephemeral_job_on_cache_cold(app_and_db, monkey
         job = walk_jobs[0]
         assert job["status"] == "running"
         assert job["workspace_id"] == ws_id
+        assert job["counts_for_badge"] is False
         # Job is tied to the workspace via config.workspace_name for the UI label.
         assert "workspace_name" in job["config"]
     finally:

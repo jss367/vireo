@@ -1864,6 +1864,7 @@ window.NAV_ALL_PAGES = [
   {id: 'cull',            label: 'Cull',            href: '/cull'},
   {id: 'misses',          label: 'Misses',          href: '/misses'},
   {id: 'highlights',      label: 'Highlights',      href: '/highlights'},
+  {id: 'life_list',       label: 'Life List',       href: '/life-list'},
   {id: 'browse',          label: 'Browse',          href: '/browse'},
   {id: 'map',             label: 'Map',             href: '/map'},
   {id: 'variants',        label: 'Variants',        href: '/variants'},
@@ -4210,7 +4211,7 @@ function buildLightboxContextMenu(pid) {
     items = items.concat(window.buildOpenInEditorMenuItems([pid]));
   }
   if (has('revealPhoto')) {
-    items.push({ label: 'Reveal in Finder/Folder',
+    items.push({ label: window.VIREO_REVEAL_LABEL,
       onClick: function() { window.revealPhoto(pid); } });
   }
   if (has('copyPhotoPaths')) {
@@ -4415,6 +4416,8 @@ function lightboxDelete() {
 }
 /* ---------- iNat Submission ---------- */
 var inatQueue = [];  // [{photo_id, taxon_name, observed_on, latitude, longitude, description, geoprivacy, filename, already_submitted, existing_url}]
+var _inatSubmitting = false;  // true while inatDoSubmit's loop is running
+var _inatCancelled = false;   // set by closeInatModal to stop the loop gracefully
 
 async function submitToInat(photoId) {
   try {
@@ -4514,7 +4517,14 @@ function openInatModal() {
 function closeInatModal() {
   if (window._inatEscToken) { Keymap.popEsc(window._inatEscToken); window._inatEscToken = null; }
   document.getElementById('inatModal').classList.remove('open');
-  inatQueue = [];
+  if (_inatSubmitting) {
+    // Cancel/Esc during an in-flight submit: don't clear the queue out from
+    // under the loop — flag it so it stops after the current item and
+    // reports a partial result.
+    _inatCancelled = true;
+  } else {
+    inatQueue = [];
+  }
 }
 
 async function inatDoSubmit() {
@@ -4530,8 +4540,11 @@ async function inatDoSubmit() {
   var total = inatQueue.length;
   var done = 0;
   var succeeded = 0;
+  _inatSubmitting = true;
+  _inatCancelled = false;
 
   for (var i = 0; i < total; i++) {
+    if (_inatCancelled) break;
     var item = inatQueue[i];
     var statusEl = document.getElementById('inatStatus' + i);
 
@@ -4574,6 +4587,15 @@ async function inatDoSubmit() {
     text.textContent = done + ' / ' + total + ' processed (' + succeeded + ' succeeded)';
   }
 
+  _inatSubmitting = false;
+  if (_inatCancelled) {
+    // Modal is already closed (closeInatModal deferred the queue cleanup
+    // to us) — surface the partial result where the user can see it.
+    _inatCancelled = false;
+    inatQueue = [];
+    showToast('iNaturalist: submitted ' + succeeded + ' of ' + total + ', cancelled', 'info');
+    return;
+  }
   btn.textContent = 'Done';
   // Change cancel to Close
   document.querySelector('#inatActions .modal-btn-cancel').textContent = 'Close';
@@ -4590,12 +4612,18 @@ document.addEventListener('keydown', function(e) {
   // listener below still handles arrow keys / +/-/0 / B / Z / F / G while the
   // lightbox is open.
   if (!document.getElementById('lightboxOverlay').classList.contains('active')) return;
-  if (document.querySelector('.pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;
-  if (e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
-  if (e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }
+  // .grm-overlay.open is deliberately NOT in this suppression list: the burst
+  // modal can only sit *underneath* the lightbox (review's "Open in Lightbox"),
+  // so the lightbox keeps keyboard precedence; the burst modal's own keydown
+  // handler bails while the lightbox is open.
+  if (document.querySelector('.pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;
   var tag0 = e.target && e.target.tagName;
   var editable0 = tag0 === 'INPUT' || tag0 === 'TEXTAREA' || tag0 === 'SELECT' ||
     (e.target && e.target.isContentEditable);
+  // Editable check must come before arrow handling so arrows inside form
+  // fields (e.g. the mask-variant <select>) change the value, not the photo.
+  if (!editable0 && e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
+  if (!editable0 && e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }
   if (!editable0 && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !lightboxKeyMatchesConfiguredBrowseShortcut(e)) {
     if (e.key.toLowerCase() === 'f') {
       requestLightboxFullscreen();
@@ -5085,7 +5113,7 @@ function renderPipeline(data, photoId) {
   // Step 1: Original image
   html += '<div class="pipeline-step">' +
     '<div class="pipeline-step-header"><span class="pipeline-step-num">1</span><span class="pipeline-step-title">Original Image</span></div>' +
-    '<div class="pipeline-stat"><b>' + data.filename + '</b></div>' +
+    '<div class="pipeline-stat"><b>' + escapeHtml(data.filename) + '</b></div>' +
     (data.width ? '<div class="pipeline-stat">' + data.width + ' &times; ' + data.height + '</div>' : '') +
     (data.timestamp ? '<div class="pipeline-stat">' + data.timestamp + '</div>' : '') +
     '</div>';
@@ -5139,12 +5167,14 @@ function renderPipeline(data, photoId) {
     data.predictions.forEach(function(p) {
       var pct = Math.round(p.confidence * 100);
       var statusColor = p.status === 'accepted' ? 'var(--accent)' : p.status === 'rejected' ? 'var(--danger)' : 'var(--text-dim)';
+      // Species/model values can carry user-typed text (freeform species
+      // confirms, custom label files) — escape before interpolating.
       html += '<tr>' +
-        '<td>' + p.species + (p.scientific_name ? '<br><span style="font-size:11px;color:var(--text-dim);font-style:italic;">' + p.scientific_name + '</span>' : '') + '</td>' +
+        '<td>' + escapeHtml(p.species) + (p.scientific_name ? '<br><span style="font-size:11px;color:var(--text-dim);font-style:italic;">' + escapeHtml(p.scientific_name) + '</span>' : '') + '</td>' +
         '<td><span class="pipeline-conf-bar" style="width:' + pct + 'px;"></span> ' + pct + '%</td>' +
-        '<td style="color:var(--text-dim);">' + p.model + '</td>' +
-        '<td style="color:' + statusColor + ';">' + p.status + '</td>' +
-        '<td style="color:var(--text-dim);">' + p.category + '</td>' +
+        '<td style="color:var(--text-dim);">' + escapeHtml(p.model) + '</td>' +
+        '<td style="color:' + statusColor + ';">' + escapeHtml(p.status) + '</td>' +
+        '<td style="color:var(--text-dim);">' + escapeHtml(p.category) + '</td>' +
       '</tr>';
     });
     html += '</table>';
@@ -5161,7 +5191,7 @@ function renderPipeline(data, photoId) {
       if (withTax.taxonomy_genus) parts.push(withTax.taxonomy_genus);
       html += '<div style="margin-top:8px;font-size:12px;color:var(--text-dim);">' +
         '<span style="color:var(--text-muted);">Taxonomy:</span> ' +
-        parts.join(' &rsaquo; ') +
+        parts.map(escapeHtml).join(' &rsaquo; ') +
       '</div>';
     }
 
@@ -5213,7 +5243,8 @@ function renderPipeline(data, photoId) {
       '<div class="pipeline-step-header"><span class="pipeline-step-num">6</span><span class="pipeline-step-title">Current Keywords</span></div>' +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
     data.keywords.forEach(function(k) {
-      html += '<span style="background:var(--bg-tertiary);padding:3px 8px;border-radius:4px;font-size:12px;">' + k.name + '</span>';
+      // Keyword names are user-controlled (typed confirms, XMP imports).
+      html += '<span style="background:var(--bg-tertiary);padding:3px 8px;border-radius:4px;font-size:12px;">' + escapeHtml(k.name) + '</span>';
     });
     html += '</div></div>';
   }
@@ -5250,27 +5281,52 @@ function findSimilar(photoId) {
         content.innerHTML = '<p style="color:var(--warning);">' + escapeHtml(data.error) + '</p>';
         return;
       }
-      var html = '<p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">Compared against ' +
-        data.total_compared.toLocaleString() + ' photos with embeddings</p>';
+      // Filenames are user-controlled: build cards with DOM methods and
+      // closure-bound click handlers instead of interpolating into
+      // HTML/onclick strings — a quote or angle bracket in a filename broke
+      // the inline handler (and could inject markup).
+      content.textContent = '';
+      var summary = document.createElement('p');
+      summary.style.cssText = 'font-size:12px;color:var(--text-dim);margin-bottom:12px;';
+      summary.textContent = 'Compared against ' + data.total_compared.toLocaleString() + ' photos with embeddings';
+      content.appendChild(summary);
 
       if (data.similar.length === 0) {
-        html += '<p style="color:var(--text-dim);">No similar photos found.</p>';
+        var none = document.createElement('p');
+        none.style.color = 'var(--text-dim)';
+        none.textContent = 'No similar photos found.';
+        content.appendChild(none);
       } else {
-        html += '<div class="similar-grid">';
+        var grid = document.createElement('div');
+        grid.className = 'similar-grid';
         data.similar.forEach(function(item) {
           var p = item.photo;
           var pct = Math.round(item.similarity * 100);
-          html += '<div class="similar-card" onclick="closeSimilar(); openLightbox(' + p.id + ',\'' + (p.filename || '').replace(/'/g, "\\'") + '\')">' +
-            '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="">' +
-            '<div class="similar-card-info">' +
-              '<div class="similar-card-name" title="' + (p.filename || '') + '">' + (p.filename || '') + '</div>' +
-              '<div class="similar-card-score">' + pct + '% similar</div>' +
-            '</div>' +
-          '</div>';
+          var card = document.createElement('div');
+          card.className = 'similar-card';
+          card.addEventListener('click', function() {
+            closeSimilar();
+            openLightbox(p.id, p.filename || '');
+          });
+          var img = document.createElement('img');
+          img.src = '/thumbnails/' + p.id + '.jpg';
+          img.loading = 'lazy';
+          img.alt = '';
+          var info = document.createElement('div');
+          info.className = 'similar-card-info';
+          var name = document.createElement('div');
+          name.className = 'similar-card-name';
+          name.title = p.filename || '';
+          name.textContent = p.filename || '';
+          var score = document.createElement('div');
+          score.className = 'similar-card-score';
+          score.textContent = pct + '% similar';
+          info.append(name, score);
+          card.append(img, info);
+          grid.appendChild(card);
         });
-        html += '</div>';
+        content.appendChild(grid);
       }
-      content.innerHTML = html;
     })
     .catch(function(e) {
       content.innerHTML = '<p style="color:var(--danger);">Failed: ' + escapeHtml(e.message) + '</p>';
@@ -5585,6 +5641,14 @@ function isLiveJob(job) {
   );
 }
 
+function countsForBadge(job) {
+  return !job || job.counts_for_badge !== false;
+}
+
+function isAttentionJob(job) {
+  return isLiveJob(job) && countsForBadge(job);
+}
+
 function isWaitingJob(job) {
   return !!job && (job.status === 'queued' || job.status === 'pending');
 }
@@ -5596,7 +5660,7 @@ async function nativeMenuCancelCurrentJob() {
   // the queued path atomically), so the native menu's "cancel current
   // job" should be able to reach them — otherwise a waiting pipeline
   // is stuck if the user closes the pipeline page.
-  var running = list.find(isLiveJob);
+  var running = list.find(isAttentionJob);
   if (!running) {
     nativeMenuInfo('No active job to cancel');
     return;
@@ -5648,7 +5712,7 @@ window.handleNativeMenuCommand = async function(command) {
         nativeMenuOpenBrowse();
         break;
       case 'photo_reveal': {
-        var revealIds = nativeMenuRequirePhotos('Reveal in Finder');
+        var revealIds = nativeMenuRequirePhotos(window.VIREO_REVEAL_LABEL);
         if (!revealIds) break;
         if (typeof revealPhoto === 'function') revealPhoto(revealIds[0]);
         else if (typeof revealReviewPhoto === 'function') revealReviewPhoto(revealIds[0]);
@@ -6179,10 +6243,9 @@ function formatDuration(seconds) {
       if (lpSource) { lpSource.close(); lpSource = null; }
       // Only warn on actual tab close, not internal navigation
       if (isInternalNav) { isInternalNav = false; return; }
-      // Warn on tab close when ANY live job exists — including queued
-      // or pending jobs. Closing the tab leaves them sitting in the
-      // server-side queue with no UI to manage them from this session.
-      var running = activeJobs.filter(isLiveJob);
+      // Warn on tab close when user-attention work exists, including queued
+      // or pending jobs. Ambient system jobs should not block tab close.
+      var running = activeJobs.filter(isAttentionJob);
       if (running.length > 0) {
         e.preventDefault();
         e.returnValue = '';
@@ -6478,7 +6541,9 @@ function formatDuration(seconds) {
   var _lastDockProgress = { state: null, value: -1 };
   function updateDockProgress() {
     if (!window.__TAURI_INTERNALS__) return;
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var running = activeJobs.filter(function(j) {
+      return j.status === 'running' && countsForBadge(j);
+    });
     var state, value;
     if (running.length === 0) {
       state = 'none'; value = null;
@@ -6516,13 +6581,15 @@ function formatDuration(seconds) {
     // pipeline — there'd be no way to find or cancel the queued run
     // from this surface.
     var allRunning = activeJobs.filter(isLiveJob);
+    var attentionJobs = allRunning.filter(countsForBadge);
     var thisWs = allRunning.filter(function(j) { return j.workspace_id === _activeWsId; });
     var otherWs = allRunning.filter(function(j) { return j.workspace_id !== _activeWsId; });
 
-    // Badges count all active jobs across workspaces
-    document.getElementById('jobsBadge').textContent = allRunning.length;
+    // Badges count attention-worthy work across workspaces. Ambient system
+    // jobs stay visible in the panel without asking for attention.
+    document.getElementById('jobsBadge').textContent = attentionJobs.length;
     var navBadge = document.getElementById('navJobBadge');
-    if (navBadge) navBadge.textContent = allRunning.length > 0 ? ' (' + allRunning.length + ')' : '';
+    if (navBadge) navBadge.textContent = attentionJobs.length > 0 ? ' (' + attentionJobs.length + ')' : '';
 
     if (allRunning.length === 0) {
       // "Last run" fallback must exclude live state — running,
@@ -6590,11 +6657,19 @@ function formatDuration(seconds) {
 
   function updateSummary() {
     var summary = document.getElementById('jobSummary');
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
-    var waiting = activeJobs.filter(isWaitingJob);
+    var liveJobs = activeJobs.filter(isLiveJob);
+    var attentionJobs = liveJobs.filter(countsForBadge);
+    var running = attentionJobs.filter(function(j) { return j.status === 'running'; });
+    var waiting = attentionJobs.filter(isWaitingJob);
 
     if (running.length === 0 && waiting.length === 0) {
-      summary.textContent = 'No active jobs';
+      if (liveJobs.length > 0) {
+        summary.textContent = liveJobs.length === 1
+          ? 'Background: ' + window.formatJobType(liveJobs[0].type)
+          : liveJobs.length + ' background jobs';
+      } else {
+        summary.textContent = 'No active jobs';
+      }
       summary.classList.add('idle');
       summary.classList.remove('active');
       return;
@@ -6643,9 +6718,9 @@ function formatDuration(seconds) {
   }
 
   function updateActivityDot() {
-    // The dot signals "something live is happening" — waiting work counts
-    // because the user has work the system is on the hook to run.
-    var running = activeJobs.filter(isLiveJob);
+    // The dot signals attention-worthy work; ambient system jobs remain in
+    // the Jobs panel without lighting up the navbar.
+    var running = activeJobs.filter(isAttentionJob);
     var dot = document.getElementById('navActivityDot');
     if (dot) dot.classList.toggle('active', running.length > 0);
   }
@@ -7107,16 +7182,34 @@ async function loadMissingFolders() {
       checkMissingFolders();  // update banner
       return;
     }
-    container.innerHTML = folders.map(f => `
-      <div class="missing-folder-row">
-        <div class="missing-folder-path" title="${f.path}">${f.path}</div>
-        <div class="missing-folder-count">${f.photo_count} photo${f.photo_count !== 1 ? 's' : ''}</div>
-        <div class="missing-folder-actions">
-          <button onclick="startRelocate(${f.id}, '${f.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;')}')">Relocate</button>
-          <button class="danger" onclick="startRemoveFolder(${f.id}, '${f.path.replace(/'/g, "\\'")}', ${f.photo_count})">Remove</button>
-        </div>
-      </div>
-    `).join('');
+    // Paths are user-controlled: build rows with DOM methods instead of
+    // interpolating into HTML/onclick strings — a quote, backslash, or
+    // angle bracket in a folder name broke the inline handlers (and could
+    // inject markup). Closures carry the path values safely.
+    container.textContent = '';
+    folders.forEach(f => {
+      const row = document.createElement('div');
+      row.className = 'missing-folder-row';
+      const pathEl = document.createElement('div');
+      pathEl.className = 'missing-folder-path';
+      pathEl.title = f.path;
+      pathEl.textContent = f.path;
+      const countEl = document.createElement('div');
+      countEl.className = 'missing-folder-count';
+      countEl.textContent = `${f.photo_count} photo${f.photo_count !== 1 ? 's' : ''}`;
+      const actions = document.createElement('div');
+      actions.className = 'missing-folder-actions';
+      const relocateBtn = document.createElement('button');
+      relocateBtn.textContent = 'Relocate';
+      relocateBtn.addEventListener('click', () => startRelocate(f.id, f.path));
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'danger';
+      removeBtn.textContent = 'Remove';
+      removeBtn.addEventListener('click', () => startRemoveFolder(f.id, f.path, f.photo_count));
+      actions.append(relocateBtn, removeBtn);
+      row.append(pathEl, countEl, actions);
+      container.appendChild(row);
+    });
   } catch (e) {
     container.innerHTML = '<p style="color:var(--text-secondary);">Failed to check folders.</p>';
   }

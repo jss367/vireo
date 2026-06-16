@@ -152,6 +152,7 @@
 .tree-status-icon.running { color: var(--accent); animation: pulse-step 1.5s ease-in-out infinite; }
 .tree-status-icon.completed { color: var(--success, #4caf50); }
 .tree-status-icon.failed { color: var(--danger); }
+.tree-status-icon.cancelled { color: var(--text-muted); }
 @keyframes pulse-step {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
@@ -309,6 +310,7 @@
       case 'running': return '<span class="tree-status-icon running">\u25CB</span>';
       case 'completed': return '<span class="tree-status-icon completed">\u2713</span>';
       case 'failed': return '<span class="tree-status-icon failed">\u2717</span>';
+      case 'cancelled': return '<span class="tree-status-icon cancelled">\u2298</span>';
       default: return '<span class="tree-status-icon pending">\u25CB</span>';
     }
   }
@@ -420,8 +422,11 @@
       }
     }
 
-    // 7: Summary for completed steps
-    if (step.status === 'completed' && step.summary) {
+    // 7: Summary for terminal steps. The backend writes explanatory
+    // summaries on completed, cancelled ("Cancelled (N animals detected
+    // so far)"), and some failed steps (e.g. scan) — show them all.
+    var isTerminal = step.status === 'completed' || step.status === 'cancelled' || step.status === 'failed';
+    if (isTerminal && step.summary) {
       html += '<span class="tree-step-summary">(' + esc(step.summary) + ')</span>';
     }
 

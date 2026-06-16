@@ -251,7 +251,14 @@ def _pair_raw_jpeg_companions(db):
         if primary_full["rating"] == 0 and companion_full["rating"] != 0:
             updates.append("rating = ?")
             params.append(companion_full["rating"])
-        if primary_full["flag"] == "none" and companion_full["flag"] != "none":
+        if (
+            primary_full["flag"] == "none"
+            and companion_full["flag"] not in ("none", "rejected")
+        ):
+            # Never copy 'rejected': the duplicate auto-resolver runs earlier
+            # in the same scan and rejects companion JPEGs that lose to a
+            # byte-identical twin elsewhere — stamping that onto the RAW
+            # would silently hide a unique photo.
             updates.append("flag = ?")
             params.append(companion_full["flag"])
         if primary_full["latitude"] is None and companion_full["latitude"] is not None:
@@ -1174,10 +1181,25 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
         for image_path in image_files:
             _check_cancelled()
-            stat = image_path.stat()
+            try:
+                stat = image_path.stat()
+            except OSError:
+                # File deleted/renamed between discovery and this pass —
+                # skip it instead of aborting the whole scan (the discovery
+                # walk has the same guard for broken symlinks).
+                log.info("File vanished during scan, skipping: %s", image_path)
+                processed_count += 1
+                if progress_callback:
+                    progress_callback(processed_count, total)
+                continue
             file_mtime = stat.st_mtime
             xmp_path = image_path.with_suffix(".xmp")
-            xmp_mtime = xmp_path.stat().st_mtime if xmp_path.exists() else None
+            try:
+                xmp_mtime = xmp_path.stat().st_mtime
+            except OSError:
+                # Covers both "no sidecar" and a sidecar deleted between
+                # exists() and stat() — same outcome either way.
+                xmp_mtime = None
 
             if incremental:
                 full_path_str = str(image_path)
@@ -1217,6 +1239,16 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                         db.conn.execute(
                             "UPDATE photos SET xmp_mtime = ? WHERE id = ?",
                             (xmp_mtime, existing["id"]),
+                        )
+                        commit_with_retry(db.conn)
+                    elif not xmp_unchanged:
+                        # Sidecar deleted: clear the stored mtime so the row
+                        # converges instead of looking "XMP changed" on every
+                        # later scan (this skip path never reaches the main
+                        # loop, so nothing else would ever reset it).
+                        db.conn.execute(
+                            "UPDATE photos SET xmp_mtime = NULL WHERE id = ?",
+                            (existing["id"],),
                         )
                         commit_with_retry(db.conn)
 
@@ -1307,17 +1339,30 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     try:
         for image_path, (phash, file_hash) in _iter_features():
             _check_cancelled()
+
+            # File stats — first touch of the path in this loop. A file
+            # deleted/renamed between discovery and here must skip, not
+            # abort the scan and flag every folder in scope 'partial'.
+            try:
+                stat = image_path.stat()
+            except OSError:
+                log.info("File vanished during scan, skipping: %s", image_path)
+                processed_count += 1
+                if progress_callback:
+                    progress_callback(processed_count, total)
+                continue
+
             folder_id = _ensure_folder(image_path.parent)
             touched_folder_ids.add(folder_id)
-
-            # File stats
-            stat = image_path.stat()
             file_size = stat.st_size
             file_mtime = stat.st_mtime
 
             # XMP sidecar
             xmp_path = image_path.with_suffix(".xmp")
-            xmp_mtime = xmp_path.stat().st_mtime if xmp_path.exists() else None
+            try:
+                xmp_mtime = xmp_path.stat().st_mtime
+            except OSError:
+                xmp_mtime = None
 
             # Get pre-extracted metadata for this file
             file_meta = metadata_map.get(str(image_path), {})
@@ -1420,6 +1465,16 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             if file_hash is not None:
                 updates.append("file_hash=?")
                 update_params.append(file_hash)
+                if row_already_existed and prev_file_hash != file_hash:
+                    # The stored baseline is being replaced, so any prior
+                    # integrity verdict applied to bytes that no longer
+                    # exist. Clear the verification markers rather than
+                    # carry them forward — the audit summary must only
+                    # claim "checked" for baselines verify_hashes (or an
+                    # explicit user accept) actually vouched for. A rescan
+                    # that recomputes the same hash leaves coverage intact.
+                    updates.append("hash_checked_at=NULL")
+                    updates.append("hash_status=NULL")
             if file_meta and extract_full_metadata:
                 updates.append("exif_data=?")
                 update_params.append(json.dumps(file_meta))
@@ -1428,6 +1483,28 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 # extract_full_metadata is off) — prevents perpetual retry
                 updates.append("exif_data=COALESCE(exif_data, ?)")
                 update_params.append("{}")
+            if row_already_existed:
+                # add_photo is INSERT OR IGNORE, so the fresh stat values it
+                # was passed never reach an existing row. Without these the
+                # incremental pre-pass keeps comparing against the stale
+                # stored mtime and re-processes a changed file on every scan
+                # forever. Only advance file_mtime/file_size when the content
+                # hash succeeded: _compute_file_features hashes every
+                # processed file, so file_hash is None only when the bytes
+                # couldn't be read (transient permission/I-O error). Marking
+                # such a file's mtime current would make the next incremental
+                # scan skip it forever with a stale hash and stale derived
+                # caches; leaving the old mtime in place retries it instead.
+                if file_hash is not None:
+                    updates.extend(["file_mtime=?", "file_size=?"])
+                    update_params.extend([file_mtime, file_size])
+                # xmp_mtime stays unconditional — the sidecar is a separate
+                # file whose keyword import below runs regardless of image
+                # hash success, and it may be None here: writing NULL is
+                # correct (a deleted sidecar otherwise re-trips the "XMP
+                # changed" check on every scan).
+                updates.append("xmp_mtime=?")
+                update_params.append(xmp_mtime)
             if updates:
                 update_params.append(photo_id)
                 db.conn.execute(

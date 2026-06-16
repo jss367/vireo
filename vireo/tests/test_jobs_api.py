@@ -605,6 +605,51 @@ def test_update_step_current_file(app_and_db):
     assert runner._jobs[job_id]["steps"][0]["current_file"] == "DSC_0001.NEF"
 
 
+def test_start_job_ids_unique_within_same_millisecond(app_and_db, monkeypatch):
+    """start() ids carry a monotonic suffix — two same-type jobs started in
+    the same millisecond previously collided, overwriting each other's
+    registration and history row."""
+    import time as _time
+
+    import jobs as jobs_mod
+    from jobs import JobRunner
+    # Freeze the clock so every start() provably lands in the same
+    # millisecond — without this a slow CI worker could space the calls
+    # out and the old (suffix-less) implementation would also pass.
+    frozen = _time.time()
+    monkeypatch.setattr(jobs_mod.time, "time", lambda: frozen)
+    runner = JobRunner()
+    ids = [runner.start("scan", lambda j: None) for _ in range(10)]
+    assert len(set(ids)) == 10
+
+
+def test_update_step_cancelled_is_terminal(app_and_db):
+    """status='cancelled' finalizes a step (finished_at + duration), same as
+    completed/failed — classify/pipeline steps report it on user cancel."""
+    from jobs import JobRunner
+    runner = JobRunner.__new__(JobRunner)
+    runner._jobs = {}
+    runner._subscribers = {}
+    runner._lock = __import__('threading').Lock()
+    runner._history_db_path = None
+
+    job_id = "test-cancel-step"
+    runner._jobs[job_id] = {
+        "id": job_id,
+        "steps": [
+            {"id": "classify", "label": "Classify", "status": "pending",
+             "started_at": None, "finished_at": None, "duration": None},
+        ],
+    }
+    runner.update_step(job_id, "classify", status="running")
+    runner.update_step(job_id, "classify", status="cancelled",
+                       summary="Cancelled (3 of 10 processed)")
+    step = runner._jobs[job_id]["steps"][0]
+    assert step["status"] == "cancelled"
+    assert step["finished_at"] is not None
+    assert step["duration"] is not None
+
+
 def test_scan_step_has_progress(app_and_db, tmp_path):
     """Scan step reports step-level progress with current/total."""
     app, _ = app_and_db

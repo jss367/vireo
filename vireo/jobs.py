@@ -264,7 +264,13 @@ class JobRunner:
                         "workspace_id": ctx["workspace_id"],
                         "steps": [],
                         "ephemeral": False,
+                        "counts_for_badge": True,
                         "runtime_warning": ctx["runtime_warning"],
+                        # Pre-seeded for iteration safety — see start().
+                        "_start_time": time.time(),
+                        "_ended_at": None,
+                        "_persisted": False,
+                        "_fatal_error": None,
                     }
                     self._prune_finished_jobs()
                     self._jobs[job_id] = job
@@ -334,6 +340,7 @@ class JobRunner:
             "workspace_id": ctx["workspace_id"],
             "steps": [],
             "ephemeral": False,
+            "counts_for_badge": True,
             "runtime_warning": ctx.get("runtime_warning"),
             "_ended_at": time.time(),
             "_persisted": True,
@@ -345,7 +352,7 @@ class JobRunner:
             self._subscribers.setdefault(job_id, [])
 
     def start(self, job_type, work_fn, config=None, workspace_id=None,
-              ephemeral=False, runtime_warning=None):
+              ephemeral=False, runtime_warning=None, counts_for_badge=True):
         """Start a background job.
 
         Args:
@@ -362,11 +369,20 @@ class JobRunner:
                        it to clutter the history list.
             runtime_warning: optional user-facing warning metadata to expose
                        while the job is running.
+            counts_for_badge: if False, the job remains visible in job lists
+                       but does not contribute to app/Dock attention badges.
 
         Returns:
             job_id string
         """
-        job_id = f"{job_type}-{int(time.time() * 1000)}"
+        # Monotonic suffix (shared with enqueue_pipeline) so two same-type
+        # starts in the same millisecond can't collide — a collision makes
+        # the second registration overwrite the first in _jobs/_events and
+        # clobber its history row.
+        with self._lock:
+            self._enqueue_counter += 1
+            seq = self._enqueue_counter
+        job_id = f"{job_type}-{int(time.time() * 1000)}-{seq}"
         now = datetime.now().isoformat()
 
         job = {
@@ -382,7 +398,17 @@ class JobRunner:
             "workspace_id": workspace_id,
             "steps": [],
             "ephemeral": ephemeral,
+            "counts_for_badge": counts_for_badge,
             "runtime_warning": runtime_warning,
+            # Pre-seeded so later writes from worker threads update an
+            # existing key instead of inserting a new one: key insertion
+            # while a request handler iterates the same dict (jsonify of
+            # /api/jobs) raises "dictionary changed size during iteration";
+            # same-key updates don't resize the dict.
+            "_start_time": time.time(),
+            "_ended_at": None,
+            "_persisted": False,
+            "_fatal_error": None,
         }
 
         with self._lock:
@@ -523,6 +549,7 @@ class JobRunner:
         )
 
         for attempt in range(3):
+            conn = None
             try:
                 conn = sqlite3.connect(self._db_path, timeout=30)
                 conn.execute(
@@ -555,7 +582,6 @@ class JobRunner:
                         (ws_id, ws_id),
                     )
                 conn.commit()
-                conn.close()
                 return
             except sqlite3.OperationalError:
                 if attempt < 2:
@@ -565,6 +591,11 @@ class JobRunner:
                         "Failed to persist job history for %s after 3 attempts",
                         job["id"],
                     )
+            finally:
+                # Close on every path — a failed execute/commit previously
+                # leaked the connection (one per retry).
+                if conn is not None:
+                    conn.close()
 
     def _build_summary(self, job):
         """Build a one-line summary from job steps or result."""
@@ -618,15 +649,32 @@ class JobRunner:
             "workspace_id": ctx["workspace_id"],
             "steps": [],
             "ephemeral": False,
+            "counts_for_badge": True,
             "runtime_warning": ctx.get("runtime_warning"),
         }
 
+    @staticmethod
+    def _snapshot_job(job):
+        """Copy a job dict for callers outside the lock.
+
+        The top-level copy alone isn't enough: handlers jsonify the nested
+        progress/steps containers while worker threads mutate them, and a
+        key insertion during that iteration raises RuntimeError. Snapshot
+        the nested mutable containers under the lock too.
+        """
+        snap = dict(job)
+        snap["progress"] = dict(job.get("progress") or {})
+        snap["steps"] = [dict(s) for s in (job.get("steps") or [])]
+        snap["errors"] = list(job.get("errors") or [])
+        return snap
+
     def get(self, job_id):
-        """Get a job by id. Returns a shallow copy so callers don't mutate shared state."""
+        """Get a job by id. Returns a copy so callers don't mutate (or race
+        with) shared state."""
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
-                return dict(job)
+                return self._snapshot_job(job)
             ctx = self._queued_pipelines.get(job_id)
             if ctx is None:
                 return None
@@ -637,10 +685,11 @@ class JobRunner:
 
         Includes synthetic queued-pipeline entries so the navbar and
         /jobs page can render and cancel them; otherwise a queued run
-        disappears from the UI between enqueue and promotion.
+        disappears from the UI between enqueue and promotion. Returns
+        snapshots, not live dicts — see _snapshot_job.
         """
         with self._lock:
-            jobs = list(self._jobs.values())
+            jobs = [self._snapshot_job(j) for j in self._jobs.values()]
             for job_id, ctx in self._queued_pipelines.items():
                 jobs.append(self._synthesize_queued_view(job_id, ctx))
             return jobs
@@ -800,7 +849,10 @@ class JobRunner:
                     new_status = kwargs.get("status")
                     if new_status == "running" and step["status"] == "pending":
                         step["started_at"] = datetime.now().isoformat()
-                    if new_status in ("completed", "failed") and step["started_at"]:
+                    # "cancelled" is terminal too — classify/pipeline steps
+                    # report it on user cancel; without it here those steps
+                    # persist with no finished_at/duration.
+                    if new_status in ("completed", "failed", "cancelled") and step["started_at"]:
                         step["finished_at"] = datetime.now().isoformat()
                         start = datetime.fromisoformat(step["started_at"])
                         end = datetime.fromisoformat(step["finished_at"])
