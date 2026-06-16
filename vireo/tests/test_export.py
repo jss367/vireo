@@ -169,6 +169,42 @@ def test_export_photos_applies_edit_recipe(export_env):
         assert img.size == (300, 800)
 
 
+def test_export_cropped_recipe_avoids_undersized_working_copy(export_env):
+    """Cropped resized exports use the original when a capped WC is too small."""
+    env = export_env
+    db = env["db"]
+    working_dir = os.path.join(env["vireo_dir"], "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{env['p1']}.jpg")
+    Image.new("RGB", (400, 300), color="red").save(wc_path, "JPEG", quality=95)
+    db.conn.execute(
+        "UPDATE photos SET width=800, height=600, working_copy_path=? WHERE id=?",
+        (f"working/{env['p1']}.jpg", env["p1"]),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 300,
+            "working_copy_max_size": 400,
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(os.path.join(env["dest"], "bird1.jpg")) as img:
+        assert img.size == (300, 225)
+
+
 def test_export_photos_subdirectories(export_env):
     """export_photos creates subdirectories from template."""
     env = export_env

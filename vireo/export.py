@@ -158,8 +158,11 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             source_path, photo, max_size
         ):
             source_path = None
+        recipe = edit_recipes.get(pid)
         if not source_path:
-            use_wc = bool(max_size) and max_size <= wc_max
+            use_wc = _working_copy_can_satisfy_export(
+                photo, recipe, max_size, wc_max
+            )
             source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=use_wc)
         if not source_path or not os.path.isfile(source_path):
             errors.append(f"{photo['filename']}: source file missing")
@@ -217,7 +220,6 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
 
         # Load, resize, and save
         try:
-            recipe = edit_recipes.get(pid)
             img = load_image(source_path, max_size=None if recipe else (max_size or None))
             if img is None:
                 errors.append(f"{photo['filename']}: failed to load image")
@@ -474,6 +476,34 @@ def _find_developed_output(filename, folder_path, developed_dir, index=None):
         if hit:
             return hit
     return None
+
+
+def _working_copy_can_satisfy_export(photo, recipe, max_size, wc_max):
+    """Return True when the working copy can preserve requested export pixels."""
+    if not max_size or max_size <= 0:
+        return False
+    if max_size > wc_max:
+        return False
+    crop = (recipe or {}).get("crop") if recipe else None
+    if not crop:
+        return True
+
+    width = photo["width"] or 0
+    height = photo["height"] or 0
+    if width <= 0 or height <= 0:
+        # Missing dimensions: prefer the original over silently exporting a
+        # cropped derivative from an undersized working copy.
+        return False
+
+    rotation = (recipe or {}).get("rotation", 0)
+    if rotation in (90, 270):
+        width, height = height, width
+    source_long = max(width, height)
+    crop_long = max(float(crop["w"]) * width, float(crop["h"]) * height)
+    if crop_long <= 0:
+        return False
+    required_source_long = max_size * (source_long / crop_long)
+    return required_source_long <= wc_max
 
 
 def _resolve_source(photo, vireo_dir, folders, use_working_copy=False):
