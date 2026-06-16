@@ -3336,11 +3336,21 @@ function _lbApplyFlag(photoId, flag) {
 
   Promise.resolve(write).then(function(ok) {
     _lbFlagPendingWrites = Math.max(0, _lbFlagPendingWrites - 1);
-    if (_lightboxCurrentId !== photoId) return;
     if (ok === false) {
-      if (_lbFlagEditSeq === seq) _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
+      if (_lightboxCurrentId === photoId && _lbFlagEditSeq === seq) {
+        _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
+      }
       return;
     }
+    // Notify pages (e.g. Highlights) that a flag write landed so they can
+    // reconcile their grid — fire even when the user has navigated to another
+    // photo, since the write still succeeded for `photoId`.
+    try {
+      document.dispatchEvent(new CustomEvent('lightbox:flagchanged', {
+        detail: { photoId: photoId, flag: normalized },
+      }));
+    } catch (_) {}
+    if (_lightboxCurrentId !== photoId) return;
     if (_lbFlagEditSeq === seq || _lbFlagPendingWrites === 0) {
       _lbRecordFlag(photoId, normalized);
     } else {

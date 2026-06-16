@@ -724,6 +724,54 @@ async function doSave(mode) {
   closeSaveModal();
 }
 
+// Drop a photo from the in-memory model after it is rejected, so the grid
+// matches the backend query (which excludes rejected photos). Returns true if
+// anything changed.
+function removeRejectedPhotoFromModel(photoId) {
+  if (!currentData) return false;
+  var changed = false;
+
+  function pruneSection(section) {
+    if (!section || !Array.isArray(section.photos)) return;
+    var before = section.photos.length;
+    // Replace (don't splice) the array so any open lightbox keeps navigating
+    // its original, stable photo set.
+    var kept = section.photos.filter(function(p) { return p.id !== photoId; });
+    if (kept.length !== before) {
+      section.photos = kept;
+      section.photo_count = Math.max(0, (section.photo_count || before) - 1);
+      if (typeof section.loaded_count === 'number') {
+        section.loaded_count = Math.max(0, section.loaded_count - 1);
+      }
+      changed = true;
+    }
+  }
+
+  (currentData.buckets || []).forEach(pruneSection);
+  pruneSection(currentData.unidentified);
+
+  if (changed) {
+    // Drop buckets emptied by the rejection.
+    if (currentData.buckets) {
+      currentData.buckets = currentData.buckets.filter(function(b) {
+        return (b.photo_count || 0) > 0 && (b.photos || []).length > 0;
+      });
+    }
+    if (currentData.meta && typeof currentData.meta.eligible === 'number') {
+      currentData.meta.eligible = Math.max(0, currentData.meta.eligible - 1);
+    }
+  }
+  return changed;
+}
+
+document.addEventListener('lightbox:flagchanged', function(e) {
+  var detail = e && e.detail;
+  if (!detail || detail.flag !== 'rejected' || detail.photoId == null) return;
+  if (removeRejectedPhotoFromModel(detail.photoId)) {
+    render();
+  }
+});
+
 loadHighlights();
 </script>
 </body>
