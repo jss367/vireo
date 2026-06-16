@@ -701,6 +701,67 @@ def test_pipeline_previews_stage_writes_atomically(tmp_path, monkeypatch):
         )
 
 
+def test_pipeline_previews_stage_bounds_non_crop_recipe_loads(tmp_path, monkeypatch):
+    import config as cfg
+    import image_loader
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    source_path = photo_dir / "edited.jpg"
+    Image.new("RGB", (800, 600), "red").save(source_path, "JPEG")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_id = db.add_folder(str(photo_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="edited.jpg",
+        extension=".jpg",
+        file_size=os.path.getsize(source_path),
+        file_mtime=os.path.getmtime(source_path),
+        width=800,
+        height=600,
+    )
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    collection_id = db.add_collection(
+        "Edited",
+        json.dumps([{"field": "photo_ids", "op": "in", "value": [photo_id]}]),
+    )
+
+    original_load_image = image_loader.load_image
+    seen_max_sizes = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        seen_max_sizes.append(max_size)
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(
+        job,
+        runner,
+        db_path,
+        ws_id,
+        PipelineParams(
+            collection_id=collection_id,
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+            preview_max_size=1920,
+        ),
+    )
+
+    assert seen_max_sizes[-1] == 1920
+
+
 def test_pipeline_params_sources_used_over_source():
     """When sources is provided, it should take precedence over source."""
     params = PipelineParams(source="/single", sources=["/a", "/b"])

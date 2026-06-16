@@ -11931,7 +11931,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     canonical, _using_working_copy = _recipe_render_source(
                         photo, recipe, max_size, vireo_dir, folders,
                     )
-                    img = load_image(canonical, max_size=None if recipe else max_size)
+                    load_max_size = (
+                        None if recipe and recipe.get("crop") else max_size
+                    )
+                    img = load_image(canonical, max_size=load_max_size)
                     if img:
                         if recipe:
                             img = apply_recipe_to_loaded_image(

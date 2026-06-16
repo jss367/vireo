@@ -2610,10 +2610,13 @@ def test_preview_job_writes_sized_filename_and_tracks(client_with_photo):
     assert not os.path.exists(os.path.join(preview_dir, f"{photo_id}.jpg"))
 
 
-def test_preview_job_applies_edit_recipe_to_warmed_file(client_with_photo):
+def test_preview_job_applies_edit_recipe_to_warmed_file(
+    client_with_photo, monkeypatch,
+):
     import os
     import time
 
+    import image_loader
     from PIL import Image
 
     app, db, photo_id = client_with_photo
@@ -2622,6 +2625,14 @@ def test_preview_job_applies_edit_recipe_to_warmed_file(client_with_photo):
     preview_dir = os.path.join(vireo_dir, "previews")
     preview_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    original_load_image = image_loader.load_image
+    seen_max_sizes = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        seen_max_sizes.append(max_size)
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
 
     resp = client.post("/api/jobs/previews", json={})
     assert resp.status_code == 200
@@ -2639,6 +2650,7 @@ def test_preview_job_applies_edit_recipe_to_warmed_file(client_with_photo):
         time.sleep(0.05)
     assert data["status"] == "completed"
 
+    assert seen_max_sizes == [1920]
     assert db.preview_cache_get(photo_id, 1920) is not None
     with Image.open(preview_path) as img:
         assert img.size == (600, 800)

@@ -1549,7 +1549,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     canonical = _recipe_render_source(
                         photo, recipe, max_size, base_dir, folders,
                     )
-                    img = load_image(canonical, max_size=None if recipe else max_size)
+                    load_max_size = (
+                        None if recipe and recipe.get("crop") else max_size
+                    )
+                    img = load_image(canonical, max_size=load_max_size)
                     if img:
                         if recipe:
                             img = apply_recipe_to_loaded_image(
