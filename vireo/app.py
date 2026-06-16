@@ -1416,16 +1416,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         preview_dir = os.path.join(vireo_dir, "previews")
         originals_dir = os.path.join(vireo_dir, "originals")
         for pid in photo_ids:
+            tracked_sizes = set()
             for row in db.conn.execute(
                 "SELECT size FROM preview_cache WHERE photo_id = ?",
                 (pid,),
             ).fetchall():
+                tracked_sizes.add(str(row["size"]))
                 path = os.path.join(preview_dir, f"{pid}_{row['size']}.jpg")
                 try:
                     if os.path.exists(path):
                         os.remove(path)
                 except OSError:
                     log.warning("Failed to remove stale preview cache %s", path)
+            try:
+                for name in os.listdir(preview_dir):
+                    if not (name.startswith(f"{pid}_") and name.endswith(".jpg")):
+                        continue
+                    size_part = name[len(f"{pid}_"):-4]
+                    if size_part in tracked_sizes:
+                        continue
+                    path = os.path.join(preview_dir, name)
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        log.warning("Failed to remove stale preview cache %s", path)
+            except FileNotFoundError:
+                pass
             db.conn.execute("DELETE FROM preview_cache WHERE photo_id = ?", (pid,))
             original_cache = os.path.join(originals_dir, f"{pid}.jpg")
             try:

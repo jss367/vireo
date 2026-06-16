@@ -1393,6 +1393,29 @@ def test_edit_recipe_api_invalidates_preview_cache_and_renders(client_with_photo
         assert img.size == (600, 800)
 
 
+def test_edit_recipe_api_invalidates_untracked_preview_file(client_with_photo):
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    untracked_path = os.path.join(preview_dir, f"{photo_id}_2560.jpg")
+    Image.new("RGB", (10, 10), "purple").save(untracked_path, "JPEG")
+    assert db.preview_cache_get(photo_id, 2560) is None
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 90}},
+    )
+
+    assert resp.status_code == 200
+    assert not os.path.exists(untracked_path)
+
+
 def test_edit_recipe_api_rejects_invalid_recipe(client_with_photo):
     app, _db, photo_id = client_with_photo
     client = app.test_client()
