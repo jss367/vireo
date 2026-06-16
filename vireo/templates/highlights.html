@@ -774,11 +774,26 @@ function removeRejectedPhotoFromModel(photoId) {
   return changed;
 }
 
+// Photos this page pulled out of the grid because they were rejected. If the
+// user clears/changes that flag from the still-open lightbox, the backend
+// includes the photo again — we resync so it (and the Save-as-Collection list)
+// no longer omits it. Tracking the set lets us reload only for genuine
+// reappearances, not for every Pick/Unflag on a photo still in the grid.
+var rejectedFromGrid = new Set();
+
 document.addEventListener('lightbox:flagchanged', function(e) {
   var detail = e && e.detail;
-  if (!detail || detail.flag !== 'rejected' || detail.photoId == null) return;
-  if (removeRejectedPhotoFromModel(detail.photoId)) {
-    render();
+  if (!detail || detail.photoId == null) return;
+  if (detail.flag === 'rejected') {
+    if (removeRejectedPhotoFromModel(detail.photoId)) {
+      rejectedFromGrid.add(detail.photoId);
+      render();
+    }
+  } else if (rejectedFromGrid.has(detail.photoId)) {
+    // A previously-rejected photo was un-rejected — it re-qualifies for
+    // highlights, so refetch to restore it in its correct bucket.
+    rejectedFromGrid.delete(detail.photoId);
+    loadHighlights();
   }
 });
 
