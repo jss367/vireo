@@ -34,7 +34,9 @@ jobs:
               per_page: 100,
             });
 
-            const paths = files.map((file) => file.filename);
+            const paths = files.flatMap((file) =>
+              [file.filename, file.previous_filename].filter(Boolean)
+            );
             const touchesTestWorkflow = paths.includes(".github/workflows/test.yml");
 
             const python = touchesTestWorkflow || paths.some((path) =>
