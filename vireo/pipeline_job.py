@@ -1502,11 +1502,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     break
                 cache_path = os.path.join(preview_dir, f'{photo["id"]}_{max_size}.jpg')
                 recipe = thread_db.get_photo_edit_recipe(photo["id"])
-                if recipe and os.path.exists(cache_path):
-                    with contextlib.suppress(OSError):
-                        os.remove(cache_path)
-                    with contextlib.suppress(Exception):
-                        thread_db.preview_cache_delete(photo["id"], max_size)
                 if os.path.exists(cache_path):
                     skipped += 1
                     try:

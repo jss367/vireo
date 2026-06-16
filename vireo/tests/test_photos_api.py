@@ -2498,11 +2498,52 @@ def test_preview_job_applies_edit_recipe_to_warmed_file(client_with_photo):
     client = app.test_client()
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     preview_dir = os.path.join(vireo_dir, "previews")
-    os.makedirs(preview_dir, exist_ok=True)
     preview_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
-    Image.new("RGB", (800, 600), "green").save(preview_path, "JPEG")
-    db.preview_cache_insert(photo_id, 1920, os.path.getsize(preview_path))
+
+    resp = client.post("/api/jobs/previews", json={})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status_resp = client.get(f"/api/jobs/{job_id}")
+        if status_resp.status_code != 200:
+            time.sleep(0.05)
+            continue
+        data = status_resp.get_json()
+        if data.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert data["status"] == "completed"
+
+    assert db.preview_cache_get(photo_id, 1920) is not None
+    with Image.open(preview_path) as img:
+        assert img.size == (600, 800)
+
+
+def test_preview_job_preserves_existing_edited_preview_when_source_missing(
+    client_with_photo,
+):
+    import os
+    import time
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert rendered.status_code == 200
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_path = os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
+    assert os.path.exists(preview_path)
+    folder = db.conn.execute(
+        "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    os.remove(os.path.join(folder["path"], folder["filename"]))
 
     resp = client.post("/api/jobs/previews", json={})
     assert resp.status_code == 200

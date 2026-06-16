@@ -11879,11 +11879,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             for i, photo in enumerate(photos):
                 cache_path = os.path.join(preview_dir, f'{photo["id"]}_{max_size}.jpg')
                 recipe = thread_db.get_photo_edit_recipe(photo["id"])
-                if recipe and os.path.exists(cache_path):
-                    with contextlib.suppress(OSError):
-                        os.remove(cache_path)
-                    with contextlib.suppress(Exception):
-                        thread_db.preview_cache_delete(photo["id"], max_size)
                 if os.path.exists(cache_path):
                     skipped += 1
                     # Adopt any untracked file so precompute output is
