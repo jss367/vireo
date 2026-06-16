@@ -1393,6 +1393,26 @@ def test_edit_recipe_api_invalidates_preview_cache_and_renders(client_with_photo
         assert img.size == (600, 800)
 
 
+def test_non_crop_preview_loads_with_requested_size(client_with_photo, monkeypatch):
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    original_load_image = image_loader.load_image
+    seen_max_sizes = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        seen_max_sizes.append(max_size)
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    resp = app.test_client().get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 200
+    assert seen_max_sizes == [1920]
+
+
 def test_edit_recipe_api_invalidates_untracked_preview_file(client_with_photo):
     import os
 
@@ -1517,6 +1537,53 @@ def test_edited_original_uses_trusted_working_copy_when_source_missing(
 
     rendered = client.get(f"/photos/{photo_id}/original")
     assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
+
+
+def test_edited_original_prefers_full_res_companion_before_raw_decode(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    companion_path = os.path.join(folder["path"], "test.jpg")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='test.jpg',
+               working_copy_path=NULL,
+               width=800, height=600
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    original_load_image = image_loader.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        loaded_paths.append(file_path)
+        if str(file_path).lower().endswith(".nef"):
+            raise AssertionError("edited original decoded RAW before companion")
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    rendered = client.get(f"/photos/{photo_id}/original")
+
+    assert rendered.status_code == 200
+    assert loaded_paths == [companion_path]
     with Image.open(io.BytesIO(rendered.data)) as img:
         assert img.size == (600, 800)
 

@@ -16374,7 +16374,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 photo_id,
             )
             return "Could not load image", 500
-        img = load_image(canonical, max_size=None if recipe else size)
+        load_max_size = None if recipe and recipe.get("crop") else size
+        img = load_image(canonical, max_size=load_max_size)
         if img is None:
             _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500
@@ -16515,6 +16516,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         trusted_wc_path = _trusted_full_res_working_copy_path()
 
+        def _full_res_companion_path(folder_path, using_offline_cache=False):
+            companion_path = photo["companion_path"]
+            if not companion_path:
+                return None
+            companion_abs = os.path.join(folder_path, companion_path)
+            if using_offline_cache:
+                offline_row = db.offline_original_get(photo_id)
+                if offline_row and offline_row["companion_path"]:
+                    offline_companion = os.path.join(
+                        vireo_dir, offline_row["companion_path"]
+                    )
+                    if os.path.exists(offline_companion):
+                        companion_abs = offline_companion
+            if not os.path.exists(companion_abs):
+                return None
+            orig_w = photo["width"]
+            orig_h = photo["height"]
+            if not (orig_w and orig_h):
+                return None
+            from PIL import Image as _PILImage
+            try:
+                with _PILImage.open(companion_abs) as _cimg:
+                    c_w, c_h = _cimg.size
+            except Exception:
+                return None
+            if c_w >= orig_w and c_h >= orig_h:
+                return companion_abs
+            return None
+
         if recipe:
             folder = db.conn.execute(
                 "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
@@ -16531,6 +16561,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     vireo_dir,
                     {photo["folder_id"]: folder["path"]},
                 )
+                companion_source = _full_res_companion_path(
+                    folder["path"], using_offline_cache,
+                )
+                if companion_source:
+                    image_path = companion_source
             from image_loader import RAW_EXTENSIONS, load_image
             resolved_ext = os.path.splitext(image_path)[1].lower()
             if (
@@ -16613,30 +16648,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # dimensions must be at least as large as the stored original
         # dimensions.  If original dimensions are unknown (None) we cannot
         # make that guarantee, so fall back to decoding from the RAW.
-        source_for_extraction = image_path
-        if photo["companion_path"]:
-            companion_abs = os.path.join(folder["path"], photo["companion_path"])
-            if using_offline_cache:
-                offline_row = db.offline_original_get(photo_id)
-                if offline_row and offline_row["companion_path"]:
-                    offline_companion = os.path.join(
-                        vireo_dir, offline_row["companion_path"]
-                    )
-                    if os.path.exists(offline_companion):
-                        companion_abs = offline_companion
-            if os.path.exists(companion_abs):
-                orig_w = photo["width"]
-                orig_h = photo["height"]
-                if orig_w and orig_h:
-                    from PIL import Image as _PILImage
-                    try:
-                        with _PILImage.open(companion_abs) as _cimg:
-                            c_w, c_h = _cimg.size
-                        if c_w >= orig_w and c_h >= orig_h:
-                            source_for_extraction = companion_abs
-                    except Exception:
-                        pass  # unreadable companion — fall back to RAW
-                # If original dims are unknown, skip companion (can't verify resolution)
+        source_for_extraction = (
+            _full_res_companion_path(folder["path"], using_offline_cache) or image_path
+        )
 
         if extract_working_copy(source_for_extraction, wc_abs, max_size=0, quality=quality):
             # Update DB so future requests are fast; also backfill
