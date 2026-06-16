@@ -635,6 +635,36 @@ def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
     assert "Robin" in kw_names
 
 
+def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
+    """Pairing raw+JPEG preserves a recipe stored on the deleted companion."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(img_dir), name="photos")
+    jpeg_id = db.add_photo(
+        folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
+        file_size=2000, file_mtime=1.0,
+    )
+    db.set_photo_edit_recipe(jpeg_id, {"rotation": 90})
+
+    _pair_raw_jpeg_companions(db)
+
+    photo = db.conn.execute("SELECT id, filename FROM photos").fetchone()
+    assert photo["filename"] == "IMG_001.cr3"
+    assert db.get_photo_edit_recipe(photo["id"]) == {
+        "rotation": 90,
+        "version": 1,
+    }
+
+
 def test_pairing_does_not_copy_rejected_flag_to_raw(tmp_path):
     """A companion JPEG's 'rejected' flag (e.g. set by the duplicate
     auto-resolver when the JPEG has a byte-identical twin) must not be

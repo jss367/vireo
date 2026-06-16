@@ -56,6 +56,44 @@ def test_generate_thumbnail_bounds_non_crop_recipe_load(tmp_path, monkeypatch):
     assert seen_max_sizes == [400]
 
 
+def test_recipe_source_path_uses_exif_oriented_dimensions(tmp_path):
+    import json
+
+    import pipeline_job
+    import thumbnails
+
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    original = folder / "portrait.jpg"
+    Image.new("RGB", (600, 400), color="red").save(original)
+
+    vireo_dir = tmp_path / "vireo"
+    working_dir = vireo_dir / "working"
+    working_dir.mkdir(parents=True)
+    working = working_dir / "1.jpg"
+    Image.new("RGB", (400, 400), color="blue").save(working)
+
+    photo = {
+        "id": 1,
+        "folder_id": 10,
+        "filename": "portrait.jpg",
+        "working_copy_path": "working/1.jpg",
+        "companion_path": None,
+        "width": 600,
+        "height": 400,
+        "exif_data": json.dumps({"EXIF": {"Orientation": 6}}),
+    }
+    folders = {10: str(folder)}
+    recipe = {"crop": {"x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0}}
+
+    assert thumbnails._recipe_source_path(
+        photo, recipe, 500, str(vireo_dir), folders,
+    ) == str(original)
+    assert pipeline_job._recipe_render_source(
+        photo, recipe, 500, str(vireo_dir), folders,
+    ) == str(original)
+
+
 def test_generate_thumbnail_skips_existing(tmp_path):
     """generate_thumbnail skips if thumbnail already exists."""
     from thumbnails import generate_thumbnail

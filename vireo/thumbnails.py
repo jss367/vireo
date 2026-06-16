@@ -1,6 +1,7 @@
 """Generate and manage local thumbnail cache for the photo browser."""
 
 import contextlib
+import json
 import logging
 import os
 import tempfile
@@ -23,9 +24,67 @@ def _rendered_recipe_long_edge(width, height, recipe):
     return max(width, height)
 
 
+def _photo_value(photo, key):
+    try:
+        return photo[key]
+    except (KeyError, IndexError, TypeError):
+        if hasattr(photo, "get"):
+            return photo.get(key)
+    return None
+
+
+def _exif_orientation(exif_data):
+    if not exif_data:
+        return None
+    if isinstance(exif_data, str):
+        try:
+            metadata = json.loads(exif_data)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(exif_data, dict):
+        metadata = exif_data
+    else:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    for group in ("EXIF", "IFD0", "TIFF", "File"):
+        values = metadata.get(group)
+        if isinstance(values, dict) and "Orientation" in values:
+            return values["Orientation"]
+    return metadata.get("Orientation")
+
+
+def _orientation_swaps_axes(orientation):
+    if orientation is None or isinstance(orientation, bool):
+        return False
+    if isinstance(orientation, (int, float)):
+        return int(orientation) in (5, 6, 7, 8)
+    text = str(orientation).strip().lower()
+    if not text:
+        return False
+    try:
+        return int(text) in (5, 6, 7, 8)
+    except ValueError:
+        return "90" in text or "270" in text
+
+
+def _recipe_source_dimensions(photo):
+    try:
+        width = int(_photo_value(photo, "width") or 0)
+        height = int(_photo_value(photo, "height") or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+    if (
+        width > 0
+        and height > 0
+        and _orientation_swaps_axes(_exif_orientation(_photo_value(photo, "exif_data")))
+    ):
+        return height, width
+    return width, height
+
+
 def _path_satisfies_recipe_render(path, photo, recipe, max_size):
-    original_w = photo["width"] or 0
-    original_h = photo["height"] or 0
+    original_w, original_h = _recipe_source_dimensions(photo)
     if original_w <= 0 or original_h <= 0:
         return False
     try:

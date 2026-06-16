@@ -431,6 +431,16 @@ def _pair_raw_jpeg_companions(db):
             "UPDATE inat_submissions SET photo_id = ? WHERE photo_id = ?",
             (primary["id"], companion["id"]),
         )
+        # Preserve non-destructive edits when a JPEG companion is folded into
+        # a RAW primary. If both already have recipes, the primary wins.
+        db.conn.execute(
+            """INSERT OR IGNORE INTO photo_edit_recipes
+                   (photo_id, recipe_json, updated_at)
+               SELECT ?, recipe_json, updated_at
+               FROM photo_edit_recipes
+               WHERE photo_id = ?""",
+            (primary["id"], companion["id"]),
+        )
         # Remove keyword associations then the duplicate JPEG record
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
         db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
