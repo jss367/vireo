@@ -13446,7 +13446,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # self-heal work for cameras whose RAW format libraw cannot
         # decode (the working copy was extracted from the embedded JPEG
         # at scan time).
-        from image_loader import get_canonical_image_path
+        import config as cfg
         from thumbnails import generate_thumbnail
         vireo_dir = os.path.dirname(thumb_dir)
         # Look up the photo's folder path directly rather than via
@@ -13464,8 +13464,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         try:
             recipe = db.get_photo_edit_recipe(photo_id)
-            source = get_canonical_image_path(photo, vireo_dir, folders)
-            result = generate_thumbnail(photo_id, source, thumb_dir, recipe=recipe)
+            thumb_size = cfg.load().get("thumbnail_size", 400)
+            source, _using_working_copy = _recipe_render_source(
+                photo, recipe, thumb_size, vireo_dir, folders,
+            )
+            result = generate_thumbnail(
+                photo_id,
+                source,
+                thumb_dir,
+                size=thumb_size,
+                recipe=recipe,
+            )
         except Exception:
             log.exception(
                 "Thumbnail self-heal failed for photo %s (source=%s)",
