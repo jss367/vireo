@@ -165,6 +165,16 @@ var existingCollections = [];
 var speciesSuggestionsLoaded = false;
 var speciesModalPhotoIds = [];
 var activeLightboxPhotoId = null;
+// Photos the user has rejected from the lightbox this session and not since
+// un-rejected. Drives grid removal AND guards reloads (see loadHighlights).
+var rejectedFromGrid = new Set();
+// Monotonic counter bumped each time a highlights reload is *issued*, plus the
+// counter value captured at each photo's rejection. Together they let the
+// reload prune ONLY photos rejected at/after the in-flight request was sent
+// (whose response predates the rejection) — never photos the backend restored
+// out-of-band (another tab, Undo panel), which it must be trusted to include.
+var highlightsLoadSeq = 0;
+var rejectedAtLoadSeq = {};
 
 function escapeAttr(s) {
   if (s === null || s === undefined) return '';
@@ -200,8 +210,22 @@ async function loadHighlights() {
   params.set('limit_per_bucket', Math.max(20, parseInt(document.getElementById('perRowSlider').value)));
   if (speciesSearch) params.set('species', speciesSearch);
 
+  // Capture the issue-time sequence so the prune below can tell rejections that
+  // happened after this request was sent (response is stale for them) from
+  // older ones the backend already excludes — or out-of-band restores it now
+  // includes and we must not strip.
+  var loadSeq = ++highlightsLoadSeq;
   var data = await safeFetch('/api/highlights?' + params);
   currentData = data;
+
+  // Guard against a reload issued against backend state from before a rejection
+  // landed (e.g. un-reject starts a restore reload, then the photo is rejected
+  // again before it returns). Only prune photos rejected at/after this request
+  // was issued; a photo restored out-of-band has an older rejection seq, so the
+  // authoritative response that now includes it is left intact.
+  rejectedFromGrid.forEach(function(id) {
+    if ((rejectedAtLoadSeq[id] || 0) >= loadSeq) removeRejectedPhotoFromModel(id);
+  });
 
   // Populate folder dropdown on first load.
   if (!folderSelect.options.length) {
@@ -244,8 +268,11 @@ function renderCard(p, idx) {
     return '<span class="card-chip reason">' + escapeAttr(r) + '</span>';
   }).join('');
   var title = (p.reasons || []).join(', ');
+  var ribbon = p.is_highlights_photo
+    ? '<div class="best-ribbon">Highlight</div>'
+    : (idx === 0 ? '<div class="best-ribbon">Best</div>' : '');
   return '<div class="highlights-card' + (idx === 0 ? ' best-card' : '') + '" data-photo-id="' + p.id + '" title="' + escapeAttr(title) + '">'
-    + (idx === 0 ? '<div class="best-ribbon">Best</div>' : '')
+    + ribbon
     + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
     + '<div class="card-info"><span class="card-chip score">' + formatScore(p.highlight_score) + '</span>' + conf + reasons + '</div>'
     + '</div>';
@@ -383,6 +410,25 @@ async function submitSpeciesModal() {
   }
 }
 
+async function setPhotoPreference(purpose, species, photoId, button) {
+  if (!purpose || !species || !photoId) return;
+  if (button) button.disabled = true;
+  try {
+    await safeFetch('/api/photo-preferences', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ purpose: purpose, species: species, photo_id: photoId }),
+    });
+    await loadHighlights();
+    updateHighlightsLightboxControls(activeLightboxPhotoId);
+    if (typeof showToast === 'function') {
+      showToast(purpose === 'life_list' ? 'Life List photo set' : 'Highlights photo set', 'success');
+    }
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function renderBucket(bucket) {
   var perRow = parseInt(document.getElementById('perRowSlider').value);
   var expanded = expandedBuckets.has(bucket.species);
@@ -397,7 +443,11 @@ function renderBucket(bucket) {
     + ' · best ' + formatScore(bucket.best_score);
   if (!bucket.is_accepted && bucket.avg_confidence != null) meta += ' · ID ' + formatPercent(bucket.avg_confidence);
   var expandBtn = '';
-  if (bucket.photo_count > perRow) {
+  // Show the affordance whenever photos are hidden (more loaded than one row)
+  // or unloaded (has_more). Gating on photo_count > perRow alone would strand
+  // backend rows after a rejection drops photo_count to perRow while has_more
+  // is still true — leaving no way to load the rest without a refresh.
+  if (bucket.photos.length > perRow || bucket.has_more) {
     expandBtn = '<button class="bucket-expand" data-species="'
       + escapeAttr(bucket.species) + '">'
       + (expanded ? (bucket.has_more ? 'Load more' : 'Show fewer') : '+ ' + remaining + ' more')
@@ -428,7 +478,10 @@ function renderUnidentified() {
   var visible = unidentifiedExpanded ? unid.photos : unid.photos.slice(0, perRow);
   var remaining = unid.photo_count - visible.length;
   var expandBtn = '';
-  if (unid.photo_count > perRow) {
+  // Same as renderBucket: keep the load/expand affordance while photos are
+  // hidden or unloaded, so a rejection that drops photo_count to perRow with
+  // has_more still true doesn't strand the remaining backend rows.
+  if (unid.photos.length > perRow || unid.has_more) {
     expandBtn = '<button class="bucket-expand" data-unid="1">'
       + (unidentifiedExpanded ? (unid.has_more ? 'Load more' : 'Show fewer') : '+ ' + remaining + ' more')
       + '</button>';
@@ -593,6 +646,15 @@ function updateHighlightsLightboxControls(photoId) {
   }
   panel.style.display = '';
   var html = '<span>' + escapeAttr(photoCurrentLabel(photo)) + '</span>';
+  var highlightSpecies = photoSpeciesName(photo);
+  if (highlightSpecies) {
+    html += '<button data-lb-action="set-highlight"'
+      + (photo.is_highlights_photo ? ' class="primary"' : '') + '>'
+      + (photo.is_highlights_photo ? 'Highlights Photo' : 'Use as Highlights') + '</button>';
+  }
+  if (photo.has_accepted_species && photo.species) {
+    html += '<button data-lb-action="set-life-list">Use as Life List</button>';
+  }
   if (photo.is_confirmable_prediction) {
     html += '<button class="primary" data-lb-action="confirm">Confirm</button>';
   }
@@ -601,8 +663,13 @@ function updateHighlightsLightboxControls(photoId) {
   panel.querySelectorAll('button').forEach(function(btn) {
     btn.addEventListener('click', function(event) {
       event.stopPropagation();
-      if (btn.getAttribute('data-lb-action') === 'confirm') {
+      var action = btn.getAttribute('data-lb-action');
+      if (action === 'confirm') {
         confirmPhotoIds([photo.id], btn);
+      } else if (action === 'set-highlight') {
+        setPhotoPreference('highlights', photoSpeciesName(photo), photo.id, btn);
+      } else if (action === 'set-life-list') {
+        setPhotoPreference('life_list', photo.species, photo.id, btn);
       } else {
         var modalTitle = (photo.is_confirmable_prediction || photo.has_accepted_species)
           ? 'Change species'
@@ -723,6 +790,72 @@ async function doSave(mode) {
   });
   closeSaveModal();
 }
+
+// Drop a photo from the in-memory model after it is rejected, so the grid
+// matches the backend query (which excludes rejected photos). Returns true if
+// anything changed.
+function removeRejectedPhotoFromModel(photoId) {
+  if (!currentData) return false;
+  var changed = false;
+
+  function pruneSection(section) {
+    if (!section || !Array.isArray(section.photos)) return;
+    var before = section.photos.length;
+    // Replace (don't splice) the array so any open lightbox keeps navigating
+    // its original, stable photo set.
+    var kept = section.photos.filter(function(p) { return p.id !== photoId; });
+    if (kept.length !== before) {
+      section.photos = kept;
+      section.photo_count = Math.max(0, (section.photo_count || before) - 1);
+      if (typeof section.loaded_count === 'number') {
+        section.loaded_count = Math.max(0, section.loaded_count - 1);
+      }
+      changed = true;
+    }
+  }
+
+  (currentData.buckets || []).forEach(pruneSection);
+  pruneSection(currentData.unidentified);
+
+  if (changed) {
+    // Drop only buckets fully emptied by the rejection. A large bucket may
+    // still have eligible photos behind `has_more` even after every loaded
+    // card is rejected (photo_count stays positive), so keep it — its expand
+    // button is the user's only way to load the rest without a refresh.
+    if (currentData.buckets) {
+      currentData.buckets = currentData.buckets.filter(function(b) {
+        return (b.photo_count || 0) > 0 || (b.photos || []).length > 0;
+      });
+    }
+    if (currentData.meta && typeof currentData.meta.eligible === 'number') {
+      currentData.meta.eligible = Math.max(0, currentData.meta.eligible - 1);
+    }
+  }
+  return changed;
+}
+
+document.addEventListener('lightbox:flagchanged', function(e) {
+  var detail = e && e.detail;
+  if (!detail || detail.photoId == null) return;
+  if (detail.flag === 'rejected') {
+    // Track before mutating: during an in-flight restore reload the photo may
+    // not be in currentData yet, so removeRejectedPhotoFromModel returns false
+    // — but the id must still be remembered so the reload's prune drops it.
+    // Stamp the current load seq so only reloads issued no later than now prune
+    // it (a reload issued afterward already reflects the rejection server-side).
+    rejectedFromGrid.add(detail.photoId);
+    rejectedAtLoadSeq[detail.photoId] = highlightsLoadSeq;
+    if (removeRejectedPhotoFromModel(detail.photoId)) render();
+  } else if (rejectedFromGrid.has(detail.photoId)) {
+    // A previously-rejected photo was un-rejected — it re-qualifies for
+    // highlights, so refetch to restore it (and the Save-as-Collection list)
+    // in its correct bucket. Tracking the set keeps this scoped to genuine
+    // reappearances, not every Pick/Unflag on a photo still in the grid.
+    rejectedFromGrid.delete(detail.photoId);
+    delete rejectedAtLoadSeq[detail.photoId];
+    loadHighlights();
+  }
+});
 
 loadHighlights();
 </script>
