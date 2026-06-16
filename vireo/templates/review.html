@@ -1538,7 +1538,7 @@ function buildBurstGroupContextMenu(photoId, filename) {
         if (typeof window.developPhotos === 'function') window.developPhotos([photoId]);
       } },
     { label: 'Open in Browse Mode',
-      onClick: function() { window.open('/browse?photo_id=' + photoId, '_blank'); } },
+      onClick: function() { window.openInBrowse(photoId); } },
     { separator: true },
     { label: 'Remove from Group',       onClick: function() { grmRemoveFromGroup(); } },
   ]);
