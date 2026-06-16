@@ -1514,11 +1514,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
         from image_loader import get_canonical_image_path
 
+        def _is_working_copy_path(path):
+            wc_rel = photo["working_copy_path"]
+            if not path or not wc_rel:
+                return False
+            wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
+            return os.path.abspath(path) == os.path.abspath(wc_path)
+
         if not recipe or not recipe.get("crop"):
-            return get_canonical_image_path(photo, vireo_dir, folders), True
+            canonical = get_canonical_image_path(photo, vireo_dir, folders)
+            return canonical, _is_working_copy_path(canonical)
 
         if _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
-            return get_canonical_image_path(photo, vireo_dir, folders), True
+            canonical = get_canonical_image_path(photo, vireo_dir, folders)
+            return canonical, _is_working_copy_path(canonical)
 
         folder_path = folders.get(photo["folder_id"])
         if not folder_path:
@@ -3677,8 +3686,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/photos/<int:photo_id>/edit-recipe", methods=["PUT", "POST"])
     def api_set_photo_edit_recipe(photo_id):
         db = _get_db()
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
         recipe = body.get("recipe", body)
+        if not isinstance(recipe, dict):
+            return json_error("recipe must be a JSON object")
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
             return json_error("not found", 404)

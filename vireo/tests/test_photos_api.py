@@ -1602,6 +1602,29 @@ def test_edit_recipe_api_rejects_invalid_recipe(client_with_photo):
     assert "rotation" in resp.get_json()["error"]
 
 
+def test_edit_recipe_api_rejects_malformed_body_without_clearing(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    existing = {"rotation": 180}
+    assert client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": existing},
+    ).status_code == 200
+    stored = db.get_photo_edit_recipe(photo_id)
+
+    cases = [
+        {},
+        {"data": "{", "content_type": "application/json"},
+        {"json": []},
+        {"json": {"recipe": []}},
+    ]
+    for kwargs in cases:
+        resp = client.put(f"/api/photos/{photo_id}/edit-recipe", **kwargs)
+        assert resp.status_code == 400
+        assert db.get_photo_edit_recipe(photo_id) == stored
+
+
 def test_edit_recipe_api_undo_redo(client_with_photo):
     app, db, photo_id = client_with_photo
     client = app.test_client()
