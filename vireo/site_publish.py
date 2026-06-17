@@ -142,7 +142,7 @@ def publish_site(db, vireo_dir, destination, life_list, highlights=None, options
     """
     options = options or {}
     highlights = highlights or {"buckets": [], "meta": {}}
-    include_locations = bool(options.get("include_locations", True))
+    include_locations = bool(options.get("include_locations", False))
 
     destination_path = Path(destination)
     data_dir = destination_path / "data"

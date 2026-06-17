@@ -177,6 +177,7 @@ def test_publish_site_uses_developed_render_when_max_exceeds_original(tmp_path, 
     assert result["errors"] == []
     life = json.loads((dest / "data" / "life-list.json").read_text())
     cardinal = next(e for e in life["species"] if e["species"] == "Northern Cardinal")
+    assert cardinal["locations"] == []
     with Image.open(dest / cardinal["best"]["image"]) as out:
         red, green, _blue = out.getpixel((0, 0))
     assert green > red
