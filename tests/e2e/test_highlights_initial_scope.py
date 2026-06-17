@@ -221,6 +221,42 @@ def test_highlights_lightbox_reject_advances_and_can_restore(live_server, page):
     expect(page.locator("#highlightUndo")).not_to_have_class(re.compile(r"\bopen\b"))
 
 
+def test_highlights_lightbox_next_preserves_pending_one_to_one_zoom(live_server, page):
+    """Highlights lightbox navigation must carry a pending 1:1 zoom intent."""
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+    hawk_section.locator(".highlights-card").first.click()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
+
+    page.evaluate(
+        """() => {
+            const next = window._lightboxPhotoList[1];
+            window._lbNativeZoom = 2;
+            window._lbZoom = 2;
+            window._lbPending1To1 = false;
+            window._lbViewportByPhotoId[String(next.id)] = {
+                zoom: 1,
+                centerX: 0.5,
+                centerY: 0.5,
+                oneToOne: false,
+                pending1To1: false,
+            };
+        }"""
+    )
+
+    page.locator("[title='Next (→)']").click()
+    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    assert page.evaluate("window._lbPending1To1") is True
+    assert page.evaluate("window._lbZoom > 1.001") is True
+    assert page.evaluate("window._lbCurrentSrcKey") == "original"
+
+
 def test_highlights_api_limits_initial_bucket_and_loads_more(live_server):
     db = live_server["db"]
     data = live_server["data"]

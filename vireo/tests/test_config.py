@@ -625,7 +625,7 @@ def test_save_retries_on_windows_permission_error(tmp_path, monkeypatch):
 
     def flaky_replace(src, dst):
         calls["n"] += 1
-        if calls["n"] < 3:
+        if calls["n"] < 8:
             raise PermissionError(5, "Access is denied", dst)
         return real_replace(src, dst)
 
@@ -634,7 +634,7 @@ def test_save_retries_on_windows_permission_error(tmp_path, monkeypatch):
 
     cfg.save({"classification_threshold": 0.42})
 
-    assert calls["n"] == 3
+    assert calls["n"] == 8
     assert cfg.load()["classification_threshold"] == 0.42
 
 
