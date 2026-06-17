@@ -2216,9 +2216,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # Daemon=True so short-lived ``create_app`` callers (tests, scripts,
     # one-shot tooling) don't get pinned waiting on the 5-second delay
     # only to fire DB work after their real work is already done.
-    _wc_backfill_timer = threading.Timer(5.0, _kickoff_working_copy_backfill)
-    _wc_backfill_timer.daemon = True
-    _wc_backfill_timer.start()
+    #
+    # Suppressed in tests via ``VIREO_DISABLE_STARTUP_BACKFILL_TIMERS``:
+    # otherwise a Timer scheduled by a fast-finishing test fires during a
+    # later test, runs a JobRunner thread against the now-stale tmp_path
+    # DB, and its ``image_loader.load_image`` call (via
+    # ``extract_working_copy``) is intercepted by the next test's
+    # monkeypatch of that same module attribute.
+    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
+        _wc_backfill_timer = threading.Timer(5.0, _kickoff_working_copy_backfill)
+        _wc_backfill_timer.daemon = True
+        _wc_backfill_timer.start()
 
     # ----- thumb_path self-healing backfill -----
     # The dashboard's coverage card counts thumbnails by ``thumb_path IS NOT
@@ -2299,9 +2307,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     app._kickoff_thumb_path_backfill = _kickoff_thumb_path_backfill
 
-    _thumb_backfill_timer = threading.Timer(6.0, _kickoff_thumb_path_backfill)
-    _thumb_backfill_timer.daemon = True
-    _thumb_backfill_timer.start()
+    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
+        _thumb_backfill_timer = threading.Timer(6.0, _kickoff_thumb_path_backfill)
+        _thumb_backfill_timer.daemon = True
+        _thumb_backfill_timer.start()
 
     # -- Page routes --
 
