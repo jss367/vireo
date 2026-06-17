@@ -3482,6 +3482,9 @@ function _lbCloneEditRecipe(recipe) {
   if (!recipe || typeof recipe !== 'object') return {};
   var out = {};
   if (recipe.rotation) out.rotation = recipe.rotation;
+  if (Math.abs(Number(recipe.straighten || 0)) > 1e-9) {
+    out.straighten = Number(recipe.straighten);
+  }
   if (recipe.flip && typeof recipe.flip === 'object') {
     out.flip = {};
     if (recipe.flip.horizontal) out.flip.horizontal = true;
@@ -3537,7 +3540,7 @@ function _lbCurrentRecipeHasOrientation() {
 
 window.vireoPhotoHasOrientationEdit = function(photoId) {
   if (photoId == null) return false;
-  return _lbRecipeHasOrientation(_lbEditRecipeByPhoto[String(photoId)]);
+  return _lbRecipeHasGeometricEdit(_lbEditRecipeByPhoto[String(photoId)]);
 };
 
 window.vireoRememberPhotoEditRecipe = function(photoId, recipe, options) {
@@ -3582,6 +3585,8 @@ function _lbCurrentEditRecipeClone() {
 function _lbNormalizeClientRecipe(recipe) {
   var out = _lbCloneEditRecipe(recipe);
   if (!out.rotation) delete out.rotation;
+  if (Math.abs(Number(out.straighten || 0)) < 0.0001) delete out.straighten;
+  else out.straighten = Math.round(Number(out.straighten) * 10000) / 10000;
   if (out.flip) {
     if (!out.flip.horizontal) delete out.flip.horizontal;
     if (!out.flip.vertical) delete out.flip.vertical;
@@ -3598,6 +3603,9 @@ function _lbRecipeAfterEditOperation(recipe, op) {
     return _lbNormalizeClientRecipe(next);
   }
   var orientation = _lbComposeDisplayedOrientation(next, op);
+  if (next.crop && typeof next.crop === 'object') {
+    next.crop = _lbTransformBoxByEditOperation(next.crop, op);
+  }
   delete next.rotation;
   delete next.flip;
   if (orientation.rotation) next.rotation = orientation.rotation;
@@ -3613,6 +3621,16 @@ function _lbApplyDisplayedOrientationOperation(point, op) {
   if (op === 'flip-horizontal') return { x: 1 - x, y: y };
   if (op === 'flip-vertical') return { x: x, y: 1 - y };
   return { x: x, y: y };
+}
+
+function _lbTransformBoxByEditOperation(box, op) {
+  var opRecipe = null;
+  if (op === 'rotate-right') opRecipe = { rotation: 90 };
+  else if (op === 'rotate-left') opRecipe = { rotation: 270 };
+  else if (op === 'flip-horizontal') opRecipe = { flip: { horizontal: true } };
+  else if (op === 'flip-vertical') opRecipe = { flip: { vertical: true } };
+  if (!opRecipe) return box;
+  return _lbTransformBoxByRecipe(box, opRecipe);
 }
 
 function _lbOrientationCandidates() {
