@@ -13798,16 +13798,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not folder_row:
             return "", 404
         live_source = os.path.join(folder_row["path"], photo["filename"])
-        if _has_current_working_copy_failure(
-            photo, os.path.dirname(thumb_dir),
-            live_source_path=live_source, folder_path=folder_row["path"],
-        ):
-            log.info(
-                "Skipping thumbnail self-heal for photo %s; RAW working-copy "
-                "extraction already failed for current source mtime",
-                photo_id,
-            )
-            return "", 404
 
         # Resolve source via the canonical-path helper so we prefer the
         # JPEG working copy over the original RAW. This makes the

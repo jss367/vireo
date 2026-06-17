@@ -9424,6 +9424,102 @@ def test_pipeline_previews_honor_raw_failure_marker_after_source_selection(
     assert db.preview_cache_get(photo_id, 1920) is None
 
 
+def test_pipeline_scan_thumbnails_use_recipe_source_before_live_raw(
+    tmp_path, monkeypatch,
+):
+    import config as cfg
+    import scanner
+    import thumbnails
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    raw_path = photo_dir / "source.NEF"
+    raw_path.write_bytes(b"raw")
+    companion_path = photo_dir / "source.jpg"
+    Image.new("RGB", (800, 600), "blue").save(companion_path)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    scanned = {"done": False}
+
+    def fake_scan(
+        root,
+        scan_db,
+        progress_callback=None,
+        photo_callback=None,
+        **_kwargs,
+    ):
+        folder_id = scan_db.add_folder(str(root), name="photos")
+        photo_id = scan_db.add_photo(
+            folder_id=folder_id,
+            filename="source.NEF",
+            extension=".nef",
+            file_size=raw_path.stat().st_size,
+            file_mtime=1234.0,
+            width=800,
+            height=600,
+        )
+        scan_db.conn.execute(
+            """UPDATE photos
+               SET companion_path='source.jpg',
+                   working_copy_path=NULL,
+                   working_copy_failed_at=datetime('now'),
+                   working_copy_failed_mtime=1234.0,
+                   working_copy_failed_source='source'
+               WHERE id=?""",
+            (photo_id,),
+        )
+        scan_db.conn.commit()
+        scan_db.set_photo_edit_recipe(
+            photo_id,
+            {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+        )
+        scanned["done"] = True
+        if progress_callback:
+            progress_callback(1, 1)
+        if photo_callback:
+            photo_callback(photo_id, str(raw_path))
+
+    thumbnail_sources = []
+
+    def fake_generate_thumbnail(photo_id, photo_path, cache_dir, size=300, **kwargs):
+        thumbnail_sources.append(photo_path)
+        if os.path.abspath(str(photo_path)) == os.path.abspath(str(raw_path)):
+            raise AssertionError("scan thumbnail used live RAW path")
+        assert kwargs.get("recipe")
+        os.makedirs(cache_dir, exist_ok=True)
+        thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
+        Image.new("RGB", (size, size), "green").save(thumb_path)
+        return thumb_path
+
+    monkeypatch.setattr(scanner, "scan", fake_scan)
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fake_generate_thumbnail)
+
+    result = run_pipeline_job(
+        _make_job(),
+        FakeRunner(),
+        db_path,
+        ws_id,
+        PipelineParams(
+            source=str(photo_dir),
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        ),
+    )
+
+    assert scanned["done"] is True
+    assert result["stages"]["thumbnails"]["failed"] == 0
+    assert thumbnail_sources == [str(companion_path)]
+
+
 # ---------------------------------------------------------------------------
 # Aborted pipelines must not leave step rows stuck at "pending"
 # ---------------------------------------------------------------------------

@@ -1618,6 +1618,59 @@ def test_cropped_thumbnail_uses_original_when_working_copy_is_too_small(
         assert img.size == (400, 300)
 
 
+def test_cropped_thumbnail_uses_companion_before_raw_failure_marker(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import thumbnails
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    companion_path = os.path.join(folder["path"], "test.jpg")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='test.jpg',
+               working_copy_path=NULL,
+               width=800, height=600,
+               file_mtime=1234.0,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=1234.0,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+    original_load_image = thumbnails.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        loaded_paths.append(file_path)
+        if str(file_path).lower().endswith(".nef"):
+            raise AssertionError("thumbnail retried RAW before companion")
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
+
+    rendered = client.get(f"/thumbnails/{photo_id}.jpg")
+
+    assert rendered.status_code == 200
+    assert loaded_paths == [companion_path]
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (267, 400)
+
+
 def test_edited_original_uses_trusted_working_copy_when_source_missing(
     client_with_photo,
 ):

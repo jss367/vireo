@@ -1430,6 +1430,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
                     already_exists = os.path.exists(thumb_path)
                     recipe = thread_db.get_photo_edit_recipe(photo_id)
+                    if recipe:
+                        detail_photo = thread_db.get_photo(photo_id)
+                        if detail_photo:
+                            folder_row = thread_db.get_folder(detail_photo["folder_id"])
+                            folders = (
+                                {folder_row["id"]: folder_row["path"]}
+                                if folder_row else {}
+                            )
+                            photo_path = _recipe_render_source(
+                                detail_photo,
+                                recipe,
+                                thumb_size,
+                                effective_vireo_dir,
+                                folders,
+                            )
                     recipe_kwargs = {"recipe": recipe} if recipe else {}
                     result_path = generate_thumbnail(
                         photo_id,
