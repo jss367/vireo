@@ -2307,10 +2307,18 @@ def test_edited_original_skips_recent_failed_raw_before_decode(
         (file_mtime, photo_id),
     )
     db.conn.commit()
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = (SELECT folder_id FROM photos WHERE id=?)",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.abspath(os.path.join(folder["path"], "bad.NEF"))
+    original_load_image = image_loader.load_image
 
     called = {"load": False}
 
-    def fail_if_called(*_args, **_kwargs):
+    def fail_if_called(file_path, *args, **kwargs):
+        if os.path.abspath(os.fspath(file_path)) != raw_path:
+            return original_load_image(file_path, *args, **kwargs)
         called["load"] = True
         raise AssertionError("edited original retried failed RAW decode")
 
