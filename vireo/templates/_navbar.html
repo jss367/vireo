@@ -3976,9 +3976,13 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
 async function lightboxApplyEdit(op) {
   if (_lightboxCurrentId == null || _lbEditWritePending) return;
   var photoId = _lightboxCurrentId;
-  var nextRecipe = _lbRecipeAfterEditOperation(_lbCurrentEditRecipeClone(), op);
   _lbSetEditBusy(true);
   try {
+    _lbFlushPendingAdjustmentSave();
+    await _lbWaitForAdjustmentSaveIdle(photoId);
+    if (_lightboxCurrentId !== photoId) return;
+    var baseRecipe = _lbEditRecipeLoaded ? _lbCloneEditRecipe(_lbEditRecipe) : _lbCurrentEditRecipeClone();
+    var nextRecipe = _lbRecipeAfterEditOperation(baseRecipe, op);
     var data;
     if (nextRecipe) {
       data = await safeFetch('/api/photos/' + photoId + '/edit-recipe', {
