@@ -3770,6 +3770,29 @@ function _lbFlushPendingAdjustmentSave() {
   _lbSaveAdjustmentRecipe(_lbReadAdjustmentControls());
 }
 
+function _lbWaitForAdjustmentSaveIdle(photoId) {
+  var key = String(photoId);
+  return new Promise(function(resolve, reject) {
+    var started = Date.now();
+    function check() {
+      if (
+        !_lbAdjustSaveTimer &&
+        !_lbAdjustSaveInFlightByPhoto[key] &&
+        !_lbQueuedAdjustmentSaveByPhoto[key]
+      ) {
+        resolve();
+        return;
+      }
+      if (Date.now() - started > 15000) {
+        reject(new Error('Timed out waiting for adjustment save'));
+        return;
+      }
+      setTimeout(check, 25);
+    }
+    check();
+  });
+}
+
 function onLightboxAdjustmentInput(input) {
   if (!_lbEditRecipeLoaded) {
     _lbSetAdjustmentStatus('Loading recipe...');
@@ -4791,9 +4814,12 @@ async function openCropEditor() {
   if (saveBtn) saveBtn.disabled = false;
   _cropSetStatus('Loading recipe...');
   try {
+    _lbFlushPendingAdjustmentSave();
+    await _lbWaitForAdjustmentSaveIdle(requestedPhotoId);
+    if (_lightboxCurrentId !== requestedPhotoId || !_cropIsActiveSession(requestedPhotoId, session)) return;
     var data = await safeFetch('/api/photos/' + requestedPhotoId + '/edit-recipe', {}, { toast: false });
     if (_lightboxCurrentId !== requestedPhotoId || !_cropIsActiveSession(requestedPhotoId, session)) return;
-    _cropRecipe = _cropCloneRecipe(data.recipe || {});
+    _cropRecipe = _cropCloneRecipe(_lbEditRecipeLoaded ? _lbEditRecipe : (data.recipe || {}));
     _cropDefaultCrop(_cropRecipe);
     _cropSyncControls();
     var modal = document.getElementById('cropEditorModal');
