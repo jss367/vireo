@@ -4976,6 +4976,12 @@ async function loadDetail(id) {
 
 function renderDetail(photo) {
   window._detailPhotoId = photo.id;
+  if (
+    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
+    Object.prototype.hasOwnProperty.call(photo, 'edit_recipe')
+  ) {
+    window.vireoRememberPhotoEditRecipe(photo.id, photo.edit_recipe);
+  }
   var detailThumb = window.vireoRenderedUrl ? window.vireoRenderedUrl('/thumbnails/' + photo.id + '.jpg', photo.id) : '/thumbnails/' + photo.id + '.jpg';
   document.getElementById('detailImg').src = detailThumb;
   document.getElementById('detailFilename').textContent = photo.filename;

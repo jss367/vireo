@@ -3150,10 +3150,8 @@ var _lbPhotoDataByPhoto = {};
 var _lbRenderVersionByPhoto = {};
 var _lbEditWritePending = false;
 
-function _vireoUrlWithRenderVersion(url, photoId) {
-  if (!url || photoId == null) return url;
-  var version = _lbRenderVersionByPhoto[String(photoId)];
-  if (!version) return url;
+function _vireoUrlWithQueryParam(url, key, value) {
+  if (!url || !key || value == null || value === '') return url;
   var hash = '';
   var hashIdx = url.indexOf('#');
   if (hashIdx !== -1) {
@@ -3161,16 +3159,42 @@ function _vireoUrlWithRenderVersion(url, photoId) {
     url = url.slice(0, hashIdx);
   }
   var joiner = url.indexOf('?') === -1 ? '?' : '&';
-  return url + joiner + 'rv=' + encodeURIComponent(version) + hash;
+  return url + joiner + encodeURIComponent(key) + '=' + encodeURIComponent(value) + hash;
+}
+
+function _vireoUrlWithRenderVersion(url, photoId) {
+  if (!url || photoId == null) return url;
+  var version = _lbRenderVersionByPhoto[String(photoId)];
+  if (!version) return url;
+  return _vireoUrlWithQueryParam(url, 'rv', version);
+}
+
+function _vireoCleanRenderSearch(search) {
+  if (!search) return '';
+  try {
+    var params = new URLSearchParams(search);
+    params.delete('rv');
+    params.delete('er');
+    var qs = params.toString();
+    return qs ? '?' + qs : '';
+  } catch (_) {
+    return search
+      .replace(/([?&])(rv|er)=[^&]*&?/g, '$1')
+      .replace(/\?&/, '?')
+      .replace(/[?&]$/, '');
+  }
 }
 
 function _vireoBaseRenderedUrl(src) {
   if (!src) return '';
   try {
     var parsed = new URL(src, window.location.origin);
-    return parsed.pathname + (parsed.search ? parsed.search.replace(/([?&])rv=[^&]*&?/, '$1').replace(/[?&]$/, '') : '');
+    return parsed.pathname + _vireoCleanRenderSearch(parsed.search);
   } catch (_) {
-    return src.replace(/([?&])rv=[^&]*&?/, '$1').replace(/[?&]$/, '');
+    return src
+      .replace(/([?&])(rv|er)=[^&]*&?/g, '$1')
+      .replace(/\?&/, '?')
+      .replace(/[?&]$/, '');
   }
 }
 
@@ -3200,7 +3224,9 @@ window.vireoRefreshPhotoRenders = function(photoIds) {
         base === '/photos/' + id + '/original' ||
         base.indexOf('/photos/' + id + '/preview?') === 0
       ) {
-        img.src = _vireoUrlWithRenderVersion(base, id);
+        img.src = window.vireoRenderedUrl
+          ? window.vireoRenderedUrl(base, id)
+          : _vireoUrlWithRenderVersion(base, id);
       }
     });
   });
@@ -3212,6 +3238,9 @@ window.vireoRefreshPhotoRenders = function(photoIds) {
 };
 
 window.vireoRenderedUrl = function(url, photoId) {
+  var recipe = photoId == null ? null : _lbEditRecipeByPhoto[String(photoId)];
+  var recipeKey = _vireoEditRecipeCacheKey(recipe);
+  if (recipeKey) url = _vireoUrlWithQueryParam(url, 'er', recipeKey);
   return _vireoUrlWithRenderVersion(url, photoId);
 };
 
@@ -3237,6 +3266,20 @@ function _lbCloneEditRecipe(recipe) {
     out.adjustments = Object.assign({}, recipe.adjustments);
   }
   return out;
+}
+
+function _vireoHashString(s) {
+  var hash = 5381;
+  for (var i = 0; i < s.length; i++) {
+    hash = ((hash << 5) + hash) ^ s.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function _vireoEditRecipeCacheKey(recipe) {
+  var normalized = _lbCloneEditRecipe(recipe);
+  if (!_lbRecipeHasEdits(normalized)) return '';
+  return _vireoHashString(JSON.stringify(normalized));
 }
 
 function _lbRecipeHasEdits(recipe) {
