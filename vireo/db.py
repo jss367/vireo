@@ -645,6 +645,12 @@ class Database:
                 PRIMARY KEY (photo_id, workspace_id)
             );
 
+            CREATE TABLE IF NOT EXISTS photo_edit_recipes (
+                photo_id    INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+                recipe_json TEXT NOT NULL,
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS photo_preferences (
                 workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
                 purpose       TEXT NOT NULL,
@@ -5532,6 +5538,88 @@ class Database:
                 )
         self.conn.commit()
 
+    def get_photo_edit_recipe(self, photo_id, verify_workspace=False):
+        """Return the normalized edit recipe dict for a photo, or None."""
+        if verify_workspace:
+            self._verify_photo_in_workspace(photo_id)
+        row = self.conn.execute(
+            "SELECT recipe_json FROM photo_edit_recipes WHERE photo_id = ?",
+            (photo_id,),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            from image_edits import copy_recipe
+            return copy_recipe(row["recipe_json"])
+        except Exception:
+            log.warning("Invalid stored edit recipe for photo %s", photo_id, exc_info=True)
+            return None
+
+    def get_photo_edit_recipes(self, photo_ids):
+        """Return {photo_id: normalized recipe dict} for the given photos."""
+        if not photo_ids:
+            return {}
+        out = {}
+        from image_edits import copy_recipe
+        for chunk in _chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"SELECT photo_id, recipe_json FROM photo_edit_recipes "
+                f"WHERE photo_id IN ({placeholders})",
+                list(chunk),
+            ).fetchall()
+            for row in rows:
+                try:
+                    recipe = copy_recipe(row["recipe_json"])
+                except Exception:
+                    log.warning(
+                        "Invalid stored edit recipe for photo %s",
+                        row["photo_id"], exc_info=True,
+                    )
+                    continue
+                if recipe:
+                    out[row["photo_id"]] = recipe
+        return out
+
+    def set_photo_edit_recipe(self, photo_id, recipe, verify_workspace=True):
+        """Set or clear a non-destructive edit recipe for a photo.
+
+        Returns the normalized recipe dict, or None when the provided recipe is
+        a no-op and the stored row was cleared.
+        """
+        if verify_workspace:
+            self._verify_photo_in_workspace(photo_id)
+        from image_edits import copy_recipe, recipe_to_json
+        recipe_json = recipe_to_json(recipe)
+        if recipe_json is None:
+            self.conn.execute(
+                "DELETE FROM photo_edit_recipes WHERE photo_id = ?",
+                (photo_id,),
+            )
+            self.conn.commit()
+            return None
+        self.conn.execute(
+            """INSERT INTO photo_edit_recipes (photo_id, recipe_json, updated_at)
+               VALUES (?, ?, datetime('now'))
+               ON CONFLICT(photo_id) DO UPDATE SET
+                   recipe_json = excluded.recipe_json,
+                   updated_at = excluded.updated_at""",
+            (photo_id, recipe_json),
+        )
+        self.conn.commit()
+        return copy_recipe(recipe_json)
+
+    def clear_photo_edit_recipe(self, photo_id, verify_workspace=True):
+        """Remove a photo's edit recipe. Returns True if a row was removed."""
+        if verify_workspace:
+            self._verify_photo_in_workspace(photo_id)
+        cur = self.conn.execute(
+            "DELETE FROM photo_edit_recipes WHERE photo_id = ?",
+            (photo_id,),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def prune_pipeline_cache_for_ids(self, ids):
         """Remove ``ids`` from the workspace's pipeline review cache file.
 
@@ -10092,6 +10180,12 @@ class Database:
                     self.set_color_label(pid, old_val)
                 else:
                     self.remove_color_label(pid)
+            elif entry['action_type'] == 'edit_recipe':
+                self.set_photo_edit_recipe(
+                    pid,
+                    old_val if old_val else None,
+                    verify_workspace=False,
+                )
             elif entry['action_type'] in ('keyword_add', 'prediction_accept'):
                 old_meta = self._edit_old_value_meta(old_val)
                 self.untag_photo(pid, int(entry['new_value']))
@@ -10223,6 +10317,12 @@ class Database:
                     self.set_color_label(pid, new_val)
                 else:
                     self.remove_color_label(pid)
+            elif entry['action_type'] == 'edit_recipe':
+                self.set_photo_edit_recipe(
+                    pid,
+                    new_val if new_val else None,
+                    verify_workspace=False,
+                )
             elif entry['action_type'] in ('keyword_add', 'prediction_accept'):
                 old_meta = self._edit_old_value_meta(item['old_value'])
                 self.tag_photo(pid, int(entry['new_value']))

@@ -9,6 +9,14 @@ from db import Database
 
 
 @pytest.fixture(autouse=True)
+def _disable_startup_backfill_timers(monkeypatch):
+    """See ``vireo/tests/conftest.py`` for the rationale — mirrored here so
+    the top-level ``tests/`` suite (which also calls ``create_app``) doesn't
+    leak Timer-driven backfill jobs across tests."""
+    monkeypatch.setenv("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS", "1")
+
+
+@pytest.fixture(autouse=True)
 def _expanduser_prefers_test_home(monkeypatch):
     """Make HOME-based tests portable to Windows.
 

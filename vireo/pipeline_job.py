@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import numpy as np
 from db import Database, commit_with_retry
@@ -27,6 +28,7 @@ from pipeline_locks import acquire_photo_mask, acquire_workspace_regroup
 log = logging.getLogger(__name__)
 
 _SENTINEL = object()  # unique end-of-stream marker
+_EXIF_ORIENTATION_TAG = 274
 
 
 @dataclass
@@ -65,6 +67,168 @@ def _should_abort(abort_event):
     return abort_event.is_set()
 
 
+def _rendered_recipe_long_edge(width, height, recipe):
+    rotation = (recipe or {}).get("rotation", 0)
+    if rotation in (90, 270):
+        width, height = height, width
+    crop = (recipe or {}).get("crop") if recipe else None
+    if crop:
+        return max(float(crop["w"]) * width, float(crop["h"]) * height)
+    return max(width, height)
+
+
+def _photo_value(photo, key):
+    try:
+        return photo[key]
+    except (KeyError, IndexError, TypeError):
+        if hasattr(photo, "get"):
+            return photo.get(key)
+    return None
+
+
+def _exif_orientation(exif_data):
+    if not exif_data:
+        return None
+    if isinstance(exif_data, str):
+        try:
+            metadata = json.loads(exif_data)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(exif_data, dict):
+        metadata = exif_data
+    else:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    for group in ("EXIF", "IFD0", "TIFF", "File"):
+        values = metadata.get(group)
+        if isinstance(values, dict) and "Orientation" in values:
+            return values["Orientation"]
+    return metadata.get("Orientation")
+
+
+def _orientation_swaps_axes(orientation):
+    if orientation is None or isinstance(orientation, bool):
+        return False
+    if isinstance(orientation, (int, float)):
+        return int(orientation) in (5, 6, 7, 8)
+    text = str(orientation).strip().lower()
+    if not text:
+        return False
+    try:
+        return int(text) in (5, 6, 7, 8)
+    except ValueError:
+        return "90" in text or "270" in text
+
+
+def _recipe_source_dimensions(photo):
+    try:
+        width = int(_photo_value(photo, "width") or 0)
+        height = int(_photo_value(photo, "height") or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+    if (
+        width > 0
+        and height > 0
+        and _orientation_swaps_axes(_exif_orientation(_photo_value(photo, "exif_data")))
+    ):
+        return height, width
+    return width, height
+
+
+def _image_size_after_exif_orientation(img):
+    width, height = img.size
+    orientation = None
+    with contextlib.suppress(Exception):
+        orientation = img.getexif().get(_EXIF_ORIENTATION_TAG)
+    if _orientation_swaps_axes(orientation):
+        return height, width
+    return width, height
+
+
+def _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
+    if not recipe or not recipe.get("crop"):
+        return True
+    wc_rel = photo["working_copy_path"]
+    if not wc_rel:
+        return False
+    wc_path = os.path.join(vireo_dir, wc_rel)
+    if not os.path.exists(wc_path):
+        return False
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(wc_path) as wc_img:
+            wc_w, wc_h = _image_size_after_exif_orientation(wc_img)
+    except Exception:
+        return False
+    original_w, original_h = _recipe_source_dimensions(photo)
+    if original_w <= 0 or original_h <= 0:
+        return False
+    original_render_long = _rendered_recipe_long_edge(original_w, original_h, recipe)
+    required_long = min(max_size, original_render_long) if max_size else original_render_long
+    wc_render_long = _rendered_recipe_long_edge(wc_w, wc_h, recipe)
+    return wc_render_long >= required_long
+
+
+def _path_satisfies_recipe_render(path, photo, recipe, max_size):
+    original_w, original_h = _recipe_source_dimensions(photo)
+    if original_w <= 0 or original_h <= 0:
+        return False
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(path) as img:
+            width, height = _image_size_after_exif_orientation(img)
+    except Exception:
+        return False
+    original_render_long = _rendered_recipe_long_edge(
+        original_w, original_h, recipe,
+    )
+    required_long = min(max_size, original_render_long) if max_size else original_render_long
+    return _rendered_recipe_long_edge(width, height, recipe) >= required_long
+
+
+def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
+    from image_loader import get_canonical_image_path
+
+    if not recipe:
+        return get_canonical_image_path(photo, vireo_dir, folders)
+    canonical = get_canonical_image_path(photo, vireo_dir, folders)
+    wc_rel = photo["working_copy_path"]
+    if not recipe.get("crop") and canonical and wc_rel:
+        wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
+        if os.path.abspath(canonical) == os.path.abspath(wc_path):
+            return canonical
+    if recipe.get("crop") and _working_copy_satisfies_recipe_render(
+        photo, recipe, max_size, vireo_dir,
+    ):
+        return canonical
+
+    folder_path = folders.get(photo["folder_id"])
+    if not folder_path:
+        if photo["working_copy_path"]:
+            wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
+            if os.path.exists(wc_path):
+                return wc_path
+        return ""
+    companion_path = photo["companion_path"]
+    if companion_path:
+        companion = os.path.join(folder_path, companion_path)
+        if (
+            os.path.exists(companion)
+            and _path_satisfies_recipe_render(companion, photo, recipe, max_size)
+        ):
+            return companion
+    original = os.path.join(
+        folder_path,
+        photo["filename"],
+    )
+    if not os.path.exists(original) and photo["working_copy_path"]:
+        wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
+        if os.path.exists(wc_path):
+            return wc_path
+    return original
+
+
 def _incomplete_model_message(model_name, is_custom=False):
     if is_custom:
         return (
@@ -89,6 +253,60 @@ def _looks_like_missing_external_data(err):
 
 
 _RAW_EXTENSIONS = (".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf")
+_WORKING_COPY_FAILURE_RETRY_SECONDS = 24 * 60 * 60
+
+
+def _has_current_working_copy_failure(
+    photo, vireo_dir=None, trust_existing_working_copy=True,
+    live_source_path=None, folder_path=None,
+):
+    working_copy_path = _photo_value(photo, "working_copy_path")
+    if working_copy_path and trust_existing_working_copy:
+        if not vireo_dir:
+            return False
+        wc_abs = (
+            working_copy_path if os.path.isabs(working_copy_path)
+            else os.path.join(vireo_dir, working_copy_path)
+        )
+        if os.path.exists(wc_abs):
+            return False
+
+    filename = _photo_value(photo, "filename") or ""
+    if os.path.splitext(filename)[1].lower() not in _RAW_EXTENSIONS:
+        return False
+
+    companion_path = _photo_value(photo, "companion_path")
+    if companion_path and live_source_path and folder_path:
+        companion_abs = os.path.join(folder_path, companion_path)
+        failed_source = _photo_value(photo, "working_copy_failed_source")
+        if (
+            failed_source != "source"
+            and os.path.exists(live_source_path)
+            and os.path.exists(companion_abs)
+        ):
+            return False
+
+    failed_at = _photo_value(photo, "working_copy_failed_at")
+    failed_mtime = _photo_value(photo, "working_copy_failed_mtime")
+    file_mtime = _photo_value(photo, "file_mtime")
+    if not failed_at or failed_mtime is None or file_mtime is None:
+        return False
+    try:
+        if float(failed_mtime) != float(file_mtime):
+            return False
+    except (TypeError, ValueError):
+        return False
+    try:
+        failed_s = str(failed_at).strip()
+        if failed_s.endswith("Z"):
+            failed_s = failed_s[:-1] + "+00:00"
+        failed_dt = datetime.fromisoformat(failed_s)
+        if failed_dt.tzinfo is None:
+            failed_dt = failed_dt.replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return False
+    age = (datetime.now(UTC) - failed_dt.astimezone(UTC)).total_seconds()
+    return age < _WORKING_COPY_FAILURE_RETRY_SECONDS
 
 
 _CLASSIFIER_BUNDLE_FIELDS = (
@@ -1219,7 +1437,43 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 try:
                     thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
                     already_exists = os.path.exists(thumb_path)
-                    result_path = generate_thumbnail(photo_id, photo_path, cache_dir, size=thumb_size)
+                    recipe = thread_db.get_photo_edit_recipe(photo_id)
+                    detail_photo = None
+                    if recipe:
+                        detail_photo = thread_db.get_photo(photo_id)
+                        if detail_photo:
+                            folder_row = thread_db.get_folder(detail_photo["folder_id"])
+                            folders = (
+                                {folder_row["id"]: folder_row["path"]}
+                                if folder_row else {}
+                            )
+                            photo_path = _recipe_render_source(
+                                detail_photo,
+                                recipe,
+                                thumb_size,
+                                effective_vireo_dir,
+                                folders,
+                            )
+                            if (
+                                os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
+                                and _has_current_working_copy_failure(
+                                    detail_photo,
+                                    effective_vireo_dir,
+                                    trust_existing_working_copy=False,
+                                    live_source_path=photo_path,
+                                    folder_path=folders.get(detail_photo["folder_id"]),
+                                )
+                            ):
+                                skipped += 1
+                                continue
+                    recipe_kwargs = {"recipe": recipe} if recipe else {}
+                    result_path = generate_thumbnail(
+                        photo_id,
+                        photo_path,
+                        cache_dir,
+                        size=thumb_size,
+                        **recipe_kwargs,
+                    )
                     if result_path is None:
                         failed += 1
                     elif already_exists:
@@ -1274,8 +1528,36 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
                     already_exists = os.path.exists(thumb_path)
                     try:
+                        recipe = thread_db.get_photo_edit_recipe(photo_id)
+                        detail_photo = None
+                        if recipe:
+                            detail_photo = thread_db.get_photo(photo_id) or photo
+                            photo_path = _recipe_render_source(
+                                detail_photo,
+                                recipe,
+                                thumb_size,
+                                effective_vireo_dir,
+                                folders,
+                            )
+                            if (
+                                os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
+                                and _has_current_working_copy_failure(
+                                    detail_photo,
+                                    effective_vireo_dir,
+                                    trust_existing_working_copy=False,
+                                    live_source_path=photo_path,
+                                    folder_path=folders.get(detail_photo["folder_id"]),
+                                )
+                            ):
+                                skipped += 1
+                                continue
+                        recipe_kwargs = {"recipe": recipe} if recipe else {}
                         result_path = generate_thumbnail(
-                            photo_id, photo_path, cache_dir, size=thumb_size,
+                            photo_id,
+                            photo_path,
+                            cache_dir,
+                            size=thumb_size,
+                            **recipe_kwargs,
                         )
                         if result_path is None:
                             failed += 1
@@ -1369,7 +1651,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         try:
             import config as cfg
-            from image_loader import get_canonical_image_path, load_image
+            from image_edits import apply_recipe_to_loaded_image
+            from image_loader import load_image
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
@@ -1422,20 +1705,67 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             for i, photo in enumerate(photos):
                 if _should_abort(abort):
                     break
+                detail_photo = thread_db.get_photo(photo["id"]) or photo
                 cache_path = os.path.join(preview_dir, f'{photo["id"]}_{max_size}.jpg')
+                recipe = thread_db.get_photo_edit_recipe(photo["id"])
                 if os.path.exists(cache_path):
-                    skipped += 1
-                    try:
-                        if not thread_db.preview_cache_get(photo["id"], max_size):
-                            thread_db.preview_cache_insert(
-                                photo["id"], max_size, os.path.getsize(cache_path),
+                    cache_row = None
+                    with contextlib.suppress(Exception):
+                        cache_row = thread_db.preview_cache_get(photo["id"], max_size)
+                    if recipe and cache_row is None:
+                        with contextlib.suppress(OSError):
+                            os.remove(cache_path)
+                        if os.path.exists(cache_path):
+                            skipped += 1
+                            log.info(
+                                "Skipping untracked edited preview for photo %s; "
+                                "existing cache file could not be removed",
+                                photo["id"],
                             )
-                    except Exception:
-                        pass  # photo may have been deleted mid-pipeline
-                else:
-                    canonical = get_canonical_image_path(photo, base_dir, folders)
-                    img = load_image(canonical, max_size=max_size)
+                            continue
+                    else:
+                        skipped += 1
+                        try:
+                            if cache_row is None:
+                                thread_db.preview_cache_insert(
+                                    photo["id"],
+                                    max_size,
+                                    os.path.getsize(cache_path),
+                                )
+                        except Exception:
+                            pass  # photo may have been deleted mid-pipeline
+                        continue
+                if not os.path.exists(cache_path):
+                    canonical = _recipe_render_source(
+                        detail_photo, recipe, max_size, base_dir, folders,
+                    )
+                    if (
+                        os.path.splitext(canonical)[1].lower() in _RAW_EXTENSIONS
+                        and _has_current_working_copy_failure(
+                            detail_photo,
+                            base_dir,
+                            trust_existing_working_copy=False,
+                            live_source_path=canonical,
+                            folder_path=folders.get(detail_photo["folder_id"]),
+                        )
+                    ):
+                        skipped += 1
+                        log.info(
+                            "Skipping pipeline preview for photo %s; RAW "
+                            "working-copy extraction already failed for "
+                            "current source mtime",
+                            photo["id"],
+                        )
+                        continue
+                    load_max_size = (
+                        None if recipe and recipe.get("crop") else max_size
+                    )
+                    img = load_image(canonical, max_size=load_max_size)
                     if img:
+                        if recipe:
+                            img = apply_recipe_to_loaded_image(
+                                img, recipe, max_size=max_size,
+                            )
                         # Atomic write: with SLOT_CAP > 1 two pipelines
                         # processing the same photo can both miss the
                         # os.path.exists() check above and race here on the

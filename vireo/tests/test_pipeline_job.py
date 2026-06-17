@@ -701,6 +701,67 @@ def test_pipeline_previews_stage_writes_atomically(tmp_path, monkeypatch):
         )
 
 
+def test_pipeline_previews_stage_bounds_non_crop_recipe_loads(tmp_path, monkeypatch):
+    import config as cfg
+    import image_loader
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    source_path = photo_dir / "edited.jpg"
+    Image.new("RGB", (800, 600), "red").save(source_path, "JPEG")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_id = db.add_folder(str(photo_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="edited.jpg",
+        extension=".jpg",
+        file_size=os.path.getsize(source_path),
+        file_mtime=os.path.getmtime(source_path),
+        width=800,
+        height=600,
+    )
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    collection_id = db.add_collection(
+        "Edited",
+        json.dumps([{"field": "photo_ids", "op": "in", "value": [photo_id]}]),
+    )
+
+    original_load_image = image_loader.load_image
+    seen_max_sizes = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        seen_max_sizes.append(max_size)
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(
+        job,
+        runner,
+        db_path,
+        ws_id,
+        PipelineParams(
+            collection_id=collection_id,
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+            preview_max_size=1920,
+        ),
+    )
+
+    assert seen_max_sizes[-1] == 1920
+
+
 def test_pipeline_params_sources_used_over_source():
     """When sources is provided, it should take precedence over source."""
     params = PipelineParams(source="/single", sources=["/a", "/b"])
@@ -1820,6 +1881,84 @@ def test_pipeline_collection_mode_generates_missing_thumbnails(tmp_path, monkeyp
     )
     thumb_files = [f for f in os.listdir(thumb_dir) if not f.startswith(".")]
     assert len(thumb_files) == 3
+
+
+def test_pipeline_collection_mode_edited_thumbnail_uses_working_copy(
+    tmp_path, monkeypatch,
+):
+    """Collection thumbnail replay should fall back to usable working copies."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    original = photo_dir / "a.jpg"
+    Image.new("RGB", (100, 100), "red").save(str(original))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    runner = FakeRunner()
+    job = _make_job()
+    result = run_pipeline_job(
+        job,
+        runner,
+        db_path,
+        ws_id,
+        PipelineParams(
+            source=str(photo_dir),
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        ),
+    )
+    coll_id = result["collection_id"]
+
+    photo = db.get_collection_photos(coll_id, per_page=999999)[0]
+    working_dir = tmp_path / "working"
+    working_dir.mkdir()
+    Image.new("RGB", (100, 100), "blue").save(str(working_dir / f"{photo['id']}.jpg"))
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{photo['id']}.jpg", photo["id"]),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo["id"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+    os.remove(original)
+
+    thumb_dir = os.path.join(os.path.dirname(db_path), "thumbnails")
+    for f in os.listdir(thumb_dir):
+        os.remove(os.path.join(thumb_dir, f))
+
+    runner2 = FakeRunner()
+    job2 = _make_job()
+    result2 = run_pipeline_job(
+        job2,
+        runner2,
+        db_path,
+        ws_id,
+        PipelineParams(
+            collection_id=coll_id,
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        ),
+    )
+
+    thumb_result = result2["stages"].get("thumbnails", {})
+    assert thumb_result.get("failed") == 0
+    assert thumb_result.get("generated") == 1
+    with Image.open(os.path.join(thumb_dir, f"{photo['id']}.jpg")) as thumb:
+        r, g, b = thumb.resize((1, 1)).getpixel((0, 0))
+    assert b > r and b > g
 
 
 # ---------------------------------------------------------------------------
@@ -4826,6 +4965,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
 
     monkeypatch.setenv("HOME", str(tmp_path))
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    _stub_extract_masks_heavy_ops(monkeypatch)
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
@@ -9191,6 +9331,279 @@ def test_previews_stage_uses_thumb_cache_dir_parent(tmp_path, monkeypatch):
     )
     # The preview_cache row must account for the file the app will serve.
     assert db2.preview_cache_get(photo_id, 1920) is not None
+
+
+def test_pipeline_previews_honor_raw_failure_marker_after_source_selection(
+    tmp_path, monkeypatch,
+):
+    import config as cfg
+    import image_loader
+    import scanner
+    import thumbnails
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    raw_path = photo_dir / "source.NEF"
+    raw_path.write_bytes(b"raw")
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_id = db.add_folder(str(photo_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="source.NEF",
+        extension=".nef",
+        file_size=raw_path.stat().st_size,
+        file_mtime=1234.0,
+        width=600,
+        height=400,
+    )
+    working_dir = tmp_path / "working"
+    working_dir.mkdir()
+    Image.new("RGB", (400, 400), "blue").save(str(working_dir / f"{photo_id}.jpg"))
+    db.conn.execute(
+        """UPDATE photos
+           SET working_copy_path=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=1234.0,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+    collection_id = db.add_collection("Test", json.dumps([]))
+
+    def fake_generate_thumbnail(photo_id, photo_path, cache_dir, size=300, **kwargs):
+        os.makedirs(cache_dir, exist_ok=True)
+        thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
+        Image.new("RGB", (size, size), "green").save(thumb_path)
+        return thumb_path
+
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fake_generate_thumbnail)
+    monkeypatch.setattr(scanner, "extract_working_copy", lambda *args, **kwargs: False)
+
+    original_load_image = image_loader.load_image
+    raw_loads = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        if os.path.abspath(str(file_path)) == os.path.abspath(str(raw_path)):
+            raw_loads.append(file_path)
+            raise AssertionError("pipeline preview retried failed RAW")
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    result = run_pipeline_job(
+        _make_job(),
+        FakeRunner(),
+        db_path,
+        ws_id,
+        PipelineParams(
+            collection_id=collection_id,
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+            preview_max_size=1920,
+        ),
+    )
+
+    previews = result["stages"]["previews"]
+    assert previews["failed"] == 0
+    assert previews["generated"] == 0
+    assert previews["skipped"] == 1
+    assert raw_loads == []
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+
+def test_pipeline_scan_thumbnails_use_recipe_source_before_live_raw(
+    tmp_path, monkeypatch,
+):
+    import config as cfg
+    import scanner
+    import thumbnails
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    raw_path = photo_dir / "source.NEF"
+    raw_path.write_bytes(b"raw")
+    companion_path = photo_dir / "source.jpg"
+    Image.new("RGB", (800, 600), "blue").save(companion_path)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    scanned = {"done": False}
+
+    def fake_scan(
+        root,
+        scan_db,
+        progress_callback=None,
+        photo_callback=None,
+        **_kwargs,
+    ):
+        folder_id = scan_db.add_folder(str(root), name="photos")
+        photo_id = scan_db.add_photo(
+            folder_id=folder_id,
+            filename="source.NEF",
+            extension=".nef",
+            file_size=raw_path.stat().st_size,
+            file_mtime=1234.0,
+            width=800,
+            height=600,
+        )
+        scan_db.conn.execute(
+            """UPDATE photos
+               SET companion_path='source.jpg',
+                   working_copy_path=NULL,
+                   working_copy_failed_at=datetime('now'),
+                   working_copy_failed_mtime=1234.0,
+                   working_copy_failed_source='source'
+               WHERE id=?""",
+            (photo_id,),
+        )
+        scan_db.conn.commit()
+        scan_db.set_photo_edit_recipe(
+            photo_id,
+            {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+        )
+        scanned["done"] = True
+        if progress_callback:
+            progress_callback(1, 1)
+        if photo_callback:
+            photo_callback(photo_id, str(raw_path))
+
+    thumbnail_sources = []
+
+    def fake_generate_thumbnail(photo_id, photo_path, cache_dir, size=300, **kwargs):
+        thumbnail_sources.append(photo_path)
+        if os.path.abspath(str(photo_path)) == os.path.abspath(str(raw_path)):
+            raise AssertionError("scan thumbnail used live RAW path")
+        assert kwargs.get("recipe")
+        os.makedirs(cache_dir, exist_ok=True)
+        thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
+        Image.new("RGB", (size, size), "green").save(thumb_path)
+        return thumb_path
+
+    monkeypatch.setattr(scanner, "scan", fake_scan)
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fake_generate_thumbnail)
+
+    result = run_pipeline_job(
+        _make_job(),
+        FakeRunner(),
+        db_path,
+        ws_id,
+        PipelineParams(
+            source=str(photo_dir),
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        ),
+    )
+
+    assert scanned["done"] is True
+    assert result["stages"]["thumbnails"]["failed"] == 0
+    assert thumbnail_sources == [str(companion_path)]
+
+
+def test_pipeline_scan_thumbnails_honor_raw_marker_after_source_selection(
+    tmp_path, monkeypatch,
+):
+    import config as cfg
+    import scanner
+    import thumbnails
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    raw_path = photo_dir / "source.NEF"
+    raw_path.write_bytes(b"raw")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    def fake_scan(
+        root,
+        scan_db,
+        progress_callback=None,
+        photo_callback=None,
+        **_kwargs,
+    ):
+        folder_id = scan_db.add_folder(str(root), name="photos")
+        photo_id = scan_db.add_photo(
+            folder_id=folder_id,
+            filename="source.NEF",
+            extension=".nef",
+            file_size=raw_path.stat().st_size,
+            file_mtime=1234.0,
+            width=800,
+            height=600,
+        )
+        working_dir = tmp_path / "working"
+        working_dir.mkdir()
+        Image.new("RGB", (200, 150), "blue").save(
+            working_dir / f"{photo_id}.jpg",
+        )
+        scan_db.conn.execute(
+            """UPDATE photos
+               SET working_copy_path=?,
+                   working_copy_failed_at=datetime('now'),
+                   working_copy_failed_mtime=1234.0,
+                   working_copy_failed_source='source'
+               WHERE id=?""",
+            (f"working/{photo_id}.jpg", photo_id),
+        )
+        scan_db.conn.commit()
+        scan_db.set_photo_edit_recipe(
+            photo_id,
+            {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+        )
+        if progress_callback:
+            progress_callback(1, 1)
+        if photo_callback:
+            photo_callback(photo_id, str(raw_path))
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("scan thumbnail retried failed RAW")
+
+    monkeypatch.setattr(scanner, "scan", fake_scan)
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fail_if_called)
+
+    result = run_pipeline_job(
+        _make_job(),
+        FakeRunner(),
+        db_path,
+        ws_id,
+        PipelineParams(
+            source=str(photo_dir),
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        ),
+    )
+
+    thumbnails_stage = result["stages"]["thumbnails"]
+    assert thumbnails_stage["failed"] == 0
+    assert thumbnails_stage["skipped"] == 1
 
 
 # ---------------------------------------------------------------------------

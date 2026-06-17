@@ -1363,6 +1363,607 @@ def test_preview_cache_hit_updates_last_access(client_with_photo):
     assert row2["last_access_at"] > row1["last_access_at"]
 
 
+def test_edit_recipe_api_invalidates_preview_cache_and_renders(client_with_photo):
+    import io
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    assert client.get(f"/photos/{photo_id}/preview?size=1920").status_code == 200
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_path = os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
+    assert os.path.exists(preview_path)
+    assert db.preview_cache_get(photo_id, 1920) is not None
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 90}},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["recipe"] == {"version": 1, "rotation": 90}
+    assert db.preview_cache_get(photo_id, 1920) is None
+    assert not os.path.exists(preview_path)
+
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
+
+
+def test_non_crop_preview_loads_with_requested_size(client_with_photo, monkeypatch):
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    original_load_image = image_loader.load_image
+    seen_max_sizes = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        seen_max_sizes.append(max_size)
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    resp = app.test_client().get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 200
+    assert 1920 in seen_max_sizes
+
+
+def test_edit_recipe_api_invalidates_untracked_preview_file(client_with_photo):
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    untracked_path = os.path.join(preview_dir, f"{photo_id}_2560.jpg")
+    Image.new("RGB", (10, 10), "purple").save(untracked_path, "JPEG")
+    assert db.preview_cache_get(photo_id, 2560) is None
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 90}},
+    )
+
+    assert resp.status_code == 200
+    assert not os.path.exists(untracked_path)
+
+
+def test_edited_preview_does_not_adopt_stale_untracked_file_after_unlink_failure(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import app as app_module
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    stale_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+    Image.new("RGB", (10, 10), "purple").save(stale_path, "JPEG")
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    assert db.preview_cache_get(photo_id, 1920) is None
+    original_remove = app_module.os.remove
+
+    def locked_remove(path):
+        if path == stale_path:
+            raise OSError("locked")
+        return original_remove(path)
+
+    monkeypatch.setattr(app_module.os, "remove", locked_remove)
+
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
+
+
+def test_cleared_recipe_does_not_adopt_stale_edited_preview_after_unlink_failure(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import app as app_module
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_path = os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
+
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    edited = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert edited.status_code == 200
+    assert db.preview_cache_get(photo_id, 1920) is not None
+    with Image.open(io.BytesIO(edited.data)) as img:
+        assert img.size == (600, 800)
+
+    original_remove = app_module.os.remove
+
+    def locked_remove(path):
+        if path == preview_path:
+            raise OSError("locked")
+        return original_remove(path)
+
+    monkeypatch.setattr(app_module.os, "remove", locked_remove)
+
+    cleared = client.delete(f"/api/photos/{photo_id}/edit-recipe")
+    assert cleared.status_code == 200
+    assert os.path.exists(preview_path)
+
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (800, 600)
+
+
+def test_failed_preview_invalidation_survives_app_restart(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import app as app_module
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_path = os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
+
+    original = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert original.status_code == 200
+    assert db.preview_cache_get(photo_id, 1920) is not None
+    with Image.open(io.BytesIO(original.data)) as img:
+        assert img.size == (800, 600)
+
+    original_remove = app_module.os.remove
+
+    def locked_remove(path):
+        if path == preview_path:
+            raise OSError("locked")
+        return original_remove(path)
+
+    monkeypatch.setattr(app_module.os, "remove", locked_remove)
+    edited = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 90}},
+    )
+    assert edited.status_code == 200
+    assert os.path.exists(preview_path)
+    assert db.preview_cache_get(photo_id, 1920) is not None
+
+    monkeypatch.setattr(app_module.os, "remove", original_remove)
+    restarted = app_module.create_app(
+        db._db_path,
+        thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+    )
+    rendered = restarted.test_client().get(
+        f"/photos/{photo_id}/preview?size=1920",
+    )
+
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
+
+
+def test_edit_recipe_api_invalidates_thumbnail_and_renders_edit(client_with_photo):
+    import io
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    thumb_dir = app.config["THUMB_CACHE_DIR"]
+    thumb_path = os.path.join(thumb_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (400, 300), "green").save(thumb_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (f"{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 90}},
+    )
+
+    assert resp.status_code == 200
+    assert not os.path.exists(thumb_path)
+    row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id = ?", (photo_id,),
+    ).fetchone()
+    assert row["thumb_path"] is None
+
+    rendered = client.get(f"/thumbnails/{photo_id}.jpg")
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (300, 400)
+
+
+def test_edit_recipe_keeps_thumb_path_when_stale_thumbnail_unlink_fails(
+    client_with_photo, monkeypatch,
+):
+    import os
+
+    import app as app_module
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    thumb_dir = app.config["THUMB_CACHE_DIR"]
+    thumb_path = os.path.join(thumb_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (400, 300), "green").save(thumb_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (f"{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    original_remove = app_module.os.remove
+
+    def locked_remove(path):
+        if path == thumb_path:
+            raise OSError("locked")
+        return original_remove(path)
+
+    monkeypatch.setattr(app_module.os, "remove", locked_remove)
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 90}},
+    )
+
+    assert resp.status_code == 200
+    assert os.path.exists(thumb_path)
+    row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id = ?", (photo_id,),
+    ).fetchone()
+    assert row["thumb_path"] == f"{photo_id}.jpg"
+
+
+def test_cropped_thumbnail_uses_original_when_working_copy_is_too_small(
+    client_with_photo,
+):
+    import io
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (400, 300), (30, 120, 200)).save(working_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    rendered = client.get(f"/thumbnails/{photo_id}.jpg")
+
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (400, 300)
+
+
+def test_cropped_thumbnail_uses_companion_before_raw_failure_marker(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import thumbnails
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    companion_path = os.path.join(folder["path"], "test.jpg")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='test.jpg',
+               working_copy_path=NULL,
+               width=800, height=600,
+               file_mtime=1234.0,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=1234.0,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+    original_load_image = thumbnails.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        loaded_paths.append(file_path)
+        if str(file_path).lower().endswith(".nef"):
+            raise AssertionError("thumbnail retried RAW before companion")
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
+
+    rendered = client.get(f"/thumbnails/{photo_id}.jpg")
+
+    assert rendered.status_code == 200
+    assert loaded_paths == [companion_path]
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (267, 400)
+
+
+def test_edited_original_uses_trusted_working_copy_when_source_missing(
+    client_with_photo,
+):
+    import io
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (30, 120, 200)).save(working_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    folder = db.conn.execute(
+        "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    os.remove(os.path.join(folder["path"], folder["filename"]))
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 90}},
+    )
+    assert resp.status_code == 200
+
+    rendered = client.get(f"/photos/{photo_id}/original")
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
+
+
+def test_edited_original_prefers_full_res_companion_before_raw_decode(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    companion_path = os.path.join(folder["path"], "test.jpg")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='test.jpg',
+               working_copy_path=NULL,
+               width=800, height=600,
+               file_mtime=1234.0,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=1234.0,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    original_load_image = image_loader.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        loaded_paths.append(file_path)
+        if str(file_path).lower().endswith(".nef"):
+            raise AssertionError("edited original decoded RAW before companion")
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    rendered = client.get(f"/photos/{photo_id}/original")
+
+    assert rendered.status_code == 200
+    assert loaded_paths == [companion_path]
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
+
+
+def test_edited_original_cache_write_is_atomic(client_with_photo, monkeypatch):
+    import os
+
+    import app as app_module
+
+    app, db, photo_id = client_with_photo
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    final_path = os.path.join(vireo_dir, "originals", f"{photo_id}.jpg")
+    calls = []
+    original_replace = app_module.os.replace
+
+    def tracking_replace(src, dst):
+        calls.append((src, dst, os.path.exists(src)))
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(app_module.os, "replace", tracking_replace)
+
+    rendered = app.test_client().get(f"/photos/{photo_id}/original")
+
+    assert rendered.status_code == 200
+    assert calls
+    tmp_path, dst_path, tmp_existed = calls[0]
+    assert tmp_existed is True
+    assert dst_path == final_path
+    assert not os.path.exists(tmp_path)
+    assert os.path.exists(final_path)
+
+
+def test_cropped_preview_uses_original_when_working_copy_is_too_small(
+    client_with_photo,
+):
+    import io
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (400, 300), (30, 120, 200)).save(working_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (400, 300)
+
+
+def test_cropped_preview_keeps_full_size_working_copy_fallback(
+    client_with_photo,
+):
+    import io
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (30, 120, 200)).save(working_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    folder = db.conn.execute(
+        "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    os.remove(os.path.join(folder["path"], folder["filename"]))
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (400, 300)
+
+
+def test_edit_recipe_api_rejects_invalid_recipe(client_with_photo):
+    app, _db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 45}},
+    )
+    assert resp.status_code == 400
+    assert "rotation" in resp.get_json()["error"]
+
+
+def test_edit_recipe_api_rejects_malformed_body_without_clearing(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    existing = {"rotation": 180}
+    assert client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": existing},
+    ).status_code == 200
+    stored = db.get_photo_edit_recipe(photo_id)
+
+    cases = [
+        {},
+        {"data": "{", "content_type": "application/json"},
+        {"json": []},
+        {"json": {"recipe": []}},
+        {"json": {"recipe": {"crop": {"x": False, "y": False, "w": True, "h": True}}}},
+    ]
+    for kwargs in cases:
+        resp = client.put(f"/api/photos/{photo_id}/edit-recipe", **kwargs)
+        assert resp.status_code == 400
+        assert db.get_photo_edit_recipe(photo_id) == stored
+
+
+def test_edit_recipe_api_undo_redo(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 180}},
+    )
+    assert resp.status_code == 200
+    assert db.get_photo_edit_recipe(photo_id)["rotation"] == 180
+
+    undo = client.post("/api/undo")
+    assert undo.status_code == 200
+    assert db.get_photo_edit_recipe(photo_id) is None
+
+    redo = client.post("/api/redo")
+    assert redo.status_code == 200
+    assert db.get_photo_edit_recipe(photo_id)["rotation"] == 180
+
+
 def test_preview_adopts_existing_file_on_first_access(client_with_photo):
     """A cached file left over from the old scheme is adopted into the LRU."""
     import os
@@ -1483,6 +2084,109 @@ def test_preview_skips_recent_failed_raw_when_working_copy_path_is_stale(
 
     assert resp.status_code == 500
     assert called["load"] is False
+
+
+def test_cropped_preview_uses_companion_before_raw_failure_marker(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    companion_path = os.path.join(folder["path"], "test.jpg")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='test.jpg',
+               working_copy_path=NULL,
+               width=800, height=600,
+               file_mtime=1234.0,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=1234.0,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+    original_load_image = image_loader.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        loaded_paths.append(file_path)
+        if str(file_path).lower().endswith(".nef"):
+            raise AssertionError("preview retried RAW before companion")
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert rendered.status_code == 200
+    assert loaded_paths == [companion_path]
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (400, 600)
+
+
+def test_non_crop_preview_uses_companion_before_raw_failure_marker(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    companion_path = os.path.join(folder["path"], "test.jpg")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='test.jpg',
+               working_copy_path=NULL,
+               width=800, height=600,
+               file_mtime=1234.0,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=1234.0,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    original_load_image = image_loader.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        loaded_paths.append(file_path)
+        if str(file_path).lower().endswith(".nef"):
+            raise AssertionError("preview retried RAW before companion")
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert rendered.status_code == 200
+    assert loaded_paths == [companion_path]
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
 
 
 def test_preview_retries_raw_when_recent_marker_came_from_companion(
@@ -1804,6 +2508,51 @@ def test_original_skips_recent_failed_raw_working_copy(
 
     assert resp.status_code == 500
     assert called["extract"] is False
+
+
+def test_edited_original_skips_recent_failed_raw_before_decode(
+    client_with_photo, monkeypatch,
+):
+    """Edited originals should honor RAW failure markers before load_image."""
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = (SELECT folder_id FROM photos WHERE id=?)",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.abspath(os.path.join(folder["path"], "bad.NEF"))
+    original_load_image = image_loader.load_image
+
+    called = {"load": False}
+
+    def fail_if_called(file_path, *args, **kwargs):
+        if os.path.abspath(os.fspath(file_path)) != raw_path:
+            return original_load_image(file_path, *args, **kwargs)
+        called["load"] = True
+        raise AssertionError("edited original retried failed RAW decode")
+
+    monkeypatch.setattr(image_loader, "load_image", fail_if_called)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 500
+    assert called["load"] is False
 
 
 def test_original_skips_recent_failed_raw_after_rejecting_small_working_copy(
@@ -2222,6 +2971,282 @@ def test_preview_job_writes_sized_filename_and_tracks(client_with_photo):
 
     # Legacy naming NOT produced
     assert not os.path.exists(os.path.join(preview_dir, f"{photo_id}.jpg"))
+
+
+def test_preview_job_applies_edit_recipe_to_warmed_file(
+    client_with_photo, monkeypatch,
+):
+    import os
+    import time
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    preview_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    original_load_image = image_loader.load_image
+    seen_max_sizes = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        seen_max_sizes.append(max_size)
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    resp = client.post("/api/jobs/previews", json={})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status_resp = client.get(f"/api/jobs/{job_id}")
+        if status_resp.status_code != 200:
+            time.sleep(0.05)
+            continue
+        data = status_resp.get_json()
+        if data.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert data["status"] == "completed"
+
+    assert seen_max_sizes == [1920]
+    assert db.preview_cache_get(photo_id, 1920) is not None
+    with Image.open(preview_path) as img:
+        assert img.size == (600, 800)
+
+
+def test_preview_job_honors_raw_failure_marker_after_source_selection(
+    client_with_photo, monkeypatch,
+):
+    import os
+    import time
+
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path=NULL,
+               working_copy_path=NULL,
+               width=800, height=600,
+               file_mtime=1234.0,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=1234.0,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = (SELECT folder_id FROM photos WHERE id=?)",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "source.NEF")
+    original_load_image = image_loader.load_image
+    raw_loads = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        if os.path.abspath(str(file_path)) == os.path.abspath(raw_path):
+            raw_loads.append(file_path)
+            raise AssertionError("preview warmup retried failed RAW")
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    resp = client.post("/api/jobs/previews", json={})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status_resp = client.get(f"/api/jobs/{job_id}")
+        if status_resp.status_code != 200:
+            time.sleep(0.05)
+            continue
+        data = status_resp.get_json()
+        if data.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert data["status"] == "completed"
+    assert raw_loads == []
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    assert db.preview_cache_get(photo_id, 1920) is None
+    assert not os.path.exists(
+        os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg"),
+    )
+
+
+def test_preview_job_does_not_adopt_untracked_edited_preview_after_unlink_failure(
+    client_with_photo, monkeypatch,
+):
+    import os
+    import time
+
+    import app as app_module
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    preview_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    with open(preview_path, "wb") as f:
+        f.write(b"stale-preview")
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+    original_remove = app_module.os.remove
+
+    def locked_remove(path):
+        if os.path.abspath(path) == os.path.abspath(preview_path):
+            raise OSError("locked")
+        return original_remove(path)
+
+    monkeypatch.setattr(app_module.os, "remove", locked_remove)
+
+    resp = client.post("/api/jobs/previews", json={})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status_resp = client.get(f"/api/jobs/{job_id}")
+        if status_resp.status_code != 200:
+            time.sleep(0.05)
+            continue
+        data = status_resp.get_json()
+        if data.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert data["status"] == "completed"
+
+    assert os.path.exists(preview_path)
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+
+def test_preview_job_uses_detail_row_exif_for_cropped_source_selection(
+    client_with_photo, monkeypatch,
+):
+    import json
+    import os
+    import time
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (400, 400), "blue").save(working_path)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = (SELECT folder_id FROM photos WHERE id=?)",
+        (photo_id,),
+    ).fetchone()
+    original_path = os.path.join(folder["path"], "test.jpg")
+    db.conn.execute(
+        """UPDATE photos
+           SET width=600, height=400, exif_data=?, working_copy_path=?
+           WHERE id=?""",
+        (
+            json.dumps({"EXIF": {"Orientation": 6}}),
+            f"working/{photo_id}.jpg",
+            photo_id,
+        ),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        loaded_paths.append(os.path.abspath(str(file_path)))
+        return Image.new("RGB", (600, 400), "red")
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    resp = client.post("/api/jobs/previews", json={})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status_resp = client.get(f"/api/jobs/{job_id}")
+        if status_resp.status_code != 200:
+            time.sleep(0.05)
+            continue
+        data = status_resp.get_json()
+        if data.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert data["status"] == "completed"
+
+    source_dir = os.path.abspath(os.path.dirname(original_path))
+    relevant_paths = [
+        path for path in loaded_paths
+        if os.path.commonpath([source_dir, path]) == source_dir
+    ]
+    assert relevant_paths == [os.path.abspath(original_path)]
+    assert db.preview_cache_get(photo_id, 1920) is not None
+
+
+def test_preview_job_preserves_existing_edited_preview_when_source_missing(
+    client_with_photo,
+):
+    import os
+    import time
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert rendered.status_code == 200
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_path = os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
+    assert os.path.exists(preview_path)
+    folder = db.conn.execute(
+        "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    os.remove(os.path.join(folder["path"], folder["filename"]))
+
+    resp = client.post("/api/jobs/previews", json={})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status_resp = client.get(f"/api/jobs/{job_id}")
+        if status_resp.status_code != 200:
+            time.sleep(0.05)
+            continue
+        data = status_resp.get_json()
+        if data.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert data["status"] == "completed"
+
+    assert db.preview_cache_get(photo_id, 1920) is not None
+    with Image.open(preview_path) as img:
+        assert img.size == (600, 800)
 
 
 def test_eviction_keeps_row_when_unlink_fails(client_with_photo, monkeypatch):
