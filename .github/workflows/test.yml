@@ -127,6 +127,13 @@ jobs:
       - name: Pre-download MegaDetector weights
         if: needs.changes.outputs.python == 'true' && steps.cache-mdv6.outputs.cache-hit != 'true'
         shell: bash
+        # Authenticate the Hugging Face download. Unauthenticated requests share
+        # a low anonymous rate limit, so a cold cache (notably Windows, whose
+        # cache never warms while these runs keep failing) gets throttled with
+        # 429s and the step fails. A read-only token raises the limit enough for
+        # the single sequential pre-download to succeed and warm the cache.
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd vireo
           # Track success explicitly: a bash ``for`` loop exits with the
