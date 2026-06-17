@@ -5898,6 +5898,7 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
             species = "robin" if enc_idx == 0 else "eagle"
             db.add_prediction(det_ids[0], species, 0.9 - i * 0.05, "bioclip", category="match")
             (collection_pids if enc_idx == 0 else other_pids).append(pid)
+    db.set_photo_edit_recipe(collection_pids[0], {"rotation": 90})
 
     import json as _json
     cid = db.add_collection(
@@ -5934,6 +5935,8 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
         f"scoped response leaked non-collection photos: "
         f"{scoped_pids ^ set(collection_pids)}"
     )
+    scoped_recipes = {p["id"]: p.get("edit_recipe") for p in scoped["photos"]}
+    assert scoped_recipes[collection_pids[0]] == {"version": 1, "rotation": 90}
     for enc in scoped["encounters"]:
         for pid in enc["photo_ids"]:
             assert pid in collection_pids, (
@@ -5954,8 +5957,11 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
         json={"config": {}, "collection_id": cid},
     )
     assert resp.status_code == 200, resp.get_json()
-    reflow_pids = {p["id"] for p in resp.get_json()["photos"]}
+    reflow = resp.get_json()
+    reflow_pids = {p["id"] for p in reflow["photos"]}
     assert reflow_pids == set(collection_pids)
+    reflow_recipes = {p["id"]: p.get("edit_recipe") for p in reflow["photos"]}
+    assert reflow_recipes[collection_pids[0]] == {"version": 1, "rotation": 90}
     cached_after_reflow = load_results_raw(cache_dir, ws_id)
     assert {p["id"] for p in cached_after_reflow["photos"]} == cached_before_pids
 

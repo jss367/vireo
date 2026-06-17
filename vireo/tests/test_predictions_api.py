@@ -38,6 +38,21 @@ def test_list_predictions(app_and_db):
     assert 'House Sparrow' in species_set
 
 
+def test_list_predictions_includes_photo_edit_recipe(app_and_db):
+    """GET /api/predictions exposes photo edit recipes for review cards."""
+    app, db = app_and_db
+    photos = _seed_predictions(db)
+    db.set_photo_edit_recipe(photos[0]["id"], {"rotation": 90})
+    client = app.test_client()
+
+    resp = client.get('/api/predictions')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    by_photo = {p["photo_id"]: p for p in data}
+    assert by_photo[photos[0]["id"]]["edit_recipe"] == {"version": 1, "rotation": 90}
+    assert by_photo[photos[1]["id"]]["edit_recipe"] is None
+
+
 def test_list_predictions_filter_by_status(app_and_db):
     """GET /api/predictions?status=pending returns only pending predictions."""
     app, db = app_and_db

@@ -419,6 +419,28 @@ def test_run_duplicate_scan_emits_resolved_proposal(tmp_path):
     assert result["loser_count"] == 0
 
 
+def test_run_duplicate_scan_attaches_edit_recipes(tmp_path):
+    """Fresh scan results seed thumbnail edit cache keys immediately."""
+    from duplicate_scan import run_duplicate_scan
+
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    p1 = _add(db, fid, "owl.jpg", file_hash="HEDIT")
+    p2 = _add(db, fid, "owl-copy.jpg", file_hash="HEDIT")
+    _reset_flags(db, "HEDIT")
+    db.set_photo_edit_recipe(p1, {"rotation": 90})
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=False)
+    assert len(result["proposals"]) == 1
+    prop = result["proposals"][0]
+    by_id = {
+        candidate["id"]: candidate
+        for candidate in [prop["winner"]] + prop["losers"]
+    }
+    assert by_id[p1]["edit_recipe"] == {"version": 1, "rotation": 90}
+    assert by_id[p2]["edit_recipe"] is None
+
+
 def test_run_duplicate_scan_excludes_resolved_when_opt_out(tmp_path):
     """``include_resolved=False`` preserves the legacy unresolved-only output."""
     from duplicate_scan import run_duplicate_scan

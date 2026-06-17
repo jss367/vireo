@@ -175,8 +175,11 @@ function renderSyncPreview() {
 
     html += '<div style="display:flex;gap:12px;padding:12px 0;border-bottom:1px solid var(--border-subtle);">';
 
+    var thumbUrl = window.vireoThumbnailUrl
+      ? window.vireoThumbnailUrl(p)
+      : '/thumbnails/' + p.photo_id + '.jpg';
     html += '<div style="flex-shrink:0;">';
-    html += '<img class="sync-preview-thumb" src="' + vireoThumbnailUrl(p.photo_id) + '" style="width:' + _syncThumbSize + 'px;height:' + Math.round(_syncThumbSize * 2 / 3) + 'px;object-fit:cover;border-radius:4px;cursor:pointer;display:block;" data-photo-id="' + p.photo_id + '" data-filename="' + escapeAttr(p.filename) + '">';
+    html += '<img class="sync-preview-thumb" src="' + escapeAttr(thumbUrl) + '" style="width:' + _syncThumbSize + 'px;height:' + Math.round(_syncThumbSize * 2 / 3) + 'px;object-fit:cover;border-radius:4px;cursor:pointer;display:block;" data-photo-id="' + p.photo_id + '" data-filename="' + escapeAttr(p.filename) + '">';
     html += '</div>';
 
     html += '<div style="flex:1;min-width:0;">';

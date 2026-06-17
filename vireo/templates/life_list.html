@@ -160,9 +160,16 @@ function sortedSpecies() {
   return list;
 }
 
+function photoThumbnailUrl(photo) {
+  if (!photo || photo.id == null) return '';
+  return window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(photo)
+    : '/thumbnails/' + photo.id + '.jpg';
+}
+
 function renderCard(entry) {
   var best = entry.best;
-  var thumb = best ? vireoThumbnailUrl(best.id) : '';
+  var thumb = best ? photoThumbnailUrl(best) : '';
   var sci = entry.scientific_name && entry.scientific_name !== entry.species
     ? '<div class="species-sci">' + escapeAttr(entry.scientific_name) + '</div>'
     : '';

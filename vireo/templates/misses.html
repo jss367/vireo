@@ -505,6 +505,13 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) { return escapeHtml(s); }
 
+function photoThumbnailUrl(p) {
+  if (!p || p.id == null) return '';
+  return window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(p)
+    : '/thumbnails/' + p.id + '.jpg';
+}
+
 /* ---------- detection_box parsing ----------
  * Stored as a JSON string: '{"x": 0.12, "y": 0.22, "w": 0.3, "h": 0.4}'
  * where x/y/w/h are normalized [0,1] image coordinates.
@@ -875,7 +882,7 @@ function renderCard(cat, p, idx) {
       'onclick="onCardClick(\'' + cat + '\', ' + idx + ', ' + p.id + ', event)" ' +
       'ondblclick="onCardDoubleClick(\'' + cat + '\', ' + idx + ', event)">' +
       '<div class="miss-card-img-wrap">' +
-        '<img src="' + escapeAttr(vireoThumbnailUrl(p.id)) + '" loading="lazy" alt="' + escapeAttr(p.filename || '') + '">' +
+        '<img src="' + escapeAttr(photoThumbnailUrl(p)) + '" loading="lazy" alt="' + escapeAttr(p.filename || '') + '">' +
         bboxHtml +
         '<span class="miss-card-badge">' +
           '<span class="dot cat-' + cat + '"></span>' +

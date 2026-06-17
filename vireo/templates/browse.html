@@ -2135,6 +2135,18 @@ function renderCardInfo(p) {
 
 function renderPhotoCard(p, idx) {
   var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
+  if (
+    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
+    Object.prototype.hasOwnProperty.call(p, 'edit_recipe')
+  ) {
+    window.vireoRememberPhotoEditRecipe(p.id, p.edit_recipe, {
+      skipIfLocallyWritten: true,
+    });
+  }
+  var hideDetectionOverlays = (
+    typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+    window.vireoPhotoHasOrientationEdit(p.id)
+  );
 
   // Detection box overlays — render one per detection in the photo
   var boxHtml = '';
@@ -2143,7 +2155,7 @@ function renderPhotoCard(p, idx) {
       if (d == null || d.x == null) return;
       var conf = (d.confidence != null) ? Math.round(d.confidence * 100) + '%' : '';
       var cat = (d.category && d.category !== 'animal') ? escapeHtml(d.category) + ' ' : '';
-      boxHtml += '<div class="det-box" style="left:' + (d.x * 100) + '%;top:' + (d.y * 100) + '%;width:' + (d.w * 100) + '%;height:' + (d.h * 100) + '%;">' +
+      boxHtml += '<div class="det-box" data-photo-id="' + p.id + '" style="' + (hideDetectionOverlays ? 'display:none;' : '') + 'left:' + (d.x * 100) + '%;top:' + (d.y * 100) + '%;width:' + (d.w * 100) + '%;height:' + (d.h * 100) + '%;">' +
         ((cat || conf) ? '<span class="det-box-label">' + cat + conf + '</span>' : '') +
       '</div>';
     });
@@ -2171,9 +2183,10 @@ function renderPhotoCard(p, idx) {
     speciesBadgeHtml += '</div>';
   }
 
+  var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
   return '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
     '<div class="grid-card-img-wrap">' +
-      '<img src="' + vireoThumbnailUrl(p.id) + '" loading="lazy" decoding="async" alt="' + escapeAttr(p.filename) + '">' +
+      '<img src="' + escapeAttr(thumbUrl) + '" loading="lazy" decoding="async" alt="' + escapeAttr(p.filename) + '">' +
       clipBadge +
       boxHtml +
       inatBadge +
@@ -2185,6 +2198,19 @@ function renderPhotoCard(p, idx) {
     '</div>' +
   '</div>';
 }
+
+document.addEventListener('lightbox:renderchanged', function(e) {
+  var ids = e && e.detail && Array.isArray(e.detail.photoIds) ? e.detail.photoIds : [];
+  ids.forEach(function(id) {
+    var hideDetectionOverlays = (
+      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+      window.vireoPhotoHasOrientationEdit(id)
+    );
+    document.querySelectorAll('.grid-card[data-id="' + id + '"] .det-box').forEach(function(box) {
+      box.style.display = hideDetectionOverlays ? 'none' : '';
+    });
+  });
+});
 
 function appendGridPhotos(newPhotos, startIdx) {
   if (!newPhotos.length) return;
@@ -4022,8 +4048,9 @@ function renderBestBatch(data) {
   }).join('');
   var cards = (data.cards || []).map(function(card) {
     var reasons = (card.reasons || []).slice(0, 2).map(escapeHtml).join(' · ');
+    var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(card) : '/thumbnails/' + card.id + '.jpg';
     return '<div class="best-batch-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
-      '<img src="' + vireoThumbnailUrl(card.id) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
+      '<img src="' + escapeAttr(thumbUrl) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
       '<div class="best-batch-card-body">' +
         '<div class="best-batch-role ' + escapeAttr(card.role || '') + '">#' + card.rank + ' ' + bestBatchRoleLabel(card.role) + '</div>' +
         '<div class="best-batch-card-name" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
@@ -4032,11 +4059,12 @@ function renderBestBatch(data) {
       '</div>' +
     '</div>';
   }).join('');
+  var bestThumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(best) : '/thumbnails/' + best.id + '.jpg';
   content.className = '';
   content.innerHTML =
     '<div class="best-batch-head">' +
       '<div class="best-batch-pick">' +
-        '<img src="' + vireoThumbnailUrl(best.id) + '" alt="' + escapeAttr(best.filename || '') + '">' +
+        '<img src="' + escapeAttr(bestThumbUrl) + '" alt="' + escapeAttr(best.filename || '') + '">' +
         '<div class="best-batch-pick-meta">' +
           '<div class="best-batch-eyebrow">Best Pick</div>' +
           '<div class="best-batch-title">' + escapeHtml(best.filename || '') + '</div>' +
@@ -4928,6 +4956,9 @@ async function undoLast() {
   try {
     var data = await safeFetch('/api/undo', { method: 'POST' });
     showToast('Undone: ' + data.undone + ' — Ctrl+Shift+Z to redo');
+    if (typeof window.vireoRefreshEditRecipeCache === 'function') {
+      window.vireoRefreshEditRecipeCache(data.edit_recipes);
+    }
     resetAndLoad();
     scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();
@@ -4938,6 +4969,9 @@ async function redoLast() {
   try {
     var data = await safeFetch('/api/redo', { method: 'POST' });
     showToast('Redone: ' + data.redone);
+    if (typeof window.vireoRefreshEditRecipeCache === 'function') {
+      window.vireoRefreshEditRecipeCache(data.edit_recipes);
+    }
     resetAndLoad();
     scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();
@@ -4969,7 +5003,16 @@ async function loadDetail(id) {
 
 function renderDetail(photo) {
   window._detailPhotoId = photo.id;
-  document.getElementById('detailImg').src = vireoThumbnailUrl(photo.id);
+  if (
+    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
+    Object.prototype.hasOwnProperty.call(photo, 'edit_recipe')
+  ) {
+    window.vireoRememberPhotoEditRecipe(photo.id, photo.edit_recipe, {
+      skipIfLocallyWritten: true,
+    });
+  }
+  var detailThumb = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg';
+  document.getElementById('detailImg').src = detailThumb;
   document.getElementById('detailFilename').textContent = photo.filename;
 
   // Rating stars

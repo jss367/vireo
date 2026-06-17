@@ -3288,6 +3288,21 @@ async function createWorkspace() {
     <button class="lb-action-btn lb-action-accent" id="lightboxInspect" onclick="">
       Inspect Pipeline
     </button>
+    <button class="lb-action-btn" id="lightboxRotateLeft" onclick="event.stopPropagation(); lightboxApplyEdit('rotate-left');" title="Rotate left">
+      Rotate Left
+    </button>
+    <button class="lb-action-btn" id="lightboxRotateRight" onclick="event.stopPropagation(); lightboxApplyEdit('rotate-right');" title="Rotate right">
+      Rotate Right
+    </button>
+    <button class="lb-action-btn" id="lightboxFlipHorizontal" onclick="event.stopPropagation(); lightboxApplyEdit('flip-horizontal');" title="Flip horizontally">
+      Flip H
+    </button>
+    <button class="lb-action-btn" id="lightboxFlipVertical" onclick="event.stopPropagation(); lightboxApplyEdit('flip-vertical');" title="Flip vertically">
+      Flip V
+    </button>
+    <button class="lb-action-btn" id="lightboxResetEdit" onclick="event.stopPropagation(); lightboxApplyEdit('reset');" title="Reset rotate and flip edits">
+      Reset Edit
+    </button>
     <button class="lb-action-btn" id="lightboxOpenEditor" onclick="">
       Open in Editor
     </button>
@@ -3454,6 +3469,12 @@ var _lbFlagPendingByPhoto = {};  // count of in-flight flag writes PER photo; li
 var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated from optimistic page helpers
 var _lbViewportByPhotoId = {};  // per-session lightbox viewport cache keyed by photo id
 var _lbPendingViewportState = null;
+var _lbEditRecipeByPhoto = {};
+var _lbEditRecipeKnownByPhoto = {};
+var _lbEditRecipeWriteSeq = 0;
+var _lbEditRecipeWriteSeqByPhoto = {};
+var _lbPhotoDataByPhoto = {};
+var _lbRenderVersionByPhoto = {};
 var _lbEditRecipe = null;
 var _lbEditRecipeLoaded = false;
 var _lbRenderedAdjustmentValues = null;
@@ -3464,6 +3485,135 @@ var _lbAdjustmentInputSeqByPhoto = {};
 var _lbAdjustSaveInFlightByPhoto = {};
 var _lbQueuedAdjustmentSaveByPhoto = {};
 var _lbRecipeBustByPhotoId = {};
+var _lbEditVersionByPhoto = {};
+var _lbEditWritePending = false;
+var _cropRecipe = null;
+var _cropPhotoId = null;
+var _cropPreviewSeq = 0;
+var _cropSessionSeq = 0;
+var _cropDrag = null;
+var _cropPreviewTimer = null;
+var _cropEscToken = null;
+
+function _vireoUrlWithQueryParam(url, key, value) {
+  if (!url || !key || value == null || value === '') return url;
+  var hash = '';
+  var hashIdx = url.indexOf('#');
+  if (hashIdx !== -1) {
+    hash = url.slice(hashIdx);
+    url = url.slice(0, hashIdx);
+  }
+  var joiner = url.indexOf('?') === -1 ? '?' : '&';
+  return url + joiner + encodeURIComponent(key) + '=' + encodeURIComponent(value) + hash;
+}
+
+function _vireoUrlWithRenderVersion(url, photoId) {
+  if (!url || photoId == null) return url;
+  var version = _lbRenderVersionByPhoto[String(photoId)];
+  if (!version) return url;
+  return _vireoUrlWithQueryParam(url, 'rv', version);
+}
+
+function _vireoCleanRenderSearch(search) {
+  if (!search) return '';
+  try {
+    var params = new URLSearchParams(search);
+    params.delete('rv');
+    params.delete('er');
+    params.delete('editv');
+    params.delete('v');
+    var qs = params.toString();
+    return qs ? '?' + qs : '';
+  } catch (_) {
+    return search
+      .replace(/([?&])(rv|er|editv|v)=[^&]*&?/g, '$1')
+      .replace(/\?&/, '?')
+      .replace(/[?&]$/, '');
+  }
+}
+
+function _vireoBaseRenderedUrl(src) {
+  if (!src) return '';
+  try {
+    var parsed = new URL(src, window.location.origin);
+    return parsed.pathname + _vireoCleanRenderSearch(parsed.search);
+  } catch (_) {
+    return src
+      .replace(/([?&])(rv|er|editv|v)=[^&]*&?/g, '$1')
+      .replace(/\?&/, '?')
+      .replace(/[?&]$/, '');
+  }
+}
+
+function _vireoBumpRenderVersion(photoId) {
+  if (photoId == null) return null;
+  var version = Date.now() + '-' + Math.floor(Math.random() * 1000000);
+  _lbRenderVersionByPhoto[String(photoId)] = version;
+  return version;
+}
+
+window.vireoRefreshPhotoRenders = function(photoIds) {
+  if (!Array.isArray(photoIds)) photoIds = [photoIds];
+  var idSet = {};
+  photoIds.forEach(function(id) {
+    if (id == null) return;
+    idSet[String(id)] = true;
+  });
+  if (!Object.keys(idSet).length) return;
+  var imgs = document.querySelectorAll('img[src]');
+  imgs.forEach(function(img) {
+    var attr = img.getAttribute('src') || '';
+    var base = _vireoBaseRenderedUrl(attr);
+    Object.keys(idSet).forEach(function(id) {
+      if (
+        base === '/thumbnails/' + id + '.jpg' ||
+        base === '/photos/' + id + '/full' ||
+        base === '/photos/' + id + '/original' ||
+        base.indexOf('/photos/' + id + '/preview?') === 0
+      ) {
+        img.src = window.vireoRenderedUrl
+          ? window.vireoRenderedUrl(base, id)
+          : _vireoUrlWithRenderVersion(base, id);
+      }
+    });
+  });
+  try {
+    document.dispatchEvent(new CustomEvent('lightbox:renderchanged', {
+      detail: { photoIds: Object.keys(idSet).map(function(id) { return parseInt(id, 10); }) },
+    }));
+  } catch (_) {}
+};
+
+window.vireoRenderedUrl = function(url, photoId) {
+  var recipe = photoId == null ? null : _lbEditRecipeByPhoto[String(photoId)];
+  var recipeKey = _vireoEditRecipeCacheKey(recipe);
+  if (recipeKey) url = _vireoUrlWithQueryParam(url, 'er', recipeKey);
+  return _vireoUrlWithRenderVersion(url, photoId);
+};
+
+window.vireoThumbnailUrl = function(photoOrId) {
+  var photo = photoOrId && typeof photoOrId === 'object' ? photoOrId : null;
+  var photoId = photo ? (photo.photo_id != null ? photo.photo_id : photo.id) : photoOrId;
+  if (photoId == null) return '';
+  if (
+    photo &&
+    Object.prototype.hasOwnProperty.call(photo, 'edit_recipe') &&
+    typeof photo.edit_recipe !== 'undefined' &&
+    typeof window.vireoRememberPhotoEditRecipe === 'function'
+  ) {
+    window.vireoRememberPhotoEditRecipe(photoId, photo.edit_recipe, {
+      skipIfLocallyWritten: true
+    });
+  }
+  var url = '/thumbnails/' + photoId + '.jpg';
+  return window.vireoRenderedUrl
+    ? window.vireoRenderedUrl(url, photoId)
+    : _vireoUrlWithRenderVersion(url, photoId);
+};
+
+function vireoThumbnailUrl(photoOrId) {
+  return window.vireoThumbnailUrl(photoOrId);
+}
 
 function vireoCacheBustedPhotoUrl(photoId, url) {
   url = String(url || '')
@@ -3474,36 +3624,453 @@ function vireoCacheBustedPhotoUrl(photoId, url) {
       return suffix ? prefix : '';
     })
     .replace(/[?&]$/, '');
+  url = window.vireoRenderedUrl
+    ? window.vireoRenderedUrl(url, photoId)
+    : _vireoUrlWithRenderVersion(url, photoId);
   var version = _lbEditVersionByPhoto[String(photoId)];
-  if (version) {
-    url += (url.indexOf('?') === -1 ? '?' : '&') + 'editv=' + encodeURIComponent(version);
-  }
+  if (version) url = _vireoUrlWithQueryParam(url, 'editv', version);
   var bust = _lbRecipeBustByPhotoId[String(photoId)];
-  if (bust) {
-    url += (url.indexOf('?') === -1 ? '?' : '&') + 'v=' + bust;
-  }
+  if (bust) url = _vireoUrlWithQueryParam(url, 'v', bust);
   return url;
-}
-
-function vireoThumbnailUrl(photoId) {
-  return vireoCacheBustedPhotoUrl(photoId, '/thumbnails/' + photoId + '.jpg');
 }
 
 function vireoPreviewUrl(photoId, size) {
   return vireoCacheBustedPhotoUrl(photoId, '/photos/' + photoId + '/preview?size=' + (size || 1920));
 }
 
-window.vireoThumbnailUrl = vireoThumbnailUrl;
 window.vireoPreviewUrl = vireoPreviewUrl;
 window.vireoCacheBustedPhotoUrl = vireoCacheBustedPhotoUrl;
-var _lbEditVersionByPhoto = {};
-var _cropRecipe = null;
-var _cropPhotoId = null;
-var _cropPreviewSeq = 0;
-var _cropSessionSeq = 0;
-var _cropDrag = null;
-var _cropPreviewTimer = null;
-var _cropEscToken = null;
+
+function _lbCloneEditRecipe(recipe) {
+  if (!recipe || typeof recipe !== 'object') return {};
+  var out = {};
+  if (recipe.rotation) out.rotation = recipe.rotation;
+  if (Math.abs(Number(recipe.straighten || 0)) > 1e-9) {
+    out.straighten = Number(recipe.straighten);
+  }
+  if (recipe.flip && typeof recipe.flip === 'object') {
+    out.flip = {};
+    if (recipe.flip.horizontal) out.flip.horizontal = true;
+    if (recipe.flip.vertical) out.flip.vertical = true;
+    if (!Object.keys(out.flip).length) delete out.flip;
+  }
+  if (recipe.crop && typeof recipe.crop === 'object') {
+    out.crop = {
+      x: recipe.crop.x,
+      y: recipe.crop.y,
+      w: recipe.crop.w,
+      h: recipe.crop.h,
+    };
+  }
+  if (recipe.adjustments && typeof recipe.adjustments === 'object') {
+    out.adjustments = Object.assign({}, recipe.adjustments);
+  }
+  return out;
+}
+
+function _vireoHashString(s) {
+  var hash = 5381;
+  for (var i = 0; i < s.length; i++) {
+    hash = ((hash << 5) + hash) ^ s.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function _vireoEditRecipeCacheKey(recipe) {
+  var normalized = _lbCloneEditRecipe(recipe);
+  if (!_lbRecipeHasEdits(normalized)) return '';
+  return _vireoHashString(JSON.stringify(normalized));
+}
+
+function _lbRecipeHasEdits(recipe) {
+  return !!(recipe && typeof recipe === 'object' && Object.keys(recipe).some(function(k) {
+    return k !== 'version';
+  }));
+}
+
+function _lbRecipeHasOrientation(recipe) {
+  return !!(
+    recipe &&
+    typeof recipe === 'object' &&
+    (recipe.rotation || (recipe.flip && (recipe.flip.horizontal || recipe.flip.vertical)))
+  );
+}
+
+function _lbCurrentRecipeHasOrientation() {
+  if (_lightboxCurrentId == null) return false;
+  return _lbRecipeHasOrientation(_lbEditRecipeByPhoto[String(_lightboxCurrentId)]);
+}
+
+window.vireoPhotoHasOrientationEdit = function(photoId) {
+  if (photoId == null) return false;
+  return _lbRecipeHasGeometricEdit(_lbEditRecipeByPhoto[String(photoId)]);
+};
+
+window.vireoRememberPhotoEditRecipe = function(photoId, recipe, options) {
+  if (options && options.skipIfLocallyWritten && _lbEditRecipeWriteSeqFor(photoId)) return;
+  _lbRememberEditRecipe(photoId, recipe);
+};
+
+window.vireoPhotoEditRecipe = function(photoId) {
+  if (photoId == null) return {};
+  return _lbCloneEditRecipe(_lbEditRecipeByPhoto[String(photoId)]);
+};
+
+function _lbRememberEditRecipe(photoId, recipe) {
+  if (photoId == null) return;
+  var numericId = Number(photoId);
+  var storedRecipe = _lbCloneEditRecipe(recipe);
+  var currentRecipe = _lbRecipeHasEdits(storedRecipe) ? storedRecipe : null;
+  _lbEditRecipeByPhoto[String(photoId)] = storedRecipe;
+  _lbEditRecipeKnownByPhoto[String(photoId)] = true;
+  var p = _lightboxPhotoList.find(function(x) { return x.id === numericId; });
+  if (p) p.edit_recipe = currentRecipe;
+  if (_lightboxCurrentId === numericId) {
+    _lbCurrentEditRecipe = currentRecipe;
+    _lbEditRecipe = _lbCloneRecipe(storedRecipe);
+    _lbEditRecipeLoaded = true;
+    _lbRenderedAdjustmentValues = _lbAdjustmentValues(_lbEditRecipe);
+    _lbRenderAdjustmentControls();
+    _lbSetAdjustmentControlsDisabled(false);
+  }
+  _lbApplyEditButtonState();
+}
+
+function _lbEditRecipeWriteSeqFor(photoId) {
+  if (photoId == null) return 0;
+  return _lbEditRecipeWriteSeqByPhoto[String(photoId)] || 0;
+}
+
+function _lbMarkEditRecipeWrite(photoId) {
+  if (photoId == null) return;
+  _lbEditRecipeWriteSeq += 1;
+  _lbEditRecipeWriteSeqByPhoto[String(photoId)] = _lbEditRecipeWriteSeq;
+}
+
+function _lbCurrentEditRecipeClone() {
+  if (_lightboxCurrentId == null) return {};
+  return _lbCloneEditRecipe(_lbEditRecipeByPhoto[String(_lightboxCurrentId)]);
+}
+
+function _lbNormalizeClientRecipe(recipe) {
+  var out = _lbCloneEditRecipe(recipe);
+  if (!out.rotation) delete out.rotation;
+  if (Math.abs(Number(out.straighten || 0)) < 0.0001) delete out.straighten;
+  else out.straighten = Math.round(Number(out.straighten) * 10000) / 10000;
+  if (out.flip) {
+    if (!out.flip.horizontal) delete out.flip.horizontal;
+    if (!out.flip.vertical) delete out.flip.vertical;
+    if (!Object.keys(out.flip).length) delete out.flip;
+  }
+  return _lbRecipeHasEdits(out) ? out : null;
+}
+
+function _lbRecipeAfterEditOperation(recipe, op) {
+  var next = _lbCloneEditRecipe(recipe);
+  if (op === 'reset') {
+    var removedFlip = next.flip || {};
+    if (next.crop && typeof next.crop === 'object') {
+      next.crop = _lbTransformBoxByRecipe(
+        next.crop,
+        _lbInverseOrientationRecipe(next)
+      );
+    }
+    if (
+      (!!removedFlip.horizontal !== !!removedFlip.vertical) &&
+      Math.abs(Number(next.straighten || 0)) > 0.0001
+    ) {
+      next.straighten = -Number(next.straighten);
+    }
+    delete next.rotation;
+    delete next.flip;
+    return _lbNormalizeClientRecipe(next);
+  }
+  var orientation = _lbComposeDisplayedOrientation(next, op);
+  if (next.crop && typeof next.crop === 'object') {
+    next.crop = _lbTransformBoxByEditOperation(next.crop, op);
+  }
+  if (
+    (op === 'flip-horizontal' || op === 'flip-vertical') &&
+    Math.abs(Number(next.straighten || 0)) > 0.0001
+  ) {
+    next.straighten = -Number(next.straighten);
+  }
+  delete next.rotation;
+  delete next.flip;
+  if (orientation.rotation) next.rotation = orientation.rotation;
+  if (orientation.flip) next.flip = orientation.flip;
+  return _lbNormalizeClientRecipe(next);
+}
+
+function _lbApplyDisplayedOrientationOperation(point, op) {
+  var x = point.x;
+  var y = point.y;
+  if (op === 'rotate-right') return { x: 1 - y, y: x };
+  if (op === 'rotate-left') return { x: y, y: 1 - x };
+  if (op === 'flip-horizontal') return { x: 1 - x, y: y };
+  if (op === 'flip-vertical') return { x: x, y: 1 - y };
+  return { x: x, y: y };
+}
+
+function _lbTransformBoxByEditOperation(box, op) {
+  var opRecipe = null;
+  if (op === 'rotate-right') opRecipe = { rotation: 90 };
+  else if (op === 'rotate-left') opRecipe = { rotation: 270 };
+  else if (op === 'flip-horizontal') opRecipe = { flip: { horizontal: true } };
+  else if (op === 'flip-vertical') opRecipe = { flip: { vertical: true } };
+  if (!opRecipe) return box;
+  return _lbTransformBoxByRecipe(box, opRecipe);
+}
+
+function _lbOrientationCandidates() {
+  var candidates = [];
+  [0, 90, 180, 270].forEach(function(rotation) {
+    [false, true].forEach(function(horizontal) {
+      [false, true].forEach(function(vertical) {
+        var candidate = {};
+        if (rotation) candidate.rotation = rotation;
+        if (horizontal || vertical) {
+          candidate.flip = {};
+          if (horizontal) candidate.flip.horizontal = true;
+          if (vertical) candidate.flip.vertical = true;
+        }
+        candidates.push(candidate);
+      });
+    });
+  });
+  return candidates;
+}
+
+function _lbComposeDisplayedOrientation(recipe, op) {
+  var samplePoints = [
+    { x: 0.125, y: 0.25 },
+    { x: 0.8, y: 0.2 },
+    { x: 0.3, y: 0.85 },
+  ];
+  var desired = samplePoints.map(function(point) {
+    return _lbApplyDisplayedOrientationOperation(
+      _lbTransformPointByRecipe(point.x, point.y, recipe),
+      op
+    );
+  });
+  var candidates = _lbOrientationCandidates();
+  for (var i = 0; i < candidates.length; i++) {
+    var candidate = candidates[i];
+    var matches = true;
+    for (var j = 0; j < samplePoints.length; j++) {
+      var actual = _lbTransformPointByRecipe(
+        samplePoints[j].x,
+        samplePoints[j].y,
+        candidate
+      );
+      if (
+        Math.abs(actual.x - desired[j].x) > 0.000001 ||
+        Math.abs(actual.y - desired[j].y) > 0.000001
+      ) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return candidate;
+  }
+  return {};
+}
+
+function _lbInverseOrientationRecipe(recipe) {
+  var samplePoints = [
+    { x: 0.125, y: 0.25 },
+    { x: 0.8, y: 0.2 },
+    { x: 0.3, y: 0.85 },
+  ];
+  var candidates = _lbOrientationCandidates();
+  for (var i = 0; i < candidates.length; i++) {
+    var candidate = candidates[i];
+    var matches = true;
+    for (var j = 0; j < samplePoints.length; j++) {
+      var original = samplePoints[j];
+      var oriented = _lbTransformPointByRecipe(original.x, original.y, recipe);
+      var restored = _lbTransformPointByRecipe(oriented.x, oriented.y, candidate);
+      if (
+        Math.abs(restored.x - original.x) > 0.000001 ||
+        Math.abs(restored.y - original.y) > 0.000001
+      ) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return candidate;
+  }
+  return {};
+}
+
+function _lbApplyEditButtonState() {
+  var recipe = _lbCurrentEditRecipeClone();
+  var hasOrientation = _lbRecipeHasOrientation(recipe);
+  var known = _lightboxCurrentId != null && !!_lbEditRecipeKnownByPhoto[String(_lightboxCurrentId)];
+  var ids = [
+    'lightboxRotateLeft',
+    'lightboxRotateRight',
+    'lightboxFlipHorizontal',
+    'lightboxFlipVertical',
+    'lightboxResetEdit',
+  ];
+  ids.forEach(function(id) {
+    var btn = document.getElementById(id);
+    if (!btn) return;
+    btn.disabled = _lbEditWritePending || _lightboxCurrentId == null || !known || (id === 'lightboxResetEdit' && !hasOrientation);
+  });
+}
+
+function _lbSetEditBusy(busy) {
+  _lbEditWritePending = !!busy;
+  _lbApplyEditButtonState();
+}
+
+function _lbReloadCurrentRenderAfterEdit(photoId) {
+  if (_lightboxCurrentId !== photoId) return;
+  var img = document.getElementById('lightboxImg');
+  var wrap = document.getElementById('lightboxWrap');
+  if (!img) return;
+  _lbZoom = 1.0;
+  _lbPanX = 0;
+  _lbPanY = 0;
+  _lbNativeZoom = null;
+  _lbCurrentSrcKey = 'full';
+  _lbFullLongEdge = null;
+  _lbPending1To1 = false;
+  _lbPending1To1Anchor = null;
+  _lbPendingViewportState = null;
+  _lbOriginalUnavailable = false;
+  if (_lbSwapTimer) {
+    clearTimeout(_lbSwapTimer);
+    _lbSwapTimer = null;
+  }
+  _lbDesiredSrcKey = null;
+  if (wrap) wrap.classList.remove('zoomed');
+  _lbApplyTransform();
+  img.onload = function() {
+    img.onload = null;
+    img.onerror = null;
+    if (_lightboxCurrentId !== photoId) return;
+    if (img.naturalWidth) {
+      _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
+      _lbSessionFullLongEdge = _lbFullLongEdge;
+    }
+    _lbRecomputeNativeZoom();
+    _lbApplyTransform();
+  };
+  img.onerror = function() {
+    img.onload = null;
+    img.onerror = null;
+    if (_lightboxCurrentId === photoId && typeof showToast === 'function') {
+      showToast('Could not reload edited photo', 'error');
+    }
+  };
+  img.src = _lbSrcUrl(photoId, 'full');
+  _lbLoadDetections(photoId);
+  _lbRenderEyeCrosshair(_lbPhotoDataByPhoto[String(photoId)]);
+  _lbApplyMaskVisibility();
+  _lbLoadMaskVariants(photoId);
+}
+
+async function lightboxApplyEdit(op) {
+  if (_lightboxCurrentId == null || _lbEditWritePending) return;
+  var photoId = _lightboxCurrentId;
+  _lbSetEditBusy(true);
+  try {
+    _lbFlushPendingAdjustmentSave();
+    await _lbWaitForAdjustmentSaveIdle(photoId);
+    if (_lightboxCurrentId !== photoId) return;
+    var baseRecipe = _lbEditRecipeLoaded ? _lbCloneEditRecipe(_lbEditRecipe) : _lbCurrentEditRecipeClone();
+    var nextRecipe = _lbRecipeAfterEditOperation(baseRecipe, op);
+    var data;
+    if (nextRecipe) {
+      data = await safeFetch('/api/photos/' + photoId + '/edit-recipe', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ recipe: nextRecipe }),
+      }, { toast: false });
+    } else {
+      data = await safeFetch('/api/photos/' + photoId + '/edit-recipe', {
+        method: 'DELETE',
+      }, { toast: false });
+    }
+    _lbMarkEditRecipeWrite(photoId);
+    _lbRememberEditRecipe(photoId, data ? data.recipe : null);
+    _vireoBumpRenderVersion(photoId);
+    if (typeof window.vireoRefreshPhotoRenders === 'function') {
+      window.vireoRefreshPhotoRenders([photoId]);
+    }
+    if (_lightboxCurrentId === photoId) {
+      _lbReloadCurrentRenderAfterEdit(photoId);
+      if (typeof showToast === 'function') showToast('Updated photo edit', 'success');
+    }
+  } catch (e) {
+    if (typeof showToast === 'function') showToast(e.message || 'Could not update photo edit', 'error');
+  } finally {
+    _lbSetEditBusy(false);
+  }
+}
+
+function _lbTransformPointByRecipe(x, y, recipe) {
+  recipe = recipe || {};
+  var rotation = Number(recipe.rotation) || 0;
+  var nx = x;
+  var ny = y;
+  if (rotation === 90) {
+    nx = 1 - y;
+    ny = x;
+  } else if (rotation === 180) {
+    nx = 1 - x;
+    ny = 1 - y;
+  } else if (rotation === 270) {
+    nx = y;
+    ny = 1 - x;
+  }
+  var flip = recipe.flip || {};
+  if (flip.horizontal) nx = 1 - nx;
+  if (flip.vertical) ny = 1 - ny;
+  return {
+    x: Math.max(0, Math.min(1, nx)),
+    y: Math.max(0, Math.min(1, ny)),
+  };
+}
+
+function _lbTransformBoxByRecipe(box, recipe) {
+  recipe = recipe || {};
+  var x = Number(box.x);
+  var y = Number(box.y);
+  var w = Number(box.w);
+  var h = Number(box.h);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(w) || !Number.isFinite(h)) return box;
+  var rotation = Number(recipe.rotation) || 0;
+  var nx = x;
+  var ny = y;
+  var nw = w;
+  var nh = h;
+  if (rotation === 90) {
+    nx = 1 - (y + h);
+    ny = x;
+    nw = h;
+    nh = w;
+  } else if (rotation === 180) {
+    nx = 1 - (x + w);
+    ny = 1 - (y + h);
+  } else if (rotation === 270) {
+    nx = y;
+    ny = 1 - (x + w);
+    nw = h;
+    nh = w;
+  }
+  var flip = recipe.flip || {};
+  if (flip.horizontal) nx = 1 - (nx + nw);
+  if (flip.vertical) ny = 1 - (ny + nh);
+  nx = Math.max(0, Math.min(1, nx));
+  ny = Math.max(0, Math.min(1, ny));
+  nw = Math.max(0, Math.min(1 - nx, nw));
+  nh = Math.max(0, Math.min(1 - ny, nh));
+  return { x: nx, y: ny, w: nw, h: nh };
+}
 
 function _lbCloneRecipe(recipe) {
   if (!recipe) return {};
@@ -3716,6 +4283,9 @@ function _lbStartAdjustmentRecipeSave(photoId, recipe, inputSeq) {
       });
     })
     .then(function(data) {
+      _lbMarkEditRecipeWrite(photoId);
+      _lbRememberEditRecipe(photoId, data.recipe || null);
+      _vireoBumpRenderVersion(photoId);
       _lbBumpRecipeBust(photoId);
       _lbRefreshVisiblePhotoImages(photoId);
       try {
@@ -4353,8 +4923,13 @@ function _lbRenderEyeCrosshair(photo) {
     container.style.display = 'none';
     return;
   }
-  var xPct = photo.eye_x * 100;
-  var yPct = photo.eye_y * 100;
+  var point = _lbTransformPointByRecipe(
+    Number(photo.eye_x),
+    Number(photo.eye_y),
+    _lbEditRecipeByPhoto[String(photo.id || _lightboxCurrentId)]
+  );
+  var xPct = point.x * 100;
+  var yPct = point.y * 100;
   var marker = document.createElement('div');
   marker.className = 'lb-eye-crosshair';
   marker.style.left = xPct.toFixed(3) + '%';
@@ -4387,12 +4962,19 @@ function _lbLoadDetections(photoId) {
         _lbApplyBoxesVisibility();
         return;
       }
+      var recipe = _lbEditRecipeByPhoto[String(photoId)] || _lbCurrentEditRecipe;
       detections.forEach(function(det) {
         if (det.box_x == null || det.box_y == null) return;
         var color = _lbGetSpeciesColor(det.category || 'animal');
+        var transformed = _lbTransformBoxByRecipe({
+          x: det.box_x,
+          y: det.box_y,
+          w: det.box_w,
+          h: det.box_h,
+        }, recipe);
         var box = document.createElement('div');
         box.className = 'lb-detection-box';
-        box.style.cssText = 'left:' + (det.box_x * 100).toFixed(2) + '%;top:' + (det.box_y * 100).toFixed(2) + '%;width:' + (det.box_w * 100).toFixed(2) + '%;height:' + (det.box_h * 100).toFixed(2) + '%;border-color:' + color + ';';
+        box.style.cssText = 'left:' + (transformed.x * 100).toFixed(2) + '%;top:' + (transformed.y * 100).toFixed(2) + '%;width:' + (transformed.w * 100).toFixed(2) + '%;height:' + (transformed.h * 100).toFixed(2) + '%;border-color:' + color + ';';
         var conf = det.detector_confidence ? Math.round(det.detector_confidence * 100) + '%' : '';
         if (conf) {
           box.innerHTML = '<span class="lb-detection-label" style="background:' + color + ';color:#0A1F2E;">' + conf + '</span>';
@@ -4437,11 +5019,17 @@ function _lbResetMaskOverlay() {
   _lbMaskActiveVariant = null;
   _lbMaskAvailable = [];
   _lbMaskCurrentUrl = null;
+  _lbApplyMaskToggleButton();
 }
 
 function _lbApplyMaskVisibility() {
   var img = document.getElementById('lightboxMaskOverlay');
   if (!img) return;
+  _lbApplyMaskToggleButton();
+  if (!_lbSourceOverlaysAvailable()) {
+    var ctrls = document.getElementById('lightboxMaskControls');
+    if (ctrls) ctrls.classList.remove('has-variants');
+  }
   if (!_lbSourceOverlaysAvailable() || !_lbMasksVisible || !_lbMaskCurrentUrl) {
     img.classList.remove('show');
     // A previous call may have assigned onload to re-add `show` once
@@ -4502,14 +5090,19 @@ function _lbApplyMaskUrl(url) {
 
 function _lbApplyMaskToggleButton() {
   var btn = document.getElementById('lightboxToggleMasks');
-  if (btn) {
-    var available = _lbSourceOverlaysAvailable();
-    btn.disabled = !available;
-    btn.textContent = !available ? 'Masks Edited' : (_lbMasksVisible ? 'Hide Masks' : 'Show Masks');
-    btn.title = !available
-      ? 'Mask overlay is hidden for geometrically edited photos'
-      : 'Toggle mask overlay';
+  if (!btn) return;
+  var available = _lbSourceOverlaysAvailable();
+  if (!available) {
+    btn.disabled = true;
+    btn.textContent = 'Masks Hidden';
+    btn.title = 'Mask overlay is hidden for geometrically edited photos';
+    btn.setAttribute('aria-label', btn.title);
+    return;
   }
+  btn.disabled = false;
+  btn.textContent = _lbMasksVisible ? 'Hide Masks' : 'Show Masks';
+  btn.title = 'Toggle mask overlay';
+  btn.setAttribute('aria-label', btn.title);
 }
 
 function _lbApplyWildlifeExcludedButton() {
@@ -4532,6 +5125,10 @@ function toggleLightboxMasks() {
 function _lbOnMaskVariantChange() {
   var sel = document.getElementById('lightboxMaskSelect');
   if (!sel) return;
+  if (_lbCurrentRecipeHasOrientation()) {
+    _lbApplyMaskUrl(null);
+    return;
+  }
   var choice = sel.value;
   if (choice === '__active__') {
     if (!_lbMaskActiveVariant) {
@@ -4569,6 +5166,10 @@ function _lbLoadMaskVariants(photoId) {
       if (!_lbSourceOverlaysAvailable()) return;
       _lbMaskActiveVariant = data.active || null;
       _lbMaskAvailable = data.variants || [];
+      if (_lbCurrentRecipeHasOrientation()) {
+        _lbApplyMaskUrl(null);
+        return;
+      }
       if (_lbMaskAvailable.length === 0) {
         // No masks for this photo — keep the control hidden.
         return;
@@ -4986,17 +5587,25 @@ function _lbRefreshThumbnailCache(photoId, version) {
 function _lbRefreshEditRecipeCache(updates) {
   if (!updates || typeof updates !== 'object') return;
   var version = String(Date.now());
+  var refreshedPhotoIds = [];
   Object.keys(updates).forEach(function(photoId) {
-    _lbEditVersionByPhoto[String(photoId)] = version;
-    _lbRefreshThumbnailCache(photoId, version);
     var numericId = Number(photoId);
-    var p = _lightboxPhotoList.find(function(x) { return x.id === numericId; });
-    if (p) p.edit_recipe = updates[photoId] || null;
-    if (_lightboxCurrentId === numericId) {
-      _lbCurrentEditRecipe = updates[photoId] || null;
-    }
+    _lbEditVersionByPhoto[String(photoId)] = version;
+    _lbMarkEditRecipeWrite(numericId);
+    _lbRememberEditRecipe(numericId, updates[photoId]);
+    _vireoBumpRenderVersion(numericId);
+    _lbRefreshThumbnailCache(photoId, version);
+    refreshedPhotoIds.push(numericId);
   });
+  if (refreshedPhotoIds.length && typeof window.vireoRefreshPhotoRenders === 'function') {
+    window.vireoRefreshPhotoRenders(refreshedPhotoIds);
+  }
+  if (_lightboxCurrentId != null && refreshedPhotoIds.indexOf(Number(_lightboxCurrentId)) !== -1) {
+    _lbReloadCurrentRenderAfterEdit(Number(_lightboxCurrentId));
+  }
 }
+
+window.vireoRefreshEditRecipeCache = _lbRefreshEditRecipeCache;
 
 function openLightbox(photoId, filename, photoList, options) {
   var alreadyOpen = !!window._lbEscToken;
@@ -5044,6 +5653,7 @@ function openLightbox(photoId, filename, photoList, options) {
 
   _lightboxCurrentId = photoId;
   if (photoList) _lightboxPhotoList = photoList;
+  _lbApplyEditButtonState();
   try {
     document.dispatchEvent(new CustomEvent('lightbox:photochanged', { detail: { photoId: photoId } }));
   } catch(_) {}
@@ -5089,6 +5699,9 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbPhotoH = null;
   _lbPhotoOrientation = null;
   _lbCurrentEditRecipe = currentFromList && currentFromList.edit_recipe || null;
+  if (currentFromList && Object.prototype.hasOwnProperty.call(currentFromList, 'edit_recipe')) {
+    _lbRememberEditRecipe(photoId, currentFromList.edit_recipe);
+  }
   _lbCurrentSrcKey = (
     restoreWantsOneToOne ||
     (
@@ -5123,15 +5736,37 @@ function openLightbox(photoId, filename, photoList, options) {
 
   // Fetch original dimensions (async, non-blocking for image display)
   var flagFetchSeq = _lbFlagEditSeq;
+  var editRecipeFetchSeq = _lbEditRecipeWriteSeqFor(photoId);
   var editFetchSeq = _lbAdjustSeq;
   fetch('/api/photos/' + photoId)
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
       if (!data || _lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
+      var editRecipeFresh = _lbEditRecipeWriteSeqFor(photoId) === editRecipeFetchSeq;
+      var recipeKeyBefore = _vireoEditRecipeCacheKey(_lbEditRecipeByPhoto[String(photoId)]);
+      if (!editRecipeFresh) {
+        var currentRecipe = _lbEditRecipeByPhoto[String(photoId)];
+        data.edit_recipe = _lbRecipeHasEdits(currentRecipe) ? _lbCloneEditRecipe(currentRecipe) : null;
+      }
+      _lbPhotoDataByPhoto[String(photoId)] = data;
+      if (editRecipeFresh) {
+        _lbRememberEditRecipe(photoId, data.edit_recipe);
+        if (_vireoEditRecipeCacheKey(data.edit_recipe) !== recipeKeyBefore) {
+          _vireoBumpRenderVersion(photoId);
+          if (typeof window.vireoRefreshPhotoRenders === 'function') {
+            window.vireoRefreshPhotoRenders([photoId]);
+          }
+          _lbReloadCurrentRenderAfterEdit(photoId);
+        }
+      }
+      _lbApplyMaskVisibility();
       _lbPhotoW = data.width || null;
       _lbPhotoH = data.height || null;
       _lbPhotoOrientation = _lbMetadataOrientation(data.metadata);
-      _lbCurrentEditRecipe = data.edit_recipe || null;
+      var currentLayoutRecipe = _lbEditRecipeByPhoto[String(photoId)];
+      _lbCurrentEditRecipe = _lbRecipeHasEdits(currentLayoutRecipe)
+        ? currentLayoutRecipe
+        : null;
       if (!_lbSourceOverlaysAvailable()) {
         var detContainer2 = document.getElementById('lightboxDetections');
         if (detContainer2) detContainer2.innerHTML = '';
@@ -5152,6 +5787,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbRecordFetchedFlag(photoId, data.flag, flagFetchSeq);
       _lbRecomputeNativeZoom();
       if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
+      _lbLoadDetections(photoId);
       _lbRenderEyeCrosshair(data);
       _lbApplyBoxesVisibility();
       _lbApplyEyeVisibility();
@@ -5231,8 +5867,6 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbApplyMaskToggleButton();
   _lbApplyWildlifeExcludedButton();
 
-  // Fetch and render detection bounding boxes
-  _lbLoadDetections(photoId);
   _lbApplyBoxesVisibility();
 
   // Fetch the photo's SAM mask variants and (if any) populate the
@@ -5818,6 +6452,7 @@ async function submitToInat(photoId) {
       description: '',
       geoprivacy: 'open',
       filename: data.filename,
+      edit_recipe: data.edit_recipe,
       already_submitted: data.already_submitted,
       existing_url: data.existing_observation_url,
     }];
@@ -5843,6 +6478,7 @@ async function submitToInatBatch(photoIds) {
         description: '',
         geoprivacy: 'open',
         filename: data.filename,
+        edit_recipe: data.edit_recipe,
         already_submitted: data.already_submitted,
         existing_url: data.existing_observation_url,
       });
@@ -5868,9 +6504,10 @@ function openInatModal() {
     if (item.already_submitted) {
       warn = '<div class="inat-card-status warning">&#9888; Already submitted: <a href="' + escapeAttr(item.existing_url) + '" target="_blank" onclick="return openExternalLink(event, this.href)" style="color:var(--warning);">' + escapeHtml(item.existing_url) + '</a></div>';
     }
+    var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(item) : '/thumbnails/' + item.photo_id + '.jpg';
     html += '<div class="inat-card" id="inatCard' + idx + '">' +
       '<div class="inat-card-header">' +
-        '<img class="inat-card-thumb" src="' + escapeAttr(vireoThumbnailUrl(item.photo_id)) + '" alt="">' +
+        '<img class="inat-card-thumb" src="' + escapeAttr(thumbUrl) + '" alt="">' +
         '<div style="flex:1;min-width:0;">' +
           '<div style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(item.filename) + '</div>' +
           warn +
@@ -6397,7 +7034,12 @@ function _lbSrcUrl(photoId, key) {
   if (key === 'original') url = '/photos/' + photoId + '/original';
   else if (key === 'full') url = '/photos/' + photoId + '/full';
   else url = '/photos/' + photoId + '/preview?size=' + key;
-  return vireoCacheBustedPhotoUrl(photoId, url);
+  url = window.vireoRenderedUrl
+    ? window.vireoRenderedUrl(url, photoId)
+    : _vireoUrlWithRenderVersion(url, photoId);
+  var version = _lbEditVersionByPhoto[String(photoId)];
+  if (version) url = _vireoUrlWithQueryParam(url, 'editv', version);
+  return url;
 }
 
 function _lbScheduleSourceSwap(targetZoom) {
@@ -6715,7 +7357,9 @@ function findSimilar(photoId) {
             openLightbox(p.id, p.filename || '');
           });
           var img = document.createElement('img');
-          img.src = vireoThumbnailUrl(p.id);
+          img.src = window.vireoThumbnailUrl
+            ? window.vireoThumbnailUrl(p)
+            : '/thumbnails/' + p.id + '.jpg';
           img.loading = 'lazy';
           img.alt = '';
           var info = document.createElement('div');
@@ -7823,6 +8467,30 @@ function formatDuration(seconds) {
       .catch(function() { if (btn) btn.disabled = false; });
   };
 
+  function _refreshEditRecipeHistoryChanges(data) {
+    if (!data || data.action_type !== 'edit_recipe' || !Array.isArray(data.edit_recipes)) return;
+    var photoIds = [];
+    data.edit_recipes.forEach(function(update) {
+      if (!update || update.photo_id == null) return;
+      var photoId = Number(update.photo_id);
+      if (!Number.isFinite(photoId)) return;
+      photoIds.push(photoId);
+      _lbMarkEditRecipeWrite(photoId);
+      _lbRememberEditRecipe(photoId, update.recipe);
+      if (_lbPhotoDataByPhoto[String(photoId)]) {
+        _lbPhotoDataByPhoto[String(photoId)].edit_recipe = update.recipe || null;
+      }
+      _vireoBumpRenderVersion(photoId);
+    });
+    if (!photoIds.length) return;
+    if (typeof window.vireoRefreshPhotoRenders === 'function') {
+      window.vireoRefreshPhotoRenders(photoIds);
+    }
+    if (_lightboxCurrentId != null && photoIds.indexOf(Number(_lightboxCurrentId)) !== -1) {
+      _lbReloadCurrentRenderAfterEdit(Number(_lightboxCurrentId));
+    }
+  }
+
   function _bumpHistoryBadge() {
     _historySessionCount++;
     var badge = document.getElementById('historyBadge');
@@ -8803,8 +9471,11 @@ async function loadMissingPhotos() {
     document.getElementById('missingPhotosSelectAll').checked = false;
     container.innerHTML = photos.map(p => {
       const ts = p.timestamp ? new Date(p.timestamp).toLocaleDateString() : '';
+      const thumbUrl = window.vireoThumbnailUrl
+        ? window.vireoThumbnailUrl(p)
+        : `/thumbnails/${p.id}.jpg`;
       const thumb = p.has_thumb
-        ? `<img src="${_escapeAttr(vireoThumbnailUrl(p.id))}" alt="" loading="lazy">`
+        ? `<img src="${_escapeAttr(thumbUrl)}" alt="" loading="lazy">`
         : '<span>no thumb</span>';
       const badges = [
         ['thumb', p.has_thumb],

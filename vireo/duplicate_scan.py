@@ -53,6 +53,33 @@ def _row_to_info(row, folder_path):
     }
 
 
+def _attach_edit_recipes(db, proposals):
+    """Attach edit recipes to every candidate in duplicate proposals."""
+    candidates = []
+    for proposal in proposals:
+        winner = proposal.get("winner")
+        if isinstance(winner, dict):
+            candidates.append(winner)
+        candidates.extend(
+            loser for loser in proposal.get("losers", [])
+            if isinstance(loser, dict)
+        )
+    if not candidates:
+        return proposals
+    recipe_map = db.get_photo_edit_recipes(
+        sorted({
+            candidate["id"]
+            for candidate in candidates
+            if isinstance(candidate.get("id"), int)
+            and not isinstance(candidate.get("id"), bool)
+        })
+    )
+    for candidate in candidates:
+        pid = candidate.get("id")
+        candidate["edit_recipe"] = recipe_map.get(pid)
+    return proposals
+
+
 def _build_unresolved_proposal(db, group):
     """Return a proposal dict for an unresolved group, or None on race."""
     rows = _fetch_photo_rows(
@@ -187,6 +214,7 @@ def run_duplicate_scan(job, db, include_resolved=True):
         # Show the winner's path (human-readable) rather than an opaque hash.
         job["progress"]["current_file"] = proposal["winner"]["path"]
 
+    _attach_edit_recipes(db, proposals)
     return {
         "proposals": proposals,
         "buckets": bucket_unresolved_proposals(proposals),

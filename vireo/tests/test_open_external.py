@@ -88,6 +88,67 @@ def test_open_external_uses_configured_editor(app_and_db, monkeypatch):
     assert launched[0][1][0] == '/usr/bin/gimp'
 
 
+def test_open_external_hands_off_rendered_edit_recipe(client_with_photo, monkeypatch):
+    """External editors receive a rendered derivative when Vireo edits exist."""
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"rotation": 90, "flip": {"horizontal": True}},
+    )
+    client.post('/api/config',
+                data=json.dumps({"external_editor": "/usr/bin/gimp"}),
+                content_type='application/json')
+    launched = _patch_launchers(monkeypatch)
+
+    resp = client.post('/api/photos/open-external',
+                       data=json.dumps({"photo_ids": [photo_id]}),
+                       content_type='application/json')
+
+    assert resp.status_code == 200
+    opened_path = launched[0][1][1]
+    assert os.path.basename(opened_path) == f"{photo_id}.jpg"
+    assert os.path.basename(os.path.dirname(opened_path)) == "external-edits"
+    with Image.open(opened_path) as img:
+        assert img.size == (600, 800)
+
+
+def test_open_external_edit_recipe_avoids_capped_working_copy(
+    client_with_photo, monkeypatch,
+):
+    """Rotate/flip handoffs should render from full-res original when wc is small."""
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (400, 300), (10, 20, 30)).save(working_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    client.post('/api/config',
+                data=json.dumps({"external_editor": "/usr/bin/gimp"}),
+                content_type='application/json')
+    launched = _patch_launchers(monkeypatch)
+
+    resp = client.post('/api/photos/open-external',
+                       data=json.dumps({"photo_ids": [photo_id]}),
+                       content_type='application/json')
+
+    assert resp.status_code == 200
+    opened_path = launched[0][1][1]
+    with Image.open(opened_path) as img:
+        assert img.size == (600, 800)
+
+
 def test_open_external_returns_500_on_launch_failure(app_and_db, monkeypatch):
     """POST /api/photos/open-external returns 500 when launcher raises."""
     app, _ = app_and_db

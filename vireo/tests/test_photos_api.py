@@ -15,6 +15,20 @@ def test_api_photos_default(app_and_db):
     assert 'total' in data
 
 
+def test_api_photos_includes_edit_recipe(app_and_db):
+    """GET /api/photos exposes edit recipes so card overlays can align."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    db.set_photo_edit_recipe(photo["id"], {"rotation": 90})
+
+    client = app.test_client()
+    resp = client.get('/api/photos')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    listed = {p["id"]: p for p in data["photos"]}
+    assert listed[photo["id"]]["edit_recipe"] == {"version": 1, "rotation": 90}
+
+
 def test_api_photos_pagination(app_and_db):
     """GET /api/photos supports pagination."""
     app, _ = app_and_db
@@ -539,6 +553,7 @@ def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
             0.92 - idx * 0.05,
             "bioclip",
         )
+    db.set_photo_edit_recipe(ordered_ids[0], {"rotation": 90})
 
     client = app.test_client()
     resp = client.post("/api/pipeline/selection-results", json={"photo_ids": ordered_ids})
@@ -558,6 +573,9 @@ def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
     }
     assert enc["bursts"][0]["species_predictions"] == enc["species_predictions"]
     assert all("quality_composite" in p for p in data["photos"])
+    recipes = {p["id"]: p.get("edit_recipe") for p in data["photos"]}
+    assert recipes[ordered_ids[0]] == {"version": 1, "rotation": 90}
+    assert recipes[ordered_ids[1]] is None
 
 
 def test_api_photos_calendar(app_and_db):
@@ -1671,6 +1689,33 @@ def test_edit_recipe_api_invalidates_thumbnail_and_renders_edit(client_with_phot
     assert rendered.status_code == 200
     with Image.open(io.BytesIO(rendered.data)) as img:
         assert img.size == (300, 400)
+
+
+def test_edit_recipe_api_invalidates_external_edit_handoff(client_with_photo):
+    import json
+    import os
+
+    from PIL import Image
+
+    app, _db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    external_dir = os.path.join(vireo_dir, "external-edits")
+    os.makedirs(external_dir, exist_ok=True)
+    external_path = os.path.join(external_dir, f"{photo_id}.jpg")
+    external_meta = os.path.join(external_dir, f"{photo_id}.json")
+    Image.new("RGB", (10, 10), "green").save(external_path, "JPEG")
+    with open(external_meta, "w", encoding="utf-8") as f:
+        json.dump({"recipe": "stale"}, f)
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 90}},
+    )
+
+    assert resp.status_code == 200
+    assert not os.path.exists(external_path)
+    assert not os.path.exists(external_meta)
 
 
 def test_edit_recipe_keeps_thumb_path_when_stale_thumbnail_unlink_fails(

@@ -959,12 +959,15 @@ function renderCulling() {
         // Filename rides in a data attribute: interpolating it into the
         // onclick JS string broke on double quotes (attribute terminator,
         // which escapeHtml doesn't encode) and trailing backslashes.
+        var thumbUrl = window.vireoThumbnailUrl
+          ? window.vireoThumbnailUrl(photo)
+          : '/thumbnails/' + photo.photo_id + '.jpg';
         html += '<div class="' + cardClass + '" data-photo-id="' + photo.photo_id + '" ' +
           'data-filename="' + escapeAttr(photo.filename || '') + '" ' +
           'onclick="openLightbox(' + photo.photo_id + ', this.dataset.filename, window.' + poseKey + ')" ' +
           'ondblclick="toggleCullAction(' + si + ',' + pi + ',' + photo.photo_id + ')">' +
           badge +
-          '<img src="' + escapeAttr(vireoThumbnailUrl(photo.photo_id)) + '" loading="lazy">' +
+          '<img src="' + escapeAttr(thumbUrl) + '" loading="lazy">' +
           '<div class="cull-card-info">' +
             '<div class="cull-quality">' + (photo.pipeline_label || photo.action.toUpperCase()) + ' &middot; Q: ' + qScore + '</div>' +
             '<div class="cull-filename" onclick="event.stopPropagation()" onmousedown="event.stopPropagation()">' + escapeHtml(photo.filename || '') + '</div>' +

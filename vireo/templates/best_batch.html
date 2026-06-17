@@ -368,8 +368,11 @@ function previewUrl(photoId, size) {
   return vireoPreviewUrl(photoId, size || 1920);
 }
 
-function thumbnailUrl(photoId) {
-  return vireoThumbnailUrl(photoId);
+function thumbnailUrl(photoOrId) {
+  var photoId = photoOrId && typeof photoOrId === 'object' ? photoOrId.id : photoOrId;
+  return window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(photoOrId)
+    : '/thumbnails/' + photoId + '.jpg';
 }
 
 function roleLabel(role) {
@@ -445,7 +448,7 @@ function inspectPhoto(photoId) {
   var img = document.getElementById('inspectImg');
   img.onerror = function() {
     this.onerror = null;
-    this.src = thumbnailUrl(card.id);
+    this.src = thumbnailUrl(card);
   };
   img.src = previewUrl(card.id, 1920);
   img.alt = card.filename || '';
@@ -503,7 +506,7 @@ function renderBatch(data) {
   document.getElementById('rankList').innerHTML = cards.map(function(card) {
     var reasons = (card.reasons || []).slice(0, 2).join(' · ');
     return '<div class="rank-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '" onclick="inspectPhoto(' + card.id + ')">' +
-      '<img src="' + thumbnailUrl(card.id) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
+      '<img src="' + thumbnailUrl(card) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
       '<div class="rank-meta">' +
         '<div class="role ' + escapeAttr(card.role || '') + '">#' + card.rank + ' ' + roleLabel(card.role) + '</div>' +
         '<div class="filename" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +

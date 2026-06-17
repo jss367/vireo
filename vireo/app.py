@@ -1467,6 +1467,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         thumb_dir = app.config["THUMB_CACHE_DIR"]
         preview_dir = os.path.join(vireo_dir, "previews")
         originals_dir = os.path.join(vireo_dir, "originals")
+        external_edits_dir = os.path.join(vireo_dir, "external-edits")
         for pid in photo_ids:
             thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
             clear_thumb_path = True
@@ -1547,6 +1548,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     os.remove(original_cache)
             except OSError:
                 log.warning("Failed to remove stale original cache %s", original_cache)
+            external_cache = os.path.join(external_edits_dir, f"{pid}.jpg")
+            external_meta = os.path.join(external_edits_dir, f"{pid}.json")
+            for path in (external_cache, external_meta):
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    log.warning(
+                        "Failed to remove stale external edit cache %s",
+                        path, exc_info=True,
+                    )
         db.conn.commit()
 
     def _queue_edit_recipe_sync(db, photo_id, recipe_json):
@@ -2494,6 +2506,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             p["detections"] = det_map.get(p["id"], [])
         return photo_dicts
 
+    def _attach_edit_recipes(db, photo_dicts):
+        """Attach non-destructive edit recipes to photo dicts (in-place)."""
+        if not photo_dicts:
+            return photo_dicts
+        ids = [p["id"] for p in photo_dicts]
+        recipe_map = db.get_photo_edit_recipes(ids)
+        for p in photo_dicts:
+            p["edit_recipe"] = recipe_map.get(p["id"])
+        return photo_dicts
+
+    def _attach_nested_edit_recipes(db, payload):
+        """Attach edit recipes to nested photo-like dicts in an API payload."""
+        refs = []
+
+        def visit(value):
+            if isinstance(value, dict):
+                pid = value.get("photo_id", value.get("id"))
+                if (
+                    isinstance(pid, int)
+                    and not isinstance(pid, bool)
+                    and "filename" in value
+                ):
+                    refs.append((value, pid))
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+
+        visit(payload)
+        if not refs:
+            return payload
+        recipe_map = db.get_photo_edit_recipes(sorted({pid for _, pid in refs}))
+        for photo, pid in refs:
+            photo["edit_recipe"] = recipe_map.get(pid)
+        return payload
+
     def _request_flag_filter():
         flag = request.args.get("flag", None)
         if flag in (None, ""):
@@ -2521,6 +2570,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
         _attach_detections(db, photo_dicts)
+        _attach_edit_recipes(db, photo_dicts)
         collection_dicts = []
         for c in collections:
             d = dict(c)
@@ -2831,6 +2881,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     or os.path.isfile(src + ".XMP")
                 ),
             })
+        _attach_nested_edit_recipes(db, out)
         return jsonify(out)
 
     @app.route("/api/folders/check-health", methods=["POST"])
@@ -3028,6 +3079,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
         _attach_detections(db, photo_dicts)
+        _attach_edit_recipes(db, photo_dicts)
 
         return jsonify(
             {
@@ -3306,6 +3358,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         results = serialize_results(
             run_selected_batch_review(photos, config=effective_cfg)
         )
+        _attach_edit_recipes(db, results.get("photos", []))
         results["source"] = "browse-selection"
         return jsonify(results)
 
@@ -3331,6 +3384,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if error:
             return json_error(error, 404)
         result["scope_method"] = method_or_error
+        _attach_nested_edit_recipes(db, result)
         return jsonify(result)
 
     @app.route("/api/photos/best-batch", methods=["POST"])
@@ -3375,6 +3429,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if error:
             return json_error(error, 404)
         result["scope_method"] = "selected_photos"
+        _attach_nested_edit_recipes(db, result)
         return jsonify(result)
 
     @app.route("/api/photos/geo")
@@ -3400,8 +3455,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         total_without_gps = db.count_photos_without_gps()
         total_with_gps = total_photos - total_without_gps
 
+        photo_dicts = [dict(p) for p in photos]
+        _attach_edit_recipes(db, photo_dicts)
+
         return jsonify({
-            "photos": [dict(p) for p in photos],
+            "photos": photo_dicts,
             "total_filtered": len(photos),
             "total_photos": total_photos,
             "total_with_gps": total_with_gps,
@@ -5394,6 +5452,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Undo --
 
+    def _edit_recipe_history_updates(db, edit_id):
+        from image_edits import recipe_to_json
+        rows = db.conn.execute(
+            "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
+            (edit_id,),
+        ).fetchall()
+        photo_ids = [r["photo_id"] for r in rows]
+        if not photo_ids:
+            return {}
+        _invalidate_photo_render_cache(db, photo_ids)
+        updates = {}
+        for photo_id in photo_ids:
+            recipe = db.get_photo_edit_recipe(photo_id)
+            updates[str(photo_id)] = recipe
+            _queue_edit_recipe_sync(
+                db, photo_id, recipe_to_json(recipe) or "",
+            )
+        return updates
+
     @app.route("/api/undo", methods=["POST"])
     def api_undo():
         db = _get_db()
@@ -5402,20 +5479,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("nothing to undo")
         edit_recipe_updates = None
         if result.get("action_type") == "edit_recipe":
-            from image_edits import recipe_to_json
-            rows = db.conn.execute(
-                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
-                (result["id"],),
-            ).fetchall()
-            photo_ids = [r["photo_id"] for r in rows]
-            _invalidate_photo_render_cache(db, photo_ids)
-            edit_recipe_updates = {}
-            for pid in photo_ids:
-                recipe = db.get_photo_edit_recipe(pid)
-                edit_recipe_updates[str(pid)] = recipe
-                _queue_edit_recipe_sync(
-                    db, pid, recipe_to_json(recipe) or "",
-                )
+            edit_recipe_updates = _edit_recipe_history_updates(db, result["id"])
         response = {"ok": True, "undone": result["description"]}
         if edit_recipe_updates is not None:
             response["action_type"] = "edit_recipe"
@@ -5453,20 +5517,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("nothing to redo")
         edit_recipe_updates = None
         if result.get("action_type") == "edit_recipe":
-            from image_edits import recipe_to_json
-            rows = db.conn.execute(
-                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
-                (result["id"],),
-            ).fetchall()
-            photo_ids = [r["photo_id"] for r in rows]
-            _invalidate_photo_render_cache(db, photo_ids)
-            edit_recipe_updates = {}
-            for pid in photo_ids:
-                recipe = db.get_photo_edit_recipe(pid)
-                edit_recipe_updates[str(pid)] = recipe
-                _queue_edit_recipe_sync(
-                    db, pid, recipe_to_json(recipe) or "",
-                )
+            edit_recipe_updates = _edit_recipe_history_updates(db, result["id"])
         response = {"ok": True, "redone": result["description"]}
         if edit_recipe_updates is not None:
             response["action_type"] = "edit_recipe"
@@ -5785,10 +5836,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "value": c["value"],
             })
 
-        return jsonify({
+        result = {
             "photos": list(by_photo.values()),
             "total_changes": len(changes),
-        })
+        }
+        _attach_nested_edit_recipes(db, result)
+        return jsonify(result)
 
     @app.route("/api/sync/discard", methods=["POST"])
     def api_sync_discard():
@@ -6029,6 +6082,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
         _attach_detections(db, photo_dicts)
+        _attach_edit_recipes(db, photo_dicts)
         return jsonify(
             {
                 "photos": photo_dicts,
@@ -6261,10 +6315,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "has_more": len(photos) > len(limited),
             }
 
+        limited_buckets = [limited_bucket(b) for b in buckets]
         unidentified_limited = unidentified_photos[:limit_per_bucket]
+        visible_photos = []
+        for bucket in limited_buckets:
+            visible_photos.extend(bucket["photos"])
+        visible_photos.extend(unidentified_limited)
+        _attach_edit_recipes(db, visible_photos)
 
         return {
-            "buckets": [limited_bucket(b) for b in buckets],
+            "buckets": limited_buckets,
             "unidentified": {
                 "photo_count": len(unidentified_photos),
                 "photos": unidentified_limited,
@@ -6396,6 +6456,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ))
         for i, e in enumerate(species_entries, start=1):
             e["number"] = i
+        life_list_photos = []
+        for entry in species_entries:
+            if entry.get("best"):
+                life_list_photos.append(entry["best"])
+            life_list_photos.extend(entry.get("photos") or [])
+        _attach_edit_recipes(db, life_list_photos)
 
         return {
             "species": species_entries,
@@ -6649,6 +6715,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             label = bucket["species"]
 
         chunk = photos[offset: offset + limit]
+        _attach_edit_recipes(db, chunk)
         return jsonify({
             "species": label,
             "photos": chunk,
@@ -7248,10 +7315,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Enrich predictions and attach alternatives
         results = []
-        for p in preds:
-            d = dict(p)
+        pred_dicts = [dict(p) for p in preds]
+        recipes_by_photo = db.get_photo_edit_recipes({
+            p.get("photo_id") for p in pred_dicts if p.get("photo_id") is not None
+        })
+        for d in pred_dicts:
             if d.get("status") == "alternative":
                 continue  # alternatives are nested, not top-level
+            d["edit_recipe"] = recipes_by_photo.get(d.get("photo_id"))
             if d.get("category") in ("disagreement", "refinement"):
                 keywords = db.get_photo_keywords(d["photo_id"])
                 existing_species = [
@@ -7298,6 +7369,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         preds = db.get_predictions(photo_ids=photo_ids)
         keywords_by_photo = db.get_keywords_for_photos(photo_ids)
         species_by_photo = db.get_species_keywords_for_photos(photo_ids)
+        edit_recipes_by_photo = db.get_photo_edit_recipes(photo_ids)
         taxonomy = load_local_taxonomy()
 
         def summarize_photo(row):
@@ -7309,6 +7381,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "flag": row["flag"],
                 "width": row["width"],
                 "height": row["height"],
+                "edit_recipe": edit_recipes_by_photo.get(row["id"]),
                 "keywords": keywords_by_photo.get(row["id"], []),
                 "species_keywords": species_by_photo.get(row["id"], []),
                 "predictions": {},
@@ -7562,7 +7635,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Get all predictions and photo data for a burst group."""
         db = _get_db()
         preds = db.get_group_predictions(group_id)
-        return jsonify([dict(p) for p in preds])
+        rows = [dict(p) for p in preds]
+        _attach_nested_edit_recipes(db, rows)
+        return jsonify(rows)
 
     @app.route("/api/photos/sharpness/regions", methods=["POST"])
     def api_photo_region_sharpness():
@@ -7884,6 +7959,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         return jsonify(miss_config_from_effective(db.get_effective_config(cfg.load())))
 
+    def _attach_miss_edit_recipes(db, grouped):
+        for category in ("no_subject", "clipped", "oof"):
+            photos = [dict(p) for p in grouped.get(category, [])]
+            _attach_edit_recipes(db, photos)
+            grouped[category] = photos
+        return grouped
+
     @app.route("/api/misses")
     def api_misses():
         """Return photos flagged as misses.
@@ -7899,13 +7981,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if category is not None:
             if category not in ("no_subject", "clipped", "oof"):
                 return jsonify({"error": "invalid category"}), 400
-            photos = db.list_misses(category=category, since=since)
+            photos = [dict(p) for p in db.list_misses(category=category, since=since)]
+            _attach_edit_recipes(db, photos)
             return jsonify({"photos": photos, "category": category})
-        return jsonify({
+        grouped = {
             "no_subject": db.list_misses(category="no_subject", since=since),
             "clipped":    db.list_misses(category="clipped", since=since),
             "oof":        db.list_misses(category="oof", since=since),
-        })
+        }
+        return jsonify(_attach_miss_edit_recipes(db, grouped))
 
     @app.route("/api/misses/preview", methods=["POST"])
     def api_misses_preview():
@@ -7924,6 +8008,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db, pipeline, detector_confidence=detector_confidence,
             since=body.get("since") or None,
         )
+        _attach_miss_edit_recipes(db, grouped)
         grouped["config"] = values
         grouped["preview"] = True
         return jsonify(grouped)
@@ -7952,6 +8037,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         grouped = preview_misses_for_workspace(
             db, pipeline, detector_confidence=detector_confidence, since=since,
         )
+        _attach_miss_edit_recipes(db, grouped)
         grouped["config"] = values
         grouped["updated"] = updated
         grouped["saved_defaults"] = body.get("save_defaults") is True
@@ -8661,6 +8747,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         db = _get_db()
         folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         photo_paths = []
         for pid in photo_ids:
             photo = db.get_photo(pid)
@@ -8675,6 +8762,109 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not photo_paths:
             return json_error("No photos found", 404)
+
+        def _external_edit_recipe_source(photo, recipe, fallback_path):
+            if recipe.get("crop"):
+                source_path, _using_working_copy = _recipe_render_source(
+                    photo, recipe, 0, vireo_dir, folders,
+                )
+                return source_path or fallback_path
+
+            wc_rel = photo["working_copy_path"]
+            if wc_rel:
+                wc_path = (
+                    wc_rel if os.path.isabs(wc_rel)
+                    else os.path.join(vireo_dir, wc_rel)
+                )
+                if (
+                    os.path.exists(wc_path)
+                    and _path_satisfies_recipe_render(wc_path, photo, recipe, 0)
+                ):
+                    return wc_path
+
+            folder_path = folders.get(photo["folder_id"])
+            if folder_path:
+                companion_path = photo["companion_path"]
+                if companion_path:
+                    companion = os.path.join(folder_path, companion_path)
+                    if (
+                        os.path.exists(companion)
+                        and _path_satisfies_recipe_render(
+                            companion, photo, recipe, 0,
+                        )
+                    ):
+                        return companion
+                original = os.path.join(folder_path, photo["filename"])
+                if os.path.exists(original):
+                    return original
+            return fallback_path
+
+        def _external_edit_handoff_path(photo, fallback_path):
+            recipe = db.get_photo_edit_recipe(photo["id"])
+            if not recipe:
+                return fallback_path, None
+
+            from image_edits import apply_recipe, recipe_to_json
+            from image_loader import load_image
+
+            source_path = _external_edit_recipe_source(
+                photo, recipe, fallback_path,
+            )
+            if not source_path or not os.path.isfile(source_path):
+                return None, f"{photo['filename']}: source file missing"
+
+            out_dir = os.path.join(vireo_dir, "external-edits")
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, f"{photo['id']}.jpg")
+            meta_path = os.path.join(out_dir, f"{photo['id']}.json")
+            source_mtime = os.path.getmtime(source_path)
+            recipe_json = recipe_to_json(recipe) or ""
+            expected_meta = {
+                "recipe": recipe_json,
+                "source_path": source_path,
+                "source_mtime": source_mtime,
+            }
+            try:
+                if os.path.isfile(out_path) and os.path.isfile(meta_path):
+                    with open(meta_path, encoding="utf-8") as f:
+                        cached_meta = json.load(f)
+                    if cached_meta == expected_meta:
+                        return out_path, None
+            except (OSError, ValueError, TypeError):
+                pass
+
+            img = load_image(source_path, max_size=None)
+            if img is None:
+                return None, f"{photo['filename']}: failed to load image"
+            rendered = None
+            tmp_path = None
+            fd = None
+            try:
+                rendered = apply_recipe(img, recipe)
+                quality = cfg.load().get("working_copy_quality", 92)
+                fd, tmp_path = tempfile.mkstemp(
+                    prefix=f".{photo['id']}.", suffix=".jpg.tmp", dir=out_dir,
+                )
+                os.close(fd)
+                fd = None
+                rendered.save(tmp_path, format="JPEG", quality=quality)
+                os.replace(tmp_path, out_path)
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(expected_meta, f, sort_keys=True)
+            except Exception:
+                if fd is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
+                with contextlib.suppress(OSError):
+                    if tmp_path:
+                        os.unlink(tmp_path)
+                raise
+            finally:
+                if rendered is not None:
+                    rendered.close()
+                if rendered is not img:
+                    img.close()
+            return out_path, None
 
         editors = cfg.get_editors()
         selected_editor = None
@@ -8739,13 +8929,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ]
             return "darktable" in " ".join(parts).lower()
 
-        file_paths = [path for _photo, path in photo_paths]
+        file_paths = []
+        for photo, path in photo_paths:
+            handoff_path, handoff_error = _external_edit_handoff_path(photo, path)
+            if handoff_error:
+                return json_error(handoff_error, 500)
+            file_paths.append(handoff_path)
         if _is_darktable_editor():
             from develop import convert_to_dng, is_nikon_high_efficiency_nef
 
-            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             converted_paths = []
-            for photo, input_path in photo_paths:
+            for (photo, _original_path), input_path in zip(
+                photo_paths, file_paths, strict=True,
+            ):
                 try:
                     metadata = (
                         json.loads(photo["exif_data"])
@@ -10712,6 +10908,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "latitude": lat,
             "longitude": lng,
             "filename": photo["filename"],
+            "edit_recipe": db.get_photo_edit_recipe(photo_id),
             "upload_url": upload_url,
             "mode": mode,
             "already_submitted": already,
@@ -10730,6 +10927,105 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if result is None:
             return json_error("Invalid or expired token", 401)
         return jsonify(result)
+
+    def _inat_edit_recipe_source(photo, recipe, fallback_path):
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        folders = {photo["folder_id"]: photo["folder_path"]}
+        if recipe.get("crop"):
+            source_path, _using_working_copy = _recipe_render_source(
+                photo, recipe, 0, vireo_dir, folders,
+            )
+            return source_path or fallback_path
+
+        wc_rel = photo["working_copy_path"]
+        if wc_rel:
+            wc_path = (
+                wc_rel if os.path.isabs(wc_rel)
+                else os.path.join(vireo_dir, wc_rel)
+            )
+            if (
+                os.path.exists(wc_path)
+                and _path_satisfies_recipe_render(wc_path, photo, recipe, 0)
+            ):
+                return wc_path
+
+        companion_path = photo["companion_path"]
+        if companion_path:
+            companion = os.path.join(photo["folder_path"], companion_path)
+            if (
+                os.path.exists(companion)
+                and _path_satisfies_recipe_render(companion, photo, recipe, 0)
+            ):
+                return companion
+        return fallback_path
+
+    def _inat_upload_photo_path(db, photo, fallback_path):
+        import config as cfg
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        recipe = db.get_photo_edit_recipe(photo["id"])
+        if not recipe:
+            return fallback_path, None
+
+        from image_edits import apply_recipe, recipe_to_json
+        from image_loader import load_image
+
+        source_path = _inat_edit_recipe_source(photo, recipe, fallback_path)
+        if not source_path or not os.path.isfile(source_path):
+            return None, f"{photo['filename']}: source file missing"
+
+        out_dir = os.path.join(vireo_dir, "inat-uploads")
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f"{photo['id']}.jpg")
+        meta_path = os.path.join(out_dir, f"{photo['id']}.json")
+        source_mtime = os.path.getmtime(source_path)
+        recipe_json = recipe_to_json(recipe) or ""
+        expected_meta = {
+            "recipe": recipe_json,
+            "source_path": source_path,
+            "source_mtime": source_mtime,
+        }
+        try:
+            if os.path.isfile(out_path) and os.path.isfile(meta_path):
+                with open(meta_path, encoding="utf-8") as f:
+                    cached_meta = json.load(f)
+                if cached_meta == expected_meta:
+                    return out_path, None
+        except (OSError, ValueError, TypeError):
+            pass
+
+        img = load_image(source_path, max_size=None)
+        if img is None:
+            return None, f"{photo['filename']}: failed to load image"
+        rendered = None
+        tmp_path = None
+        fd = None
+        try:
+            rendered = apply_recipe(img, recipe)
+            quality = cfg.load().get("working_copy_quality", 92)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=f".{photo['id']}.", suffix=".jpg.tmp", dir=out_dir,
+            )
+            os.close(fd)
+            fd = None
+            rendered.save(tmp_path, format="JPEG", quality=quality)
+            os.replace(tmp_path, out_path)
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(expected_meta, f, sort_keys=True)
+        except Exception:
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+            with contextlib.suppress(OSError):
+                if tmp_path:
+                    os.unlink(tmp_path)
+            raise
+        finally:
+            if rendered is not None:
+                rendered.close()
+            if rendered is not img:
+                img.close()
+        return out_path, None
 
     @app.route("/api/inat/submit", methods=["POST"])
     def api_inat_submit():
@@ -10764,6 +11060,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not os.path.isfile(photo_path):
             return json_error("Photo file not found on disk", 404)
 
+        upload_path, upload_error = _inat_upload_photo_path(db, photo, photo_path)
+        if upload_error:
+            return json_error(upload_error, 500)
+
         # Use overrides from request, or fall back to DB data. The helper
         # picks the highest-confidence prediction from the CURRENT
         # fingerprint, scoped to the active workspace, and respecting the
@@ -10788,7 +11088,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             obs_id, obs_url = inat.submit_observation(
                 token=token,
-                photo_path=photo_path,
+                photo_path=upload_path,
                 taxon_name=taxon,
                 observed_on=observed_on,
                 latitude=lat,
@@ -10851,6 +11151,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 results.append({"photo_id": photo_id, "error": "Photo file not found on disk"})
                 continue
 
+            upload_path, upload_error = _inat_upload_photo_path(
+                db, photo, photo_path,
+            )
+            if upload_error:
+                results.append({"photo_id": photo_id, "error": upload_error})
+                continue
+
             # Current-fingerprint + workspace-scoped top prediction,
             # respecting the active detector_confidence floor — avoids
             # submitting a stale-label-set or now-hidden taxon to iNaturalist.
@@ -10869,7 +11176,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             try:
                 obs_id, obs_url = inat.submit_observation(
                     token=token,
-                    photo_path=photo_path,
+                    photo_path=upload_path,
                     taxon_name=taxon,
                     observed_on=observed_on,
                     latitude=lat,
@@ -12092,6 +12399,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             result = json.loads(row["result"])
         except (json.JSONDecodeError, TypeError):
             return jsonify({"found": False})
+        _attach_nested_edit_recipes(db, result)
         return jsonify({
             "found": True,
             "job_id": row["id"],
@@ -14103,6 +14411,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 photo = db.get_photo(r["photo_id"])
                 if photo:
                     photos.append({"photo": dict(photo), "cluster": 0})
+            _attach_nested_edit_recipes(db, photos)
             return jsonify(
                 {
                     "species": species_name,
@@ -14124,6 +14433,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 photo_data.append(dict(photo))
             else:
                 photo_data.append({"id": r["photo_id"], "filename": r["filename"]})
+        _attach_nested_edit_recipes(db, photo_data)
 
         emb_matrix = np.stack(embeddings)
 
@@ -15408,6 +15718,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         results = load_results(cache_dir, db._active_workspace_id)
         if results is None:
             return json_error("No pipeline results found. Run regroup first.", 404)
+        _attach_nested_edit_recipes(db, results)
         return jsonify(results)
 
     @app.route("/api/pipeline/photo/<int:photo_id>")
@@ -15426,6 +15737,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not row:
             return json_error("Photo not found", 404)
         result = dict(row)
+        result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
         # Get primary detection from global detections table (threshold
         # resolved from workspace-effective config inside get_detections).
         dets = db.get_detections(photo_id)
@@ -15608,7 +15920,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if collection_id is None:
             save_results(results, cache_dir, db._active_workspace_id)
 
-        return jsonify(serialize_results(results))
+        serialized = serialize_results(results)
+        _attach_nested_edit_recipes(db, serialized)
+        return jsonify(serialized)
 
     @app.route("/api/pipeline/regroup-live", methods=["POST"])
     def api_pipeline_regroup_live():
@@ -15664,7 +15978,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if collection_id is None:
             save_results(results, cache_dir, db._active_workspace_id)
 
-        return jsonify(serialize_results(results))
+        serialized = serialize_results(results)
+        _attach_nested_edit_recipes(db, serialized)
+        return jsonify(serialized)
 
     @app.route("/api/pipeline/save-grouping-defaults", methods=["POST"])
     def api_pipeline_save_grouping_defaults():
@@ -16173,6 +16489,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         photo["sharpness"] = p["sharpness"]
                         photo["subject_sharpness"] = p["subject_sharpness"]
                         photo["quality_score"] = p["quality_score"]
+        _attach_nested_edit_recipes(db, results)
 
         return jsonify(results)
 
@@ -16345,6 +16662,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     sims_by_pid[pid] = round(sim, 4)
             _attach_species(db, photo_dicts)
             _attach_detections(db, photo_dicts)
+            _attach_edit_recipes(db, photo_dicts)
             results = [
                 {
                     "photo": photo,
@@ -16431,6 +16749,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "similarity": round(sim, 4),
                     }
                 )
+        _attach_nested_edit_recipes(db, results)
 
         return jsonify(
             {

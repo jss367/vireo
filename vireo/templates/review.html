@@ -1100,6 +1100,19 @@ function renderGrid() {
   grid.innerHTML = items.map(function(p) { return renderPredictionCard(p); }).join('');
 }
 
+document.addEventListener('lightbox:renderchanged', function(e) {
+  var ids = e && e.detail && Array.isArray(e.detail.photoIds) ? e.detail.photoIds : [];
+  ids.forEach(function(id) {
+    var hideDetectionOverlay = (
+      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+      window.vireoPhotoHasOrientationEdit(id)
+    );
+    document.querySelectorAll('.detection-box[data-photo-id="' + id + '"]').forEach(function(box) {
+      box.style.display = hideDetectionOverlay ? 'none' : '';
+    });
+  });
+});
+
 /* Delegate grid clicks for lightbox and group review (XSS-safe) */
 document.getElementById('grid').addEventListener('click', function(e) {
   var img = e.target.closest('img[data-photo-id]');
@@ -1139,7 +1152,17 @@ function getConsensusSpecies(pred) {
 }
 
 function renderPredictionCard(pred) {
-  var thumbUrl = vireoThumbnailUrl(pred.photo_id);
+  if (
+    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
+    Object.prototype.hasOwnProperty.call(pred, 'edit_recipe')
+  ) {
+    window.vireoRememberPhotoEditRecipe(pred.photo_id, pred.edit_recipe, {
+      skipIfLocallyWritten: true,
+    });
+  }
+  var thumbUrl = window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(pred)
+    : '/thumbnails/' + pred.photo_id + '.jpg';
   var displaySpecies = pred.group_id ? getConsensusSpecies(pred) : pred.species;
   var confPct = Math.round(pred.confidence * 100);
   var confColor = confPct >= 70 ? 'var(--accent)' : confPct >= 50 ? 'var(--warning)' : 'var(--danger)';
@@ -1247,6 +1270,10 @@ function renderPredictionCard(pred) {
 
   // Build image with optional bounding box overlay
   var hasBox = pred.box_x != null && pred.box_y != null && pred.box_w != null && pred.box_h != null;
+  var hideDetectionOverlay = (
+    typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+    window.vireoPhotoHasOrientationEdit(pred.photo_id)
+  );
   var imgStyle = hasBox ? 'cursor:pointer;object-fit:contain;' : 'cursor:pointer;';
   var imgTag = '<img src="' + thumbUrl + '" loading="lazy" alt="' + escapeAttr(pred.filename || '') +
     '" style="' + imgStyle + '" data-photo-id="' + pred.photo_id + '" data-filename="' + escapeAttr(pred.filename || '') + '">';
@@ -1259,7 +1286,7 @@ function renderPredictionCard(pred) {
     var bWidth = (pred.box_w * 100).toFixed(2) + '%';
     var bHeight = (pred.box_h * 100).toFixed(2) + '%';
     imgHtml = '<div class="card-img-wrap">' + imgTag +
-      '<div class="detection-box" style="left:' + bLeft + ';top:' + bTop +
+      '<div class="detection-box" data-photo-id="' + pred.photo_id + '" style="' + (hideDetectionOverlay ? 'display:none;' : '') + 'left:' + bLeft + ';top:' + bTop +
       ';width:' + bWidth + ';height:' + bHeight + ';border-color:' + color + ';">' +
       '<span class="detection-label" style="background:' + color +
       ';color:#0A1F2E;">' + escapeHtml(displaySpecies) + ' ' + confPct + '%</span>' +
@@ -1673,7 +1700,7 @@ function renderGroupModal() {
     var boxSharp = it.box_sharpness != null ? Math.round(it.box_sharpness) : null;
     var confPct = Math.round((it.confidence || 0) * 100);
 
-    var src = grmPhotoUrl(it.photo_id);
+    var src = grmPhotoUrl(it);
     var nat = grmNaturalDims(it);
     var imgStyle = 'width:' + nat.w + 'px;height:' + nat.h + 'px;';
     var scoresHtml = 'Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span>';
@@ -1944,9 +1971,20 @@ function grmSetThumbSize(value, persist) {
 GRM_CARD_W = _grmInitialThumbSize();
 GRM_CARD_H = Math.round(GRM_CARD_W * 2 / 3);
 
-function grmPhotoUrl(photoId) {
+function grmPhotoUrl(photoOrId) {
+  var photo = photoOrId && typeof photoOrId === 'object' ? photoOrId : null;
+  var photoId = photo ? (photo.photo_id != null ? photo.photo_id : photo.id) : photoOrId;
   var stop = GRM_RES_STOPS[grmResolutionIdx] || GRM_RES_STOPS[1];
-  if (stop.kind === 'thumb') return vireoThumbnailUrl(photoId);
+  if (stop.kind === 'thumb') {
+    if (!photo && grmState && grmState.items) {
+      photo = grmState.items.find(function(it) {
+        return String(it.photo_id) === String(photoId);
+      }) || null;
+    }
+    return window.vireoThumbnailUrl
+      ? window.vireoThumbnailUrl(photo || photoId)
+      : '/thumbnails/' + photoId + '.jpg';
+  }
   if (stop.kind === 'original') return '/photos/' + photoId + '/original';
   return vireoPreviewUrl(photoId, stop.size);
 }
@@ -1955,10 +1993,30 @@ function grmLoupePhotoUrl(photoId) {
   return grmPhotoUrl(photoId);
 }
 
+function grmEditedSourceDims(item) {
+  var W = (item && item.width) ? Number(item.width) : 1800;
+  var H = (item && item.height) ? Number(item.height) : 1200;
+  var recipe = (item && item.edit_recipe) || {};
+  var rotation = Number(recipe.rotation || 0);
+  if (rotation === 90 || rotation === 270) {
+    var tmp = W;
+    W = H;
+    H = tmp;
+  }
+  if (recipe.crop && typeof recipe.crop === 'object') {
+    var cropW = Number(recipe.crop.w);
+    var cropH = Number(recipe.crop.h);
+    if (Number.isFinite(cropW) && cropW > 0) W = Math.max(1, Math.round(W * cropW));
+    if (Number.isFinite(cropH) && cropH > 0) H = Math.max(1, Math.round(H * cropH));
+  }
+  return { w: W, h: H };
+}
+
 function grmNaturalDims(item) {
   var stop = GRM_RES_STOPS[grmResolutionIdx] || GRM_RES_STOPS[1];
-  var W = (item && item.width) ? item.width : 1800;
-  var H = (item && item.height) ? item.height : 1200;
+  var dims = grmEditedSourceDims(item);
+  var W = dims.w;
+  var H = dims.h;
   if (stop.kind === 'original') {
     return { w: W, h: H };
   }
@@ -2010,7 +2068,7 @@ function grmSetResolution(idx) {
     card.dataset.natH = nat.h;
     img.style.width = nat.w + 'px';
     img.style.height = nat.h + 'px';
-    img.src = grmPhotoUrl(pid);
+    img.src = grmPhotoUrl(item || pid);
   });
   if (grmState && grmState.selected) {
     var loupe = document.getElementById('grmLoupePhoto');
@@ -2135,7 +2193,7 @@ function _grmUpgradeStripToOriginal() {
     card.dataset.natH = nat.h;
     img.style.width = nat.w + 'px';
     img.style.height = nat.h + 'px';
-    img.src = grmPhotoUrl(pid);
+    img.src = grmPhotoUrl(item || pid);
   });
   if (grmState && grmState.selected) {
     var loupe = document.getElementById('grmLoupePhoto');
