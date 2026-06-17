@@ -52,6 +52,13 @@
   .highlights-empty { text-align:center; padding:80px 24px; color:var(--text-secondary); }
   .highlights-empty a { color:var(--accent); }
   .highlights-meta { padding:8px 24px; font-size:12px; color:var(--text-secondary); }
+  .highlight-undo { display:none; align-items:center; justify-content:space-between; gap:12px; margin:8px 24px 0; padding:8px 12px; border:1px solid var(--border-secondary); border-radius:6px; background:var(--bg-secondary); color:var(--text-primary); font-size:13px; }
+  .highlight-undo.open { display:flex; }
+  .highlight-undo span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .highlight-undo-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
+  .highlight-undo button { padding:4px 10px; border-radius:4px; border:1px solid var(--border-secondary); background:var(--bg-tertiary); color:var(--text-primary); cursor:pointer; font-size:12px; }
+  .highlight-undo button.primary { background:var(--accent); color:var(--accent-text); border-color:var(--accent); }
+  .highlight-undo button:disabled { opacity:0.6; cursor:default; }
 
   /* Save modal (unchanged) */
   .save-modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:500; align-items:center; justify-content:center; }
@@ -119,6 +126,13 @@
 </div>
 
 <div class="highlights-meta" id="meta"></div>
+<div id="highlightUndo" class="highlight-undo" role="status" aria-live="polite">
+  <span id="highlightUndoText"></span>
+  <div class="highlight-undo-actions">
+    <button id="highlightUndoBtn" class="primary" type="button" onclick="undoLastHighlightReject()">Undo</button>
+    <button type="button" onclick="hideHighlightUndo()">Dismiss</button>
+  </div>
+</div>
 
 <div id="content"></div>
 
@@ -170,6 +184,7 @@ var activeLightboxPhotoId = null;
 // Photos the user has rejected from the lightbox this session and not since
 // un-rejected. Drives grid removal AND guards reloads (see loadHighlights).
 var rejectedFromGrid = new Set();
+var lastHighlightReject = null;
 // Monotonic counter bumped each time a highlights reload is *issued*, plus the
 // counter value captured at each photo's rejection. Together they let the
 // reload prune ONLY photos rejected at/after the in-flight request was sent
@@ -624,6 +639,77 @@ function findHighlightPhoto(photoId) {
   return unid.find(function(p) { return p.id === photoId; }) || null;
 }
 
+function lightboxIsOpenOnPhoto(photoId) {
+  var overlay = document.getElementById('lightboxOverlay');
+  return !!(
+    overlay &&
+    overlay.classList.contains('active') &&
+    typeof _lightboxCurrentId !== 'undefined' &&
+    _lightboxCurrentId === photoId
+  );
+}
+
+function advanceHighlightLightboxAfterReject(photoId) {
+  if (!lightboxIsOpenOnPhoto(photoId)) return;
+  if (!Array.isArray(_lightboxPhotoList) || !_lightboxPhotoList.length) return;
+
+  var idx = _lightboxPhotoList.findIndex(function(p) { return p.id === photoId; });
+  if (idx < 0) return;
+  var nextList = _lightboxPhotoList.filter(function(p) {
+    return p.id !== photoId && p.flag !== 'rejected';
+  });
+  if (!nextList.length) {
+    closeLightbox();
+    return;
+  }
+  var nextIdx = Math.min(idx, nextList.length - 1);
+  var next = nextList[nextIdx];
+  openLightbox(next.id, next.filename || '', nextList);
+}
+
+function showHighlightUndo(photo, previousFlag) {
+  lastHighlightReject = {
+    photoId: photo.id,
+    filename: photo.filename || 'photo',
+    previousFlag: previousFlag || 'none',
+  };
+  var bar = document.getElementById('highlightUndo');
+  var text = document.getElementById('highlightUndoText');
+  var btn = document.getElementById('highlightUndoBtn');
+  if (!bar || !text || !btn) return;
+  text.textContent = 'Rejected ' + lastHighlightReject.filename + '.';
+  btn.disabled = false;
+  bar.classList.add('open');
+}
+
+function hideHighlightUndo() {
+  lastHighlightReject = null;
+  var bar = document.getElementById('highlightUndo');
+  if (bar) bar.classList.remove('open');
+}
+
+async function undoLastHighlightReject() {
+  if (!lastHighlightReject) return;
+  var undo = lastHighlightReject;
+  var btn = document.getElementById('highlightUndoBtn');
+  if (btn) btn.disabled = true;
+  try {
+    await safeFetch('/api/photos/' + undo.photoId + '/flag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ flag: undo.previousFlag }),
+    });
+    rejectedFromGrid.delete(undo.photoId);
+    delete rejectedAtLoadSeq[undo.photoId];
+    hideHighlightUndo();
+    await loadHighlights();
+    updateHighlightsLightboxControls(activeLightboxPhotoId);
+    if (typeof showToast === 'function') showToast('Reject undone', 'success');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function ensureHighlightsLightboxPanel() {
   var actions = document.getElementById('lightboxActions');
   if (!actions) return null;
@@ -641,32 +727,43 @@ function updateHighlightsLightboxControls(photoId) {
   var panel = ensureHighlightsLightboxPanel();
   if (!panel) return;
   var photo = findHighlightPhoto(photoId);
-  if (!photo) {
+  if (!photo && !lastHighlightReject) {
     panel.style.display = 'none';
     panel.innerHTML = '';
     return;
   }
   panel.style.display = '';
-  var html = '<span>' + escapeAttr(photoCurrentLabel(photo)) + '</span>';
-  var highlightSpecies = photoSpeciesName(photo);
-  if (highlightSpecies) {
-    html += '<button data-lb-action="set-highlight"'
-      + (photo.is_highlights_photo ? ' class="primary"' : '') + '>'
-      + (photo.is_highlights_photo ? 'Highlights Photo' : 'Use as Highlights') + '</button>';
+  var html = photo
+    ? '<span>' + escapeAttr(photoCurrentLabel(photo)) + '</span>'
+    : '<span>Highlight photo removed</span>';
+  if (photo) {
+    var highlightSpecies = photoSpeciesName(photo);
+    if (highlightSpecies) {
+      html += '<button data-lb-action="set-highlight"'
+        + (photo.is_highlights_photo ? ' class="primary"' : '') + '>'
+        + (photo.is_highlights_photo ? 'Highlights Photo' : 'Use as Highlights') + '</button>';
+    }
+    if (photo.has_accepted_species && photo.species) {
+      html += '<button data-lb-action="set-life-list">Use as Life List</button>';
+    }
+    if (photo.is_confirmable_prediction) {
+      html += '<button class="primary" data-lb-action="confirm">Confirm</button>';
+    }
+    html += '<button data-lb-action="change">' + (photo.is_confirmable_prediction || photo.has_accepted_species ? 'Change' : 'Set species') + '</button>';
   }
-  if (photo.has_accepted_species && photo.species) {
-    html += '<button data-lb-action="set-life-list">Use as Life List</button>';
+  if (lastHighlightReject) {
+    html += '<button class="primary" data-lb-action="undo-reject">Undo Reject</button>';
   }
-  if (photo.is_confirmable_prediction) {
-    html += '<button class="primary" data-lb-action="confirm">Confirm</button>';
-  }
-  html += '<button data-lb-action="change">' + (photo.is_confirmable_prediction || photo.has_accepted_species ? 'Change' : 'Set species') + '</button>';
   panel.innerHTML = html;
   panel.querySelectorAll('button').forEach(function(btn) {
     btn.addEventListener('click', function(event) {
       event.stopPropagation();
       var action = btn.getAttribute('data-lb-action');
-      if (action === 'confirm') {
+      if (action === 'undo-reject') {
+        undoLastHighlightReject();
+      } else if (!photo) {
+        return;
+      } else if (action === 'confirm') {
         confirmPhotoIds([photo.id], btn);
       } else if (action === 'set-highlight') {
         setPhotoPreference('highlights', photoSpeciesName(photo), photo.id, btn);
@@ -840,6 +937,9 @@ document.addEventListener('lightbox:flagchanged', function(e) {
   var detail = e && e.detail;
   if (!detail || detail.photoId == null) return;
   if (detail.flag === 'rejected') {
+    var photo = findHighlightPhoto(detail.photoId);
+    if (photo) showHighlightUndo(photo, detail.previousFlag || photo.flag || 'none');
+    advanceHighlightLightboxAfterReject(detail.photoId);
     // Track before mutating: during an in-flight restore reload the photo may
     // not be in currentData yet, so removeRejectedPhotoFromModel returns false
     // — but the id must still be remembered so the reload's prune drops it.
