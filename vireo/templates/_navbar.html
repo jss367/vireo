@@ -3253,6 +3253,11 @@ function _lbRecipeHasOrientation(recipe) {
   );
 }
 
+function _lbCurrentRecipeHasOrientation() {
+  if (_lightboxCurrentId == null) return false;
+  return _lbRecipeHasOrientation(_lbEditRecipeByPhoto[String(_lightboxCurrentId)]);
+}
+
 function _lbRememberEditRecipe(photoId, recipe) {
   if (photoId == null) return;
   _lbEditRecipeByPhoto[String(photoId)] = _lbCloneEditRecipe(recipe);
@@ -3421,6 +3426,8 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
   img.src = _lbSrcUrl(photoId, 'full');
   _lbLoadDetections(photoId);
   _lbRenderEyeCrosshair(_lbPhotoDataByPhoto[String(photoId)]);
+  _lbApplyMaskVisibility();
+  _lbLoadMaskVariants(photoId);
 }
 
 async function lightboxApplyEdit(op) {
@@ -4054,7 +4061,12 @@ function _lbResetMaskOverlay() {
 function _lbApplyMaskVisibility() {
   var img = document.getElementById('lightboxMaskOverlay');
   if (!img) return;
-  if (!_lbMasksVisible || !_lbMaskCurrentUrl) {
+  var orientationActive = _lbCurrentRecipeHasOrientation();
+  if (orientationActive) {
+    var ctrls = document.getElementById('lightboxMaskControls');
+    if (ctrls) ctrls.classList.remove('has-variants');
+  }
+  if (!_lbMasksVisible || !_lbMaskCurrentUrl || orientationActive) {
     img.classList.remove('show');
     // A previous call may have assigned onload to re-add `show` once
     // the mask image finished loading. If the user toggles masks off
@@ -4137,6 +4149,10 @@ function toggleLightboxMasks() {
 function _lbOnMaskVariantChange() {
   var sel = document.getElementById('lightboxMaskSelect');
   if (!sel) return;
+  if (_lbCurrentRecipeHasOrientation()) {
+    _lbApplyMaskUrl(null);
+    return;
+  }
   var choice = sel.value;
   if (choice === '__active__') {
     if (!_lbMaskActiveVariant) {
@@ -4173,6 +4189,10 @@ function _lbLoadMaskVariants(photoId) {
       if (!data || _lightboxCurrentId !== photoId) return;
       _lbMaskActiveVariant = data.active || null;
       _lbMaskAvailable = data.variants || [];
+      if (_lbCurrentRecipeHasOrientation()) {
+        _lbApplyMaskUrl(null);
+        return;
+      }
       if (_lbMaskAvailable.length === 0) {
         // No masks for this photo — keep the control hidden.
         return;

@@ -8648,6 +8648,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not photo_paths:
             return json_error("No photos found", 404)
 
+        def _external_edit_recipe_source(photo, recipe, fallback_path):
+            if recipe.get("crop"):
+                source_path, _using_working_copy = _recipe_render_source(
+                    photo, recipe, 0, vireo_dir, folders,
+                )
+                return source_path or fallback_path
+
+            wc_rel = photo["working_copy_path"]
+            if wc_rel:
+                wc_path = (
+                    wc_rel if os.path.isabs(wc_rel)
+                    else os.path.join(vireo_dir, wc_rel)
+                )
+                if (
+                    os.path.exists(wc_path)
+                    and _path_satisfies_recipe_render(wc_path, photo, recipe, 0)
+                ):
+                    return wc_path
+
+            folder_path = folders.get(photo["folder_id"])
+            if folder_path:
+                companion_path = photo["companion_path"]
+                if companion_path:
+                    companion = os.path.join(folder_path, companion_path)
+                    if (
+                        os.path.exists(companion)
+                        and _path_satisfies_recipe_render(
+                            companion, photo, recipe, 0,
+                        )
+                    ):
+                        return companion
+                original = os.path.join(folder_path, photo["filename"])
+                if os.path.exists(original):
+                    return original
+            return fallback_path
+
         def _external_edit_handoff_path(photo, fallback_path):
             recipe = db.get_photo_edit_recipe(photo["id"])
             if not recipe:
@@ -8656,11 +8692,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             from image_edits import apply_recipe, recipe_to_json
             from image_loader import load_image
 
-            source_path, _using_working_copy = _recipe_render_source(
-                photo, recipe, 0, vireo_dir, folders,
+            source_path = _external_edit_recipe_source(
+                photo, recipe, fallback_path,
             )
-            if not source_path:
-                source_path = fallback_path
             if not source_path or not os.path.isfile(source_path):
                 return None, f"{photo['filename']}: source file missing"
 
