@@ -4458,6 +4458,20 @@ async function cropClearEdits() {
   }
 }
 
+function _lbRefreshEditRecipeCache(updates) {
+  if (!updates || typeof updates !== 'object') return;
+  var version = String(Date.now());
+  Object.keys(updates).forEach(function(photoId) {
+    _lbEditVersionByPhoto[String(photoId)] = version;
+    var numericId = Number(photoId);
+    var p = _lightboxPhotoList.find(function(x) { return x.id === numericId; });
+    if (p) p.edit_recipe = updates[photoId] || null;
+    if (_lightboxCurrentId === numericId) {
+      _lbCurrentEditRecipe = updates[photoId] || null;
+    }
+  });
+}
+
 function openLightbox(photoId, filename, photoList, options) {
   var alreadyOpen = !!window._lbEscToken;
   options = options || {};
@@ -7229,6 +7243,7 @@ function formatDuration(seconds) {
     safeFetch('/api/undo', {method: 'POST'})
       .then(function(data) {
         if (data && data.ok) {
+          _lbRefreshEditRecipeCache(data.edit_recipes);
           showToast('Undone: ' + data.undone + ' — press Ctrl+Shift+Z to redo', 'success');
           _historySessionCount = Math.max(0, _historySessionCount - 1);
           document.getElementById('historyBadge').textContent = _historySessionCount || '';
@@ -7243,6 +7258,7 @@ function formatDuration(seconds) {
     safeFetch('/api/redo', {method: 'POST'})
       .then(function(data) {
         if (data && data.ok) {
+          _lbRefreshEditRecipeCache(data.edit_recipes);
           showToast('Redone: ' + data.redone, 'success');
           _historySessionCount++;
           document.getElementById('historyBadge').textContent = _historySessionCount || '';

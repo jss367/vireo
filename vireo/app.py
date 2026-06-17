@@ -5400,6 +5400,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = db.undo_last_edit()
         if result is None:
             return json_error("nothing to undo")
+        edit_recipe_updates = None
         if result.get("action_type") == "edit_recipe":
             from image_edits import recipe_to_json
             rows = db.conn.execute(
@@ -5408,11 +5409,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ).fetchall()
             photo_ids = [r["photo_id"] for r in rows]
             _invalidate_photo_render_cache(db, photo_ids)
+            edit_recipe_updates = {}
             for pid in photo_ids:
+                recipe = db.get_photo_edit_recipe(pid)
+                edit_recipe_updates[str(pid)] = recipe
                 _queue_edit_recipe_sync(
-                    db, pid, recipe_to_json(db.get_photo_edit_recipe(pid)) or "",
+                    db, pid, recipe_to_json(recipe) or "",
                 )
-        return jsonify({"ok": True, "undone": result["description"]})
+        response = {"ok": True, "undone": result["description"]}
+        if edit_recipe_updates is not None:
+            response["action_type"] = "edit_recipe"
+            response["edit_recipes"] = edit_recipe_updates
+        return jsonify(response)
 
     @app.route("/api/undo/status")
     def api_undo_status():
@@ -5443,6 +5451,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = db.redo_last_undo()
         if result is None:
             return json_error("nothing to redo")
+        edit_recipe_updates = None
         if result.get("action_type") == "edit_recipe":
             from image_edits import recipe_to_json
             rows = db.conn.execute(
@@ -5451,11 +5460,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ).fetchall()
             photo_ids = [r["photo_id"] for r in rows]
             _invalidate_photo_render_cache(db, photo_ids)
+            edit_recipe_updates = {}
             for pid in photo_ids:
+                recipe = db.get_photo_edit_recipe(pid)
+                edit_recipe_updates[str(pid)] = recipe
                 _queue_edit_recipe_sync(
-                    db, pid, recipe_to_json(db.get_photo_edit_recipe(pid)) or "",
+                    db, pid, recipe_to_json(recipe) or "",
                 )
-        return jsonify({"ok": True, "redone": result["description"]})
+        response = {"ok": True, "redone": result["description"]}
+        if edit_recipe_updates is not None:
+            response["action_type"] = "edit_recipe"
+            response["edit_recipes"] = edit_recipe_updates
+        return jsonify(response)
 
     @app.route("/api/redo/status")
     def api_redo_status():

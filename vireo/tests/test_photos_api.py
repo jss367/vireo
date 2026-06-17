@@ -2034,10 +2034,16 @@ def test_edit_recipe_api_undo_redo(client_with_photo):
 
     undo = client.post("/api/undo")
     assert undo.status_code == 200
+    assert undo.get_json()["action_type"] == "edit_recipe"
+    assert undo.get_json()["edit_recipes"] == {str(photo_id): None}
     assert db.get_photo_edit_recipe(photo_id) is None
 
     redo = client.post("/api/redo")
     assert redo.status_code == 200
+    assert redo.get_json()["action_type"] == "edit_recipe"
+    assert redo.get_json()["edit_recipes"] == {
+        str(photo_id): {"rotation": 180, "version": 1}
+    }
     assert db.get_photo_edit_recipe(photo_id)["rotation"] == 180
 
 
