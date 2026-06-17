@@ -1676,7 +1676,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return canonical, _is_working_copy_path(canonical)
 
         canonical = get_canonical_image_path(photo, vireo_dir, folders)
-        if _is_working_copy_path(canonical):
+        if not recipe.get("crop") and _is_working_copy_path(canonical):
             return canonical, True
 
         if recipe.get("crop") and _working_copy_satisfies_recipe_render(

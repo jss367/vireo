@@ -194,7 +194,7 @@ def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
         return get_canonical_image_path(photo, vireo_dir, folders)
     canonical = get_canonical_image_path(photo, vireo_dir, folders)
     wc_rel = photo["working_copy_path"]
-    if canonical and wc_rel:
+    if not recipe.get("crop") and canonical and wc_rel:
         wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
         if os.path.abspath(canonical) == os.path.abspath(wc_path):
             return canonical
