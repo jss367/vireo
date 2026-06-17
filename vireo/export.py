@@ -1,5 +1,6 @@
 """Photo export with resize, quality control, and template-based naming."""
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -14,6 +15,7 @@ log = logging.getLogger(__name__)
 
 # Characters not allowed in filenames (covers Windows + macOS + Linux)
 _UNSAFE_RE = re.compile(r'[<>:"/|?*\\]')
+_EXIF_ORIENTATION_TAG = 274
 
 
 def sanitize_filename(name):
@@ -322,6 +324,16 @@ def _orientation_swaps_axes(orientation):
         return "90" in text or "270" in text
 
 
+def _image_size_after_exif_orientation(img):
+    width, height = img.size
+    orientation = None
+    with contextlib.suppress(Exception):
+        orientation = img.getexif().get(_EXIF_ORIENTATION_TAG)
+    if _orientation_swaps_axes(orientation):
+        return height, width
+    return width, height
+
+
 def _recipe_result_long_edge(width, height, recipe):
     """Return the rendered long edge after right-angle rotation and crop."""
     rotation = (recipe or {}).get("rotation", 0)
@@ -625,7 +637,7 @@ def _companion_can_satisfy_export(photo, folder_path, recipe, max_size, exif_dat
     try:
         from PIL import Image
         with Image.open(companion) as img:
-            comp_w, comp_h = img.size
+            comp_w, comp_h = _image_size_after_exif_orientation(img)
     except Exception:
         return None
 
