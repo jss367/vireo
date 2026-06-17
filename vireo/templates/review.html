@@ -1139,7 +1139,9 @@ function getConsensusSpecies(pred) {
 }
 
 function renderPredictionCard(pred) {
-  var thumbUrl = '/thumbnails/' + pred.photo_id + '.jpg';
+  var thumbUrl = window.vireoRenderedUrl
+    ? window.vireoRenderedUrl('/thumbnails/' + pred.photo_id + '.jpg', pred.photo_id)
+    : '/thumbnails/' + pred.photo_id + '.jpg';
   var displaySpecies = pred.group_id ? getConsensusSpecies(pred) : pred.species;
   var confPct = Math.round(pred.confidence * 100);
   var confColor = confPct >= 70 ? 'var(--accent)' : confPct >= 50 ? 'var(--warning)' : 'var(--danger)';

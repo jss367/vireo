@@ -2154,9 +2154,10 @@ function renderPhotoCard(p, idx) {
     speciesBadgeHtml += '</div>';
   }
 
+  var thumbUrl = window.vireoRenderedUrl ? window.vireoRenderedUrl('/thumbnails/' + p.id + '.jpg', p.id) : '/thumbnails/' + p.id + '.jpg';
   return '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
     '<div class="grid-card-img-wrap">' +
-      '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" decoding="async" alt="' + escapeAttr(p.filename) + '">' +
+      '<img src="' + escapeAttr(thumbUrl) + '" loading="lazy" decoding="async" alt="' + escapeAttr(p.filename) + '">' +
       clipBadge +
       boxHtml +
       inatBadge +
@@ -4952,7 +4953,8 @@ async function loadDetail(id) {
 
 function renderDetail(photo) {
   window._detailPhotoId = photo.id;
-  document.getElementById('detailImg').src = '/thumbnails/' + photo.id + '.jpg';
+  var detailThumb = window.vireoRenderedUrl ? window.vireoRenderedUrl('/thumbnails/' + photo.id + '.jpg', photo.id) : '/thumbnails/' + photo.id + '.jpg';
+  document.getElementById('detailImg').src = detailThumb;
   document.getElementById('detailFilename').textContent = photo.filename;
 
   // Rating stars

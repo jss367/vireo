@@ -1467,6 +1467,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         thumb_dir = app.config["THUMB_CACHE_DIR"]
         preview_dir = os.path.join(vireo_dir, "previews")
         originals_dir = os.path.join(vireo_dir, "originals")
+        external_edits_dir = os.path.join(vireo_dir, "external-edits")
         for pid in photo_ids:
             thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
             clear_thumb_path = True
@@ -1547,6 +1548,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     os.remove(original_cache)
             except OSError:
                 log.warning("Failed to remove stale original cache %s", original_cache)
+            external_cache = os.path.join(external_edits_dir, f"{pid}.jpg")
+            external_meta = os.path.join(external_edits_dir, f"{pid}.json")
+            for path in (external_cache, external_meta):
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    log.warning(
+                        "Failed to remove stale external edit cache %s",
+                        path, exc_info=True,
+                    )
         db.conn.commit()
 
     def _rendered_recipe_long_edge(width, height, recipe):
@@ -8620,6 +8632,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         db = _get_db()
         folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         photo_paths = []
         for pid in photo_ids:
             photo = db.get_photo(pid)
@@ -8634,6 +8647,66 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not photo_paths:
             return json_error("No photos found", 404)
+
+        def _external_edit_handoff_path(photo, fallback_path):
+            recipe = db.get_photo_edit_recipe(photo["id"])
+            if not recipe:
+                return fallback_path, None
+
+            from image_edits import apply_recipe, recipe_to_json
+            from image_loader import load_image
+
+            source_path, _using_working_copy = _recipe_render_source(
+                photo, recipe, 0, vireo_dir, folders,
+            )
+            if not source_path:
+                source_path = fallback_path
+            if not source_path or not os.path.isfile(source_path):
+                return None, f"{photo['filename']}: source file missing"
+
+            out_dir = os.path.join(vireo_dir, "external-edits")
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, f"{photo['id']}.jpg")
+            meta_path = os.path.join(out_dir, f"{photo['id']}.json")
+            source_mtime = os.path.getmtime(source_path)
+            recipe_json = recipe_to_json(recipe) or ""
+            expected_meta = {
+                "recipe": recipe_json,
+                "source_path": source_path,
+                "source_mtime": source_mtime,
+            }
+            try:
+                if os.path.isfile(out_path) and os.path.isfile(meta_path):
+                    with open(meta_path, encoding="utf-8") as f:
+                        cached_meta = json.load(f)
+                    if cached_meta == expected_meta:
+                        return out_path, None
+            except (OSError, ValueError, TypeError):
+                pass
+
+            img = load_image(source_path, max_size=None)
+            if img is None:
+                return None, f"{photo['filename']}: failed to load image"
+            rendered = apply_recipe(img, recipe)
+            quality = cfg.load().get("working_copy_quality", 92)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=f".{photo['id']}.", suffix=".jpg.tmp", dir=out_dir,
+            )
+            os.close(fd)
+            try:
+                rendered.save(tmp_path, format="JPEG", quality=quality)
+                os.replace(tmp_path, out_path)
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(expected_meta, f, sort_keys=True)
+            except Exception:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
+                raise
+            finally:
+                rendered.close()
+                if rendered is not img:
+                    img.close()
+            return out_path, None
 
         editors = cfg.get_editors()
         selected_editor = None
@@ -8698,13 +8771,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ]
             return "darktable" in " ".join(parts).lower()
 
-        file_paths = [path for _photo, path in photo_paths]
+        file_paths = []
+        for photo, path in photo_paths:
+            handoff_path, handoff_error = _external_edit_handoff_path(photo, path)
+            if handoff_error:
+                return json_error(handoff_error, 500)
+            file_paths.append(handoff_path)
         if _is_darktable_editor():
             from develop import convert_to_dng, is_nikon_high_efficiency_nef
 
-            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             converted_paths = []
-            for photo, input_path in photo_paths:
+            for (photo, _original_path), input_path in zip(
+                photo_paths, file_paths, strict=True,
+            ):
                 try:
                     metadata = (
                         json.loads(photo["exif_data"])

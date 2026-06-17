@@ -88,6 +88,33 @@ def test_open_external_uses_configured_editor(app_and_db, monkeypatch):
     assert launched[0][1][0] == '/usr/bin/gimp'
 
 
+def test_open_external_hands_off_rendered_edit_recipe(client_with_photo, monkeypatch):
+    """External editors receive a rendered derivative when Vireo edits exist."""
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"rotation": 90, "flip": {"horizontal": True}},
+    )
+    client.post('/api/config',
+                data=json.dumps({"external_editor": "/usr/bin/gimp"}),
+                content_type='application/json')
+    launched = _patch_launchers(monkeypatch)
+
+    resp = client.post('/api/photos/open-external',
+                       data=json.dumps({"photo_ids": [photo_id]}),
+                       content_type='application/json')
+
+    assert resp.status_code == 200
+    opened_path = launched[0][1][1]
+    assert os.path.basename(opened_path) == f"{photo_id}.jpg"
+    assert os.path.basename(os.path.dirname(opened_path)) == "external-edits"
+    with Image.open(opened_path) as img:
+        assert img.size == (600, 800)
+
+
 def test_open_external_returns_500_on_launch_failure(app_and_db, monkeypatch):
     """POST /api/photos/open-external returns 500 when launcher raises."""
     app, _ = app_and_db

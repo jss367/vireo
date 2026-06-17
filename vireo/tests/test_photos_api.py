@@ -1596,6 +1596,33 @@ def test_edit_recipe_api_invalidates_thumbnail_and_renders_edit(client_with_phot
         assert img.size == (300, 400)
 
 
+def test_edit_recipe_api_invalidates_external_edit_handoff(client_with_photo):
+    import json
+    import os
+
+    from PIL import Image
+
+    app, _db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    external_dir = os.path.join(vireo_dir, "external-edits")
+    os.makedirs(external_dir, exist_ok=True)
+    external_path = os.path.join(external_dir, f"{photo_id}.jpg")
+    external_meta = os.path.join(external_dir, f"{photo_id}.json")
+    Image.new("RGB", (10, 10), "green").save(external_path, "JPEG")
+    with open(external_meta, "w", encoding="utf-8") as f:
+        json.dump({"recipe": "stale"}, f)
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 90}},
+    )
+
+    assert resp.status_code == 200
+    assert not os.path.exists(external_path)
+    assert not os.path.exists(external_meta)
+
+
 def test_edit_recipe_keeps_thumb_path_when_stale_thumbnail_unlink_fails(
     client_with_photo, monkeypatch,
 ):
