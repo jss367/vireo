@@ -2522,7 +2522,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         def visit(value):
             if isinstance(value, dict):
-                pid = value.get("id", value.get("photo_id"))
+                pid = value.get("photo_id", value.get("id"))
                 if (
                     isinstance(pid, int)
                     and not isinstance(pid, bool)
