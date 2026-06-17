@@ -97,11 +97,11 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install dependencies
+      - name: Install test dependencies
         if: needs.changes.outputs.python == 'true'
         run: |
-          pip install pytest pytest-cov pytest-timeout pytest-xdist
-          pip install -e .
+          cd "$RUNNER_TEMP"
+          pip install pytest pytest-cov pytest-timeout pytest-xdist "huggingface_hub>=1.4.1"
 
       # Cache MegaDetector V6 weights across runs so the Windows/macOS legs
       # don't restart a cold ~300 MB download for every PR. Without this,
@@ -124,17 +124,17 @@ jobs:
       # starting their own download simultaneously. Retry a few times with
       # backoff so a single transient throttle doesn't poison the whole run.
       #
-      # We download with the ``huggingface_hub`` library — a third-party
-      # installed dependency, NOT code from the PR checkout. The inline script
-      # imports only huggingface_hub + stdlib and hard-codes the repo/filename,
-      # so no PR-authored module (detector.py, models.py, …) ever runs with the
-      # token in scope (addresses the secret-exposure concern of importing the
-      # app's downloader). huggingface_hub also sends HF_TOKEN only to
-      # huggingface.co and follows the presigned CDN redirect *without* it, so
-      # the secret is never forwarded across the cross-host redirect the way a
-      # hand-rolled ``curl -L -H Authorization`` can. Tests never download —
+      # We download with the ``huggingface_hub`` library before installing the
+      # PR package, so PR-controlled editable installs/dependency hooks cannot
+      # affect this token-bearing interpreter. The inline script imports only
+      # huggingface_hub + stdlib and hard-codes the repo/filename, so no
+      # PR-authored module (detector.py, models.py, ...) ever runs with the
+      # token in scope. huggingface_hub also sends HF_TOKEN only to
+      # huggingface.co and follows the presigned CDN redirect without it, so the
+      # secret is never forwarded across the cross-host redirect the way a
+      # hand-rolled ``curl -L -H Authorization`` can. Tests never download -
       # they mock the downloader / detect_animals or skip when the file is
-      # absent — so the weights just need to land where detector.py expects.
+      # absent - so the weights just need to land where detector.py expects.
       - name: Pre-download MegaDetector weights
         if: needs.changes.outputs.python == 'true' && steps.cache-mdv6.outputs.cache-hit != 'true'
         shell: bash
@@ -169,6 +169,10 @@ jobs:
             echo "Pre-download failed after 5 attempts; failing the step to avoid cascading xdist worker failures."
             exit 1
           fi
+
+      - name: Install package
+        if: needs.changes.outputs.python == 'true'
+        run: pip install -e .
 
       # Linux is the canonical full run and enforces the coverage threshold.
       - name: Run tests with coverage (Linux)
