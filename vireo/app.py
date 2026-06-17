@@ -1671,12 +1671,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
             return os.path.abspath(path) == os.path.abspath(wc_path)
 
-        if not recipe or not recipe.get("crop"):
+        if not recipe:
             canonical = get_canonical_image_path(photo, vireo_dir, folders)
             return canonical, _is_working_copy_path(canonical)
 
-        if _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
-            canonical = get_canonical_image_path(photo, vireo_dir, folders)
+        canonical = get_canonical_image_path(photo, vireo_dir, folders)
+        if _is_working_copy_path(canonical):
+            return canonical, True
+
+        if recipe.get("crop") and _working_copy_satisfies_recipe_render(
+            photo, recipe, max_size, vireo_dir,
+        ):
             return canonical, _is_working_copy_path(canonical)
 
         folder_path = folders.get(photo["folder_id"])

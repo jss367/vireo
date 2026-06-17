@@ -74,12 +74,16 @@ def normalize_recipe(recipe):
     if crop is not None:
         if not isinstance(crop, dict):
             raise RecipeError("crop must be an object")
+        raw_vals = []
         try:
-            x = float(crop["x"])
-            y = float(crop["y"])
-            w = float(crop["w"])
-            h = float(crop["h"])
+            raw_vals = [crop["x"], crop["y"], crop["w"], crop["h"]]
         except (KeyError, TypeError, ValueError) as exc:
+            raise RecipeError("crop must include numeric x, y, w, and h") from exc
+        if any(isinstance(v, bool) for v in raw_vals):
+            raise RecipeError("crop must include numeric x, y, w, and h")
+        try:
+            x, y, w, h = (float(v) for v in raw_vals)
+        except (TypeError, ValueError) as exc:
             raise RecipeError("crop must include numeric x, y, w, and h") from exc
         vals = (x, y, w, h)
         if not all(math.isfinite(v) for v in vals):

@@ -190,10 +190,18 @@ def _path_satisfies_recipe_render(path, photo, recipe, max_size):
 def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
     from image_loader import get_canonical_image_path
 
-    if not recipe or not recipe.get("crop"):
+    if not recipe:
         return get_canonical_image_path(photo, vireo_dir, folders)
-    if _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
-        return get_canonical_image_path(photo, vireo_dir, folders)
+    canonical = get_canonical_image_path(photo, vireo_dir, folders)
+    wc_rel = photo["working_copy_path"]
+    if canonical and wc_rel:
+        wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
+        if os.path.abspath(canonical) == os.path.abspath(wc_path):
+            return canonical
+    if recipe.get("crop") and _working_copy_satisfies_recipe_render(
+        photo, recipe, max_size, vireo_dir,
+    ):
+        return canonical
 
     folder_path = folders.get(photo["folder_id"])
     if not folder_path:

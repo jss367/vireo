@@ -1936,6 +1936,7 @@ def test_edit_recipe_api_rejects_malformed_body_without_clearing(client_with_pho
         {"data": "{", "content_type": "application/json"},
         {"json": []},
         {"json": {"recipe": []}},
+        {"json": {"recipe": {"crop": {"x": False, "y": False, "w": True, "h": True}}}},
     ]
     for kwargs in cases:
         resp = client.put(f"/api/photos/{photo_id}/edit-recipe", **kwargs)
@@ -2136,6 +2137,56 @@ def test_cropped_preview_uses_companion_before_raw_failure_marker(
     assert loaded_paths == [companion_path]
     with Image.open(io.BytesIO(rendered.data)) as img:
         assert img.size == (400, 600)
+
+
+def test_non_crop_preview_uses_companion_before_raw_failure_marker(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    companion_path = os.path.join(folder["path"], "test.jpg")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='test.jpg',
+               working_copy_path=NULL,
+               width=800, height=600,
+               file_mtime=1234.0,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=1234.0,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    original_load_image = image_loader.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        loaded_paths.append(file_path)
+        if str(file_path).lower().endswith(".nef"):
+            raise AssertionError("preview retried RAW before companion")
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert rendered.status_code == 200
+    assert loaded_paths == [companion_path]
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
 
 
 def test_preview_retries_raw_when_recent_marker_came_from_companion(
