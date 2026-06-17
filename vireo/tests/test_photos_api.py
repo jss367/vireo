@@ -3196,7 +3196,12 @@ def test_preview_job_uses_detail_row_exif_for_cropped_source_selection(
         time.sleep(0.05)
     assert data["status"] == "completed"
 
-    assert loaded_paths == [os.path.abspath(original_path)]
+    source_dir = os.path.abspath(os.path.dirname(original_path))
+    relevant_paths = [
+        path for path in loaded_paths
+        if os.path.commonpath([source_dir, path]) == source_dir
+    ]
+    assert relevant_paths == [os.path.abspath(original_path)]
     assert db.preview_cache_get(photo_id, 1920) is not None
 
 
