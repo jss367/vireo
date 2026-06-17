@@ -1393,6 +1393,45 @@ def test_edit_recipe_api_invalidates_preview_cache_and_renders(client_with_photo
         assert img.size == (600, 800)
 
 
+def test_edit_recipe_api_queues_xmp_sync(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"straighten": 2.5}},
+    )
+
+    assert resp.status_code == 200
+    changes = db.get_pending_changes()
+    assert len(changes) == 1
+    assert changes[0]["photo_id"] == photo_id
+    assert changes[0]["change_type"] == "edit_recipe"
+    assert '"straighten":2.5' in changes[0]["value"]
+
+
+def test_edit_preview_renders_uncommitted_recipe_without_storing(client_with_photo):
+    import io
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    rendered = client.get(
+        f"/photos/{photo_id}/edit-preview",
+        query_string={
+            "size": "1920",
+            "recipe": '{"rotation":90,"crop":{"x":0,"y":0,"w":0.5,"h":0.5}}',
+        },
+    )
+
+    assert rendered.status_code == 200
+    assert db.get_photo_edit_recipe(photo_id) is None
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
+
+
 def test_non_crop_preview_loads_with_requested_size(client_with_photo, monkeypatch):
     import image_loader
 

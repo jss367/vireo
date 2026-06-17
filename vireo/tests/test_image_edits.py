@@ -34,6 +34,18 @@ def test_normalize_recipe_rejects_fractional_rotation():
         normalize_recipe({"rotation": 90.9})
 
 
+def test_normalize_recipe_accepts_straighten():
+    assert normalize_recipe({"straighten": 1.23456}) == {
+        "version": 1,
+        "straighten": 1.2346,
+    }
+
+
+def test_normalize_recipe_rejects_out_of_range_straighten():
+    with pytest.raises(RecipeError, match="straighten"):
+        normalize_recipe({"straighten": 46})
+
+
 def test_normalize_recipe_rejects_non_boolean_flip():
     with pytest.raises(RecipeError, match="flip.horizontal"):
         normalize_recipe({"flip": {"horizontal": "false"}})
@@ -69,3 +81,10 @@ def test_apply_recipe_rotates_flips_and_crops():
     )
 
     assert edited.size == (30, 50)
+
+
+def test_apply_recipe_straightens_in_place():
+    img = Image.new("RGB", (100, 60), "white")
+    edited = apply_recipe(img, {"straighten": 3.5})
+
+    assert edited.size == (100, 60)
