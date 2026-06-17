@@ -1436,6 +1436,40 @@ def test_edit_recipe_api_invalidates_untracked_preview_file(client_with_photo):
     assert not os.path.exists(untracked_path)
 
 
+def test_edited_preview_does_not_adopt_stale_untracked_file_after_unlink_failure(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import app as app_module
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    stale_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+    Image.new("RGB", (10, 10), "purple").save(stale_path, "JPEG")
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    assert db.preview_cache_get(photo_id, 1920) is None
+    original_remove = app_module.os.remove
+
+    def locked_remove(path):
+        if path == stale_path:
+            raise OSError("locked")
+        return original_remove(path)
+
+    monkeypatch.setattr(app_module.os, "remove", locked_remove)
+
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
+
+
 def test_edit_recipe_api_invalidates_thumbnail_and_renders_edit(client_with_photo):
     import io
     import os

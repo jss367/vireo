@@ -638,6 +638,7 @@ def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
 def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
     """Pairing raw+JPEG preserves a recipe stored on the deleted companion."""
     from db import Database
+    from image_edits import recipe_to_json
     from scanner import _pair_raw_jpeg_companions
 
     img_dir = tmp_path / "photos"
@@ -654,6 +655,13 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
         file_size=2000, file_mtime=1.0,
     )
     db.set_photo_edit_recipe(jpeg_id, {"rotation": 90})
+    recipe_json = recipe_to_json({"rotation": 90}) or ""
+    db.record_edit(
+        "edit_recipe",
+        "Updated photo edit recipe",
+        recipe_json,
+        [{"photo_id": jpeg_id, "old_value": "", "new_value": recipe_json}],
+    )
     db.conn.execute(
         "UPDATE photos SET thumb_path = ? WHERE id = ?",
         ("thumbnails/raw.jpg", raw_id),
@@ -672,6 +680,14 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
     }
     assert photo["thumb_path"] is None
     assert db.preview_cache_get(photo["id"], 800) is None
+    history_item = db.conn.execute(
+        "SELECT photo_id FROM edit_history_items",
+    ).fetchone()
+    assert history_item["photo_id"] == photo["id"]
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert db.get_photo_edit_recipe(photo["id"]) is None
 
 
 def test_pairing_does_not_copy_rejected_flag_to_raw(tmp_path):

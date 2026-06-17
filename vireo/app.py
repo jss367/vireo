@@ -16371,6 +16371,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 pass
             db.preview_cache_delete(photo_id, size)  # no-op if no row
 
+        skip_untracked_preview_adoption = False
         if (
             recipe
             and os.path.exists(cache_path)
@@ -16379,7 +16380,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             try:
                 os.remove(cache_path)
             except OSError:
-                pass
+                skip_untracked_preview_adoption = True
+                log.warning(
+                    "Failed to remove stale untracked preview cache %s",
+                    cache_path, exc_info=True,
+                )
 
         # Cache hit (tracked): touch and serve. The touch is best-effort
         # bookkeeping — under concurrent traffic SQLite can raise
@@ -16399,7 +16404,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Read bytes into memory before evicting: eviction may delete the
         # file we just adopted (e.g. preview_cache_max_mb=0), but we can
         # still serve the response from memory — mirrors the miss path.
-        if os.path.exists(cache_path):
+        if not skip_untracked_preview_adoption and os.path.exists(cache_path):
             with open(cache_path, "rb") as f:
                 data = f.read()
             try:

@@ -442,6 +442,16 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
             (primary["id"], companion["id"]),
         )
         if transferred_recipe.rowcount:
+            db.conn.execute(
+                """UPDATE edit_history_items
+                   SET photo_id = ?
+                   WHERE photo_id = ?
+                     AND edit_id IN (
+                         SELECT id FROM edit_history
+                         WHERE action_type = 'edit_recipe'
+                     )""",
+                (primary["id"], companion["id"]),
+            )
             if vireo_dir:
                 _invalidate_derived_caches(
                     db, vireo_dir, primary["id"],
