@@ -833,6 +833,33 @@ def test_export_prefers_developed_tiff_when_jpg_absent(export_env):
     assert b > r and b > g, f"expected blue-dominant from developed TIFF, got rgb=({r},{g},{b})"
 
 
+def test_export_tiff_prefers_developed_tiff_over_developed_jpg(export_env):
+    """TIFF exports use the TIFF developed source when both formats exist."""
+    env = export_env
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(developed_dir / "bird1.jpg"), "JPEG", quality=95,
+    )
+    Image.new("RGB", (800, 600), color=(20, 30, 220)).save(
+        str(developed_dir / "bird1.tiff"), "TIFF",
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "format": "tiff"},
+    )
+
+    assert result["exported"] == 1
+    r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.tiff"))
+    assert b > r and b > g, (
+        f"expected blue-dominant from developed TIFF, got rgb=({r},{g},{b})"
+    )
+
+
 def test_export_falls_back_to_original_when_no_developed(export_env):
     """No developed output → export uses the original file (existing behavior)."""
     env = export_env

@@ -190,6 +190,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             folder_path,
             developed_dir,
             developed_index,
+            preferred_exts=_developed_ext_preference(output_ext),
         )
         # Guard against silent downscaling: darktable's develop job can
         # write the output at --width=N, so a developed file may be
@@ -312,6 +313,14 @@ def _save_export_image(img, out_path, format_info, quality):
 
 
 _PREFERRED_DEVELOPED_EXTS = ("jpg", "jpeg", "tiff", "tif")
+_TIFF_FIRST_DEVELOPED_EXTS = ("tiff", "tif", "jpg", "jpeg")
+
+
+def _developed_ext_preference(output_ext):
+    """Return source developed-output preference for the requested export type."""
+    if output_ext == "tiff":
+        return _TIFF_FIRST_DEVELOPED_EXTS
+    return _PREFERRED_DEVELOPED_EXTS
 
 
 def _get_photo_exif_data(db, photo_ids):
@@ -540,7 +549,7 @@ class _DevelopedDirIndex:
     def __init__(self):
         self._cache = {}
 
-    def lookup(self, base, stem):
+    def lookup(self, base, stem, preferred_exts=None):
         entries = self._cache.get(base)
         if entries is None:
             entries = {}
@@ -574,14 +583,16 @@ class _DevelopedDirIndex:
                 if raw_ext == ext_key and existing_ext != ext_key:
                     entries[key] = os.path.join(base, name)
             self._cache[base] = entries
-        for ext in _PREFERRED_DEVELOPED_EXTS:
+        for ext in preferred_exts or _PREFERRED_DEVELOPED_EXTS:
             path = entries.get((stem, ext))
             if path and os.path.isfile(path):
                 return path
         return None
 
 
-def _find_developed_output(filename, folder_path, developed_dir, index=None):
+def _find_developed_output(
+    filename, folder_path, developed_dir, index=None, preferred_exts=None,
+):
     """Return the path to a darktable-developed output for this photo, or None.
 
     Lookup locations are probed in order:
@@ -611,7 +622,8 @@ def _find_developed_output(filename, folder_path, developed_dir, index=None):
     the same folder on a case-sensitive filesystem) resolve to distinct
     developed files.
 
-    JPG is preferred over TIFF when both exist.
+    JPG is preferred over TIFF when both exist unless the caller passes a
+    TIFF-first preference for TIFF exports.
 
     Pass `index` (a _DevelopedDirIndex) to amortize directory scans
     across many photos in the same export.
@@ -627,7 +639,7 @@ def _find_developed_output(filename, folder_path, developed_dir, index=None):
     if index is None:
         index = _DevelopedDirIndex()
     for base in candidates:
-        hit = index.lookup(base, stem)
+        hit = index.lookup(base, stem, preferred_exts=preferred_exts)
         if hit:
             return hit
     return None
