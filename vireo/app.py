@@ -11998,9 +11998,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 photo["id"], max_size, os.path.getsize(cache_path),
                             )
                 else:
-                    canonical, _using_working_copy = _recipe_render_source(
+                    canonical, using_working_copy = _recipe_render_source(
                         photo, recipe, max_size, vireo_dir, folders,
                     )
+                    from image_loader import RAW_EXTENSIONS
+                    marker_photo = thread_db.get_photo(photo["id"]) or photo
+                    if (
+                        not using_working_copy
+                        and os.path.splitext(canonical)[1].lower() in RAW_EXTENSIONS
+                        and _has_current_working_copy_failure(
+                            marker_photo,
+                            vireo_dir,
+                            trust_existing_working_copy=False,
+                            live_source_path=canonical,
+                            folder_path=folders.get(photo["folder_id"]),
+                        )
+                    ):
+                        skipped += 1
+                        log.info(
+                            "Skipping preview warmup for photo %s; RAW "
+                            "working-copy extraction already failed for "
+                            "current source mtime",
+                            photo["id"],
+                        )
+                        continue
                     load_max_size = (
                         None if recipe and recipe.get("crop") else max_size
                     )
@@ -16415,7 +16436,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return Response(data, mimetype="image/jpeg")
 
         # Cache miss: generate, insert, evict-if-over-quota, serve.
-        from image_loader import load_image
+        from image_loader import RAW_EXTENSIONS, load_image
 
         folder_row = db.conn.execute(
             "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
@@ -16424,27 +16445,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "Not found", 404
         folders = {folder_row["id"]: folder_row["path"]}
 
-        live_source = os.path.join(folder_row["path"], photo["filename"])
-        if _has_current_working_copy_failure(
-            photo, vireo_dir,
-            live_source_path=live_source, folder_path=folder_row["path"],
-        ):
-            log.info(
-                "Skipping preview generation for photo %s; RAW working-copy "
-                "extraction already failed for current source mtime",
-                photo_id,
-            )
-            return "Could not load image", 500
-
         canonical, using_working_copy = _recipe_render_source(
             photo, recipe, size, vireo_dir, folders,
         )
-        if not using_working_copy and _has_current_working_copy_failure(
-            photo,
-            vireo_dir,
-            trust_existing_working_copy=False,
-            live_source_path=live_source,
-            folder_path=folder_row["path"],
+        selected_ext = os.path.splitext(canonical)[1].lower()
+        if (
+            not using_working_copy
+            and selected_ext in RAW_EXTENSIONS
+            and _has_current_working_copy_failure(
+                photo,
+                vireo_dir,
+                trust_existing_working_copy=False,
+                live_source_path=canonical,
+                folder_path=folder_row["path"],
+            )
         ):
             log.info(
                 "Skipping cropped preview generation for photo %s; RAW "

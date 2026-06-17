@@ -91,11 +91,17 @@ def normalize_recipe(recipe):
             abs(x) < 1e-9 and abs(y) < 1e-9
             and abs(w - 1) < 1e-9 and abs(h - 1) < 1e-9
         ):
+            x = round(x, 6)
+            y = round(y, 6)
+            w = round(w, 6)
+            h = round(h, 6)
+            if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > 1 or y + h > 1:
+                raise RecipeError("crop must fit inside normalized image bounds")
             out["crop"] = {
-                "x": round(x, 6),
-                "y": round(y, 6),
-                "w": round(w, 6),
-                "h": round(h, 6),
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
             }
 
     adjustments = recipe.get("adjustments")

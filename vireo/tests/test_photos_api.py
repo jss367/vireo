@@ -1912,6 +1912,59 @@ def test_preview_skips_recent_failed_raw_when_working_copy_path_is_stale(
     assert called["load"] is False
 
 
+def test_cropped_preview_uses_companion_before_raw_failure_marker(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    companion_path = os.path.join(folder["path"], "test.jpg")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='test.jpg',
+               working_copy_path=NULL,
+               width=800, height=600,
+               file_mtime=1234.0,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=1234.0,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+    original_load_image = image_loader.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        loaded_paths.append(file_path)
+        if str(file_path).lower().endswith(".nef"):
+            raise AssertionError("preview retried RAW before companion")
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert rendered.status_code == 200
+    assert loaded_paths == [companion_path]
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (400, 600)
+
+
 def test_preview_retries_raw_when_recent_marker_came_from_companion(
     client_with_photo, monkeypatch,
 ):
@@ -2732,6 +2785,69 @@ def test_preview_job_applies_edit_recipe_to_warmed_file(
     assert db.preview_cache_get(photo_id, 1920) is not None
     with Image.open(preview_path) as img:
         assert img.size == (600, 800)
+
+
+def test_preview_job_honors_raw_failure_marker_after_source_selection(
+    client_with_photo, monkeypatch,
+):
+    import os
+    import time
+
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path=NULL,
+               working_copy_path=NULL,
+               width=800, height=600,
+               file_mtime=1234.0,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=1234.0,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+    original_load_image = image_loader.load_image
+    raw_loads = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        if str(file_path).lower().endswith(".nef"):
+            raw_loads.append(file_path)
+            raise AssertionError("preview warmup retried failed RAW")
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    resp = client.post("/api/jobs/previews", json={})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status_resp = client.get(f"/api/jobs/{job_id}")
+        if status_resp.status_code != 200:
+            time.sleep(0.05)
+            continue
+        data = status_resp.get_json()
+        if data.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert data["status"] == "completed"
+    assert raw_loads == []
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    assert db.preview_cache_get(photo_id, 1920) is None
+    assert not os.path.exists(
+        os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg"),
+    )
 
 
 def test_preview_job_preserves_existing_edited_preview_when_source_missing(

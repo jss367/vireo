@@ -19,6 +19,11 @@ def test_normalize_recipe_rejects_out_of_bounds_crop():
         normalize_recipe({"crop": {"x": 0.5, "y": 0.5, "w": 0.6, "h": 0.6}})
 
 
+def test_normalize_recipe_rejects_crop_that_rounds_out_of_bounds():
+    with pytest.raises(RecipeError, match="crop must fit"):
+        normalize_recipe({"crop": {"x": 0, "y": 0, "w": 0.0000001, "h": 1}})
+
+
 def test_normalize_recipe_rejects_fractional_rotation():
     with pytest.raises(RecipeError, match="rotation"):
         normalize_recipe({"rotation": 90.9})
