@@ -34,6 +34,18 @@ def test_normalize_recipe_rejects_fractional_rotation():
         normalize_recipe({"rotation": 90.9})
 
 
+def test_normalize_recipe_accepts_straighten():
+    assert normalize_recipe({"straighten": 1.23456}) == {
+        "version": 1,
+        "straighten": 1.2346,
+    }
+
+
+def test_normalize_recipe_rejects_out_of_range_straighten():
+    with pytest.raises(RecipeError, match="straighten"):
+        normalize_recipe({"straighten": 46})
+
+
 def test_normalize_recipe_rejects_non_boolean_flip():
     with pytest.raises(RecipeError, match="flip.horizontal"):
         normalize_recipe({"flip": {"horizontal": "false"}})
@@ -114,3 +126,37 @@ def test_apply_recipe_adjusts_exposure_white_balance_contrast_and_saturation():
     assert r > b
     assert g > b
     assert max(r, g, b) > 100
+
+
+def test_apply_recipe_straightens_in_place():
+    img = Image.new("RGB", (100, 60), "white")
+    edited = apply_recipe(img, {"straighten": 3.5})
+
+    assert edited.size == (100, 60)
+
+
+def test_apply_recipe_white_balance_preserves_rgba_alpha():
+    img = Image.new("RGBA", (1, 1), (100, 100, 100, 123))
+    edited = apply_recipe(img, {"adjustments": {"white_balance": {"temperature": 50}}})
+
+    assert edited.mode == "RGBA"
+    assert edited.getpixel((0, 0))[3] == 123
+
+
+def test_apply_recipe_white_balance_preserves_la_alpha():
+    img = Image.new("LA", (1, 1), (100, 123))
+    edited = apply_recipe(img, {"adjustments": {"white_balance": {"temperature": 50}}})
+
+    assert edited.mode == "RGBA"
+    assert edited.getpixel((0, 0))[3] == 123
+
+
+def test_apply_recipe_white_balance_preserves_palette_transparency():
+    img = Image.new("P", (1, 1), 0)
+    img.putpalette([100, 100, 100] + [0, 0, 0] * 255)
+    img.info["transparency"] = bytes([123] * 256)
+
+    edited = apply_recipe(img, {"adjustments": {"white_balance": {"temperature": 50}}})
+
+    assert edited.mode == "RGBA"
+    assert edited.getpixel((0, 0))[3] == 123

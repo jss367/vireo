@@ -31,9 +31,9 @@ def normalize_recipe(recipe):
     """Validate and canonicalize a non-destructive image edit recipe.
 
     The crop rectangle uses normalized coordinates in the image space after
-    rotation and flips have been applied. Rotation is limited to right angles;
-    arbitrary straightening can be added to this schema without changing the
-    storage model.
+    rotation, flips, and straightening have been applied. Rotation is limited
+    to right angles; straightening is a small arbitrary clockwise angle applied
+    in-place so crop coordinates remain stable.
     """
     if recipe in (None, "", {}):
         return None
@@ -57,6 +57,17 @@ def normalize_recipe(recipe):
         raise RecipeError("rotation must be one of 0, 90, 180, or 270")
     if rotation:
         out["rotation"] = rotation
+
+    straighten = recipe.get("straighten", 0)
+    if straighten in (None, ""):
+        straighten = 0
+    if isinstance(straighten, bool) or not isinstance(straighten, (int, float)):
+        raise RecipeError("straighten must be numeric")
+    straighten = float(straighten)
+    if not math.isfinite(straighten) or straighten < -45.0 or straighten > 45.0:
+        raise RecipeError("straighten must be between -45 and 45 degrees")
+    if abs(straighten) > 1e-9:
+        out["straighten"] = round(straighten, 4)
 
     flip = recipe.get("flip")
     if flip is None:
@@ -187,9 +198,11 @@ def _apply_white_balance(img, white_balance):
     if abs(temperature) < 1e-9 and abs(tint) < 1e-9:
         return img
 
-    has_alpha = img.mode == "RGBA"
+    has_alpha = "A" in img.getbands() or "transparency" in img.info
     if img.mode not in ("RGB", "RGBA"):
-        img = img.convert("RGB")
+        img = img.convert("RGBA" if has_alpha else "RGB")
+    elif img.mode == "RGB" and "transparency" in img.info:
+        img = img.convert("RGBA")
 
     bands = img.split()
     red_gain = 1.0 + (0.26 * temperature) + (0.06 * tint)
@@ -204,7 +217,7 @@ def _apply_white_balance(img, white_balance):
         bands[1].point(_channel_lut(green_gain)),
         bands[2].point(_channel_lut(blue_gain)),
     )
-    if has_alpha:
+    if "A" in img.getbands():
         return Image.merge("RGBA", adjusted + (bands[3],))
     return Image.merge("RGB", adjusted)
 
@@ -228,6 +241,14 @@ def apply_recipe(img, recipe):
         result = result.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
     if flip.get("vertical"):
         result = result.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+
+    straighten = normalized.get("straighten", 0)
+    if straighten:
+        result = result.rotate(
+            -straighten,
+            resample=Image.Resampling.BICUBIC,
+            expand=False,
+        )
 
     crop = normalized.get("crop")
     if crop:

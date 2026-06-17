@@ -562,6 +562,72 @@ def test_export_photos_collision_renames(export_env):
     assert os.path.isfile(os.path.join(env["dest"], "photo_2.jpg"))
 
 
+def test_export_photos_convert_png_batch_deduplicates_extension(export_env):
+    """Batch conversion uses the selected extension for every output/collision."""
+    env = export_env
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"], env["p2"]],
+        destination=env["dest"],
+        options={"naming_template": "converted", "format": "png"},
+    )
+
+    assert result["exported"] == 2
+    first = os.path.join(env["dest"], "converted.png")
+    second = os.path.join(env["dest"], "converted_2.png")
+    assert os.path.isfile(first)
+    assert os.path.isfile(second)
+    assert not os.path.exists(os.path.join(env["dest"], "converted.jpg"))
+    with Image.open(first) as img:
+        assert img.format == "PNG"
+    with Image.open(second) as img:
+        assert img.format == "PNG"
+
+
+def test_export_photos_convert_tiff_applies_recipe_and_resize(export_env):
+    """Converted exports still apply edit recipes before final resizing."""
+    env = export_env
+    env["db"].set_photo_edit_recipe(
+        env["p1"],
+        {
+            "rotation": 90,
+            "crop": {"x": 0, "y": 0, "w": 0.5, "h": 1},
+        },
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "format": "tiff",
+            "max_size": 400,
+        },
+    )
+
+    assert result["exported"] == 1
+    out_path = os.path.join(env["dest"], "bird1.tiff")
+    with Image.open(out_path) as img:
+        assert img.format == "TIFF"
+        assert img.size == (150, 400)
+
+
+def test_export_rejects_unknown_output_format(export_env):
+    """Unknown export formats fail before writing partial outputs."""
+    env = export_env
+    with pytest.raises(ValueError, match="format must be one of"):
+        export_photos(
+            db=env["db"],
+            vireo_dir=env["vireo_dir"],
+            photo_ids=[env["p1"]],
+            destination=env["dest"],
+            options={"naming_template": "{original}", "format": "bmp"},
+        )
+
+
 def test_export_photos_quality(export_env):
     """export_photos respects quality setting."""
     env = export_env
@@ -799,6 +865,90 @@ def test_export_prefers_developed_tiff_when_jpg_absent(export_env):
     assert result["exported"] == 1
     r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.jpg"))
     assert b > r and b > g, f"expected blue-dominant from developed TIFF, got rgb=({r},{g},{b})"
+
+
+def test_export_tiff_prefers_developed_tiff_over_developed_jpg(export_env):
+    """TIFF exports use the TIFF developed source when both formats exist."""
+    env = export_env
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(developed_dir / "bird1.jpg"), "JPEG", quality=95,
+    )
+    Image.new("RGB", (800, 600), color=(20, 30, 220)).save(
+        str(developed_dir / "bird1.tiff"), "TIFF",
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "format": "tiff"},
+    )
+
+    assert result["exported"] == 1
+    r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.tiff"))
+    assert b > r and b > g, (
+        f"expected blue-dominant from developed TIFF, got rgb=({r},{g},{b})"
+    )
+
+
+def test_export_png_prefers_developed_tiff_over_developed_jpg(export_env):
+    """PNG exports use the best developed source instead of stale JPEG."""
+    env = export_env
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(developed_dir / "bird1.jpg"), "JPEG", quality=95,
+    )
+    Image.new("RGB", (800, 600), color=(20, 30, 220)).save(
+        str(developed_dir / "bird1.tiff"), "TIFF",
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "format": "png"},
+    )
+
+    assert result["exported"] == 1
+    r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.png"))
+    assert b > r and b > g, (
+        f"expected blue-dominant from developed TIFF, got rgb=({r},{g},{b})"
+    )
+
+
+def test_export_tries_next_developed_candidate_when_preferred_is_too_small(export_env):
+    """A too-small preferred developed file should not hide a usable fallback."""
+    env = export_env
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(developed_dir / "bird1.jpg"), "JPEG", quality=95,
+    )
+    Image.new("RGB", (200, 150), color=(20, 30, 220)).save(
+        str(developed_dir / "bird1.tiff"), "TIFF",
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "format": "png", "max_size": 400},
+    )
+
+    assert result["exported"] == 1
+    out_path = os.path.join(env["dest"], "bird1.png")
+    with Image.open(out_path) as img:
+        assert max(img.size) == 400
+    r, g, b = _avg_rgb(out_path)
+    assert g > r and g > b, (
+        f"expected green-dominant from sufficient developed JPG, got rgb=({r},{g},{b})"
+    )
 
 
 def test_export_falls_back_to_original_when_no_developed(export_env):

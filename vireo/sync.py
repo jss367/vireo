@@ -8,6 +8,7 @@ from xmp import (
     read_keywords,
     remove_keywords,
     remove_vireo_gps_location,
+    write_edit_recipe,
     write_gps_location,
     write_pick_flag,
     write_rating,
@@ -108,6 +109,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
             keywords_to_remove = set()
             new_rating = None
             new_flag = None
+            edit_recipe_json = None
             sync_location = False
             cleanup_location = False
             supported_ids = []
@@ -135,6 +137,9 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
                         sync_location = True
                     else:
                         cleanup_location = True
+                elif c["change_type"] == "edit_recipe":
+                    edit_recipe_json = c["value"] or ""
+                    supported_ids.append(c["id"])
 
             # Write keywords
             if keywords_to_add:
@@ -169,6 +174,9 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
                     remove_vireo_gps_location(xmp_path)
             elif cleanup_location:
                 remove_vireo_gps_location(xmp_path)
+
+            if edit_recipe_json is not None:
+                write_edit_recipe(xmp_path, edit_recipe_json)
 
             if supported_ids:
                 synced += 1

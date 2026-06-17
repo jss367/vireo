@@ -16,11 +16,42 @@ log = logging.getLogger(__name__)
 # Characters not allowed in filenames (covers Windows + macOS + Linux)
 _UNSAFE_RE = re.compile(r'[<>:"/|?*\\]')
 _EXIF_ORIENTATION_TAG = 274
+_OUTPUT_FORMATS = {
+    "jpg": {"extension": "jpg", "pil_format": "JPEG", "quality": True},
+    "jpeg": {"extension": "jpg", "pil_format": "JPEG", "quality": True},
+    "png": {"extension": "png", "pil_format": "PNG", "quality": False},
+    "tif": {"extension": "tiff", "pil_format": "TIFF", "quality": False},
+    "tiff": {"extension": "tiff", "pil_format": "TIFF", "quality": False},
+}
 
 
 def sanitize_filename(name):
     """Replace filesystem-unsafe characters with underscores."""
     return _UNSAFE_RE.sub("_", name)
+
+
+def normalize_output_format(output_format):
+    """Return export format metadata for a user/API format value."""
+    fmt = str(output_format or "jpg").strip().lower()
+    if fmt not in _OUTPUT_FORMATS:
+        supported = ", ".join(sorted({"jpg", "png", "tiff"}))
+        raise ValueError(f"format must be one of: {supported}")
+    return _OUTPUT_FORMATS[fmt]
+
+
+def normalize_quality(quality, default=92):
+    """Return an integer JPEG quality in Pillow's accepted 1-100 range."""
+    if quality in (None, ""):
+        quality = default
+    if isinstance(quality, bool):
+        raise ValueError("quality must be an integer from 1 to 100")
+    try:
+        value = int(quality)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("quality must be an integer from 1 to 100") from exc
+    if value < 1 or value > 100:
+        raise ValueError("quality must be an integer from 1 to 100")
+    return value
 
 
 def resolve_template(template, photo, species=None, seq=1):
@@ -75,6 +106,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         options: dict with keys:
             naming_template: str (default "{original}")
             max_size: int or None -- max long-edge pixels
+            format: str -- output format: jpg, png, or tiff (default jpg)
             quality: int 1-100 (default 92)
             working_copy_max_size: int -- the cap used when generating
                 working copies (default 4096); used to decide whether
@@ -103,7 +135,11 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
     max_size = options.get("max_size")
     if max_size is not None:
         max_size = int(max_size)
-    quality = options.get("quality", 92)
+    format_info = normalize_output_format(
+        options.get("format", options.get("output_format", "jpg"))
+    )
+    output_ext = format_info["extension"]
+    quality = normalize_quality(options.get("quality", 92))
     try:
         wc_max = int(options.get("working_copy_max_size", 4096))
     except (ValueError, TypeError):
@@ -149,21 +185,24 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         folder_path = folders.get(photo["folder_id"], "")
         recipe = edit_recipes.get(pid)
         exif_data = exif_data_map.get(pid)
-        source_path = _find_developed_output(
+        source_path = None
+        for dev_candidate in _iter_developed_outputs(
             photo["filename"],
             folder_path,
             developed_dir,
             developed_index,
-        )
-        # Guard against silent downscaling: darktable's develop job can
-        # write the output at --width=N, so a developed file may be
-        # smaller than the original. If it can't satisfy the requested
-        # export size, fall through to the working-copy / original
-        # source.
-        if source_path and not _developed_can_satisfy_size(
-            source_path, photo, max_size, recipe, exif_data=exif_data
+            preferred_exts=_developed_ext_preference(output_ext),
         ):
-            source_path = None
+            # Guard against silent downscaling: darktable's develop job
+            # can write the output at --width=N, so a developed file may
+            # be smaller than the original. Keep trying lower-preference
+            # developed candidates before falling through to the working
+            # copy / original source.
+            if _developed_can_satisfy_size(
+                dev_candidate, photo, max_size, recipe, exif_data=exif_data
+            ):
+                source_path = dev_candidate
+                break
         if not source_path:
             use_wc = _working_copy_can_satisfy_export(
                 photo, recipe, max_size, wc_max, vireo_dir, exif_data=exif_data
@@ -210,7 +249,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         # Guard against path traversal: strip leading slashes/dots so that
         # absolute paths and ".." segments cannot escape the destination dir.
         rel_path_safe = os.path.normpath(rel_path).lstrip(os.sep + ".")
-        out_path = os.path.join(destination, rel_path_safe + ".jpg")
+        out_path = os.path.join(destination, rel_path_safe + f".{output_ext}")
         # Final containment check: resolved path must start with destination.
         # dest_real may already end with os.sep when destination is a root dir
         # (e.g. "/" on POSIX), so avoid doubling the separator.
@@ -244,7 +283,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                 continue
             if recipe:
                 img = apply_recipe_to_loaded_image(img, recipe, max_size=max_size)
-            img.save(out_path, "JPEG", quality=quality)
+            _save_export_image(img, out_path, format_info, quality)
             img.close()
             exported += 1
         except Exception as exc:
@@ -257,7 +296,33 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
     return {"exported": exported, "errors": errors, "destination": destination}
 
 
+def _save_export_image(img, out_path, format_info, quality):
+    """Save a rendered export image in the requested output format."""
+    pil_format = format_info["pil_format"]
+    save_img = img
+    if pil_format == "JPEG" and img.mode not in ("RGB", "L"):
+        save_img = img.convert("RGB")
+    save_kwargs = {}
+    if format_info["quality"]:
+        save_kwargs["quality"] = quality
+    elif pil_format == "TIFF":
+        save_kwargs["compression"] = "tiff_lzw"
+    try:
+        save_img.save(out_path, pil_format, **save_kwargs)
+    finally:
+        if save_img is not img:
+            save_img.close()
+
+
 _PREFERRED_DEVELOPED_EXTS = ("jpg", "jpeg", "tiff", "tif")
+_TIFF_FIRST_DEVELOPED_EXTS = ("tiff", "tif", "jpg", "jpeg")
+
+
+def _developed_ext_preference(output_ext):
+    """Return source developed-output preference for the requested export type."""
+    if output_ext != "jpg":
+        return _TIFF_FIRST_DEVELOPED_EXTS
+    return _PREFERRED_DEVELOPED_EXTS
 
 
 def _get_photo_exif_data(db, photo_ids):
@@ -486,7 +551,7 @@ class _DevelopedDirIndex:
     def __init__(self):
         self._cache = {}
 
-    def lookup(self, base, stem):
+    def _entries_for_base(self, base):
         entries = self._cache.get(base)
         if entries is None:
             entries = {}
@@ -520,15 +585,25 @@ class _DevelopedDirIndex:
                 if raw_ext == ext_key and existing_ext != ext_key:
                     entries[key] = os.path.join(base, name)
             self._cache[base] = entries
-        for ext in _PREFERRED_DEVELOPED_EXTS:
+        return entries
+
+    def iter_matches(self, base, stem, preferred_exts=None):
+        entries = self._entries_for_base(base)
+        for ext in preferred_exts or _PREFERRED_DEVELOPED_EXTS:
             path = entries.get((stem, ext))
             if path and os.path.isfile(path):
-                return path
+                yield path
+
+    def lookup(self, base, stem, preferred_exts=None):
+        for path in self.iter_matches(base, stem, preferred_exts=preferred_exts):
+            return path
         return None
 
 
-def _find_developed_output(filename, folder_path, developed_dir, index=None):
-    """Return the path to a darktable-developed output for this photo, or None.
+def _iter_developed_outputs(
+    filename, folder_path, developed_dir, index=None, preferred_exts=None,
+):
+    """Yield darktable-developed outputs for this photo in preference order.
 
     Lookup locations are probed in order:
 
@@ -557,7 +632,8 @@ def _find_developed_output(filename, folder_path, developed_dir, index=None):
     the same folder on a case-sensitive filesystem) resolve to distinct
     developed files.
 
-    JPG is preferred over TIFF when both exist.
+    JPG is preferred over TIFF when both exist unless the caller passes a
+    TIFF-first preference for TIFF exports.
 
     Pass `index` (a _DevelopedDirIndex) to amortize directory scans
     across many photos in the same export.
@@ -573,9 +649,17 @@ def _find_developed_output(filename, folder_path, developed_dir, index=None):
     if index is None:
         index = _DevelopedDirIndex()
     for base in candidates:
-        hit = index.lookup(base, stem)
-        if hit:
-            return hit
+        yield from index.iter_matches(base, stem, preferred_exts=preferred_exts)
+
+
+def _find_developed_output(
+    filename, folder_path, developed_dir, index=None, preferred_exts=None,
+):
+    """Return the first darktable-developed output for this photo, or None."""
+    for path in _iter_developed_outputs(
+        filename, folder_path, developed_dir, index, preferred_exts=preferred_exts,
+    ):
+        return path
     return None
 
 
