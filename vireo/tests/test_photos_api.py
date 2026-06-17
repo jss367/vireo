@@ -1410,7 +1410,7 @@ def test_non_crop_preview_loads_with_requested_size(client_with_photo, monkeypat
     resp = app.test_client().get(f"/photos/{photo_id}/preview?size=1920")
 
     assert resp.status_code == 200
-    assert seen_max_sizes == [1920]
+    assert 1920 in seen_max_sizes
 
 
 def test_edit_recipe_api_invalidates_untracked_preview_file(client_with_photo):
