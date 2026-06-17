@@ -3402,6 +3402,7 @@ function _lbSaveAdjustmentRecipe(values) {
       });
     })
     .then(function(data) {
+      if (_lightboxCurrentId === photoId && seq !== _lbAdjustSeq) return;
       _lbBumpRecipeBust(photoId);
       _lbRefreshVisiblePhotoImages(photoId);
       try {
@@ -3431,6 +3432,7 @@ function _lbFlushPendingAdjustmentSave() {
 function onLightboxAdjustmentInput(input) {
   var label = document.getElementById(input.id + 'Value');
   if (label) label.textContent = _lbFormatAdjustmentValue(input.dataset.adjustment, input.value);
+  _lbAdjustSeq += 1;
   var values = _lbReadAdjustmentControls();
   _lbEditRecipe = _lbRecipeWithAdjustments(values);
   _lbApplyAdjustmentPreviewCss(values);
