@@ -5,8 +5,9 @@ import json
 import logging
 import os
 import tempfile
+from datetime import UTC, datetime
 
-from image_loader import get_canonical_image_path, load_image
+from image_loader import RAW_EXTENSIONS, get_canonical_image_path, load_image
 
 log = logging.getLogger(__name__)
 
@@ -149,6 +150,36 @@ def _recipe_source_path(photo, recipe, max_size, vireo_dir, folders):
     return original
 
 
+def _has_current_raw_failure(photo, source_path):
+    if os.path.splitext(source_path or "")[1].lower() not in RAW_EXTENSIONS:
+        return False
+    if os.path.splitext(_photo_value(photo, "filename") or "")[1].lower() not in RAW_EXTENSIONS:
+        return False
+    if _photo_value(photo, "working_copy_failed_source") not in (None, "source"):
+        return False
+    failed_at = _photo_value(photo, "working_copy_failed_at")
+    failed_mtime = _photo_value(photo, "working_copy_failed_mtime")
+    file_mtime = _photo_value(photo, "file_mtime")
+    if not failed_at or failed_mtime is None or file_mtime is None:
+        return False
+    try:
+        if float(failed_mtime) != float(file_mtime):
+            return False
+    except (TypeError, ValueError):
+        return False
+    try:
+        failed_s = str(failed_at).strip()
+        if failed_s.endswith("Z"):
+            failed_s = failed_s[:-1] + "+00:00"
+        failed_dt = datetime.fromisoformat(failed_s)
+        if failed_dt.tzinfo is None:
+            failed_dt = failed_dt.replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return False
+    age = (datetime.now(UTC) - failed_dt.astimezone(UTC)).total_seconds()
+    return age < 24 * 60 * 60
+
+
 def generate_thumbnail(
     photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85, recipe=None,
 ):
@@ -253,9 +284,15 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
         # have a vireo_dir; fall back to a raw folder+filename join for
         # callers that don't pass it.
         recipe = db.get_photo_edit_recipe(photo["id"])
+        source_photo = db.get_photo(photo["id"]) if recipe and vireo_dir else photo
+        if source_photo is None:
+            source_photo = photo
         source_path = _recipe_source_path(
-            photo, recipe, thumb_size, vireo_dir, folders,
+            source_photo, recipe, thumb_size, vireo_dir, folders,
         )
+        if recipe and _has_current_raw_failure(source_photo, source_path):
+            failed += 1
+            continue
         # generate_thumbnail decodes the source image (slow for RAW). Run
         # it before any UPDATE so no transaction is open while it runs;
         # then commit per photo to release the writer lock between

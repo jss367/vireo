@@ -294,6 +294,70 @@ def test_generate_all_does_not_record_thumb_path_on_failure(tmp_path, monkeypatc
     assert row["thumb_path"] is None
 
 
+def test_generate_all_skips_current_raw_marker_after_crop_rejects_working_copy(
+    tmp_path, monkeypatch,
+):
+    """Batch thumbnails must not retry a RAW that has a current source failure."""
+    import thumbnails as thumbnails_mod
+    from db import Database
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    raw_path = photos_dir / "bad.NEF"
+    raw_path.write_bytes(b"not a decodable raw")
+
+    vireo_dir = tmp_path / "vireo"
+    working_dir = vireo_dir / "working"
+    working_dir.mkdir(parents=True)
+    wc_path = working_dir / "1.jpg"
+    Image.new("RGB", (200, 150), color="red").save(wc_path, "JPEG")
+
+    db = Database(str(vireo_dir / "test.db"))
+    fid = db.add_folder(str(photos_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id=fid,
+        filename="bad.NEF",
+        extension=".nef",
+        file_size=raw_path.stat().st_size,
+        file_mtime=raw_path.stat().st_mtime,
+        width=800,
+        height=600,
+    )
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,),
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET working_copy_path=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        ("working/1.jpg", file_mtime, photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("batch thumbnail generation retried failed RAW")
+
+    monkeypatch.setattr(thumbnails_mod, "generate_thumbnail", fail_if_called)
+
+    result = thumbnails_mod.generate_all(
+        db, str(vireo_dir / "thumbnails"), vireo_dir=str(vireo_dir),
+    )
+
+    assert result["generated"] == 0
+    assert result["failed"] == 1
+    row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id=?", (photo_id,),
+    ).fetchone()
+    assert row["thumb_path"] is None
+
+
 def test_backfill_thumb_paths_sets_path_for_existing_files(tmp_path):
     """Library-wide backfill should mark photos whose thumbnail JPEG exists on
     disk but whose thumb_path is NULL (the dashboard-coverage repair pass)."""
