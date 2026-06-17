@@ -3231,6 +3231,7 @@ var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated 
 var _lbViewportByPhotoId = {};  // per-session lightbox viewport cache keyed by photo id
 var _lbPendingViewportState = null;
 var _lbEditRecipe = null;
+var _lbEditRecipeLoaded = false;
 var _lbRenderedAdjustmentValues = null;
 var _lbAdjustSaveTimer = null;
 var _lbAdjustSeq = 0;
@@ -3276,6 +3277,19 @@ function _lbSetAdjustmentControl(id, value) {
   if (label && input) {
     label.textContent = _lbFormatAdjustmentValue(input.dataset.adjustment, value);
   }
+}
+
+function _lbSetAdjustmentControlsDisabled(disabled) {
+  [
+    'lbAdjExposure',
+    'lbAdjContrast',
+    'lbAdjTemperature',
+    'lbAdjTint',
+    'lbAdjSaturation',
+  ].forEach(function(id) {
+    var input = document.getElementById(id);
+    if (input) input.disabled = !!disabled;
+  });
 }
 
 function _lbRenderAdjustmentControls() {
@@ -3400,7 +3414,7 @@ function _lbReloadEditedSource(photoId, seq) {
 }
 
 function _lbSaveAdjustmentRecipe(values) {
-  if (!_lightboxCurrentId) return;
+  if (!_lightboxCurrentId || !_lbEditRecipeLoaded) return;
   var photoId = _lightboxCurrentId;
   var seq = ++_lbAdjustSeq;
   var recipe = _lbRecipeWithAdjustments(values);
@@ -3446,6 +3460,11 @@ function _lbFlushPendingAdjustmentSave() {
 }
 
 function onLightboxAdjustmentInput(input) {
+  if (!_lbEditRecipeLoaded) {
+    _lbSetAdjustmentStatus('Loading recipe...');
+    _lbRenderAdjustmentControls();
+    return;
+  }
   var label = document.getElementById(input.id + 'Value');
   if (label) label.textContent = _lbFormatAdjustmentValue(input.dataset.adjustment, input.value);
   _lbAdjustSeq += 1;
@@ -3461,6 +3480,10 @@ function onLightboxAdjustmentInput(input) {
 }
 
 function resetLightboxAdjustments() {
+  if (!_lbEditRecipeLoaded) {
+    _lbSetAdjustmentStatus('Loading recipe...');
+    return;
+  }
   _lbSetAdjustmentControl('lbAdjExposure', 0);
   _lbSetAdjustmentControl('lbAdjContrast', 0);
   _lbSetAdjustmentControl('lbAdjTemperature', 0);
@@ -3483,7 +3506,11 @@ function toggleLightboxAdjustPanel() {
   var open = !panel.classList.contains('open');
   panel.classList.toggle('open', open);
   if (btn) btn.textContent = open ? 'Hide Adjust' : 'Adjust';
-  if (open) _lbRenderAdjustmentControls();
+  if (open) {
+    _lbRenderAdjustmentControls();
+    _lbSetAdjustmentControlsDisabled(!_lbEditRecipeLoaded);
+    _lbSetAdjustmentStatus(_lbEditRecipeLoaded ? '' : 'Loading recipe...');
+  }
 }
 
 function _lbIsOneToOneZoom() {
@@ -4268,6 +4295,7 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbPendingViewportState = restoreViewportState;
   _lbOriginalUnavailable = false;
   _lbEditRecipe = null;
+  _lbEditRecipeLoaded = false;
   _lbRenderedAdjustmentValues = _lbAdjustmentValues(null);
   if (_lbAdjustSaveTimer) {
     clearTimeout(_lbAdjustSaveTimer);
@@ -4276,6 +4304,7 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbAdjustSeq += 1;
   _lbClearAdjustmentPreviewCss();
   _lbRenderAdjustmentControls();
+  _lbSetAdjustmentControlsDisabled(true);
   _lbSetAdjustmentStatus('');
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
@@ -4293,8 +4322,11 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbCurrentWildlifeExcluded = !!data.wildlife_excluded;
       if (editFetchSeq === _lbAdjustSeq) {
         _lbEditRecipe = _lbCloneRecipe(data.edit_recipe || {});
+        _lbEditRecipeLoaded = true;
         _lbRenderedAdjustmentValues = _lbAdjustmentValues(_lbEditRecipe);
         _lbRenderAdjustmentControls();
+        _lbSetAdjustmentControlsDisabled(false);
+        _lbSetAdjustmentStatus('');
       }
       _lbApplyWildlifeExcludedButton();
       _lbRecordFetchedFlag(photoId, data.flag, flagFetchSeq);
@@ -4302,7 +4334,10 @@ function openLightbox(photoId, filename, photoList, options) {
       if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
       _lbRenderEyeCrosshair(data);
     })
-    .catch(function() {});
+    .catch(function() {
+      if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
+      _lbSetAdjustmentStatus('Could not load recipe', true);
+    });
 
   function handleInitialImageLoad() {
     img.onload = null;
