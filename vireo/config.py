@@ -211,13 +211,13 @@ def load():
 def _replace_with_windows_retry(src, dst):
     # On Windows, ``os.replace`` can transiently raise ``PermissionError``
     # ([WinError 5] / [WinError 32]) when Defender or the Search indexer
-    # holds the destination open for a moment after a previous write — this
-    # surfaces as test flake on CI when two saves run back-to-back. Retry
-    # with a short backoff before giving up.
+    # holds the destination open for a moment after a previous write. GitHub's
+    # Windows runners can hold temp config files for several seconds, so keep
+    # retrying with bounded backoff before giving up.
     if sys.platform != "win32":
         os.replace(src, dst)
         return
-    delays = (0.0, 0.05, 0.1, 0.2, 0.4, 0.8)
+    delays = (0.0, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2)
     last_exc = None
     for delay in delays:
         if delay:
