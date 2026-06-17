@@ -328,6 +328,38 @@ def remove_vireo_gps_location(xmp_path):
     return removed
 
 
+def write_edit_recipe(xmp_path, recipe_json):
+    """Write or clear Vireo's non-destructive edit recipe marker."""
+    recipe_json = recipe_json or ""
+    recipe_attr = f"{{{NS_VIREO}}}editRecipe"
+    version_attr = f"{{{NS_VIREO}}}editRecipeSchema"
+
+    if recipe_json:
+        root, tree = _load_or_create_xmp(xmp_path)
+        desc = _get_or_create_description(root)
+        desc.set(recipe_attr, recipe_json)
+        desc.set(version_attr, "1")
+    else:
+        result = _parse_xmp(xmp_path)
+        if result is None:
+            return False
+        root, tree = result
+        desc = root.find(f".//{{{NS_RDF}}}Description")
+        if desc is None:
+            return False
+        removed = False
+        for attr in (recipe_attr, version_attr):
+            if attr in desc.attrib:
+                del desc.attrib[attr]
+                removed = True
+        if not removed:
+            return False
+
+    ET.indent(tree, space="  ")
+    tree.write(xmp_path, xml_declaration=True, encoding="unicode")
+    return True
+
+
 def remove_keywords(xmp_path, keywords_to_remove):
     """Remove keywords from dc:subject and lr:hierarchicalSubject in an XMP file.
 

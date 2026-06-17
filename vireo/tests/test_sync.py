@@ -79,6 +79,51 @@ def test_sync_to_xmp_writes_rating(tmp_path):
     assert rating == '4'
 
 
+def test_sync_to_xmp_writes_edit_recipe(tmp_path):
+    """sync_to_xmp writes Vireo edit recipes to XMP sidecars."""
+    from db import Database
+    from sync import sync_to_xmp
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    db.queue_change(
+        pid,
+        "edit_recipe",
+        '{"crop":{"h":0.8,"w":0.7,"x":0.1,"y":0.1},"version":1}',
+    )
+
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+    content = open(xmp_path).read()
+    assert "vireo:editRecipe" in content
+    assert "&quot;crop&quot;" in content
+    assert len(db.get_pending_changes()) == 0
+
+
+def test_sync_to_xmp_clears_edit_recipe_marker(tmp_path):
+    """An empty edit_recipe change removes Vireo's XMP recipe marker."""
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import write_edit_recipe
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    write_edit_recipe(xmp_path, '{"rotation":90,"version":1}')
+
+    db.queue_change(pid, "edit_recipe", "")
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 1
+    assert "vireo:editRecipe" not in open(xmp_path).read()
+
+
 def test_sync_to_xmp_limits_sync_to_selected_change_ids(tmp_path):
     """sync_to_xmp can write only the checked pending changes."""
     from xml.etree import ElementTree as ET

@@ -1393,6 +1393,83 @@ def test_edit_recipe_api_invalidates_preview_cache_and_renders(client_with_photo
         assert img.size == (600, 800)
 
 
+def test_edit_recipe_api_queues_xmp_sync(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"straighten": 2.5}},
+    )
+
+    assert resp.status_code == 200
+    changes = db.get_pending_changes()
+    assert len(changes) == 1
+    assert changes[0]["photo_id"] == photo_id
+    assert changes[0]["change_type"] == "edit_recipe"
+    assert '"straighten":2.5' in changes[0]["value"]
+
+
+def test_edit_preview_renders_uncommitted_recipe_without_storing(client_with_photo):
+    import io
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    rendered = client.get(
+        f"/photos/{photo_id}/edit-preview",
+        query_string={
+            "size": "1920",
+            "recipe": '{"rotation":90,"crop":{"x":0,"y":0,"w":0.5,"h":0.5}}',
+        },
+    )
+
+    assert rendered.status_code == 200
+    assert db.get_photo_edit_recipe(photo_id) is None
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
+
+
+def test_edit_preview_skips_recent_failed_raw_before_decode(
+    client_with_photo, monkeypatch,
+):
+    """The crop editor preview should not retry known-bad RAW decodes."""
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"load": False}
+
+    def fail_load_if_called(*_args, **_kwargs):
+        called["load"] = True
+        raise AssertionError("edit-preview retried failed RAW decode")
+
+    monkeypatch.setattr(image_loader, "load_image", fail_load_if_called)
+
+    resp = app.test_client().get(
+        f"/photos/{photo_id}/edit-preview",
+        query_string={"recipe": '{"straighten":1.5}'},
+    )
+
+    assert resp.status_code == 500
+    assert called["load"] is False
+
+
 def test_non_crop_preview_loads_with_requested_size(client_with_photo, monkeypatch):
     import image_loader
 
@@ -1957,10 +2034,16 @@ def test_edit_recipe_api_undo_redo(client_with_photo):
 
     undo = client.post("/api/undo")
     assert undo.status_code == 200
+    assert undo.get_json()["action_type"] == "edit_recipe"
+    assert undo.get_json()["edit_recipes"] == {str(photo_id): None}
     assert db.get_photo_edit_recipe(photo_id) is None
 
     redo = client.post("/api/redo")
     assert redo.status_code == 200
+    assert redo.get_json()["action_type"] == "edit_recipe"
+    assert redo.get_json()["edit_recipes"] == {
+        str(photo_id): {"rotation": 180, "version": 1}
+    }
     assert db.get_photo_edit_recipe(photo_id)["rotation"] == 180
 
 

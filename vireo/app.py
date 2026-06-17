@@ -1549,6 +1549,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 log.warning("Failed to remove stale original cache %s", original_cache)
         db.conn.commit()
 
+    def _queue_edit_recipe_sync(db, photo_id, recipe_json):
+        """Queue the current non-destructive edit recipe for XMP sync."""
+        db.remove_pending_changes(
+            photo_id, "edit_recipe", workspace_id=db._ws_id(), _commit=False,
+        )
+        db.queue_change(
+            photo_id, "edit_recipe", recipe_json or "",
+            workspace_id=db._ws_id(), _commit=False,
+        )
+        db.conn.commit()
+
     def _rendered_recipe_long_edge(width, height, recipe):
         rotation = (recipe or {}).get("rotation", 0)
         if rotation in (90, 270):
@@ -3871,6 +3882,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), 403)
         _invalidate_photo_render_cache(db, [photo_id])
         if old_value != new_value:
+            _queue_edit_recipe_sync(db, photo_id, new_value)
             db.record_edit(
                 "edit_recipe",
                 "Updated photo edit recipe",
@@ -3894,6 +3906,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), 403)
         _invalidate_photo_render_cache(db, [photo_id])
         if old_value:
+            _queue_edit_recipe_sync(db, photo_id, "")
             db.record_edit(
                 "edit_recipe",
                 "Cleared photo edit recipe",
@@ -5387,13 +5400,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = db.undo_last_edit()
         if result is None:
             return json_error("nothing to undo")
+        edit_recipe_updates = None
         if result.get("action_type") == "edit_recipe":
+            from image_edits import recipe_to_json
             rows = db.conn.execute(
                 "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
                 (result["id"],),
             ).fetchall()
-            _invalidate_photo_render_cache(db, [r["photo_id"] for r in rows])
-        return jsonify({"ok": True, "undone": result["description"]})
+            photo_ids = [r["photo_id"] for r in rows]
+            _invalidate_photo_render_cache(db, photo_ids)
+            edit_recipe_updates = {}
+            for pid in photo_ids:
+                recipe = db.get_photo_edit_recipe(pid)
+                edit_recipe_updates[str(pid)] = recipe
+                _queue_edit_recipe_sync(
+                    db, pid, recipe_to_json(recipe) or "",
+                )
+        response = {"ok": True, "undone": result["description"]}
+        if edit_recipe_updates is not None:
+            response["action_type"] = "edit_recipe"
+            response["edit_recipes"] = edit_recipe_updates
+        return jsonify(response)
 
     @app.route("/api/undo/status")
     def api_undo_status():
@@ -5424,13 +5451,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = db.redo_last_undo()
         if result is None:
             return json_error("nothing to redo")
+        edit_recipe_updates = None
         if result.get("action_type") == "edit_recipe":
+            from image_edits import recipe_to_json
             rows = db.conn.execute(
                 "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
                 (result["id"],),
             ).fetchall()
-            _invalidate_photo_render_cache(db, [r["photo_id"] for r in rows])
-        return jsonify({"ok": True, "redone": result["description"]})
+            photo_ids = [r["photo_id"] for r in rows]
+            _invalidate_photo_render_cache(db, photo_ids)
+            edit_recipe_updates = {}
+            for pid in photo_ids:
+                recipe = db.get_photo_edit_recipe(pid)
+                edit_recipe_updates[str(pid)] = recipe
+                _queue_edit_recipe_sync(
+                    db, pid, recipe_to_json(recipe) or "",
+                )
+        response = {"ok": True, "redone": result["description"]}
+        if edit_recipe_updates is not None:
+            response["action_type"] = "edit_recipe"
+            response["edit_recipes"] = edit_recipe_updates
+        return jsonify(response)
 
     @app.route("/api/redo/status")
     def api_redo_status():
@@ -16887,6 +16928,80 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if size not in allowed_preview_sizes():
             return "Unsupported size", 400
         return _serve_preview(photo_id, size)
+
+    @app.route("/photos/<int:photo_id>/edit-preview")
+    def serve_photo_edit_preview(photo_id):
+        """Serve an uncropped preview for an in-progress edit recipe."""
+        import io
+
+        import config as cfg
+
+        db = _get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return "Not found", 404
+        try:
+            size = int(request.args.get("size", "1920"))
+        except ValueError:
+            return "Invalid size", 400
+        size = max(256, min(3840, size))
+
+        raw_recipe = request.args.get("recipe")
+        if raw_recipe:
+            try:
+                recipe = json.loads(raw_recipe)
+            except (TypeError, ValueError):
+                return "Invalid recipe", 400
+        else:
+            recipe = db.get_photo_edit_recipe(photo_id) or {}
+        if not isinstance(recipe, dict):
+            return "Invalid recipe", 400
+        display_recipe = dict(recipe)
+        display_recipe.pop("crop", None)
+
+        try:
+            from image_edits import RecipeError, apply_recipe_to_loaded_image
+            from image_loader import RAW_EXTENSIONS, load_image
+            recipe_json = display_recipe
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+            folder_row = db.conn.execute(
+                "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
+            ).fetchone()
+            if not folder_row:
+                return "Not found", 404
+            canonical, using_working_copy = _recipe_render_source(
+                photo, None, size, vireo_dir, {folder_row["id"]: folder_row["path"]},
+            )
+            selected_ext = os.path.splitext(canonical)[1].lower()
+            if (
+                not using_working_copy
+                and selected_ext in RAW_EXTENSIONS
+                and _has_current_working_copy_failure(
+                    photo,
+                    vireo_dir,
+                    trust_existing_working_copy=False,
+                    live_source_path=canonical,
+                    folder_path=folder_row["path"],
+                )
+            ):
+                log.info(
+                    "Skipping edit-preview generation for photo %s; RAW "
+                    "working-copy extraction already failed for current source mtime",
+                    photo_id,
+                )
+                return "Could not load image", 500
+            img = load_image(canonical, max_size=size)
+            if img is None:
+                _record_working_copy_failure(db, photo, canonical)
+                return "Could not load image", 500
+            img = apply_recipe_to_loaded_image(img, recipe_json, max_size=size)
+        except RecipeError as e:
+            return str(e), 400
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=cfg.load().get("preview_quality", 90))
+        img.close()
+        return Response(buf.getvalue(), mimetype="image/jpeg")
 
     @app.route("/photos/<int:photo_id>/original")
     def serve_original_photo(photo_id):
