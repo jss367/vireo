@@ -1100,6 +1100,19 @@ function renderGrid() {
   grid.innerHTML = items.map(function(p) { return renderPredictionCard(p); }).join('');
 }
 
+document.addEventListener('lightbox:renderchanged', function(e) {
+  var ids = e && e.detail && Array.isArray(e.detail.photoIds) ? e.detail.photoIds : [];
+  ids.forEach(function(id) {
+    var hideDetectionOverlay = (
+      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+      window.vireoPhotoHasOrientationEdit(id)
+    );
+    document.querySelectorAll('.detection-box[data-photo-id="' + id + '"]').forEach(function(box) {
+      box.style.display = hideDetectionOverlay ? 'none' : '';
+    });
+  });
+});
+
 /* Delegate grid clicks for lightbox and group review (XSS-safe) */
 document.getElementById('grid').addEventListener('click', function(e) {
   var img = e.target.closest('img[data-photo-id]');
@@ -1249,6 +1262,10 @@ function renderPredictionCard(pred) {
 
   // Build image with optional bounding box overlay
   var hasBox = pred.box_x != null && pred.box_y != null && pred.box_w != null && pred.box_h != null;
+  var hideDetectionOverlay = (
+    typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+    window.vireoPhotoHasOrientationEdit(pred.photo_id)
+  );
   var imgStyle = hasBox ? 'cursor:pointer;object-fit:contain;' : 'cursor:pointer;';
   var imgTag = '<img src="' + thumbUrl + '" loading="lazy" alt="' + escapeAttr(pred.filename || '') +
     '" style="' + imgStyle + '" data-photo-id="' + pred.photo_id + '" data-filename="' + escapeAttr(pred.filename || '') + '">';
@@ -1261,7 +1278,7 @@ function renderPredictionCard(pred) {
     var bWidth = (pred.box_w * 100).toFixed(2) + '%';
     var bHeight = (pred.box_h * 100).toFixed(2) + '%';
     imgHtml = '<div class="card-img-wrap">' + imgTag +
-      '<div class="detection-box" style="left:' + bLeft + ';top:' + bTop +
+      '<div class="detection-box" data-photo-id="' + pred.photo_id + '" style="' + (hideDetectionOverlay ? 'display:none;' : '') + 'left:' + bLeft + ';top:' + bTop +
       ';width:' + bWidth + ';height:' + bHeight + ';border-color:' + color + ';">' +
       '<span class="detection-label" style="background:' + color +
       ';color:#0A1F2E;">' + escapeHtml(displaySpecies) + ' ' + confPct + '%</span>' +

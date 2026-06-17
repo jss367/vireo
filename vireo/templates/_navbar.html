@@ -3258,6 +3258,11 @@ function _lbCurrentRecipeHasOrientation() {
   return _lbRecipeHasOrientation(_lbEditRecipeByPhoto[String(_lightboxCurrentId)]);
 }
 
+window.vireoPhotoHasOrientationEdit = function(photoId) {
+  if (photoId == null) return false;
+  return _lbRecipeHasOrientation(_lbEditRecipeByPhoto[String(photoId)]);
+};
+
 function _lbRememberEditRecipe(photoId, recipe) {
   if (photoId == null) return;
   _lbEditRecipeByPhoto[String(photoId)] = _lbCloneEditRecipe(recipe);
@@ -4341,6 +4346,7 @@ function openLightbox(photoId, filename, photoList, options) {
       if (!data || _lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
       _lbPhotoDataByPhoto[String(photoId)] = data;
       _lbRememberEditRecipe(photoId, data.edit_recipe);
+      _lbApplyMaskVisibility();
       _lbPhotoW = data.width || null;
       _lbPhotoH = data.height || null;
       _lbCurrentWildlifeExcluded = !!data.wildlife_excluded;
