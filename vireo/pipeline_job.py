@@ -1438,6 +1438,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
                     already_exists = os.path.exists(thumb_path)
                     recipe = thread_db.get_photo_edit_recipe(photo_id)
+                    detail_photo = None
                     if recipe:
                         detail_photo = thread_db.get_photo(photo_id)
                         if detail_photo:
@@ -1453,6 +1454,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 effective_vireo_dir,
                                 folders,
                             )
+                            if (
+                                os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
+                                and _has_current_working_copy_failure(
+                                    detail_photo,
+                                    effective_vireo_dir,
+                                    trust_existing_working_copy=False,
+                                    live_source_path=photo_path,
+                                    folder_path=folders.get(detail_photo["folder_id"]),
+                                )
+                            ):
+                                skipped += 1
+                                continue
                     recipe_kwargs = {"recipe": recipe} if recipe else {}
                     result_path = generate_thumbnail(
                         photo_id,
@@ -1516,14 +1529,28 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     already_exists = os.path.exists(thumb_path)
                     try:
                         recipe = thread_db.get_photo_edit_recipe(photo_id)
+                        detail_photo = None
                         if recipe:
+                            detail_photo = thread_db.get_photo(photo_id) or photo
                             photo_path = _recipe_render_source(
-                                photo,
+                                detail_photo,
                                 recipe,
                                 thumb_size,
                                 effective_vireo_dir,
                                 folders,
                             )
+                            if (
+                                os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
+                                and _has_current_working_copy_failure(
+                                    detail_photo,
+                                    effective_vireo_dir,
+                                    trust_existing_working_copy=False,
+                                    live_source_path=photo_path,
+                                    folder_path=folders.get(detail_photo["folder_id"]),
+                                )
+                            ):
+                                skipped += 1
+                                continue
                         recipe_kwargs = {"recipe": recipe} if recipe else {}
                         result_path = generate_thumbnail(
                             photo_id,

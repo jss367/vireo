@@ -9520,6 +9520,92 @@ def test_pipeline_scan_thumbnails_use_recipe_source_before_live_raw(
     assert thumbnail_sources == [str(companion_path)]
 
 
+def test_pipeline_scan_thumbnails_honor_raw_marker_after_source_selection(
+    tmp_path, monkeypatch,
+):
+    import config as cfg
+    import scanner
+    import thumbnails
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    raw_path = photo_dir / "source.NEF"
+    raw_path.write_bytes(b"raw")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    def fake_scan(
+        root,
+        scan_db,
+        progress_callback=None,
+        photo_callback=None,
+        **_kwargs,
+    ):
+        folder_id = scan_db.add_folder(str(root), name="photos")
+        photo_id = scan_db.add_photo(
+            folder_id=folder_id,
+            filename="source.NEF",
+            extension=".nef",
+            file_size=raw_path.stat().st_size,
+            file_mtime=1234.0,
+            width=800,
+            height=600,
+        )
+        working_dir = tmp_path / "working"
+        working_dir.mkdir()
+        Image.new("RGB", (200, 150), "blue").save(
+            working_dir / f"{photo_id}.jpg",
+        )
+        scan_db.conn.execute(
+            """UPDATE photos
+               SET working_copy_path=?,
+                   working_copy_failed_at=datetime('now'),
+                   working_copy_failed_mtime=1234.0,
+                   working_copy_failed_source='source'
+               WHERE id=?""",
+            (f"working/{photo_id}.jpg", photo_id),
+        )
+        scan_db.conn.commit()
+        scan_db.set_photo_edit_recipe(
+            photo_id,
+            {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+        )
+        if progress_callback:
+            progress_callback(1, 1)
+        if photo_callback:
+            photo_callback(photo_id, str(raw_path))
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("scan thumbnail retried failed RAW")
+
+    monkeypatch.setattr(scanner, "scan", fake_scan)
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fail_if_called)
+
+    result = run_pipeline_job(
+        _make_job(),
+        FakeRunner(),
+        db_path,
+        ws_id,
+        PipelineParams(
+            source=str(photo_dir),
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        ),
+    )
+
+    thumbnails_stage = result["stages"]["thumbnails"]
+    assert thumbnails_stage["failed"] == 0
+    assert thumbnails_stage["skipped"] == 1
+
+
 # ---------------------------------------------------------------------------
 # Aborted pipelines must not leave step rows stuck at "pending"
 # ---------------------------------------------------------------------------
