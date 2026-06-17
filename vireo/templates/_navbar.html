@@ -3405,6 +3405,7 @@ function _lbRecordFetchedFlag(photoId, flag, flagFetchSeq) {
 function _lbApplyFlag(photoId, flag) {
   var normalized = _lbNormalizeFlag(flag);
   if (!normalized || photoId == null) return false;
+  var previousFlag = _lbNormalizeFlag(_lbConfirmedFlagFor(photoId)) || 'none';
   var seq = _lbFlagEditSeq + 1;
   _lbFlagEditSeq = seq;
   _lbFlagPendingWrites += 1;
@@ -3454,7 +3455,11 @@ function _lbApplyFlag(photoId, flag) {
     if (!Object.prototype.hasOwnProperty.call(_lbFlagPendingByPhoto, photoId)) {
       try {
         document.dispatchEvent(new CustomEvent('lightbox:flagchanged', {
-          detail: { photoId: photoId, flag: _lbConfirmedFlagFor(photoId) },
+          detail: {
+            photoId: photoId,
+            flag: _lbConfirmedFlagFor(photoId),
+            previousFlag: previousFlag,
+          },
         }));
       } catch (_) {}
     }
