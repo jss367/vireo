@@ -140,7 +140,16 @@ jobs:
         shell: bash
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Keep the PR-controlled checkout off sys.path so the ``import
+          # huggingface_hub`` below resolves to the installed package and can't
+          # be shadowed by a PR-added huggingface_hub.py — ``python -c``
+          # otherwise prepends the working directory as sys.path[0].
+          PYTHONSAFEPATH: "1"
         run: |
+          # Belt-and-suspenders with PYTHONSAFEPATH: run from outside the
+          # checkout too, so even the cwd that ``python -c`` uses for
+          # sys.path[0] holds no PR-authored files.
+          cd "$RUNNER_TEMP"
           # Track success explicitly: a bash ``for`` loop exits with the
           # status of its last command, and ``sleep`` always succeeds —
           # without this flag, five consecutive download failures would
