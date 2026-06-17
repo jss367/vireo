@@ -11,6 +11,7 @@ from xmp import (
     read_keywords,
     remove_keywords,
     remove_vireo_gps_location,
+    write_edit_recipe,
     write_gps_location,
     write_pick_flag,
     write_rating,
@@ -223,6 +224,31 @@ def test_write_gps_location_rejects_out_of_range_coords(sample_xmp):
         write_gps_location(sample_xmp, 91.0, 2.3522)
     with pytest.raises(ValueError, match="longitude"):
         write_gps_location(sample_xmp, 48.8566, 181.0)
+
+
+# ── write_edit_recipe ───────────────────────────────────────────────────
+
+def test_write_edit_recipe_creates_vireo_marker(missing_xmp):
+    recipe_json = '{"crop":{"h":0.8,"w":0.7,"x":0.1,"y":0.1},"version":1}'
+
+    assert write_edit_recipe(missing_xmp, recipe_json) is True
+
+    with open(missing_xmp) as f:
+        content = f.read()
+    assert 'vireo:editRecipe="' in content
+    assert "&quot;crop&quot;" in content
+    assert 'vireo:editRecipeSchema="1"' in content
+
+
+def test_write_edit_recipe_removes_vireo_marker(missing_xmp):
+    write_edit_recipe(missing_xmp, '{"rotation":90,"version":1}')
+
+    assert write_edit_recipe(missing_xmp, "") is True
+
+    with open(missing_xmp) as f:
+        content = f.read()
+    assert "vireo:editRecipe" not in content
+    assert "vireo:editRecipeSchema" not in content
 
 
 # ── remove_keywords ─────────────────────────────────────────────────────

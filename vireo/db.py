@@ -54,6 +54,40 @@ def _escape_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _keyword_token_clause(keyword):
+    """Build a WHERE clause for a multi-token keyword search.
+
+    The query is split on whitespace into tokens; a photo matches only if
+    EVERY token appears (case-insensitively, as a literal substring) in the
+    photo's filename or in at least one of its keyword names. Tokens may be
+    satisfied by different keywords, so "red bill" matches a photo tagged
+    "Red-billed leiothrix" (both tokens in one keyword) as well as a photo
+    tagged both "Reddish" and "Billboard" (one token each). Tokens are escaped
+    so LIKE metacharacters (``%``/``_``) in the query match literally.
+
+    Returns ``(clause_sql, params)``. The clause references the outer photos
+    alias ``p``, so callers must expose the photos table as ``p``. Returns
+    ``(None, [])`` when the query has no tokens (caller applies no keyword
+    filter).
+    """
+    tokens = keyword.split()
+    if not tokens:
+        return None, []
+    clauses = []
+    params = []
+    for tok in tokens:
+        like = f"%{_escape_like(tok)}%"
+        clauses.append(
+            "(p.filename LIKE ? ESCAPE '\\' OR EXISTS ("
+            "SELECT 1 FROM photo_keywords pk_s "
+            "JOIN keywords k_s ON k_s.id = pk_s.keyword_id "
+            "WHERE pk_s.photo_id = p.id AND k_s.name LIKE ? ESCAPE '\\'))"
+        )
+        params.append(like)
+        params.append(like)
+    return " AND ".join(clauses), params
+
+
 def _subtree_prefix(path: str) -> str:
     return _path_for_subtree_match(path) + "/"
 
@@ -4621,13 +4655,10 @@ class Database:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
         if keyword is not None:
-            join_clause += """
-                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
-                LEFT JOIN keywords k ON k.id = pk.keyword_id
-            """
-            conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
-            where_params.append(f"%{keyword}%")
-            where_params.append(f"%{keyword}%")
+            kw_clause, kw_params = _keyword_token_clause(keyword)
+            if kw_clause:
+                conditions.append(kw_clause)
+                where_params.extend(kw_params)
         if color_label is not None:
             join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
             join_params.append(ws)
@@ -4704,13 +4735,10 @@ class Database:
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
-            join_clause += """
-                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
-                LEFT JOIN keywords k ON k.id = pk.keyword_id
-            """
-            conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
-            where_params.append(f"%{keyword}%")
-            where_params.append(f"%{keyword}%")
+            kw_clause, kw_params = _keyword_token_clause(keyword)
+            if kw_clause:
+                conditions.append(kw_clause)
+                where_params.extend(kw_params)
 
         if color_label is not None:
             join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
@@ -4788,13 +4816,10 @@ class Database:
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
-            join_clause += """
-                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
-                LEFT JOIN keywords k ON k.id = pk.keyword_id
-            """
-            conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
-            where_params.append(f"%{keyword}%")
-            where_params.append(f"%{keyword}%")
+            kw_clause, kw_params = _keyword_token_clause(keyword)
+            if kw_clause:
+                conditions.append(kw_clause)
+                where_params.extend(kw_params)
 
         if color_label is not None:
             join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
@@ -4861,13 +4886,10 @@ class Database:
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
-            join_clause += """
-                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
-                LEFT JOIN keywords k ON k.id = pk.keyword_id
-            """
-            conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
-            where_params.append(f"%{keyword}%")
-            where_params.append(f"%{keyword}%")
+            kw_clause, kw_params = _keyword_token_clause(keyword)
+            if kw_clause:
+                conditions.append(kw_clause)
+                where_params.extend(kw_params)
 
         if color_label is not None:
             join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
@@ -4944,13 +4966,10 @@ class Database:
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
-            join_clause += """
-                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
-                LEFT JOIN keywords k ON k.id = pk.keyword_id
-            """
-            conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
-            where_params.append(f"%{keyword}%")
-            where_params.append(f"%{keyword}%")
+            kw_clause, kw_params = _keyword_token_clause(keyword)
+            if kw_clause:
+                conditions.append(kw_clause)
+                where_params.extend(kw_params)
 
         if color_label is not None:
             join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
@@ -5127,13 +5146,10 @@ class Database:
             f"\n{location_subquery}"
         )
         if keyword is not None:
-            join_clause += """
-                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
-                LEFT JOIN keywords k ON k.id = pk.keyword_id
-            """
-            conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
-            params.append(f"%{keyword}%")
-            params.append(f"%{keyword}%")
+            kw_clause, kw_params = _keyword_token_clause(keyword)
+            if kw_clause:
+                conditions.append(kw_clause)
+                params.extend(kw_params)
 
         # Match any species tag on the photo, not just MIN(name) — a photo can be
         # tagged with multiple species keywords.

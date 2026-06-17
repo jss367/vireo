@@ -643,6 +643,171 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   font-size: 12px;
   padding: 2px 6px;
 }
+.crop-editor-overlay {
+  z-index: 10003;
+  background: rgba(0, 0, 0, 0.82);
+}
+.crop-editor-modal {
+  width: min(1120px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+  background: #111417;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  color: #f4f7f8;
+  overflow: hidden;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+}
+.crop-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+.crop-editor-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+.crop-editor-close {
+  width: 32px;
+  height: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #f4f7f8;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.crop-editor-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 16px;
+  padding: 16px;
+  min-height: 0;
+}
+.crop-stage-shell {
+  min-width: 0;
+  min-height: 360px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #050607;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  overflow: auto;
+}
+.crop-stage {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+}
+#cropEditorImg {
+  max-width: min(100%, 760px);
+  max-height: min(68vh, 720px);
+  display: block;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.crop-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid #ffe066;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.42);
+  cursor: move;
+  touch-action: none;
+}
+.crop-box::before,
+.crop-box::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+}
+.crop-box::before {
+  inset: 33.333% 0 auto 0;
+  height: 33.333%;
+  border-top: 1px solid rgba(255, 255, 255, 0.55);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.55);
+}
+.crop-box::after {
+  inset: 0 33.333% 0 auto;
+  width: 33.333%;
+  border-left: 1px solid rgba(255, 255, 255, 0.55);
+  border-right: 1px solid rgba(255, 255, 255, 0.55);
+}
+.crop-handle {
+  position: absolute;
+  width: 13px;
+  height: 13px;
+  background: #ffe066;
+  border: 2px solid #111417;
+  border-radius: 50%;
+  box-sizing: border-box;
+  z-index: 1;
+}
+.crop-handle.nw { left: -7px; top: -7px; cursor: nwse-resize; }
+.crop-handle.ne { right: -7px; top: -7px; cursor: nesw-resize; }
+.crop-handle.sw { left: -7px; bottom: -7px; cursor: nesw-resize; }
+.crop-handle.se { right: -7px; bottom: -7px; cursor: nwse-resize; }
+.crop-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.crop-control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.crop-control-label {
+  font-size: 12px;
+  color: rgba(244, 247, 248, 0.72);
+  font-weight: 650;
+}
+.crop-control-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.crop-control-row input[type="range"] {
+  flex: 1;
+}
+.crop-control-row input[type="number"] {
+  width: 76px;
+  background: #1b2025;
+  color: #f4f7f8;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 4px;
+  padding: 6px 7px;
+  font-size: 12px;
+}
+.crop-button-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.crop-editor-status {
+  min-height: 18px;
+  font-size: 12px;
+  color: rgba(244, 247, 248, 0.72);
+}
+.crop-editor-status.error { color: #ff8a80; }
+@media (max-width: 820px) {
+  .crop-editor-body {
+    grid-template-columns: 1fr;
+  }
+  .crop-stage-shell {
+    min-height: 280px;
+  }
+  .crop-controls {
+    max-height: 32vh;
+    overflow: auto;
+  }
+}
 /* Crosshair over the detected eye keypoint. Scales with the image via
    position:% — parent .lightbox-transform absorbs the zoom transform. */
 .lb-eye-crosshair {
@@ -3072,7 +3237,64 @@ async function createWorkspace() {
     <button class="lb-action-btn" id="lightboxOpenEditor" onclick="">
       Open in Editor
     </button>
+    <button class="lb-action-btn lb-action-accent" id="lightboxCropEdit" onclick="event.stopPropagation(); openCropEditor();">
+      Crop
+    </button>
     <button class="lb-action-btn lb-action-danger" onclick="lightboxDelete()" title="Delete photo">Delete</button>
+  </div>
+</div>
+
+<!-- Crop and straighten modal -->
+<div class="modal-overlay crop-editor-overlay" id="cropEditorModal" onclick="closeCropEditor(event)">
+  <div class="crop-editor-modal" onclick="event.stopPropagation();">
+    <div class="crop-editor-header">
+      <h3>Crop and Straighten</h3>
+      <button class="crop-editor-close" onclick="closeCropEditor(event)" title="Close">&times;</button>
+    </div>
+    <div class="crop-editor-body">
+      <div class="crop-stage-shell">
+        <div class="crop-stage" id="cropStage">
+          <img id="cropEditorImg" src="" alt="">
+          <div class="crop-box" id="cropBox">
+            <span class="crop-handle nw" data-handle="nw"></span>
+            <span class="crop-handle ne" data-handle="ne"></span>
+            <span class="crop-handle sw" data-handle="sw"></span>
+            <span class="crop-handle se" data-handle="se"></span>
+          </div>
+        </div>
+      </div>
+      <div class="crop-controls">
+        <div class="crop-control-group">
+          <div class="crop-control-label">Straighten</div>
+          <div class="crop-control-row">
+            <input type="range" id="cropStraightenRange" min="-10" max="10" step="0.1" value="0">
+            <input type="number" id="cropStraightenInput" min="-45" max="45" step="0.1" value="0">
+          </div>
+        </div>
+        <div class="crop-control-group">
+          <div class="crop-control-label">Rotate</div>
+          <div class="crop-button-grid">
+            <button class="lb-action-btn" type="button" onclick="cropRotate(-90)">Left</button>
+            <button class="lb-action-btn" type="button" onclick="cropRotate(90)">Right</button>
+          </div>
+        </div>
+        <div class="crop-control-group">
+          <div class="crop-control-label">Frame</div>
+          <div class="crop-button-grid">
+            <button class="lb-action-btn" type="button" onclick="cropResetFrame()">Full Frame</button>
+            <button class="lb-action-btn" type="button" onclick="cropSetAspect(1.5)">3:2</button>
+            <button class="lb-action-btn" type="button" onclick="cropSetAspect(1.3333333333)">4:3</button>
+            <button class="lb-action-btn" type="button" onclick="cropSetAspect(1)">1:1</button>
+          </div>
+        </div>
+        <div class="crop-editor-status" id="cropEditorStatus"></div>
+        <div class="modal-actions" style="margin-top:auto;">
+          <button class="modal-btn modal-btn-cancel" type="button" onclick="cropClearEdits()">Clear</button>
+          <button class="modal-btn modal-btn-cancel" type="button" onclick="closeCropEditor(event)">Cancel</button>
+          <button class="modal-btn modal-btn-primary" type="button" id="cropSaveBtn" onclick="saveCropEditor()">Save</button>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -3130,6 +3352,8 @@ var _lbNativeZoom = null;   // zoom value corresponding to 1:1 for current photo
 var _lbFitScale = 1.0;      // natural image scale at zoom=1.0
 var _lbPhotoW = null;       // original photo width (px)
 var _lbPhotoH = null;       // original photo height (px)
+var _lbPhotoOrientation = null; // original EXIF orientation, when API metadata has it
+var _lbCurrentEditRecipe = null; // active non-destructive recipe for layout math
 var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
 var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
 var _lbSessionFullLongEdge = null;  // last learned /full size across photos; better fallback than hardcoded 1920 for custom preview_max_size
@@ -3150,7 +3374,15 @@ var _lbEditRecipeWriteSeq = 0;
 var _lbEditRecipeWriteSeqByPhoto = {};
 var _lbPhotoDataByPhoto = {};
 var _lbRenderVersionByPhoto = {};
+var _lbEditVersionByPhoto = {};
 var _lbEditWritePending = false;
+var _cropRecipe = null;
+var _cropPhotoId = null;
+var _cropPreviewSeq = 0;
+var _cropSessionSeq = 0;
+var _cropDrag = null;
+var _cropPreviewTimer = null;
+var _cropEscToken = null;
 
 function _vireoUrlWithQueryParam(url, key, value) {
   if (!url || !key || value == null || value === '') return url;
@@ -3320,8 +3552,14 @@ window.vireoPhotoEditRecipe = function(photoId) {
 
 function _lbRememberEditRecipe(photoId, recipe) {
   if (photoId == null) return;
-  _lbEditRecipeByPhoto[String(photoId)] = _lbCloneEditRecipe(recipe);
+  var numericId = Number(photoId);
+  var storedRecipe = _lbCloneEditRecipe(recipe);
+  var currentRecipe = _lbRecipeHasEdits(storedRecipe) ? storedRecipe : null;
+  _lbEditRecipeByPhoto[String(photoId)] = storedRecipe;
   _lbEditRecipeKnownByPhoto[String(photoId)] = true;
+  var p = _lightboxPhotoList.find(function(x) { return x.id === numericId; });
+  if (p) p.edit_recipe = currentRecipe;
+  if (_lightboxCurrentId === numericId) _lbCurrentEditRecipe = currentRecipe;
   _lbApplyEditButtonState();
 }
 
@@ -3336,7 +3574,7 @@ function _lbMarkEditRecipeWrite(photoId) {
   _lbEditRecipeWriteSeqByPhoto[String(photoId)] = _lbEditRecipeWriteSeq;
 }
 
-function _lbCurrentEditRecipe() {
+function _lbCurrentEditRecipeClone() {
   if (_lightboxCurrentId == null) return {};
   return _lbCloneEditRecipe(_lbEditRecipeByPhoto[String(_lightboxCurrentId)]);
 }
@@ -3432,7 +3670,7 @@ function _lbComposeDisplayedOrientation(recipe, op) {
 }
 
 function _lbApplyEditButtonState() {
-  var recipe = _lbCurrentEditRecipe();
+  var recipe = _lbCurrentEditRecipeClone();
   var hasOrientation = _lbRecipeHasOrientation(recipe);
   var known = _lightboxCurrentId != null && !!_lbEditRecipeKnownByPhoto[String(_lightboxCurrentId)];
   var ids = [
@@ -3504,7 +3742,7 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
 async function lightboxApplyEdit(op) {
   if (_lightboxCurrentId == null || _lbEditWritePending) return;
   var photoId = _lightboxCurrentId;
-  var nextRecipe = _lbRecipeAfterEditOperation(_lbCurrentEditRecipe(), op);
+  var nextRecipe = _lbRecipeAfterEditOperation(_lbCurrentEditRecipeClone(), op);
   _lbSetEditBusy(true);
   try {
     var data;
@@ -3595,7 +3833,6 @@ function _lbTransformBoxByRecipe(box, recipe) {
   nh = Math.max(0, Math.min(1 - ny, nh));
   return { x: nx, y: ny, w: nw, h: nh };
 }
-
 function _lbIsOneToOneZoom() {
   if (_lbPending1To1) return true;
   if (!_lbNativeZoom || _lbNativeZoom <= 1.001) return false;
@@ -3957,11 +4194,62 @@ var _lbEyeVisible = _lbStoredBool('vireo.lb.eyeVisible', true);
 var _lbInfoVisible = _lbStoredBool('vireo.lb.infoVisible', true);
 var _lbChromeVisible = _lbStoredBool('vireo.lb.chromeVisible', true);
 
+function _lbRecipeHasCrop(recipe) {
+  return !!(recipe && recipe.crop && Number(recipe.crop.w) > 0 && Number(recipe.crop.h) > 0);
+}
+
+function _lbRecipeHasGeometricEdit(recipe) {
+  if (!recipe || typeof recipe !== 'object') return false;
+  if (_lbRecipeHasCrop(recipe)) return true;
+  if (Number(recipe.rotation || 0)) return true;
+  if (Math.abs(Number(recipe.straighten || 0)) > 1e-9) return true;
+  var flip = recipe.flip || {};
+  return !!(flip.horizontal || flip.vertical);
+}
+
+function _lbMetadataOrientation(metadata) {
+  if (!metadata || typeof metadata !== 'object') return null;
+  var groups = ['EXIF', 'IFD0', 'TIFF', 'File'];
+  for (var i = 0; i < groups.length; i++) {
+    var group = metadata[groups[i]];
+    if (group && Object.prototype.hasOwnProperty.call(group, 'Orientation')) {
+      return group.Orientation;
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(metadata, 'Orientation')) {
+    return metadata.Orientation;
+  }
+  return null;
+}
+
+function _lbOrientationSwapsAxes(orientation) {
+  if (orientation == null || typeof orientation === 'boolean') return false;
+  if (typeof orientation === 'number') {
+    return [5, 6, 7, 8].indexOf(Math.round(orientation)) !== -1;
+  }
+  var text = String(orientation).trim().toLowerCase();
+  if (!text) return false;
+  var parsed = Number(text);
+  if (Number.isFinite(parsed)) return [5, 6, 7, 8].indexOf(Math.round(parsed)) !== -1;
+  return text.indexOf('90') !== -1 || text.indexOf('270') !== -1;
+}
+
+function _lbSourceOverlaysAvailable() {
+  return !_lbRecipeHasGeometricEdit(_lbCurrentEditRecipe);
+}
+
 function _lbApplyBoxesVisibility() {
   var container = document.getElementById('lightboxDetections');
-  if (container) container.style.display = _lbBoxesVisible ? '' : 'none';
+  var available = _lbSourceOverlaysAvailable();
+  if (container) container.style.display = (_lbBoxesVisible && available) ? '' : 'none';
   var btn = document.getElementById('lightboxToggleBoxes');
-  if (btn) btn.textContent = _lbBoxesVisible ? 'Hide Boxes' : 'Show Boxes';
+  if (btn) {
+    btn.disabled = !available;
+    btn.textContent = !available ? 'Boxes Edited' : (_lbBoxesVisible ? 'Hide Boxes' : 'Show Boxes');
+    btn.title = !available
+      ? 'Detection boxes are hidden for geometrically edited photos'
+      : 'Toggle detection boxes (b)';
+  }
 }
 
 function toggleLightboxBoxes() {
@@ -3998,12 +4286,19 @@ function toggleLightboxChrome() {
 
 function _lbApplyEyeVisibility() {
   var container = document.getElementById('lightboxEye');
+  var available = _lbSourceOverlaysAvailable();
   if (container) {
     container.style.display =
-      (_lbEyeVisible && container.childElementCount > 0) ? 'block' : 'none';
+      (_lbEyeVisible && available && container.childElementCount > 0) ? 'block' : 'none';
   }
   var btn = document.getElementById('lightboxToggleEye');
-  if (btn) btn.textContent = _lbEyeVisible ? 'Hide Eye' : 'Show Eye';
+  if (btn) {
+    btn.disabled = !available;
+    btn.textContent = !available ? 'Eye Edited' : (_lbEyeVisible ? 'Hide Eye' : 'Show Eye');
+    btn.title = !available
+      ? 'Eye marker is hidden for geometrically edited photos'
+      : 'Toggle eye marker';
+  }
 }
 
 function toggleLightboxEye() {
@@ -4066,13 +4361,22 @@ function _lbLoadDetections(photoId) {
   var container = document.getElementById('lightboxDetections');
   if (!container) return;
   container.innerHTML = '';
+  if (!_lbSourceOverlaysAvailable()) {
+    _lbApplyBoxesVisibility();
+    return;
+  }
   fetch('/api/detections/' + photoId)
     .then(function(r) { return r.json(); })
     .then(function(detections) {
       if (!detections || detections.length === 0) return;
       // Only render if still viewing the same photo
       if (_lightboxCurrentId !== photoId) return;
-      var recipe = _lbEditRecipeByPhoto[String(photoId)];
+      if (!_lbSourceOverlaysAvailable()) {
+        container.innerHTML = '';
+        _lbApplyBoxesVisibility();
+        return;
+      }
+      var recipe = _lbEditRecipeByPhoto[String(photoId)] || _lbCurrentEditRecipe;
       detections.forEach(function(det) {
         if (det.box_x == null || det.box_y == null) return;
         var color = _lbGetSpeciesColor(det.category || 'animal');
@@ -4135,13 +4439,12 @@ function _lbResetMaskOverlay() {
 function _lbApplyMaskVisibility() {
   var img = document.getElementById('lightboxMaskOverlay');
   if (!img) return;
-  var orientationActive = _lbCurrentRecipeHasOrientation();
   _lbApplyMaskToggleButton();
-  if (orientationActive) {
+  if (!_lbSourceOverlaysAvailable()) {
     var ctrls = document.getElementById('lightboxMaskControls');
     if (ctrls) ctrls.classList.remove('has-variants');
   }
-  if (!_lbMasksVisible || !_lbMaskCurrentUrl || orientationActive) {
+  if (!_lbSourceOverlaysAvailable() || !_lbMasksVisible || !_lbMaskCurrentUrl) {
     img.classList.remove('show');
     // A previous call may have assigned onload to re-add `show` once
     // the mask image finished loading. If the user toggles masks off
@@ -4202,10 +4505,11 @@ function _lbApplyMaskUrl(url) {
 function _lbApplyMaskToggleButton() {
   var btn = document.getElementById('lightboxToggleMasks');
   if (!btn) return;
-  if (_lbCurrentRecipeHasOrientation()) {
+  var available = _lbSourceOverlaysAvailable();
+  if (!available) {
     btn.disabled = true;
     btn.textContent = 'Masks Hidden';
-    btn.title = 'Masks are hidden while rotate or flip edits are active';
+    btn.title = 'Mask overlay is hidden for geometrically edited photos';
     btn.setAttribute('aria-label', btn.title);
     return;
   }
@@ -4273,6 +4577,7 @@ function _lbLoadMaskVariants(photoId) {
       // Bail if the user navigated to a different photo while the
       // request was in flight.
       if (!data || _lightboxCurrentId !== photoId) return;
+      if (!_lbSourceOverlaysAvailable()) return;
       _lbMaskActiveVariant = data.active || null;
       _lbMaskAvailable = data.variants || [];
       if (_lbCurrentRecipeHasOrientation()) {
@@ -4309,6 +4614,409 @@ function _lbLoadMaskVariants(photoId) {
     })
     .catch(function() { /* network error → leave control hidden */ });
 }
+
+function _cropCloneRecipe(recipe) {
+  if (!recipe || typeof recipe !== 'object') return {};
+  try { return JSON.parse(JSON.stringify(recipe)); }
+  catch (_) { return {}; }
+}
+
+function _cropDefaultCrop(recipe) {
+  if (!recipe.crop || typeof recipe.crop !== 'object') {
+    recipe.crop = { x: 0, y: 0, w: 1, h: 1 };
+  }
+  recipe.crop.x = Number(recipe.crop.x) || 0;
+  recipe.crop.y = Number(recipe.crop.y) || 0;
+  recipe.crop.w = Number(recipe.crop.w) || 1;
+  recipe.crop.h = Number(recipe.crop.h) || 1;
+  recipe.crop = _cropClampBox(recipe.crop);
+  return recipe.crop;
+}
+
+function _cropClampBox(crop) {
+  var min = 0.02;
+  var x = Number(crop.x) || 0;
+  var y = Number(crop.y) || 0;
+  var w = Number(crop.w) || 1;
+  var h = Number(crop.h) || 1;
+  w = Math.max(min, Math.min(1, w));
+  h = Math.max(min, Math.min(1, h));
+  x = Math.max(0, Math.min(1 - w, x));
+  y = Math.max(0, Math.min(1 - h, y));
+  return { x: x, y: y, w: w, h: h };
+}
+
+function _cropIsFullFrame(crop) {
+  return !crop || (
+    Math.abs((Number(crop.x) || 0)) < 0.0005 &&
+    Math.abs((Number(crop.y) || 0)) < 0.0005 &&
+    Math.abs((Number(crop.w) || 1) - 1) < 0.0005 &&
+    Math.abs((Number(crop.h) || 1) - 1) < 0.0005
+  );
+}
+
+function _cropSetStatus(message, isError) {
+  var el = document.getElementById('cropEditorStatus');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.toggle('error', !!isError);
+}
+
+function _cropIsActiveSession(photoId, session) {
+  return _cropPhotoId === photoId && _cropSessionSeq === session;
+}
+
+function _cropDisplayRecipe() {
+  var recipe = _cropCloneRecipe(_cropRecipe);
+  delete recipe.crop;
+  return recipe;
+}
+
+function _cropSyncControls() {
+  if (!_cropRecipe) return;
+  var value = Number(_cropRecipe.straighten || 0);
+  var range = document.getElementById('cropStraightenRange');
+  var input = document.getElementById('cropStraightenInput');
+  if (range) range.value = Math.max(-10, Math.min(10, value));
+  if (input) input.value = String(Math.round(value * 10) / 10);
+}
+
+function _cropRenderBox() {
+  if (!_cropRecipe) return;
+  var img = document.getElementById('cropEditorImg');
+  var box = document.getElementById('cropBox');
+  if (!img || !box || !img.complete || !img.clientWidth || !img.clientHeight) return;
+  var crop = _cropDefaultCrop(_cropRecipe);
+  box.style.left = (crop.x * img.clientWidth) + 'px';
+  box.style.top = (crop.y * img.clientHeight) + 'px';
+  box.style.width = (crop.w * img.clientWidth) + 'px';
+  box.style.height = (crop.h * img.clientHeight) + 'px';
+}
+
+function _cropUpdatePreview() {
+  if (!_cropPhotoId || !_cropRecipe) return;
+  var img = document.getElementById('cropEditorImg');
+  if (!img) return;
+  var seq = ++_cropPreviewSeq;
+  var recipe = _cropDisplayRecipe();
+  _cropSetStatus('Loading preview...');
+  img.onload = function() {
+    if (seq !== _cropPreviewSeq) return;
+    _cropRenderBox();
+    _cropSetStatus('');
+  };
+  img.onerror = function() {
+    if (seq !== _cropPreviewSeq) return;
+    _cropSetStatus('Could not render preview', true);
+  };
+  img.src = '/photos/' + _cropPhotoId + '/edit-preview?size=1920&recipe=' +
+    encodeURIComponent(JSON.stringify(recipe)) + '&v=' + seq;
+}
+
+function _cropSchedulePreview() {
+  if (_cropPreviewTimer) clearTimeout(_cropPreviewTimer);
+  _cropPreviewTimer = setTimeout(function() {
+    _cropPreviewTimer = null;
+    _cropUpdatePreview();
+  }, 120);
+}
+
+function _cropNormalizeRecipeForSave() {
+  var recipe = _cropCloneRecipe(_cropRecipe);
+  var crop = _cropDefaultCrop(recipe);
+  delete recipe.version;
+  if (!recipe.rotation) delete recipe.rotation;
+  if (Math.abs(Number(recipe.straighten || 0)) < 0.0001) delete recipe.straighten;
+  else recipe.straighten = Math.round(Number(recipe.straighten) * 10000) / 10000;
+  if (_cropIsFullFrame(crop)) delete recipe.crop;
+  else {
+    recipe.crop = {
+      x: Math.round(crop.x * 1000000) / 1000000,
+      y: Math.round(crop.y * 1000000) / 1000000,
+      w: Math.round(crop.w * 1000000) / 1000000,
+      h: Math.round(crop.h * 1000000) / 1000000,
+    };
+  }
+  return recipe;
+}
+
+function _cropInitEvents() {
+  if (window._cropEventsReady) return;
+  window._cropEventsReady = true;
+  var range = document.getElementById('cropStraightenRange');
+  var input = document.getElementById('cropStraightenInput');
+  function setStraighten(value) {
+    if (!_cropRecipe) return;
+    var v = Number(value);
+    if (!Number.isFinite(v)) v = 0;
+    v = Math.max(-45, Math.min(45, v));
+    _cropRecipe.straighten = v;
+    _cropSyncControls();
+    _cropSchedulePreview();
+  }
+  if (range) range.addEventListener('input', function() { setStraighten(range.value); });
+  if (input) input.addEventListener('input', function() { setStraighten(input.value); });
+
+  var box = document.getElementById('cropBox');
+  if (box) {
+    box.addEventListener('pointerdown', function(e) {
+      if (!_cropRecipe) return;
+      var img = document.getElementById('cropEditorImg');
+      if (!img || !img.clientWidth || !img.clientHeight) return;
+      var handle = e.target && e.target.dataset ? e.target.dataset.handle : '';
+      _cropDrag = {
+        handle: handle || 'move',
+        startX: e.clientX,
+        startY: e.clientY,
+        startCrop: _cropCloneRecipe({ crop: _cropDefaultCrop(_cropRecipe) }).crop,
+        imgW: img.clientWidth,
+        imgH: img.clientHeight,
+      };
+      box.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      e.stopPropagation();
+    });
+  }
+
+  document.addEventListener('pointermove', function(e) {
+    if (!_cropDrag || !_cropRecipe) return;
+    var dx = (e.clientX - _cropDrag.startX) / _cropDrag.imgW;
+    var dy = (e.clientY - _cropDrag.startY) / _cropDrag.imgH;
+    var c = _cropCloneRecipe({ crop: _cropDrag.startCrop }).crop;
+    var min = 0.02;
+    if (_cropDrag.handle === 'move') {
+      c.x += dx;
+      c.y += dy;
+    } else {
+      if (_cropDrag.handle.indexOf('w') !== -1) {
+        c.x += dx;
+        c.w -= dx;
+      }
+      if (_cropDrag.handle.indexOf('e') !== -1) c.w += dx;
+      if (_cropDrag.handle.indexOf('n') !== -1) {
+        c.y += dy;
+        c.h -= dy;
+      }
+      if (_cropDrag.handle.indexOf('s') !== -1) c.h += dy;
+      if (c.w < min) {
+        if (_cropDrag.handle.indexOf('w') !== -1) c.x = _cropDrag.startCrop.x + _cropDrag.startCrop.w - min;
+        c.w = min;
+      }
+      if (c.h < min) {
+        if (_cropDrag.handle.indexOf('n') !== -1) c.y = _cropDrag.startCrop.y + _cropDrag.startCrop.h - min;
+        c.h = min;
+      }
+    }
+    _cropRecipe.crop = _cropClampBox(c);
+    _cropRenderBox();
+    e.preventDefault();
+  });
+  document.addEventListener('pointerup', function() {
+    _cropDrag = null;
+  });
+  window.addEventListener('resize', function() {
+    if (_cropPhotoId) _cropRenderBox();
+  });
+}
+
+async function openCropEditor() {
+  if (!_lightboxCurrentId) return;
+  _cropInitEvents();
+  var requestedPhotoId = _lightboxCurrentId;
+  _cropPhotoId = requestedPhotoId;
+  var session = ++_cropSessionSeq;
+  var saveBtn = document.getElementById('cropSaveBtn');
+  if (saveBtn) saveBtn.disabled = false;
+  _cropSetStatus('Loading recipe...');
+  try {
+    var data = await safeFetch('/api/photos/' + requestedPhotoId + '/edit-recipe', {}, { toast: false });
+    if (_lightboxCurrentId !== requestedPhotoId || !_cropIsActiveSession(requestedPhotoId, session)) return;
+    _cropRecipe = _cropCloneRecipe(data.recipe || {});
+    _cropDefaultCrop(_cropRecipe);
+    _cropSyncControls();
+    var modal = document.getElementById('cropEditorModal');
+    if (_cropEscToken) Keymap.popEsc(_cropEscToken);
+    _cropEscToken = Keymap.pushEsc(function() { closeCropEditor(); });
+    if (modal) modal.classList.add('open');
+    _cropUpdatePreview();
+  } catch (e) {
+    if (_cropIsActiveSession(requestedPhotoId, session)) {
+      _cropSetStatus(e.message || 'Could not load recipe', true);
+    }
+  }
+}
+
+function closeCropEditor(event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  var modal = document.getElementById('cropEditorModal');
+  if (modal) modal.classList.remove('open');
+  if (_cropEscToken) {
+    Keymap.popEsc(_cropEscToken);
+    _cropEscToken = null;
+  }
+  _cropSessionSeq++;
+  _cropPhotoId = null;
+  _cropRecipe = null;
+  _cropDrag = null;
+  if (_cropPreviewTimer) {
+    clearTimeout(_cropPreviewTimer);
+    _cropPreviewTimer = null;
+  }
+}
+
+function cropRotate(delta) {
+  if (!_cropRecipe) return;
+  var current = Number(_cropRecipe.rotation || 0);
+  var next = (current + delta) % 360;
+  if (next < 0) next += 360;
+  _cropRecipe.rotation = next;
+  cropResetFrame();
+  _cropSchedulePreview();
+}
+
+function cropResetFrame() {
+  if (!_cropRecipe) return;
+  _cropRecipe.crop = { x: 0, y: 0, w: 1, h: 1 };
+  _cropRenderBox();
+}
+
+function cropSetAspect(aspect) {
+  if (!_cropRecipe) return;
+  var img = document.getElementById('cropEditorImg');
+  if (!img || !img.clientWidth || !img.clientHeight) return;
+  var imageAspect = img.clientWidth / img.clientHeight;
+  var normalizedRatio = aspect / imageAspect;
+  var w = 0.9;
+  var h = w / normalizedRatio;
+  if (h > 0.9) {
+    h = 0.9;
+    w = h * normalizedRatio;
+  }
+  _cropRecipe.crop = {
+    x: (1 - w) / 2,
+    y: (1 - h) / 2,
+    w: w,
+    h: h,
+  };
+  _cropRenderBox();
+}
+
+async function saveCropEditor() {
+  if (!_cropPhotoId || !_cropRecipe) return;
+  var pid = _cropPhotoId;
+  var session = _cropSessionSeq;
+  var btn = document.getElementById('cropSaveBtn');
+  if (btn) btn.disabled = true;
+  _cropSetStatus('Saving...');
+  try {
+    var recipe = _cropNormalizeRecipeForSave();
+    var data = await safeFetch('/api/photos/' + pid + '/edit-recipe', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipe: recipe }),
+    }, { toast: false });
+    var updates = {};
+    updates[String(pid)] = data.recipe;
+    _lbRefreshEditRecipeCache(updates);
+    var p = _lightboxPhotoList.find(function(x) { return x.id === pid; });
+    if (_cropIsActiveSession(pid, session)) {
+      closeCropEditor();
+      if (_lightboxCurrentId === pid) {
+        var filename = p ? p.filename : document.getElementById('lightboxFilename').textContent;
+        openLightbox(pid, filename, _lightboxPhotoList);
+      }
+      showToast('Crop saved', 'success');
+    }
+  } catch (e) {
+    if (_cropIsActiveSession(pid, session)) {
+      _cropSetStatus(e.message || 'Could not save crop', true);
+    }
+  } finally {
+    if (btn && _cropIsActiveSession(pid, session)) btn.disabled = false;
+  }
+}
+
+async function cropClearEdits() {
+  if (!_cropPhotoId) return;
+  var pid = _cropPhotoId;
+  var session = _cropSessionSeq;
+  _cropSetStatus('Clearing...');
+  try {
+    await safeFetch('/api/photos/' + pid + '/edit-recipe', {
+      method: 'DELETE',
+    }, { toast: false });
+    var updates = {};
+    updates[String(pid)] = null;
+    _lbRefreshEditRecipeCache(updates);
+    var p = _lightboxPhotoList.find(function(x) { return x.id === pid; });
+    if (_cropIsActiveSession(pid, session)) {
+      closeCropEditor();
+      if (_lightboxCurrentId === pid) {
+        var filename = p ? p.filename : document.getElementById('lightboxFilename').textContent;
+        openLightbox(pid, filename, _lightboxPhotoList);
+      }
+      showToast('Edits cleared', 'success');
+    }
+  } catch (e) {
+    if (_cropIsActiveSession(pid, session)) {
+      _cropSetStatus(e.message || 'Could not clear edits', true);
+    }
+  }
+}
+
+function _lbThumbnailUrl(photoId, version) {
+  var url = '/thumbnails/' + photoId + '.jpg';
+  if (version) url += '?editv=' + encodeURIComponent(version);
+  return url;
+}
+
+function _lbRefreshThumbnailCache(photoId, version) {
+  var id = String(photoId);
+  var refreshedUrl = _lbThumbnailUrl(id, version);
+  document.querySelectorAll('img').forEach(function(img) {
+    var rawSrc = img.getAttribute('src') || '';
+    if (!rawSrc) return;
+    var url;
+    try {
+      url = new URL(rawSrc, window.location.href);
+    } catch (_) {
+      return;
+    }
+    if (url.pathname !== '/thumbnails/' + id + '.jpg') return;
+    img.src = refreshedUrl;
+  });
+  try {
+    document.dispatchEvent(new CustomEvent('vireo:thumbnail-invalidated', {
+      detail: { photoId: Number(photoId), version: version }
+    }));
+  } catch (_) {}
+}
+
+function _lbRefreshEditRecipeCache(updates) {
+  if (!updates || typeof updates !== 'object') return;
+  var version = String(Date.now());
+  var refreshedPhotoIds = [];
+  Object.keys(updates).forEach(function(photoId) {
+    var numericId = Number(photoId);
+    _lbEditVersionByPhoto[String(photoId)] = version;
+    _lbMarkEditRecipeWrite(numericId);
+    _lbRememberEditRecipe(numericId, updates[photoId]);
+    _vireoBumpRenderVersion(numericId);
+    _lbRefreshThumbnailCache(photoId, version);
+    refreshedPhotoIds.push(numericId);
+  });
+  if (refreshedPhotoIds.length && typeof window.vireoRefreshPhotoRenders === 'function') {
+    window.vireoRefreshPhotoRenders(refreshedPhotoIds);
+  }
+  if (_lightboxCurrentId != null && refreshedPhotoIds.indexOf(Number(_lightboxCurrentId)) !== -1) {
+    _lbReloadCurrentRenderAfterEdit(Number(_lightboxCurrentId));
+  }
+}
+
+window.vireoRefreshEditRecipeCache = _lbRefreshEditRecipeCache;
 
 function openLightbox(photoId, filename, photoList, options) {
   var alreadyOpen = !!window._lbEscToken;
@@ -4399,6 +5107,11 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbNativeZoom = null;
   _lbPhotoW = null;
   _lbPhotoH = null;
+  _lbPhotoOrientation = null;
+  _lbCurrentEditRecipe = currentFromList && currentFromList.edit_recipe || null;
+  if (currentFromList && Object.prototype.hasOwnProperty.call(currentFromList, 'edit_recipe')) {
+    _lbRememberEditRecipe(photoId, currentFromList.edit_recipe);
+  }
   _lbCurrentSrcKey = (
     restoreWantsOneToOne ||
     (
@@ -4446,6 +5159,18 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbApplyMaskVisibility();
       _lbPhotoW = data.width || null;
       _lbPhotoH = data.height || null;
+      _lbPhotoOrientation = _lbMetadataOrientation(data.metadata);
+      var currentLayoutRecipe = _lbEditRecipeByPhoto[String(photoId)];
+      _lbCurrentEditRecipe = _lbRecipeHasEdits(currentLayoutRecipe)
+        ? currentLayoutRecipe
+        : null;
+      if (!_lbSourceOverlaysAvailable()) {
+        var detContainer2 = document.getElementById('lightboxDetections');
+        if (detContainer2) detContainer2.innerHTML = '';
+        var eyeContainer2 = document.getElementById('lightboxEye');
+        if (eyeContainer2) eyeContainer2.innerHTML = '';
+        _lbResetMaskOverlay();
+      }
       _lbCurrentWildlifeExcluded = !!data.wildlife_excluded;
       _lbApplyWildlifeExcludedButton();
       _lbRecordFetchedFlag(photoId, data.flag, flagFetchSeq);
@@ -4453,6 +5178,10 @@ function openLightbox(photoId, filename, photoList, options) {
       if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
       _lbLoadDetections(photoId);
       _lbRenderEyeCrosshair(data);
+      _lbApplyBoxesVisibility();
+      _lbApplyEyeVisibility();
+      _lbApplyMaskToggleButton();
+      _lbApplyMaskVisibility();
     })
     .catch(function() {});
 
@@ -5460,13 +6189,33 @@ function _lbOrientedPhotoDims(img) {
   if (!_lbPhotoW || !_lbPhotoH) return null;
   var w = _lbPhotoW;
   var h = _lbPhotoH;
-  if (img && img.naturalWidth && img.naturalHeight) {
+  if (_lbOrientationSwapsAxes(_lbPhotoOrientation)) {
+    w = _lbPhotoH;
+    h = _lbPhotoW;
+  } else if (img && img.naturalWidth && img.naturalHeight) {
     var storedAspect = w / h;
     var imgAspect = img.naturalWidth / img.naturalHeight;
     if (Math.abs(storedAspect - imgAspect) > Math.abs((1 / storedAspect) - imgAspect)) {
       w = _lbPhotoH;
       h = _lbPhotoW;
     }
+  }
+  return { w: w, h: h };
+}
+
+function _lbDisplayDimsForRecipe(width, height, recipe) {
+  var w = Number(width) || 0;
+  var h = Number(height) || 0;
+  if (!w || !h) return { w: null, h: null };
+  recipe = recipe || {};
+  var rotation = Number(recipe.rotation || 0);
+  if (rotation === 90 || rotation === 270) {
+    var tmp = w; w = h; h = tmp;
+  }
+  var crop = recipe.crop;
+  if (crop && Number(crop.w) > 0 && Number(crop.h) > 0) {
+    w = Math.max(1, Math.round(w * Number(crop.w)));
+    h = Math.max(1, Math.round(h * Number(crop.h)));
   }
   return { w: w, h: h };
 }
@@ -5478,7 +6227,13 @@ function _lbLayoutDims() {
   // coordinates even if the currently displayed tier is /full. That matches the
   // sharp zoom-test path and avoids recalibrating pan/zoom when the source swaps.
   var originalDims = !_lbOriginalUnavailable ? _lbOrientedPhotoDims(img) : null;
-  if (originalDims) return originalDims;
+  if (originalDims) {
+    return _lbDisplayDimsForRecipe(
+      originalDims.w,
+      originalDims.h,
+      _lbCurrentEditRecipe
+    );
+  }
   if (img.naturalWidth && img.naturalHeight) {
     return { w: img.naturalWidth, h: img.naturalHeight };
   }
@@ -5656,9 +6411,12 @@ function _lbSrcUrl(photoId, key) {
   if (key === 'original') url = '/photos/' + photoId + '/original';
   else if (key === 'full') url = '/photos/' + photoId + '/full';
   else url = '/photos/' + photoId + '/preview?size=' + key;
-  return window.vireoRenderedUrl
+  url = window.vireoRenderedUrl
     ? window.vireoRenderedUrl(url, photoId)
     : _vireoUrlWithRenderVersion(url, photoId);
+  var version = _lbEditVersionByPhoto[String(photoId)];
+  if (version) url = _vireoUrlWithQueryParam(url, 'editv', version);
+  return url;
 }
 
 function _lbScheduleSourceSwap(targetZoom) {
@@ -7059,7 +7817,7 @@ function formatDuration(seconds) {
     safeFetch('/api/undo', {method: 'POST'})
       .then(function(data) {
         if (data && data.ok) {
-          _refreshEditRecipeHistoryChanges(data);
+          _lbRefreshEditRecipeCache(data.edit_recipes);
           showToast('Undone: ' + data.undone + ' — press Ctrl+Shift+Z to redo', 'success');
           _historySessionCount = Math.max(0, _historySessionCount - 1);
           document.getElementById('historyBadge').textContent = _historySessionCount || '';
@@ -7074,7 +7832,7 @@ function formatDuration(seconds) {
     safeFetch('/api/redo', {method: 'POST'})
       .then(function(data) {
         if (data && data.ok) {
-          _refreshEditRecipeHistoryChanges(data);
+          _lbRefreshEditRecipeCache(data.edit_recipes);
           showToast('Redone: ' + data.redone, 'success');
           _historySessionCount++;
           document.getElementById('historyBadge').textContent = _historySessionCount || '';

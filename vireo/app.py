@@ -1561,6 +1561,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     )
         db.conn.commit()
 
+    def _queue_edit_recipe_sync(db, photo_id, recipe_json):
+        """Queue the current non-destructive edit recipe for XMP sync."""
+        db.remove_pending_changes(
+            photo_id, "edit_recipe", workspace_id=db._ws_id(), _commit=False,
+        )
+        db.queue_change(
+            photo_id, "edit_recipe", recipe_json or "",
+            workspace_id=db._ws_id(), _commit=False,
+        )
+        db.conn.commit()
+
     def _rendered_recipe_long_edge(width, height, recipe):
         rotation = (recipe or {}).get("rotation", 0)
         if rotation in (90, 270):
@@ -3413,8 +3424,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         total_without_gps = db.count_photos_without_gps()
         total_with_gps = total_photos - total_without_gps
 
+        photo_dicts = [dict(p) for p in photos]
+        _attach_edit_recipes(db, photo_dicts)
+
         return jsonify({
-            "photos": [dict(p) for p in photos],
+            "photos": photo_dicts,
             "total_filtered": len(photos),
             "total_photos": total_photos,
             "total_with_gps": total_with_gps,
@@ -3895,6 +3909,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), 403)
         _invalidate_photo_render_cache(db, [photo_id])
         if old_value != new_value:
+            _queue_edit_recipe_sync(db, photo_id, new_value)
             db.record_edit(
                 "edit_recipe",
                 "Updated photo edit recipe",
@@ -3918,6 +3933,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), 403)
         _invalidate_photo_render_cache(db, [photo_id])
         if old_value:
+            _queue_edit_recipe_sync(db, photo_id, "")
             db.record_edit(
                 "edit_recipe",
                 "Cleared photo edit recipe",
@@ -5406,25 +5422,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # -- Undo --
 
     def _edit_recipe_history_updates(db, edit_id):
+        from image_edits import recipe_to_json
         rows = db.conn.execute(
             "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
             (edit_id,),
         ).fetchall()
         photo_ids = [r["photo_id"] for r in rows]
         if not photo_ids:
-            return []
+            return {}
         _invalidate_photo_render_cache(db, photo_ids)
-        recipes = db.get_photo_edit_recipes(photo_ids)
-        seen = set()
-        updates = []
+        updates = {}
         for photo_id in photo_ids:
-            if photo_id in seen:
-                continue
-            seen.add(photo_id)
-            updates.append({
-                "photo_id": photo_id,
-                "recipe": recipes.get(photo_id),
-            })
+            recipe = db.get_photo_edit_recipe(photo_id)
+            updates[str(photo_id)] = recipe
+            _queue_edit_recipe_sync(
+                db, photo_id, recipe_to_json(recipe) or "",
+            )
         return updates
 
     @app.route("/api/undo", methods=["POST"])
@@ -5433,15 +5446,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = db.undo_last_edit()
         if result is None:
             return json_error("nothing to undo")
-        edit_recipe_updates = []
+        edit_recipe_updates = None
         if result.get("action_type") == "edit_recipe":
             edit_recipe_updates = _edit_recipe_history_updates(db, result["id"])
-        return jsonify({
-            "ok": True,
-            "undone": result["description"],
-            "action_type": result.get("action_type"),
-            "edit_recipes": edit_recipe_updates,
-        })
+        response = {"ok": True, "undone": result["description"]}
+        if edit_recipe_updates is not None:
+            response["action_type"] = "edit_recipe"
+            response["edit_recipes"] = edit_recipe_updates
+        return jsonify(response)
 
     @app.route("/api/undo/status")
     def api_undo_status():
@@ -5472,15 +5484,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = db.redo_last_undo()
         if result is None:
             return json_error("nothing to redo")
-        edit_recipe_updates = []
+        edit_recipe_updates = None
         if result.get("action_type") == "edit_recipe":
             edit_recipe_updates = _edit_recipe_history_updates(db, result["id"])
-        return jsonify({
-            "ok": True,
-            "redone": result["description"],
-            "action_type": result.get("action_type"),
-            "edit_recipes": edit_recipe_updates,
-        })
+        response = {"ok": True, "redone": result["description"]}
+        if edit_recipe_updates is not None:
+            response["action_type"] = "edit_recipe"
+            response["edit_recipes"] = edit_recipe_updates
+        return jsonify(response)
 
     @app.route("/api/redo/status")
     def api_redo_status():
@@ -6271,10 +6282,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "has_more": len(photos) > len(limited),
             }
 
+        limited_buckets = [limited_bucket(b) for b in buckets]
         unidentified_limited = unidentified_photos[:limit_per_bucket]
+        visible_photos = []
+        for bucket in limited_buckets:
+            visible_photos.extend(bucket["photos"])
+        visible_photos.extend(unidentified_limited)
+        _attach_edit_recipes(db, visible_photos)
 
         return {
-            "buckets": [limited_bucket(b) for b in buckets],
+            "buckets": limited_buckets,
             "unidentified": {
                 "photo_count": len(unidentified_photos),
                 "photos": unidentified_limited,
@@ -6406,6 +6423,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ))
         for i, e in enumerate(species_entries, start=1):
             e["number"] = i
+        life_list_photos = []
+        for entry in species_entries:
+            if entry.get("best"):
+                life_list_photos.append(entry["best"])
+            life_list_photos.extend(entry.get("photos") or [])
+        _attach_edit_recipes(db, life_list_photos)
 
         return {
             "species": species_entries,
@@ -6659,6 +6682,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             label = bucket["species"]
 
         chunk = photos[offset: offset + limit]
+        _attach_edit_recipes(db, chunk)
         return jsonify({
             "species": label,
             "photos": chunk,
@@ -7898,6 +7922,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         return jsonify(miss_config_from_effective(db.get_effective_config(cfg.load())))
 
+    def _attach_miss_edit_recipes(db, grouped):
+        for category in ("no_subject", "clipped", "oof"):
+            photos = [dict(p) for p in grouped.get(category, [])]
+            _attach_edit_recipes(db, photos)
+            grouped[category] = photos
+        return grouped
+
     @app.route("/api/misses")
     def api_misses():
         """Return photos flagged as misses.
@@ -7913,13 +7944,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if category is not None:
             if category not in ("no_subject", "clipped", "oof"):
                 return jsonify({"error": "invalid category"}), 400
-            photos = db.list_misses(category=category, since=since)
+            photos = [dict(p) for p in db.list_misses(category=category, since=since)]
+            _attach_edit_recipes(db, photos)
             return jsonify({"photos": photos, "category": category})
-        return jsonify({
+        grouped = {
             "no_subject": db.list_misses(category="no_subject", since=since),
             "clipped":    db.list_misses(category="clipped", since=since),
             "oof":        db.list_misses(category="oof", since=since),
-        })
+        }
+        return jsonify(_attach_miss_edit_recipes(db, grouped))
 
     @app.route("/api/misses/preview", methods=["POST"])
     def api_misses_preview():
@@ -7938,6 +7971,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db, pipeline, detector_confidence=detector_confidence,
             since=body.get("since") or None,
         )
+        _attach_miss_edit_recipes(db, grouped)
         grouped["config"] = values
         grouped["preview"] = True
         return jsonify(grouped)
@@ -7966,6 +8000,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         grouped = preview_misses_for_workspace(
             db, pipeline, detector_confidence=detector_confidence, since=since,
         )
+        _attach_miss_edit_recipes(db, grouped)
         grouped["config"] = values
         grouped["updated"] = updated
         grouped["saved_defaults"] = body.get("save_defaults") is True
@@ -12549,6 +12584,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         naming_template = body.get("naming_template", "{original}")
         max_size = body.get("max_size")
         quality = body.get("quality", 92)
+        output_format = body.get("format", body.get("output_format", "jpg"))
 
         if not raw_ids:
             return json_error("photo_ids required")
@@ -12560,6 +12596,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("destination required")
         if not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
+        if max_size in ("", 0):
+            max_size = None
+        if max_size is not None:
+            if isinstance(max_size, bool):
+                return json_error("max_size must be a positive integer")
+            try:
+                max_size = int(max_size)
+            except (TypeError, ValueError):
+                return json_error("max_size must be a positive integer")
+            if max_size < 1 or max_size > 50000:
+                return json_error("max_size must be between 1 and 50000")
+        try:
+            from export import normalize_output_format, normalize_quality
+            output_format_info = normalize_output_format(output_format)
+            output_format = output_format_info["extension"]
+            quality = normalize_quality(quality)
+        except ValueError as exc:
+            return json_error(str(exc))
 
         db = _get_db()
         runner = app._job_runner
@@ -12620,6 +12674,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "naming_template": naming_template,
                     "max_size": max_size,
                     "quality": quality,
+                    "format": output_format,
                     "working_copy_max_size": wc_max_size,
                     "developed_dir": developed_dir,
                 },
@@ -12632,6 +12687,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "photo_ids": photo_ids,
                 "destination": destination,
                 "naming_template": naming_template,
+                "format": output_format,
             },
             workspace_id=active_ws,
         )
@@ -17032,6 +17088,80 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if size not in allowed_preview_sizes():
             return "Unsupported size", 400
         return _serve_preview(photo_id, size)
+
+    @app.route("/photos/<int:photo_id>/edit-preview")
+    def serve_photo_edit_preview(photo_id):
+        """Serve an uncropped preview for an in-progress edit recipe."""
+        import io
+
+        import config as cfg
+
+        db = _get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return "Not found", 404
+        try:
+            size = int(request.args.get("size", "1920"))
+        except ValueError:
+            return "Invalid size", 400
+        size = max(256, min(3840, size))
+
+        raw_recipe = request.args.get("recipe")
+        if raw_recipe:
+            try:
+                recipe = json.loads(raw_recipe)
+            except (TypeError, ValueError):
+                return "Invalid recipe", 400
+        else:
+            recipe = db.get_photo_edit_recipe(photo_id) or {}
+        if not isinstance(recipe, dict):
+            return "Invalid recipe", 400
+        display_recipe = dict(recipe)
+        display_recipe.pop("crop", None)
+
+        try:
+            from image_edits import RecipeError, apply_recipe_to_loaded_image
+            from image_loader import RAW_EXTENSIONS, load_image
+            recipe_json = display_recipe
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+            folder_row = db.conn.execute(
+                "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
+            ).fetchone()
+            if not folder_row:
+                return "Not found", 404
+            canonical, using_working_copy = _recipe_render_source(
+                photo, None, size, vireo_dir, {folder_row["id"]: folder_row["path"]},
+            )
+            selected_ext = os.path.splitext(canonical)[1].lower()
+            if (
+                not using_working_copy
+                and selected_ext in RAW_EXTENSIONS
+                and _has_current_working_copy_failure(
+                    photo,
+                    vireo_dir,
+                    trust_existing_working_copy=False,
+                    live_source_path=canonical,
+                    folder_path=folder_row["path"],
+                )
+            ):
+                log.info(
+                    "Skipping edit-preview generation for photo %s; RAW "
+                    "working-copy extraction already failed for current source mtime",
+                    photo_id,
+                )
+                return "Could not load image", 500
+            img = load_image(canonical, max_size=size)
+            if img is None:
+                _record_working_copy_failure(db, photo, canonical)
+                return "Could not load image", 500
+            img = apply_recipe_to_loaded_image(img, recipe_json, max_size=size)
+        except RecipeError as e:
+            return str(e), 400
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=cfg.load().get("preview_quality", 90))
+        img.close()
+        return Response(buf.getvalue(), mimetype="image/jpeg")
 
     @app.route("/photos/<int:photo_id>/original")
     def serve_original_photo(photo_id):

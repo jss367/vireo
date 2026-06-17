@@ -276,8 +276,24 @@ function sortedBuckets() {
   return buckets;
 }
 
+function photoThumbnailUrl(p) {
+  if (
+    p &&
+    Object.prototype.hasOwnProperty.call(p, 'edit_recipe') &&
+    typeof window.vireoRememberPhotoEditRecipe === 'function'
+  ) {
+    window.vireoRememberPhotoEditRecipe(p.id, p.edit_recipe, {
+      skipIfLocallyWritten: true
+    });
+  }
+  var url = '/thumbnails/' + p.id + '.jpg';
+  return typeof window.vireoRenderedUrl === 'function'
+    ? window.vireoRenderedUrl(url, p.id)
+    : url;
+}
+
 function renderCard(p, idx) {
-  var thumbSrc = '/thumbnails/' + p.id + '.jpg';
+  var thumbSrc = photoThumbnailUrl(p);
   var conf = p.has_accepted_species
     ? '<span class="card-chip conf">Tagged</span>'
     : (p.predicted_confidence != null ? '<span class="card-chip conf">ID ' + formatPercent(p.predicted_confidence) + '</span>' : '');

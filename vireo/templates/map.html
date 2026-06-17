@@ -472,6 +472,22 @@ function openPhotoMarker(photoId) {
   return true;
 }
 
+function photoThumbnailUrl(p) {
+  if (!p || p.id == null) return '';
+  if (
+    Object.prototype.hasOwnProperty.call(p, 'edit_recipe') &&
+    typeof window.vireoRememberPhotoEditRecipe === 'function'
+  ) {
+    window.vireoRememberPhotoEditRecipe(p.id, p.edit_recipe, {
+      skipIfLocallyWritten: true
+    });
+  }
+  var url = '/thumbnails/' + p.id + '.jpg';
+  return typeof window.vireoRenderedUrl === 'function'
+    ? window.vireoRenderedUrl(url, p.id)
+    : url;
+}
+
 /* ── Sidebar rendering ── */
 function renderSidebar(photos) {
   var list = document.getElementById('sidebarList');
@@ -483,7 +499,7 @@ function renderSidebar(photos) {
     card.className = 'sidebar-card';
     card.setAttribute('data-id', p.id);
 
-    var thumbSrc = p.id != null ? '/thumbnails/' + p.id + '.jpg' : '';
+    var thumbSrc = photoThumbnailUrl(p);
     var color = getSpeciesColor(p.species);
     var speciesHtml = p.species
       ? '<div class="card-species"><span class="species-dot" style="background:' + color + '"></span>'
@@ -518,7 +534,7 @@ function showClusterPreview(e) {
   for (var i = 0; i < previewCount; i++) {
     var p = childMarkers[i]._photoData;
     if (p && p.id != null) {
-      gridHtml += '<img src="/thumbnails/' + p.id + '.jpg"'
+      gridHtml += '<img src="' + escapeAttr(photoThumbnailUrl(p)) + '"'
         + ' alt="" onerror="this.style.visibility=\'hidden\'">';
     } else {
       gridHtml += '<div style="width:56px;height:56px;background:var(--bg-tertiary,#14374E);border-radius:3px"></div>';
@@ -587,7 +603,7 @@ async function loadPhotos() {
     legendControl.update(speciesColorMap);
 
     data.photos.forEach(function(p) {
-      var thumbSrc = p.id != null ? '/thumbnails/' + p.id + '.jpg' : '';
+      var thumbSrc = photoThumbnailUrl(p);
       var imgTag = thumbSrc
         ? '<img src="' + escapeAttr(thumbSrc) + '" alt="" onerror="this.style.display=\'none\'">'
         : '';
