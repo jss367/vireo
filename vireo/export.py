@@ -367,7 +367,7 @@ def _developed_can_satisfy_size(dev_path, photo, max_size, recipe=None, exif_dat
 
     try:
         with Image.open(dev_path) as img:
-            dev_w, dev_h = img.size
+            dev_w, dev_h = _image_size_after_exif_orientation(img)
     except Exception:
         return True
     dev_long = _recipe_result_long_edge(dev_w, dev_h, recipe)
