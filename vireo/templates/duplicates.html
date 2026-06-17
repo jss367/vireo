@@ -902,7 +902,9 @@
     var missing = photo.exists === false;
     if (missing) cls += ' missing';
     var badge = isWinner ? 'KEEP' : (isResolvedLoser ? 'REJECTED' : 'WILL REJECT');
-    var thumbUrl = photo.id != null ? ('/thumbnails/' + photo.id + '.jpg') : null;
+    var thumbUrl = photo.id != null
+      ? (window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg')
+      : null;
     var html = '<div class="dup-card ' + cls + '" data-photo-id="' +
                (photo.id != null ? photo.id : '') + '">';
     if (thumbUrl) {

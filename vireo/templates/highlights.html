@@ -277,19 +277,10 @@ function sortedBuckets() {
 }
 
 function photoThumbnailUrl(p) {
-  if (
-    p &&
-    Object.prototype.hasOwnProperty.call(p, 'edit_recipe') &&
-    typeof window.vireoRememberPhotoEditRecipe === 'function'
-  ) {
-    window.vireoRememberPhotoEditRecipe(p.id, p.edit_recipe, {
-      skipIfLocallyWritten: true
-    });
-  }
-  var url = '/thumbnails/' + p.id + '.jpg';
-  return typeof window.vireoRenderedUrl === 'function'
-    ? window.vireoRenderedUrl(url, p.id)
-    : url;
+  if (!p || p.id == null) return '';
+  return window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(p)
+    : '/thumbnails/' + p.id + '.jpg';
 }
 
 function renderCard(p, idx) {

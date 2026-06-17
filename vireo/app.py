@@ -2516,6 +2516,33 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             p["edit_recipe"] = recipe_map.get(p["id"])
         return photo_dicts
 
+    def _attach_nested_edit_recipes(db, payload):
+        """Attach edit recipes to nested photo-like dicts in an API payload."""
+        refs = []
+
+        def visit(value):
+            if isinstance(value, dict):
+                pid = value.get("id", value.get("photo_id"))
+                if (
+                    isinstance(pid, int)
+                    and not isinstance(pid, bool)
+                    and "filename" in value
+                ):
+                    refs.append((value, pid))
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+
+        visit(payload)
+        if not refs:
+            return payload
+        recipe_map = db.get_photo_edit_recipes(sorted({pid for _, pid in refs}))
+        for photo, pid in refs:
+            photo["edit_recipe"] = recipe_map.get(pid)
+        return payload
+
     def _request_flag_filter():
         flag = request.args.get("flag", None)
         if flag in (None, ""):
@@ -2854,6 +2881,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     or os.path.isfile(src + ".XMP")
                 ),
             })
+        _attach_nested_edit_recipes(db, out)
         return jsonify(out)
 
     @app.route("/api/folders/check-health", methods=["POST"])
@@ -3355,6 +3383,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if error:
             return json_error(error, 404)
         result["scope_method"] = method_or_error
+        _attach_nested_edit_recipes(db, result)
         return jsonify(result)
 
     @app.route("/api/photos/best-batch", methods=["POST"])
@@ -3399,6 +3428,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if error:
             return json_error(error, 404)
         result["scope_method"] = "selected_photos"
+        _attach_nested_edit_recipes(db, result)
         return jsonify(result)
 
     @app.route("/api/photos/geo")
@@ -5805,10 +5835,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "value": c["value"],
             })
 
-        return jsonify({
+        result = {
             "photos": list(by_photo.values()),
             "total_changes": len(changes),
-        })
+        }
+        _attach_nested_edit_recipes(db, result)
+        return jsonify(result)
 
     @app.route("/api/sync/discard", methods=["POST"])
     def api_sync_discard():
@@ -7336,6 +7368,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         preds = db.get_predictions(photo_ids=photo_ids)
         keywords_by_photo = db.get_keywords_for_photos(photo_ids)
         species_by_photo = db.get_species_keywords_for_photos(photo_ids)
+        edit_recipes_by_photo = db.get_photo_edit_recipes(photo_ids)
         taxonomy = load_local_taxonomy()
 
         def summarize_photo(row):
@@ -7347,6 +7380,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "flag": row["flag"],
                 "width": row["width"],
                 "height": row["height"],
+                "edit_recipe": edit_recipes_by_photo.get(row["id"]),
                 "keywords": keywords_by_photo.get(row["id"], []),
                 "species_keywords": species_by_photo.get(row["id"], []),
                 "predictions": {},
@@ -10871,6 +10905,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "latitude": lat,
             "longitude": lng,
             "filename": photo["filename"],
+            "edit_recipe": db.get_photo_edit_recipe(photo_id),
             "upload_url": upload_url,
             "mode": mode,
             "already_submitted": already,
@@ -12251,6 +12286,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             result = json.loads(row["result"])
         except (json.JSONDecodeError, TypeError):
             return jsonify({"found": False})
+        _attach_nested_edit_recipes(db, result)
         return jsonify({
             "found": True,
             "job_id": row["id"],
@@ -14262,6 +14298,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 photo = db.get_photo(r["photo_id"])
                 if photo:
                     photos.append({"photo": dict(photo), "cluster": 0})
+            _attach_nested_edit_recipes(db, photos)
             return jsonify(
                 {
                     "species": species_name,
@@ -14283,6 +14320,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 photo_data.append(dict(photo))
             else:
                 photo_data.append({"id": r["photo_id"], "filename": r["filename"]})
+        _attach_nested_edit_recipes(db, photo_data)
 
         emb_matrix = np.stack(embeddings)
 
@@ -15567,6 +15605,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         results = load_results(cache_dir, db._active_workspace_id)
         if results is None:
             return json_error("No pipeline results found. Run regroup first.", 404)
+        _attach_nested_edit_recipes(db, results)
         return jsonify(results)
 
     @app.route("/api/pipeline/photo/<int:photo_id>")
@@ -15585,6 +15624,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not row:
             return json_error("Photo not found", 404)
         result = dict(row)
+        result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
         # Get primary detection from global detections table (threshold
         # resolved from workspace-effective config inside get_detections).
         dets = db.get_detections(photo_id)
@@ -16332,6 +16372,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         photo["sharpness"] = p["sharpness"]
                         photo["subject_sharpness"] = p["subject_sharpness"]
                         photo["quality_score"] = p["quality_score"]
+        _attach_nested_edit_recipes(db, results)
 
         return jsonify(results)
 
@@ -16591,6 +16632,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "similarity": round(sim, 4),
                     }
                 )
+        _attach_nested_edit_recipes(db, results)
 
         return jsonify(
             {

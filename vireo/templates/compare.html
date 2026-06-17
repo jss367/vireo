@@ -567,12 +567,15 @@ function renderTable(rows) {
 
 function renderPhotoCell(photo) {
   var meta = [];
+  var thumbUrl = window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(photo)
+    : '/thumbnails/' + photo.photo_id + '.jpg';
   if (photo.timestamp) meta.push(photo.timestamp.replace('T', ' ').substring(0, 16));
   if (photo.rating) meta.push(photo.rating + ' star' + (photo.rating === 1 ? '' : 's'));
   if (photo.flag && photo.flag !== 'none') meta.push(photo.flag);
   return '<div class="photo-cell">' +
     '<button type="button" class="photo-thumb-button" title="View larger" onclick="openCompareLightbox(' +
-    photo.photo_id + ')"><img src="/thumbnails/' + photo.photo_id + '.jpg" loading="lazy" alt="' +
+    photo.photo_id + ')"><img src="' + escapeAttr(thumbUrl) + '" loading="lazy" alt="' +
     escapeAttr(photo.filename) + '"></button>' +
     '<div><div class="photo-name">' + escapeHtml(photo.filename) + '</div>' +
     '<div class="photo-meta">' + escapeHtml(meta.join(' · ')) + '</div>' +

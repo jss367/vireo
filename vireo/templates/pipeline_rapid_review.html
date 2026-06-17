@@ -790,8 +790,11 @@ function photoOriginalUrl(id) {
   return '/photos/' + id + '/original';
 }
 
-function thumbUrl(id) {
-  return '/thumbnails/' + id + '.jpg';
+function thumbUrl(photoOrId) {
+  var photoId = photoOrId && typeof photoOrId === 'object' ? photoOrId.id : photoOrId;
+  return window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(photoOrId)
+    : '/thumbnails/' + photoId + '.jpg';
 }
 
 function burstIds(burst) {
@@ -1516,7 +1519,7 @@ function thumbClass(p) {
 function renderFilmstrip() {
   var html = rapid.items.map(function(p) {
     return '<button class="' + thumbClass(p) + '" onclick="selectPhoto(' + p.id + ')" title="' + escapeHtml(p.filename || '') + '">' +
-      '<img src="' + thumbUrl(p.id) + '" alt=""></button>';
+      '<img src="' + thumbUrl(p) + '" alt=""></button>';
   }).join('');
   document.getElementById('filmstrip').innerHTML = html;
 }
@@ -1525,7 +1528,7 @@ function renderLane(id, photos) {
   var html = photos.map(function(p) {
     var muted = (!rapid.queue.includeRejected && photoFlag(p) === 'rejected') ? ' rejected-muted' : '';
     return '<button class="mini-thumb' + muted + '" onclick="selectPhoto(' + p.id + ')" title="' + escapeHtml(p.filename || '') + '">' +
-      '<img src="' + thumbUrl(p.id) + '" alt=""></button>';
+      '<img src="' + thumbUrl(p) + '" alt=""></button>';
   }).join('');
   document.getElementById(id).innerHTML = html;
 }

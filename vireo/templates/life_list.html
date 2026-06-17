@@ -161,19 +161,10 @@ function sortedSpecies() {
 }
 
 function photoThumbnailUrl(photo) {
-  if (
-    photo &&
-    Object.prototype.hasOwnProperty.call(photo, 'edit_recipe') &&
-    typeof window.vireoRememberPhotoEditRecipe === 'function'
-  ) {
-    window.vireoRememberPhotoEditRecipe(photo.id, photo.edit_recipe, {
-      skipIfLocallyWritten: true
-    });
-  }
-  var url = '/thumbnails/' + photo.id + '.jpg';
-  return typeof window.vireoRenderedUrl === 'function'
-    ? window.vireoRenderedUrl(url, photo.id)
-    : url;
+  if (!photo || photo.id == null) return '';
+  return window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(photo)
+    : '/thumbnails/' + photo.id + '.jpg';
 }
 
 function renderCard(entry) {

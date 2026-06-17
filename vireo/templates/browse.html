@@ -2183,7 +2183,7 @@ function renderPhotoCard(p, idx) {
     speciesBadgeHtml += '</div>';
   }
 
-  var thumbUrl = window.vireoRenderedUrl ? window.vireoRenderedUrl('/thumbnails/' + p.id + '.jpg', p.id) : '/thumbnails/' + p.id + '.jpg';
+  var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
   return '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
     '<div class="grid-card-img-wrap">' +
       '<img src="' + escapeAttr(thumbUrl) + '" loading="lazy" decoding="async" alt="' + escapeAttr(p.filename) + '">' +
@@ -4048,8 +4048,9 @@ function renderBestBatch(data) {
   }).join('');
   var cards = (data.cards || []).map(function(card) {
     var reasons = (card.reasons || []).slice(0, 2).map(escapeHtml).join(' · ');
+    var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(card) : '/thumbnails/' + card.id + '.jpg';
     return '<div class="best-batch-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
-      '<img src="/thumbnails/' + card.id + '.jpg" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
+      '<img src="' + escapeAttr(thumbUrl) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
       '<div class="best-batch-card-body">' +
         '<div class="best-batch-role ' + escapeAttr(card.role || '') + '">#' + card.rank + ' ' + bestBatchRoleLabel(card.role) + '</div>' +
         '<div class="best-batch-card-name" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
@@ -4058,11 +4059,12 @@ function renderBestBatch(data) {
       '</div>' +
     '</div>';
   }).join('');
+  var bestThumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(best) : '/thumbnails/' + best.id + '.jpg';
   content.className = '';
   content.innerHTML =
     '<div class="best-batch-head">' +
       '<div class="best-batch-pick">' +
-        '<img src="/thumbnails/' + best.id + '.jpg" alt="' + escapeAttr(best.filename || '') + '">' +
+        '<img src="' + escapeAttr(bestThumbUrl) + '" alt="' + escapeAttr(best.filename || '') + '">' +
         '<div class="best-batch-pick-meta">' +
           '<div class="best-batch-eyebrow">Best Pick</div>' +
           '<div class="best-batch-title">' + escapeHtml(best.filename || '') + '</div>' +
@@ -5009,7 +5011,7 @@ function renderDetail(photo) {
       skipIfLocallyWritten: true,
     });
   }
-  var detailThumb = window.vireoRenderedUrl ? window.vireoRenderedUrl('/thumbnails/' + photo.id + '.jpg', photo.id) : '/thumbnails/' + photo.id + '.jpg';
+  var detailThumb = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg';
   document.getElementById('detailImg').src = detailThumb;
   document.getElementById('detailFilename').textContent = photo.filename;
 

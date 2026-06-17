@@ -605,8 +605,9 @@ function renderPhotoGrid() {
   var html = '<div class="photo-grid">';
   photoList.forEach(function(p, idx) {
     var selClass = selectedPhotos.has(p.id) ? ' selected' : '';
+    var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
     html += '<div class="grid-card' + selClass + '" data-id="' + p.id + '" data-idx="' + idx + '" onclick="handlePhotoClick(event, ' + p.id + ', ' + idx + ')">';
-    html += '<div class="grid-card-img-wrap"><img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt=""></div>';
+    html += '<div class="grid-card-img-wrap"><img src="' + escapeAttr(thumbUrl) + '" loading="lazy" alt=""></div>';
     html += '<div class="grid-card-info"><div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div></div>';
     html += '</div>';
   });

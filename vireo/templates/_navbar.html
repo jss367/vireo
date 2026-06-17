@@ -3478,6 +3478,25 @@ window.vireoRenderedUrl = function(url, photoId) {
   return _vireoUrlWithRenderVersion(url, photoId);
 };
 
+window.vireoThumbnailUrl = function(photoOrId) {
+  var photo = photoOrId && typeof photoOrId === 'object' ? photoOrId : null;
+  var photoId = photo ? (photo.id != null ? photo.id : photo.photo_id) : photoOrId;
+  if (photoId == null) return '';
+  if (
+    photo &&
+    Object.prototype.hasOwnProperty.call(photo, 'edit_recipe') &&
+    typeof window.vireoRememberPhotoEditRecipe === 'function'
+  ) {
+    window.vireoRememberPhotoEditRecipe(photoId, photo.edit_recipe, {
+      skipIfLocallyWritten: true
+    });
+  }
+  var url = '/thumbnails/' + photoId + '.jpg';
+  return window.vireoRenderedUrl
+    ? window.vireoRenderedUrl(url, photoId)
+    : _vireoUrlWithRenderVersion(url, photoId);
+};
+
 function _lbCloneEditRecipe(recipe) {
   if (!recipe || typeof recipe !== 'object') return {};
   var out = {};
@@ -5850,6 +5869,7 @@ async function submitToInat(photoId) {
       description: '',
       geoprivacy: 'open',
       filename: data.filename,
+      edit_recipe: data.edit_recipe,
       already_submitted: data.already_submitted,
       existing_url: data.existing_observation_url,
     }];
@@ -5875,6 +5895,7 @@ async function submitToInatBatch(photoIds) {
         description: '',
         geoprivacy: 'open',
         filename: data.filename,
+        edit_recipe: data.edit_recipe,
         already_submitted: data.already_submitted,
         existing_url: data.existing_observation_url,
       });
@@ -5900,9 +5921,10 @@ function openInatModal() {
     if (item.already_submitted) {
       warn = '<div class="inat-card-status warning">&#9888; Already submitted: <a href="' + escapeAttr(item.existing_url) + '" target="_blank" onclick="return openExternalLink(event, this.href)" style="color:var(--warning);">' + escapeHtml(item.existing_url) + '</a></div>';
     }
+    var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(item) : '/thumbnails/' + item.photo_id + '.jpg';
     html += '<div class="inat-card" id="inatCard' + idx + '">' +
       '<div class="inat-card-header">' +
-        '<img class="inat-card-thumb" src="/thumbnails/' + item.photo_id + '.jpg" alt="">' +
+        '<img class="inat-card-thumb" src="' + escapeAttr(thumbUrl) + '" alt="">' +
         '<div style="flex:1;min-width:0;">' +
           '<div style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(item.filename) + '</div>' +
           warn +
@@ -6752,7 +6774,9 @@ function findSimilar(photoId) {
             openLightbox(p.id, p.filename || '');
           });
           var img = document.createElement('img');
-          img.src = '/thumbnails/' + p.id + '.jpg';
+          img.src = window.vireoThumbnailUrl
+            ? window.vireoThumbnailUrl(p)
+            : '/thumbnails/' + p.id + '.jpg';
           img.loading = 'lazy';
           img.alt = '';
           var info = document.createElement('div');
@@ -8864,8 +8888,11 @@ async function loadMissingPhotos() {
     document.getElementById('missingPhotosSelectAll').checked = false;
     container.innerHTML = photos.map(p => {
       const ts = p.timestamp ? new Date(p.timestamp).toLocaleDateString() : '';
+      const thumbUrl = window.vireoThumbnailUrl
+        ? window.vireoThumbnailUrl(p)
+        : `/thumbnails/${p.id}.jpg`;
       const thumb = p.has_thumb
-        ? `<img src="/thumbnails/${p.id}.jpg" alt="" loading="lazy">`
+        ? `<img src="${_escapeAttr(thumbUrl)}" alt="" loading="lazy">`
         : '<span>no thumb</span>';
       const badges = [
         ['thumb', p.has_thumb],
