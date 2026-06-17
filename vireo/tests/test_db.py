@@ -572,6 +572,38 @@ def test_get_photos_keyword_search(tmp_path):
     assert results[0]['filename'] == 'cardinal.jpg'
 
 
+def test_get_photos_keyword_multi_token(tmp_path):
+    """Multi-token keyword search requires every whitespace-separated token to
+    match (in the filename or some keyword), so "red bill" finds the
+    hyphenated keyword "Red-billed leiothrix" without an exact substring."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p3 = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.tag_photo(p1, db.add_keyword('Red-billed leiothrix'))
+    db.tag_photo(p2, db.add_keyword('Northern Cardinal'))
+    # p3 holds each token in a *separate* keyword.
+    db.tag_photo(p3, db.add_keyword('Reddish'))
+    db.tag_photo(p3, db.add_keyword('Billboard'))
+
+    # "red bill" matches the hyphenated single keyword (p1) and the
+    # split-across-two-keywords photo (p3); token order is irrelevant.
+    assert {r['filename'] for r in db.get_photos(keyword='red bill')} == {'a.jpg', 'c.jpg'}
+    assert {r['filename'] for r in db.get_photos(keyword='bill red')} == {'a.jpg', 'c.jpg'}
+
+    # Every token must match: no photo has both a "red*" and a "cardinal*" tag.
+    assert db.get_photos(keyword='red cardinal') == []
+
+    # A token can be satisfied by a different keyword on the same photo.
+    assert {r['filename'] for r in db.get_photos(keyword='northern card')} == {'b.jpg'}
+
+    # count_filtered_photos and get_photo_ids agree with get_photos.
+    assert db.count_filtered_photos(keyword='red bill') == 2
+    assert len(db.get_photo_ids(keyword='red bill')) == 2
+
+
 def test_add_keyword_idempotent(tmp_path):
     """add_keyword returns existing id if keyword already exists."""
     from db import Database
