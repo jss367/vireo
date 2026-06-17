@@ -124,15 +124,15 @@ jobs:
       # starting their own download simultaneously. Retry a few times with
       # backoff so a single transient throttle doesn't poison the whole run.
       #
-      # We fetch with curl rather than importing the app's downloader
-      # (``from detector import ensure_megadetector_weights``) on purpose: this
-      # is a ``pull_request`` workflow, so the checkout is PR-authored code.
-      # Running that code with HF_TOKEN in the environment would expose the
-      # secret to any same-repo PR that edits detector.py (or its imports).
-      # curl keeps the token out of PR-controlled Python; it only authenticates
-      # the initial huggingface.co request (the redirect target is a presigned
-      # CDN URL), and ``-f`` makes a 429 fail the attempt so the loop retries
-      # instead of saving an error page as the model. Tests never download —
+      # We download with the ``huggingface_hub`` library — a third-party
+      # installed dependency, NOT code from the PR checkout. The inline script
+      # imports only huggingface_hub + stdlib and hard-codes the repo/filename,
+      # so no PR-authored module (detector.py, models.py, …) ever runs with the
+      # token in scope (addresses the secret-exposure concern of importing the
+      # app's downloader). huggingface_hub also sends HF_TOKEN only to
+      # huggingface.co and follows the presigned CDN redirect *without* it, so
+      # the secret is never forwarded across the cross-host redirect the way a
+      # hand-rolled ``curl -L -H Authorization`` can. Tests never download —
       # they mock the downloader / detect_animals or skip when the file is
       # absent — so the weights just need to land where detector.py expects.
       - name: Pre-download MegaDetector weights
@@ -141,9 +141,6 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          dest="$HOME/.vireo/models/megadetector-v6"
-          url="https://huggingface.co/jss367/vireo-onnx-models/resolve/main/megadetector-v6/model.onnx"
-          mkdir -p "$dest"
           # Track success explicitly: a bash ``for`` loop exits with the
           # status of its last command, and ``sleep`` always succeeds —
           # without this flag, five consecutive download failures would
@@ -152,8 +149,7 @@ jobs:
           # pre-download is meant to prevent.
           success=0
           for i in 1 2 3 4 5; do
-            if curl -fL -H "Authorization: Bearer $HF_TOKEN" "$url" -o "$dest/model.onnx.part"; then
-              mv "$dest/model.onnx.part" "$dest/model.onnx"
+            if python -c "import os, shutil; from huggingface_hub import hf_hub_download; d = os.path.expanduser('~/.vireo/models/megadetector-v6'); os.makedirs(d, exist_ok=True); shutil.copy2(hf_hub_download(repo_id='jss367/vireo-onnx-models', filename='model.onnx', subfolder='megadetector-v6'), os.path.join(d, 'model.onnx'))"; then
               success=1
               break
             fi
