@@ -344,7 +344,7 @@ function renderClusters(data) {
     html += '<div class="cluster-grid">';
     cluster.photos.forEach(function(item) {
       var p = item.photo;
-      html += '<img class="cluster-thumb" src="/thumbnails/' + p.id + '.jpg" loading="lazy" ' +
+      html += '<img class="cluster-thumb" src="' + vireoThumbnailUrl(p.id) + '" loading="lazy" ' +
         'title="' + escapeAttr(p.filename) + '" ' +
         'data-photo-id="' + p.id + '" data-filename="' + escapeAttr(p.filename) + '">';
     });

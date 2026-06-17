@@ -2402,7 +2402,7 @@ function renderPhotoCard(p, encIdx, burstIdx) {
   var q = p.quality_composite || 0;
   var qPct = Math.round(q * 100);
   var html = '<div class="photo-card ' + label + '" data-photo-id="' + p.id + '">';
-  html += '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="" onclick="openInspect(' + p.id + ')">';
+  html += '<img src="' + vireoThumbnailUrl(p.id) + '" loading="lazy" alt="" onclick="openInspect(' + p.id + ')">';
   if (p.label) html += '<span class="photo-label ' + label + '">' + p.label + '</span>';
   if (p.rarity_protected) html += '<span class="photo-rarity">protected</span>';
   if (p.flag === 'flagged') html += '<span class="photo-flag-badge flag-flagged">P</span>';
@@ -2870,7 +2870,7 @@ function openInspect(photoId) {
 
   // Image with mask toggle
   html += '<div class="inspect-img-wrap">';
-  html += '<img src="/thumbnails/' + photoId + '.jpg" alt="">';
+  html += '<img src="' + vireoThumbnailUrl(photoId) + '" alt="">';
   html += '<img class="mask-overlay" id="maskOverlay" src="/masks/' + photoId + '.png" alt="">';
   html += '<button class="mask-toggle" onclick="toggleMask()">Toggle Mask</button>';
   html += '</div>';
@@ -2922,7 +2922,7 @@ function openInspect(photoId) {
     html += '<div class="context-filmstrip">';
     (enc.photo_ids || []).forEach(function(pid) {
       var isCurrent = pid === photoId ? ' current' : '';
-      html += '<img src="/thumbnails/' + pid + '.jpg" class="' + isCurrent + '" onclick="openInspect(' + pid + ')" alt="">';
+      html += '<img src="' + vireoThumbnailUrl(pid) + '" class="' + isCurrent + '" onclick="openInspect(' + pid + ')" alt="">';
     });
     html += '</div>';
   }

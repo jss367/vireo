@@ -875,7 +875,7 @@ function renderCard(cat, p, idx) {
       'onclick="onCardClick(\'' + cat + '\', ' + idx + ', ' + p.id + ', event)" ' +
       'ondblclick="onCardDoubleClick(\'' + cat + '\', ' + idx + ', event)">' +
       '<div class="miss-card-img-wrap">' +
-        '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename || '') + '">' +
+        '<img src="' + escapeAttr(vireoThumbnailUrl(p.id)) + '" loading="lazy" alt="' + escapeAttr(p.filename || '') + '">' +
         bboxHtml +
         '<span class="miss-card-badge">' +
           '<span class="dot cat-' + cat + '"></span>' +

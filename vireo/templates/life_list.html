@@ -162,7 +162,7 @@ function sortedSpecies() {
 
 function renderCard(entry) {
   var best = entry.best;
-  var thumb = best ? '/thumbnails/' + best.id + '.jpg' : '';
+  var thumb = best ? vireoThumbnailUrl(best.id) : '';
   var sci = entry.scientific_name && entry.scientific_name !== entry.species
     ? '<div class="species-sci">' + escapeAttr(entry.scientific_name) + '</div>'
     : '';
@@ -180,7 +180,7 @@ function renderCard(entry) {
     + escapeAttr((entry.locations || []).join(', ')) + '">'
     + '<div class="lifer-number">#' + entry.number + '</div>'
     + (best && best.is_life_list_photo ? '<div class="lifelist-ribbon">Life List</div>' : '')
-    + (best ? '<img src="' + escapeAttr(thumb) + '" alt="' + escapeAttr(best.filename) + '" loading="lazy">' : '')
+    + (best ? '<img src="' + escapeAttr(thumb) + '" data-photo-id="' + escapeAttr(best.id) + '" alt="' + escapeAttr(best.filename) + '" loading="lazy">' : '')
     + '<div class="species-info">'
     + '<div class="species-name">' + escapeAttr(entry.species) + '</div>'
     + sci

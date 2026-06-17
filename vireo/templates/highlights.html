@@ -277,7 +277,7 @@ function sortedBuckets() {
 }
 
 function renderCard(p, idx) {
-  var thumbSrc = '/thumbnails/' + p.id + '.jpg';
+  var thumbSrc = escapeAttr(vireoThumbnailUrl(p.id));
   var conf = p.has_accepted_species
     ? '<span class="card-chip conf">Tagged</span>'
     : (p.predicted_confidence != null ? '<span class="card-chip conf">ID ' + formatPercent(p.predicted_confidence) + '</span>' : '');

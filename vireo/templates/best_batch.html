@@ -365,11 +365,11 @@ async function fetchJson(url, options) {
 }
 
 function previewUrl(photoId, size) {
-  return '/photos/' + photoId + '/preview?size=' + (size || 1920);
+  return vireoPreviewUrl(photoId, size || 1920);
 }
 
 function thumbnailUrl(photoId) {
-  return '/thumbnails/' + photoId + '.jpg';
+  return vireoThumbnailUrl(photoId);
 }
 
 function roleLabel(role) {
