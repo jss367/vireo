@@ -3337,6 +3337,7 @@ var _lbNativeZoom = null;   // zoom value corresponding to 1:1 for current photo
 var _lbFitScale = 1.0;      // natural image scale at zoom=1.0
 var _lbPhotoW = null;       // original photo width (px)
 var _lbPhotoH = null;       // original photo height (px)
+var _lbPhotoOrientation = null; // original EXIF orientation, when API metadata has it
 var _lbCurrentEditRecipe = null; // active non-destructive recipe for layout math
 var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
 var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
@@ -3723,6 +3724,33 @@ var _lbChromeVisible = _lbStoredBool('vireo.lb.chromeVisible', true);
 
 function _lbRecipeHasCrop(recipe) {
   return !!(recipe && recipe.crop && Number(recipe.crop.w) > 0 && Number(recipe.crop.h) > 0);
+}
+
+function _lbMetadataOrientation(metadata) {
+  if (!metadata || typeof metadata !== 'object') return null;
+  var groups = ['EXIF', 'TIFF', 'Image'];
+  for (var i = 0; i < groups.length; i++) {
+    var group = metadata[groups[i]];
+    if (group && Object.prototype.hasOwnProperty.call(group, 'Orientation')) {
+      return group.Orientation;
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(metadata, 'Orientation')) {
+    return metadata.Orientation;
+  }
+  return null;
+}
+
+function _lbOrientationSwapsAxes(orientation) {
+  if (orientation == null || typeof orientation === 'boolean') return false;
+  if (typeof orientation === 'number') {
+    return [5, 6, 7, 8].indexOf(Math.round(orientation)) !== -1;
+  }
+  var text = String(orientation).trim().toLowerCase();
+  if (!text) return false;
+  var parsed = Number(text);
+  if (Number.isFinite(parsed)) return [5, 6, 7, 8].indexOf(Math.round(parsed)) !== -1;
+  return text.indexOf('90') !== -1 || text.indexOf('270') !== -1;
 }
 
 function _lbSourceOverlaysAvailable() {
@@ -4488,6 +4516,7 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbNativeZoom = null;
   _lbPhotoW = null;
   _lbPhotoH = null;
+  _lbPhotoOrientation = null;
   _lbCurrentEditRecipe = currentFromList && currentFromList.edit_recipe || null;
   _lbCurrentSrcKey = (
     restoreWantsOneToOne ||
@@ -4517,6 +4546,7 @@ function openLightbox(photoId, filename, photoList, options) {
       if (!data || _lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
       _lbPhotoW = data.width || null;
       _lbPhotoH = data.height || null;
+      _lbPhotoOrientation = _lbMetadataOrientation(data.metadata);
       _lbCurrentEditRecipe = data.edit_recipe || null;
       if (_lbRecipeHasCrop(_lbCurrentEditRecipe)) {
         var detContainer2 = document.getElementById('lightboxDetections');
@@ -5544,7 +5574,10 @@ function _lbOrientedPhotoDims(img) {
   if (!_lbPhotoW || !_lbPhotoH) return null;
   var w = _lbPhotoW;
   var h = _lbPhotoH;
-  if (img && img.naturalWidth && img.naturalHeight) {
+  if (_lbOrientationSwapsAxes(_lbPhotoOrientation)) {
+    w = _lbPhotoH;
+    h = _lbPhotoW;
+  } else if (img && img.naturalWidth && img.naturalHeight) {
     var storedAspect = w / h;
     var imgAspect = img.naturalWidth / img.naturalHeight;
     if (Math.abs(storedAspect - imgAspect) > Math.abs((1 / storedAspect) - imgAspect)) {
