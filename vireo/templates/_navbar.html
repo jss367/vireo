@@ -3481,7 +3481,7 @@ window.vireoRenderedUrl = function(url, photoId) {
 
 window.vireoThumbnailUrl = function(photoOrId) {
   var photo = photoOrId && typeof photoOrId === 'object' ? photoOrId : null;
-  var photoId = photo ? (photo.id != null ? photo.id : photo.photo_id) : photoOrId;
+  var photoId = photo ? (photo.photo_id != null ? photo.photo_id : photo.id) : photoOrId;
   if (photoId == null) return '';
   if (
     photo &&
