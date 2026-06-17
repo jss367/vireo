@@ -1511,6 +1511,56 @@ def test_cleared_recipe_does_not_adopt_stale_edited_preview_after_unlink_failure
         assert img.size == (800, 600)
 
 
+def test_failed_preview_invalidation_survives_app_restart(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import app as app_module
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_path = os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
+
+    original = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert original.status_code == 200
+    assert db.preview_cache_get(photo_id, 1920) is not None
+    with Image.open(io.BytesIO(original.data)) as img:
+        assert img.size == (800, 600)
+
+    original_remove = app_module.os.remove
+
+    def locked_remove(path):
+        if path == preview_path:
+            raise OSError("locked")
+        return original_remove(path)
+
+    monkeypatch.setattr(app_module.os, "remove", locked_remove)
+    edited = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 90}},
+    )
+    assert edited.status_code == 200
+    assert os.path.exists(preview_path)
+    assert db.preview_cache_get(photo_id, 1920) is not None
+
+    monkeypatch.setattr(app_module.os, "remove", original_remove)
+    restarted = app_module.create_app(
+        db._db_path,
+        thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+    )
+    rendered = restarted.test_client().get(
+        f"/photos/{photo_id}/preview?size=1920",
+    )
+
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
+
+
 def test_edit_recipe_api_invalidates_thumbnail_and_renders_edit(client_with_photo):
     import io
     import os

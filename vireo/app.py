@@ -1421,6 +1421,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     _invalid_preview_cache_paths = set()
 
+    def _ensure_preview_cache_invalidations_table(db):
+        db.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS preview_cache_invalidations (
+                photo_id INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                PRIMARY KEY (photo_id, size),
+                FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
+            )
+            """,
+        )
+
+    def _mark_preview_cache_invalid(db, photo_id, size, *, commit=True):
+        _ensure_preview_cache_invalidations_table(db)
+        db.conn.execute(
+            "INSERT OR IGNORE INTO preview_cache_invalidations (photo_id, size) "
+            "VALUES (?, ?)",
+            (photo_id, size),
+        )
+        if commit:
+            db.conn.commit()
+
+    def _clear_preview_cache_invalid(db, photo_id, size, *, commit=True):
+        _ensure_preview_cache_invalidations_table(db)
+        db.conn.execute(
+            "DELETE FROM preview_cache_invalidations WHERE photo_id=? AND size=?",
+            (photo_id, size),
+        )
+        if commit:
+            db.conn.commit()
+
+    def _is_preview_cache_invalid(db, photo_id, size):
+        _ensure_preview_cache_invalidations_table(db)
+        row = db.conn.execute(
+            "SELECT 1 FROM preview_cache_invalidations "
+            "WHERE photo_id=? AND size=?",
+            (photo_id, size),
+        ).fetchone()
+        return row is not None
+
     def _invalidate_photo_render_cache(db, photo_ids):
         """Drop cached rendered derivatives after an edit recipe changes."""
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
@@ -1458,12 +1498,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 except OSError:
                     if os.path.exists(path):
                         _invalid_preview_cache_paths.add(path)
+                        _mark_preview_cache_invalid(
+                            db, pid, size_value, commit=False,
+                        )
                     log.warning(
                         "Failed to remove stale preview cache %s",
                         path, exc_info=True,
                     )
                 else:
                     removed_preview_rows.append((pid, size_value))
+                    _clear_preview_cache_invalid(
+                        db, pid, size_value, commit=False,
+                    )
             try:
                 for name in os.listdir(preview_dir):
                     if not (name.startswith(f"{pid}_") and name.endswith(".jpg")):
@@ -1477,9 +1523,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     except OSError:
                         if os.path.exists(path):
                             _invalid_preview_cache_paths.add(path)
+                            _mark_preview_cache_invalid(
+                                db, pid, size_part, commit=False,
+                            )
                         log.warning(
                             "Failed to remove stale preview cache %s",
                             path, exc_info=True,
+                        )
+                    else:
+                        _clear_preview_cache_invalid(
+                            db, pid, size_part, commit=False,
                         )
             except FileNotFoundError:
                 pass
@@ -16619,7 +16672,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.preview_cache_delete(photo_id, size)  # no-op if no row
 
         skip_untracked_preview_adoption = False
-        stale_after_failed_invalidation = cache_path in _invalid_preview_cache_paths
+        stale_after_failed_invalidation = (
+            cache_path in _invalid_preview_cache_paths
+            or _is_preview_cache_invalid(db, photo_id, size)
+        )
         if stale_after_failed_invalidation and os.path.exists(cache_path):
             try:
                 os.remove(cache_path)
@@ -16631,8 +16687,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
             else:
                 _invalid_preview_cache_paths.discard(cache_path)
+                _clear_preview_cache_invalid(db, photo_id, size)
                 db.preview_cache_delete(photo_id, size)
                 stale_after_failed_invalidation = False
+        elif stale_after_failed_invalidation:
+            _invalid_preview_cache_paths.discard(cache_path)
+            _clear_preview_cache_invalid(db, photo_id, size)
+            db.preview_cache_delete(photo_id, size)
+            stale_after_failed_invalidation = False
         if (
             recipe
             and os.path.exists(cache_path)
@@ -16741,6 +16803,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             with open(cache_path, "wb") as f:
                 f.write(data)
             _invalid_preview_cache_paths.discard(cache_path)
+            _clear_preview_cache_invalid(db, photo_id, size)
             db.preview_cache_insert(photo_id, size, len(data))
             evict_preview_cache_if_over_quota(db, vireo_dir)
         except Exception as e:
