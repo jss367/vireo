@@ -318,7 +318,7 @@ _TIFF_FIRST_DEVELOPED_EXTS = ("tiff", "tif", "jpg", "jpeg")
 
 def _developed_ext_preference(output_ext):
     """Return source developed-output preference for the requested export type."""
-    if output_ext == "tiff":
+    if output_ext != "jpg":
         return _TIFF_FIRST_DEVELOPED_EXTS
     return _PREFERRED_DEVELOPED_EXTS
 
