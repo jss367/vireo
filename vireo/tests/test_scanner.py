@@ -635,6 +635,61 @@ def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
     assert "Robin" in kw_names
 
 
+def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
+    """Pairing raw+JPEG preserves a recipe stored on the deleted companion."""
+    from db import Database
+    from image_edits import recipe_to_json
+    from scanner import _pair_raw_jpeg_companions
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(img_dir), name="photos")
+    jpeg_id = db.add_photo(
+        folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+    )
+    raw_id = db.add_photo(
+        folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
+        file_size=2000, file_mtime=1.0,
+    )
+    db.set_photo_edit_recipe(jpeg_id, {"rotation": 90})
+    recipe_json = recipe_to_json({"rotation": 90}) or ""
+    db.record_edit(
+        "edit_recipe",
+        "Updated photo edit recipe",
+        recipe_json,
+        [{"photo_id": jpeg_id, "old_value": "", "new_value": recipe_json}],
+    )
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        ("thumbnails/raw.jpg", raw_id),
+    )
+    db.preview_cache_insert(raw_id, 800, 1234)
+
+    _pair_raw_jpeg_companions(db)
+
+    photo = db.conn.execute(
+        "SELECT id, filename, thumb_path FROM photos",
+    ).fetchone()
+    assert photo["filename"] == "IMG_001.cr3"
+    assert db.get_photo_edit_recipe(photo["id"]) == {
+        "rotation": 90,
+        "version": 1,
+    }
+    assert photo["thumb_path"] is None
+    assert db.preview_cache_get(photo["id"], 800) is None
+    history_item = db.conn.execute(
+        "SELECT photo_id FROM edit_history_items",
+    ).fetchone()
+    assert history_item["photo_id"] == photo["id"]
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert db.get_photo_edit_recipe(photo["id"]) is None
+
+
 def test_pairing_does_not_copy_rejected_flag_to_raw(tmp_path):
     """A companion JPEG's 'rejected' flag (e.g. set by the duplicate
     auto-resolver when the JPEG has a byte-identical twin) must not be

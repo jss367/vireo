@@ -5,6 +5,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import json
 import logging
 import logging.handlers
@@ -14,6 +15,7 @@ import queue
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
@@ -46,6 +48,7 @@ from werkzeug.exceptions import BadRequest
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
+_EXIF_ORIENTATION_TAG = 274
 
 # Serializes Windows SetErrorMode calls. SetErrorMode is process-wide, so
 # concurrent /api/volumes requests could otherwise interleave save/restore
@@ -1416,6 +1419,296 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             g.db = Database(db_path)
         return g.db
 
+    _invalid_preview_cache_paths = set()
+
+    def _ensure_preview_cache_invalidations_table(db):
+        db.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS preview_cache_invalidations (
+                photo_id INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                PRIMARY KEY (photo_id, size),
+                FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
+            )
+            """,
+        )
+
+    def _mark_preview_cache_invalid(db, photo_id, size, *, commit=True):
+        _ensure_preview_cache_invalidations_table(db)
+        db.conn.execute(
+            "INSERT OR IGNORE INTO preview_cache_invalidations (photo_id, size) "
+            "VALUES (?, ?)",
+            (photo_id, size),
+        )
+        if commit:
+            db.conn.commit()
+
+    def _clear_preview_cache_invalid(db, photo_id, size, *, commit=True):
+        _ensure_preview_cache_invalidations_table(db)
+        db.conn.execute(
+            "DELETE FROM preview_cache_invalidations WHERE photo_id=? AND size=?",
+            (photo_id, size),
+        )
+        if commit:
+            db.conn.commit()
+
+    def _is_preview_cache_invalid(db, photo_id, size):
+        _ensure_preview_cache_invalidations_table(db)
+        row = db.conn.execute(
+            "SELECT 1 FROM preview_cache_invalidations "
+            "WHERE photo_id=? AND size=?",
+            (photo_id, size),
+        ).fetchone()
+        return row is not None
+
+    def _invalidate_photo_render_cache(db, photo_ids):
+        """Drop cached rendered derivatives after an edit recipe changes."""
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        thumb_dir = app.config["THUMB_CACHE_DIR"]
+        preview_dir = os.path.join(vireo_dir, "previews")
+        originals_dir = os.path.join(vireo_dir, "originals")
+        for pid in photo_ids:
+            thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
+            clear_thumb_path = True
+            try:
+                if os.path.exists(thumb_cache):
+                    os.remove(thumb_cache)
+            except OSError:
+                clear_thumb_path = not os.path.exists(thumb_cache)
+                log.warning(
+                    "Failed to remove stale thumbnail cache %s", thumb_cache,
+                    exc_info=True,
+                )
+            if clear_thumb_path:
+                db.conn.execute(
+                    "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
+                )
+            tracked_sizes = set()
+            removed_preview_rows = []
+            for row in db.conn.execute(
+                "SELECT size FROM preview_cache WHERE photo_id = ?",
+                (pid,),
+            ).fetchall():
+                size_value = row["size"]
+                tracked_sizes.add(str(size_value))
+                path = os.path.join(preview_dir, f"{pid}_{size_value}.jpg")
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    if os.path.exists(path):
+                        _invalid_preview_cache_paths.add(path)
+                        _mark_preview_cache_invalid(
+                            db, pid, size_value, commit=False,
+                        )
+                    log.warning(
+                        "Failed to remove stale preview cache %s",
+                        path, exc_info=True,
+                    )
+                else:
+                    removed_preview_rows.append((pid, size_value))
+                    _clear_preview_cache_invalid(
+                        db, pid, size_value, commit=False,
+                    )
+            try:
+                for name in os.listdir(preview_dir):
+                    if not (name.startswith(f"{pid}_") and name.endswith(".jpg")):
+                        continue
+                    size_part = name[len(f"{pid}_"):-4]
+                    if size_part in tracked_sizes:
+                        continue
+                    path = os.path.join(preview_dir, name)
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        if os.path.exists(path):
+                            _invalid_preview_cache_paths.add(path)
+                            _mark_preview_cache_invalid(
+                                db, pid, size_part, commit=False,
+                            )
+                        log.warning(
+                            "Failed to remove stale preview cache %s",
+                            path, exc_info=True,
+                        )
+                    else:
+                        _clear_preview_cache_invalid(
+                            db, pid, size_part, commit=False,
+                        )
+            except FileNotFoundError:
+                pass
+            if removed_preview_rows:
+                db.conn.executemany(
+                    "DELETE FROM preview_cache WHERE photo_id = ? AND size = ?",
+                    removed_preview_rows,
+                )
+            original_cache = os.path.join(originals_dir, f"{pid}.jpg")
+            try:
+                if os.path.exists(original_cache):
+                    os.remove(original_cache)
+            except OSError:
+                log.warning("Failed to remove stale original cache %s", original_cache)
+        db.conn.commit()
+
+    def _rendered_recipe_long_edge(width, height, recipe):
+        rotation = (recipe or {}).get("rotation", 0)
+        if rotation in (90, 270):
+            width, height = height, width
+        crop = (recipe or {}).get("crop") if recipe else None
+        if crop:
+            return max(float(crop["w"]) * width, float(crop["h"]) * height)
+        return max(width, height)
+
+    def _photo_value(photo, key):
+        try:
+            return photo[key]
+        except (KeyError, IndexError, TypeError):
+            if hasattr(photo, "get"):
+                return photo.get(key)
+        return None
+
+    def _exif_orientation(exif_data):
+        if not exif_data:
+            return None
+        if isinstance(exif_data, str):
+            try:
+                metadata = json.loads(exif_data)
+            except (TypeError, ValueError):
+                return None
+        elif isinstance(exif_data, dict):
+            metadata = exif_data
+        else:
+            return None
+        if not isinstance(metadata, dict):
+            return None
+        for group in ("EXIF", "IFD0", "TIFF", "File"):
+            values = metadata.get(group)
+            if isinstance(values, dict) and "Orientation" in values:
+                return values["Orientation"]
+        return metadata.get("Orientation")
+
+    def _orientation_swaps_axes(orientation):
+        if orientation is None or isinstance(orientation, bool):
+            return False
+        if isinstance(orientation, (int, float)):
+            return int(orientation) in (5, 6, 7, 8)
+        text = str(orientation).strip().lower()
+        if not text:
+            return False
+        try:
+            return int(text) in (5, 6, 7, 8)
+        except ValueError:
+            return "90" in text or "270" in text
+
+    def _recipe_source_dimensions(photo):
+        try:
+            width = int(_photo_value(photo, "width") or 0)
+            height = int(_photo_value(photo, "height") or 0)
+        except (TypeError, ValueError):
+            return 0, 0
+        if (
+            width > 0
+            and height > 0
+            and _orientation_swaps_axes(_exif_orientation(_photo_value(photo, "exif_data")))
+        ):
+            return height, width
+        return width, height
+
+    def _image_size_after_exif_orientation(img):
+        width, height = img.size
+        orientation = None
+        with contextlib.suppress(Exception):
+            orientation = img.getexif().get(_EXIF_ORIENTATION_TAG)
+        if _orientation_swaps_axes(orientation):
+            return height, width
+        return width, height
+
+    def _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
+        if not recipe or not recipe.get("crop"):
+            return True
+        wc_rel = photo["working_copy_path"]
+        if not wc_rel:
+            return False
+        wc_path = os.path.join(vireo_dir, wc_rel)
+        if not os.path.exists(wc_path):
+            return False
+        try:
+            from PIL import Image as _PILImage
+            with _PILImage.open(wc_path) as wc_img:
+                wc_w, wc_h = _image_size_after_exif_orientation(wc_img)
+        except Exception:
+            return False
+        original_w, original_h = _recipe_source_dimensions(photo)
+        if original_w <= 0 or original_h <= 0:
+            return False
+        original_render_long = _rendered_recipe_long_edge(original_w, original_h, recipe)
+        required_long = min(max_size, original_render_long) if max_size else original_render_long
+        wc_render_long = _rendered_recipe_long_edge(wc_w, wc_h, recipe)
+        return wc_render_long >= required_long
+
+    def _path_satisfies_recipe_render(path, photo, recipe, max_size):
+        original_w, original_h = _recipe_source_dimensions(photo)
+        if original_w <= 0 or original_h <= 0:
+            return False
+        try:
+            from PIL import Image as _PILImage
+            with _PILImage.open(path) as img:
+                width, height = _image_size_after_exif_orientation(img)
+        except Exception:
+            return False
+        original_render_long = _rendered_recipe_long_edge(
+            original_w, original_h, recipe,
+        )
+        required_long = min(max_size, original_render_long) if max_size else original_render_long
+        return _rendered_recipe_long_edge(width, height, recipe) >= required_long
+
+    def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
+        from image_loader import get_canonical_image_path
+
+        def _is_working_copy_path(path):
+            wc_rel = photo["working_copy_path"]
+            if not path or not wc_rel:
+                return False
+            wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
+            return os.path.abspath(path) == os.path.abspath(wc_path)
+
+        if not recipe:
+            canonical = get_canonical_image_path(photo, vireo_dir, folders)
+            return canonical, _is_working_copy_path(canonical)
+
+        canonical = get_canonical_image_path(photo, vireo_dir, folders)
+        if not recipe.get("crop") and _is_working_copy_path(canonical):
+            return canonical, True
+
+        if recipe.get("crop") and _working_copy_satisfies_recipe_render(
+            photo, recipe, max_size, vireo_dir,
+        ):
+            return canonical, _is_working_copy_path(canonical)
+
+        folder_path = folders.get(photo["folder_id"])
+        if not folder_path:
+            if photo["working_copy_path"]:
+                wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
+                if os.path.exists(wc_path):
+                    return wc_path, True
+            return "", False
+        companion_path = photo["companion_path"]
+        if companion_path:
+            companion = os.path.join(folder_path, companion_path)
+            if (
+                os.path.exists(companion)
+                and _path_satisfies_recipe_render(companion, photo, recipe, max_size)
+            ):
+                return companion, True
+        original = os.path.join(
+            folder_path,
+            photo["filename"],
+        )
+        if not os.path.exists(original) and photo["working_copy_path"]:
+            wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
+            if os.path.exists(wc_path):
+                return wc_path, True
+        return original, False
+
     _ACCELERATED_RUNTIME_PROVIDERS = {
         "ACLExecutionProvider",
         "ArmNNExecutionProvider",
@@ -1923,9 +2216,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # Daemon=True so short-lived ``create_app`` callers (tests, scripts,
     # one-shot tooling) don't get pinned waiting on the 5-second delay
     # only to fire DB work after their real work is already done.
-    _wc_backfill_timer = threading.Timer(5.0, _kickoff_working_copy_backfill)
-    _wc_backfill_timer.daemon = True
-    _wc_backfill_timer.start()
+    #
+    # Suppressed in tests via ``VIREO_DISABLE_STARTUP_BACKFILL_TIMERS``:
+    # otherwise a Timer scheduled by a fast-finishing test fires during a
+    # later test, runs a JobRunner thread against the now-stale tmp_path
+    # DB, and its ``image_loader.load_image`` call (via
+    # ``extract_working_copy``) is intercepted by the next test's
+    # monkeypatch of that same module attribute.
+    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
+        _wc_backfill_timer = threading.Timer(5.0, _kickoff_working_copy_backfill)
+        _wc_backfill_timer.daemon = True
+        _wc_backfill_timer.start()
 
     # ----- thumb_path self-healing backfill -----
     # The dashboard's coverage card counts thumbnails by ``thumb_path IS NOT
@@ -2006,9 +2307,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     app._kickoff_thumb_path_backfill = _kickoff_thumb_path_backfill
 
-    _thumb_backfill_timer = threading.Timer(6.0, _kickoff_thumb_path_backfill)
-    _thumb_backfill_timer.daemon = True
-    _thumb_backfill_timer.start()
+    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
+        _thumb_backfill_timer = threading.Timer(6.0, _kickoff_thumb_path_backfill)
+        _thumb_backfill_timer.daemon = True
+        _thumb_backfill_timer.start()
 
     # -- Page routes --
 
@@ -2838,6 +3140,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Location section: pre-resolved leaf + parent chain so the photo
         # detail panel can render the filled state without a second roundtrip.
         result["location"] = _serialize_photo_location(db, photo_id)
+        result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
 
         # Read XMP sidecar keywords
         folder = db.conn.execute(
@@ -3532,6 +3835,72 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db.record_edit('color_label', f'Set color to {color or "none"}', new_color,
                        [{'photo_id': photo_id, 'old_value': old_color, 'new_value': new_color}])
         return jsonify({"ok": True})
+
+    @app.route("/api/photos/<int:photo_id>/edit-recipe", methods=["GET"])
+    def api_get_photo_edit_recipe(photo_id):
+        db = _get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return json_error("not found", 404)
+        return jsonify({
+            "photo_id": photo_id,
+            "recipe": db.get_photo_edit_recipe(photo_id),
+        })
+
+    @app.route("/api/photos/<int:photo_id>/edit-recipe", methods=["PUT", "POST"])
+    def api_set_photo_edit_recipe(photo_id):
+        db = _get_db()
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        recipe = body.get("recipe", body)
+        if not isinstance(recipe, dict):
+            return json_error("recipe must be a JSON object")
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return json_error("not found", 404)
+        from image_edits import RecipeError, recipe_to_json
+        old_recipe = db.get_photo_edit_recipe(photo_id)
+        try:
+            old_value = recipe_to_json(old_recipe) or ""
+            new_recipe = db.set_photo_edit_recipe(photo_id, recipe, verify_workspace=True)
+            new_value = recipe_to_json(new_recipe) or ""
+        except RecipeError as e:
+            return json_error(str(e))
+        except ValueError as e:
+            return json_error(str(e), 403)
+        _invalidate_photo_render_cache(db, [photo_id])
+        if old_value != new_value:
+            db.record_edit(
+                "edit_recipe",
+                "Updated photo edit recipe",
+                new_value,
+                [{"photo_id": photo_id, "old_value": old_value, "new_value": new_value}],
+            )
+        return jsonify({"ok": True, "recipe": new_recipe})
+
+    @app.route("/api/photos/<int:photo_id>/edit-recipe", methods=["DELETE"])
+    def api_clear_photo_edit_recipe(photo_id):
+        db = _get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return json_error("not found", 404)
+        from image_edits import recipe_to_json
+        old_recipe = db.get_photo_edit_recipe(photo_id)
+        old_value = recipe_to_json(old_recipe) or ""
+        try:
+            db.clear_photo_edit_recipe(photo_id, verify_workspace=True)
+        except ValueError as e:
+            return json_error(str(e), 403)
+        _invalidate_photo_render_cache(db, [photo_id])
+        if old_value:
+            db.record_edit(
+                "edit_recipe",
+                "Cleared photo edit recipe",
+                "",
+                [{"photo_id": photo_id, "old_value": old_value, "new_value": ""}],
+            )
+        return jsonify({"ok": True, "recipe": None})
 
     @app.route("/api/files/reveal", methods=["POST"])
     def api_files_reveal():
@@ -5018,6 +5387,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = db.undo_last_edit()
         if result is None:
             return json_error("nothing to undo")
+        if result.get("action_type") == "edit_recipe":
+            rows = db.conn.execute(
+                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
+                (result["id"],),
+            ).fetchall()
+            _invalidate_photo_render_cache(db, [r["photo_id"] for r in rows])
         return jsonify({"ok": True, "undone": result["description"]})
 
     @app.route("/api/undo/status")
@@ -5049,6 +5424,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = db.redo_last_undo()
         if result is None:
             return json_error("nothing to redo")
+        if result.get("action_type") == "edit_recipe":
+            rows = db.conn.execute(
+                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
+                (result["id"],),
+            ).fetchall()
+            _invalidate_photo_render_cache(db, [r["photo_id"] for r in rows])
         return jsonify({"ok": True, "redone": result["description"]})
 
     @app.route("/api/redo/status")
@@ -11725,7 +12106,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             import contextlib
 
             import config as cfg
-            from image_loader import get_canonical_image_path, load_image
+            from image_edits import apply_recipe_to_loaded_image
+            from image_loader import load_image
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
@@ -11761,21 +12143,71 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             job["_start_time"] = time.time()
 
             for i, photo in enumerate(photos):
+                detail_photo = thread_db.get_photo(photo["id"]) or photo
                 cache_path = os.path.join(preview_dir, f'{photo["id"]}_{max_size}.jpg')
+                recipe = thread_db.get_photo_edit_recipe(photo["id"])
                 if os.path.exists(cache_path):
-                    skipped += 1
-                    # Adopt any untracked file so precompute output is
-                    # visible to eviction and /api/preview-cache.
-                    # Best-effort: photo may be deleted mid-job (FK error).
+                    cache_row = None
                     with contextlib.suppress(Exception):
-                        if not thread_db.preview_cache_get(photo["id"], max_size):
-                            thread_db.preview_cache_insert(
-                                photo["id"], max_size, os.path.getsize(cache_path),
+                        cache_row = thread_db.preview_cache_get(photo["id"], max_size)
+                    if recipe and cache_row is None:
+                        with contextlib.suppress(OSError):
+                            os.remove(cache_path)
+                        if os.path.exists(cache_path):
+                            skipped += 1
+                            log.info(
+                                "Skipping untracked edited preview for photo %s; "
+                                "existing cache file could not be removed",
+                                photo["id"],
                             )
-                else:
-                    canonical = get_canonical_image_path(photo, vireo_dir, folders)
-                    img = load_image(canonical, max_size=max_size)
+                            continue
+                    else:
+                        skipped += 1
+                        # Adopt untracked unedited files so precompute output is
+                        # visible to eviction and /api/preview-cache.
+                        # Best-effort: photo may be deleted mid-job (FK error).
+                        with contextlib.suppress(Exception):
+                            if cache_row is None:
+                                thread_db.preview_cache_insert(
+                                    photo["id"],
+                                    max_size,
+                                    os.path.getsize(cache_path),
+                                )
+                        continue
+
+                if not os.path.exists(cache_path):
+                    canonical, using_working_copy = _recipe_render_source(
+                        detail_photo, recipe, max_size, vireo_dir, folders,
+                    )
+                    from image_loader import RAW_EXTENSIONS
+                    if (
+                        not using_working_copy
+                        and os.path.splitext(canonical)[1].lower() in RAW_EXTENSIONS
+                        and _has_current_working_copy_failure(
+                            detail_photo,
+                            vireo_dir,
+                            trust_existing_working_copy=False,
+                            live_source_path=canonical,
+                            folder_path=folders.get(detail_photo["folder_id"]),
+                        )
+                    ):
+                        skipped += 1
+                        log.info(
+                            "Skipping preview warmup for photo %s; RAW "
+                            "working-copy extraction already failed for "
+                            "current source mtime",
+                            photo["id"],
+                        )
+                        continue
+                    load_max_size = (
+                        None if recipe and recipe.get("crop") else max_size
+                    )
+                    img = load_image(canonical, max_size=load_max_size)
                     if img:
+                        if recipe:
+                            img = apply_recipe_to_loaded_image(
+                                img, recipe, max_size=max_size,
+                            )
                         img.save(cache_path, format="JPEG", quality=preview_quality)
                         with contextlib.suppress(Exception):
                             thread_db.preview_cache_insert(
@@ -13433,23 +13865,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not folder_row:
             return "", 404
         live_source = os.path.join(folder_row["path"], photo["filename"])
-        if _has_current_working_copy_failure(
-            photo, os.path.dirname(thumb_dir),
-            live_source_path=live_source, folder_path=folder_row["path"],
-        ):
-            log.info(
-                "Skipping thumbnail self-heal for photo %s; RAW working-copy "
-                "extraction already failed for current source mtime",
-                photo_id,
-            )
-            return "", 404
 
         # Resolve source via the canonical-path helper so we prefer the
         # JPEG working copy over the original RAW. This makes the
         # self-heal work for cameras whose RAW format libraw cannot
         # decode (the working copy was extracted from the embedded JPEG
         # at scan time).
-        from image_loader import get_canonical_image_path
+        import config as cfg
         from thumbnails import generate_thumbnail
         vireo_dir = os.path.dirname(thumb_dir)
         # Look up the photo's folder path directly rather than via
@@ -13466,8 +13888,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             {folder_row["id"]: folder_row["path"]} if folder_row else {}
         )
         try:
-            source = get_canonical_image_path(photo, vireo_dir, folders)
-            result = generate_thumbnail(photo_id, source, thumb_dir)
+            recipe = db.get_photo_edit_recipe(photo_id)
+            thumb_size = cfg.load().get("thumbnail_size", 400)
+            source, _using_working_copy = _recipe_render_source(
+                photo, recipe, thumb_size, vireo_dir, folders,
+            )
+            if (
+                not _using_working_copy
+                and _has_current_working_copy_failure(
+                    photo,
+                    vireo_dir,
+                    trust_existing_working_copy=False,
+                    live_source_path=live_source,
+                    folder_path=folder_row["path"],
+                )
+            ):
+                log.info(
+                    "Skipping thumbnail self-heal for photo %s; selected source "
+                    "would retry a RAW decode that already failed for current "
+                    "source mtime",
+                    photo_id,
+                )
+                return "", 404
+            result = generate_thumbnail(
+                photo_id,
+                source,
+                thumb_dir,
+                size=thumb_size,
+                recipe=recipe,
+            )
         except Exception:
             log.exception(
                 "Thumbnail self-heal failed for photo %s (source=%s)",
@@ -16224,6 +16673,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         preview_dir = os.path.join(vireo_dir, "previews")
         cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
+        recipe = db.get_photo_edit_recipe(photo_id)
 
         # Reject corrupt zero-byte cache files (prior write interrupted).
         # Treat them as a miss so the regeneration path below produces a
@@ -16235,11 +16685,53 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 pass
             db.preview_cache_delete(photo_id, size)  # no-op if no row
 
+        skip_untracked_preview_adoption = False
+        stale_after_failed_invalidation = (
+            cache_path in _invalid_preview_cache_paths
+            or _is_preview_cache_invalid(db, photo_id, size)
+        )
+        if stale_after_failed_invalidation and os.path.exists(cache_path):
+            try:
+                os.remove(cache_path)
+            except OSError:
+                skip_untracked_preview_adoption = True
+                log.warning(
+                    "Failed to remove previously invalidated preview cache %s",
+                    cache_path, exc_info=True,
+                )
+            else:
+                _invalid_preview_cache_paths.discard(cache_path)
+                _clear_preview_cache_invalid(db, photo_id, size)
+                db.preview_cache_delete(photo_id, size)
+                stale_after_failed_invalidation = False
+        elif stale_after_failed_invalidation:
+            _invalid_preview_cache_paths.discard(cache_path)
+            _clear_preview_cache_invalid(db, photo_id, size)
+            db.preview_cache_delete(photo_id, size)
+            stale_after_failed_invalidation = False
+        if (
+            recipe
+            and os.path.exists(cache_path)
+            and not db.preview_cache_get(photo_id, size)
+        ):
+            try:
+                os.remove(cache_path)
+            except OSError:
+                skip_untracked_preview_adoption = True
+                log.warning(
+                    "Failed to remove stale untracked preview cache %s",
+                    cache_path, exc_info=True,
+                )
+
         # Cache hit (tracked): touch and serve. The touch is best-effort
         # bookkeeping — under concurrent traffic SQLite can raise
         # OperationalError: database is locked, but that shouldn't turn a
         # valid cache hit into a 500 when the JPEG is right there on disk.
-        if db.preview_cache_get(photo_id, size) and os.path.exists(cache_path):
+        if (
+            not stale_after_failed_invalidation
+            and db.preview_cache_get(photo_id, size)
+            and os.path.exists(cache_path)
+        ):
             try:
                 db.preview_cache_touch(photo_id, size)
             except Exception:
@@ -16253,7 +16745,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Read bytes into memory before evicting: eviction may delete the
         # file we just adopted (e.g. preview_cache_max_mb=0), but we can
         # still serve the response from memory — mirrors the miss path.
-        if os.path.exists(cache_path):
+        if (
+            not stale_after_failed_invalidation
+            and not skip_untracked_preview_adoption
+            and os.path.exists(cache_path)
+        ):
             with open(cache_path, "rb") as f:
                 data = f.read()
             try:
@@ -16264,7 +16760,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return Response(data, mimetype="image/jpeg")
 
         # Cache miss: generate, insert, evict-if-over-quota, serve.
-        from image_loader import get_canonical_image_path, load_image
+        from image_loader import RAW_EXTENSIONS, load_image
 
         folder_row = db.conn.execute(
             "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
@@ -16273,23 +16769,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "Not found", 404
         folders = {folder_row["id"]: folder_row["path"]}
 
-        live_source = os.path.join(folder_row["path"], photo["filename"])
-        if _has_current_working_copy_failure(
-            photo, vireo_dir,
-            live_source_path=live_source, folder_path=folder_row["path"],
+        canonical, using_working_copy = _recipe_render_source(
+            photo, recipe, size, vireo_dir, folders,
+        )
+        selected_ext = os.path.splitext(canonical)[1].lower()
+        if (
+            not using_working_copy
+            and selected_ext in RAW_EXTENSIONS
+            and _has_current_working_copy_failure(
+                photo,
+                vireo_dir,
+                trust_existing_working_copy=False,
+                live_source_path=canonical,
+                folder_path=folder_row["path"],
+            )
         ):
             log.info(
-                "Skipping preview generation for photo %s; RAW working-copy "
-                "extraction already failed for current source mtime",
+                "Skipping cropped preview generation for photo %s; RAW "
+                "working-copy extraction already failed for current source mtime",
                 photo_id,
             )
             return "Could not load image", 500
-
-        canonical = get_canonical_image_path(photo, vireo_dir, folders)
-        img = load_image(canonical, max_size=size)
+        load_max_size = None if recipe and recipe.get("crop") else size
+        img = load_image(canonical, max_size=load_max_size)
         if img is None:
             _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500
+        if recipe:
+            from image_edits import apply_recipe_to_loaded_image
+            img = apply_recipe_to_loaded_image(img, recipe, max_size=size)
 
         preview_quality = cfg.load().get("preview_quality", 90)
 
@@ -16308,6 +16816,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             os.makedirs(preview_dir, exist_ok=True)
             with open(cache_path, "wb") as f:
                 f.write(data)
+            _invalid_preview_cache_paths.discard(cache_path)
+            _clear_preview_cache_invalid(db, photo_id, size)
             db.preview_cache_insert(photo_id, size, len(data))
             evict_preview_cache_if_over_quota(db, vireo_dir)
         except Exception as e:
@@ -16371,6 +16881,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "Not found", 404
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        recipe = db.get_photo_edit_recipe(photo_id)
 
         # Decide whether to trust the working copy as the full-res asset
         # by reading its actual on-disk dimensions, NOT the current
@@ -16383,45 +16894,141 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # is safe to do per request even during burst-review zoom. The
         # expensive path we must avoid is the RAW re-extract below
         # (5–7s per photo), not the header read.
-        if photo["working_copy_path"]:
+        def _trusted_full_res_working_copy_path():
+            if not photo["working_copy_path"]:
+                return None
             wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
-            if os.path.exists(wc_path):
-                from PIL import Image as _PILImage
-                try:
-                    with _PILImage.open(wc_path) as _wc_img:
-                        wc_w, wc_h = _wc_img.size
-                except Exception:
-                    wc_w = wc_h = 0
-                orig_w = photo["width"] or 0
-                orig_h = photo["height"] or 0
-                # Trust the wc when it meets/exceeds the believed
-                # original dims, or when those dims are unknown (no
-                # basis to declare the wc stale and a speculative RAW
-                # re-extract would just thrash the disk).
-                if wc_w and wc_h and (
-                    (wc_w >= orig_w and wc_h >= orig_h)
-                    or not (orig_w and orig_h)
-                ):
-                    return send_file(wc_path, mimetype="image/jpeg")
-                # The wc is smaller than the believed original. For RAW
-                # sources this often means rawpy.postprocess() failed
-                # and we fell back to the embedded JPEG, which can be a
-                # few pixels shy of the full sensor area (e.g. Nikon
-                # NEFs report 8280×5520 but the embedded JPEG is
-                # 8256×5504). Re-extracting would yield the same
-                # fallback image, just slower — so trust the wc when
-                # it is within 1% of the believed dims. This tolerance
-                # is RAW-only: for JPEG/PNG/etc., the wc being smaller
-                # means the cap downsized it, and re-extracting WILL
-                # produce more pixels.
-                from image_loader import RAW_EXTENSIONS
-                ext = os.path.splitext(photo["filename"])[1].lower()
-                if ext in RAW_EXTENSIONS and wc_w and wc_h:
-                    wc_long = max(wc_w, wc_h)
-                    orig_long = max(orig_w, orig_h)
-                    if orig_long and wc_long >= orig_long * 0.99:
-                        return send_file(wc_path, mimetype="image/jpeg")
-                # Fall through to on-demand re-extract.
+            if not os.path.exists(wc_path):
+                return None
+            from PIL import Image as _PILImage
+            try:
+                with _PILImage.open(wc_path) as _wc_img:
+                    wc_w, wc_h = _wc_img.size
+            except Exception:
+                wc_w = wc_h = 0
+            orig_w = photo["width"] or 0
+            orig_h = photo["height"] or 0
+            # Trust the wc when it meets/exceeds the believed original dims,
+            # or when those dims are unknown (no basis to declare the wc stale
+            # and a speculative RAW re-extract would just thrash the disk).
+            if wc_w and wc_h and (
+                (wc_w >= orig_w and wc_h >= orig_h) or not (orig_w and orig_h)
+            ):
+                return wc_path
+            # The wc is smaller than the believed original. For RAW sources
+            # this often means rawpy.postprocess() failed and we fell back to
+            # the embedded JPEG, which can be a few pixels shy of the full
+            # sensor area. Re-extracting would yield the same fallback image,
+            # just slower — so trust the wc when it is within 1% of the
+            # believed dims. This tolerance is RAW-only: for JPEG/PNG/etc.,
+            # the wc being smaller means the cap downsized it, and re-extracting
+            # WILL produce more pixels.
+            from image_loader import RAW_EXTENSIONS
+            ext = os.path.splitext(photo["filename"])[1].lower()
+            if ext in RAW_EXTENSIONS and wc_w and wc_h:
+                wc_long = max(wc_w, wc_h)
+                orig_long = max(orig_w, orig_h)
+                if orig_long and wc_long >= orig_long * 0.99:
+                    return wc_path
+            return None
+
+        trusted_wc_path = _trusted_full_res_working_copy_path()
+
+        def _full_res_companion_path(folder_path, using_offline_cache=False):
+            companion_path = photo["companion_path"]
+            if not companion_path:
+                return None
+            companion_abs = os.path.join(folder_path, companion_path)
+            if using_offline_cache:
+                offline_row = db.offline_original_get(photo_id)
+                if offline_row and offline_row["companion_path"]:
+                    offline_companion = os.path.join(
+                        vireo_dir, offline_row["companion_path"]
+                    )
+                    if os.path.exists(offline_companion):
+                        companion_abs = offline_companion
+            if not os.path.exists(companion_abs):
+                return None
+            orig_w = photo["width"]
+            orig_h = photo["height"]
+            if not (orig_w and orig_h):
+                return None
+            from PIL import Image as _PILImage
+            try:
+                with _PILImage.open(companion_abs) as _cimg:
+                    c_w, c_h = _cimg.size
+            except Exception:
+                return None
+            if c_w >= orig_w and c_h >= orig_h:
+                return companion_abs
+            return None
+
+        if recipe:
+            folder = db.conn.execute(
+                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+            ).fetchone()
+            if not folder:
+                return "Not found", 404
+            image_path = trusted_wc_path
+            using_offline_cache = False
+            if image_path is None:
+                from offline_cache import resolve_original_path
+                image_path, using_offline_cache = resolve_original_path(
+                    db,
+                    photo,
+                    vireo_dir,
+                    {photo["folder_id"]: folder["path"]},
+                )
+                companion_source = _full_res_companion_path(
+                    folder["path"], using_offline_cache,
+                )
+                if companion_source:
+                    image_path = companion_source
+            from image_loader import RAW_EXTENSIONS, load_image
+            resolved_ext = os.path.splitext(image_path)[1].lower()
+            if (
+                trusted_wc_path is None
+                and resolved_ext in RAW_EXTENSIONS
+                and _has_current_working_copy_failure(
+                    photo,
+                    vireo_dir,
+                    trust_existing_working_copy=False,
+                    live_source_path=image_path,
+                    folder_path=folder["path"],
+                )
+            ):
+                log.info(
+                    "Skipping edited original-image extraction for photo %s; "
+                    "RAW working-copy extraction already failed for current source mtime",
+                    photo_id,
+                )
+                return "Could not load image", 500
+            img = load_image(image_path, max_size=None)
+            if img is None:
+                _record_working_copy_failure(db, photo, image_path)
+                return "Could not load image", 500
+            from image_edits import apply_recipe
+            img = apply_recipe(img, recipe)
+            originals_dir = os.path.join(vireo_dir, "originals")
+            cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
+            os.makedirs(originals_dir, exist_ok=True)
+            quality = cfg.load().get("working_copy_quality", 92)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=f".{photo_id}.", suffix=".jpg.tmp", dir=originals_dir,
+            )
+            os.close(fd)
+            try:
+                img.save(tmp_path, format="JPEG", quality=quality)
+                os.replace(tmp_path, cache_path)
+            except Exception:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
+                raise
+            img.close()
+            return send_file(cache_path, mimetype="image/jpeg")
+
+        if trusted_wc_path:
+            return send_file(trusted_wc_path, mimetype="image/jpeg")
 
         # Resolve original file path
         folder = db.conn.execute(
@@ -16469,30 +17076,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # dimensions must be at least as large as the stored original
         # dimensions.  If original dimensions are unknown (None) we cannot
         # make that guarantee, so fall back to decoding from the RAW.
-        source_for_extraction = image_path
-        if photo["companion_path"]:
-            companion_abs = os.path.join(folder["path"], photo["companion_path"])
-            if using_offline_cache:
-                offline_row = db.offline_original_get(photo_id)
-                if offline_row and offline_row["companion_path"]:
-                    offline_companion = os.path.join(
-                        vireo_dir, offline_row["companion_path"]
-                    )
-                    if os.path.exists(offline_companion):
-                        companion_abs = offline_companion
-            if os.path.exists(companion_abs):
-                orig_w = photo["width"]
-                orig_h = photo["height"]
-                if orig_w and orig_h:
-                    from PIL import Image as _PILImage
-                    try:
-                        with _PILImage.open(companion_abs) as _cimg:
-                            c_w, c_h = _cimg.size
-                        if c_w >= orig_w and c_h >= orig_h:
-                            source_for_extraction = companion_abs
-                    except Exception:
-                        pass  # unreadable companion — fall back to RAW
-                # If original dims are unknown, skip companion (can't verify resolution)
+        source_for_extraction = (
+            _full_res_companion_path(folder["path"], using_offline_cache) or image_path
+        )
 
         if extract_working_copy(source_for_extraction, wc_abs, max_size=0, quality=quality):
             # Update DB so future requests are fast; also backfill
