@@ -1948,7 +1948,7 @@ function grmPhotoUrl(photoId) {
   var stop = GRM_RES_STOPS[grmResolutionIdx] || GRM_RES_STOPS[1];
   if (stop.kind === 'thumb') return vireoThumbnailUrl(photoId);
   if (stop.kind === 'original') return '/photos/' + photoId + '/original';
-  return '/photos/' + photoId + '/preview?size=' + stop.size;
+  return vireoPreviewUrl(photoId, stop.size);
 }
 
 function grmLoupePhotoUrl(photoId) {

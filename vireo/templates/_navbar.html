@@ -3460,6 +3460,7 @@ var _lbRenderedAdjustmentValues = null;
 var _lbAdjustSaveTimer = null;
 var _lbAdjustSeq = 0;
 var _lbAdjustmentInputSeq = 0;
+var _lbAdjustmentInputSeqByPhoto = {};
 var _lbAdjustSaveInFlightByPhoto = {};
 var _lbQueuedAdjustmentSaveByPhoto = {};
 var _lbRecipeBustByPhotoId = {};
@@ -3511,6 +3512,17 @@ function _lbCloneRecipe(recipe) {
   } catch (_) {
     return {};
   }
+}
+
+function _lbAdjustmentInputSeqFor(photoId) {
+  return _lbAdjustmentInputSeqByPhoto[String(photoId)] || 0;
+}
+
+function _lbBumpAdjustmentInputSeq(photoId) {
+  var key = String(photoId);
+  _lbAdjustmentInputSeq += 1;
+  _lbAdjustmentInputSeqByPhoto[key] = (_lbAdjustmentInputSeqByPhoto[key] || 0) + 1;
+  return _lbAdjustmentInputSeqByPhoto[key];
 }
 
 function _lbAdjustmentValues(recipe) {
@@ -3711,7 +3723,7 @@ function _lbStartAdjustmentRecipeSave(photoId, recipe, inputSeq) {
           detail: {photoId: photoId, recipe: data.recipe || null}
         }));
       } catch (_) {}
-      if (_lightboxCurrentId !== photoId || inputSeq !== _lbAdjustmentInputSeq) return;
+      if (_lightboxCurrentId !== photoId || inputSeq !== _lbAdjustmentInputSeqFor(photoId)) return;
       var activeSeq = ++_lbAdjustSeq;
       _lbEditRecipe = _lbCloneRecipe(data.recipe || {});
       _lbEditRecipeLoaded = true;
@@ -3737,7 +3749,7 @@ function _lbSaveAdjustmentRecipe(values) {
   if (!_lightboxCurrentId || !_lbEditRecipeLoaded) return;
   var photoId = _lightboxCurrentId;
   var key = String(photoId);
-  var inputSeq = _lbAdjustmentInputSeq;
+  var inputSeq = _lbAdjustmentInputSeqFor(photoId);
   var recipe = _lbRecipeWithAdjustments(values);
   _lbEditRecipe = _lbCloneRecipe(recipe);
   if (_lbAdjustSaveInFlightByPhoto[key]) {
@@ -3767,7 +3779,7 @@ function onLightboxAdjustmentInput(input) {
   var label = document.getElementById(input.id + 'Value');
   if (label) label.textContent = _lbFormatAdjustmentValue(input.dataset.adjustment, input.value);
   _lbAdjustSeq += 1;
-  _lbAdjustmentInputSeq += 1;
+  _lbBumpAdjustmentInputSeq(_lightboxCurrentId);
   var values = _lbReadAdjustmentControls();
   _lbEditRecipe = _lbRecipeWithAdjustments(values);
   _lbApplyAdjustmentPreviewCss(values);
@@ -3792,7 +3804,7 @@ function resetLightboxAdjustments() {
   var values = _lbReadAdjustmentControls();
   _lbEditRecipe = _lbRecipeWithAdjustments(values);
   _lbApplyAdjustmentPreviewCss(values);
-  _lbAdjustmentInputSeq += 1;
+  _lbBumpAdjustmentInputSeq(_lightboxCurrentId);
   if (_lbAdjustSaveTimer) {
     clearTimeout(_lbAdjustSaveTimer);
     _lbAdjustSaveTimer = null;
@@ -5832,7 +5844,7 @@ function openInatModal() {
     }
     html += '<div class="inat-card" id="inatCard' + idx + '">' +
       '<div class="inat-card-header">' +
-        '<img class="inat-card-thumb" src="' + vireoThumbnailUrl(item.photo_id) + '" alt="">' +
+        '<img class="inat-card-thumb" src="' + escapeAttr(vireoThumbnailUrl(item.photo_id)) + '" alt="">' +
         '<div style="flex:1;min-width:0;">' +
           '<div style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(item.filename) + '</div>' +
           warn +
@@ -8766,7 +8778,7 @@ async function loadMissingPhotos() {
     container.innerHTML = photos.map(p => {
       const ts = p.timestamp ? new Date(p.timestamp).toLocaleDateString() : '';
       const thumb = p.has_thumb
-        ? `<img src="${vireoThumbnailUrl(p.id)}" alt="" loading="lazy">`
+        ? `<img src="${_escapeAttr(vireoThumbnailUrl(p.id))}" alt="" loading="lazy">`
         : '<span>no thumb</span>';
       const badges = [
         ['thumb', p.has_thumb],

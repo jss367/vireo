@@ -964,7 +964,7 @@ function renderCulling() {
           'onclick="openLightbox(' + photo.photo_id + ', this.dataset.filename, window.' + poseKey + ')" ' +
           'ondblclick="toggleCullAction(' + si + ',' + pi + ',' + photo.photo_id + ')">' +
           badge +
-          '<img src="' + vireoThumbnailUrl(photo.photo_id) + '" loading="lazy">' +
+          '<img src="' + escapeAttr(vireoThumbnailUrl(photo.photo_id)) + '" loading="lazy">' +
           '<div class="cull-card-info">' +
             '<div class="cull-quality">' + (photo.pipeline_label || photo.action.toUpperCase()) + ' &middot; Q: ' + qScore + '</div>' +
             '<div class="cull-filename" onclick="event.stopPropagation()" onmousedown="event.stopPropagation()">' + escapeHtml(photo.filename || '') + '</div>' +

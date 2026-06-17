@@ -518,7 +518,7 @@ function showClusterPreview(e) {
   for (var i = 0; i < previewCount; i++) {
     var p = childMarkers[i]._photoData;
     if (p && p.id != null) {
-      gridHtml += '<img src="' + vireoThumbnailUrl(p.id) + '"'
+      gridHtml += '<img src="' + escapeAttr(vireoThumbnailUrl(p.id)) + '"'
         + ' alt="" onerror="this.style.visibility=\'hidden\'">';
     } else {
       gridHtml += '<div style="width:56px;height:56px;background:var(--bg-tertiary,#14374E);border-radius:3px"></div>';

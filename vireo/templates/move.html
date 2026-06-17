@@ -606,7 +606,7 @@ function renderPhotoGrid() {
   photoList.forEach(function(p, idx) {
     var selClass = selectedPhotos.has(p.id) ? ' selected' : '';
     html += '<div class="grid-card' + selClass + '" data-id="' + p.id + '" data-idx="' + idx + '" onclick="handlePhotoClick(event, ' + p.id + ', ' + idx + ')">';
-    html += '<div class="grid-card-img-wrap"><img src="' + vireoThumbnailUrl(p.id) + '" loading="lazy" alt=""></div>';
+    html += '<div class="grid-card-img-wrap"><img src="' + escapeAttr(vireoThumbnailUrl(p.id)) + '" loading="lazy" alt=""></div>';
     html += '<div class="grid-card-info"><div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div></div>';
     html += '</div>';
   });

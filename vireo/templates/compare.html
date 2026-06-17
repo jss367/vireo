@@ -572,7 +572,7 @@ function renderPhotoCell(photo) {
   if (photo.flag && photo.flag !== 'none') meta.push(photo.flag);
   return '<div class="photo-cell">' +
     '<button type="button" class="photo-thumb-button" title="View larger" onclick="openCompareLightbox(' +
-    photo.photo_id + ')"><img src="' + vireoThumbnailUrl(photo.photo_id) + '" loading="lazy" alt="' +
+    photo.photo_id + ')"><img src="' + escapeAttr(vireoThumbnailUrl(photo.photo_id)) + '" loading="lazy" alt="' +
     escapeAttr(photo.filename) + '"></button>' +
     '<div><div class="photo-name">' + escapeHtml(photo.filename) + '</div>' +
     '<div class="photo-meta">' + escapeHtml(meta.join(' · ')) + '</div>' +
