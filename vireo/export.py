@@ -166,7 +166,15 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             use_wc = _working_copy_can_satisfy_export(
                 photo, recipe, max_size, wc_max, vireo_dir, exif_data=exif_data
             )
-            source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=use_wc)
+            source_path = None
+            if not use_wc:
+                source_path = _companion_can_satisfy_export(
+                    photo, folder_path, recipe, max_size, exif_data=exif_data
+                )
+            if not source_path:
+                source_path = _resolve_source(
+                    photo, vireo_dir, folders, use_working_copy=use_wc,
+                )
         if not source_path or not os.path.isfile(source_path):
             errors.append(f"{photo['filename']}: source file missing")
             if progress_cb:
@@ -601,6 +609,35 @@ def _working_copy_can_satisfy_export(
         return False
     required_long = min(max_size, original_render_long)
     return wc_render_long >= required_long
+
+
+def _companion_can_satisfy_export(photo, folder_path, recipe, max_size, exif_data=None):
+    """Return a full-resolution companion path when it can satisfy edited export."""
+    crop = (recipe or {}).get("crop") if recipe else None
+    if not crop:
+        return None
+    companion_rel = photo["companion_path"]
+    if not companion_rel or not folder_path:
+        return None
+    companion = os.path.join(folder_path, companion_rel)
+    if not os.path.isfile(companion):
+        return None
+    try:
+        from PIL import Image
+        with Image.open(companion) as img:
+            comp_w, comp_h = img.size
+    except Exception:
+        return None
+
+    original_w, original_h = _recipe_source_dimensions(photo, exif_data)
+    if original_w <= 0 or original_h <= 0:
+        return None
+    required_long = _recipe_result_long_edge(original_w, original_h, recipe)
+    if max_size is not None:
+        required_long = min(max_size, required_long)
+    if _recipe_result_long_edge(comp_w, comp_h, recipe) >= required_long:
+        return companion
+    return None
 
 
 def _resolve_source(photo, vireo_dir, folders, use_working_copy=False):

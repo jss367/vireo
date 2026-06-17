@@ -1470,6 +1470,47 @@ def test_edited_preview_does_not_adopt_stale_untracked_file_after_unlink_failure
         assert img.size == (600, 800)
 
 
+def test_cleared_recipe_does_not_adopt_stale_edited_preview_after_unlink_failure(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import app as app_module
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_path = os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
+
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    edited = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert edited.status_code == 200
+    assert db.preview_cache_get(photo_id, 1920) is not None
+    with Image.open(io.BytesIO(edited.data)) as img:
+        assert img.size == (600, 800)
+
+    original_remove = app_module.os.remove
+
+    def locked_remove(path):
+        if path == preview_path:
+            raise OSError("locked")
+        return original_remove(path)
+
+    monkeypatch.setattr(app_module.os, "remove", locked_remove)
+
+    cleared = client.delete(f"/api/photos/{photo_id}/edit-recipe")
+    assert cleared.status_code == 200
+    assert os.path.exists(preview_path)
+
+    rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert rendered.status_code == 200
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (800, 600)
+
+
 def test_edit_recipe_api_invalidates_thumbnail_and_renders_edit(client_with_photo):
     import io
     import os
@@ -1664,6 +1705,35 @@ def test_edited_original_prefers_full_res_companion_before_raw_decode(
     assert loaded_paths == [companion_path]
     with Image.open(io.BytesIO(rendered.data)) as img:
         assert img.size == (600, 800)
+
+
+def test_edited_original_cache_write_is_atomic(client_with_photo, monkeypatch):
+    import os
+
+    import app as app_module
+
+    app, db, photo_id = client_with_photo
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    final_path = os.path.join(vireo_dir, "originals", f"{photo_id}.jpg")
+    calls = []
+    original_replace = app_module.os.replace
+
+    def tracking_replace(src, dst):
+        calls.append((src, dst, os.path.exists(src)))
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(app_module.os, "replace", tracking_replace)
+
+    rendered = app.test_client().get(f"/photos/{photo_id}/original")
+
+    assert rendered.status_code == 200
+    assert calls
+    tmp_path, dst_path, tmp_existed = calls[0]
+    assert tmp_existed is True
+    assert dst_path == final_path
+    assert not os.path.exists(tmp_path)
+    assert os.path.exists(final_path)
 
 
 def test_cropped_preview_uses_original_when_working_copy_is_too_small(

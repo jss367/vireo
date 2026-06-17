@@ -15,6 +15,7 @@ import queue
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import webbrowser
 from datetime import UTC, datetime
@@ -1412,6 +1413,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             g.db = Database(db_path)
         return g.db
 
+    _invalid_preview_cache_paths = set()
+
     def _invalidate_photo_render_cache(db, photo_ids):
         """Drop cached rendered derivatives after an edit recipe changes."""
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
@@ -1435,17 +1438,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
                 )
             tracked_sizes = set()
+            removed_preview_rows = []
             for row in db.conn.execute(
                 "SELECT size FROM preview_cache WHERE photo_id = ?",
                 (pid,),
             ).fetchall():
-                tracked_sizes.add(str(row["size"]))
-                path = os.path.join(preview_dir, f"{pid}_{row['size']}.jpg")
+                size_value = row["size"]
+                tracked_sizes.add(str(size_value))
+                path = os.path.join(preview_dir, f"{pid}_{size_value}.jpg")
                 try:
                     if os.path.exists(path):
                         os.remove(path)
                 except OSError:
-                    log.warning("Failed to remove stale preview cache %s", path)
+                    if os.path.exists(path):
+                        _invalid_preview_cache_paths.add(path)
+                    log.warning(
+                        "Failed to remove stale preview cache %s",
+                        path, exc_info=True,
+                    )
+                else:
+                    removed_preview_rows.append((pid, size_value))
             try:
                 for name in os.listdir(preview_dir):
                     if not (name.startswith(f"{pid}_") and name.endswith(".jpg")):
@@ -1457,10 +1469,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     try:
                         os.remove(path)
                     except OSError:
-                        log.warning("Failed to remove stale preview cache %s", path)
+                        if os.path.exists(path):
+                            _invalid_preview_cache_paths.add(path)
+                        log.warning(
+                            "Failed to remove stale preview cache %s",
+                            path, exc_info=True,
+                        )
             except FileNotFoundError:
                 pass
-            db.conn.execute("DELETE FROM preview_cache WHERE photo_id = ?", (pid,))
+            if removed_preview_rows:
+                db.conn.executemany(
+                    "DELETE FROM preview_cache WHERE photo_id = ? AND size = ?",
+                    removed_preview_rows,
+                )
             original_cache = os.path.join(originals_dir, f"{pid}.jpg")
             try:
                 if os.path.exists(original_cache):
@@ -16412,6 +16433,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.preview_cache_delete(photo_id, size)  # no-op if no row
 
         skip_untracked_preview_adoption = False
+        stale_after_failed_invalidation = cache_path in _invalid_preview_cache_paths
+        if stale_after_failed_invalidation and os.path.exists(cache_path):
+            try:
+                os.remove(cache_path)
+            except OSError:
+                skip_untracked_preview_adoption = True
+                log.warning(
+                    "Failed to remove previously invalidated preview cache %s",
+                    cache_path, exc_info=True,
+                )
+            else:
+                _invalid_preview_cache_paths.discard(cache_path)
+                db.preview_cache_delete(photo_id, size)
+                stale_after_failed_invalidation = False
         if (
             recipe
             and os.path.exists(cache_path)
@@ -16430,7 +16465,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # bookkeeping — under concurrent traffic SQLite can raise
         # OperationalError: database is locked, but that shouldn't turn a
         # valid cache hit into a 500 when the JPEG is right there on disk.
-        if db.preview_cache_get(photo_id, size) and os.path.exists(cache_path):
+        if (
+            not stale_after_failed_invalidation
+            and db.preview_cache_get(photo_id, size)
+            and os.path.exists(cache_path)
+        ):
             try:
                 db.preview_cache_touch(photo_id, size)
             except Exception:
@@ -16444,7 +16483,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Read bytes into memory before evicting: eviction may delete the
         # file we just adopted (e.g. preview_cache_max_mb=0), but we can
         # still serve the response from memory — mirrors the miss path.
-        if not skip_untracked_preview_adoption and os.path.exists(cache_path):
+        if (
+            not stale_after_failed_invalidation
+            and not skip_untracked_preview_adoption
+            and os.path.exists(cache_path)
+        ):
             with open(cache_path, "rb") as f:
                 data = f.read()
             try:
@@ -16511,6 +16554,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             os.makedirs(preview_dir, exist_ok=True)
             with open(cache_path, "wb") as f:
                 f.write(data)
+            _invalid_preview_cache_paths.discard(cache_path)
             db.preview_cache_insert(photo_id, size, len(data))
             evict_preview_cache_if_over_quota(db, vireo_dir)
         except Exception as e:
@@ -16706,7 +16750,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
             os.makedirs(originals_dir, exist_ok=True)
             quality = cfg.load().get("working_copy_quality", 92)
-            img.save(cache_path, format="JPEG", quality=quality)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=f".{photo_id}.", suffix=".jpg.tmp", dir=originals_dir,
+            )
+            os.close(fd)
+            try:
+                img.save(tmp_path, format="JPEG", quality=quality)
+                os.replace(tmp_path, cache_path)
+            except Exception:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
+                raise
             img.close()
             return send_file(cache_path, mimetype="image/jpeg")
 

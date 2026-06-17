@@ -231,6 +231,42 @@ def test_export_cropped_recipe_avoids_undersized_working_copy(export_env):
         assert img.size == (300, 225)
 
 
+def test_export_cropped_recipe_uses_full_res_companion_before_raw(export_env):
+    """Cropped RAW+JPEG exports should use a sufficient companion before RAW."""
+    env = export_env
+    db = env["db"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='bird1.jpg',
+               working_copy_path=NULL,
+               width=800, height=600
+           WHERE id=?""",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 300,
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(os.path.join(env["dest"], "source.jpg")) as img:
+        assert img.size == (300, 225)
+
+
 def test_export_cropped_recipe_avoids_undersized_developed_output(export_env):
     """Cropped resized exports skip developed files that lack source pixels."""
     env = export_env
