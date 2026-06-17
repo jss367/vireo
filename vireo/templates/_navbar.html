@@ -3235,6 +3235,7 @@ var _lbEditRecipeLoaded = false;
 var _lbRenderedAdjustmentValues = null;
 var _lbAdjustSaveTimer = null;
 var _lbAdjustSeq = 0;
+var _lbAdjustmentInputSeq = 0;
 var _lbRecipeBustByPhotoId = {};
 
 function _lbCloneRecipe(recipe) {
@@ -3417,6 +3418,7 @@ function _lbSaveAdjustmentRecipe(values) {
   if (!_lightboxCurrentId || !_lbEditRecipeLoaded) return;
   var photoId = _lightboxCurrentId;
   var seq = ++_lbAdjustSeq;
+  var inputSeq = _lbAdjustmentInputSeq;
   var recipe = _lbRecipeWithAdjustments(values);
   _lbEditRecipe = _lbCloneRecipe(recipe);
   _lbSetAdjustmentStatus('Saving...');
@@ -3432,7 +3434,6 @@ function _lbSaveAdjustmentRecipe(values) {
       });
     })
     .then(function(data) {
-      if (_lightboxCurrentId === photoId && seq !== _lbAdjustSeq) return;
       _lbBumpRecipeBust(photoId);
       _lbRefreshVisiblePhotoImages(photoId);
       try {
@@ -3440,10 +3441,13 @@ function _lbSaveAdjustmentRecipe(values) {
           detail: {photoId: photoId, recipe: data.recipe || null}
         }));
       } catch (_) {}
-      if (_lightboxCurrentId !== photoId || seq !== _lbAdjustSeq) return;
+      if (_lightboxCurrentId !== photoId || inputSeq !== _lbAdjustmentInputSeq) return;
+      var activeSeq = _lbAdjustSeq;
       _lbEditRecipe = _lbCloneRecipe(data.recipe || {});
+      _lbEditRecipeLoaded = true;
       _lbRenderAdjustmentControls();
-      _lbReloadEditedSource(photoId, seq);
+      _lbSetAdjustmentControlsDisabled(false);
+      _lbReloadEditedSource(photoId, activeSeq);
       _lbSetAdjustmentStatus('Saved');
     })
     .catch(function(err) {
@@ -3468,6 +3472,7 @@ function onLightboxAdjustmentInput(input) {
   var label = document.getElementById(input.id + 'Value');
   if (label) label.textContent = _lbFormatAdjustmentValue(input.dataset.adjustment, input.value);
   _lbAdjustSeq += 1;
+  _lbAdjustmentInputSeq += 1;
   var values = _lbReadAdjustmentControls();
   _lbEditRecipe = _lbRecipeWithAdjustments(values);
   _lbApplyAdjustmentPreviewCss(values);
@@ -3492,6 +3497,7 @@ function resetLightboxAdjustments() {
   var values = _lbReadAdjustmentControls();
   _lbEditRecipe = _lbRecipeWithAdjustments(values);
   _lbApplyAdjustmentPreviewCss(values);
+  _lbAdjustmentInputSeq += 1;
   if (_lbAdjustSaveTimer) {
     clearTimeout(_lbAdjustSaveTimer);
     _lbAdjustSaveTimer = null;
