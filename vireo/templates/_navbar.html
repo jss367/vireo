@@ -3359,11 +3359,27 @@ function _lbBumpRecipeBust(photoId) {
 function _lbRefreshVisiblePhotoImages(photoId) {
   var bust = _lbRecipeBustByPhotoId[String(photoId)];
   if (!bust) return;
-  var gridImg = document.querySelector('.grid-card[data-id="' + photoId + '"] img');
-  if (gridImg) gridImg.src = '/thumbnails/' + photoId + '.jpg?v=' + bust;
+  var thumbUrl = '/thumbnails/' + photoId + '.jpg?v=' + bust;
+  var refreshed = [];
+
+  function refreshImg(img) {
+    if (!img || refreshed.indexOf(img) !== -1) return;
+    refreshed.push(img);
+    img.src = thumbUrl;
+  }
+
+  refreshImg(document.querySelector('.grid-card[data-id="' + photoId + '"] img'));
+  document.querySelectorAll('img[data-photo-id="' + photoId + '"]').forEach(refreshImg);
+  document.querySelectorAll('[data-photo-id="' + photoId + '"] img').forEach(function(img) {
+    var src = img.getAttribute('src') || '';
+    if (src.indexOf('/thumbnails/' + photoId + '.jpg') !== -1) {
+      refreshImg(img);
+    }
+  });
+
   var detailImg = document.getElementById('detailImg');
   if (detailImg && window._detailPhotoId === photoId) {
-    detailImg.src = '/thumbnails/' + photoId + '.jpg?v=' + bust;
+    refreshImg(detailImg);
   }
 }
 
