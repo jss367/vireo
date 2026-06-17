@@ -40,6 +40,8 @@ def _seed_publish_app(tmp_path, monkeypatch):
         file_size=1000,
         file_mtime=1.0,
         timestamp="2024-01-15T10:00:00",
+        width=1200,
+        height=800,
     )
     p2 = db.add_photo(
         folder_id=fid,
@@ -48,6 +50,8 @@ def _seed_publish_app(tmp_path, monkeypatch):
         file_size=1000,
         file_mtime=2.0,
         timestamp="2024-02-01T10:00:00",
+        width=900,
+        height=900,
     )
     p3 = db.add_photo(
         folder_id=fid,
@@ -56,6 +60,8 @@ def _seed_publish_app(tmp_path, monkeypatch):
         file_size=1000,
         file_mtime=3.0,
         timestamp="2024-03-01T10:00:00",
+        width=1000,
+        height=700,
     )
     db.conn.execute("UPDATE photos SET quality_score = 0.9 WHERE id = ?", (p1,))
     db.conn.execute("UPDATE photos SET quality_score = 0.7 WHERE id = ?", (p2,))
@@ -72,11 +78,11 @@ def _seed_publish_app(tmp_path, monkeypatch):
     db.conn.commit()
 
     app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
-    return app, db
+    return app, db, {"photos_dir": photos_dir, "vireo_dir": vireo_dir, "p1": p1}
 
 
 def test_publish_site_job_writes_life_list_highlights_and_images(tmp_path, monkeypatch):
-    app, db = _seed_publish_app(tmp_path, monkeypatch)
+    app, db, _meta = _seed_publish_app(tmp_path, monkeypatch)
     client = app.test_client()
     dest = tmp_path / "published"
 
@@ -118,7 +124,7 @@ def test_publish_site_job_writes_life_list_highlights_and_images(tmp_path, monke
 
 
 def test_publish_site_job_can_include_locations(tmp_path, monkeypatch):
-    app, db = _seed_publish_app(tmp_path, monkeypatch)
+    app, db, _meta = _seed_publish_app(tmp_path, monkeypatch)
     client = app.test_client()
     dest = tmp_path / "published"
 
@@ -132,6 +138,48 @@ def test_publish_site_job_can_include_locations(tmp_path, monkeypatch):
     life = json.loads((dest / "data" / "life-list.json").read_text())
     cardinal = next(e for e in life["species"] if e["species"] == "Northern Cardinal")
     assert cardinal["locations"] == ["Backyard"]
+
+    db.close()
+
+
+def test_publish_site_uses_developed_render_when_max_exceeds_original(tmp_path, monkeypatch):
+    app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
+    client = app.test_client()
+    dest = tmp_path / "published"
+    developed_dir = tmp_path / "developed"
+
+    from export import developed_folder_key
+    from site_publish import publish_site
+
+    developed_subdir = developed_dir / developed_folder_key(str(meta["photos_dir"]))
+    developed_subdir.mkdir(parents=True)
+    Image.new("RGB", (1200, 800), (20, 210, 40)).save(
+        developed_subdir / "cardinal.jpg",
+        "JPEG",
+        quality=95,
+    )
+
+    life_list = client.get("/api/life-list").get_json()
+    highlights = client.get("/api/highlights?scope=workspace").get_json()
+    result = publish_site(
+        db=db,
+        vireo_dir=str(meta["vireo_dir"]),
+        destination=str(dest),
+        life_list=life_list,
+        highlights=highlights,
+        options={
+            "developed_dir": str(developed_dir),
+            "max_size": 2400,
+            "quality": 95,
+        },
+    )
+
+    assert result["errors"] == []
+    life = json.loads((dest / "data" / "life-list.json").read_text())
+    cardinal = next(e for e in life["species"] if e["species"] == "Northern Cardinal")
+    with Image.open(dest / cardinal["best"]["image"]) as out:
+        red, green, _blue = out.getpixel((0, 0))
+    assert green > red
 
     db.close()
 

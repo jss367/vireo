@@ -60,6 +60,16 @@ def _rel_image_path(photo, context):
     return f"images/photos/{prefix}-{photo['id']}-{name}.jpg"
 
 
+def _developed_required_size(photo, max_size):
+    if max_size is None:
+        return None
+    original_w = photo.get("width")
+    original_h = photo.get("height")
+    if original_w and original_h:
+        return min(max_size, max(original_w, original_h))
+    return max_size
+
+
 def _export_image(db, vireo_dir, photo, rel_path, destination, options, folders, index):
     source = None
     folder_path = folders.get(photo.get("folder_id"), "")
@@ -74,7 +84,8 @@ def _export_image(db, vireo_dir, photo, rel_path, destination, options, folders,
             developed_dir,
             index,
         )
-        if source and not _developed_can_satisfy_size(source, photo, max_size):
+        required_size = _developed_required_size(photo, max_size)
+        if source and not _developed_can_satisfy_size(source, photo, required_size):
             source = None
 
     if not source:
