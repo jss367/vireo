@@ -430,6 +430,8 @@ def _make_app_with_real_photo(tmp_path, monkeypatch, filename="bird.jpg"):
     monkeypatch.setenv("HOME", str(tmp_path))
     import config as cfg
     import models
+    import scanner
+    import thumbnails as _thumbnails_module
     from app import create_app
     from db import Database
 
@@ -439,6 +441,24 @@ def _make_app_with_real_photo(tmp_path, monkeypatch, filename="bird.jpg"):
     )
     monkeypatch.setattr(
         models, "CONFIG_PATH", str(tmp_path / "models.json"),
+    )
+
+    # ``create_app`` schedules two ``threading.Timer`` kickoffs (5s and 6s)
+    # that fire ``scanner.backfill_working_copies`` / ``thumbnails.backfill_thumb_paths``
+    # in background threads. Slow Windows runners can leave these timers
+    # alive long enough that the backfill thread races the assertions in
+    # tests that set ``working_copy_failed_at`` directly (it re-stamps the
+    # marker to ``datetime('now')`` when the fake source can't be decoded).
+    # The kickoffs short-circuit when ``*_candidate_count`` returns 0, so
+    # stub the predicates here — tests in this file exercise the route
+    # logic, not the startup backfill.
+    monkeypatch.setattr(
+        scanner, "working_copy_backfill_candidate_count", lambda *a, **kw: 0,
+    )
+    monkeypatch.setattr(
+        _thumbnails_module,
+        "thumb_path_backfill_candidate_count",
+        lambda *a, **kw: 0,
     )
 
     photos_dir = tmp_path / "photos"

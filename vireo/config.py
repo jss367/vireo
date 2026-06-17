@@ -5,8 +5,10 @@ import copy
 import json
 import logging
 import os
+import sys
 import tempfile
 import threading
+import time
 
 log = logging.getLogger(__name__)
 
@@ -206,6 +208,28 @@ def load():
     return config
 
 
+def _replace_with_windows_retry(src, dst):
+    # On Windows, ``os.replace`` can transiently raise ``PermissionError``
+    # ([WinError 5] / [WinError 32]) when Defender or the Search indexer
+    # holds the destination open for a moment after a previous write — this
+    # surfaces as test flake on CI when two saves run back-to-back. Retry
+    # with a short backoff before giving up.
+    if sys.platform != "win32":
+        os.replace(src, dst)
+        return
+    delays = (0.0, 0.05, 0.1, 0.2, 0.4, 0.8)
+    last_exc = None
+    for delay in delays:
+        if delay:
+            time.sleep(delay)
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as exc:
+            last_exc = exc
+    raise last_exc
+
+
 def save(config):
     """Save config to disk atomically (write to temp file, then replace)."""
     config_dir = os.path.dirname(CONFIG_PATH)
@@ -214,7 +238,7 @@ def save(config):
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(config, f, indent=2)
-        os.replace(tmp_path, CONFIG_PATH)
+        _replace_with_windows_retry(tmp_path, CONFIG_PATH)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)

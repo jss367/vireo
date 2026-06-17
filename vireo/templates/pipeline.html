@@ -804,7 +804,7 @@ body { padding-bottom: 36px; }
             <div class="setting-item">
               <div class="setting-label">Destination</div>
               <div style="display:flex;gap:6px;">
-                <input type="text" class="setting-select" id="cfgDestination"
+                <input type="text" class="setting-select" id="cfgDestination" list="volumeDatalist"
                        placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
                        oninput="updateStartButton();markFolderPreviewStale()">
                 <button onclick="openFolderBrowser('destination')" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
@@ -4323,6 +4323,12 @@ function closeFolderBrowser() {
 function browseTo(path) {
   var listEl = document.getElementById('fbList');
   listEl.innerHTML = '<div class="folder-browser-loading">Loading\u2026</div>';
+  // Clear _fbCurrentPath before the async fetch resolves so New Folder
+  // cannot target the previous location's path if the user clicks it
+  // while the new browse is still in flight. updateNewFolderButton()
+  // re-disables the button until the fetch sets _fbCurrentPath again.
+  _fbCurrentPath = '';
+  updateNewFolderButton();
   _fbSelectedDir = '';
   _fbSelectedDirs = [];
   _fbSelectAnchorPath = '';
@@ -4338,6 +4344,34 @@ function browseTo(path) {
   if (path === '__pictures__') {
     url = '/api/browse?path=' + encodeURIComponent(_fbHomePath + '/Pictures');
   } else if (path === '__volumes__') {
+    // Windows has no single "volumes root" directory — drives live at C:\,
+    // D:\, etc. /api/volumes enumerates them via the Win32 API; render the
+    // drive list directly as a synthetic listing the user can drill into.
+    if (navigator.userAgent.indexOf('Win') >= 0) {
+      fetch('/api/volumes').then(function(r) {
+        if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Failed to enumerate volumes'); });
+        return r.json();
+      }).then(function(volumes) {
+        _fbCurrentPath = '';
+        _fbSelectedDir = '';
+        _fbSelectedDirs = [];
+        _fbSelectAnchorPath = '';
+        document.getElementById('fbSelectedPath').textContent = '';
+        updateFbSelectButtonLabel();
+        updateNewFolderButton();
+        var bc = document.getElementById('fbBreadcrumb');
+        bc.innerHTML = '<span class="current">Volumes</span>';
+        bc.onclick = null;
+        // Skip recursive photo counts on the synthetic drive-root list:
+        // /api/volumes includes the system drive, and counting it would
+        // recursively walk all of C:\ before the user has picked anything.
+        // Counts resume once the user drills into a specific drive.
+        renderFolderList(volumes, { skipCounts: true });
+      }).catch(function(err) {
+        listEl.innerHTML = '<div class="folder-browser-error">' + escapeHtml(err.message) + '</div>';
+      });
+      return;
+    }
     var volDir = navigator.userAgent.indexOf('Mac') >= 0 ? '/Volumes' : '/media';
     url = '/api/browse?path=' + encodeURIComponent(volDir);
   } else if (path) {
@@ -4349,6 +4383,7 @@ function browseTo(path) {
     return r.json();
   }).then(function(data) {
     _fbCurrentPath = data.path;
+    updateNewFolderButton();
     if (!path) _fbHomePath = data.path;
     // Implicit fallback: selectFolder() uses _fbSelectedDir when the user
     // hits Select without clicking any subfolder. Keep _fbSelectedDirs empty
@@ -4360,7 +4395,15 @@ function browseTo(path) {
     document.getElementById('fbSelectedPath').textContent = data.path;
     updateFbSelectButtonLabel();
     renderBreadcrumb(data.path);
-    renderFolderList(data.dirs);
+    // Drilling into a Windows drive root (e.g. C:\, D:/) lists top-level
+    // system directories like Users, Windows, Program Files. Recursive
+    // photo counts on those would scan the entire volume and hang the
+    // UI/server, so skip counts here and resume once the user drills in
+    // one more level. The synthetic Volumes list is handled separately
+    // (with skipCounts:true) above; this guard covers the post-drill
+    // path that /api/browse renders.
+    var isWindowsDriveRoot = /^[A-Za-z]:[\\\/]?$/.test(data.path || '');
+    renderFolderList(data.dirs, { skipCounts: isWindowsDriveRoot });
   }).catch(function(err) {
     listEl.innerHTML = '<div class="folder-browser-error">' + escapeHtml(err.message) + '</div>';
   });
@@ -4386,7 +4429,7 @@ function renderBreadcrumb(path) {
   };
 }
 
-function renderFolderList(dirs) {
+function renderFolderList(dirs, opts) {
   var listEl = document.getElementById('fbList');
   if (!dirs.length) {
     listEl.innerHTML = '<div class="folder-browser-empty">No subfolders</div>';
@@ -4401,8 +4444,10 @@ function renderFolderList(dirs) {
   }
   listEl.innerHTML = html;
   // In source mode, asynchronously fetch recursive photo counts for each
-  // subfolder so users can see which ones contain photos.
-  if (_fbMode === 'source') {
+  // subfolder so users can see which ones contain photos. Callers can pass
+  // skipCounts to avoid this for synthetic listings (e.g. Windows drive
+  // roots) where counting would recursively walk an entire volume.
+  if (_fbMode === 'source' && !(opts && opts.skipCounts)) {
     fetchFolderCounts(dirs.map(function(d) { return d.path; }));
   }
   // Event delegation: click to select, double-click to drill in.
@@ -4562,9 +4607,24 @@ function cancelNewFolder() {
   document.getElementById('fbNewFolderInput').value = '';
 }
 
+function updateNewFolderButton() {
+  // The synthetic Windows Volumes listing leaves _fbCurrentPath empty —
+  // letting users click New Folder there would POST mkdir to '/<name>'
+  // (the current drive root on Windows) instead of a real selected path.
+  var btn = document.getElementById('fbNewFolderBtn');
+  if (!btn) return;
+  btn.disabled = !_fbCurrentPath;
+  btn.style.opacity = _fbCurrentPath ? '' : '0.5';
+  btn.title = _fbCurrentPath ? '' : 'Open a drive to create folders inside it';
+}
+
 function createNewFolder() {
   var name = document.getElementById('fbNewFolderInput').value.trim();
   if (!name) return;
+  if (!_fbCurrentPath) {
+    alert('Open a drive before creating a folder.');
+    return;
+  }
   var newPath = _fbCurrentPath.replace(/\/+$/, '') + '/' + name;
   fetch('/api/browse/mkdir', {
     method: 'POST',
@@ -4606,7 +4666,7 @@ var _fbHomePath = '';
     </div>
     <div class="folder-browser-list" id="fbList"></div>
     <div class="folder-browser-footer">
-      <button class="btn btn-secondary" onclick="showNewFolderInput()" style="font-size:12px;flex-shrink:0;">New Folder</button>
+      <button id="fbNewFolderBtn" class="btn btn-secondary" onclick="showNewFolderInput()" style="font-size:12px;flex-shrink:0;">New Folder</button>
       <div style="display:flex;align-items:center;flex:1;min-width:0;margin-left:12px;">
         <span class="folder-browser-path" id="fbSelectedPath"></span>
         <button class="btn btn-secondary" onclick="closeFolderBrowser()" style="font-size:12px;flex-shrink:0;">Cancel</button>

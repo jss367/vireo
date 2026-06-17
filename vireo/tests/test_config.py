@@ -607,3 +607,63 @@ def test_open_in_browser_round_trip(tmp_path, monkeypatch):
 
     cfg.set("open_in_browser", False)
     assert cfg.get("open_in_browser") is False
+
+
+def test_save_retries_on_windows_permission_error(tmp_path, monkeypatch):
+    """On Windows, Defender / Search indexer transiently locks the destination
+    after a write; ``cfg.save`` must retry ``os.replace`` instead of bubbling
+    the ``PermissionError`` up as a 500. Regression for CI failure on PR #977
+    where two consecutive saves in ``test_import_replaces_global_file`` hit
+    ``[WinError 5] Access is denied`` from the second ``os.replace``."""
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "sys", _FakeWin32Sys())
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    real_replace = cfg.os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError(5, "Access is denied", dst)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(cfg.os, "replace", flaky_replace)
+    monkeypatch.setattr(cfg.time, "sleep", lambda _s: None)
+
+    cfg.save({"classification_threshold": 0.42})
+
+    assert calls["n"] == 3
+    assert cfg.load()["classification_threshold"] == 0.42
+
+
+def test_save_raises_when_windows_retry_budget_exhausted(tmp_path, monkeypatch):
+    """If every ``os.replace`` attempt raises ``PermissionError``, the last
+    exception is re-raised so callers see the underlying failure rather than
+    silently dropping the write."""
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "sys", _FakeWin32Sys())
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    def always_fail(src, dst):
+        raise PermissionError(5, "Access is denied", dst)
+
+    monkeypatch.setattr(cfg.os, "replace", always_fail)
+    monkeypatch.setattr(cfg.time, "sleep", lambda _s: None)
+
+    import pytest
+
+    with pytest.raises(PermissionError):
+        cfg.save({"classification_threshold": 0.42})
+
+    # Temp file should be cleaned up after the failure.
+    assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
+
+
+class _FakeWin32Sys:
+    """Stand-in for ``sys`` that reports ``platform == 'win32'`` so the retry
+    branch in ``config._replace_with_windows_retry`` exercises on POSIX CI."""
+
+    platform = "win32"

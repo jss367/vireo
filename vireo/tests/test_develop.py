@@ -129,7 +129,7 @@ def test_output_path_for_photo():
         output_dir="/output",
         output_format="jpg",
     )
-    assert result == "/output/bird.jpg"
+    assert os.path.normpath(result) == os.path.normpath("/output/bird.jpg")
 
 
 def test_output_path_for_photo_tiff():
@@ -141,7 +141,7 @@ def test_output_path_for_photo_tiff():
         output_dir="/developed",
         output_format="tiff",
     )
-    assert result == "/developed/eagle.tiff"
+    assert os.path.normpath(result) == os.path.normpath("/developed/eagle.tiff")
 
 
 def test_develop_photo_returns_error_when_no_binary():

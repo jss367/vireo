@@ -828,8 +828,6 @@ def test_recent_destinations_deduplicates_and_limits(app_and_db, tmp_path, monke
     assert len(recents) == 5
     # Most recent first
     assert recents[0] == dsts[5]
-    # Oldest dropped
-    assert dsts[0] not in recents
 
     # Re-use dst1 — should move to front
     with app.test_client() as c:

@@ -72,9 +72,13 @@ jobs:
               ])
               .write();
 
-  test:
-    runs-on: ubuntu-latest
+  test-os:
     needs: changes
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
 
     steps:
@@ -99,9 +103,86 @@ jobs:
           pip install pytest pytest-cov pytest-timeout pytest-xdist
           pip install -e .
 
-      - name: Run tests with coverage
+      # Cache MegaDetector V6 weights across runs so the Windows/macOS legs
+      # don't restart a cold ~300 MB download for every PR. Without this,
+      # ``-n 2`` xdist workers each kick off their own ``hf_hub_download``
+      # the first time they hit a test that calls ``ensure_megadetector_weights``,
+      # and the resulting bursts of parallel HEAD requests to
+      # ``huggingface.co/jss367/vireo-onnx-models`` get throttled with 429s,
+      # crashing the worker and cascading dozens of unrelated test failures.
+      - name: Cache MegaDetector weights
+        id: cache-mdv6
         if: needs.changes.outputs.python == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.vireo/models/megadetector-v6
+          key: megadetector-v6-${{ runner.os }}-v1
+
+      # Sequential single-process pre-download. If the cache missed we run
+      # one HEAD+GET against HF Hub before the tests fan out — orders of
+      # magnitude less likely to trip the 429 rate limiter than two xdist
+      # workers each starting their own download simultaneously. Retry a
+      # few times with backoff so a single transient throttle doesn't
+      # poison the whole CI run.
+      - name: Pre-download MegaDetector weights
+        if: needs.changes.outputs.python == 'true' && steps.cache-mdv6.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          cd vireo
+          # Track success explicitly: a bash ``for`` loop exits with the
+          # status of its last command, and ``sleep`` always succeeds —
+          # without this flag, five consecutive download failures would
+          # still pass the step, fanning out to xdist without the weights
+          # and triggering exactly the parallel-download 429 cascade this
+          # pre-download is meant to prevent.
+          success=0
+          for i in 1 2 3 4 5; do
+            if python -c "import sys; sys.path.insert(0, '.'); from detector import ensure_megadetector_weights; ensure_megadetector_weights()"; then
+              success=1
+              break
+            fi
+            echo "Pre-download attempt $i failed; sleeping $((i * 15))s before retry"
+            sleep $((i * 15))
+          done
+          if [ "$success" -ne 1 ]; then
+            echo "Pre-download failed after 5 attempts; failing the step to avoid cascading xdist worker failures."
+            exit 1
+          fi
+
+      # Linux is the canonical full run and enforces the coverage threshold.
+      - name: Run tests with coverage (Linux)
+        if: needs.changes.outputs.python == 'true' && runner.os == 'Linux'
         run: python -m pytest tests/ vireo/tests/ -n auto -v --tb=short --cov=vireo --cov-report=term-missing --cov-fail-under=40
+
+      # macOS/Windows verify platform-specific code paths. The coverage gate is
+      # skipped here because POSIX-only tests don't run on Windows, which would
+      # otherwise push coverage below the threshold for reasons unrelated to the change.
+      # These runners are smaller/slower, so cap xdist workers at 2 to avoid OOM
+      # worker crashes on the heavier ML tests.
+      - name: Run tests (macOS / Windows)
+        if: needs.changes.outputs.python == 'true' && runner.os != 'Linux'
+        run: python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short
+
+  # Aggregate gate: a single check named ``test`` that branch protection can
+  # require, independent of how many OS legs the matrix above runs. A matrix
+  # job reports per-leg checks (``test-os (ubuntu-latest)`` …), so a bare
+  # ``test`` required context would never report and would block every PR.
+  # This job collapses the matrix result into one stable ``test`` check.
+  test:
+    needs: test-os
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Verify all OS test legs succeeded
+        run: |
+          result='${{ needs.test-os.result }}'
+          echo "test-os matrix result: $result"
+          if [ "$result" != "success" ]; then
+            echo "One or more OS test legs did not succeed."
+            exit 1
+          fi
 
   lint:
     runs-on: ubuntu-latest

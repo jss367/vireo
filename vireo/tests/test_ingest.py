@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datetime import datetime
 
+import pytest
 from db import Database
 from ingest import build_destination_path, discover_source_files, ingest, preview_destination
 from PIL import Image
@@ -508,6 +509,63 @@ def test_ingest_duplicate_folders_rejects_sql_like_wildcard_siblings(tmp_path):
         )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: ``\\`` is a path separator on Windows, so "
+    "``tmp_path / 'photos\\\\archive'`` parses as a child of dest "
+    "rather than the literal sibling this test exercises.",
+)
+def test_ingest_duplicate_folders_rejects_posix_backslash_sibling(tmp_path):
+    """duplicate_folders must not leak a literal sibling whose name
+    contains ``\\`` on POSIX hosts.
+
+    Regression for the Codex P2 on PR #977 (discussion r3416819572):
+    the SQL prefilter previously ran ``REPLACE(f.path, '\\', '/')``
+    unconditionally, so a stored row like ``/tmp/photos\\archive``
+    (a sibling literally named ``photos\\archive``) compared equal to
+    the destination ``/tmp/photos``'s LIKE prefix ``/tmp/photos/%``,
+    then passed the ``_path_under_root`` post-filter for the same
+    reason, and ended up in duplicate_folders. The pipeline then walked
+    that out-of-tree sibling as if it were under the destination.
+    """
+    src = tmp_path / "sd_card"
+    dest = tmp_path / "photos"
+    # Literal sibling whose name contains a backslash. On POSIX this is
+    # a single folder, NOT a child of "photos".
+    sibling = tmp_path / "photos\\archive"
+    for d in [src, dest, sibling]:
+        d.mkdir(parents=True)
+
+    img = Image.new("RGB", (100, 100), color="magenta")
+    img.save(str(sibling / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(sibling), db)
+
+    import shutil
+    shutil.copy2(str(sibling / "shot.jpg"), str(src / "shot.jpg"))
+
+    result = ingest(str(src), str(dest), db=db, skip_duplicates=True)
+
+    # The byte-identical file in the sibling counts as a known hash, so
+    # the ingest still skips it as a duplicate — but the sibling folder
+    # must NOT be reported as a destination duplicate_folder.
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(sibling) not in dup_folders, (
+        f"duplicate_folders leaked POSIX backslash-named sibling "
+        f"{str(sibling)!r}; got {dup_folders!r}"
+    )
+    # Defense in depth: nothing outside dest slipped through.
+    for f in dup_folders:
+        assert f == str(dest) or f.startswith(str(dest) + "/"), (
+            f"duplicate_folders contains {f!r} which is not under "
+            f"destination {str(dest)!r}"
+        )
+
+
 def test_ingest_duplicate_folders_excludes_folder_deleted_from_disk(tmp_path):
     """duplicate_folders must not contain folders that no longer exist on
     disk, even if their DB status is stale ('ok').
@@ -680,6 +738,15 @@ def test_ingest_duplicate_folders_flat_import_root_duplicate(tmp_path):
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: on Windows, destination ``\"/\"`` is drive-relative "
+    "(resolves to the current drive root, e.g. ``D:\\``), so a library "
+    "scanned on a different drive (e.g. ``C:\\Users\\...\\tmp\\...``) "
+    "is correctly NOT under the root destination. The Windows drive-scope "
+    "branch is covered by "
+    "test_path_under_root_scopes_root_relative_to_current_drive_on_windows.",
+)
 def test_ingest_duplicate_folders_matches_under_posix_root_destination(tmp_path):
     """When destination_dir is the POSIX filesystem root ("/"), the SQL
     prefilter must still match duplicate folders that live anywhere under
@@ -845,6 +912,306 @@ def test_ingest_duplicate_folders_rejects_dot_dot_escape(tmp_path):
             f"duplicate_folders contains {f!r} (normpath={resolved!r}) "
             f"which is not under destination {str(dst)!r}"
         )
+
+
+def test_path_under_root_is_case_insensitive_on_windows(monkeypatch):
+    """On Windows the slash-normalized subtree check must be
+    case-insensitive to preserve the previous ``Path.is_relative_to``
+    behaviour on ``WindowsPath`` (and to match NTFS/FAT semantics).
+
+    Regression guard for the Codex review on PR #977: a destination
+    passed as ``c:\\photos`` must still be recognised as the parent of
+    folder rows scanned as ``C:\\Photos\\sub`` so duplicate-only ingests
+    do not leave ``duplicate_folders`` empty.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", True)
+
+    assert ingest._path_under_root(r"C:\Photos\sub\file.jpg", r"c:\photos")
+    assert ingest._path_under_root(r"c:\PHOTOS", r"C:\photos")
+    assert ingest._path_under_root(r"C:\Photos\Sub", r"c:\photos\sub")
+    # A sibling whose case-folded form differs from root must still be
+    # rejected so the Windows fold does not over-match.
+    assert not ingest._path_under_root(r"C:\Photos2\file.jpg", r"C:\photos")
+
+
+def test_path_under_root_is_case_sensitive_on_posix(monkeypatch):
+    """POSIX hosts keep case-sensitive matching: ``/Photos`` and
+    ``/photos`` are distinct directories and the subtree check must
+    not collapse them.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", False)
+
+    assert ingest._path_under_root("/photos/sub", "/photos")
+    assert not ingest._path_under_root("/Photos/sub", "/photos")
+    assert not ingest._path_under_root("/photos/sub", "/Photos")
+
+
+def test_path_under_root_collapses_dotdot(monkeypatch):
+    """``..`` segments must be collapsed before the prefix comparison so a
+    candidate like ``/photos/sub/../other`` is recognised as a sibling of
+    ``/photos/sub`` rather than a child.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", False)
+    # POSIX: forward-slash ``..`` segments collapse via posixpath.normpath.
+    assert not ingest._path_under_root("/photos/sub/../other", "/photos/sub")
+    assert ingest._path_under_root("/photos/sub/../other", "/photos")
+
+    monkeypatch.setattr(ingest, "_WINDOWS", True)
+    # Windows: backslash separators are converted then collapsed.
+    assert not ingest._path_under_root(r"C:\dest\sub\..\other", r"C:\dest\sub")
+    assert ingest._path_under_root(r"C:\dest\sub\..\other", r"C:\dest")
+    # Forward-slash ``..`` segments also collapse on Windows.
+    assert ingest._path_under_root("C:/dest/sub/../other", "C:/dest")
+
+
+def test_path_under_root_scopes_root_relative_to_current_drive_on_windows(
+    monkeypatch,
+):
+    """On Windows, ``/`` and ``\\`` are drive-relative paths meaning the
+    *current* drive root (e.g. ``C:\\``), not every drive or UNC share.
+
+    A duplicate-only ingest into ``/`` previously fell into the
+    ``root_norm in {"", "/"}`` branch and was accepted by
+    ``os.path.isabs(...)`` for any absolute candidate, so folder rows on
+    ``D:\\...`` or ``\\\\server\\share\\...`` leaked into
+    ``duplicate_folders`` and the follow-up restricted scan could link
+    folders outside the selected destination.
+
+    Regression guard for the Codex P2 on PR #977 (discussion r3417096143).
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", True)
+    # Simulate a Windows process whose current drive is C:, so that
+    # ``os.path.abspath('/')`` resolves to ``C:\``. On the POSIX test
+    # host abspath would otherwise return ``/`` (which strips back to
+    # empty and re-enters the fallback we're trying to test around).
+    monkeypatch.setattr(
+        ingest.os.path,
+        "abspath",
+        lambda p: "C:\\" if p in ("/", "\\") else p,
+    )
+
+    # Candidates on the current drive are accepted.
+    assert ingest._path_under_root(r"C:\photos\foo.jpg", "/")
+    assert ingest._path_under_root(r"C:\photos\foo.jpg", "\\")
+    assert ingest._path_under_root(r"C:\\", "/")
+    # Candidates on a different drive must be rejected.
+    assert not ingest._path_under_root(r"D:\photos\foo.jpg", "/")
+    assert not ingest._path_under_root(r"D:\photos\foo.jpg", "\\")
+    # UNC paths must be rejected — they are not on any local drive root.
+    assert not ingest._path_under_root(
+        r"\\server\share\photos\foo.jpg", "/"
+    )
+
+
+def test_path_under_root_distinguishes_drive_relative_root_on_windows(
+    monkeypatch,
+):
+    """On Windows, ``C:`` (drive letter and colon, no separator) is a
+    drive-relative path meaning the current directory on drive C —
+    NOT the root of C drive. Folder rows on ``C:\\Photos\\...`` must
+    only be classified as inside a destination given as ``C:`` when
+    they actually live under that per-drive cwd. ``C:\\`` (drive root)
+    keeps its previous "all of C:" semantics.
+
+    Previously both ``C:`` and ``C:\\`` collapsed to ``c:`` after
+    ``posixpath.normpath`` stripped the trailing slash, so the SQL
+    prefilter plus ``_path_under_root`` treated rows like
+    ``C:\\Photos\\...`` as inside a destination the user gave as ``C:``,
+    and duplicate-only imports could return ``duplicate_folders`` from
+    the whole C: drive.
+
+    Regression guard for the Codex P2 on PR #977 (discussion r3417302365).
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", True)
+    # Simulate a Windows process whose per-drive cwd on C: is
+    # ``C:\Users\me``. On the POSIX test host abspath would otherwise
+    # return ``{cwd}/C:``, which doesn't model the real Windows
+    # drive-relative resolution.
+    def fake_abspath(p):
+        if p == "C:":
+            return r"C:\Users\me"
+        if p in ("/", "\\"):
+            return "C:\\"
+        return p
+    monkeypatch.setattr(ingest.os.path, "abspath", fake_abspath)
+
+    # ``C:`` resolves to the per-drive cwd; only paths under it are inside.
+    assert ingest._path_under_root(r"C:\Users\me\photos\foo.jpg", "C:")
+    assert ingest._path_under_root(r"C:\Users\Me\Photos\foo.jpg", "c:")
+    # A sibling on the same drive but outside the cwd must be rejected.
+    assert not ingest._path_under_root(r"C:\photos\foo.jpg", "C:")
+    assert not ingest._path_under_root(r"C:\Users\other\foo.jpg", "C:")
+
+    # ``C:\`` keeps drive-root semantics — every path on C: is inside.
+    assert ingest._path_under_root(r"C:\photos\foo.jpg", "C:\\")
+    assert ingest._path_under_root(r"C:\Users\me\photos\foo.jpg", "C:\\")
+    # But a different drive is still rejected.
+    assert not ingest._path_under_root(r"D:\photos\foo.jpg", "C:\\")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: monkeypatching ``ingest._WINDOWS = False`` does not "
+    "swap ``os.path`` to ``posixpath``, so the fallback "
+    "``os.path.isabs(\"/foo\")`` still uses Windows semantics — and on "
+    "Python 3.13+ Windows returns False for drive-less paths. The POSIX "
+    "branch is exercised by the Ubuntu leg of the CI matrix.",
+)
+def test_path_under_root_root_slash_still_accepts_absolutes_on_posix(
+    monkeypatch,
+):
+    """POSIX behaviour for root ``/`` is unchanged: every absolute path
+    is under it. Only the Windows branch is drive-scoped.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", False)
+
+    assert ingest._path_under_root("/photos/foo.jpg", "/")
+    assert ingest._path_under_root("/anywhere/else", "/")
+    # Relative candidate (no leading slash) is not under root ``/``.
+    assert not ingest._path_under_root("relative/path", "/")
+
+
+def test_path_under_root_treats_backslash_as_literal_on_posix(monkeypatch):
+    """On POSIX, ``\\`` is a valid filename character, not a separator.
+    A stored sibling literally named ``photos\\archive`` at the root of
+    the destination's parent must NOT be classified as a child of
+    ``/photos``; the SQL prefilter would already accept the row, so the
+    post-filter prefix check has to reject it.
+
+    Regression guard for the Codex P2 on PR #977 (discussion r3416819572):
+    unconditionally converting backslashes to forward slashes was letting
+    out-of-tree siblings slip into ``duplicate_folders`` on POSIX hosts.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", False)
+
+    # Sibling literally named "photos\archive" at the same level as
+    # "photos" must not be treated as a child of "photos".
+    assert not ingest._path_under_root("/photos\\archive", "/photos")
+    assert not ingest._path_under_root(
+        "/dest/photos\\archive/sub", "/dest/photos"
+    )
+    # The legitimate child is still matched.
+    assert ingest._path_under_root("/photos/archive", "/photos")
+
+
+def test_ingest_duplicate_folders_matches_case_variant_destination_on_windows(
+    tmp_path, monkeypatch
+):
+    """Stored folder rows with one case variant must still match a
+    destination passed with a different case variant when running on
+    Windows. Without case-folding the SQL prefilter (``=`` is
+    case-sensitive on SQLite) and the post-filter
+    ``_path_under_root`` both miss the row and ``duplicate_folders``
+    comes back empty, defeating the restricted scan that links the
+    existing duplicates to the active workspace.
+    """
+    import shutil
+
+    import ingest as ingest_mod
+    from scanner import scan
+
+    monkeypatch.setattr(ingest_mod, "_WINDOWS", True)
+
+    src = tmp_path / "sd_card"
+    library = tmp_path / "Library"
+    for d in [src, library]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="purple")
+    img.save(str(library / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(library), db)
+
+    shutil.copy2(str(library / "shot.jpg"), str(src / "shot.jpg"))
+
+    # Pass the destination with a different case from how the folder
+    # was scanned. On a real Windows host these resolve to the same
+    # NTFS path; on the test host (Linux) the directory still exists
+    # under the original case, so we rely on ``Path(...).is_dir()``
+    # accepting the canonical-case path that came back from the DB.
+    miscased_dst = str(library).lower()
+    result = ingest_mod.ingest(
+        str(src), miscased_dst, db=db,
+        skip_duplicates=True, folder_template="",
+    )
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(library) in dup_folders, (
+        "case-insensitive Windows match should surface duplicate folder "
+        f"{str(library)!r} when destination is passed as {miscased_dst!r}; "
+        f"got duplicate_folders={dup_folders!r}"
+    )
+
+
+def test_ingest_duplicate_folders_matches_non_ascii_case_variant_on_windows(
+    tmp_path, monkeypatch
+):
+    """Windows case-folding for the SQL prefilter must be Unicode-aware.
+
+    SQLite's built-in ``LOWER()`` only folds ASCII characters, so a stored
+    folder row like ``Älbum`` would stay ``Älbum`` while the Python-side
+    destination ``älbum`` lowers via ``str.lower()`` to ``älbum``. Without
+    a Unicode-aware SQL ``LOWER`` the prefilter drops the row before the
+    ``_path_under_root`` post-filter (which uses Python's Unicode-aware
+    folding) ever sees it, leaving ``duplicate_folders`` empty even though
+    the hash is skipped.
+    """
+    import shutil
+
+    import ingest as ingest_mod
+    from scanner import scan
+
+    monkeypatch.setattr(ingest_mod, "_WINDOWS", True)
+
+    src = tmp_path / "sd_card"
+    # Folder name has a non-ASCII character (Ä) that SQLite's ASCII-only
+    # LOWER() would leave untouched.
+    library = tmp_path / "Älbum"
+    for d in [src, library]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="purple")
+    img.save(str(library / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(library), db)
+
+    shutil.copy2(str(library / "shot.jpg"), str(src / "shot.jpg"))
+
+    # Destination passed with the non-ASCII character in lowercase form.
+    # On a case-insensitive Windows filesystem these resolve to the same
+    # path; the prefilter must accept the stored row regardless of case.
+    miscased_dst = str(library).lower()
+    result = ingest_mod.ingest(
+        str(src), miscased_dst, db=db,
+        skip_duplicates=True, folder_template="",
+    )
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(library) in dup_folders, (
+        "Unicode-aware case folding should surface duplicate folder "
+        f"{str(library)!r} when destination is passed as {miscased_dst!r}; "
+        f"got duplicate_folders={dup_folders!r}"
+    )
 
 
 def test_ingest_file_types_filter(tmp_path):

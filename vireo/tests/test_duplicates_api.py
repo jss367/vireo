@@ -696,6 +696,12 @@ def test_last_scan_ignores_failed_jobs(app_and_db):
 def test_ensure_volume_trashes_dir_creates_dir_under_volume(monkeypatch):
     """Path under /Volumes/X triggers makedirs for /Volumes/X/.Trashes/$UID."""
     import os
+    import sys
+
+    import pytest
+
+    if sys.platform != "darwin":
+        pytest.skip("macOS /Volumes trash hook")
 
     from app import _ensure_volume_trashes_dir
 
@@ -717,6 +723,13 @@ def test_ensure_volume_trashes_dir_creates_dir_under_volume(monkeypatch):
 
 def test_ensure_volume_trashes_dir_idempotent_per_volume(monkeypatch):
     """Repeated calls for files on the same volume only run makedirs once."""
+    import sys
+
+    import pytest
+
+    if sys.platform != "darwin":
+        pytest.skip("macOS /Volumes trash hook")
+
     from app import _ensure_volume_trashes_dir
 
     calls = []
@@ -732,6 +745,13 @@ def test_ensure_volume_trashes_dir_idempotent_per_volume(monkeypatch):
 
 def test_ensure_volume_trashes_dir_creates_per_distinct_volume(monkeypatch):
     """Files on different volumes each get their own .Trashes dir created."""
+    import sys
+
+    import pytest
+
+    if sys.platform != "darwin":
+        pytest.skip("macOS /Volumes trash hook")
+
     from app import _ensure_volume_trashes_dir
 
     calls = []

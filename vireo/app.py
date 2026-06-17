@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import webbrowser
 from datetime import UTC, datetime
@@ -48,6 +49,11 @@ from werkzeug.exceptions import BadRequest
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 _EXIF_ORIENTATION_TAG = 274
+
+# Serializes Windows SetErrorMode calls. SetErrorMode is process-wide, so
+# concurrent /api/volumes requests could otherwise interleave save/restore
+# and leave the process in the wrong mode mid-probe.
+_WIN_ERROR_MODE_LOCK = threading.Lock()
 
 
 # Stable ordering and labels for the palette + nav rendering.
@@ -6106,27 +6112,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "species": parsed["species"],
         })
 
-    @app.route("/api/highlights")
-    def api_highlights():
-        db = _get_db()
-
+    def _build_highlights_payload(
+        db,
+        scope="folder",
+        folder_id=None,
+        min_quality=0.0,
+        confidence_threshold=0.70,
+        limit_per_bucket=20,
+        species_filter="",
+    ):
         folders = db.get_folders_with_quality_data()
-
-        scope = request.args.get("scope", "folder")
-        folder_id = request.args.get("folder_id", type=int)
         if scope == "workspace":
             folder_id = None
         elif folder_id is None and folders:
             folder_id = folders[0]["id"]  # Most recent
-
-        min_quality = request.args.get("min_quality", 0.0, type=float)
-        confidence_threshold = request.args.get(
-            "confidence_threshold", 0.70, type=float
-        )
-        limit_per_bucket = max(
-            1, min(request.args.get("limit_per_bucket", 20, type=int), 100)
-        )
-        species_filter = (request.args.get("species") or "").strip().lower()
+        limit_per_bucket = max(1, min(int(limit_per_bucket), 100))
+        species_filter = (species_filter or "").strip().lower()
 
         candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
         total_in_scope = db.count_filtered_photos(folder_id=folder_id)
@@ -6154,7 +6155,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         unidentified_limited = unidentified_photos[:limit_per_bucket]
 
-        return jsonify({
+        return {
             "buckets": [limited_bucket(b) for b in buckets],
             "unidentified": {
                 "photo_count": len(unidentified_photos),
@@ -6172,15 +6173,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "limit_per_bucket": limit_per_bucket,
             },
             "scope": "workspace" if folder_id is None else "folder",
-        })
+        }
 
-    @app.route("/api/life-list")
-    def api_life_list():
+    @app.route("/api/highlights")
+    def api_highlights():
         db = _get_db()
+        payload = _build_highlights_payload(
+            db,
+            scope=request.args.get("scope", "folder"),
+            folder_id=request.args.get("folder_id", type=int),
+            min_quality=request.args.get("min_quality", 0.0, type=float),
+            confidence_threshold=request.args.get(
+                "confidence_threshold", 0.70, type=float
+            ),
+            limit_per_bucket=request.args.get("limit_per_bucket", 20, type=int),
+            species_filter=request.args.get("species") or "",
+        )
+        return jsonify(payload)
+
+    def _build_life_list_payload(db, photos_per_species=12):
         rows = db.get_life_list_candidates()
         locations_by_species = db.get_life_list_locations()
         photos_per_species = max(
-            1, min(request.args.get("photos_per_species", 12, type=int), 100)
+            1, min(int(photos_per_species), 100)
         )
 
         buckets = {}
@@ -6274,14 +6289,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         for i, e in enumerate(species_entries, start=1):
             e["number"] = i
 
-        return jsonify({
+        return {
             "species": species_entries,
             "meta": {
                 "species_count": len(species_entries),
                 "photo_count": len(distinct_photo_ids),
                 "photos_per_species": photos_per_species,
             },
-        })
+        }
+
+    @app.route("/api/life-list")
+    def api_life_list():
+        db = _get_db()
+        payload = _build_life_list_payload(
+            db,
+            photos_per_species=request.args.get("photos_per_species", 12, type=int),
+        )
+        return jsonify(payload)
 
     @app.route("/api/highlights/confirm", methods=["POST"])
     def api_highlights_confirm():
@@ -9321,7 +9345,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/volumes", methods=["GET"])
     def api_volumes():
-        """List mounted volumes (macOS/Linux) to help find SD cards."""
+        """List mounted volumes (macOS/Windows/Linux) to help find SD cards."""
         import platform
         volumes = []
         seen_paths: set[str] = set()
@@ -9341,8 +9365,51 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 for name in entries:
                     _add_volume(name, os.path.join(vol_dir, name))
 
+        def _scan_windows_drives() -> None:
+            """Enumerate mounted drive letters via the Win32 API."""
+            import ctypes
+            import string
+
+            kernel32 = ctypes.windll.kernel32
+            # Suppress the "no disk in drive" hardware error dialog that can
+            # otherwise pop up when probing not-ready removable drives.
+            # SetErrorMode is process-wide, so the save/probe/restore must
+            # be serialized — without the lock, concurrent /api/volumes
+            # requests can interleave and leave the process in the wrong
+            # mode mid-probe.
+            SEM_FAILCRITICALERRORS = 0x0001
+            with _WIN_ERROR_MODE_LOCK:
+                old_mode = kernel32.SetErrorMode(SEM_FAILCRITICALERRORS)
+                try:
+                    bitmask = kernel32.GetLogicalDrives()
+                    for i, letter in enumerate(string.ascii_uppercase):
+                        if not (bitmask >> i) & 1:
+                            continue
+                        root = f"{letter}:\\"
+                        # Skip drives with no media inserted (empty card
+                        # readers, optical drives) — only ready drives are
+                        # real volumes.
+                        if not os.path.isdir(root):
+                            continue
+                        label = None
+                        try:
+                            buf = ctypes.create_unicode_buffer(261)
+                            if kernel32.GetVolumeInformationW(
+                                ctypes.c_wchar_p(root), buf, len(buf),
+                                None, None, None, None, 0,
+                            ):
+                                label = buf.value or None
+                        except Exception:
+                            label = None
+                        name = f"{label} ({letter}:)" if label else f"{letter}:"
+                        _add_volume(name, root)
+                finally:
+                    kernel32.SetErrorMode(old_mode)
+
         if platform.system() == "Darwin":
             _scan_dir("/Volumes")
+        elif platform.system() == "Windows":
+            _scan_windows_drives()
         else:
             # /media — flat list of mount points
             _scan_dir("/media")
@@ -10501,19 +10568,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species = pred["species"] if pred else ""
         scientific = pred["scientific_name"] if pred else ""
 
+        # Percent-encode every value: scientific names contain spaces, and an
+        # unencoded space makes the URL invalid, so the desktop opener plugin
+        # rejects it and nothing opens.
         params = []
         if scientific:
-            params.append("taxon_name=" + scientific)
+            params.append("taxon_name=" + quote(scientific))
         elif species:
-            params.append("taxon_name=" + species)
+            params.append("taxon_name=" + quote(species))
         if photo["timestamp"]:
-            params.append("observed_on=" + photo["timestamp"][:10])
+            params.append("observed_on=" + quote(photo["timestamp"][:10]))
         loc = db.get_effective_photo_location(photo_id)
         lat = loc["latitude"] if loc else None
         lng = loc["longitude"] if loc else None
         if lat is not None and lng is not None:
-            params.append("lat=" + str(lat))
-            params.append("lng=" + str(lng))
+            params.append("lat=" + quote(str(lat)))
+            params.append("lng=" + quote(str(lng)))
 
         upload_url = "https://www.inaturalist.org/observations/upload"
         if params:
@@ -12330,6 +12400,132 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "photo_ids": photo_ids,
                 "destination": destination,
                 "naming_template": naming_template,
+            },
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/jobs/publish-site", methods=["POST"])
+    def api_job_publish_site():
+        """Publish workspace life-list and highlights data for a static site."""
+        body = request.get_json(silent=True) or {}
+        destination = (body.get("destination") or "").strip()
+        if not destination:
+            return json_error("destination required")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
+        try:
+            photos_per_species = int(body.get("photos_per_species") or 12)
+            limit_per_bucket = int(body.get("limit_per_bucket") or 12)
+        except (TypeError, ValueError):
+            return json_error("photos_per_species and limit_per_bucket must be numbers")
+        photos_per_species = max(1, min(photos_per_species, 100))
+        limit_per_bucket = max(1, min(limit_per_bucket, 100))
+        max_size = body.get("max_size", 2400)
+        if max_size in ("", None):
+            max_size = None
+        elif isinstance(max_size, bool):
+            return json_error("max_size must be a number")
+        else:
+            try:
+                max_size = int(max_size)
+            except (TypeError, ValueError):
+                return json_error("max_size must be a number")
+        quality = body.get("quality", 88)
+        if isinstance(quality, bool):
+            return json_error("quality must be a number")
+        try:
+            quality = int(quality)
+        except (TypeError, ValueError):
+            return json_error("quality must be a number")
+        quality = max(1, min(quality, 100))
+        raw_include_locations = body.get("include_locations", False)
+        if isinstance(raw_include_locations, str):
+            include_locations = raw_include_locations.strip().lower() in {
+                "1", "true", "yes", "on",
+            }
+        else:
+            include_locations = bool(raw_include_locations)
+
+        import config as cfg
+        db = _get_db()
+        runner = app._job_runner
+        active_ws = db._active_workspace_id
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        effective_cfg = db.get_effective_config(cfg.load())
+        wc_max_size = effective_cfg.get("working_copy_max_size", 4096)
+        developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
+
+        def work(job):
+            from site_publish import publish_site
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+            job["_start_time"] = time.time()
+
+            life_list = _build_life_list_payload(
+                thread_db,
+                photos_per_species=photos_per_species,
+            )
+            highlights = _build_highlights_payload(
+                thread_db,
+                scope="workspace",
+                min_quality=0.0,
+                limit_per_bucket=limit_per_bucket,
+            )
+            photo_ids = {
+                p["id"]
+                for entry in life_list.get("species", [])
+                for p in ([entry.get("best")] + (entry.get("photos") or []))
+                if p and p.get("id")
+            }
+            for bucket in highlights.get("buckets", []):
+                photo_ids.update(
+                    p["id"] for p in (bucket.get("photos") or []) if p.get("id")
+                )
+            job["progress"]["total"] = len(photo_ids)
+
+            def progress_cb(current, total, filename):
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = filename
+                runner.push_event(job["id"], "progress", {
+                    "current": current,
+                    "total": total,
+                    "current_file": filename,
+                    "rate": round(
+                        current / max(time.time() - job["_start_time"], 0.01), 1
+                    ),
+                    "phase": "Publishing website",
+                })
+
+            return publish_site(
+                db=thread_db,
+                vireo_dir=vireo_dir,
+                destination=destination,
+                life_list=life_list,
+                highlights=highlights,
+                options={
+                    "max_size": max_size,
+                    "quality": quality,
+                    "working_copy_max_size": wc_max_size,
+                    "developed_dir": developed_dir,
+                    "include_locations": include_locations,
+                },
+                progress_cb=progress_cb,
+            )
+
+        job_id = runner.start(
+            "publish-site",
+            work,
+            config={
+                "destination": destination,
+                "photos_per_species": photos_per_species,
+                "limit_per_bucket": limit_per_bucket,
+                "max_size": max_size,
+                "quality": quality,
+                "include_locations": include_locations,
             },
             workspace_id=active_ws,
         )
