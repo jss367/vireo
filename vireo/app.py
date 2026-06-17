@@ -8764,23 +8764,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             img = load_image(source_path, max_size=None)
             if img is None:
                 return None, f"{photo['filename']}: failed to load image"
-            rendered = apply_recipe(img, recipe)
-            quality = cfg.load().get("working_copy_quality", 92)
-            fd, tmp_path = tempfile.mkstemp(
-                prefix=f".{photo['id']}.", suffix=".jpg.tmp", dir=out_dir,
-            )
-            os.close(fd)
+            rendered = None
+            tmp_path = None
+            fd = None
             try:
+                rendered = apply_recipe(img, recipe)
+                quality = cfg.load().get("working_copy_quality", 92)
+                fd, tmp_path = tempfile.mkstemp(
+                    prefix=f".{photo['id']}.", suffix=".jpg.tmp", dir=out_dir,
+                )
+                os.close(fd)
+                fd = None
                 rendered.save(tmp_path, format="JPEG", quality=quality)
                 os.replace(tmp_path, out_path)
                 with open(meta_path, "w", encoding="utf-8") as f:
                     json.dump(expected_meta, f, sort_keys=True)
             except Exception:
+                if fd is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
                 with contextlib.suppress(OSError):
-                    os.unlink(tmp_path)
+                    if tmp_path:
+                        os.unlink(tmp_path)
                 raise
             finally:
-                rendered.close()
+                if rendered is not None:
+                    rendered.close()
                 if rendered is not img:
                     img.close()
             return out_path, None

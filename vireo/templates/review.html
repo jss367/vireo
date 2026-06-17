@@ -1156,7 +1156,9 @@ function renderPredictionCard(pred) {
     typeof window.vireoRememberPhotoEditRecipe === 'function' &&
     Object.prototype.hasOwnProperty.call(pred, 'edit_recipe')
   ) {
-    window.vireoRememberPhotoEditRecipe(pred.photo_id, pred.edit_recipe);
+    window.vireoRememberPhotoEditRecipe(pred.photo_id, pred.edit_recipe, {
+      skipIfLocallyWritten: true,
+    });
   }
   var thumbUrl = window.vireoRenderedUrl
     ? window.vireoRenderedUrl('/thumbnails/' + pred.photo_id + '.jpg', pred.photo_id)
