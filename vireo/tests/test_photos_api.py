@@ -553,6 +553,7 @@ def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
             0.92 - idx * 0.05,
             "bioclip",
         )
+    db.set_photo_edit_recipe(ordered_ids[0], {"rotation": 90})
 
     client = app.test_client()
     resp = client.post("/api/pipeline/selection-results", json={"photo_ids": ordered_ids})
@@ -572,6 +573,9 @@ def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
     }
     assert enc["bursts"][0]["species_predictions"] == enc["species_predictions"]
     assert all("quality_composite" in p for p in data["photos"])
+    recipes = {p["id"]: p.get("edit_recipe") for p in data["photos"]}
+    assert recipes[ordered_ids[0]] == {"version": 1, "rotation": 90}
+    assert recipes[ordered_ids[1]] is None
 
 
 def test_api_photos_calendar(app_and_db):

@@ -2924,7 +2924,7 @@ function openInspect(photoId) {
     html += '<div class="context-filmstrip">';
     (enc.photo_ids || []).forEach(function(pid) {
       var isCurrent = pid === photoId ? ' current' : '';
-      var contextPhoto = photoMap[pid] || pid;
+      var contextPhoto = findPhotoInResults(pid) || pid;
       var contextThumb = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(contextPhoto) : '/thumbnails/' + pid + '.jpg';
       html += '<img src="' + escapeAttr(contextThumb) + '" class="' + isCurrent + '" onclick="openInspect(' + pid + ')" alt="">';
     });

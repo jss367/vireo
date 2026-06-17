@@ -3486,6 +3486,7 @@ window.vireoThumbnailUrl = function(photoOrId) {
   if (
     photo &&
     Object.prototype.hasOwnProperty.call(photo, 'edit_recipe') &&
+    typeof photo.edit_recipe !== 'undefined' &&
     typeof window.vireoRememberPhotoEditRecipe === 'function'
   ) {
     window.vireoRememberPhotoEditRecipe(photoId, photo.edit_recipe, {
@@ -3618,6 +3619,12 @@ function _lbNormalizeClientRecipe(recipe) {
 function _lbRecipeAfterEditOperation(recipe, op) {
   var next = _lbCloneEditRecipe(recipe);
   if (op === 'reset') {
+    if (next.crop && typeof next.crop === 'object') {
+      next.crop = _lbTransformBoxByRecipe(
+        next.crop,
+        _lbInverseOrientationRecipe(next)
+      );
+    }
     delete next.rotation;
     delete next.flip;
     return _lbNormalizeClientRecipe(next);
@@ -3697,6 +3704,33 @@ function _lbComposeDisplayedOrientation(recipe, op) {
       if (
         Math.abs(actual.x - desired[j].x) > 0.000001 ||
         Math.abs(actual.y - desired[j].y) > 0.000001
+      ) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return candidate;
+  }
+  return {};
+}
+
+function _lbInverseOrientationRecipe(recipe) {
+  var samplePoints = [
+    { x: 0.125, y: 0.25 },
+    { x: 0.8, y: 0.2 },
+    { x: 0.3, y: 0.85 },
+  ];
+  var candidates = _lbOrientationCandidates();
+  for (var i = 0; i < candidates.length; i++) {
+    var candidate = candidates[i];
+    var matches = true;
+    for (var j = 0; j < samplePoints.length; j++) {
+      var original = samplePoints[j];
+      var oriented = _lbTransformPointByRecipe(original.x, original.y, recipe);
+      var restored = _lbTransformPointByRecipe(oriented.x, oriented.y, candidate);
+      if (
+        Math.abs(restored.x - original.x) > 0.000001 ||
+        Math.abs(restored.y - original.y) > 0.000001
       ) {
         matches = false;
         break;

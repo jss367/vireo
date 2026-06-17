@@ -3358,6 +3358,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         results = serialize_results(
             run_selected_batch_review(photos, config=effective_cfg)
         )
+        _attach_edit_recipes(db, results.get("photos", []))
         results["source"] = "browse-selection"
         return jsonify(results)
 

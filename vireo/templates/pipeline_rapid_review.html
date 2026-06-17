@@ -782,6 +782,10 @@ function escapeHtml(s) {
   });
 }
 
+function escapeAttr(s) {
+  return escapeHtml(s);
+}
+
 function photoPreviewUrl(id) {
   return '/photos/' + id + '/preview?size=2560';
 }
@@ -1519,7 +1523,7 @@ function thumbClass(p) {
 function renderFilmstrip() {
   var html = rapid.items.map(function(p) {
     return '<button class="' + thumbClass(p) + '" onclick="selectPhoto(' + p.id + ')" title="' + escapeHtml(p.filename || '') + '">' +
-      '<img src="' + thumbUrl(p) + '" alt=""></button>';
+      '<img src="' + escapeAttr(thumbUrl(p)) + '" alt=""></button>';
   }).join('');
   document.getElementById('filmstrip').innerHTML = html;
 }
@@ -1528,7 +1532,7 @@ function renderLane(id, photos) {
   var html = photos.map(function(p) {
     var muted = (!rapid.queue.includeRejected && photoFlag(p) === 'rejected') ? ' rejected-muted' : '';
     return '<button class="mini-thumb' + muted + '" onclick="selectPhoto(' + p.id + ')" title="' + escapeHtml(p.filename || '') + '">' +
-      '<img src="' + thumbUrl(p) + '" alt=""></button>';
+      '<img src="' + escapeAttr(thumbUrl(p)) + '" alt=""></button>';
   }).join('');
   document.getElementById(id).innerHTML = html;
 }
