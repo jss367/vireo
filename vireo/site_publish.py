@@ -18,6 +18,7 @@ from export import (
 from image_loader import load_image
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+_PRIVATE_PHOTO_FIELDS = {"mask_path"}
 
 
 def slugify(value, fallback="item"):
@@ -103,6 +104,18 @@ def _write_json(path, payload):
         f.write("\n")
 
 
+def _strip_private_photo_fields(highlights):
+    for bucket in highlights.get("buckets", []):
+        for photo in bucket.get("photos") or []:
+            for field in _PRIVATE_PHOTO_FIELDS:
+                photo.pop(field, None)
+
+    unidentified = highlights.get("unidentified") or {}
+    for photo in unidentified.get("photos") or []:
+        for field in _PRIVATE_PHOTO_FIELDS:
+            photo.pop(field, None)
+
+
 def publish_site(db, vireo_dir, destination, life_list, highlights=None, options=None, progress_cb=None):
     """Write JSON manifests and optimized photos for a static website.
 
@@ -126,6 +139,7 @@ def publish_site(db, vireo_dir, destination, life_list, highlights=None, options
 
     published_life_list = copy.deepcopy(life_list)
     published_highlights = copy.deepcopy(highlights)
+    _strip_private_photo_fields(published_highlights)
     if not include_locations:
         for entry in published_life_list.get("species", []):
             entry["locations"] = []

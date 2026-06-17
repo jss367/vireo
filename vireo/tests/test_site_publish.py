@@ -60,6 +60,8 @@ def _seed_publish_app(tmp_path, monkeypatch):
     db.conn.execute("UPDATE photos SET quality_score = 0.9 WHERE id = ?", (p1,))
     db.conn.execute("UPDATE photos SET quality_score = 0.7 WHERE id = ?", (p2,))
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (p3,))
+    db.conn.execute("UPDATE photos SET mask_path = ? WHERE id = ?", ("masks/cardinal.png", p1))
+    db.conn.execute("UPDATE photos SET mask_path = ? WHERE id = ?", ("masks/mystery.png", p3))
 
     cardinal = db.add_keyword("Northern Cardinal", is_species=True)
     sparrow = db.add_keyword("House Sparrow", is_species=True)
@@ -106,7 +108,9 @@ def test_publish_site_job_writes_life_list_highlights_and_images(tmp_path, monke
         "Northern Cardinal",
         "House Sparrow",
     ]
+    assert "mask_path" not in highlights["buckets"][0]["photos"][0]
     unidentified = highlights["unidentified"]["photos"][0]
+    assert "mask_path" not in unidentified
     assert unidentified["image"].startswith("images/photos/unidentified-")
     assert (dest / unidentified["image"]).exists()
 
