@@ -116,6 +116,8 @@ def _write_json(path, payload):
 
 
 def _strip_private_photo_fields(highlights):
+    highlights.pop("folders", None)
+
     for bucket in highlights.get("buckets", []):
         for photo in bucket.get("photos") or []:
             for field in _PRIVATE_PHOTO_FIELDS:

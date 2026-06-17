@@ -106,6 +106,7 @@ def test_publish_site_job_writes_life_list_highlights_and_images(tmp_path, monke
     assert site["schema_version"] == 1
     assert site["counts"]["life_list_species"] == 2
     assert life["meta"]["species_count"] == 2
+    assert "folders" not in highlights
     cardinal = next(e for e in life["species"] if e["species"] == "Northern Cardinal")
     assert cardinal["locations"] == []
     assert cardinal["best"]["image"].startswith("images/photos/")
