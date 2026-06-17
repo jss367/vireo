@@ -15810,7 +15810,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if collection_id is None:
             save_results(results, cache_dir, db._active_workspace_id)
 
-        return jsonify(serialize_results(results))
+        serialized = serialize_results(results)
+        _attach_nested_edit_recipes(db, serialized)
+        return jsonify(serialized)
 
     @app.route("/api/pipeline/regroup-live", methods=["POST"])
     def api_pipeline_regroup_live():
@@ -15866,7 +15868,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if collection_id is None:
             save_results(results, cache_dir, db._active_workspace_id)
 
-        return jsonify(serialize_results(results))
+        serialized = serialize_results(results)
+        _attach_nested_edit_recipes(db, serialized)
+        return jsonify(serialized)
 
     @app.route("/api/pipeline/save-grouping-defaults", methods=["POST"])
     def api_pipeline_save_grouping_defaults():

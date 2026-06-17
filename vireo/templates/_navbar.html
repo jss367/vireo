@@ -3633,6 +3633,12 @@ function _lbRecipeAfterEditOperation(recipe, op) {
   if (next.crop && typeof next.crop === 'object') {
     next.crop = _lbTransformBoxByEditOperation(next.crop, op);
   }
+  if (
+    (op === 'flip-horizontal' || op === 'flip-vertical') &&
+    Math.abs(Number(next.straighten || 0)) > 0.0001
+  ) {
+    next.straighten = -Number(next.straighten);
+  }
   delete next.rotation;
   delete next.flip;
   if (orientation.rotation) next.rotation = orientation.rotation;
