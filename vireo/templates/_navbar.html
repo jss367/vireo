@@ -3776,7 +3776,7 @@ function _lbRecipeAfterEditOperation(recipe, op) {
       );
     }
     if (
-      (removedFlip.horizontal || removedFlip.vertical) &&
+      (!!removedFlip.horizontal !== !!removedFlip.vertical) &&
       Math.abs(Number(next.straighten || 0)) > 0.0001
     ) {
       next.straighten = -Number(next.straighten);
