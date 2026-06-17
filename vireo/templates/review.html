@@ -1986,7 +1986,7 @@ function grmPhotoUrl(photoOrId) {
       : '/thumbnails/' + photoId + '.jpg';
   }
   if (stop.kind === 'original') return '/photos/' + photoId + '/original';
-  return '/photos/' + photoId + '/preview?size=' + stop.size;
+  return vireoPreviewUrl(photoId, stop.size);
 }
 
 function grmLoupePhotoUrl(photoId) {

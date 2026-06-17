@@ -79,9 +79,37 @@ fn set_job_progress(
         .map_err(|e| e.to_string())
 }
 
+/// Build the logging plugin used in BOTH dev and release builds.
+///
+/// Previously logging was only initialized under `cfg!(debug_assertions)`, so
+/// installed builds wrote nothing to disk — every `log::` call from the sidecar
+/// supervisor, updater, tray, and browser opener silently vanished, which made
+/// field bugs (such as the iNaturalist quick-open failing) impossible to
+/// diagnose. Now it runs everywhere, writing to the OS log directory
+/// (`~/Library/Logs/com.vireo.app/Vireo.log` on macOS) and stdout.
+///
+/// The webview forwards its own logs and uncaught errors here via the plugin's
+/// `log` command (see tauri-bridge.js), so the single file captures both the
+/// Rust side and the JS side.
+fn build_log_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
+    tauri_plugin_log::Builder::default()
+        .level(log::LevelFilter::Info)
+        // The plugin default is only 40 KB; match the Flask sidecar's 5 MB so a
+        // real debugging session's worth of logs survives before rotating.
+        .max_file_size(5 * 1024 * 1024)
+        .rotation_strategy(RotationStrategy::KeepSome(3))
+        .targets([
+            Target::new(TargetKind::Stdout),
+            Target::new(TargetKind::LogDir { file_name: None }),
+        ])
+        .build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(build_log_plugin())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -94,12 +122,9 @@ pub fn run() {
             let browser_mode = launch_cfg.open_in_browser();
 
             if cfg!(debug_assertions) {
-                // In dev mode, don't spawn sidecar — developer runs Flask manually
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+                // In dev mode, don't spawn sidecar — developer runs Flask
+                // manually. Logging is initialized unconditionally in the
+                // builder chain (see build_log_plugin), so it's already active.
                 // Use a placeholder state pointing to the dev server
                 app.manage(SidecarState::unmanaged(8080));
             } else {
