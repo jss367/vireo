@@ -99,6 +99,10 @@ jobs:
 
       - name: Install test dependencies
         if: needs.changes.outputs.python == 'true'
+        # ``run`` defaults to PowerShell on Windows, where ``$RUNNER_TEMP``
+        # doesn't expand (it would need ``$env:RUNNER_TEMP``). Pin bash so the
+        # same ``cd "$RUNNER_TEMP"`` works across all three OS legs.
+        shell: bash
         run: |
           cd "$RUNNER_TEMP"
           pip install pytest pytest-cov pytest-timeout pytest-xdist "huggingface_hub>=1.4.1"
