@@ -3146,6 +3146,8 @@ var _lbViewportByPhotoId = {};  // per-session lightbox viewport cache keyed by 
 var _lbPendingViewportState = null;
 var _lbEditRecipeByPhoto = {};
 var _lbEditRecipeKnownByPhoto = {};
+var _lbEditRecipeWriteSeq = 0;
+var _lbEditRecipeWriteSeqByPhoto = {};
 var _lbPhotoDataByPhoto = {};
 var _lbRenderVersionByPhoto = {};
 var _lbEditWritePending = false;
@@ -3315,6 +3317,17 @@ function _lbRememberEditRecipe(photoId, recipe) {
   _lbEditRecipeByPhoto[String(photoId)] = _lbCloneEditRecipe(recipe);
   _lbEditRecipeKnownByPhoto[String(photoId)] = true;
   _lbApplyEditButtonState();
+}
+
+function _lbEditRecipeWriteSeqFor(photoId) {
+  if (photoId == null) return 0;
+  return _lbEditRecipeWriteSeqByPhoto[String(photoId)] || 0;
+}
+
+function _lbMarkEditRecipeWrite(photoId) {
+  if (photoId == null) return;
+  _lbEditRecipeWriteSeq += 1;
+  _lbEditRecipeWriteSeqByPhoto[String(photoId)] = _lbEditRecipeWriteSeq;
 }
 
 function _lbCurrentEditRecipe() {
@@ -3501,6 +3514,7 @@ async function lightboxApplyEdit(op) {
       }, { toast: false });
     }
     if (_lightboxCurrentId !== photoId) return;
+    _lbMarkEditRecipeWrite(photoId);
     _lbRememberEditRecipe(photoId, data ? data.recipe : null);
     _vireoBumpRenderVersion(photoId);
     if (typeof window.vireoRefreshPhotoRenders === 'function') {
@@ -4387,12 +4401,18 @@ function openLightbox(photoId, filename, photoList, options) {
 
   // Fetch original dimensions (async, non-blocking for image display)
   var flagFetchSeq = _lbFlagEditSeq;
+  var editRecipeFetchSeq = _lbEditRecipeWriteSeqFor(photoId);
   fetch('/api/photos/' + photoId)
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
       if (!data || _lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
+      var editRecipeFresh = _lbEditRecipeWriteSeqFor(photoId) === editRecipeFetchSeq;
+      if (!editRecipeFresh) {
+        var currentRecipe = _lbEditRecipeByPhoto[String(photoId)];
+        data.edit_recipe = _lbRecipeHasEdits(currentRecipe) ? _lbCloneEditRecipe(currentRecipe) : null;
+      }
       _lbPhotoDataByPhoto[String(photoId)] = data;
-      _lbRememberEditRecipe(photoId, data.edit_recipe);
+      if (editRecipeFresh) _lbRememberEditRecipe(photoId, data.edit_recipe);
       _lbApplyMaskVisibility();
       _lbPhotoW = data.width || null;
       _lbPhotoH = data.height || null;
@@ -7040,6 +7060,7 @@ function formatDuration(seconds) {
       var photoId = Number(update.photo_id);
       if (!Number.isFinite(photoId)) return;
       photoIds.push(photoId);
+      _lbMarkEditRecipeWrite(photoId);
       _lbRememberEditRecipe(photoId, update.recipe);
       if (_lbPhotoDataByPhoto[String(photoId)]) {
         _lbPhotoDataByPhoto[String(photoId)].edit_recipe = update.recipe || null;
