@@ -3895,6 +3895,11 @@ function _lbLoadDetections(photoId) {
       if (!detections || detections.length === 0) return;
       // Only render if still viewing the same photo
       if (_lightboxCurrentId !== photoId) return;
+      if (!_lbSourceOverlaysAvailable()) {
+        container.innerHTML = '';
+        _lbApplyBoxesVisibility();
+        return;
+      }
       detections.forEach(function(det) {
         if (det.box_x == null || det.box_y == null) return;
         var color = _lbGetSpeciesColor(det.category || 'animal');
@@ -4411,9 +4416,10 @@ async function saveCropEditor() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ recipe: recipe }),
     }, { toast: false });
-    _lbEditVersionByPhoto[String(pid)] = String(Date.now());
+    var updates = {};
+    updates[String(pid)] = data.recipe;
+    _lbRefreshEditRecipeCache(updates);
     var p = _lightboxPhotoList.find(function(x) { return x.id === pid; });
-    if (p) p.edit_recipe = data.recipe;
     if (_cropIsActiveSession(pid, session)) {
       closeCropEditor();
       if (_lightboxCurrentId === pid) {
@@ -4440,9 +4446,10 @@ async function cropClearEdits() {
     await safeFetch('/api/photos/' + pid + '/edit-recipe', {
       method: 'DELETE',
     }, { toast: false });
-    _lbEditVersionByPhoto[String(pid)] = String(Date.now());
+    var updates = {};
+    updates[String(pid)] = null;
+    _lbRefreshEditRecipeCache(updates);
     var p = _lightboxPhotoList.find(function(x) { return x.id === pid; });
-    if (p) p.edit_recipe = null;
     if (_cropIsActiveSession(pid, session)) {
       closeCropEditor();
       if (_lightboxCurrentId === pid) {
@@ -4458,11 +4465,40 @@ async function cropClearEdits() {
   }
 }
 
+function _lbThumbnailUrl(photoId, version) {
+  var url = '/thumbnails/' + photoId + '.jpg';
+  if (version) url += '?editv=' + encodeURIComponent(version);
+  return url;
+}
+
+function _lbRefreshThumbnailCache(photoId, version) {
+  var id = String(photoId);
+  var refreshedUrl = _lbThumbnailUrl(id, version);
+  document.querySelectorAll('img').forEach(function(img) {
+    var rawSrc = img.getAttribute('src') || '';
+    if (!rawSrc) return;
+    var url;
+    try {
+      url = new URL(rawSrc, window.location.href);
+    } catch (_) {
+      return;
+    }
+    if (url.pathname !== '/thumbnails/' + id + '.jpg') return;
+    img.src = refreshedUrl;
+  });
+  try {
+    document.dispatchEvent(new CustomEvent('vireo:thumbnail-invalidated', {
+      detail: { photoId: Number(photoId), version: version }
+    }));
+  } catch (_) {}
+}
+
 function _lbRefreshEditRecipeCache(updates) {
   if (!updates || typeof updates !== 'object') return;
   var version = String(Date.now());
   Object.keys(updates).forEach(function(photoId) {
     _lbEditVersionByPhoto[String(photoId)] = version;
+    _lbRefreshThumbnailCache(photoId, version);
     var numericId = Number(photoId);
     var p = _lightboxPhotoList.find(function(x) { return x.id === numericId; });
     if (p) p.edit_recipe = updates[photoId] || null;
