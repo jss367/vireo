@@ -2815,11 +2815,16 @@ def test_preview_job_honors_raw_failure_marker_after_source_selection(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = (SELECT folder_id FROM photos WHERE id=?)",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "source.NEF")
     original_load_image = image_loader.load_image
     raw_loads = []
 
     def tracking_load_image(file_path, max_size=1024):
-        if str(file_path).lower().endswith(".nef"):
+        if os.path.abspath(str(file_path)) == os.path.abspath(raw_path):
             raw_loads.append(file_path)
             raise AssertionError("preview warmup retried failed RAW")
         return original_load_image(file_path, max_size=max_size)
