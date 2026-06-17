@@ -13,6 +13,12 @@
   .control-group label { font-size:13px; color:var(--text-secondary); white-space:nowrap; }
   .control-group input[type=search], .control-group select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
   .control-group input[type=search] { width:180px; }
+  .publish-btn { margin-left:auto; border:1px solid var(--accent); background:transparent; color:var(--accent); border-radius:4px; padding:5px 10px; font-size:12px; cursor:pointer; }
+  .publish-btn:hover { background:rgba(99, 179, 237, 0.08); }
+  .publish-path-row { display:flex; gap:8px; align-items:center; }
+  .publish-path-row .modal-input { flex:1; }
+  .publish-option { display:flex; gap:8px; align-items:flex-start; margin-top:12px; font-size:13px; color:var(--text-secondary); }
+  .publish-status { min-height:16px; margin-top:10px; font-size:12px; color:var(--text-secondary); }
 
   .lifelist-meta { padding:8px 24px; font-size:12px; color:var(--text-secondary); }
 
@@ -55,9 +61,43 @@
       <option value="most-photos">Most photos</option>
     </select>
   </div>
+  <button class="publish-btn" onclick="openPublishModal()">Publish Site</button>
 </div>
 
 <div class="lifelist-meta" id="meta"></div>
+
+<div class="modal-overlay" id="publishModal">
+  <div class="modal">
+    <h3>Publish Website Data</h3>
+    <label class="modal-label" for="publishDest">Destination folder</label>
+    <div class="publish-path-row">
+      <input id="publishDest" class="modal-input" type="text" placeholder="/path/to/site/public">
+      <button class="modal-btn modal-btn-cancel" onclick="browsePublishDest()">Browse</button>
+    </div>
+    <div class="modal-hint">
+      Writes data/site.json, data/life-list.json, data/highlights.json, and optimized images.
+    </div>
+
+    <label class="publish-option">
+      <input id="publishLocations" type="checkbox">
+      <span>Include location keywords in the published life list.</span>
+    </label>
+
+    <label class="modal-label" for="publishMaxSize" style="margin-top:12px;">Image max long edge</label>
+    <select id="publishMaxSize" class="modal-input">
+      <option value="2400">2400 px</option>
+      <option value="2048">2048 px</option>
+      <option value="1600">1600 px</option>
+      <option value="">Original size</option>
+    </select>
+
+    <div class="publish-status" id="publishStatus"></div>
+    <div class="modal-actions">
+      <button id="publishSubmitBtn" class="modal-btn modal-btn-primary" onclick="startPublishSite()">Publish</button>
+      <button class="modal-btn modal-btn-cancel" onclick="closePublishModal()">Cancel</button>
+    </div>
+  </div>
+</div>
 
 <div class="lifelist-grid" id="content"></div>
 
@@ -206,6 +246,59 @@ document.getElementById('speciesSearch').addEventListener('input', debounceRende
 document.getElementById('sortSelect').addEventListener('change', function() {
   if (currentData) render();
 });
+
+function openPublishModal() {
+  var modal = document.getElementById('publishModal');
+  var status = document.getElementById('publishStatus');
+  if (status) status.textContent = '';
+  modal.classList.add('open');
+  setTimeout(function() {
+    var input = document.getElementById('publishDest');
+    if (input) input.focus();
+  }, 0);
+}
+
+function closePublishModal() {
+  document.getElementById('publishModal').classList.remove('open');
+}
+
+async function browsePublishDest() {
+  if (typeof pickDirectory !== 'function') {
+    showToast('Folder picker is available in the desktop app.', 'info');
+    return;
+  }
+  var selected = await pickDirectory('Select website publish folder');
+  if (selected) document.getElementById('publishDest').value = selected;
+}
+
+async function startPublishSite() {
+  var dest = document.getElementById('publishDest').value.trim();
+  var status = document.getElementById('publishStatus');
+  var btn = document.getElementById('publishSubmitBtn');
+  if (!dest) {
+    status.textContent = 'Destination folder is required.';
+    return;
+  }
+  btn.disabled = true;
+  status.textContent = 'Starting publish job...';
+  try {
+    var maxSize = document.getElementById('publishMaxSize').value;
+    var data = await safeFetch('/api/jobs/publish-site', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        destination: dest,
+        max_size: maxSize,
+        include_locations: document.getElementById('publishLocations').checked,
+      }),
+    });
+    status.textContent = 'Publish job started: ' + data.job_id;
+    if (typeof showToast === 'function') showToast('Publishing website data...', 'info');
+    setTimeout(closePublishModal, 700);
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 function findLifeListEntryForPhoto(photoId) {
   if (!currentData || photoId == null) return null;
