@@ -97,11 +97,15 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install dependencies
+      - name: Install test dependencies
         if: needs.changes.outputs.python == 'true'
+        # ``run`` defaults to PowerShell on Windows, where ``$RUNNER_TEMP``
+        # doesn't expand (it would need ``$env:RUNNER_TEMP``). Pin bash so the
+        # same ``cd "$RUNNER_TEMP"`` works across all three OS legs.
+        shell: bash
         run: |
-          pip install pytest pytest-cov pytest-timeout pytest-xdist
-          pip install -e .
+          cd "$RUNNER_TEMP"
+          pip install pytest pytest-cov pytest-timeout pytest-xdist "huggingface_hub>=1.4.1"
 
       # Cache MegaDetector V6 weights across runs so the Windows/macOS legs
       # don't restart a cold ~300 MB download for every PR. Without this,
@@ -118,17 +122,38 @@ jobs:
           path: ~/.vireo/models/megadetector-v6
           key: megadetector-v6-${{ runner.os }}-v1
 
-      # Sequential single-process pre-download. If the cache missed we run
-      # one HEAD+GET against HF Hub before the tests fan out — orders of
-      # magnitude less likely to trip the 429 rate limiter than two xdist
-      # workers each starting their own download simultaneously. Retry a
-      # few times with backoff so a single transient throttle doesn't
-      # poison the whole CI run.
+      # Sequential single-process pre-download. If the cache missed we fetch
+      # the weights once before the tests fan out — orders of magnitude less
+      # likely to trip the 429 rate limiter than two xdist workers each
+      # starting their own download simultaneously. Retry a few times with
+      # backoff so a single transient throttle doesn't poison the whole run.
+      #
+      # We download with the ``huggingface_hub`` library before installing the
+      # PR package, so PR-controlled editable installs/dependency hooks cannot
+      # affect this token-bearing interpreter. The inline script imports only
+      # huggingface_hub + stdlib and hard-codes the repo/filename, so no
+      # PR-authored module (detector.py, models.py, ...) ever runs with the
+      # token in scope. huggingface_hub also sends HF_TOKEN only to
+      # huggingface.co and follows the presigned CDN redirect without it, so the
+      # secret is never forwarded across the cross-host redirect the way a
+      # hand-rolled ``curl -L -H Authorization`` can. Tests never download -
+      # they mock the downloader / detect_animals or skip when the file is
+      # absent - so the weights just need to land where detector.py expects.
       - name: Pre-download MegaDetector weights
         if: needs.changes.outputs.python == 'true' && steps.cache-mdv6.outputs.cache-hit != 'true'
         shell: bash
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Keep the PR-controlled checkout off sys.path so the ``import
+          # huggingface_hub`` below resolves to the installed package and can't
+          # be shadowed by a PR-added huggingface_hub.py — ``python -c``
+          # otherwise prepends the working directory as sys.path[0].
+          PYTHONSAFEPATH: "1"
         run: |
-          cd vireo
+          # Belt-and-suspenders with PYTHONSAFEPATH: run from outside the
+          # checkout too, so even the cwd that ``python -c`` uses for
+          # sys.path[0] holds no PR-authored files.
+          cd "$RUNNER_TEMP"
           # Track success explicitly: a bash ``for`` loop exits with the
           # status of its last command, and ``sleep`` always succeeds —
           # without this flag, five consecutive download failures would
@@ -137,7 +162,7 @@ jobs:
           # pre-download is meant to prevent.
           success=0
           for i in 1 2 3 4 5; do
-            if python -c "import sys; sys.path.insert(0, '.'); from detector import ensure_megadetector_weights; ensure_megadetector_weights()"; then
+            if python -c "import os, shutil; from huggingface_hub import hf_hub_download; d = os.path.expanduser('~/.vireo/models/megadetector-v6'); os.makedirs(d, exist_ok=True); shutil.copy2(hf_hub_download(repo_id='jss367/vireo-onnx-models', filename='model.onnx', subfolder='megadetector-v6'), os.path.join(d, 'model.onnx'))"; then
               success=1
               break
             fi
@@ -148,6 +173,10 @@ jobs:
             echo "Pre-download failed after 5 attempts; failing the step to avoid cascading xdist worker failures."
             exit 1
           fi
+
+      - name: Install package
+        if: needs.changes.outputs.python == 'true'
+        run: pip install -e .
 
       # Linux is the canonical full run and enforces the coverage threshold.
       - name: Run tests with coverage (Linux)
