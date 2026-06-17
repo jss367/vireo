@@ -3726,6 +3726,15 @@ function _lbRecipeHasCrop(recipe) {
   return !!(recipe && recipe.crop && Number(recipe.crop.w) > 0 && Number(recipe.crop.h) > 0);
 }
 
+function _lbRecipeHasGeometricEdit(recipe) {
+  if (!recipe || typeof recipe !== 'object') return false;
+  if (_lbRecipeHasCrop(recipe)) return true;
+  if (Number(recipe.rotation || 0)) return true;
+  if (Math.abs(Number(recipe.straighten || 0)) > 1e-9) return true;
+  var flip = recipe.flip || {};
+  return !!(flip.horizontal || flip.vertical);
+}
+
 function _lbMetadataOrientation(metadata) {
   if (!metadata || typeof metadata !== 'object') return null;
   var groups = ['EXIF', 'TIFF', 'Image'];
@@ -3754,7 +3763,7 @@ function _lbOrientationSwapsAxes(orientation) {
 }
 
 function _lbSourceOverlaysAvailable() {
-  return !_lbRecipeHasCrop(_lbCurrentEditRecipe);
+  return !_lbRecipeHasGeometricEdit(_lbCurrentEditRecipe);
 }
 
 function _lbApplyBoxesVisibility() {
@@ -3764,9 +3773,9 @@ function _lbApplyBoxesVisibility() {
   var btn = document.getElementById('lightboxToggleBoxes');
   if (btn) {
     btn.disabled = !available;
-    btn.textContent = !available ? 'Boxes Cropped' : (_lbBoxesVisible ? 'Hide Boxes' : 'Show Boxes');
+    btn.textContent = !available ? 'Boxes Edited' : (_lbBoxesVisible ? 'Hide Boxes' : 'Show Boxes');
     btn.title = !available
-      ? 'Detection boxes are hidden for cropped photos'
+      ? 'Detection boxes are hidden for geometrically edited photos'
       : 'Toggle detection boxes (b)';
   }
 }
@@ -3813,9 +3822,9 @@ function _lbApplyEyeVisibility() {
   var btn = document.getElementById('lightboxToggleEye');
   if (btn) {
     btn.disabled = !available;
-    btn.textContent = !available ? 'Eye Cropped' : (_lbEyeVisible ? 'Hide Eye' : 'Show Eye');
+    btn.textContent = !available ? 'Eye Edited' : (_lbEyeVisible ? 'Hide Eye' : 'Show Eye');
     btn.title = !available
-      ? 'Eye marker is hidden for cropped photos'
+      ? 'Eye marker is hidden for geometrically edited photos'
       : 'Toggle eye marker';
   }
 }
@@ -4003,9 +4012,9 @@ function _lbApplyMaskToggleButton() {
   if (btn) {
     var available = _lbSourceOverlaysAvailable();
     btn.disabled = !available;
-    btn.textContent = !available ? 'Masks Cropped' : (_lbMasksVisible ? 'Hide Masks' : 'Show Masks');
+    btn.textContent = !available ? 'Masks Edited' : (_lbMasksVisible ? 'Hide Masks' : 'Show Masks');
     btn.title = !available
-      ? 'Mask overlay is hidden for cropped photos'
+      ? 'Mask overlay is hidden for geometrically edited photos'
       : 'Toggle mask overlay';
   }
 }
@@ -4548,7 +4557,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbPhotoH = data.height || null;
       _lbPhotoOrientation = _lbMetadataOrientation(data.metadata);
       _lbCurrentEditRecipe = data.edit_recipe || null;
-      if (_lbRecipeHasCrop(_lbCurrentEditRecipe)) {
+      if (!_lbSourceOverlaysAvailable()) {
         var detContainer2 = document.getElementById('lightboxDetections');
         if (detContainer2) detContainer2.innerHTML = '';
         var eyeContainer2 = document.getElementById('lightboxEye');
