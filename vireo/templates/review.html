@@ -1993,10 +1993,30 @@ function grmLoupePhotoUrl(photoId) {
   return grmPhotoUrl(photoId);
 }
 
+function grmEditedSourceDims(item) {
+  var W = (item && item.width) ? Number(item.width) : 1800;
+  var H = (item && item.height) ? Number(item.height) : 1200;
+  var recipe = (item && item.edit_recipe) || {};
+  var rotation = Number(recipe.rotation || 0);
+  if (rotation === 90 || rotation === 270) {
+    var tmp = W;
+    W = H;
+    H = tmp;
+  }
+  if (recipe.crop && typeof recipe.crop === 'object') {
+    var cropW = Number(recipe.crop.w);
+    var cropH = Number(recipe.crop.h);
+    if (Number.isFinite(cropW) && cropW > 0) W = Math.max(1, Math.round(W * cropW));
+    if (Number.isFinite(cropH) && cropH > 0) H = Math.max(1, Math.round(H * cropH));
+  }
+  return { w: W, h: H };
+}
+
 function grmNaturalDims(item) {
   var stop = GRM_RES_STOPS[grmResolutionIdx] || GRM_RES_STOPS[1];
-  var W = (item && item.width) ? item.width : 1800;
-  var H = (item && item.height) ? item.height : 1200;
+  var dims = grmEditedSourceDims(item);
+  var W = dims.w;
+  var H = dims.h;
   if (stop.kind === 'original') {
     return { w: W, h: H };
   }

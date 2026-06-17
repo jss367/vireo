@@ -287,6 +287,35 @@ def test_api_inat_submit_success(app_and_db):
     assert pid in subs
 
 
+def test_api_inat_submit_uses_edited_render(app_and_db):
+    app, db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+        (pid,),
+    ).fetchone()
+    original_path = os.path.join(folder["path"], "bird.jpg")
+    Image.new("RGB", (80, 40), (220, 30, 20)).save(original_path)
+    db.set_photo_edit_recipe(pid, {"rotation": 90})
+
+    client = app.test_client()
+    with patch(
+        "inat.submit_observation",
+        return_value=(12345, "https://www.inaturalist.org/observations/12345"),
+    ) as mock_submit:
+        resp = client.post("/api/inat/submit", json={"photo_id": pid})
+
+    assert resp.status_code == 200
+    upload_path = mock_submit.call_args.kwargs["photo_path"]
+    assert upload_path != original_path
+    assert os.path.basename(os.path.dirname(upload_path)) == "inat-uploads"
+    assert os.path.isfile(upload_path)
+    with Image.open(upload_path) as img:
+        assert img.size == (40, 80)
+
+
 def test_api_inat_submit_uses_assigned_location_coords(app_and_db):
     app, db, pid = app_and_db
     import config as cfg

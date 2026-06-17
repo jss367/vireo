@@ -10928,6 +10928,105 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("Invalid or expired token", 401)
         return jsonify(result)
 
+    def _inat_edit_recipe_source(photo, recipe, fallback_path):
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        folders = {photo["folder_id"]: photo["folder_path"]}
+        if recipe.get("crop"):
+            source_path, _using_working_copy = _recipe_render_source(
+                photo, recipe, 0, vireo_dir, folders,
+            )
+            return source_path or fallback_path
+
+        wc_rel = photo["working_copy_path"]
+        if wc_rel:
+            wc_path = (
+                wc_rel if os.path.isabs(wc_rel)
+                else os.path.join(vireo_dir, wc_rel)
+            )
+            if (
+                os.path.exists(wc_path)
+                and _path_satisfies_recipe_render(wc_path, photo, recipe, 0)
+            ):
+                return wc_path
+
+        companion_path = photo["companion_path"]
+        if companion_path:
+            companion = os.path.join(photo["folder_path"], companion_path)
+            if (
+                os.path.exists(companion)
+                and _path_satisfies_recipe_render(companion, photo, recipe, 0)
+            ):
+                return companion
+        return fallback_path
+
+    def _inat_upload_photo_path(db, photo, fallback_path):
+        import config as cfg
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        recipe = db.get_photo_edit_recipe(photo["id"])
+        if not recipe:
+            return fallback_path, None
+
+        from image_edits import apply_recipe, recipe_to_json
+        from image_loader import load_image
+
+        source_path = _inat_edit_recipe_source(photo, recipe, fallback_path)
+        if not source_path or not os.path.isfile(source_path):
+            return None, f"{photo['filename']}: source file missing"
+
+        out_dir = os.path.join(vireo_dir, "inat-uploads")
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f"{photo['id']}.jpg")
+        meta_path = os.path.join(out_dir, f"{photo['id']}.json")
+        source_mtime = os.path.getmtime(source_path)
+        recipe_json = recipe_to_json(recipe) or ""
+        expected_meta = {
+            "recipe": recipe_json,
+            "source_path": source_path,
+            "source_mtime": source_mtime,
+        }
+        try:
+            if os.path.isfile(out_path) and os.path.isfile(meta_path):
+                with open(meta_path, encoding="utf-8") as f:
+                    cached_meta = json.load(f)
+                if cached_meta == expected_meta:
+                    return out_path, None
+        except (OSError, ValueError, TypeError):
+            pass
+
+        img = load_image(source_path, max_size=None)
+        if img is None:
+            return None, f"{photo['filename']}: failed to load image"
+        rendered = None
+        tmp_path = None
+        fd = None
+        try:
+            rendered = apply_recipe(img, recipe)
+            quality = cfg.load().get("working_copy_quality", 92)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=f".{photo['id']}.", suffix=".jpg.tmp", dir=out_dir,
+            )
+            os.close(fd)
+            fd = None
+            rendered.save(tmp_path, format="JPEG", quality=quality)
+            os.replace(tmp_path, out_path)
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(expected_meta, f, sort_keys=True)
+        except Exception:
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+            with contextlib.suppress(OSError):
+                if tmp_path:
+                    os.unlink(tmp_path)
+            raise
+        finally:
+            if rendered is not None:
+                rendered.close()
+            if rendered is not img:
+                img.close()
+        return out_path, None
+
     @app.route("/api/inat/submit", methods=["POST"])
     def api_inat_submit():
         """Submit a single observation to iNaturalist."""
@@ -10961,6 +11060,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not os.path.isfile(photo_path):
             return json_error("Photo file not found on disk", 404)
 
+        upload_path, upload_error = _inat_upload_photo_path(db, photo, photo_path)
+        if upload_error:
+            return json_error(upload_error, 500)
+
         # Use overrides from request, or fall back to DB data. The helper
         # picks the highest-confidence prediction from the CURRENT
         # fingerprint, scoped to the active workspace, and respecting the
@@ -10985,7 +11088,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             obs_id, obs_url = inat.submit_observation(
                 token=token,
-                photo_path=photo_path,
+                photo_path=upload_path,
                 taxon_name=taxon,
                 observed_on=observed_on,
                 latitude=lat,
@@ -11048,6 +11151,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 results.append({"photo_id": photo_id, "error": "Photo file not found on disk"})
                 continue
 
+            upload_path, upload_error = _inat_upload_photo_path(
+                db, photo, photo_path,
+            )
+            if upload_error:
+                results.append({"photo_id": photo_id, "error": upload_error})
+                continue
+
             # Current-fingerprint + workspace-scoped top prediction,
             # respecting the active detector_confidence floor — avoids
             # submitting a stale-label-set or now-hidden taxon to iNaturalist.
@@ -11066,7 +11176,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             try:
                 obs_id, obs_url = inat.submit_observation(
                     token=token,
-                    photo_path=photo_path,
+                    photo_path=upload_path,
                     taxon_name=taxon,
                     observed_on=observed_on,
                     latitude=lat,

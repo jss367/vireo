@@ -3521,11 +3521,12 @@ function _vireoCleanRenderSearch(search) {
     params.delete('rv');
     params.delete('er');
     params.delete('editv');
+    params.delete('v');
     var qs = params.toString();
     return qs ? '?' + qs : '';
   } catch (_) {
     return search
-      .replace(/([?&])(rv|er|editv)=[^&]*&?/g, '$1')
+      .replace(/([?&])(rv|er|editv|v)=[^&]*&?/g, '$1')
       .replace(/\?&/, '?')
       .replace(/[?&]$/, '');
   }
@@ -3538,7 +3539,7 @@ function _vireoBaseRenderedUrl(src) {
     return parsed.pathname + _vireoCleanRenderSearch(parsed.search);
   } catch (_) {
     return src
-      .replace(/([?&])(rv|er)=[^&]*&?/g, '$1')
+      .replace(/([?&])(rv|er|editv|v)=[^&]*&?/g, '$1')
       .replace(/\?&/, '?')
       .replace(/[?&]$/, '');
   }
@@ -3767,11 +3768,18 @@ function _lbNormalizeClientRecipe(recipe) {
 function _lbRecipeAfterEditOperation(recipe, op) {
   var next = _lbCloneEditRecipe(recipe);
   if (op === 'reset') {
+    var removedFlip = next.flip || {};
     if (next.crop && typeof next.crop === 'object') {
       next.crop = _lbTransformBoxByRecipe(
         next.crop,
         _lbInverseOrientationRecipe(next)
       );
+    }
+    if (
+      (removedFlip.horizontal || removedFlip.vertical) &&
+      Math.abs(Number(next.straighten || 0)) > 0.0001
+    ) {
+      next.straighten = -Number(next.straighten);
     }
     delete next.rotation;
     delete next.flip;
