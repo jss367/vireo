@@ -6964,6 +6964,7 @@ function formatDuration(seconds) {
     safeFetch('/api/undo', {method: 'POST'})
       .then(function(data) {
         if (data && data.ok) {
+          _refreshEditRecipeHistoryChanges(data);
           showToast('Undone: ' + data.undone + ' — press Ctrl+Shift+Z to redo', 'success');
           _historySessionCount = Math.max(0, _historySessionCount - 1);
           document.getElementById('historyBadge').textContent = _historySessionCount || '';
@@ -6978,6 +6979,7 @@ function formatDuration(seconds) {
     safeFetch('/api/redo', {method: 'POST'})
       .then(function(data) {
         if (data && data.ok) {
+          _refreshEditRecipeHistoryChanges(data);
           showToast('Redone: ' + data.redone, 'success');
           _historySessionCount++;
           document.getElementById('historyBadge').textContent = _historySessionCount || '';
@@ -6986,6 +6988,29 @@ function formatDuration(seconds) {
       })
       .catch(function() { if (btn) btn.disabled = false; });
   };
+
+  function _refreshEditRecipeHistoryChanges(data) {
+    if (!data || data.action_type !== 'edit_recipe' || !Array.isArray(data.edit_recipes)) return;
+    var photoIds = [];
+    data.edit_recipes.forEach(function(update) {
+      if (!update || update.photo_id == null) return;
+      var photoId = Number(update.photo_id);
+      if (!Number.isFinite(photoId)) return;
+      photoIds.push(photoId);
+      _lbRememberEditRecipe(photoId, update.recipe);
+      if (_lbPhotoDataByPhoto[String(photoId)]) {
+        _lbPhotoDataByPhoto[String(photoId)].edit_recipe = update.recipe || null;
+      }
+      _vireoBumpRenderVersion(photoId);
+    });
+    if (!photoIds.length) return;
+    if (typeof window.vireoRefreshPhotoRenders === 'function') {
+      window.vireoRefreshPhotoRenders(photoIds);
+    }
+    if (_lightboxCurrentId != null && photoIds.indexOf(Number(_lightboxCurrentId)) !== -1) {
+      _lbReloadCurrentRenderAfterEdit(Number(_lightboxCurrentId));
+    }
+  }
 
   function _bumpHistoryBadge() {
     _historySessionCount++;

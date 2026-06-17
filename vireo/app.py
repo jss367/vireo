@@ -5405,19 +5405,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Undo --
 
+    def _edit_recipe_history_updates(db, edit_id):
+        rows = db.conn.execute(
+            "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
+            (edit_id,),
+        ).fetchall()
+        photo_ids = [r["photo_id"] for r in rows]
+        if not photo_ids:
+            return []
+        _invalidate_photo_render_cache(db, photo_ids)
+        recipes = db.get_photo_edit_recipes(photo_ids)
+        seen = set()
+        updates = []
+        for photo_id in photo_ids:
+            if photo_id in seen:
+                continue
+            seen.add(photo_id)
+            updates.append({
+                "photo_id": photo_id,
+                "recipe": recipes.get(photo_id),
+            })
+        return updates
+
     @app.route("/api/undo", methods=["POST"])
     def api_undo():
         db = _get_db()
         result = db.undo_last_edit()
         if result is None:
             return json_error("nothing to undo")
+        edit_recipe_updates = []
         if result.get("action_type") == "edit_recipe":
-            rows = db.conn.execute(
-                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
-                (result["id"],),
-            ).fetchall()
-            _invalidate_photo_render_cache(db, [r["photo_id"] for r in rows])
-        return jsonify({"ok": True, "undone": result["description"]})
+            edit_recipe_updates = _edit_recipe_history_updates(db, result["id"])
+        return jsonify({
+            "ok": True,
+            "undone": result["description"],
+            "action_type": result.get("action_type"),
+            "edit_recipes": edit_recipe_updates,
+        })
 
     @app.route("/api/undo/status")
     def api_undo_status():
@@ -5448,13 +5472,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = db.redo_last_undo()
         if result is None:
             return json_error("nothing to redo")
+        edit_recipe_updates = []
         if result.get("action_type") == "edit_recipe":
-            rows = db.conn.execute(
-                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
-                (result["id"],),
-            ).fetchall()
-            _invalidate_photo_render_cache(db, [r["photo_id"] for r in rows])
-        return jsonify({"ok": True, "redone": result["description"]})
+            edit_recipe_updates = _edit_recipe_history_updates(db, result["id"])
+        return jsonify({
+            "ok": True,
+            "redone": result["description"],
+            "action_type": result.get("action_type"),
+            "edit_recipes": edit_recipe_updates,
+        })
 
     @app.route("/api/redo/status")
     def api_redo_status():
