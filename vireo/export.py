@@ -185,22 +185,24 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         folder_path = folders.get(photo["folder_id"], "")
         recipe = edit_recipes.get(pid)
         exif_data = exif_data_map.get(pid)
-        source_path = _find_developed_output(
+        source_path = None
+        for dev_candidate in _iter_developed_outputs(
             photo["filename"],
             folder_path,
             developed_dir,
             developed_index,
             preferred_exts=_developed_ext_preference(output_ext),
-        )
-        # Guard against silent downscaling: darktable's develop job can
-        # write the output at --width=N, so a developed file may be
-        # smaller than the original. If it can't satisfy the requested
-        # export size, fall through to the working-copy / original
-        # source.
-        if source_path and not _developed_can_satisfy_size(
-            source_path, photo, max_size, recipe, exif_data=exif_data
         ):
-            source_path = None
+            # Guard against silent downscaling: darktable's develop job
+            # can write the output at --width=N, so a developed file may
+            # be smaller than the original. Keep trying lower-preference
+            # developed candidates before falling through to the working
+            # copy / original source.
+            if _developed_can_satisfy_size(
+                dev_candidate, photo, max_size, recipe, exif_data=exif_data
+            ):
+                source_path = dev_candidate
+                break
         if not source_path:
             use_wc = _working_copy_can_satisfy_export(
                 photo, recipe, max_size, wc_max, vireo_dir, exif_data=exif_data
@@ -549,7 +551,7 @@ class _DevelopedDirIndex:
     def __init__(self):
         self._cache = {}
 
-    def lookup(self, base, stem, preferred_exts=None):
+    def _entries_for_base(self, base):
         entries = self._cache.get(base)
         if entries is None:
             entries = {}
@@ -583,17 +585,25 @@ class _DevelopedDirIndex:
                 if raw_ext == ext_key and existing_ext != ext_key:
                     entries[key] = os.path.join(base, name)
             self._cache[base] = entries
+        return entries
+
+    def iter_matches(self, base, stem, preferred_exts=None):
+        entries = self._entries_for_base(base)
         for ext in preferred_exts or _PREFERRED_DEVELOPED_EXTS:
             path = entries.get((stem, ext))
             if path and os.path.isfile(path):
-                return path
+                yield path
+
+    def lookup(self, base, stem, preferred_exts=None):
+        for path in self.iter_matches(base, stem, preferred_exts=preferred_exts):
+            return path
         return None
 
 
-def _find_developed_output(
+def _iter_developed_outputs(
     filename, folder_path, developed_dir, index=None, preferred_exts=None,
 ):
-    """Return the path to a darktable-developed output for this photo, or None.
+    """Yield darktable-developed outputs for this photo in preference order.
 
     Lookup locations are probed in order:
 
@@ -639,9 +649,17 @@ def _find_developed_output(
     if index is None:
         index = _DevelopedDirIndex()
     for base in candidates:
-        hit = index.lookup(base, stem, preferred_exts=preferred_exts)
-        if hit:
-            return hit
+        yield from index.iter_matches(base, stem, preferred_exts=preferred_exts)
+
+
+def _find_developed_output(
+    filename, folder_path, developed_dir, index=None, preferred_exts=None,
+):
+    """Return the first darktable-developed output for this photo, or None."""
+    for path in _iter_developed_outputs(
+        filename, folder_path, developed_dir, index, preferred_exts=preferred_exts,
+    ):
+        return path
     return None
 
 
