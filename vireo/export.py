@@ -625,8 +625,7 @@ def _working_copy_can_satisfy_export(
 
 def _companion_can_satisfy_export(photo, folder_path, recipe, max_size, exif_data=None):
     """Return a full-resolution companion path when it can satisfy edited export."""
-    crop = (recipe or {}).get("crop") if recipe else None
-    if not crop:
+    if not recipe:
         return None
     companion_rel = photo["companion_path"]
     if not companion_rel or not folder_path:

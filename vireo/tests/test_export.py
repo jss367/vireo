@@ -267,6 +267,55 @@ def test_export_cropped_recipe_uses_full_res_companion_before_raw(export_env):
         assert img.size == (300, 225)
 
 
+def test_export_non_crop_recipe_uses_full_res_companion_before_raw(
+    export_env, monkeypatch,
+):
+    """Non-crop RAW+JPEG edits should use a sufficient companion before RAW."""
+    import export as export_module
+
+    env = export_env
+    db = env["db"]
+    companion_path = os.path.join(env["src"], "bird1.jpg")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='bird1.jpg',
+               working_copy_path=NULL,
+               width=800, height=600
+           WHERE id=?""",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(env["p1"], {"rotation": 90})
+    original_load_image = export_module.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        loaded_paths.append(file_path)
+        if str(file_path).lower().endswith(".nef"):
+            raise AssertionError("export decoded RAW before companion")
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(export_module, "load_image", tracking_load_image)
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 500,
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    assert loaded_paths == [companion_path]
+    with Image.open(os.path.join(env["dest"], "source.jpg")) as img:
+        assert img.size == (375, 500)
+
+
 def test_export_cropped_recipe_uses_exif_oriented_companion(export_env):
     """Companion eligibility must match load_image's EXIF-transposed source."""
     env = export_env
