@@ -3738,7 +3738,7 @@ function _lbRecipeHasGeometricEdit(recipe) {
 
 function _lbMetadataOrientation(metadata) {
   if (!metadata || typeof metadata !== 'object') return null;
-  var groups = ['EXIF', 'TIFF', 'Image'];
+  var groups = ['EXIF', 'IFD0', 'TIFF', 'File'];
   for (var i = 0; i < groups.length; i++) {
     var group = metadata[groups[i]];
     if (group && Object.prototype.hasOwnProperty.call(group, 'Orientation')) {
@@ -4318,6 +4318,8 @@ async function openCropEditor() {
   var requestedPhotoId = _lightboxCurrentId;
   _cropPhotoId = requestedPhotoId;
   var session = ++_cropSessionSeq;
+  var saveBtn = document.getElementById('cropSaveBtn');
+  if (saveBtn) saveBtn.disabled = false;
   _cropSetStatus('Loading recipe...');
   try {
     var data = await safeFetch('/api/photos/' + requestedPhotoId + '/edit-recipe', {}, { toast: false });
