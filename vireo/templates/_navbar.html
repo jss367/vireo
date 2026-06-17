@@ -3337,6 +3337,7 @@ var _lbNativeZoom = null;   // zoom value corresponding to 1:1 for current photo
 var _lbFitScale = 1.0;      // natural image scale at zoom=1.0
 var _lbPhotoW = null;       // original photo width (px)
 var _lbPhotoH = null;       // original photo height (px)
+var _lbCurrentEditRecipe = null; // active non-destructive recipe for layout math
 var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
 var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
 var _lbSessionFullLongEdge = null;  // last learned /full size across photos; better fallback than hardcoded 1920 for custom preview_max_size
@@ -4451,6 +4452,7 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbNativeZoom = null;
   _lbPhotoW = null;
   _lbPhotoH = null;
+  _lbCurrentEditRecipe = null;
   _lbCurrentSrcKey = (
     restoreWantsOneToOne ||
     (
@@ -4477,9 +4479,9 @@ function openLightbox(photoId, filename, photoList, options) {
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
       if (!data || _lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
-      var displayDims = _lbDisplayDimsForRecipe(data.width, data.height, data.edit_recipe);
-      _lbPhotoW = displayDims.w || data.width || null;
-      _lbPhotoH = displayDims.h || data.height || null;
+      _lbPhotoW = data.width || null;
+      _lbPhotoH = data.height || null;
+      _lbCurrentEditRecipe = data.edit_recipe || null;
       _lbCurrentWildlifeExcluded = !!data.wildlife_excluded;
       _lbApplyWildlifeExcludedButton();
       _lbRecordFetchedFlag(photoId, data.flag, flagFetchSeq);
@@ -5530,7 +5532,13 @@ function _lbLayoutDims() {
   // coordinates even if the currently displayed tier is /full. That matches the
   // sharp zoom-test path and avoids recalibrating pan/zoom when the source swaps.
   var originalDims = !_lbOriginalUnavailable ? _lbOrientedPhotoDims(img) : null;
-  if (originalDims) return originalDims;
+  if (originalDims) {
+    return _lbDisplayDimsForRecipe(
+      originalDims.w,
+      originalDims.h,
+      _lbCurrentEditRecipe
+    );
+  }
   if (img.naturalWidth && img.naturalHeight) {
     return { w: img.naturalWidth, h: img.naturalHeight };
   }
