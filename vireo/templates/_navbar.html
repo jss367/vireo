@@ -3409,11 +3409,12 @@ function _vireoCleanRenderSearch(search) {
     var params = new URLSearchParams(search);
     params.delete('rv');
     params.delete('er');
+    params.delete('editv');
     var qs = params.toString();
     return qs ? '?' + qs : '';
   } catch (_) {
     return search
-      .replace(/([?&])(rv|er)=[^&]*&?/g, '$1')
+      .replace(/([?&])(rv|er|editv)=[^&]*&?/g, '$1')
       .replace(/\?&/, '?')
       .replace(/[?&]$/, '');
   }

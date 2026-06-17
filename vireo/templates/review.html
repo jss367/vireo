@@ -1700,7 +1700,7 @@ function renderGroupModal() {
     var boxSharp = it.box_sharpness != null ? Math.round(it.box_sharpness) : null;
     var confPct = Math.round((it.confidence || 0) * 100);
 
-    var src = grmPhotoUrl(it.photo_id);
+    var src = grmPhotoUrl(it);
     var nat = grmNaturalDims(it);
     var imgStyle = 'width:' + nat.w + 'px;height:' + nat.h + 'px;';
     var scoresHtml = 'Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span>';
@@ -1971,11 +1971,18 @@ function grmSetThumbSize(value, persist) {
 GRM_CARD_W = _grmInitialThumbSize();
 GRM_CARD_H = Math.round(GRM_CARD_W * 2 / 3);
 
-function grmPhotoUrl(photoId) {
+function grmPhotoUrl(photoOrId) {
+  var photo = photoOrId && typeof photoOrId === 'object' ? photoOrId : null;
+  var photoId = photo ? (photo.photo_id != null ? photo.photo_id : photo.id) : photoOrId;
   var stop = GRM_RES_STOPS[grmResolutionIdx] || GRM_RES_STOPS[1];
   if (stop.kind === 'thumb') {
+    if (!photo && grmState && grmState.items) {
+      photo = grmState.items.find(function(it) {
+        return String(it.photo_id) === String(photoId);
+      }) || null;
+    }
     return window.vireoThumbnailUrl
-      ? window.vireoThumbnailUrl(photoId)
+      ? window.vireoThumbnailUrl(photo || photoId)
       : '/thumbnails/' + photoId + '.jpg';
   }
   if (stop.kind === 'original') return '/photos/' + photoId + '/original';
@@ -2041,7 +2048,7 @@ function grmSetResolution(idx) {
     card.dataset.natH = nat.h;
     img.style.width = nat.w + 'px';
     img.style.height = nat.h + 'px';
-    img.src = grmPhotoUrl(pid);
+    img.src = grmPhotoUrl(item || pid);
   });
   if (grmState && grmState.selected) {
     var loupe = document.getElementById('grmLoupePhoto');
@@ -2166,7 +2173,7 @@ function _grmUpgradeStripToOriginal() {
     card.dataset.natH = nat.h;
     img.style.width = nat.w + 'px';
     img.style.height = nat.h + 'px';
-    img.src = grmPhotoUrl(pid);
+    img.src = grmPhotoUrl(item || pid);
   });
   if (grmState && grmState.selected) {
     var loupe = document.getElementById('grmLoupePhoto');

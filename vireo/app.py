@@ -7634,7 +7634,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Get all predictions and photo data for a burst group."""
         db = _get_db()
         preds = db.get_group_predictions(group_id)
-        return jsonify([dict(p) for p in preds])
+        rows = [dict(p) for p in preds]
+        _attach_nested_edit_recipes(db, rows)
+        return jsonify(rows)
 
     @app.route("/api/photos/sharpness/regions", methods=["POST"])
     def api_photo_region_sharpness():
