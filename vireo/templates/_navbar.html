@@ -3721,11 +3721,26 @@ var _lbEyeVisible = _lbStoredBool('vireo.lb.eyeVisible', true);
 var _lbInfoVisible = _lbStoredBool('vireo.lb.infoVisible', true);
 var _lbChromeVisible = _lbStoredBool('vireo.lb.chromeVisible', true);
 
+function _lbRecipeHasCrop(recipe) {
+  return !!(recipe && recipe.crop && Number(recipe.crop.w) > 0 && Number(recipe.crop.h) > 0);
+}
+
+function _lbSourceOverlaysAvailable() {
+  return !_lbRecipeHasCrop(_lbCurrentEditRecipe);
+}
+
 function _lbApplyBoxesVisibility() {
   var container = document.getElementById('lightboxDetections');
-  if (container) container.style.display = _lbBoxesVisible ? '' : 'none';
+  var available = _lbSourceOverlaysAvailable();
+  if (container) container.style.display = (_lbBoxesVisible && available) ? '' : 'none';
   var btn = document.getElementById('lightboxToggleBoxes');
-  if (btn) btn.textContent = _lbBoxesVisible ? 'Hide Boxes' : 'Show Boxes';
+  if (btn) {
+    btn.disabled = !available;
+    btn.textContent = !available ? 'Boxes Cropped' : (_lbBoxesVisible ? 'Hide Boxes' : 'Show Boxes');
+    btn.title = !available
+      ? 'Detection boxes are hidden for cropped photos'
+      : 'Toggle detection boxes (b)';
+  }
 }
 
 function toggleLightboxBoxes() {
@@ -3762,12 +3777,19 @@ function toggleLightboxChrome() {
 
 function _lbApplyEyeVisibility() {
   var container = document.getElementById('lightboxEye');
+  var available = _lbSourceOverlaysAvailable();
   if (container) {
     container.style.display =
-      (_lbEyeVisible && container.childElementCount > 0) ? 'block' : 'none';
+      (_lbEyeVisible && available && container.childElementCount > 0) ? 'block' : 'none';
   }
   var btn = document.getElementById('lightboxToggleEye');
-  if (btn) btn.textContent = _lbEyeVisible ? 'Hide Eye' : 'Show Eye';
+  if (btn) {
+    btn.disabled = !available;
+    btn.textContent = !available ? 'Eye Cropped' : (_lbEyeVisible ? 'Hide Eye' : 'Show Eye');
+    btn.title = !available
+      ? 'Eye marker is hidden for cropped photos'
+      : 'Toggle eye marker';
+  }
 }
 
 function toggleLightboxEye() {
@@ -3825,6 +3847,10 @@ function _lbLoadDetections(photoId) {
   var container = document.getElementById('lightboxDetections');
   if (!container) return;
   container.innerHTML = '';
+  if (!_lbSourceOverlaysAvailable()) {
+    _lbApplyBoxesVisibility();
+    return;
+  }
   fetch('/api/detections/' + photoId)
     .then(function(r) { return r.json(); })
     .then(function(detections) {
@@ -3886,7 +3912,7 @@ function _lbResetMaskOverlay() {
 function _lbApplyMaskVisibility() {
   var img = document.getElementById('lightboxMaskOverlay');
   if (!img) return;
-  if (!_lbMasksVisible || !_lbMaskCurrentUrl) {
+  if (!_lbSourceOverlaysAvailable() || !_lbMasksVisible || !_lbMaskCurrentUrl) {
     img.classList.remove('show');
     // A previous call may have assigned onload to re-add `show` once
     // the mask image finished loading. If the user toggles masks off
@@ -3946,7 +3972,14 @@ function _lbApplyMaskUrl(url) {
 
 function _lbApplyMaskToggleButton() {
   var btn = document.getElementById('lightboxToggleMasks');
-  if (btn) btn.textContent = _lbMasksVisible ? 'Hide Masks' : 'Show Masks';
+  if (btn) {
+    var available = _lbSourceOverlaysAvailable();
+    btn.disabled = !available;
+    btn.textContent = !available ? 'Masks Cropped' : (_lbMasksVisible ? 'Hide Masks' : 'Show Masks');
+    btn.title = !available
+      ? 'Mask overlay is hidden for cropped photos'
+      : 'Toggle mask overlay';
+  }
 }
 
 function _lbApplyWildlifeExcludedButton() {
@@ -4003,6 +4036,7 @@ function _lbLoadMaskVariants(photoId) {
       // Bail if the user navigated to a different photo while the
       // request was in flight.
       if (!data || _lightboxCurrentId !== photoId) return;
+      if (!_lbSourceOverlaysAvailable()) return;
       _lbMaskActiveVariant = data.active || null;
       _lbMaskAvailable = data.variants || [];
       if (_lbMaskAvailable.length === 0) {
@@ -4239,10 +4273,12 @@ function _cropInitEvents() {
 async function openCropEditor() {
   if (!_lightboxCurrentId) return;
   _cropInitEvents();
-  _cropPhotoId = _lightboxCurrentId;
+  var requestedPhotoId = _lightboxCurrentId;
+  _cropPhotoId = requestedPhotoId;
   _cropSetStatus('Loading recipe...');
   try {
-    var data = await safeFetch('/api/photos/' + _cropPhotoId + '/edit-recipe', {}, { toast: false });
+    var data = await safeFetch('/api/photos/' + requestedPhotoId + '/edit-recipe', {}, { toast: false });
+    if (_lightboxCurrentId !== requestedPhotoId || _cropPhotoId !== requestedPhotoId) return;
     _cropRecipe = _cropCloneRecipe(data.recipe || {});
     _cropDefaultCrop(_cropRecipe);
     _cropSyncControls();
@@ -4452,7 +4488,7 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbNativeZoom = null;
   _lbPhotoW = null;
   _lbPhotoH = null;
-  _lbCurrentEditRecipe = null;
+  _lbCurrentEditRecipe = currentFromList && currentFromList.edit_recipe || null;
   _lbCurrentSrcKey = (
     restoreWantsOneToOne ||
     (
@@ -4482,12 +4518,23 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbPhotoW = data.width || null;
       _lbPhotoH = data.height || null;
       _lbCurrentEditRecipe = data.edit_recipe || null;
+      if (_lbRecipeHasCrop(_lbCurrentEditRecipe)) {
+        var detContainer2 = document.getElementById('lightboxDetections');
+        if (detContainer2) detContainer2.innerHTML = '';
+        var eyeContainer2 = document.getElementById('lightboxEye');
+        if (eyeContainer2) eyeContainer2.innerHTML = '';
+        _lbResetMaskOverlay();
+      }
       _lbCurrentWildlifeExcluded = !!data.wildlife_excluded;
       _lbApplyWildlifeExcludedButton();
       _lbRecordFetchedFlag(photoId, data.flag, flagFetchSeq);
       _lbRecomputeNativeZoom();
       if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
       _lbRenderEyeCrosshair(data);
+      _lbApplyBoxesVisibility();
+      _lbApplyEyeVisibility();
+      _lbApplyMaskToggleButton();
+      _lbApplyMaskVisibility();
     })
     .catch(function() {});
 
