@@ -3402,18 +3402,18 @@ function _lbSaveAdjustmentRecipe(values) {
       });
     })
     .then(function(data) {
-      if (_lightboxCurrentId !== photoId || seq !== _lbAdjustSeq) return;
-      _lbEditRecipe = _lbCloneRecipe(data.recipe || {});
-      _lbRenderAdjustmentControls();
       _lbBumpRecipeBust(photoId);
       _lbRefreshVisiblePhotoImages(photoId);
-      _lbReloadEditedSource(photoId, seq);
-      _lbSetAdjustmentStatus('Saved');
       try {
         document.dispatchEvent(new CustomEvent('lightbox:editchanged', {
           detail: {photoId: photoId, recipe: data.recipe || null}
         }));
       } catch (_) {}
+      if (_lightboxCurrentId !== photoId || seq !== _lbAdjustSeq) return;
+      _lbEditRecipe = _lbCloneRecipe(data.recipe || {});
+      _lbRenderAdjustmentControls();
+      _lbReloadEditedSource(photoId, seq);
+      _lbSetAdjustmentStatus('Saved');
     })
     .catch(function(err) {
       if (_lightboxCurrentId !== photoId || seq !== _lbAdjustSeq) return;
