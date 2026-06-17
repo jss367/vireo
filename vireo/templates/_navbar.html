@@ -3357,6 +3357,7 @@ var _lbEditVersionByPhoto = {};
 var _cropRecipe = null;
 var _cropPhotoId = null;
 var _cropPreviewSeq = 0;
+var _cropSessionSeq = 0;
 var _cropDrag = null;
 var _cropPreviewTimer = null;
 var _cropEscToken = null;
@@ -4154,6 +4155,10 @@ function _cropSetStatus(message, isError) {
   el.classList.toggle('error', !!isError);
 }
 
+function _cropIsActiveSession(photoId, session) {
+  return _cropPhotoId === photoId && _cropSessionSeq === session;
+}
+
 function _cropDisplayRecipe() {
   var recipe = _cropCloneRecipe(_cropRecipe);
   delete recipe.crop;
@@ -4312,10 +4317,11 @@ async function openCropEditor() {
   _cropInitEvents();
   var requestedPhotoId = _lightboxCurrentId;
   _cropPhotoId = requestedPhotoId;
+  var session = ++_cropSessionSeq;
   _cropSetStatus('Loading recipe...');
   try {
     var data = await safeFetch('/api/photos/' + requestedPhotoId + '/edit-recipe', {}, { toast: false });
-    if (_lightboxCurrentId !== requestedPhotoId || _cropPhotoId !== requestedPhotoId) return;
+    if (_lightboxCurrentId !== requestedPhotoId || !_cropIsActiveSession(requestedPhotoId, session)) return;
     _cropRecipe = _cropCloneRecipe(data.recipe || {});
     _cropDefaultCrop(_cropRecipe);
     _cropSyncControls();
@@ -4325,7 +4331,9 @@ async function openCropEditor() {
     if (modal) modal.classList.add('open');
     _cropUpdatePreview();
   } catch (e) {
-    _cropSetStatus(e.message || 'Could not load recipe', true);
+    if (_cropIsActiveSession(requestedPhotoId, session)) {
+      _cropSetStatus(e.message || 'Could not load recipe', true);
+    }
   }
 }
 
@@ -4340,6 +4348,7 @@ function closeCropEditor(event) {
     Keymap.popEsc(_cropEscToken);
     _cropEscToken = null;
   }
+  _cropSessionSeq++;
   _cropPhotoId = null;
   _cropRecipe = null;
   _cropDrag = null;
@@ -4389,6 +4398,7 @@ function cropSetAspect(aspect) {
 async function saveCropEditor() {
   if (!_cropPhotoId || !_cropRecipe) return;
   var pid = _cropPhotoId;
+  var session = _cropSessionSeq;
   var btn = document.getElementById('cropSaveBtn');
   if (btn) btn.disabled = true;
   _cropSetStatus('Saving...');
@@ -4402,22 +4412,27 @@ async function saveCropEditor() {
     _lbEditVersionByPhoto[String(pid)] = String(Date.now());
     var p = _lightboxPhotoList.find(function(x) { return x.id === pid; });
     if (p) p.edit_recipe = data.recipe;
-    closeCropEditor();
-    if (_lightboxCurrentId === pid) {
-      var filename = p ? p.filename : document.getElementById('lightboxFilename').textContent;
-      openLightbox(pid, filename, _lightboxPhotoList);
+    if (_cropIsActiveSession(pid, session)) {
+      closeCropEditor();
+      if (_lightboxCurrentId === pid) {
+        var filename = p ? p.filename : document.getElementById('lightboxFilename').textContent;
+        openLightbox(pid, filename, _lightboxPhotoList);
+      }
+      showToast('Crop saved', 'success');
     }
-    showToast('Crop saved', 'success');
   } catch (e) {
-    _cropSetStatus(e.message || 'Could not save crop', true);
+    if (_cropIsActiveSession(pid, session)) {
+      _cropSetStatus(e.message || 'Could not save crop', true);
+    }
   } finally {
-    if (btn) btn.disabled = false;
+    if (btn && _cropIsActiveSession(pid, session)) btn.disabled = false;
   }
 }
 
 async function cropClearEdits() {
   if (!_cropPhotoId) return;
   var pid = _cropPhotoId;
+  var session = _cropSessionSeq;
   _cropSetStatus('Clearing...');
   try {
     await safeFetch('/api/photos/' + pid + '/edit-recipe', {
@@ -4426,14 +4441,18 @@ async function cropClearEdits() {
     _lbEditVersionByPhoto[String(pid)] = String(Date.now());
     var p = _lightboxPhotoList.find(function(x) { return x.id === pid; });
     if (p) p.edit_recipe = null;
-    closeCropEditor();
-    if (_lightboxCurrentId === pid) {
-      var filename = p ? p.filename : document.getElementById('lightboxFilename').textContent;
-      openLightbox(pid, filename, _lightboxPhotoList);
+    if (_cropIsActiveSession(pid, session)) {
+      closeCropEditor();
+      if (_lightboxCurrentId === pid) {
+        var filename = p ? p.filename : document.getElementById('lightboxFilename').textContent;
+        openLightbox(pid, filename, _lightboxPhotoList);
+      }
+      showToast('Edits cleared', 'success');
     }
-    showToast('Edits cleared', 'success');
   } catch (e) {
-    _cropSetStatus(e.message || 'Could not clear edits', true);
+    if (_cropIsActiveSession(pid, session)) {
+      _cropSetStatus(e.message || 'Could not clear edits', true);
+    }
   }
 }
 
