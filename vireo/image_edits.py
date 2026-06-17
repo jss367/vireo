@@ -17,6 +17,11 @@ _ADJUSTMENT_RANGES = {
     "saturation": (-100.0, 100.0),
 }
 
+_WHITE_BALANCE_RANGES = {
+    "temperature": (-100.0, 100.0),
+    "tint": (-100.0, 100.0),
+}
+
 
 class RecipeError(ValueError):
     """Raised when an edit recipe is malformed or unsupported."""
@@ -125,6 +130,35 @@ def normalize_recipe(recipe):
             raise RecipeError(f"{name} adjustment must be between {lo:g} and {hi:g}")
         if abs(val) > 1e-9:
             normalized_adjustments[name] = round(val, 6)
+
+    white_balance = adjustments.get("white_balance")
+    if white_balance is None:
+        white_balance = {
+            key: adjustments[key]
+            for key in _WHITE_BALANCE_RANGES
+            if key in adjustments
+        }
+    if white_balance in (None, "", {}):
+        white_balance = {}
+    if not isinstance(white_balance, dict):
+        raise RecipeError("white_balance adjustment must be an object")
+    normalized_wb = {}
+    for name, (lo, hi) in _WHITE_BALANCE_RANGES.items():
+        raw = white_balance.get(name)
+        if raw in (None, ""):
+            continue
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise RecipeError(f"white_balance.{name} adjustment must be numeric")
+        val = float(raw)
+        if not math.isfinite(val) or val < lo or val > hi:
+            raise RecipeError(
+                f"white_balance.{name} adjustment must be between {lo:g} and {hi:g}"
+            )
+        if abs(val) > 1e-9:
+            normalized_wb[name] = round(val, 6)
+    if normalized_wb:
+        normalized_adjustments["white_balance"] = normalized_wb
+
     if normalized_adjustments:
         out["adjustments"] = normalized_adjustments
 
@@ -137,6 +171,42 @@ def recipe_to_json(recipe):
     if normalized is None:
         return None
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+
+
+def _clamp_channel(value):
+    return max(0, min(255, int(round(value))))
+
+
+def _channel_lut(gain):
+    return [_clamp_channel(i * gain) for i in range(256)]
+
+
+def _apply_white_balance(img, white_balance):
+    temperature = float((white_balance or {}).get("temperature") or 0.0) / 100.0
+    tint = float((white_balance or {}).get("tint") or 0.0) / 100.0
+    if abs(temperature) < 1e-9 and abs(tint) < 1e-9:
+        return img
+
+    has_alpha = img.mode == "RGBA"
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGB")
+
+    bands = img.split()
+    red_gain = 1.0 + (0.26 * temperature) + (0.06 * tint)
+    green_gain = 1.0 - (0.18 * tint)
+    blue_gain = 1.0 - (0.26 * temperature) + (0.06 * tint)
+    red_gain = max(0.05, red_gain)
+    green_gain = max(0.05, green_gain)
+    blue_gain = max(0.05, blue_gain)
+
+    adjusted = (
+        bands[0].point(_channel_lut(red_gain)),
+        bands[1].point(_channel_lut(green_gain)),
+        bands[2].point(_channel_lut(blue_gain)),
+    )
+    if has_alpha:
+        return Image.merge("RGBA", adjusted + (bands[3],))
+    return Image.merge("RGB", adjusted)
 
 
 def apply_recipe(img, recipe):
@@ -171,6 +241,8 @@ def apply_recipe(img, recipe):
         result = result.crop((left, top, right, bottom))
 
     adjustments = normalized.get("adjustments") or {}
+    if "white_balance" in adjustments:
+        result = _apply_white_balance(result, adjustments["white_balance"])
     if "exposure" in adjustments:
         result = ImageEnhance.Brightness(result).enhance(2 ** adjustments["exposure"])
     if "brightness" in adjustments:

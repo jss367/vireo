@@ -57,6 +57,31 @@ def test_recipe_json_is_canonical():
     )
 
 
+def test_normalize_recipe_canonicalizes_white_balance():
+    assert normalize_recipe(
+        {
+            "adjustments": {
+                "temperature": 20,
+                "tint": -10,
+                "exposure": 0,
+            }
+        }
+    ) == {
+        "version": 1,
+        "adjustments": {
+            "white_balance": {
+                "temperature": 20.0,
+                "tint": -10.0,
+            },
+        },
+    }
+
+
+def test_normalize_recipe_rejects_invalid_white_balance():
+    with pytest.raises(RecipeError, match="white_balance.temperature"):
+        normalize_recipe({"adjustments": {"white_balance": {"temperature": 200}}})
+
+
 def test_apply_recipe_rotates_flips_and_crops():
     img = Image.new("RGB", (100, 60), "white")
     edited = apply_recipe(
@@ -69,3 +94,23 @@ def test_apply_recipe_rotates_flips_and_crops():
     )
 
     assert edited.size == (30, 50)
+
+
+def test_apply_recipe_adjusts_exposure_white_balance_contrast_and_saturation():
+    img = Image.new("RGB", (1, 1), (100, 100, 100))
+    edited = apply_recipe(
+        img,
+        {
+            "adjustments": {
+                "exposure": 1,
+                "contrast": 10,
+                "white_balance": {"temperature": 60, "tint": -30},
+                "saturation": 20,
+            },
+        },
+    )
+
+    r, g, b = edited.getpixel((0, 0))
+    assert r > b
+    assert g > b
+    assert max(r, g, b) > 100

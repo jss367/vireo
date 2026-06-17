@@ -517,7 +517,8 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .lightbox-close:hover { opacity: 1; }
 .lightbox-overlay.lb-hide-chrome .lightbox-close,
 .lightbox-overlay.lb-hide-chrome .lightbox-nav,
-.lightbox-overlay.lb-hide-chrome .lightbox-actions {
+.lightbox-overlay.lb-hide-chrome .lightbox-actions,
+.lightbox-overlay.lb-hide-chrome .lightbox-adjust-panel {
   display: none !important;
 }
 .lightbox-overlay.lb-hide-info .lightbox-filename,
@@ -542,6 +543,71 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
 }
+.lightbox-adjust-panel {
+  display: none;
+  position: absolute;
+  right: 24px;
+  top: 64px;
+  width: min(320px, calc(100vw - 48px));
+  padding: 12px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.76);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  cursor: default;
+  z-index: 10001;
+}
+.lightbox-adjust-panel.open { display: block; }
+.lb-adjust-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+  color: #f4f7f8;
+  font-size: 12px;
+  font-weight: 700;
+}
+.lb-adjust-reset {
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(12, 14, 16, 0.72);
+  color: #f4f7f8;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.lb-adjust-reset:hover { border-color: rgba(255, 255, 255, 0.72); }
+.lb-adjust-row {
+  display: grid;
+  grid-template-columns: 86px 1fr 44px;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+}
+.lb-adjust-row label {
+  color: rgba(244, 247, 248, 0.78);
+  font-size: 12px;
+}
+.lb-adjust-row input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.lb-adjust-value {
+  color: rgba(244, 247, 248, 0.72);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.lb-adjust-status {
+  min-height: 16px;
+  margin-top: 8px;
+  color: rgba(244, 247, 248, 0.58);
+  font-size: 11px;
+}
+.lb-adjust-status.error { color: #ff9c90; }
 .lb-action-btn {
   min-height: 32px;
   padding: 6px 13px;
@@ -3038,6 +3104,9 @@ async function createWorkspace() {
     <button class="lb-action-btn" id="lightboxToggleChrome" onclick="event.stopPropagation(); toggleLightboxChrome();" title="Toggle lightbox controls">
       Hide UI
     </button>
+    <button class="lb-action-btn lb-action-accent" id="lightboxAdjustBtn" onclick="event.stopPropagation(); toggleLightboxAdjustPanel();" title="Adjust exposure, white balance, contrast, and saturation">
+      Adjust
+    </button>
     <span class="lb-mask-controls" id="lightboxMaskControls" onclick="event.stopPropagation();" title="SAM mask overlay">
       <span>Mask:</span>
       <select id="lightboxMaskSelect" onchange="event.stopPropagation(); _lbOnMaskVariantChange();"></select>
@@ -3058,6 +3127,38 @@ async function createWorkspace() {
       Open in Editor
     </button>
     <button class="lb-action-btn lb-action-danger" onclick="lightboxDelete()" title="Delete photo">Delete</button>
+  </div>
+  <div class="lightbox-adjust-panel" id="lightboxAdjustPanel" onclick="event.stopPropagation()">
+    <div class="lb-adjust-header">
+      <span>Adjustments</span>
+      <button class="lb-adjust-reset" type="button" onclick="resetLightboxAdjustments()">Reset</button>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjExposure">Exposure</label>
+      <input id="lbAdjExposure" data-adjustment="exposure" type="range" min="-5" max="5" step="0.1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjExposureValue">0.0</span>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjContrast">Contrast</label>
+      <input id="lbAdjContrast" data-adjustment="contrast" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjContrastValue">0</span>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjTemperature">Temp</label>
+      <input id="lbAdjTemperature" data-adjustment="temperature" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjTemperatureValue">0</span>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjTint">Tint</label>
+      <input id="lbAdjTint" data-adjustment="tint" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjTintValue">0</span>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjSaturation">Saturation</label>
+      <input id="lbAdjSaturation" data-adjustment="saturation" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjSaturationValue">0</span>
+    </div>
+    <div class="lb-adjust-status" id="lightboxAdjustStatus"></div>
   </div>
 </div>
 
@@ -3129,6 +3230,243 @@ var _lbFlagPendingByPhoto = {};  // count of in-flight flag writes PER photo; li
 var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated from optimistic page helpers
 var _lbViewportByPhotoId = {};  // per-session lightbox viewport cache keyed by photo id
 var _lbPendingViewportState = null;
+var _lbEditRecipe = null;
+var _lbRenderedAdjustmentValues = null;
+var _lbAdjustSaveTimer = null;
+var _lbAdjustSeq = 0;
+var _lbRecipeBustByPhotoId = {};
+
+function _lbCloneRecipe(recipe) {
+  if (!recipe) return {};
+  try {
+    return JSON.parse(JSON.stringify(recipe));
+  } catch (_) {
+    return {};
+  }
+}
+
+function _lbAdjustmentValues(recipe) {
+  var adj = (recipe && recipe.adjustments) || {};
+  var wb = adj.white_balance || {};
+  return {
+    exposure: Number(adj.exposure || 0),
+    contrast: Number(adj.contrast || 0),
+    temperature: Number(wb.temperature || adj.temperature || 0),
+    tint: Number(wb.tint || adj.tint || 0),
+    saturation: Number(adj.saturation || 0),
+  };
+}
+
+function _lbSetAdjustmentStatus(text, isError) {
+  var el = document.getElementById('lightboxAdjustStatus');
+  if (!el) return;
+  el.textContent = text || '';
+  el.classList.toggle('error', !!isError);
+}
+
+function _lbFormatAdjustmentValue(name, value) {
+  if (name === 'exposure') return Number(value || 0).toFixed(1);
+  return String(Math.round(Number(value || 0)));
+}
+
+function _lbSetAdjustmentControl(id, value) {
+  var input = document.getElementById(id);
+  var label = document.getElementById(id + 'Value');
+  if (input) input.value = String(value || 0);
+  if (label && input) {
+    label.textContent = _lbFormatAdjustmentValue(input.dataset.adjustment, value);
+  }
+}
+
+function _lbRenderAdjustmentControls() {
+  var values = _lbAdjustmentValues(_lbEditRecipe);
+  _lbSetAdjustmentControl('lbAdjExposure', values.exposure);
+  _lbSetAdjustmentControl('lbAdjContrast', values.contrast);
+  _lbSetAdjustmentControl('lbAdjTemperature', values.temperature);
+  _lbSetAdjustmentControl('lbAdjTint', values.tint);
+  _lbSetAdjustmentControl('lbAdjSaturation', values.saturation);
+}
+
+function _lbReadAdjustmentControls() {
+  function val(id) {
+    var el = document.getElementById(id);
+    return el ? Number(el.value || 0) : 0;
+  }
+  return {
+    exposure: val('lbAdjExposure'),
+    contrast: val('lbAdjContrast'),
+    temperature: val('lbAdjTemperature'),
+    tint: val('lbAdjTint'),
+    saturation: val('lbAdjSaturation'),
+  };
+}
+
+function _lbRecipeWithAdjustments(values) {
+  var recipe = _lbCloneRecipe(_lbEditRecipe);
+  delete recipe.version;
+  var adj = _lbCloneRecipe(recipe.adjustments || {});
+  ['exposure', 'contrast', 'saturation'].forEach(function(key) {
+    var value = Number(values[key] || 0);
+    if (Math.abs(value) > 0.000001) adj[key] = value;
+    else delete adj[key];
+  });
+
+  var wb = _lbCloneRecipe(adj.white_balance || {});
+  delete adj.temperature;
+  delete adj.tint;
+  ['temperature', 'tint'].forEach(function(key) {
+    var value = Number(values[key] || 0);
+    if (Math.abs(value) > 0.000001) wb[key] = value;
+    else delete wb[key];
+  });
+  if (Object.keys(wb).length) adj.white_balance = wb;
+  else delete adj.white_balance;
+
+  if (Object.keys(adj).length) recipe.adjustments = adj;
+  else delete recipe.adjustments;
+  return recipe;
+}
+
+function _lbApplyAdjustmentPreviewCss(values) {
+  var img = document.getElementById('lightboxImg');
+  if (!img) return;
+  var base = _lbRenderedAdjustmentValues || _lbAdjustmentValues(null);
+  var exposure = Math.pow(2, Number(values.exposure || 0) - Number(base.exposure || 0));
+  var baseContrast = Math.max(0.001, 1 + Number(base.contrast || 0) / 100);
+  var contrast = Math.max(0, 1 + Number(values.contrast || 0) / 100) / baseContrast;
+  var baseSaturation = Math.max(0.001, 1 + Number(base.saturation || 0) / 100);
+  var saturation = Math.max(0, 1 + Number(values.saturation || 0) / 100) / baseSaturation;
+  var hue = (Number(values.tint || 0) - Number(base.tint || 0)) * 0.2
+    - (Number(values.temperature || 0) - Number(base.temperature || 0)) * 0.08;
+  img.style.filter = [
+    'brightness(' + exposure.toFixed(3) + ')',
+    'contrast(' + contrast.toFixed(3) + ')',
+    'saturate(' + saturation.toFixed(3) + ')',
+    'hue-rotate(' + hue.toFixed(2) + 'deg)'
+  ].join(' ');
+}
+
+function _lbClearAdjustmentPreviewCss() {
+  var img = document.getElementById('lightboxImg');
+  if (img) img.style.filter = '';
+}
+
+function _lbBumpRecipeBust(photoId) {
+  var key = String(photoId);
+  _lbRecipeBustByPhotoId[key] = Date.now();
+}
+
+function _lbRefreshVisiblePhotoImages(photoId) {
+  var bust = _lbRecipeBustByPhotoId[String(photoId)];
+  if (!bust) return;
+  var gridImg = document.querySelector('.grid-card[data-id="' + photoId + '"] img');
+  if (gridImg) gridImg.src = '/thumbnails/' + photoId + '.jpg?v=' + bust;
+  var detailImg = document.getElementById('detailImg');
+  if (detailImg && window._detailPhotoId === photoId) {
+    detailImg.src = '/thumbnails/' + photoId + '.jpg?v=' + bust;
+  }
+}
+
+function _lbReloadEditedSource(photoId, seq) {
+  if (_lightboxCurrentId !== photoId) return;
+  var img = document.getElementById('lightboxImg');
+  if (!img) return;
+  var key = _lbCurrentSrcKey || 'full';
+  img.addEventListener('load', function onEditedReload() {
+    img.removeEventListener('load', onEditedReload);
+    if (_lightboxCurrentId !== photoId || seq !== _lbAdjustSeq) return;
+    _lbRenderedAdjustmentValues = _lbAdjustmentValues(_lbEditRecipe);
+    _lbClearAdjustmentPreviewCss();
+    _lbRecomputeNativeZoom();
+    _lbApplyTransform();
+  });
+  img.src = _lbSrcUrl(photoId, key);
+}
+
+function _lbSaveAdjustmentRecipe(values) {
+  if (!_lightboxCurrentId) return;
+  var photoId = _lightboxCurrentId;
+  var seq = ++_lbAdjustSeq;
+  var recipe = _lbRecipeWithAdjustments(values);
+  _lbEditRecipe = _lbCloneRecipe(recipe);
+  _lbSetAdjustmentStatus('Saving...');
+  fetch('/api/photos/' + photoId + '/edit-recipe', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({recipe: recipe}),
+  })
+    .then(function(r) {
+      return r.json().then(function(data) {
+        if (!r.ok) throw new Error((data && data.error) || 'Save failed');
+        return data;
+      });
+    })
+    .then(function(data) {
+      if (_lightboxCurrentId !== photoId || seq !== _lbAdjustSeq) return;
+      _lbEditRecipe = _lbCloneRecipe(data.recipe || {});
+      _lbRenderAdjustmentControls();
+      _lbBumpRecipeBust(photoId);
+      _lbRefreshVisiblePhotoImages(photoId);
+      _lbReloadEditedSource(photoId, seq);
+      _lbSetAdjustmentStatus('Saved');
+      try {
+        document.dispatchEvent(new CustomEvent('lightbox:editchanged', {
+          detail: {photoId: photoId, recipe: data.recipe || null}
+        }));
+      } catch (_) {}
+    })
+    .catch(function(err) {
+      if (_lightboxCurrentId !== photoId || seq !== _lbAdjustSeq) return;
+      _lbSetAdjustmentStatus(err.message || 'Save failed', true);
+    });
+}
+
+function _lbFlushPendingAdjustmentSave() {
+  if (!_lbAdjustSaveTimer) return;
+  clearTimeout(_lbAdjustSaveTimer);
+  _lbAdjustSaveTimer = null;
+  _lbSaveAdjustmentRecipe(_lbReadAdjustmentControls());
+}
+
+function onLightboxAdjustmentInput(input) {
+  var label = document.getElementById(input.id + 'Value');
+  if (label) label.textContent = _lbFormatAdjustmentValue(input.dataset.adjustment, input.value);
+  var values = _lbReadAdjustmentControls();
+  _lbEditRecipe = _lbRecipeWithAdjustments(values);
+  _lbApplyAdjustmentPreviewCss(values);
+  _lbSetAdjustmentStatus('Previewing...');
+  if (_lbAdjustSaveTimer) clearTimeout(_lbAdjustSaveTimer);
+  _lbAdjustSaveTimer = setTimeout(function() {
+    _lbAdjustSaveTimer = null;
+    _lbSaveAdjustmentRecipe(_lbReadAdjustmentControls());
+  }, 350);
+}
+
+function resetLightboxAdjustments() {
+  _lbSetAdjustmentControl('lbAdjExposure', 0);
+  _lbSetAdjustmentControl('lbAdjContrast', 0);
+  _lbSetAdjustmentControl('lbAdjTemperature', 0);
+  _lbSetAdjustmentControl('lbAdjTint', 0);
+  _lbSetAdjustmentControl('lbAdjSaturation', 0);
+  var values = _lbReadAdjustmentControls();
+  _lbEditRecipe = _lbRecipeWithAdjustments(values);
+  _lbApplyAdjustmentPreviewCss(values);
+  if (_lbAdjustSaveTimer) {
+    clearTimeout(_lbAdjustSaveTimer);
+    _lbAdjustSaveTimer = null;
+  }
+  _lbSaveAdjustmentRecipe(values);
+}
+
+function toggleLightboxAdjustPanel() {
+  var panel = document.getElementById('lightboxAdjustPanel');
+  var btn = document.getElementById('lightboxAdjustBtn');
+  if (!panel) return;
+  var open = !panel.classList.contains('open');
+  panel.classList.toggle('open', open);
+  if (btn) btn.textContent = open ? 'Hide Adjust' : 'Adjust';
+  if (open) _lbRenderAdjustmentControls();
+}
 
 function _lbIsOneToOneZoom() {
   if (_lbPending1To1) return true;
@@ -3810,6 +4148,7 @@ function openLightbox(photoId, filename, photoList, options) {
   var alreadyOpen = !!window._lbEscToken;
   options = options || {};
   var fallbackViewportState = options.fallbackViewportState || null;
+  _lbFlushPendingAdjustmentSave();
   if (alreadyOpen && _lightboxCurrentId != null) {
     _lbSaveViewportState(_lightboxCurrentId);
   }
@@ -3910,12 +4249,23 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbPending1To1Anchor = null;
   _lbPendingViewportState = restoreViewportState;
   _lbOriginalUnavailable = false;
+  _lbEditRecipe = null;
+  _lbRenderedAdjustmentValues = _lbAdjustmentValues(null);
+  if (_lbAdjustSaveTimer) {
+    clearTimeout(_lbAdjustSaveTimer);
+    _lbAdjustSaveTimer = null;
+  }
+  _lbAdjustSeq += 1;
+  _lbClearAdjustmentPreviewCss();
+  _lbRenderAdjustmentControls();
+  _lbSetAdjustmentStatus('');
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
   _lbApplyTransform();  // Clear stale pan while preserving 1:1 scale when requested.
 
   // Fetch original dimensions (async, non-blocking for image display)
   var flagFetchSeq = _lbFlagEditSeq;
+  var editFetchSeq = _lbAdjustSeq;
   fetch('/api/photos/' + photoId)
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
@@ -3923,6 +4273,11 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbPhotoW = data.width || null;
       _lbPhotoH = data.height || null;
       _lbCurrentWildlifeExcluded = !!data.wildlife_excluded;
+      if (editFetchSeq === _lbAdjustSeq) {
+        _lbEditRecipe = _lbCloneRecipe(data.edit_recipe || {});
+        _lbRenderedAdjustmentValues = _lbAdjustmentValues(_lbEditRecipe);
+        _lbRenderAdjustmentControls();
+      }
       _lbApplyWildlifeExcludedButton();
       _lbRecordFetchedFlag(photoId, data.flag, flagFetchSeq);
       _lbRecomputeNativeZoom();
@@ -4232,6 +4587,7 @@ function toggleLightboxZoom(e) {
 
 function closeLightbox(e) {
   if (e && e.target && e.target.tagName === 'IMG') return;
+  _lbFlushPendingAdjustmentSave();
   if (_lightboxCurrentId != null) _lbSaveViewportState(_lightboxCurrentId);
   var wasOpen = !!window._lbEscToken;
   if (wasOpen) { Keymap.popEsc(window._lbEscToken); window._lbEscToken = null; }
@@ -4243,6 +4599,11 @@ function closeLightbox(e) {
   _lbClearPendingViewportRestore();
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
+  _lbClearAdjustmentPreviewCss();
+  var adjustPanel = document.getElementById('lightboxAdjustPanel');
+  if (adjustPanel) adjustPanel.classList.remove('open');
+  var adjustBtn = document.getElementById('lightboxAdjustBtn');
+  if (adjustBtn) adjustBtn.textContent = 'Adjust';
   _lbApplyTransform();
   document.getElementById('lightboxOverlay').classList.remove('active');
   document.getElementById('lightboxImg').src = '';
@@ -5129,9 +5490,13 @@ function _lbPickSourceKey(targetZoom) {
 }
 
 function _lbSrcUrl(photoId, key) {
-  if (key === 'original') return '/photos/' + photoId + '/original';
-  if (key === 'full') return '/photos/' + photoId + '/full';
-  return '/photos/' + photoId + '/preview?size=' + key;
+  var url;
+  if (key === 'original') url = '/photos/' + photoId + '/original';
+  else if (key === 'full') url = '/photos/' + photoId + '/full';
+  else url = '/photos/' + photoId + '/preview?size=' + key;
+  var bust = _lbRecipeBustByPhotoId[String(photoId)];
+  if (bust) url += (url.indexOf('?') === -1 ? '?' : '&') + 'v=' + bust;
+  return url;
 }
 
 function _lbScheduleSourceSwap(targetZoom) {
