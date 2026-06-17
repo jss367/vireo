@@ -2855,6 +2855,119 @@ def test_preview_job_honors_raw_failure_marker_after_source_selection(
     )
 
 
+def test_preview_job_does_not_adopt_untracked_edited_preview_after_unlink_failure(
+    client_with_photo, monkeypatch,
+):
+    import os
+    import time
+
+    import app as app_module
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    preview_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    with open(preview_path, "wb") as f:
+        f.write(b"stale-preview")
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+    original_remove = app_module.os.remove
+
+    def locked_remove(path):
+        if os.path.abspath(path) == os.path.abspath(preview_path):
+            raise OSError("locked")
+        return original_remove(path)
+
+    monkeypatch.setattr(app_module.os, "remove", locked_remove)
+
+    resp = client.post("/api/jobs/previews", json={})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status_resp = client.get(f"/api/jobs/{job_id}")
+        if status_resp.status_code != 200:
+            time.sleep(0.05)
+            continue
+        data = status_resp.get_json()
+        if data.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert data["status"] == "completed"
+
+    assert os.path.exists(preview_path)
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+
+def test_preview_job_uses_detail_row_exif_for_cropped_source_selection(
+    client_with_photo, monkeypatch,
+):
+    import json
+    import os
+    import time
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (400, 400), "blue").save(working_path)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = (SELECT folder_id FROM photos WHERE id=?)",
+        (photo_id,),
+    ).fetchone()
+    original_path = os.path.join(folder["path"], "test.jpg")
+    db.conn.execute(
+        """UPDATE photos
+           SET width=600, height=400, exif_data=?, working_copy_path=?
+           WHERE id=?""",
+        (
+            json.dumps({"EXIF": {"Orientation": 6}}),
+            f"working/{photo_id}.jpg",
+            photo_id,
+        ),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        loaded_paths.append(os.path.abspath(str(file_path)))
+        return Image.new("RGB", (600, 400), "red")
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    resp = client.post("/api/jobs/previews", json={})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status_resp = client.get(f"/api/jobs/{job_id}")
+        if status_resp.status_code != 200:
+            time.sleep(0.05)
+            continue
+        data = status_resp.get_json()
+        if data.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert data["status"] == "completed"
+
+    assert loaded_paths == [os.path.abspath(original_path)]
+    assert db.preview_cache_get(photo_id, 1920) is not None
+
+
 def test_preview_job_preserves_existing_edited_preview_when_source_missing(
     client_with_photo,
 ):

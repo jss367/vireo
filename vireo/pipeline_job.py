@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import numpy as np
 from db import Database, commit_with_retry
@@ -244,6 +245,60 @@ def _looks_like_missing_external_data(err):
 
 
 _RAW_EXTENSIONS = (".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf")
+_WORKING_COPY_FAILURE_RETRY_SECONDS = 24 * 60 * 60
+
+
+def _has_current_working_copy_failure(
+    photo, vireo_dir=None, trust_existing_working_copy=True,
+    live_source_path=None, folder_path=None,
+):
+    working_copy_path = _photo_value(photo, "working_copy_path")
+    if working_copy_path and trust_existing_working_copy:
+        if not vireo_dir:
+            return False
+        wc_abs = (
+            working_copy_path if os.path.isabs(working_copy_path)
+            else os.path.join(vireo_dir, working_copy_path)
+        )
+        if os.path.exists(wc_abs):
+            return False
+
+    filename = _photo_value(photo, "filename") or ""
+    if os.path.splitext(filename)[1].lower() not in _RAW_EXTENSIONS:
+        return False
+
+    companion_path = _photo_value(photo, "companion_path")
+    if companion_path and live_source_path and folder_path:
+        companion_abs = os.path.join(folder_path, companion_path)
+        failed_source = _photo_value(photo, "working_copy_failed_source")
+        if (
+            failed_source != "source"
+            and os.path.exists(live_source_path)
+            and os.path.exists(companion_abs)
+        ):
+            return False
+
+    failed_at = _photo_value(photo, "working_copy_failed_at")
+    failed_mtime = _photo_value(photo, "working_copy_failed_mtime")
+    file_mtime = _photo_value(photo, "file_mtime")
+    if not failed_at or failed_mtime is None or file_mtime is None:
+        return False
+    try:
+        if float(failed_mtime) != float(file_mtime):
+            return False
+    except (TypeError, ValueError):
+        return False
+    try:
+        failed_s = str(failed_at).strip()
+        if failed_s.endswith("Z"):
+            failed_s = failed_s[:-1] + "+00:00"
+        failed_dt = datetime.fromisoformat(failed_s)
+        if failed_dt.tzinfo is None:
+            failed_dt = failed_dt.replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return False
+    age = (datetime.now(UTC) - failed_dt.astimezone(UTC)).total_seconds()
+    return age < _WORKING_COPY_FAILURE_RETRY_SECONDS
 
 
 _CLASSIFIER_BUNDLE_FIELDS = (
@@ -1600,21 +1655,58 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             for i, photo in enumerate(photos):
                 if _should_abort(abort):
                     break
+                detail_photo = thread_db.get_photo(photo["id"]) or photo
                 cache_path = os.path.join(preview_dir, f'{photo["id"]}_{max_size}.jpg')
                 recipe = thread_db.get_photo_edit_recipe(photo["id"])
                 if os.path.exists(cache_path):
-                    skipped += 1
-                    try:
-                        if not thread_db.preview_cache_get(photo["id"], max_size):
-                            thread_db.preview_cache_insert(
-                                photo["id"], max_size, os.path.getsize(cache_path),
+                    cache_row = None
+                    with contextlib.suppress(Exception):
+                        cache_row = thread_db.preview_cache_get(photo["id"], max_size)
+                    if recipe and cache_row is None:
+                        with contextlib.suppress(OSError):
+                            os.remove(cache_path)
+                        if os.path.exists(cache_path):
+                            skipped += 1
+                            log.info(
+                                "Skipping untracked edited preview for photo %s; "
+                                "existing cache file could not be removed",
+                                photo["id"],
                             )
-                    except Exception:
-                        pass  # photo may have been deleted mid-pipeline
-                else:
+                            continue
+                    else:
+                        skipped += 1
+                        try:
+                            if cache_row is None:
+                                thread_db.preview_cache_insert(
+                                    photo["id"],
+                                    max_size,
+                                    os.path.getsize(cache_path),
+                                )
+                        except Exception:
+                            pass  # photo may have been deleted mid-pipeline
+                        continue
+                if not os.path.exists(cache_path):
                     canonical = _recipe_render_source(
-                        photo, recipe, max_size, base_dir, folders,
+                        detail_photo, recipe, max_size, base_dir, folders,
                     )
+                    if (
+                        os.path.splitext(canonical)[1].lower() in _RAW_EXTENSIONS
+                        and _has_current_working_copy_failure(
+                            detail_photo,
+                            base_dir,
+                            trust_existing_working_copy=False,
+                            live_source_path=canonical,
+                            folder_path=folders.get(detail_photo["folder_id"]),
+                        )
+                    ):
+                        skipped += 1
+                        log.info(
+                            "Skipping pipeline preview for photo %s; RAW "
+                            "working-copy extraction already failed for "
+                            "current source mtime",
+                            photo["id"],
+                        )
+                        continue
                     load_max_size = (
                         None if recipe and recipe.get("crop") else max_size
                     )

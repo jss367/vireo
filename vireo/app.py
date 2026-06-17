@@ -11985,33 +11985,52 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             job["_start_time"] = time.time()
 
             for i, photo in enumerate(photos):
+                detail_photo = thread_db.get_photo(photo["id"]) or photo
                 cache_path = os.path.join(preview_dir, f'{photo["id"]}_{max_size}.jpg')
                 recipe = thread_db.get_photo_edit_recipe(photo["id"])
                 if os.path.exists(cache_path):
-                    skipped += 1
-                    # Adopt any untracked file so precompute output is
-                    # visible to eviction and /api/preview-cache.
-                    # Best-effort: photo may be deleted mid-job (FK error).
+                    cache_row = None
                     with contextlib.suppress(Exception):
-                        if not thread_db.preview_cache_get(photo["id"], max_size):
-                            thread_db.preview_cache_insert(
-                                photo["id"], max_size, os.path.getsize(cache_path),
+                        cache_row = thread_db.preview_cache_get(photo["id"], max_size)
+                    if recipe and cache_row is None:
+                        with contextlib.suppress(OSError):
+                            os.remove(cache_path)
+                        if os.path.exists(cache_path):
+                            skipped += 1
+                            log.info(
+                                "Skipping untracked edited preview for photo %s; "
+                                "existing cache file could not be removed",
+                                photo["id"],
                             )
-                else:
+                            continue
+                    else:
+                        skipped += 1
+                        # Adopt untracked unedited files so precompute output is
+                        # visible to eviction and /api/preview-cache.
+                        # Best-effort: photo may be deleted mid-job (FK error).
+                        with contextlib.suppress(Exception):
+                            if cache_row is None:
+                                thread_db.preview_cache_insert(
+                                    photo["id"],
+                                    max_size,
+                                    os.path.getsize(cache_path),
+                                )
+                        continue
+
+                if not os.path.exists(cache_path):
                     canonical, using_working_copy = _recipe_render_source(
-                        photo, recipe, max_size, vireo_dir, folders,
+                        detail_photo, recipe, max_size, vireo_dir, folders,
                     )
                     from image_loader import RAW_EXTENSIONS
-                    marker_photo = thread_db.get_photo(photo["id"]) or photo
                     if (
                         not using_working_copy
                         and os.path.splitext(canonical)[1].lower() in RAW_EXTENSIONS
                         and _has_current_working_copy_failure(
-                            marker_photo,
+                            detail_photo,
                             vireo_dir,
                             trust_existing_working_copy=False,
                             live_source_path=canonical,
-                            folder_path=folders.get(photo["folder_id"]),
+                            folder_path=folders.get(detail_photo["folder_id"]),
                         )
                     ):
                         skipped += 1

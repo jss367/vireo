@@ -9333,6 +9333,97 @@ def test_previews_stage_uses_thumb_cache_dir_parent(tmp_path, monkeypatch):
     assert db2.preview_cache_get(photo_id, 1920) is not None
 
 
+def test_pipeline_previews_honor_raw_failure_marker_after_source_selection(
+    tmp_path, monkeypatch,
+):
+    import config as cfg
+    import image_loader
+    import scanner
+    import thumbnails
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    raw_path = photo_dir / "source.NEF"
+    raw_path.write_bytes(b"raw")
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_id = db.add_folder(str(photo_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="source.NEF",
+        extension=".nef",
+        file_size=raw_path.stat().st_size,
+        file_mtime=1234.0,
+        width=600,
+        height=400,
+    )
+    working_dir = tmp_path / "working"
+    working_dir.mkdir()
+    Image.new("RGB", (400, 400), "blue").save(str(working_dir / f"{photo_id}.jpg"))
+    db.conn.execute(
+        """UPDATE photos
+           SET working_copy_path=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=1234.0,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+    collection_id = db.add_collection("Test", json.dumps([]))
+
+    def fake_generate_thumbnail(photo_id, photo_path, cache_dir, size=300, **kwargs):
+        os.makedirs(cache_dir, exist_ok=True)
+        thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
+        Image.new("RGB", (size, size), "green").save(thumb_path)
+        return thumb_path
+
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fake_generate_thumbnail)
+    monkeypatch.setattr(scanner, "extract_working_copy", lambda *args, **kwargs: False)
+
+    original_load_image = image_loader.load_image
+    raw_loads = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        if os.path.abspath(str(file_path)) == os.path.abspath(str(raw_path)):
+            raw_loads.append(file_path)
+            raise AssertionError("pipeline preview retried failed RAW")
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    result = run_pipeline_job(
+        _make_job(),
+        FakeRunner(),
+        db_path,
+        ws_id,
+        PipelineParams(
+            collection_id=collection_id,
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+            preview_max_size=1920,
+        ),
+    )
+
+    previews = result["stages"]["previews"]
+    assert previews["failed"] == 0
+    assert previews["generated"] == 0
+    assert previews["skipped"] == 1
+    assert raw_loads == []
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+
 # ---------------------------------------------------------------------------
 # Aborted pipelines must not leave step rows stuck at "pending"
 # ---------------------------------------------------------------------------
