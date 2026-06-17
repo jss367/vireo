@@ -209,6 +209,26 @@ def test_api_inat_prepare_uses_assigned_location_coords(app_and_db):
     assert "lng=2.3522" in data["upload_url"]
 
 
+def test_api_inat_prepare_url_encodes_query_params(app_and_db):
+    """The prefilled upload URL must be valid: a scientific name with a space
+    (e.g. "Cardinalis cardinalis") has to be percent-encoded, otherwise the
+    desktop opener plugin rejects the malformed URL and nothing opens."""
+    from urllib.parse import parse_qs, urlparse
+
+    app, _db, pid = app_and_db
+    client = app.test_client()
+    resp = client.get(f'/api/inat/prepare/{pid}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    url = data["upload_url"]
+    # No raw spaces anywhere in the URL.
+    assert " " not in url
+    # The taxon name still round-trips back to the real binomial.
+    qs = parse_qs(urlparse(url).query)
+    assert qs["taxon_name"] == ["Cardinalis cardinalis"]
+
+
 def _add_out_of_workspace_photo(db):
     active_ws = db._active_workspace_id
     base_dir = db.conn.execute("SELECT path FROM folders LIMIT 1").fetchone()["path"]
