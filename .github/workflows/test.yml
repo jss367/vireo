@@ -118,24 +118,32 @@ jobs:
           path: ~/.vireo/models/megadetector-v6
           key: megadetector-v6-${{ runner.os }}-v1
 
-      # Sequential single-process pre-download. If the cache missed we run
-      # one HEAD+GET against HF Hub before the tests fan out — orders of
-      # magnitude less likely to trip the 429 rate limiter than two xdist
-      # workers each starting their own download simultaneously. Retry a
-      # few times with backoff so a single transient throttle doesn't
-      # poison the whole CI run.
+      # Sequential single-process pre-download. If the cache missed we fetch
+      # the weights once before the tests fan out — orders of magnitude less
+      # likely to trip the 429 rate limiter than two xdist workers each
+      # starting their own download simultaneously. Retry a few times with
+      # backoff so a single transient throttle doesn't poison the whole run.
+      #
+      # We fetch with curl rather than importing the app's downloader
+      # (``from detector import ensure_megadetector_weights``) on purpose: this
+      # is a ``pull_request`` workflow, so the checkout is PR-authored code.
+      # Running that code with HF_TOKEN in the environment would expose the
+      # secret to any same-repo PR that edits detector.py (or its imports).
+      # curl keeps the token out of PR-controlled Python; it only authenticates
+      # the initial huggingface.co request (the redirect target is a presigned
+      # CDN URL), and ``-f`` makes a 429 fail the attempt so the loop retries
+      # instead of saving an error page as the model. Tests never download —
+      # they mock the downloader / detect_animals or skip when the file is
+      # absent — so the weights just need to land where detector.py expects.
       - name: Pre-download MegaDetector weights
         if: needs.changes.outputs.python == 'true' && steps.cache-mdv6.outputs.cache-hit != 'true'
         shell: bash
-        # Authenticate the Hugging Face download. Unauthenticated requests share
-        # a low anonymous rate limit, so a cold cache (notably Windows, whose
-        # cache never warms while these runs keep failing) gets throttled with
-        # 429s and the step fails. A read-only token raises the limit enough for
-        # the single sequential pre-download to succeed and warm the cache.
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          cd vireo
+          dest="$HOME/.vireo/models/megadetector-v6"
+          url="https://huggingface.co/jss367/vireo-onnx-models/resolve/main/megadetector-v6/model.onnx"
+          mkdir -p "$dest"
           # Track success explicitly: a bash ``for`` loop exits with the
           # status of its last command, and ``sleep`` always succeeds —
           # without this flag, five consecutive download failures would
@@ -144,7 +152,8 @@ jobs:
           # pre-download is meant to prevent.
           success=0
           for i in 1 2 3 4 5; do
-            if python -c "import sys; sys.path.insert(0, '.'); from detector import ensure_megadetector_weights; ensure_megadetector_weights()"; then
+            if curl -fL -H "Authorization: Bearer $HF_TOKEN" "$url" -o "$dest/model.onnx.part"; then
+              mv "$dest/model.onnx.part" "$dest/model.onnx"
               success=1
               break
             fi
