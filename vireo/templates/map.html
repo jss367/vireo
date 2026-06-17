@@ -483,7 +483,7 @@ function renderSidebar(photos) {
     card.className = 'sidebar-card';
     card.setAttribute('data-id', p.id);
 
-    var thumbSrc = p.id != null ? '/thumbnails/' + p.id + '.jpg' : '';
+    var thumbSrc = p.id != null ? vireoThumbnailUrl(p.id) : '';
     var color = getSpeciesColor(p.species);
     var speciesHtml = p.species
       ? '<div class="card-species"><span class="species-dot" style="background:' + color + '"></span>'
@@ -518,7 +518,7 @@ function showClusterPreview(e) {
   for (var i = 0; i < previewCount; i++) {
     var p = childMarkers[i]._photoData;
     if (p && p.id != null) {
-      gridHtml += '<img src="/thumbnails/' + p.id + '.jpg"'
+      gridHtml += '<img src="' + vireoThumbnailUrl(p.id) + '"'
         + ' alt="" onerror="this.style.visibility=\'hidden\'">';
     } else {
       gridHtml += '<div style="width:56px;height:56px;background:var(--bg-tertiary,#14374E);border-radius:3px"></div>';
@@ -587,7 +587,7 @@ async function loadPhotos() {
     legendControl.update(speciesColorMap);
 
     data.photos.forEach(function(p) {
-      var thumbSrc = p.id != null ? '/thumbnails/' + p.id + '.jpg' : '';
+      var thumbSrc = p.id != null ? vireoThumbnailUrl(p.id) : '';
       var imgTag = thumbSrc
         ? '<img src="' + escapeAttr(thumbSrc) + '" alt="" onerror="this.style.display=\'none\'">'
         : '';

@@ -2156,7 +2156,7 @@ function renderPhotoCard(p, idx) {
 
   return '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
     '<div class="grid-card-img-wrap">' +
-      '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" decoding="async" alt="' + escapeAttr(p.filename) + '">' +
+      '<img src="' + vireoThumbnailUrl(p.id) + '" loading="lazy" decoding="async" alt="' + escapeAttr(p.filename) + '">' +
       clipBadge +
       boxHtml +
       inatBadge +
@@ -4006,7 +4006,7 @@ function renderBestBatch(data) {
   var cards = (data.cards || []).map(function(card) {
     var reasons = (card.reasons || []).slice(0, 2).map(escapeHtml).join(' · ');
     return '<div class="best-batch-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
-      '<img src="/thumbnails/' + card.id + '.jpg" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
+      '<img src="' + vireoThumbnailUrl(card.id) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
       '<div class="best-batch-card-body">' +
         '<div class="best-batch-role ' + escapeAttr(card.role || '') + '">#' + card.rank + ' ' + bestBatchRoleLabel(card.role) + '</div>' +
         '<div class="best-batch-card-name" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
@@ -4019,7 +4019,7 @@ function renderBestBatch(data) {
   content.innerHTML =
     '<div class="best-batch-head">' +
       '<div class="best-batch-pick">' +
-        '<img src="/thumbnails/' + best.id + '.jpg" alt="' + escapeAttr(best.filename || '') + '">' +
+        '<img src="' + vireoThumbnailUrl(best.id) + '" alt="' + escapeAttr(best.filename || '') + '">' +
         '<div class="best-batch-pick-meta">' +
           '<div class="best-batch-eyebrow">Best Pick</div>' +
           '<div class="best-batch-title">' + escapeHtml(best.filename || '') + '</div>' +
@@ -4952,7 +4952,7 @@ async function loadDetail(id) {
 
 function renderDetail(photo) {
   window._detailPhotoId = photo.id;
-  document.getElementById('detailImg').src = '/thumbnails/' + photo.id + '.jpg';
+  document.getElementById('detailImg').src = vireoThumbnailUrl(photo.id);
   document.getElementById('detailFilename').textContent = photo.filename;
 
   // Rating stars

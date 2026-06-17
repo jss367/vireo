@@ -3238,6 +3238,14 @@ var _lbAdjustSeq = 0;
 var _lbAdjustmentInputSeq = 0;
 var _lbRecipeBustByPhotoId = {};
 
+function vireoThumbnailUrl(photoId) {
+  var url = '/thumbnails/' + photoId + '.jpg';
+  var bust = _lbRecipeBustByPhotoId[String(photoId)];
+  if (bust) url += '?v=' + bust;
+  return url;
+}
+window.vireoThumbnailUrl = vireoThumbnailUrl;
+
 function _lbCloneRecipe(recipe) {
   if (!recipe) return {};
   try {
@@ -3374,7 +3382,7 @@ function _lbBumpRecipeBust(photoId) {
 function _lbRefreshVisiblePhotoImages(photoId) {
   var bust = _lbRecipeBustByPhotoId[String(photoId)];
   if (!bust) return;
-  var thumbUrl = '/thumbnails/' + photoId + '.jpg?v=' + bust;
+  var thumbUrl = vireoThumbnailUrl(photoId);
   var refreshed = [];
 
   function refreshImg(img) {
@@ -5052,7 +5060,7 @@ function openInatModal() {
     }
     html += '<div class="inat-card" id="inatCard' + idx + '">' +
       '<div class="inat-card-header">' +
-        '<img class="inat-card-thumb" src="/thumbnails/' + item.photo_id + '.jpg" alt="">' +
+        '<img class="inat-card-thumb" src="' + vireoThumbnailUrl(item.photo_id) + '" alt="">' +
         '<div style="flex:1;min-width:0;">' +
           '<div style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(item.filename) + '</div>' +
           warn +
@@ -5873,7 +5881,7 @@ function findSimilar(photoId) {
             openLightbox(p.id, p.filename || '');
           });
           var img = document.createElement('img');
-          img.src = '/thumbnails/' + p.id + '.jpg';
+          img.src = vireoThumbnailUrl(p.id);
           img.loading = 'lazy';
           img.alt = '';
           var info = document.createElement('div');
@@ -7960,7 +7968,7 @@ async function loadMissingPhotos() {
     container.innerHTML = photos.map(p => {
       const ts = p.timestamp ? new Date(p.timestamp).toLocaleDateString() : '';
       const thumb = p.has_thumb
-        ? `<img src="/thumbnails/${p.id}.jpg" alt="" loading="lazy">`
+        ? `<img src="${vireoThumbnailUrl(p.id)}" alt="" loading="lazy">`
         : '<span>no thumb</span>';
       const badges = [
         ['thumb', p.has_thumb],

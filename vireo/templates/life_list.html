@@ -162,7 +162,7 @@ function sortedSpecies() {
 
 function renderCard(entry) {
   var best = entry.best;
-  var thumb = best ? '/thumbnails/' + best.id + '.jpg' : '';
+  var thumb = best ? vireoThumbnailUrl(best.id) : '';
   var sci = entry.scientific_name && entry.scientific_name !== entry.species
     ? '<div class="species-sci">' + escapeAttr(entry.scientific_name) + '</div>'
     : '';

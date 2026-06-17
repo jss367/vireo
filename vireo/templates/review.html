@@ -1139,7 +1139,7 @@ function getConsensusSpecies(pred) {
 }
 
 function renderPredictionCard(pred) {
-  var thumbUrl = '/thumbnails/' + pred.photo_id + '.jpg';
+  var thumbUrl = vireoThumbnailUrl(pred.photo_id);
   var displaySpecies = pred.group_id ? getConsensusSpecies(pred) : pred.species;
   var confPct = Math.round(pred.confidence * 100);
   var confColor = confPct >= 70 ? 'var(--accent)' : confPct >= 50 ? 'var(--warning)' : 'var(--danger)';
@@ -1946,7 +1946,7 @@ GRM_CARD_H = Math.round(GRM_CARD_W * 2 / 3);
 
 function grmPhotoUrl(photoId) {
   var stop = GRM_RES_STOPS[grmResolutionIdx] || GRM_RES_STOPS[1];
-  if (stop.kind === 'thumb') return '/thumbnails/' + photoId + '.jpg';
+  if (stop.kind === 'thumb') return vireoThumbnailUrl(photoId);
   if (stop.kind === 'original') return '/photos/' + photoId + '/original';
   return '/photos/' + photoId + '/preview?size=' + stop.size;
 }
