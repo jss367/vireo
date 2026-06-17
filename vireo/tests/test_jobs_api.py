@@ -771,6 +771,54 @@ def test_job_export_relative_destination(app_and_db):
     assert resp.status_code == 400
 
 
+def test_job_export_invalid_format(app_and_db):
+    """POST /api/jobs/export rejects unsupported output formats."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()
+
+    resp = client.post("/api/jobs/export", json={
+        "photo_ids": [photo["id"]],
+        "destination": "/tmp/out",
+        "format": "bmp",
+    })
+
+    assert resp.status_code == 400
+    assert "format must be one of" in resp.get_json()["error"]
+
+
+def test_job_export_invalid_quality(app_and_db):
+    """POST /api/jobs/export rejects JPEG quality outside Pillow's range."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()
+
+    resp = client.post("/api/jobs/export", json={
+        "photo_ids": [photo["id"]],
+        "destination": "/tmp/out",
+        "quality": 101,
+    })
+
+    assert resp.status_code == 400
+    assert "quality must be an integer" in resp.get_json()["error"]
+
+
+def test_job_export_invalid_max_size(app_and_db):
+    """POST /api/jobs/export rejects nonsensical resize settings."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()
+
+    resp = client.post("/api/jobs/export", json={
+        "photo_ids": [photo["id"]],
+        "destination": "/tmp/out",
+        "max_size": "large",
+    })
+
+    assert resp.status_code == 400
+    assert "max_size must be a positive integer" in resp.get_json()["error"]
+
+
 def test_pipeline_ingest_saves_recent_destination(app_and_db, tmp_path, monkeypatch):
     """Starting a pipeline with a destination saves it to recent_destinations in config."""
     import config as cfg

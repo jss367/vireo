@@ -12384,6 +12384,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         naming_template = body.get("naming_template", "{original}")
         max_size = body.get("max_size")
         quality = body.get("quality", 92)
+        output_format = body.get("format", body.get("output_format", "jpg"))
 
         if not raw_ids:
             return json_error("photo_ids required")
@@ -12395,6 +12396,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("destination required")
         if not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
+        if max_size in ("", 0):
+            max_size = None
+        if max_size is not None:
+            if isinstance(max_size, bool):
+                return json_error("max_size must be a positive integer")
+            try:
+                max_size = int(max_size)
+            except (TypeError, ValueError):
+                return json_error("max_size must be a positive integer")
+            if max_size < 1 or max_size > 50000:
+                return json_error("max_size must be between 1 and 50000")
+        try:
+            from export import normalize_output_format, normalize_quality
+            output_format_info = normalize_output_format(output_format)
+            output_format = output_format_info["extension"]
+            quality = normalize_quality(quality)
+        except ValueError as exc:
+            return json_error(str(exc))
 
         db = _get_db()
         runner = app._job_runner
@@ -12455,6 +12474,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "naming_template": naming_template,
                     "max_size": max_size,
                     "quality": quality,
+                    "format": output_format,
                     "working_copy_max_size": wc_max_size,
                     "developed_dir": developed_dir,
                 },
@@ -12467,6 +12487,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "photo_ids": photo_ids,
                 "destination": destination,
                 "naming_template": naming_template,
+                "format": output_format,
             },
             workspace_id=active_ws,
         )

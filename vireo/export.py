@@ -16,11 +16,42 @@ log = logging.getLogger(__name__)
 # Characters not allowed in filenames (covers Windows + macOS + Linux)
 _UNSAFE_RE = re.compile(r'[<>:"/|?*\\]')
 _EXIF_ORIENTATION_TAG = 274
+_OUTPUT_FORMATS = {
+    "jpg": {"extension": "jpg", "pil_format": "JPEG", "quality": True},
+    "jpeg": {"extension": "jpg", "pil_format": "JPEG", "quality": True},
+    "png": {"extension": "png", "pil_format": "PNG", "quality": False},
+    "tif": {"extension": "tiff", "pil_format": "TIFF", "quality": False},
+    "tiff": {"extension": "tiff", "pil_format": "TIFF", "quality": False},
+}
 
 
 def sanitize_filename(name):
     """Replace filesystem-unsafe characters with underscores."""
     return _UNSAFE_RE.sub("_", name)
+
+
+def normalize_output_format(output_format):
+    """Return export format metadata for a user/API format value."""
+    fmt = str(output_format or "jpg").strip().lower()
+    if fmt not in _OUTPUT_FORMATS:
+        supported = ", ".join(sorted({"jpg", "png", "tiff"}))
+        raise ValueError(f"format must be one of: {supported}")
+    return _OUTPUT_FORMATS[fmt]
+
+
+def normalize_quality(quality, default=92):
+    """Return an integer JPEG quality in Pillow's accepted 1-100 range."""
+    if quality in (None, ""):
+        quality = default
+    if isinstance(quality, bool):
+        raise ValueError("quality must be an integer from 1 to 100")
+    try:
+        value = int(quality)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("quality must be an integer from 1 to 100") from exc
+    if value < 1 or value > 100:
+        raise ValueError("quality must be an integer from 1 to 100")
+    return value
 
 
 def resolve_template(template, photo, species=None, seq=1):
@@ -75,6 +106,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         options: dict with keys:
             naming_template: str (default "{original}")
             max_size: int or None -- max long-edge pixels
+            format: str -- output format: jpg, png, or tiff (default jpg)
             quality: int 1-100 (default 92)
             working_copy_max_size: int -- the cap used when generating
                 working copies (default 4096); used to decide whether
@@ -103,7 +135,11 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
     max_size = options.get("max_size")
     if max_size is not None:
         max_size = int(max_size)
-    quality = options.get("quality", 92)
+    format_info = normalize_output_format(
+        options.get("format", options.get("output_format", "jpg"))
+    )
+    output_ext = format_info["extension"]
+    quality = normalize_quality(options.get("quality", 92))
     try:
         wc_max = int(options.get("working_copy_max_size", 4096))
     except (ValueError, TypeError):
@@ -210,7 +246,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         # Guard against path traversal: strip leading slashes/dots so that
         # absolute paths and ".." segments cannot escape the destination dir.
         rel_path_safe = os.path.normpath(rel_path).lstrip(os.sep + ".")
-        out_path = os.path.join(destination, rel_path_safe + ".jpg")
+        out_path = os.path.join(destination, rel_path_safe + f".{output_ext}")
         # Final containment check: resolved path must start with destination.
         # dest_real may already end with os.sep when destination is a root dir
         # (e.g. "/" on POSIX), so avoid doubling the separator.
@@ -244,7 +280,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                 continue
             if recipe:
                 img = apply_recipe_to_loaded_image(img, recipe, max_size=max_size)
-            img.save(out_path, "JPEG", quality=quality)
+            _save_export_image(img, out_path, format_info, quality)
             img.close()
             exported += 1
         except Exception as exc:
@@ -255,6 +291,24 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             progress_cb(i + 1, len(photo_ids), photo["filename"])
 
     return {"exported": exported, "errors": errors, "destination": destination}
+
+
+def _save_export_image(img, out_path, format_info, quality):
+    """Save a rendered export image in the requested output format."""
+    pil_format = format_info["pil_format"]
+    save_img = img
+    if pil_format == "JPEG" and img.mode not in ("RGB", "L"):
+        save_img = img.convert("RGB")
+    save_kwargs = {}
+    if format_info["quality"]:
+        save_kwargs["quality"] = quality
+    elif pil_format == "TIFF":
+        save_kwargs["compression"] = "tiff_lzw"
+    try:
+        save_img.save(out_path, pil_format, **save_kwargs)
+    finally:
+        if save_img is not img:
+            save_img.close()
 
 
 _PREFERRED_DEVELOPED_EXTS = ("jpg", "jpeg", "tiff", "tif")

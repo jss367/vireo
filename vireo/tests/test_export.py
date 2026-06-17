@@ -528,6 +528,72 @@ def test_export_photos_collision_renames(export_env):
     assert os.path.isfile(os.path.join(env["dest"], "photo_2.jpg"))
 
 
+def test_export_photos_convert_png_batch_deduplicates_extension(export_env):
+    """Batch conversion uses the selected extension for every output/collision."""
+    env = export_env
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"], env["p2"]],
+        destination=env["dest"],
+        options={"naming_template": "converted", "format": "png"},
+    )
+
+    assert result["exported"] == 2
+    first = os.path.join(env["dest"], "converted.png")
+    second = os.path.join(env["dest"], "converted_2.png")
+    assert os.path.isfile(first)
+    assert os.path.isfile(second)
+    assert not os.path.exists(os.path.join(env["dest"], "converted.jpg"))
+    with Image.open(first) as img:
+        assert img.format == "PNG"
+    with Image.open(second) as img:
+        assert img.format == "PNG"
+
+
+def test_export_photos_convert_tiff_applies_recipe_and_resize(export_env):
+    """Converted exports still apply edit recipes before final resizing."""
+    env = export_env
+    env["db"].set_photo_edit_recipe(
+        env["p1"],
+        {
+            "rotation": 90,
+            "crop": {"x": 0, "y": 0, "w": 0.5, "h": 1},
+        },
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "format": "tiff",
+            "max_size": 400,
+        },
+    )
+
+    assert result["exported"] == 1
+    out_path = os.path.join(env["dest"], "bird1.tiff")
+    with Image.open(out_path) as img:
+        assert img.format == "TIFF"
+        assert img.size == (150, 400)
+
+
+def test_export_rejects_unknown_output_format(export_env):
+    """Unknown export formats fail before writing partial outputs."""
+    env = export_env
+    with pytest.raises(ValueError, match="format must be one of"):
+        export_photos(
+            db=env["db"],
+            vireo_dir=env["vireo_dir"],
+            photo_ids=[env["p1"]],
+            destination=env["dest"],
+            options={"naming_template": "{original}", "format": "bmp"},
+        )
+
+
 def test_export_photos_quality(export_env):
     """export_photos respects quality setting."""
     env = export_env
