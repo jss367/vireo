@@ -1432,6 +1432,44 @@ def test_edit_preview_renders_uncommitted_recipe_without_storing(client_with_pho
         assert img.size == (600, 800)
 
 
+def test_edit_preview_skips_recent_failed_raw_before_decode(
+    client_with_photo, monkeypatch,
+):
+    """The crop editor preview should not retry known-bad RAW decodes."""
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, photo_id),
+    )
+    db.conn.commit()
+
+    called = {"load": False}
+
+    def fail_load_if_called(*_args, **_kwargs):
+        called["load"] = True
+        raise AssertionError("edit-preview retried failed RAW decode")
+
+    monkeypatch.setattr(image_loader, "load_image", fail_load_if_called)
+
+    resp = app.test_client().get(
+        f"/photos/{photo_id}/edit-preview",
+        query_string={"recipe": '{"straighten":1.5}'},
+    )
+
+    assert resp.status_code == 500
+    assert called["load"] is False
+
+
 def test_non_crop_preview_loads_with_requested_size(client_with_photo, monkeypatch):
     import image_loader
 

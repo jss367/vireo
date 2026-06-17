@@ -16924,7 +16924,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         try:
             from image_edits import RecipeError, apply_recipe_to_loaded_image
-            from image_loader import load_image
+            from image_loader import RAW_EXTENSIONS, load_image
             recipe_json = display_recipe
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             folder_row = db.conn.execute(
@@ -16932,11 +16932,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ).fetchone()
             if not folder_row:
                 return "Not found", 404
-            canonical, _using_working_copy = _recipe_render_source(
+            canonical, using_working_copy = _recipe_render_source(
                 photo, None, size, vireo_dir, {folder_row["id"]: folder_row["path"]},
             )
+            selected_ext = os.path.splitext(canonical)[1].lower()
+            if (
+                not using_working_copy
+                and selected_ext in RAW_EXTENSIONS
+                and _has_current_working_copy_failure(
+                    photo,
+                    vireo_dir,
+                    trust_existing_working_copy=False,
+                    live_source_path=canonical,
+                    folder_path=folder_row["path"],
+                )
+            ):
+                log.info(
+                    "Skipping edit-preview generation for photo %s; RAW "
+                    "working-copy extraction already failed for current source mtime",
+                    photo_id,
+                )
+                return "Could not load image", 500
             img = load_image(canonical, max_size=size)
             if img is None:
+                _record_working_copy_failure(db, photo, canonical)
                 return "Could not load image", 500
             img = apply_recipe_to_loaded_image(img, recipe_json, max_size=size)
         except RecipeError as e:
