@@ -3236,15 +3236,31 @@ var _lbRenderedAdjustmentValues = null;
 var _lbAdjustSaveTimer = null;
 var _lbAdjustSeq = 0;
 var _lbAdjustmentInputSeq = 0;
+var _lbAdjustSaveInFlightByPhoto = {};
+var _lbQueuedAdjustmentSaveByPhoto = {};
 var _lbRecipeBustByPhotoId = {};
 
-function vireoThumbnailUrl(photoId) {
-  var url = '/thumbnails/' + photoId + '.jpg';
+function vireoCacheBustedPhotoUrl(photoId, url) {
   var bust = _lbRecipeBustByPhotoId[String(photoId)];
-  if (bust) url += '?v=' + bust;
+  if (!bust) return url;
+  url = String(url || '').replace(/([?&])v=[^&]*(&?)/, function(match, prefix, suffix) {
+    return suffix ? prefix : '';
+  }).replace(/[?&]$/, '');
+  url += (url.indexOf('?') === -1 ? '?' : '&') + 'v=' + bust;
   return url;
 }
+
+function vireoThumbnailUrl(photoId) {
+  return vireoCacheBustedPhotoUrl(photoId, '/thumbnails/' + photoId + '.jpg');
+}
+
+function vireoPreviewUrl(photoId, size) {
+  return vireoCacheBustedPhotoUrl(photoId, '/photos/' + photoId + '/preview?size=' + (size || 1920));
+}
+
 window.vireoThumbnailUrl = vireoThumbnailUrl;
+window.vireoPreviewUrl = vireoPreviewUrl;
+window.vireoCacheBustedPhotoUrl = vireoCacheBustedPhotoUrl;
 
 function _lbCloneRecipe(recipe) {
   if (!recipe) return {};
@@ -3385,10 +3401,10 @@ function _lbRefreshVisiblePhotoImages(photoId) {
   var thumbUrl = vireoThumbnailUrl(photoId);
   var refreshed = [];
 
-  function refreshImg(img) {
+  function refreshImg(img, url) {
     if (!img || refreshed.indexOf(img) !== -1) return;
     refreshed.push(img);
-    img.src = thumbUrl;
+    img.src = url || thumbUrl;
   }
 
   refreshImg(document.querySelector('.grid-card[data-id="' + photoId + '"] img'));
@@ -3397,6 +3413,11 @@ function _lbRefreshVisiblePhotoImages(photoId) {
     var src = img.getAttribute('src') || '';
     if (src.indexOf('/thumbnails/' + photoId + '.jpg') !== -1) {
       refreshImg(img);
+    } else if (
+      src.indexOf('/photos/' + photoId + '/preview') !== -1 ||
+      src.indexOf('/photos/' + photoId + '/full') !== -1
+    ) {
+      refreshImg(img, vireoCacheBustedPhotoUrl(photoId, src));
     }
   });
 
@@ -3422,14 +3443,11 @@ function _lbReloadEditedSource(photoId, seq) {
   img.src = _lbSrcUrl(photoId, key);
 }
 
-function _lbSaveAdjustmentRecipe(values) {
-  if (!_lightboxCurrentId || !_lbEditRecipeLoaded) return;
-  var photoId = _lightboxCurrentId;
-  var seq = ++_lbAdjustSeq;
-  var inputSeq = _lbAdjustmentInputSeq;
-  var recipe = _lbRecipeWithAdjustments(values);
-  _lbEditRecipe = _lbCloneRecipe(recipe);
-  _lbSetAdjustmentStatus('Saving...');
+function _lbStartAdjustmentRecipeSave(photoId, recipe, inputSeq) {
+  var seq = _lightboxCurrentId === photoId ? ++_lbAdjustSeq : _lbAdjustSeq;
+  var key = String(photoId);
+  _lbAdjustSaveInFlightByPhoto[key] = true;
+  if (_lightboxCurrentId === photoId) _lbSetAdjustmentStatus('Saving...');
   fetch('/api/photos/' + photoId + '/edit-recipe', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
@@ -3461,7 +3479,32 @@ function _lbSaveAdjustmentRecipe(values) {
     .catch(function(err) {
       if (_lightboxCurrentId !== photoId || seq !== _lbAdjustSeq) return;
       _lbSetAdjustmentStatus(err.message || 'Save failed', true);
+    })
+    .then(function() {
+      delete _lbAdjustSaveInFlightByPhoto[key];
+      var queued = _lbQueuedAdjustmentSaveByPhoto[key];
+      if (!queued) return;
+      delete _lbQueuedAdjustmentSaveByPhoto[key];
+      _lbStartAdjustmentRecipeSave(photoId, queued.recipe, queued.inputSeq);
     });
+}
+
+function _lbSaveAdjustmentRecipe(values) {
+  if (!_lightboxCurrentId || !_lbEditRecipeLoaded) return;
+  var photoId = _lightboxCurrentId;
+  var key = String(photoId);
+  var inputSeq = _lbAdjustmentInputSeq;
+  var recipe = _lbRecipeWithAdjustments(values);
+  _lbEditRecipe = _lbCloneRecipe(recipe);
+  if (_lbAdjustSaveInFlightByPhoto[key]) {
+    _lbQueuedAdjustmentSaveByPhoto[key] = {
+      recipe: _lbCloneRecipe(recipe),
+      inputSeq: inputSeq,
+    };
+    _lbSetAdjustmentStatus('Saving...');
+    return;
+  }
+  _lbStartAdjustmentRecipeSave(photoId, recipe, inputSeq);
 }
 
 function _lbFlushPendingAdjustmentSave() {
