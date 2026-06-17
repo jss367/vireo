@@ -3837,7 +3837,7 @@ function openLightbox(photoId, filename, photoList, options) {
     restoreViewportState &&
     (restoreViewportState.oneToOne || restoreViewportState.pending1To1)
   );
-  if (restoreWantsOneToOne && restoreViewportState.zoom <= 1.001) {
+  if (preserveOneToOne && restoreWantsOneToOne && restoreViewportState.zoom <= 1.001) {
     restoreViewportState.zoom = Math.max(
       1.002,
       fallbackViewportState && fallbackViewportState.zoom || 1.0,
