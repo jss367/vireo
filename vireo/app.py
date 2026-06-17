@@ -2495,6 +2495,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             p["detections"] = det_map.get(p["id"], [])
         return photo_dicts
 
+    def _attach_edit_recipes(db, photo_dicts):
+        """Attach non-destructive edit recipes to photo dicts (in-place)."""
+        if not photo_dicts:
+            return photo_dicts
+        ids = [p["id"] for p in photo_dicts]
+        recipe_map = db.get_photo_edit_recipes(ids)
+        for p in photo_dicts:
+            p["edit_recipe"] = recipe_map.get(p["id"])
+        return photo_dicts
+
     def _request_flag_filter():
         flag = request.args.get("flag", None)
         if flag in (None, ""):
@@ -2522,6 +2532,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
         _attach_detections(db, photo_dicts)
+        _attach_edit_recipes(db, photo_dicts)
         collection_dicts = []
         for c in collections:
             d = dict(c)
@@ -3029,6 +3040,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
         _attach_detections(db, photo_dicts)
+        _attach_edit_recipes(db, photo_dicts)
 
         return jsonify(
             {
@@ -6000,6 +6012,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
         _attach_detections(db, photo_dicts)
+        _attach_edit_recipes(db, photo_dicts)
         return jsonify(
             {
                 "photos": photo_dicts,
@@ -7219,10 +7232,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Enrich predictions and attach alternatives
         results = []
-        for p in preds:
-            d = dict(p)
+        pred_dicts = [dict(p) for p in preds]
+        recipes_by_photo = db.get_photo_edit_recipes({
+            p.get("photo_id") for p in pred_dicts if p.get("photo_id") is not None
+        })
+        for d in pred_dicts:
             if d.get("status") == "alternative":
                 continue  # alternatives are nested, not top-level
+            d["edit_recipe"] = recipes_by_photo.get(d.get("photo_id"))
             if d.get("category") in ("disagreement", "refinement"):
                 keywords = db.get_photo_keywords(d["photo_id"])
                 existing_species = [
@@ -16396,6 +16413,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     sims_by_pid[pid] = round(sim, 4)
             _attach_species(db, photo_dicts)
             _attach_detections(db, photo_dicts)
+            _attach_edit_recipes(db, photo_dicts)
             results = [
                 {
                     "photo": photo,

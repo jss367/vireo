@@ -3263,6 +3263,10 @@ window.vireoPhotoHasOrientationEdit = function(photoId) {
   return _lbRecipeHasOrientation(_lbEditRecipeByPhoto[String(photoId)]);
 };
 
+window.vireoRememberPhotoEditRecipe = function(photoId, recipe) {
+  _lbRememberEditRecipe(photoId, recipe);
+};
+
 function _lbRememberEditRecipe(photoId, recipe) {
   if (photoId == null) return;
   _lbEditRecipeByPhoto[String(photoId)] = _lbCloneEditRecipe(recipe);

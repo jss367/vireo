@@ -1152,6 +1152,12 @@ function getConsensusSpecies(pred) {
 }
 
 function renderPredictionCard(pred) {
+  if (
+    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
+    Object.prototype.hasOwnProperty.call(pred, 'edit_recipe')
+  ) {
+    window.vireoRememberPhotoEditRecipe(pred.photo_id, pred.edit_recipe);
+  }
   var thumbUrl = window.vireoRenderedUrl
     ? window.vireoRenderedUrl('/thumbnails/' + pred.photo_id + '.jpg', pred.photo_id)
     : '/thumbnails/' + pred.photo_id + '.jpg';

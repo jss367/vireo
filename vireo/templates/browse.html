@@ -2118,6 +2118,12 @@ function renderCardInfo(p) {
 
 function renderPhotoCard(p, idx) {
   var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
+  if (
+    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
+    Object.prototype.hasOwnProperty.call(p, 'edit_recipe')
+  ) {
+    window.vireoRememberPhotoEditRecipe(p.id, p.edit_recipe);
+  }
   var hideDetectionOverlays = (
     typeof window.vireoPhotoHasOrientationEdit === 'function' &&
     window.vireoPhotoHasOrientationEdit(p.id)
