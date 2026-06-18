@@ -99,6 +99,14 @@
     <input type="search" id="speciesSearch" placeholder="Cardinal">
   </div>
   <div class="control-group">
+    <label for="confirmationFilter">Status</label>
+    <select id="confirmationFilter">
+      <option value="all">All</option>
+      <option value="confirmed">Confirmed only</option>
+      <option value="unconfirmed">Unconfirmed only</option>
+    </select>
+  </div>
+  <div class="control-group">
     <label for="qualitySlider">Min quality</label>
     <input type="range" id="qualitySlider" min="0" max="100" value="0" step="5">
     <span class="control-value" id="qualityValue">0.00</span>
@@ -217,6 +225,7 @@ function requestScopeParams() {
   }
   params.set('min_quality', (parseInt(document.getElementById('qualitySlider').value) / 100).toFixed(2));
   params.set('confidence_threshold', (parseInt(document.getElementById('confidenceSlider').value) / 100).toFixed(2));
+  params.set('confirmation', document.getElementById('confirmationFilter').value || 'all');
   return params;
 }
 
@@ -553,7 +562,11 @@ function render() {
 
   var buckets = sortedBuckets();
   var speciesSearch = document.getElementById('speciesSearch').value.trim();
-  meta.textContent = buckets.length + (speciesSearch ? ' matching' : '') + ' species · '
+  var confirmation = document.getElementById('confirmationFilter').value;
+  var filterLabel = speciesSearch ? ' matching' : '';
+  if (confirmation === 'confirmed') filterLabel += ' confirmed';
+  if (confirmation === 'unconfirmed') filterLabel += ' unconfirmed';
+  meta.textContent = buckets.length + filterLabel + ' species · '
     + currentData.meta.eligible + ' of '
     + currentData.meta.total_in_scope + ' photos scored';
 
@@ -815,6 +828,11 @@ document.getElementById('confidenceSlider').addEventListener('input', function()
 });
 document.getElementById('speciesSearch').addEventListener('input', function() {
   debounceLoad();
+});
+document.getElementById('confirmationFilter').addEventListener('change', function() {
+  expandedBuckets.clear();
+  unidentifiedExpanded = false;
+  loadHighlights();
 });
 document.getElementById('perRowSlider').addEventListener('input', function() {
   document.getElementById('perRowValue').textContent = this.value;

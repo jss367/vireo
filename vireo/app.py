@@ -308,13 +308,31 @@ def _highlight_confidence_label(confidence, is_accepted):
     return "candidate"
 
 
-def _collect_highlight_buckets(candidates, confidence_threshold):
+def _normalize_highlight_confirmation_filter(value):
+    value = (value or "all").strip().lower()
+    if value not in {"all", "confirmed", "unconfirmed"}:
+        return "all"
+    return value
+
+
+def _collect_highlight_buckets(
+    candidates,
+    confidence_threshold,
+    confirmation_filter="all",
+):
+    confirmation_filter = _normalize_highlight_confirmation_filter(
+        confirmation_filter
+    )
     bucket_map = {}
     unidentified_photos = []
 
     for row in candidates:
         r = dict(row)
         accepted = r.get("species")
+        if confirmation_filter == "confirmed" and accepted is None:
+            continue
+        if confirmation_filter == "unconfirmed" and accepted is not None:
+            continue
         predicted_conf = r.get("predicted_confidence")
         if accepted:
             species = accepted
@@ -6282,6 +6300,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         confidence_threshold=0.70,
         limit_per_bucket=20,
         species_filter="",
+        confirmation_filter="all",
     ):
         folders = db.get_folders_with_quality_data()
         if scope == "workspace":
@@ -6290,12 +6309,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             folder_id = folders[0]["id"]  # Most recent
         limit_per_bucket = max(1, min(int(limit_per_bucket), 100))
         species_filter = (species_filter or "").strip().lower()
+        confirmation_filter = _normalize_highlight_confirmation_filter(
+            confirmation_filter
+        )
 
         candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
         total_in_scope = db.count_filtered_photos(folder_id=folder_id)
 
         buckets, unidentified_photos = _collect_highlight_buckets(
-            candidates, confidence_threshold
+            candidates, confidence_threshold, confirmation_filter
+        )
+        eligible_count = sum(b["photo_count"] for b in buckets) + len(
+            unidentified_photos
         )
         _apply_highlight_preferences(db, buckets)
         if species_filter:
@@ -6337,8 +6362,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ],
             "meta": {
                 "total_in_scope": total_in_scope,
-                "eligible": len(candidates),
+                "eligible": eligible_count,
                 "limit_per_bucket": limit_per_bucket,
+                "confirmation": confirmation_filter,
             },
             "scope": "workspace" if folder_id is None else "folder",
         }
@@ -6356,6 +6382,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ),
             limit_per_bucket=request.args.get("limit_per_bucket", 20, type=int),
             species_filter=request.args.get("species") or "",
+            confirmation_filter=request.args.get("confirmation") or "all",
         )
         return jsonify(payload)
 
@@ -6693,6 +6720,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         confidence_threshold = request.args.get(
             "confidence_threshold", 0.70, type=float
         )
+        confirmation_filter = _normalize_highlight_confirmation_filter(
+            request.args.get("confirmation") or "all"
+        )
         species = (request.args.get("species") or "").strip()
         offset = max(0, request.args.get("offset", 0, type=int))
         limit = max(1, min(request.args.get("limit", 100, type=int), 500))
@@ -6701,7 +6731,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
         buckets, unidentified_photos = _collect_highlight_buckets(
-            candidates, confidence_threshold
+            candidates, confidence_threshold, confirmation_filter
         )
         _apply_highlight_preferences(db, buckets)
         if species == "__unidentified__":
