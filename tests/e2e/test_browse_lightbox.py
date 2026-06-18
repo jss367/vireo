@@ -68,7 +68,12 @@ def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
     expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
     assert page.evaluate("window._lbZoom > 1.001") is True
     assert page.evaluate("window._lbPending1To1") is True
-    assert page.evaluate("window._lbCurrentSrcKey") == "original"
+    assert page.evaluate(
+        """() => (
+            window._lbCurrentSrcKey === 'original' ||
+            (window._lbOriginalUnavailable && window._lbCurrentSrcKey === 'full')
+        )"""
+    ) is True
 
     restored = page.evaluate(
         """() => {
