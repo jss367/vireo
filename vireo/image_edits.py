@@ -12,7 +12,6 @@ SCHEMA_VERSION = 1
 
 _ADJUSTMENT_RANGES = {
     "exposure": (-5.0, 5.0),
-    "brightness": (-100.0, 100.0),
     "contrast": (-100.0, 100.0),
     "saturation": (-100.0, 100.0),
 }
@@ -266,10 +265,6 @@ def apply_recipe(img, recipe):
         result = _apply_white_balance(result, adjustments["white_balance"])
     if "exposure" in adjustments:
         result = ImageEnhance.Brightness(result).enhance(2 ** adjustments["exposure"])
-    if "brightness" in adjustments:
-        result = ImageEnhance.Brightness(result).enhance(
-            max(0.0, 1.0 + adjustments["brightness"] / 100.0)
-        )
     if "contrast" in adjustments:
         result = ImageEnhance.Contrast(result).enhance(
             max(0.0, 1.0 + adjustments["contrast"] / 100.0)
