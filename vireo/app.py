@@ -10911,6 +10911,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "edit_recipe": db.get_photo_edit_recipe(photo_id),
             "upload_url": upload_url,
             "mode": mode,
+            "direct_upload_enabled": mode == "direct",
+            "photo_upload_requires_token": mode != "direct",
             "already_submitted": already,
             "existing_observation_url": subs[photo_id]["observation_url"] if already else None,
         })

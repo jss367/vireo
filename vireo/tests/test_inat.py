@@ -229,6 +229,33 @@ def test_api_inat_prepare_url_encodes_query_params(app_and_db):
     assert qs["taxon_name"] == ["Cardinalis cardinalis"]
 
 
+def test_api_inat_prepare_marks_quick_mode_as_not_photo_upload(app_and_db):
+    app, _db, pid = app_and_db
+    client = app.test_client()
+    resp = client.get(f'/api/inat/prepare/{pid}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["mode"] == "quick"
+    assert data["direct_upload_enabled"] is False
+    assert data["photo_upload_requires_token"] is True
+
+
+def test_api_inat_prepare_marks_direct_mode_with_token(app_and_db):
+    app, _db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+
+    client = app.test_client()
+    resp = client.get(f'/api/inat/prepare/{pid}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["mode"] == "direct"
+    assert data["direct_upload_enabled"] is True
+    assert data["photo_upload_requires_token"] is False
+
+
 def _add_out_of_workspace_photo(db):
     active_ws = db._active_workspace_id
     base_dir = db.conn.execute("SELECT path FROM folders LIMIT 1").fetchone()["path"]

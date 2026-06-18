@@ -6490,13 +6490,20 @@ async function submitToInat(photoId) {
 
     if (data.mode === 'quick') {
       // No API token configured: open the iNaturalist upload page (prefilled
-      // with taxon/date/location) in the user's browser. A bare window.open is
-      // silently dropped inside the desktop webview, so route through
-      // openExternal and tell the user if nothing opened instead of failing
-      // invisibly.
+      // with taxon/date/location) in the user's browser. The local image
+      // cannot be attached this way; direct photo upload requires the iNat API
+      // token configured in Settings. A bare window.open is silently dropped
+      // inside the desktop webview, so route through openExternal and tell the
+      // user if nothing opened instead of failing invisibly.
+      var proceed = confirm(
+        'Vireo cannot upload the photo to iNaturalist unless you add an API token in Settings.\n\n' +
+        'It can still open the iNaturalist web uploader with the taxon, date, and location filled in. You will need to add the photo there.\n\n' +
+        'Open iNaturalist?'
+      );
+      if (!proceed) return;
       var opened = await openExternal(data.upload_url);
       if (opened) {
-        showToast('Opening iNaturalist in your browser…', 'info');
+        showToast('Opening iNaturalist web uploader. Add the photo there, or configure an API token for direct upload.', 'info');
       } else {
         showToast('Could not open iNaturalist. Add an API token in Settings to submit directly from Vireo.', 'error');
       }
@@ -6651,6 +6658,10 @@ async function inatDoSubmit() {
       } else {
         statusEl.className = 'inat-card-status success';
         statusEl.innerHTML = '&#10003; Submitted — <a href="' + escapeAttr(result.observation_url) + '" target="_blank" onclick="return openExternalLink(event, this.href)" style="color:var(--accent);">View on iNaturalist</a>';
+        if (total === 1 && result.observation_url && isTauri()) {
+          var opened = await openExternal(result.observation_url);
+          if (!opened) showToast('Submitted, but could not open iNaturalist: ' + result.observation_url, 'error');
+        }
         succeeded++;
       }
     } catch(e) {
