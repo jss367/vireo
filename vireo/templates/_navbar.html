@@ -4187,6 +4187,52 @@ function _lbRecipeWithAdjustments(values) {
   return recipe;
 }
 
+// Mirror image_edits._apply_white_balance: per-channel sRGB gains. Keep these
+// coefficients in sync with the server so the live preview matches the render.
+function _lbWhiteBalanceGains(temperature, tint) {
+  var t = Number(temperature || 0) / 100;
+  var ti = Number(tint || 0) / 100;
+  return {
+    r: Math.max(0.05, 1 + 0.26 * t + 0.06 * ti),
+    g: Math.max(0.05, 1 - 0.18 * ti),
+    b: Math.max(0.05, 1 - 0.26 * t + 0.06 * ti),
+  };
+}
+
+// Lazily build the SVG filter used to apply white-balance gains in the preview.
+// color-interpolation-filters="sRGB" matches PIL, which scales raw sRGB bytes
+// rather than linear-light values.
+function _lbEnsureWbFilter() {
+  if (document.getElementById('lbWbFilterFuncR')) return;
+  var ns = 'http://www.w3.org/2000/svg';
+  var svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', '0');
+  svg.setAttribute('height', '0');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.style.position = 'absolute';
+  svg.style.pointerEvents = 'none';
+  var filter = document.createElementNS(ns, 'filter');
+  filter.setAttribute('id', 'lbWbFilter');
+  filter.setAttribute('color-interpolation-filters', 'sRGB');
+  var fct = document.createElementNS(ns, 'feComponentTransfer');
+  ['R', 'G', 'B'].forEach(function(ch) {
+    var f = document.createElementNS(ns, 'feFunc' + ch);
+    f.setAttribute('id', 'lbWbFilterFunc' + ch);
+    f.setAttribute('type', 'linear');
+    f.setAttribute('slope', '1');
+    f.setAttribute('intercept', '0');
+    fct.appendChild(f);
+  });
+  filter.appendChild(fct);
+  svg.appendChild(filter);
+  document.body.appendChild(svg);
+}
+
+function _lbSetWbSlope(channel, slope) {
+  var f = document.getElementById('lbWbFilterFunc' + channel);
+  if (f) f.setAttribute('slope', slope.toFixed(4));
+}
+
 function _lbApplyAdjustmentPreviewCss(values) {
   var img = document.getElementById('lightboxImg');
   if (!img) return;
@@ -4196,14 +4242,29 @@ function _lbApplyAdjustmentPreviewCss(values) {
   var contrast = Math.max(0, 1 + Number(values.contrast || 0) / 100) / baseContrast;
   var baseSaturation = Math.max(0.001, 1 + Number(base.saturation || 0) / 100);
   var saturation = Math.max(0, 1 + Number(values.saturation || 0) / 100) / baseSaturation;
-  var hue = (Number(values.tint || 0) - Number(base.tint || 0)) * 0.2
-    - (Number(values.temperature || 0) - Number(base.temperature || 0)) * 0.08;
-  img.style.filter = [
-    'brightness(' + exposure.toFixed(3) + ')',
-    'contrast(' + contrast.toFixed(3) + ')',
-    'saturate(' + saturation.toFixed(3) + ')',
-    'hue-rotate(' + hue.toFixed(2) + 'deg)'
-  ].join(' ');
+  // White balance: the displayed source already has the saved WB baked in, so
+  // preview the delta as new-gain / rendered-gain per channel.
+  var valGains = _lbWhiteBalanceGains(values.temperature, values.tint);
+  var baseGains = _lbWhiteBalanceGains(base.temperature, base.tint);
+  var rSlope = valGains.r / baseGains.r;
+  var gSlope = valGains.g / baseGains.g;
+  var bSlope = valGains.b / baseGains.b;
+  var wbActive = Math.abs(rSlope - 1) > 1e-4
+    || Math.abs(gSlope - 1) > 1e-4
+    || Math.abs(bSlope - 1) > 1e-4;
+  var filters = [];
+  // Match the server order: white balance, then exposure, contrast, saturation.
+  if (wbActive) {
+    _lbEnsureWbFilter();
+    _lbSetWbSlope('R', rSlope);
+    _lbSetWbSlope('G', gSlope);
+    _lbSetWbSlope('B', bSlope);
+    filters.push('url(#lbWbFilter)');
+  }
+  filters.push('brightness(' + exposure.toFixed(3) + ')');
+  filters.push('contrast(' + contrast.toFixed(3) + ')');
+  filters.push('saturate(' + saturation.toFixed(3) + ')');
+  img.style.filter = filters.join(' ');
 }
 
 function _lbClearAdjustmentPreviewCss() {
