@@ -769,16 +769,19 @@ async function loadHistory() {
     var data = await safeFetch('/api/photos/' + editorState.photoId + '/edit-history?limit=100', {}, {toast: false});
     list.innerHTML = '';
     var currentKey = recipeKey(editorState.savedRecipe);
+    var visibleHistoryRows = 0;
     list.appendChild(historyRow('Current saved edit', checkpointName(editorState.savedRecipe), editorState.savedRecipe, true, true));
     list.appendChild(historyRow('Original', 'No edit recipe', null, currentKey === '{}', false));
     (data.history || []).forEach(function(entry) {
       var recipe = entry.new_recipe || null;
+      if (recipeKey(recipe) === currentKey) return;
+      visibleHistoryRows++;
       var title = checkpointName(recipe);
       var subtitle = timeLabel(entry.created_at) + ' - ' + (entry.description || 'Saved edit');
       if (entry.undone) subtitle += ' (undone)';
-      list.appendChild(historyRow(title, subtitle, recipe, recipeKey(recipe) === currentKey, false));
+      list.appendChild(historyRow(title, subtitle, recipe, false, false));
     });
-    if ((data.history || []).length === 0) {
+    if ((data.history || []).length === 0 || visibleHistoryRows === 0) {
       var empty = document.createElement('div');
       empty.className = 'history-empty';
       empty.textContent = 'No saved edit checkpoints for this photo yet.';

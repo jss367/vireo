@@ -4000,14 +4000,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             (db._ws_id(), photo_id, limit),
         ).fetchall()
 
-        from image_edits import RecipeError, copy_recipe
+        from image_edits import copy_recipe
 
         def decode_recipe(value):
-            if not value:
+            if value is None:
                 return None
             try:
                 return copy_recipe(value)
-            except RecipeError:
+            except Exception:
                 log.warning(
                     "Skipping invalid edit recipe history payload for photo %s",
                     photo_id,
