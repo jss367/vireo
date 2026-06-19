@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Photo Editor</title>
+<style>
+body {
+  min-height: 100vh;
+  overflow: hidden;
+  padding-bottom: 30px;
+}
+.editor-shell {
+  height: calc(100vh - 48px - 30px);
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) 340px 300px;
+  gap: 0;
+  border-top: 1px solid var(--border-primary);
+}
+.editor-stage {
+  min-width: 0;
+  background: var(--bg-panel);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  border-right: 1px solid var(--border-primary);
+}
+.editor-topbar {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+}
+.editor-title {
+  min-width: 0;
+  flex: 1;
+}
+.editor-title strong,
+.editor-title span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.editor-title strong { font-size: 14px; color: var(--text-primary); }
+.editor-title span { margin-top: 2px; font-size: 12px; color: var(--text-muted); }
+.editor-status {
+  color: var(--text-muted);
+  font-size: 12px;
+  min-width: 92px;
+  text-align: right;
+}
+.editor-status.error { color: var(--danger); }
+.editor-btn {
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 7px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.editor-btn:hover { border-color: var(--accent); }
+.editor-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  border-color: var(--border-primary);
+}
+.editor-btn.primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.editor-canvas-wrap {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.editor-canvas {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  max-height: 100%;
+  line-height: 0;
+}
+#editorImg {
+  display: block;
+  max-width: min(100%, calc(100vw - 700px));
+  max-height: calc(100vh - 190px);
+  width: auto;
+  height: auto;
+  background: #111;
+  user-select: none;
+}
+.crop-box {
+  position: absolute;
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.42);
+  cursor: move;
+  min-width: 20px;
+  min-height: 20px;
+}
+.crop-box::before,
+.crop-box::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+}
+.crop-box::before {
+  left: 33.333%;
+  top: 0;
+  bottom: 0;
+  width: 33.333%;
+  border-left: 1px solid rgba(255,255,255,0.45);
+  border-right: 1px solid rgba(255,255,255,0.45);
+}
+.crop-box::after {
+  top: 33.333%;
+  left: 0;
+  right: 0;
+  height: 33.333%;
+  border-top: 1px solid rgba(255,255,255,0.45);
+  border-bottom: 1px solid rgba(255,255,255,0.45);
+}
+.crop-handle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  background: var(--accent);
+  border: 2px solid var(--bg-panel);
+  border-radius: 50%;
+  z-index: 2;
+}
+.crop-handle.nw { left: -8px; top: -8px; cursor: nwse-resize; }
+.crop-handle.ne { right: -8px; top: -8px; cursor: nesw-resize; }
+.crop-handle.sw { left: -8px; bottom: -8px; cursor: nesw-resize; }
+.crop-handle.se { right: -8px; bottom: -8px; cursor: nwse-resize; }
+.editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.editor-panel,
+.history-panel {
+  min-width: 0;
+  overflow-y: auto;
+  background: var(--bg-primary);
+}
+.editor-panel { border-right: 1px solid var(--border-primary); }
+.panel-band {
+  padding: 16px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.panel-title {
+  margin-bottom: 12px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+.button-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.control-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) 46px;
+  gap: 10px;
+  align-items: center;
+  margin: 10px 0;
+}
+.control-row label {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.control-row input[type="range"] { width: 100%; }
+.control-value {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.crop-meta {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-top: 12px;
+}
+.crop-meta div {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  padding: 7px;
+}
+.history-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-primary);
+}
+.history-header h2 {
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+.history-header p {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.history-list {
+  padding: 10px 0 24px;
+}
+.history-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.history-row.current {
+  background: color-mix(in srgb, var(--accent-dim) 35%, transparent);
+}
+.history-row strong,
+.history-row span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-row strong {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.history-row span {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-top: 2px;
+}
+.history-empty {
+  padding: 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+@media (max-width: 1100px) {
+  body { overflow: auto; }
+  .editor-shell {
+    height: auto;
+    min-height: calc(100vh - 48px);
+    grid-template-columns: 1fr;
+  }
+  .editor-stage,
+  .editor-panel {
+    border-right: 0;
+    border-bottom: 1px solid var(--border-primary);
+  }
+  #editorImg {
+    max-width: calc(100vw - 32px);
+    max-height: 70vh;
+  }
+}
+</style>
+</head>
+<body>
+{% include '_navbar.html' %}
+
+<main class="editor-shell">
+  <section class="editor-stage">
+    <div class="editor-topbar">
+      <button class="editor-btn" type="button" onclick="goBackToBrowse()">Back</button>
+      <div class="editor-title">
+        <strong id="editorFilename">Loading photo...</strong>
+        <span id="editorSubhead">Non-destructive editor</span>
+      </div>
+      <div class="editor-status" id="editorStatus"></div>
+      <button class="editor-btn" type="button" onclick="resetAllEdits()">Reset All</button>
+      <button class="editor-btn primary" id="saveBtn" type="button" onclick="saveRecipe()" disabled>Save Changes</button>
+    </div>
+
+    <div class="editor-canvas-wrap">
+      <div class="editor-canvas">
+        <img id="editorImg" alt="">
+        <div class="crop-box" id="editorCropBox">
+          <span class="crop-handle nw" data-handle="nw"></span>
+          <span class="crop-handle ne" data-handle="ne"></span>
+          <span class="crop-handle sw" data-handle="sw"></span>
+          <span class="crop-handle se" data-handle="se"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="editor-footer">
+      <span id="recipeSummary">No edits</span>
+      <span id="previewStatus">Preview uses the current unsaved recipe</span>
+    </div>
+  </section>
+
+  <aside class="editor-panel">
+    <div class="panel-band">
+      <div class="panel-title">Transform</div>
+      <div class="button-row">
+        <button class="editor-btn" type="button" onclick="rotateRecipe(-90)">Rotate Left</button>
+        <button class="editor-btn" type="button" onclick="rotateRecipe(90)">Rotate Right</button>
+        <button class="editor-btn" type="button" onclick="flipRecipe('horizontal')">Flip H</button>
+        <button class="editor-btn" type="button" onclick="flipRecipe('vertical')">Flip V</button>
+      </div>
+      <div class="control-row">
+        <label for="straightenRange">Straighten</label>
+        <input id="straightenRange" type="range" min="-10" max="10" step="0.1" value="0" oninput="setStraighten(this.value)">
+        <span class="control-value" id="straightenValue">0.0</span>
+      </div>
+    </div>
+
+    <div class="panel-band">
+      <div class="panel-title">Crop</div>
+      <div class="button-row">
+        <button class="editor-btn" type="button" onclick="resetCrop()">Full Frame</button>
+        <button class="editor-btn" type="button" onclick="setAspect(1.5)">3:2</button>
+        <button class="editor-btn" type="button" onclick="setAspect(1.3333333333)">4:3</button>
+        <button class="editor-btn" type="button" onclick="setAspect(1)">1:1</button>
+      </div>
+      <div class="crop-meta">
+        <div>x <span id="cropX">0</span></div>
+        <div>y <span id="cropY">0</span></div>
+        <div>w <span id="cropW">100</span></div>
+        <div>h <span id="cropH">100</span></div>
+      </div>
+    </div>
+
+    <div class="panel-band">
+      <div class="panel-title">Adjustments</div>
+      <div class="control-row">
+        <label for="exposureRange">Exposure</label>
+        <input id="exposureRange" data-adjustment="exposure" type="range" min="-5" max="5" step="0.1" value="0" oninput="setAdjustment('exposure', this.value)">
+        <span class="control-value" id="exposureValue">0.0</span>
+      </div>
+      <div class="control-row">
+        <label for="contrastRange">Contrast</label>
+        <input id="contrastRange" data-adjustment="contrast" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('contrast', this.value)">
+        <span class="control-value" id="contrastValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="temperatureRange">Temp</label>
+        <input id="temperatureRange" data-adjustment="temperature" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('temperature', this.value)">
+        <span class="control-value" id="temperatureValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="tintRange">Tint</label>
+        <input id="tintRange" data-adjustment="tint" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('tint', this.value)">
+        <span class="control-value" id="tintValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="saturationRange">Saturation</label>
+        <input id="saturationRange" data-adjustment="saturation" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('saturation', this.value)">
+        <span class="control-value" id="saturationValue">0</span>
+      </div>
+      <div class="button-row">
+        <button class="editor-btn" type="button" onclick="resetAdjustments()">Reset Adjustments</button>
+      </div>
+    </div>
+  </aside>
+
+  <aside class="history-panel">
+    <div class="history-header">
+      <h2>Edit History</h2>
+      <p>Restore any saved recipe checkpoint for this photo. Restores are saved as a new history item.</p>
+    </div>
+    <div class="history-list" id="historyList">
+      <div class="history-empty">Loading history...</div>
+    </div>
+  </aside>
+</main>
+
+<script>
+var editorState = {
+  photoId: null,
+  photo: null,
+  savedRecipe: {},
+  recipe: {},
+  previewSeq: 0,
+  previewTimer: null,
+  drag: null,
+};
+
+function cloneRecipe(recipe) {
+  if (!recipe || typeof recipe !== 'object') return {};
+  try { return JSON.parse(JSON.stringify(recipe)); }
+  catch (_) { return {}; }
+}
+
+function setStatus(text, isError) {
+  var el = document.getElementById('editorStatus');
+  if (!el) return;
+  el.textContent = text || '';
+  el.classList.toggle('error', !!isError);
+}
+
+function isFullCrop(crop) {
+  return !crop || (
+    Math.abs(Number(crop.x || 0)) < 0.0005 &&
+    Math.abs(Number(crop.y || 0)) < 0.0005 &&
+    Math.abs(Number(crop.w || 1) - 1) < 0.0005 &&
+    Math.abs(Number(crop.h || 1) - 1) < 0.0005
+  );
+}
+
+function clampCrop(crop) {
+  var min = 0.02;
+  var x = Number(crop.x) || 0;
+  var y = Number(crop.y) || 0;
+  var w = Number(crop.w) || 1;
+  var h = Number(crop.h) || 1;
+  w = Math.max(min, Math.min(1, w));
+  h = Math.max(min, Math.min(1, h));
+  x = Math.max(0, Math.min(1 - w, x));
+  y = Math.max(0, Math.min(1 - h, y));
+  return { x: x, y: y, w: w, h: h };
+}
+
+function ensureCrop(recipe) {
+  if (!recipe.crop || typeof recipe.crop !== 'object') {
+    recipe.crop = { x: 0, y: 0, w: 1, h: 1 };
+  }
+  recipe.crop = clampCrop(recipe.crop);
+  return recipe.crop;
+}
+
+function cropFromTransformedCorners(crop, transformPoint) {
+  var c = clampCrop(crop);
+  var corners = [
+    { x: c.x, y: c.y },
+    { x: c.x + c.w, y: c.y },
+    { x: c.x, y: c.y + c.h },
+    { x: c.x + c.w, y: c.y + c.h },
+  ].map(transformPoint);
+  var xs = corners.map(function(p) { return p.x; });
+  var ys = corners.map(function(p) { return p.y; });
+  var x1 = Math.min.apply(Math, xs);
+  var y1 = Math.min.apply(Math, ys);
+  var x2 = Math.max.apply(Math, xs);
+  var y2 = Math.max.apply(Math, ys);
+  return clampCrop({ x: x1, y: y1, w: x2 - x1, h: y2 - y1 });
+}
+
+function rotatePointInBox(point, clockwiseDegrees, aspect) {
+  var angle = Number(clockwiseDegrees || 0) * Math.PI / 180;
+  if (!angle || !Number.isFinite(aspect) || aspect <= 0) return point;
+  var cos = Math.cos(angle);
+  var sin = Math.sin(angle);
+  var dx = (point.x - 0.5) * aspect;
+  var dy = point.y - 0.5;
+  return {
+    x: ((dx * cos - dy * sin) / aspect) + 0.5,
+    y: (dx * sin + dy * cos) + 0.5,
+  };
+}
+
+function imageAspectForTransform(delta) {
+  var img = document.getElementById('editorImg');
+  if (!img || !img.clientWidth || !img.clientHeight) return null;
+  var current = img.clientWidth / img.clientHeight;
+  var normalizedDelta = ((Number(delta) || 0) % 360 + 360) % 360;
+  return {
+    current: current,
+    next: normalizedDelta === 90 || normalizedDelta === 270 ? 1 / current : current,
+  };
+}
+
+function transformCropWithStraighten(crop, transformPoint, straighten, aspects) {
+  var angle = Number(straighten || 0);
+  return cropFromTransformedCorners(crop, function(point) {
+    var next = point;
+    if (angle && aspects) next = rotatePointInBox(next, -angle, aspects.current);
+    next = transformPoint(next);
+    if (angle && aspects) next = rotatePointInBox(next, angle, aspects.next);
+    return next;
+  });
+}
+
+function transformCropForRotation(crop, delta, flip) {
+  var normalizedDelta = ((Number(delta) || 0) % 360 + 360) % 360;
+  var activeFlip = flip || {};
+  var aspects = imageAspectForTransform(normalizedDelta);
+  return transformCropWithStraighten(crop, function(point) {
+    var x = point.x;
+    var y = point.y;
+    if (activeFlip.horizontal) x = 1 - x;
+    if (activeFlip.vertical) y = 1 - y;
+    if (normalizedDelta === 90) {
+      var nextX = 1 - y;
+      y = x;
+      x = nextX;
+    } else if (normalizedDelta === 180) {
+      x = 1 - x;
+      y = 1 - y;
+    } else if (normalizedDelta === 270) {
+      var nextY = 1 - x;
+      x = y;
+      y = nextY;
+    }
+    if (activeFlip.horizontal) x = 1 - x;
+    if (activeFlip.vertical) y = 1 - y;
+    return { x: x, y: y };
+  }, editorState.recipe.straighten, aspects);
+}
+
+function transformCropForFlip(crop, axis) {
+  var aspects = imageAspectForTransform(0);
+  return transformCropWithStraighten(crop, function(point) {
+    if (axis === 'horizontal') return { x: 1 - point.x, y: point.y };
+    if (axis === 'vertical') return { x: point.x, y: 1 - point.y };
+    return point;
+  }, editorState.recipe.straighten, aspects);
+}
+
+function adjustmentValues(recipe) {
+  var adj = recipe && recipe.adjustments || {};
+  var wb = adj.white_balance || {};
+  return {
+    exposure: Number(adj.exposure || 0),
+    contrast: Number(adj.contrast || 0),
+    temperature: Number(wb.temperature || adj.temperature || 0),
+    tint: Number(wb.tint || adj.tint || 0),
+    saturation: Number(adj.saturation || 0),
+  };
+}
+
+function recipeForSave(recipe) {
+  var out = cloneRecipe(recipe);
+  delete out.version;
+  if (!Number(out.rotation)) delete out.rotation;
+  else out.rotation = ((Number(out.rotation) % 360) + 360) % 360;
+  if (!out.rotation) delete out.rotation;
+
+  var straighten = Number(out.straighten || 0);
+  if (Math.abs(straighten) < 0.0001) delete out.straighten;
+  else out.straighten = Math.round(straighten * 10000) / 10000;
+
+  var flip = out.flip || {};
+  var nextFlip = {};
+  if (flip.horizontal) nextFlip.horizontal = true;
+  if (flip.vertical) nextFlip.vertical = true;
+  if (Object.keys(nextFlip).length) out.flip = nextFlip;
+  else delete out.flip;
+
+  var crop = out.crop ? clampCrop(out.crop) : null;
+  if (!crop || isFullCrop(crop)) delete out.crop;
+  else {
+    out.crop = {
+      x: Math.round(crop.x * 1000000) / 1000000,
+      y: Math.round(crop.y * 1000000) / 1000000,
+      w: Math.round(crop.w * 1000000) / 1000000,
+      h: Math.round(crop.h * 1000000) / 1000000,
+    };
+  }
+
+  var vals = adjustmentValues(out);
+  var adj = {};
+  ['exposure', 'contrast', 'saturation'].forEach(function(key) {
+    if (Math.abs(Number(vals[key] || 0)) > 0.000001) adj[key] = Number(vals[key]);
+  });
+  var wb = {};
+  ['temperature', 'tint'].forEach(function(key) {
+    if (Math.abs(Number(vals[key] || 0)) > 0.000001) wb[key] = Number(vals[key]);
+  });
+  if (Object.keys(wb).length) adj.white_balance = wb;
+  if (Object.keys(adj).length) out.adjustments = adj;
+  else delete out.adjustments;
+  return out;
+}
+
+function recipeKey(recipe) {
+  return JSON.stringify(recipeForSave(recipe || {}));
+}
+
+function updateDirtyState() {
+  var dirty = recipeKey(editorState.recipe) !== recipeKey(editorState.savedRecipe);
+  document.getElementById('saveBtn').disabled = !dirty;
+  if (dirty) setStatus('Unsaved');
+  else setStatus('');
+  updateRecipeSummary();
+}
+
+function updateRecipeSummary() {
+  var r = recipeForSave(editorState.recipe);
+  var parts = [];
+  if (r.rotation) parts.push('rotate ' + r.rotation);
+  if (r.flip && r.flip.horizontal) parts.push('flip H');
+  if (r.flip && r.flip.vertical) parts.push('flip V');
+  if (r.straighten) parts.push('straighten ' + Number(r.straighten).toFixed(1));
+  if (r.crop) parts.push('crop');
+  if (r.adjustments) {
+    Object.keys(r.adjustments).forEach(function(key) {
+      if (key === 'white_balance') parts.push('white balance');
+      else parts.push(key);
+    });
+  }
+  document.getElementById('recipeSummary').textContent = parts.length ? parts.join(' | ') : 'No edits';
+}
+
+function syncControls() {
+  var r = editorState.recipe;
+  var vals = adjustmentValues(r);
+  var set = function(id, value, fixed) {
+    var input = document.getElementById(id + 'Range');
+    var label = document.getElementById(id + 'Value');
+    if (input) input.value = String(value || 0);
+    if (label) label.textContent = fixed ? Number(value || 0).toFixed(1) : String(Math.round(Number(value || 0)));
+  };
+  set('exposure', vals.exposure, true);
+  set('contrast', vals.contrast, false);
+  set('temperature', vals.temperature, false);
+  set('tint', vals.tint, false);
+  set('saturation', vals.saturation, false);
+  var straight = Number(r.straighten || 0);
+  document.getElementById('straightenRange').value = String(straight);
+  document.getElementById('straightenValue').textContent = straight.toFixed(1);
+  renderCropBox();
+  updateDirtyState();
+}
+
+function previewRecipe() {
+  var r = recipeForSave(editorState.recipe);
+  delete r.crop;
+  return r;
+}
+
+function updatePreview() {
+  if (!editorState.photoId) return;
+  var img = document.getElementById('editorImg');
+  var seq = ++editorState.previewSeq;
+  document.getElementById('previewStatus').textContent = 'Rendering preview...';
+  img.onload = function() {
+    if (seq !== editorState.previewSeq) return;
+    document.getElementById('previewStatus').textContent = 'Preview uses the current unsaved recipe';
+    renderCropBox();
+  };
+  img.onerror = function() {
+    if (seq !== editorState.previewSeq) return;
+    document.getElementById('previewStatus').textContent = 'Could not render preview';
+  };
+  img.src = '/photos/' + editorState.photoId + '/edit-preview?size=1920&recipe=' +
+    encodeURIComponent(JSON.stringify(previewRecipe())) + '&v=' + seq;
+}
+
+function schedulePreview() {
+  if (editorState.previewTimer) clearTimeout(editorState.previewTimer);
+  editorState.previewTimer = setTimeout(function() {
+    editorState.previewTimer = null;
+    updatePreview();
+  }, 140);
+}
+
+function renderCropBox() {
+  var img = document.getElementById('editorImg');
+  var box = document.getElementById('editorCropBox');
+  if (!img || !box || !img.complete || !img.clientWidth || !img.clientHeight) return;
+  var crop = ensureCrop(editorState.recipe);
+  box.style.left = (crop.x * img.clientWidth) + 'px';
+  box.style.top = (crop.y * img.clientHeight) + 'px';
+  box.style.width = (crop.w * img.clientWidth) + 'px';
+  box.style.height = (crop.h * img.clientHeight) + 'px';
+  document.getElementById('cropX').textContent = Math.round(crop.x * 100);
+  document.getElementById('cropY').textContent = Math.round(crop.y * 100);
+  document.getElementById('cropW').textContent = Math.round(crop.w * 100);
+  document.getElementById('cropH').textContent = Math.round(crop.h * 100);
+}
+
+function markChanged(render) {
+  updateDirtyState();
+  renderCropBox();
+  if (render) schedulePreview();
+}
+
+function rotateRecipe(delta) {
+  var crop = ensureCrop(editorState.recipe);
+  var current = Number(editorState.recipe.rotation || 0);
+  var next = (current + delta) % 360;
+  if (next < 0) next += 360;
+  editorState.recipe.rotation = next;
+  editorState.recipe.crop = transformCropForRotation(crop, delta, editorState.recipe.flip || {});
+  markChanged(true);
+}
+
+function flipRecipe(axis) {
+  var crop = ensureCrop(editorState.recipe);
+  var flip = editorState.recipe.flip || {};
+  flip[axis] = !flip[axis];
+  editorState.recipe.flip = flip;
+  editorState.recipe.crop = transformCropForFlip(crop, axis);
+  markChanged(true);
+}
+
+function setStraighten(value) {
+  var v = Number(value);
+  if (!Number.isFinite(v)) v = 0;
+  v = Math.max(-45, Math.min(45, v));
+  editorState.recipe.straighten = v;
+  document.getElementById('straightenValue').textContent = v.toFixed(1);
+  markChanged(true);
+}
+
+function resetCrop() {
+  editorState.recipe.crop = { x: 0, y: 0, w: 1, h: 1 };
+  markChanged(false);
+}
+
+function setAspect(aspect) {
+  var img = document.getElementById('editorImg');
+  if (!img || !img.clientWidth || !img.clientHeight) return;
+  var imageAspect = img.clientWidth / img.clientHeight;
+  var normalizedRatio = aspect / imageAspect;
+  var w = 0.9;
+  var h = w / normalizedRatio;
+  if (h > 0.9) {
+    h = 0.9;
+    w = h * normalizedRatio;
+  }
+  editorState.recipe.crop = { x: (1 - w) / 2, y: (1 - h) / 2, w: w, h: h };
+  markChanged(false);
+}
+
+function setAdjustment(key, value) {
+  var vals = adjustmentValues(editorState.recipe);
+  vals[key] = Number(value) || 0;
+  if (key === 'exposure') document.getElementById('exposureValue').textContent = vals[key].toFixed(1);
+  else document.getElementById(key + 'Value').textContent = String(Math.round(vals[key]));
+  var adj = cloneRecipe(editorState.recipe.adjustments || {});
+  ['exposure', 'contrast', 'saturation'].forEach(function(name) {
+    if (Math.abs(vals[name]) > 0.000001) adj[name] = vals[name];
+    else delete adj[name];
+  });
+  var wb = {};
+  if (Math.abs(vals.temperature) > 0.000001) wb.temperature = vals.temperature;
+  if (Math.abs(vals.tint) > 0.000001) wb.tint = vals.tint;
+  if (Object.keys(wb).length) adj.white_balance = wb;
+  else delete adj.white_balance;
+  if (Object.keys(adj).length) editorState.recipe.adjustments = adj;
+  else delete editorState.recipe.adjustments;
+  markChanged(true);
+}
+
+function resetAdjustments() {
+  delete editorState.recipe.adjustments;
+  syncControls();
+  schedulePreview();
+}
+
+function resetAllEdits() {
+  editorState.recipe = {};
+  ensureCrop(editorState.recipe);
+  syncControls();
+  updatePreview();
+}
+
+async function saveRecipe(description) {
+  if (!editorState.photoId) return;
+  var btn = document.getElementById('saveBtn');
+  btn.disabled = true;
+  setStatus('Saving...');
+  try {
+    var data = await safeFetch('/api/photos/' + editorState.photoId + '/edit-recipe', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        recipe: recipeForSave(editorState.recipe),
+        description: description || 'Updated photo edit recipe',
+      }),
+    }, {toast: false});
+    editorState.savedRecipe = cloneRecipe(data.recipe || {});
+    editorState.recipe = cloneRecipe(data.recipe || {});
+    ensureCrop(editorState.recipe);
+    syncControls();
+    updatePreview();
+    loadHistory();
+    if (typeof window.vireoRefreshEditRecipeCache === 'function') {
+      var updates = {};
+      updates[String(editorState.photoId)] = data.recipe || null;
+      window.vireoRefreshEditRecipeCache(updates);
+    }
+    if (typeof showToast === 'function') showToast('Edit saved', 'success');
+  } catch (e) {
+    btn.disabled = false;
+    setStatus(e.message || 'Save failed', true);
+  }
+}
+
+async function restoreRecipe(recipe) {
+  editorState.recipe = cloneRecipe(recipe || {});
+  ensureCrop(editorState.recipe);
+  syncControls();
+  updatePreview();
+  await saveRecipe('Restored photo edit checkpoint');
+}
+
+function timeLabel(value) {
+  if (!value) return '';
+  var d = new Date(value + 'Z');
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString([], {
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+  });
+}
+
+function checkpointName(recipe) {
+  var key = recipeKey(recipe || {});
+  if (key === '{}') return 'Original';
+  var r = recipeForSave(recipe || {});
+  var names = [];
+  if (r.crop) names.push('Crop');
+  if (r.rotation || r.flip || r.straighten) names.push('Transform');
+  if (r.adjustments) names.push('Adjustments');
+  return names.length ? names.join(', ') : 'Edit recipe';
+}
+
+function historyRow(title, subtitle, recipe, current, disabled) {
+  var row = document.createElement('div');
+  row.className = 'history-row' + (current ? ' current' : '');
+  var text = document.createElement('div');
+  var strong = document.createElement('strong');
+  var span = document.createElement('span');
+  strong.textContent = title;
+  span.textContent = subtitle || '';
+  text.appendChild(strong);
+  text.appendChild(span);
+  var btn = document.createElement('button');
+  btn.className = 'editor-btn';
+  btn.type = 'button';
+  btn.textContent = current ? 'Current' : 'Restore';
+  btn.disabled = !!disabled || !!current;
+  btn.onclick = function() { restoreRecipe(recipe); };
+  row.appendChild(text);
+  row.appendChild(btn);
+  return row;
+}
+
+async function loadHistory() {
+  var list = document.getElementById('historyList');
+  list.innerHTML = '<div class="history-empty">Loading history...</div>';
+  try {
+    var data = await safeFetch('/api/photos/' + editorState.photoId + '/edit-history?limit=100', {}, {toast: false});
+    list.innerHTML = '';
+    var currentKey = recipeKey(editorState.savedRecipe);
+    var visibleHistoryRows = 0;
+    list.appendChild(historyRow('Current saved edit', checkpointName(editorState.savedRecipe), editorState.savedRecipe, true, true));
+    list.appendChild(historyRow('Original', 'No edit recipe', null, currentKey === '{}', false));
+    (data.history || []).forEach(function(entry) {
+      var recipe = entry.new_recipe || null;
+      if (recipeKey(recipe) === currentKey) return;
+      visibleHistoryRows++;
+      var title = checkpointName(recipe);
+      var subtitle = timeLabel(entry.created_at) + ' - ' + (entry.description || 'Saved edit');
+      if (entry.undone) subtitle += ' (undone)';
+      list.appendChild(historyRow(title, subtitle, recipe, false, false));
+    });
+    if ((data.history || []).length === 0 || visibleHistoryRows === 0) {
+      var empty = document.createElement('div');
+      empty.className = 'history-empty';
+      empty.textContent = 'No saved edit checkpoints for this photo yet.';
+      list.appendChild(empty);
+    }
+  } catch (e) {
+    list.innerHTML = '<div class="history-empty">Could not load history.</div>';
+  }
+}
+
+function goBackToBrowse() {
+  if (window.history.length > 1) window.history.back();
+  else window.location.href = '/browse';
+}
+
+function initCropDrag() {
+  var box = document.getElementById('editorCropBox');
+  box.addEventListener('pointerdown', function(e) {
+    var img = document.getElementById('editorImg');
+    if (!img || !img.clientWidth || !img.clientHeight) return;
+    var handle = e.target && e.target.dataset ? e.target.dataset.handle : '';
+    editorState.drag = {
+      handle: handle || 'move',
+      startX: e.clientX,
+      startY: e.clientY,
+      crop: cloneRecipe({crop: ensureCrop(editorState.recipe)}).crop,
+      imgW: img.clientWidth,
+      imgH: img.clientHeight,
+    };
+    box.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  document.addEventListener('pointermove', function(e) {
+    var drag = editorState.drag;
+    if (!drag) return;
+    var dx = (e.clientX - drag.startX) / drag.imgW;
+    var dy = (e.clientY - drag.startY) / drag.imgH;
+    var c = cloneRecipe({crop: drag.crop}).crop;
+    var min = 0.02;
+    if (drag.handle === 'move') {
+      c.x += dx;
+      c.y += dy;
+    } else {
+      if (drag.handle.indexOf('w') !== -1) { c.x += dx; c.w -= dx; }
+      if (drag.handle.indexOf('e') !== -1) c.w += dx;
+      if (drag.handle.indexOf('n') !== -1) { c.y += dy; c.h -= dy; }
+      if (drag.handle.indexOf('s') !== -1) c.h += dy;
+      if (c.w < min) {
+        if (drag.handle.indexOf('w') !== -1) c.x = drag.crop.x + drag.crop.w - min;
+        c.w = min;
+      }
+      if (c.h < min) {
+        if (drag.handle.indexOf('n') !== -1) c.y = drag.crop.y + drag.crop.h - min;
+        c.h = min;
+      }
+    }
+    editorState.recipe.crop = clampCrop(c);
+    markChanged(false);
+    e.preventDefault();
+  });
+  document.addEventListener('pointerup', function() {
+    editorState.drag = null;
+  });
+  window.addEventListener('resize', renderCropBox);
+}
+
+async function initEditor() {
+  var match = window.location.pathname.match(/\/edit\/(\d+)/);
+  editorState.photoId = match ? Number(match[1]) : null;
+  if (!editorState.photoId) {
+    setStatus('Missing photo id', true);
+    return;
+  }
+  initCropDrag();
+  try {
+    var photo = await safeFetch('/api/photos/' + editorState.photoId, {}, {toast: false});
+    editorState.photo = photo;
+    editorState.savedRecipe = cloneRecipe(photo.edit_recipe || {});
+    editorState.recipe = cloneRecipe(photo.edit_recipe || {});
+    ensureCrop(editorState.recipe);
+    document.getElementById('editorFilename').textContent = photo.filename || ('Photo ' + editorState.photoId);
+    var dim = photo.width && photo.height ? photo.width + ' x ' + photo.height : 'Photo ' + editorState.photoId;
+    document.getElementById('editorSubhead').textContent = dim;
+    syncControls();
+    updatePreview();
+    loadHistory();
+  } catch (e) {
+    document.getElementById('editorFilename').textContent = 'Photo unavailable';
+    setStatus(e.message || 'Could not load photo', true);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', initEditor);
+</script>
+</body>
+</html>

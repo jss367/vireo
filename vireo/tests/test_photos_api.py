@@ -2125,6 +2125,86 @@ def test_edit_recipe_api_undo_redo(client_with_photo):
     assert db.get_photo_edit_recipe(photo_id)["rotation"] == 180
 
 
+def test_photo_editor_page_renders(client_with_photo):
+    app, _db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.get(f"/edit/{photo_id}")
+
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "Photo Editor" in html
+    assert "Edit History" in html
+    assert "Save Changes" in html
+
+
+def test_photo_edit_history_endpoint_lists_recipe_checkpoints(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    first = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={
+            "recipe": {"rotation": 90},
+            "description": "Rotated from editor",
+        },
+    )
+    assert first.status_code == 200
+    second = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={
+            "recipe": {
+                "rotation": 90,
+                "adjustments": {"exposure": 0.5},
+            },
+            "description": "Adjusted exposure",
+        },
+    )
+    assert second.status_code == 200
+
+    resp = client.get(f"/api/photos/{photo_id}/edit-history")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["current_recipe"] == db.get_photo_edit_recipe(photo_id)
+    assert [h["description"] for h in data["history"][:2]] == [
+        "Adjusted exposure",
+        "Rotated from editor",
+    ]
+    assert data["history"][0]["new_recipe"]["adjustments"]["exposure"] == 0.5
+    assert data["history"][1]["old_recipe"] is None
+    assert data["history"][1]["new_recipe"] == {"version": 1, "rotation": 90}
+
+
+def test_photo_edit_history_restore_records_checkpoint(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    assert client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 90}},
+    ).status_code == 200
+    assert client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={"recipe": {"rotation": 180}},
+    ).status_code == 200
+
+    restore = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json={
+            "recipe": {"rotation": 90},
+            "description": "Restored photo edit checkpoint",
+        },
+    )
+
+    assert restore.status_code == 200
+    assert db.get_photo_edit_recipe(photo_id) == {"version": 1, "rotation": 90}
+    history = client.get(f"/api/photos/{photo_id}/edit-history").get_json()["history"]
+    assert history[0]["description"] == "Restored photo edit checkpoint"
+    assert history[0]["old_recipe"] == {"version": 1, "rotation": 180}
+    assert history[0]["new_recipe"] == {"version": 1, "rotation": 90}
+
+
 def test_preview_adopts_existing_file_on_first_access(client_with_photo):
     """A cached file left over from the old scheme is adopted into the LRU."""
     import os

@@ -3269,9 +3269,6 @@ async function createWorkspace() {
     <button class="lb-action-btn" id="lightboxToggleChrome" onclick="event.stopPropagation(); toggleLightboxChrome();" title="Toggle lightbox controls">
       Hide UI
     </button>
-    <button class="lb-action-btn lb-action-accent" id="lightboxAdjustBtn" onclick="event.stopPropagation(); toggleLightboxAdjustPanel();" title="Adjust exposure, white balance, contrast, and saturation">
-      Adjust
-    </button>
     <span class="lb-mask-controls" id="lightboxMaskControls" onclick="event.stopPropagation();" title="SAM mask overlay">
       <span>Mask:</span>
       <select id="lightboxMaskSelect" onchange="event.stopPropagation(); _lbOnMaskVariantChange();"></select>
@@ -3288,114 +3285,13 @@ async function createWorkspace() {
     <button class="lb-action-btn lb-action-accent" id="lightboxInspect" onclick="">
       Inspect Pipeline
     </button>
-    <button class="lb-action-btn" id="lightboxRotateLeft" onclick="event.stopPropagation(); lightboxApplyEdit('rotate-left');" title="Rotate left">
-      Rotate Left
-    </button>
-    <button class="lb-action-btn" id="lightboxRotateRight" onclick="event.stopPropagation(); lightboxApplyEdit('rotate-right');" title="Rotate right">
-      Rotate Right
-    </button>
-    <button class="lb-action-btn" id="lightboxFlipHorizontal" onclick="event.stopPropagation(); lightboxApplyEdit('flip-horizontal');" title="Flip horizontally">
-      Flip H
-    </button>
-    <button class="lb-action-btn" id="lightboxFlipVertical" onclick="event.stopPropagation(); lightboxApplyEdit('flip-vertical');" title="Flip vertically">
-      Flip V
-    </button>
-    <button class="lb-action-btn" id="lightboxResetEdit" onclick="event.stopPropagation(); lightboxApplyEdit('reset');" title="Reset rotate and flip edits">
-      Reset Edit
+    <button class="lb-action-btn lb-action-accent" id="lightboxEditPhoto" onclick="">
+      Edit Photo
     </button>
     <button class="lb-action-btn" id="lightboxOpenEditor" onclick="">
       Open in Editor
     </button>
-    <button class="lb-action-btn lb-action-accent" id="lightboxCropEdit" onclick="event.stopPropagation(); openCropEditor();">
-      Crop
-    </button>
     <button class="lb-action-btn lb-action-danger" onclick="lightboxDelete()" title="Delete photo">Delete</button>
-  </div>
-  <div class="lightbox-adjust-panel" id="lightboxAdjustPanel" onclick="event.stopPropagation()">
-    <div class="lb-adjust-header">
-      <span>Adjustments</span>
-      <button class="lb-adjust-reset" type="button" onclick="resetLightboxAdjustments()">Reset</button>
-    </div>
-    <div class="lb-adjust-row">
-      <label for="lbAdjExposure">Exposure</label>
-      <input id="lbAdjExposure" data-adjustment="exposure" type="range" min="-5" max="5" step="0.1" value="0" oninput="onLightboxAdjustmentInput(this)">
-      <span class="lb-adjust-value" id="lbAdjExposureValue">0.0</span>
-    </div>
-    <div class="lb-adjust-row">
-      <label for="lbAdjContrast">Contrast</label>
-      <input id="lbAdjContrast" data-adjustment="contrast" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
-      <span class="lb-adjust-value" id="lbAdjContrastValue">0</span>
-    </div>
-    <div class="lb-adjust-row">
-      <label for="lbAdjTemperature">Temp</label>
-      <input id="lbAdjTemperature" data-adjustment="temperature" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
-      <span class="lb-adjust-value" id="lbAdjTemperatureValue">0</span>
-    </div>
-    <div class="lb-adjust-row">
-      <label for="lbAdjTint">Tint</label>
-      <input id="lbAdjTint" data-adjustment="tint" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
-      <span class="lb-adjust-value" id="lbAdjTintValue">0</span>
-    </div>
-    <div class="lb-adjust-row">
-      <label for="lbAdjSaturation">Saturation</label>
-      <input id="lbAdjSaturation" data-adjustment="saturation" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
-      <span class="lb-adjust-value" id="lbAdjSaturationValue">0</span>
-    </div>
-    <div class="lb-adjust-status" id="lightboxAdjustStatus"></div>
-  </div>
-</div>
-
-<!-- Crop and straighten modal -->
-<div class="modal-overlay crop-editor-overlay" id="cropEditorModal" onclick="closeCropEditor(event)">
-  <div class="crop-editor-modal" onclick="event.stopPropagation();">
-    <div class="crop-editor-header">
-      <h3>Crop and Straighten</h3>
-      <button class="crop-editor-close" onclick="closeCropEditor(event)" title="Close">&times;</button>
-    </div>
-    <div class="crop-editor-body">
-      <div class="crop-stage-shell">
-        <div class="crop-stage" id="cropStage">
-          <img id="cropEditorImg" src="" alt="">
-          <div class="crop-box" id="cropBox">
-            <span class="crop-handle nw" data-handle="nw"></span>
-            <span class="crop-handle ne" data-handle="ne"></span>
-            <span class="crop-handle sw" data-handle="sw"></span>
-            <span class="crop-handle se" data-handle="se"></span>
-          </div>
-        </div>
-      </div>
-      <div class="crop-controls">
-        <div class="crop-control-group">
-          <div class="crop-control-label">Straighten</div>
-          <div class="crop-control-row">
-            <input type="range" id="cropStraightenRange" min="-10" max="10" step="0.1" value="0">
-            <input type="number" id="cropStraightenInput" min="-45" max="45" step="0.1" value="0">
-          </div>
-        </div>
-        <div class="crop-control-group">
-          <div class="crop-control-label">Rotate</div>
-          <div class="crop-button-grid">
-            <button class="lb-action-btn" type="button" onclick="cropRotate(-90)">Left</button>
-            <button class="lb-action-btn" type="button" onclick="cropRotate(90)">Right</button>
-          </div>
-        </div>
-        <div class="crop-control-group">
-          <div class="crop-control-label">Frame</div>
-          <div class="crop-button-grid">
-            <button class="lb-action-btn" type="button" onclick="cropResetFrame()">Full Frame</button>
-            <button class="lb-action-btn" type="button" onclick="cropSetAspect(1.5)">3:2</button>
-            <button class="lb-action-btn" type="button" onclick="cropSetAspect(1.3333333333)">4:3</button>
-            <button class="lb-action-btn" type="button" onclick="cropSetAspect(1)">1:1</button>
-          </div>
-        </div>
-        <div class="crop-editor-status" id="cropEditorStatus"></div>
-        <div class="modal-actions" style="margin-top:auto;">
-          <button class="modal-btn modal-btn-cancel" type="button" onclick="cropClearEdits()">Clear</button>
-          <button class="modal-btn modal-btn-cancel" type="button" onclick="closeCropEditor(event)">Cancel</button>
-          <button class="modal-btn modal-btn-primary" type="button" id="cropSaveBtn" onclick="saveCropEditor()">Save</button>
-        </div>
-      </div>
-    </div>
   </div>
 </div>
 
@@ -5912,6 +5808,13 @@ function openLightbox(photoId, filename, photoList, options) {
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
   similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
   inatBtn.onclick = function() { submitToInat(photoId); };
+  var editPhotoBtn = document.getElementById('lightboxEditPhoto');
+  if (editPhotoBtn) {
+    editPhotoBtn.onclick = function(e) {
+      if (e) e.stopPropagation();
+      window.location.href = '/edit/' + photoId;
+    };
+  }
   var editorBtn = document.getElementById('lightboxOpenEditor');
   if (editorBtn) {
     if (typeof openInEditorWithPicker === 'function') {
@@ -8573,8 +8476,8 @@ function formatDuration(seconds) {
   var _origSafeFetch = safeFetch;
   safeFetch = function(url, opts, options) {
     return _origSafeFetch(url, opts, options).then(function(data) {
-      if (data && data.ok && opts && opts.method && /^(POST|DELETE)$/i.test(opts.method)) {
-        if (/\/(rating|flag|keywords|batch\/|predictions\/|culling\/|species\/label-cluster|encounters\/species|sync\/discard)/.test(url)) {
+      if (data && data.ok && opts && opts.method && /^(POST|PUT|DELETE)$/i.test(opts.method)) {
+        if (/\/(rating|flag|keywords|edit-recipe|batch\/|predictions\/|culling\/|species\/label-cluster|encounters\/species|sync\/discard)/.test(url)) {
           _bumpHistoryBadge();
         }
       }
