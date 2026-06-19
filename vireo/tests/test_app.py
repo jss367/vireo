@@ -4609,6 +4609,103 @@ def test_highlights_bucket_mixed_accepted_predicted_is_not_accepted(app_and_db):
     assert bucket["is_accepted"] is False
 
 
+def test_highlights_confirmation_filter_splits_confirmed_and_unconfirmed(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hf', 'hf', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    apapane_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('ʻApapane', 'taxonomy', 1)"
+    ).lastrowid
+
+    accepted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'accepted.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (accepted_pid, apapane_kw),
+    )
+
+    predicted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'predicted.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (predicted_pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'ʻApapane', 0.95)",
+        (did,),
+    )
+
+    unidentified_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'unknown.jpg', 0.7, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confirmation=all")
+    data = resp.get_json()
+    assert data["meta"]["eligible"] == 3
+    assert data["buckets"][0]["photo_count"] == 2
+    assert data["buckets"][0]["is_accepted"] is False
+    assert data["unidentified"]["photo_count"] == 1
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confirmation=confirmed")
+    data = resp.get_json()
+    assert data["meta"]["confirmation"] == "confirmed"
+    assert data["meta"]["eligible"] == 1
+    assert data["buckets"][0]["photo_count"] == 1
+    assert data["buckets"][0]["photos"][0]["id"] == accepted_pid
+    assert data["buckets"][0]["is_accepted"] is True
+    assert data["unidentified"]["photo_count"] == 0
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confirmation=unconfirmed")
+    data = resp.get_json()
+    assert data["meta"]["confirmation"] == "unconfirmed"
+    assert data["meta"]["eligible"] == 2
+    assert data["buckets"][0]["photo_count"] == 1
+    assert data["buckets"][0]["photos"][0]["id"] == predicted_pid
+    assert data["buckets"][0]["is_accepted"] is False
+    assert data["unidentified"]["photo_count"] == 1
+    assert data["unidentified"]["photos"][0]["id"] == unidentified_pid
+
+    resp = client.get(
+        "/api/highlights/bucket",
+        query_string={
+            "folder_id": fid,
+            "species": "ʻApapane",
+            "confirmation": "confirmed",
+        },
+    )
+    data = resp.get_json()
+    assert data["photo_count"] == 1
+    assert data["photos"][0]["id"] == accepted_pid
+
+    resp = client.get(
+        "/api/highlights/bucket",
+        query_string={
+            "folder_id": fid,
+            "species": "ʻApapane",
+            "confirmation": "unconfirmed",
+        },
+    )
+    data = resp.get_json()
+    assert data["photo_count"] == 1
+    assert data["photos"][0]["id"] == predicted_pid
+
+
 def test_highlights_predictions_above_threshold_populate_buckets(app_and_db):
     """Predictions at or above confidence_threshold count as the photo's species."""
     app, db = app_and_db
