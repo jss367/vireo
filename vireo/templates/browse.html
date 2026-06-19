@@ -1421,7 +1421,6 @@ body {
       <button id="bestBatchBtn" onclick="openBestBatch()" title="Find and rank neighboring frames around the selected photo" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Best Batch</button>
       <button id="burstReviewBtn" onclick="openSelectedInBurstReview()" title="Open selected photos in burst review" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Review Burst</button>
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
-      <button onclick="openInEditorBatch(event)" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Open in Editor</button>
       <button onclick="batchSubmitInat()" style="background:var(--bg-tertiary);color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
       <button onclick="makeAvailableOffline()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Make Offline</button>
       <button onclick="openExportModal()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Export</button>
@@ -1625,9 +1624,6 @@ body {
         </button>
         <button onclick="openPipeline(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
           Inspect Pipeline
-        </button>
-        <button onclick="openInEditorWithPicker([window._detailPhotoId], event)" style="flex:1;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
-          Open in Editor
         </button>
       </div>
     </div>
@@ -6243,15 +6239,6 @@ function developSelected() {
   var ids = getActiveSelection();
   if (!ids.length) return;
   developPhotos(ids);
-}
-
-function openInEditorBatch(event) {
-  var ids = getActiveSelection();
-  if (!ids.length) return;
-  if (ids.length > 20) {
-    if (!confirm('Open ' + ids.length + ' photos in editor?')) return;
-  }
-  openInEditorWithPicker(ids, event);
 }
 
 /* ---------- Right-click context menu on grid cards ---------- */

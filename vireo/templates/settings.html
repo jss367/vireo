@@ -899,7 +899,7 @@
   <div class="section">
     <div class="section-title">External Editors</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      Applications used when clicking "Open in Editor" in the browse tab, lightbox, or burst review. Add as many as you like (e.g. Lightroom, Affinity, Photoshop) — when more than one is configured you'll get a picker. With none configured, photos open in the OS default app.
+      Applications used by "Open in Editor" context-menu and app-menu actions. Add as many as you like (e.g. Lightroom, Affinity, Photoshop); context menus show each configured editor, while the app menu uses the first. With none configured, photos open in the OS default app.
     </p>
     <div id="cfgExternalEditorsList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;"></div>
     <button type="button" onclick="addExternalEditor()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">+ Add editor</button>
@@ -1920,7 +1920,7 @@ function saveConfig() {
         }),
       });
       if (typeof loadPreviewCacheStatus === 'function') loadPreviewCacheStatus();
-      // Drop the cached editor list so the next "Open in Editor" click
+      // Drop the cached editor list so the next "Open in Editor" action
       // sees changes to the editors list without a page reload.
       if (typeof window.invalidateEditorsCache === 'function') {
         window.invalidateEditorsCache();

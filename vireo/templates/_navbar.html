@@ -3288,9 +3288,6 @@ async function createWorkspace() {
     <button class="lb-action-btn lb-action-accent" id="lightboxEditPhoto" onclick="">
       Edit Photo
     </button>
-    <button class="lb-action-btn" id="lightboxOpenEditor" onclick="">
-      Open in Editor
-    </button>
     <button class="lb-action-btn lb-action-danger" onclick="lightboxDelete()" title="Delete photo">Delete</button>
   </div>
 </div>
@@ -5815,15 +5812,6 @@ function openLightbox(photoId, filename, photoList, options) {
       window.location.href = '/edit/' + photoId;
     };
   }
-  var editorBtn = document.getElementById('lightboxOpenEditor');
-  if (editorBtn) {
-    if (typeof openInEditorWithPicker === 'function') {
-      editorBtn.style.display = '';
-      editorBtn.onclick = function(e) { openInEditorWithPicker([photoId], e); };
-    } else {
-      editorBtn.style.display = 'none';
-    }
-  }
   overlay.classList.add('active');
   _lbApplyInfoVisibility();
   _lbApplyChromeVisibility();
@@ -7894,17 +7882,14 @@ window.handleNativeMenuCommand = async function(command) {
 };
 
 /* ---------- Open in External Editor ----------
- * Three entry points for opening photos in an external editor:
+ * Two entry points for opening photos in an external editor:
  *   - openInEditor(ids, editorIndex)         — direct call, posts to backend
- *   - openInEditorWithPicker(ids, event)     — for buttons: shows a picker
- *                                              menu when 2+ editors exist,
- *                                              otherwise opens directly.
  *   - getExternalEditorsSync()               — for context-menu builders that
  *                                              need to inline editor entries
  *                                              synchronously; reads the cache.
  *
  * Editors are cached on first read of /api/config; settings.html invalidates
- * via window.invalidateEditorsCache() after saving so the next click picks
+ * via window.invalidateEditorsCache() after saving so the next action picks
  * up changes.
  */
 var _externalEditorsCache = null;
@@ -7929,7 +7914,7 @@ async function getExternalEditors() {
     // shape-validate this key) can yield {"path": 123} or similar. Without
     // the typeof guard, path.replace() would throw TypeError inside this
     // async IIFE, leaving _externalEditorsLoading as a rejected promise
-    // that every later "Open in Editor" click resolves against.
+    // that every later "Open in Editor" action resolves against.
     _externalEditorsCache = [];
     arr.forEach(function(e) {
       if (!e || typeof e !== 'object') return;
@@ -7978,27 +7963,6 @@ async function openInEditor(photoIds, editorIndex) {
     showToast('Opened ' + data.opened + ' photo(s) in editor', 'success');
   } catch(e) {
     showToast(e.message || 'Failed to open in editor');
-  }
-}
-
-async function openInEditorWithPicker(photoIds, event) {
-  if (!photoIds || !photoIds.length) return;
-  var editors = await getExternalEditors();
-  if (editors.length <= 1) {
-    // 0 editors → backend uses OS default. 1 editor → that one is the default.
-    return openInEditor(photoIds);
-  }
-  var items = editors.map(function(ed, idx) {
-    return {
-      label: 'Open in ' + ed.name,
-      onClick: function() { openInEditor(photoIds, idx); },
-    };
-  });
-  if (event && typeof window.openContextMenu === 'function') {
-    window.openContextMenu(event, items);
-  } else {
-    // No anchor event — fall back to the first editor rather than swallowing.
-    openInEditor(photoIds, 0);
   }
 }
 
