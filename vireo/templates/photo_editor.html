@@ -461,10 +461,46 @@ function cropFromTransformedCorners(crop, transformPoint) {
   return clampCrop({ x: x1, y: y1, w: x2 - x1, h: y2 - y1 });
 }
 
+function rotatePointInBox(point, clockwiseDegrees, aspect) {
+  var angle = Number(clockwiseDegrees || 0) * Math.PI / 180;
+  if (!angle || !Number.isFinite(aspect) || aspect <= 0) return point;
+  var cos = Math.cos(angle);
+  var sin = Math.sin(angle);
+  var dx = (point.x - 0.5) * aspect;
+  var dy = point.y - 0.5;
+  return {
+    x: ((dx * cos - dy * sin) / aspect) + 0.5,
+    y: (dx * sin + dy * cos) + 0.5,
+  };
+}
+
+function imageAspectForTransform(delta) {
+  var img = document.getElementById('editorImg');
+  if (!img || !img.clientWidth || !img.clientHeight) return null;
+  var current = img.clientWidth / img.clientHeight;
+  var normalizedDelta = ((Number(delta) || 0) % 360 + 360) % 360;
+  return {
+    current: current,
+    next: normalizedDelta === 90 || normalizedDelta === 270 ? 1 / current : current,
+  };
+}
+
+function transformCropWithStraighten(crop, transformPoint, straighten, aspects) {
+  var angle = Number(straighten || 0);
+  return cropFromTransformedCorners(crop, function(point) {
+    var next = point;
+    if (angle && aspects) next = rotatePointInBox(next, -angle, aspects.current);
+    next = transformPoint(next);
+    if (angle && aspects) next = rotatePointInBox(next, angle, aspects.next);
+    return next;
+  });
+}
+
 function transformCropForRotation(crop, delta, flip) {
   var normalizedDelta = ((Number(delta) || 0) % 360 + 360) % 360;
   var activeFlip = flip || {};
-  return cropFromTransformedCorners(crop, function(point) {
+  var aspects = imageAspectForTransform(normalizedDelta);
+  return transformCropWithStraighten(crop, function(point) {
     var x = point.x;
     var y = point.y;
     if (activeFlip.horizontal) x = 1 - x;
@@ -484,15 +520,16 @@ function transformCropForRotation(crop, delta, flip) {
     if (activeFlip.horizontal) x = 1 - x;
     if (activeFlip.vertical) y = 1 - y;
     return { x: x, y: y };
-  });
+  }, editorState.recipe.straighten, aspects);
 }
 
 function transformCropForFlip(crop, axis) {
-  return cropFromTransformedCorners(crop, function(point) {
+  var aspects = imageAspectForTransform(0);
+  return transformCropWithStraighten(crop, function(point) {
     if (axis === 'horizontal') return { x: 1 - point.x, y: point.y };
     if (axis === 'vertical') return { x: point.x, y: 1 - point.y };
     return point;
-  });
+  }, editorState.recipe.straighten, aspects);
 }
 
 function adjustmentValues(recipe) {
