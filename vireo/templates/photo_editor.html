@@ -444,6 +444,57 @@ function ensureCrop(recipe) {
   return recipe.crop;
 }
 
+function cropFromTransformedCorners(crop, transformPoint) {
+  var c = clampCrop(crop);
+  var corners = [
+    { x: c.x, y: c.y },
+    { x: c.x + c.w, y: c.y },
+    { x: c.x, y: c.y + c.h },
+    { x: c.x + c.w, y: c.y + c.h },
+  ].map(transformPoint);
+  var xs = corners.map(function(p) { return p.x; });
+  var ys = corners.map(function(p) { return p.y; });
+  var x1 = Math.min.apply(Math, xs);
+  var y1 = Math.min.apply(Math, ys);
+  var x2 = Math.max.apply(Math, xs);
+  var y2 = Math.max.apply(Math, ys);
+  return clampCrop({ x: x1, y: y1, w: x2 - x1, h: y2 - y1 });
+}
+
+function transformCropForRotation(crop, delta, flip) {
+  var normalizedDelta = ((Number(delta) || 0) % 360 + 360) % 360;
+  var activeFlip = flip || {};
+  return cropFromTransformedCorners(crop, function(point) {
+    var x = point.x;
+    var y = point.y;
+    if (activeFlip.horizontal) x = 1 - x;
+    if (activeFlip.vertical) y = 1 - y;
+    if (normalizedDelta === 90) {
+      var nextX = 1 - y;
+      y = x;
+      x = nextX;
+    } else if (normalizedDelta === 180) {
+      x = 1 - x;
+      y = 1 - y;
+    } else if (normalizedDelta === 270) {
+      var nextY = 1 - x;
+      x = y;
+      y = nextY;
+    }
+    if (activeFlip.horizontal) x = 1 - x;
+    if (activeFlip.vertical) y = 1 - y;
+    return { x: x, y: y };
+  });
+}
+
+function transformCropForFlip(crop, axis) {
+  return cropFromTransformedCorners(crop, function(point) {
+    if (axis === 'horizontal') return { x: 1 - point.x, y: point.y };
+    if (axis === 'vertical') return { x: point.x, y: 1 - point.y };
+    return point;
+  });
+}
+
 function adjustmentValues(recipe) {
   var adj = recipe && recipe.adjustments || {};
   var wb = adj.white_balance || {};
@@ -604,18 +655,21 @@ function markChanged(render) {
 }
 
 function rotateRecipe(delta) {
+  var crop = ensureCrop(editorState.recipe);
   var current = Number(editorState.recipe.rotation || 0);
   var next = (current + delta) % 360;
   if (next < 0) next += 360;
   editorState.recipe.rotation = next;
-  editorState.recipe.crop = { x: 0, y: 0, w: 1, h: 1 };
+  editorState.recipe.crop = transformCropForRotation(crop, delta, editorState.recipe.flip || {});
   markChanged(true);
 }
 
 function flipRecipe(axis) {
+  var crop = ensureCrop(editorState.recipe);
   var flip = editorState.recipe.flip || {};
   flip[axis] = !flip[axis];
   editorState.recipe.flip = flip;
+  editorState.recipe.crop = transformCropForFlip(crop, axis);
   markChanged(true);
 }
 
