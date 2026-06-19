@@ -157,7 +157,9 @@ def test_burst_native_open_browse_uses_selected_card(live_server, page):
     page.evaluate("window.handleNativeMenuCommand('photo_open_browse')")
 
     page.wait_for_function(
-        f"location.pathname === '/browse' && new URLSearchParams(location.search).get('photo_id') === '{pid}'",
+        "expectedPid => location.pathname === '/browse'"
+        " && new URLSearchParams(location.search).get('photo_id') === expectedPid",
+        arg=pid,
         timeout=5000,
     )
 
