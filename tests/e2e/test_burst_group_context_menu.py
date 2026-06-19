@@ -137,6 +137,31 @@ def test_burst_right_click_force_selects_card(live_server, page):
     assert str(selected) == target_pid
 
 
+def test_burst_native_open_browse_uses_selected_card(live_server, page):
+    """Native Photo > Open in Browse should understand burst modal selection."""
+    n = _seed_burst_group(live_server["db"])
+    if n < 1:
+        pytest.skip("could not seed burst group")
+
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    page.wait_for_load_state("networkidle")
+    _open_burst_modal(page)
+
+    page.locator("#grmOverlay .grm-card[data-photo-id]").first.wait_for(
+        state="visible", timeout=2000,
+    )
+    pid = page.evaluate("String(grmState.selected)")
+    assert pid and pid != "null"
+
+    page.evaluate("window.handleNativeMenuCommand('photo_open_browse')")
+
+    page.wait_for_function(
+        f"location.pathname === '/browse' && new URLSearchParams(location.search).get('photo_id') === '{pid}'",
+        timeout=5000,
+    )
+
+
 def test_burst_menu_has_chip_rows(live_server, page):
     """Burst menu includes rating chips (0-5) and flag chips (3)."""
     n = _seed_burst_group(live_server["db"])

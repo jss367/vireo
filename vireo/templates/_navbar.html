@@ -7499,6 +7499,16 @@ function nativeMenuActivePhotoIds() {
   ) {
     return [_lightboxCurrentId];
   }
+  if (
+    typeof grmState !== 'undefined' &&
+    document.getElementById('grmOverlay') &&
+    document.getElementById('grmOverlay').classList.contains('open')
+  ) {
+    if (grmState.selectedIds && grmState.selectedIds.size) {
+      return Array.from(grmState.selectedIds);
+    }
+    if (grmState.selected != null) return [grmState.selected];
+  }
   if (typeof getActiveSelection === 'function') {
     var ids = getActiveSelection();
     if (ids && ids.length) return ids;
