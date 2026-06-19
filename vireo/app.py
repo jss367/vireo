@@ -2407,6 +2407,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def review():
         return render_template("review.html")
 
+    @app.route("/edit/<int:photo_id>")
+    def photo_editor_page(photo_id):
+        return render_template("photo_editor.html")
+
     @app.route("/lightroom")
     def lightroom_page():
         return render_template("lightroom.html")
@@ -3923,6 +3927,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(body, dict):
             return json_error("request body must be a JSON object")
         recipe = body.get("recipe", body)
+        description = body.get("description")
+        if not isinstance(description, str) or not description.strip():
+            description = "Updated photo edit recipe"
         if not isinstance(recipe, dict):
             return json_error("recipe must be a JSON object")
         photo = db.get_photo(photo_id, verify_workspace=True)
@@ -3943,7 +3950,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _queue_edit_recipe_sync(db, photo_id, new_value)
             db.record_edit(
                 "edit_recipe",
-                "Updated photo edit recipe",
+                description.strip(),
                 new_value,
                 [{"photo_id": photo_id, "old_value": old_value, "new_value": new_value}],
             )
@@ -3972,6 +3979,57 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 [{"photo_id": photo_id, "old_value": old_value, "new_value": ""}],
             )
         return jsonify({"ok": True, "recipe": None})
+
+    @app.route("/api/photos/<int:photo_id>/edit-history")
+    def api_photo_edit_history(photo_id):
+        db = _get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return json_error("not found", 404)
+        limit = min(max(1, request.args.get("limit", 50, type=int)), 200)
+        rows = db.conn.execute(
+            """SELECT eh.id, eh.description, eh.created_at, eh.undone,
+                      ehi.old_value, ehi.new_value
+               FROM edit_history eh
+               JOIN edit_history_items ehi ON ehi.edit_id = eh.id
+               WHERE eh.workspace_id = ?
+                 AND eh.action_type = 'edit_recipe'
+                 AND ehi.photo_id = ?
+               ORDER BY eh.created_at DESC, eh.id DESC
+               LIMIT ?""",
+            (db._ws_id(), photo_id, limit),
+        ).fetchall()
+
+        from image_edits import RecipeError, copy_recipe
+
+        def decode_recipe(value):
+            if not value:
+                return None
+            try:
+                return copy_recipe(value)
+            except RecipeError:
+                log.warning(
+                    "Skipping invalid edit recipe history payload for photo %s",
+                    photo_id,
+                    exc_info=True,
+                )
+                return None
+
+        history = []
+        for row in rows:
+            history.append({
+                "id": row["id"],
+                "description": row["description"],
+                "created_at": row["created_at"],
+                "undone": bool(row["undone"]),
+                "old_recipe": decode_recipe(row["old_value"]),
+                "new_recipe": decode_recipe(row["new_value"]),
+            })
+        return jsonify({
+            "photo_id": photo_id,
+            "current_recipe": db.get_photo_edit_recipe(photo_id),
+            "history": history,
+        })
 
     @app.route("/api/files/reveal", methods=["POST"])
     def api_files_reveal():
