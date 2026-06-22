@@ -376,8 +376,6 @@ def test_exiftool_status_missing(monkeypatch):
 
 def test_exiftool_status_present(monkeypatch):
     """When exiftool resolves, status reports the path and parsed version."""
-    import subprocess
-
     import metadata
 
     monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
