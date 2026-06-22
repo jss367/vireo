@@ -1,5 +1,5 @@
 use fs2::FileExt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::AppHandle;
 use tauri_plugin_shell::process::CommandChild;
@@ -10,6 +10,60 @@ const RUNTIME_BOOT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const RUNTIME_BOOT_WAIT_INTERVAL: Duration = Duration::from_millis(200);
 const GUI_CLIENTS_DIR: &str = ".vireo/gui-clients";
+
+/// Typed failure modes for `start_sidecar`. The launcher matches on these
+/// to decide how to surface the error to the user — an
+/// `IncompatibleDatabase` gets actionable remediation guidance, everything
+/// else falls back to the generic "could not start backend" path.
+#[derive(Debug, Clone)]
+pub enum SidecarStartError {
+    /// The sidecar exited with a structured `incompatible_database` signal
+    /// on stderr. The launcher surfaces `db_path` so the user knows which
+    /// file to back up.
+    IncompatibleDatabase { db_path: String, reason: String },
+    /// Any other failure (spawn error, generic early exit, health timeout).
+    Generic(String),
+}
+
+impl std::fmt::Display for SidecarStartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncompatibleDatabase { db_path, reason } => write!(
+                f,
+                "Incompatible database at {}: {}",
+                db_path, reason
+            ),
+            Self::Generic(msg) => f.write_str(msg),
+        }
+    }
+}
+
+/// Structured error payload the Python sidecar writes to stderr when it
+/// can't start. See `vireo/app.py`'s `IncompatibleDatabaseError` handler.
+#[derive(serde::Deserialize)]
+struct SidecarErrorPayload {
+    error: String,
+    db_path: Option<String>,
+    reason: Option<String>,
+}
+
+/// Parse a single line of sidecar stderr looking for the structured
+/// `incompatible_database` JSON object. Returns `None` for log lines
+/// (which is the common case).
+fn parse_structured_error(line: &str) -> Option<SidecarStartError> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let payload: SidecarErrorPayload = serde_json::from_str(trimmed).ok()?;
+    match payload.error.as_str() {
+        "incompatible_database" => Some(SidecarStartError::IncompatibleDatabase {
+            db_path: payload.db_path.unwrap_or_default(),
+            reason: payload.reason.unwrap_or_else(|| "no details".into()),
+        }),
+        _ => None,
+    }
+}
 
 /// Holds the sidecar child process so we can shut it down on exit.
 pub struct SidecarState {
@@ -88,16 +142,31 @@ fn find_free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Wait for the sidecar to respond to /api/health.
-fn wait_for_health(port: u16, timeout: Duration) -> Result<(), String> {
+/// Wait for the sidecar to respond to /api/health, racing against an
+/// early exit signaled through `early_exit`. The supervisor task fills
+/// this `Mutex` when it sees the structured `incompatible_database`
+/// stderr line or a `Terminated` event, so we fail fast instead of
+/// blocking the full `timeout` on a sidecar that already gave up.
+fn wait_for_health(
+    port: u16,
+    timeout: Duration,
+    early_exit: Arc<Mutex<Option<SidecarStartError>>>,
+) -> Result<(), SidecarStartError> {
     let start = std::time::Instant::now();
     let url = format!("http://127.0.0.1:{}/api/health", port);
     loop {
+        if let Some(err) = early_exit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return Err(err);
+        }
         if start.elapsed() > timeout {
-            return Err(format!(
+            return Err(SidecarStartError::Generic(format!(
                 "Sidecar did not become healthy within {}s",
                 timeout.as_secs()
-            ));
+            )));
         }
         match ureq::get(&url).call() {
             Ok(resp) if resp.status() == 200 => return Ok(()),
@@ -314,7 +383,7 @@ fn process_is_alive(_pid: u32) -> bool {
 }
 
 /// Spawn the Python sidecar and wait for it to be ready.
-pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, String> {
+pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, SidecarStartError> {
     let attach_start = std::time::Instant::now();
     while let Some(runtime) = existing_runtime() {
         log::info!(
@@ -345,7 +414,7 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, String> {
     let mut cmd = app
         .shell()
         .sidecar("vireo-server")
-        .map_err(|e| format!("Failed to create sidecar command: {}", e))?;
+        .map_err(|e| SidecarStartError::Generic(format!("Failed to create sidecar command: {}", e)))?;
 
     #[cfg(target_os = "macos")]
     {
@@ -364,9 +433,18 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, String> {
                 .to_string_lossy(),
         ])
         .spawn()
-        .map_err(|e| format!("Failed to spawn sidecar: {}", e))?;
+        .map_err(|e| SidecarStartError::Generic(format!("Failed to spawn sidecar: {}", e)))?;
 
-    // Log sidecar stdout/stderr in a background task
+    // Shared slot the supervisor task fills when the sidecar gives up
+    // before /api/health responds. `wait_for_health` polls this in
+    // parallel so a structured failure cuts the 30s timeout short and
+    // carries the typed error back to the launcher.
+    let early_exit: Arc<Mutex<Option<SidecarStartError>>> = Arc::new(Mutex::new(None));
+    let early_exit_supervisor = Arc::clone(&early_exit);
+
+    // Log sidecar stdout/stderr in a background task and watch stderr
+    // for the structured error payload that signals a graceful refusal
+    // (e.g. incompatible database).
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
@@ -374,10 +452,31 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, String> {
                     log::info!("[sidecar] {}", String::from_utf8_lossy(&line));
                 }
                 tauri_plugin_shell::process::CommandEvent::Stderr(line) => {
-                    log::warn!("[sidecar] {}", String::from_utf8_lossy(&line));
+                    let text = String::from_utf8_lossy(&line);
+                    log::warn!("[sidecar] {}", text);
+                    if let Some(err) = parse_structured_error(&text) {
+                        let mut guard = early_exit_supervisor
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if guard.is_none() {
+                            *guard = Some(err);
+                        }
+                    }
                 }
                 tauri_plugin_shell::process::CommandEvent::Terminated(payload) => {
                     log::info!("[sidecar] terminated: {:?}", payload);
+                    // Prefer a structured error we already captured;
+                    // otherwise record the bare termination so
+                    // wait_for_health stops polling immediately.
+                    let mut guard = early_exit_supervisor
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if guard.is_none() {
+                        *guard = Some(SidecarStartError::Generic(format!(
+                            "Sidecar exited before becoming healthy (code: {:?}, signal: {:?})",
+                            payload.code, payload.signal
+                        )));
+                    }
                     break;
                 }
                 _ => {}
@@ -385,8 +484,9 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, String> {
         }
     });
 
-    // Wait up to 30 seconds for the sidecar to be healthy
-    wait_for_health(port, Duration::from_secs(30))?;
+    // Wait up to 30 seconds for the sidecar to be healthy, but bail out
+    // early if the supervisor sees a structured failure or termination.
+    wait_for_health(port, Duration::from_secs(30), early_exit)?;
 
     Ok(SidecarState::owned(child, port))
 }
@@ -464,6 +564,42 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn parse_structured_error_recognizes_incompatible_database() {
+        let line = r#"{"error":"incompatible_database","db_path":"/home/u/.vireo/vireo.db","reason":"no such column: classifier_model"}"#;
+        match parse_structured_error(line) {
+            Some(SidecarStartError::IncompatibleDatabase { db_path, reason }) => {
+                assert_eq!(db_path, "/home/u/.vireo/vireo.db");
+                assert!(reason.contains("classifier_model"));
+            }
+            other => panic!("expected IncompatibleDatabase, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_structured_error_tolerates_leading_whitespace() {
+        let line = "   {\"error\":\"incompatible_database\",\"db_path\":\"/tmp/x.db\",\"reason\":\"r\"}   \n";
+        assert!(matches!(
+            parse_structured_error(line),
+            Some(SidecarStartError::IncompatibleDatabase { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_structured_error_ignores_log_lines() {
+        assert!(parse_structured_error("INFO Vireo starting on port 8080").is_none());
+        assert!(parse_structured_error("Traceback (most recent call last):").is_none());
+        assert!(parse_structured_error("").is_none());
+    }
+
+    #[test]
+    fn parse_structured_error_ignores_unrelated_json() {
+        // Other structured errors (e.g. startup_failed) are not in scope
+        // for the incompatible-database remediation flow.
+        let line = r#"{"error":"already_running","port":8080,"pid":123}"#;
+        assert!(parse_structured_error(line).is_none());
     }
 
     #[test]
