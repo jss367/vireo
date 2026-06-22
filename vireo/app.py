@@ -17841,6 +17841,20 @@ def main():
             "reason": str(e),
         }) + "\n")
         raise SystemExit(3) from e
+    except Exception as e:
+        # Any other failure to build the app is still a fatal startup error
+        # (corrupt-but-not-stale DB, missing/locked resource, an unexpected
+        # bug, ...). Emit the same structured signal the lock-fault path uses
+        # so the desktop launcher can surface an actionable dialog instead of
+        # leaving the user with a blank window or a generic 30s health-check
+        # timeout. The full traceback still goes to the log for diagnosis.
+        import sys as _sys
+        log.exception("Vireo failed to start while initializing the app")
+        _sys.stderr.write(json.dumps({
+            "error": "startup_failed",
+            "reason": str(e) or e.__class__.__name__,
+        }) + "\n")
+        raise SystemExit(2) from e
 
     # Startup banner
     import config as cfg

@@ -47,9 +47,12 @@ struct SidecarErrorPayload {
     reason: Option<String>,
 }
 
-/// Parse a single line of sidecar stderr looking for the structured
-/// `incompatible_database` JSON object. Returns `None` for log lines
-/// (which is the common case).
+/// Parse a single line of sidecar stderr looking for a structured startup
+/// error JSON object. `incompatible_database` maps to the actionable
+/// remediation path; every other recognized `error` (e.g. `startup_failed`)
+/// maps to `Generic` so the launcher still surfaces *some* message rather
+/// than failing silently. Returns `None` for ordinary log lines (the common
+/// case).
 fn parse_structured_error(line: &str) -> Option<SidecarStartError> {
     let trimmed = line.trim();
     if !trimmed.starts_with('{') {
@@ -61,6 +64,12 @@ fn parse_structured_error(line: &str) -> Option<SidecarStartError> {
             db_path: payload.db_path.unwrap_or_default(),
             reason: payload.reason.unwrap_or_else(|| "no details".into()),
         }),
+        "startup_failed" => {
+            let reason = payload
+                .reason
+                .unwrap_or_else(|| "The Vireo backend could not start.".into());
+            Some(SidecarStartError::Generic(reason))
+        }
         _ => None,
     }
 }
@@ -596,10 +605,28 @@ mod tests {
 
     #[test]
     fn parse_structured_error_ignores_unrelated_json() {
-        // Other structured errors (e.g. startup_failed) are not in scope
-        // for the incompatible-database remediation flow.
+        // `already_running` is handled by the launcher's attach path, not the
+        // start-failure flow, so it is intentionally not parsed here.
         let line = r#"{"error":"already_running","port":8080,"pid":123}"#;
         assert!(parse_structured_error(line).is_none());
+    }
+
+    #[test]
+    fn parse_structured_error_maps_startup_failed_to_generic() {
+        let line = r#"{"error":"startup_failed","reason":"disk full"}"#;
+        match parse_structured_error(line) {
+            Some(SidecarStartError::Generic(msg)) => assert!(msg.contains("disk full")),
+            other => panic!("expected Generic, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_structured_error_startup_failed_without_reason_has_fallback() {
+        let line = r#"{"error":"startup_failed"}"#;
+        match parse_structured_error(line) {
+            Some(SidecarStartError::Generic(msg)) => assert!(!msg.is_empty()),
+            other => panic!("expected Generic, got {:?}", other),
+        }
     }
 
     #[test]
