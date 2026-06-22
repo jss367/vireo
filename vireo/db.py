@@ -21,6 +21,36 @@ AUTO_MATCH_REVIEW_MARKER = "__vireo_auto_match__"
 _SQLITE_PARAM_CHUNK_SIZE = 800
 
 
+class IncompatibleDatabaseError(RuntimeError):
+    """The on-disk database is from a Vireo version this build can't open.
+
+    Raised when schema setup fails against a pre-existing database — almost
+    always because the file predates a schema change and there is no
+    migration path (e.g. an old ``predictions`` table lacking the
+    ``classifier_model`` column). ``CREATE TABLE IF NOT EXISTS`` silently
+    skips the stale table, so the mismatch only surfaces later as an
+    ``OperationalError`` ("no such column: ...") when a dependent index or
+    query runs. We convert that opaque failure into an actionable signal so
+    callers can tell the user to back up and remove the file rather than
+    crashing with a raw traceback.
+
+    ``db_path`` is the offending file; ``cause`` is the original SQLite error
+    text, preserved so genuine schema bugs (vs. legitimately old DBs) stay
+    diagnosable.
+    """
+
+    def __init__(self, db_path, cause=None):
+        self.db_path = db_path
+        self.cause = cause
+        msg = (
+            f"The database at {db_path} is from an incompatible older version "
+            f"of Vireo and cannot be opened by this build"
+        )
+        if cause:
+            msg += f" ({cause})"
+        super().__init__(msg)
+
+
 def _nfc(name: str) -> str:
     """NFC-normalize a filename for byte-exact comparison against scandir output.
 
@@ -276,7 +306,20 @@ class Database:
         self.conn.execute("PRAGMA busy_timeout=30000")  # 30 s — tolerate parallel scan writers
         self._active_workspace_id = None
         self._new_images_cache = get_shared_cache()
-        self._create_tables()
+        # Schema setup asserts the canonical schema against whatever is on
+        # disk. `CREATE TABLE IF NOT EXISTS` silently skips a stale table, so
+        # a database from an older Vireo (e.g. a pre-`classifier_model`
+        # `predictions` table) only fails later when a dependent index/query
+        # references the missing column. Convert that opaque OperationalError
+        # into a typed, actionable error so callers can guide the user to
+        # reset the file instead of crashing with a raw traceback. The
+        # per-column migrations inside `_create_tables` catch their own
+        # expected OperationalErrors, so only genuine schema mismatches
+        # propagate here. On a fresh or current database this never raises.
+        try:
+            self._create_tables()
+        except sqlite3.OperationalError as e:
+            raise IncompatibleDatabaseError(self._db_path, str(e)) from e
         self.ensure_default_workspace()
         # Idempotent legacy-type migration. MUST run before genre seeding
         # so an upgraded DB with e.g. 'descriptive'/'event'/'people' rows
