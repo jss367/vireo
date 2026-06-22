@@ -179,9 +179,16 @@ jobs:
         run: pip install -e .
 
       # Linux is the canonical full run and enforces the coverage threshold.
+      # Cap xdist workers at 2 for the same reason as macOS/Windows below: with
+      # ``-n auto`` (one worker per core) several heavy ML/pipeline tests can
+      # load models on parallel workers at once, spike memory, and trip the
+      # Linux OOM killer — which takes out the runner agent and surfaces as an
+      # intermittent ``The runner has received a shutdown signal`` cancellation
+      # rather than a test failure. ``-n 2`` halves peak memory; the canonical
+      # run is a few minutes slower but well under the 60-minute job timeout.
       - name: Run tests with coverage (Linux)
         if: needs.changes.outputs.python == 'true' && runner.os == 'Linux'
-        run: python -m pytest tests/ vireo/tests/ -n auto -v --tb=short --cov=vireo --cov-report=term-missing --cov-fail-under=40
+        run: python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short --cov=vireo --cov-report=term-missing --cov-fail-under=40
 
       # macOS/Windows verify platform-specific code paths. The coverage gate is
       # skipped here because POSIX-only tests don't run on Windows, which would
