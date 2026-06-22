@@ -1119,6 +1119,11 @@ body { padding-bottom: 36px; }
     <span id="modelWarningText"></span>
     <button onclick="this.parentElement.style.display='none'" style="float:right;background:none;border:none;cursor:pointer;font-size:16px;line-height:1;padding:0 4px;">&times;</button>
   </div>
+  <div id="pipelineErrorBanner" data-testid="pipeline-error-banner" style="display:none;background:var(--danger,#e5484d);color:#fff;padding:10px 14px;border-radius:6px;margin:8px 0;font-size:13px;">
+    <button onclick="this.parentElement.style.display='none'" style="float:right;background:none;border:none;color:#fff;cursor:pointer;font-size:16px;line-height:1;padding:0 4px;">&times;</button>
+    <strong>Pipeline failed</strong>
+    <div id="pipelineErrorText" style="margin-top:4px;white-space:pre-line;"></div>
+  </div>
 </div><!-- end pipeline-left -->
 
 <div class="pipeline-right">
@@ -2452,6 +2457,8 @@ async function startPipeline() {
   _pipelineCancelling = false;
   _currentPipelineJobId = null;
   document.getElementById('modelWarningBanner').style.display = 'none';
+  var _prevErrBanner = document.getElementById('pipelineErrorBanner');
+  if (_prevErrBanner) _prevErrBanner.style.display = 'none';
 
   // Create new workspace if requested
   if (_destWorkspaceMode === 'new') {
@@ -2885,6 +2892,22 @@ function _updatePipelineStageUI(p) {
   }
 }
 
+// Strip the internal "[stage] Fatal:" prefix so the banner reads as a plain,
+// actionable sentence (the stage is already conveyed by the failed card pill).
+function _humanizePipelineError(msg) {
+  return String(msg).replace(/^\[\w+\]\s*/, '').replace(/^Fatal:\s*/i, '');
+}
+
+// Show a prominent, dismissible error banner with the full failure message(s).
+function _showPipelineError(messages) {
+  var banner = document.getElementById('pipelineErrorBanner');
+  var text = document.getElementById('pipelineErrorText');
+  if (!banner || !text) return;
+  text.textContent = messages.join('\n');
+  banner.style.display = '';
+  banner.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
 function _onPipelineComplete(result) {
   if (result.status === 'cancelled') {
     var actionStatus = document.getElementById('pipelineActionStatus');
@@ -3021,6 +3044,7 @@ function _onPipelineComplete(result) {
       var stage = match ? match[1] : 'unknown';
       errorStages[stage] = err;
     });
+    var firstFailedCard = null;
     for (var stage in errorStages) {
       var cardSuffix = _stageToCard[stage];
       if (cardSuffix) {
@@ -3029,7 +3053,19 @@ function _onPipelineComplete(result) {
         delete _runningStages[cardSuffix];
         _stageOutcomes[cardSuffix] = 'failed';
         _setPill(cardSuffix, 'failed');
+        if (!firstFailedCard) firstFailedCard = cardSuffix;
       }
+    }
+    // The per-card status span is easy to miss (and invisible when the card
+    // is collapsed), and errors whose stage has no card aren't shown at all.
+    // Surface the full, actionable message in a top-level banner and open the
+    // failed card so the user actually sees why the run stopped.
+    _showPipelineError(Object.keys(errorStages).map(function(s) {
+      return _humanizePipelineError(errorStages[s]);
+    }));
+    if (firstFailedCard) {
+      var failedCardEl = document.getElementById('card-' + firstFailedCard.toLowerCase());
+      if (failedCardEl) failedCardEl.classList.add('expanded');
     }
   }
 
