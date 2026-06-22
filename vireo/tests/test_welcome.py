@@ -74,7 +74,6 @@ def test_models_status_label_model_without_labels_needs_setup(app_and_db, monkey
 
 def test_models_status_label_model_with_labels_ready(app_and_db, monkeypatch, tmp_path):
     """A label-needing model becomes ready once an active species list exists."""
-    import labels
     import models
     monkeypatch.setattr(models, "get_active_model", lambda: {
         "id": "bioclip-vit-b-16", "name": "BioCLIP", "downloaded": True,
