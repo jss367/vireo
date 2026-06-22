@@ -24,7 +24,12 @@ from pathlib import Path
 from urllib.parse import quote
 
 import places
-from db import KEYWORD_TYPES, Database, commit_with_retry
+from db import (
+    KEYWORD_TYPES,
+    Database,
+    IncompatibleDatabaseError,
+    commit_with_retry,
+)
 from flask import (
     Flask,
     Response,
@@ -17812,9 +17817,44 @@ def main():
     api_token = generate_token()
     mode = "headless" if args.headless else "gui"
 
-    app = create_app(
-        db_path=args.db, thumb_cache_dir=args.thumb_dir, api_token=api_token,
-    )
+    try:
+        app = create_app(
+            db_path=args.db, thumb_cache_dir=args.thumb_dir, api_token=api_token,
+        )
+    except IncompatibleDatabaseError as e:
+        # The database file predates a schema change this build can't migrate.
+        # Fail fast with actionable guidance instead of letting a raw
+        # OperationalError traceback escape (which the sidecar host only sees
+        # as "did not become healthy within 30s"). The atexit/SIGTERM cleanup
+        # registered above releases the single-instance lock and runtime.json
+        # on this exit, so a retry isn't blocked by a stale reservation.
+        import sys as _sys
+        log.error(
+            "Cannot open database at %s: it is from an incompatible older "
+            "version of Vireo. Back it up and remove it to start fresh "
+            "(e.g. `mv %s %s.bak`), then relaunch. Underlying error: %s",
+            e.db_path, e.db_path, e.db_path, e.cause,
+        )
+        _sys.stderr.write(json.dumps({
+            "error": "incompatible_database",
+            "db_path": e.db_path,
+            "reason": str(e),
+        }) + "\n")
+        raise SystemExit(3) from e
+    except Exception as e:
+        # Any other failure to build the app is still a fatal startup error
+        # (corrupt-but-not-stale DB, missing/locked resource, an unexpected
+        # bug, ...). Emit the same structured signal the lock-fault path uses
+        # so the desktop launcher can surface an actionable dialog instead of
+        # leaving the user with a blank window or a generic 30s health-check
+        # timeout. The full traceback still goes to the log for diagnosis.
+        import sys as _sys
+        log.exception("Vireo failed to start while initializing the app")
+        _sys.stderr.write(json.dumps({
+            "error": "startup_failed",
+            "reason": str(e) or e.__class__.__name__,
+        }) + "\n")
+        raise SystemExit(2) from e
 
     # Startup banner
     import config as cfg

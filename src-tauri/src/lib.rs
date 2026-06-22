@@ -3,9 +3,10 @@ mod menu;
 mod sidecar;
 mod tray;
 mod updater;
-use sidecar::SidecarState;
+use sidecar::{SidecarStartError, SidecarState};
 use tauri::{Manager, RunEvent};
 use tauri::window::{ProgressBarState, ProgressBarStatus};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
 const INDETERMINATE_PROGRESS_FALLBACK: u64 = 10;
@@ -143,9 +144,50 @@ pub fn run() {
                             }
                         }
                     }
+                    Err(SidecarStartError::IncompatibleDatabase { db_path, reason }) => {
+                        // The Python sidecar refused to open the DB because
+                        // its schema predates a non-migratable change. Surface
+                        // an actionable dialog before exiting — without this
+                        // the user just sees the WKWebView fail to load and
+                        // has no way to tell whether to delete the DB, file a
+                        // bug, or reinstall.
+                        log::error!(
+                            "Incompatible database at {}: {}. Back up this file and relaunch.",
+                            db_path, reason
+                        );
+                        eprintln!(
+                            "Vireo: Incompatible database at {}: {}",
+                            db_path, reason
+                        );
+                        app.handle()
+                            .dialog()
+                            .message(format!(
+                                "Vireo can't open the database at:\n\n{}\n\nIt's from an incompatible older version of Vireo. To start fresh, move this file aside (for example, rename it with a `.bak` suffix) and relaunch.\n\nDetails: {}",
+                                db_path, reason
+                            ))
+                            .title("Incompatible Vireo Database")
+                            .kind(MessageDialogKind::Error)
+                            .blocking_show();
+                        std::process::exit(3);
+                    }
                     Err(e) => {
-                        log::error!("Failed to start sidecar: {}", e);
-                        eprintln!("Vireo: Failed to start Python backend: {}", e);
+                        // Any other startup failure (corrupt DB, locked file,
+                        // port conflict, health timeout, unexpected crash).
+                        // Always surface a dialog rather than exiting silently
+                        // into a blank window — the user otherwise has no idea
+                        // why Vireo didn't open.
+                        let reason = e.to_string();
+                        log::error!("Failed to start sidecar: {}", reason);
+                        eprintln!("Vireo: Failed to start Python backend: {}", reason);
+                        app.handle()
+                            .dialog()
+                            .message(format!(
+                                "Vireo couldn't start its backend.\n\nDetails: {}\n\nTry relaunching. If the problem persists, check Vireo's log file for more information.",
+                                reason
+                            ))
+                            .title("Vireo Couldn't Start")
+                            .kind(MessageDialogKind::Error)
+                            .blocking_show();
                         std::process::exit(1);
                     }
                 }

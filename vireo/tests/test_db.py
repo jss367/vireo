@@ -50,6 +50,117 @@ def test_working_copy_path_column_exists(tmp_path):
     assert row[0][0] == "working_copy_path"
 
 
+def test_old_predictions_schema_raises_incompatible(tmp_path):
+    """A pre-`classifier_model` database fails with a typed, actionable error.
+
+    Reproduces the real-world crash: a database from an older Vireo has a
+    `predictions` table built around a `model` column. The current schema's
+    `CREATE TABLE IF NOT EXISTS predictions` silently skips that existing
+    table, then `idx_predictions_identity` references the absent
+    `classifier_model` column and raises `no such column: classifier_model`.
+    `Database.__init__` must convert that opaque OperationalError into an
+    IncompatibleDatabaseError carrying the db path and original cause.
+    """
+    import sqlite3
+
+    import pytest
+    from db import Database, IncompatibleDatabaseError
+
+    db_path = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE predictions (
+            id           INTEGER PRIMARY KEY,
+            detection_id INTEGER,
+            species      TEXT,
+            model        TEXT,
+            UNIQUE(detection_id, model, species)
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(IncompatibleDatabaseError) as excinfo:
+        Database(db_path)
+    assert excinfo.value.db_path == db_path
+    assert "classifier_model" in (excinfo.value.cause or "")
+    # The message is user-facing remediation context, not a bare stack trace.
+    assert "incompatible older version" in str(excinfo.value)
+
+
+def test_fresh_database_does_not_raise_incompatible(tmp_path):
+    """A fresh database initializes cleanly — the guard never false-fires."""
+    from db import Database
+
+    # No exception == pass. Sanity-check a current-schema table came through.
+    db = Database(str(tmp_path / "fresh.db"))
+    cols = [r[1] for r in db.conn.execute("PRAGMA table_info(predictions)").fetchall()]
+    assert "classifier_model" in cols
+
+
+def test_insert_into_stale_table_raises_incompatible(tmp_path, monkeypatch):
+    """A stale-schema failure surfacing as ``has no column named …`` is caught.
+
+    SQLite reports a different OperationalError shape when an INSERT/UPDATE
+    targets an existing-but-stale table that's missing a newly added column:
+    ``table <name> has no column named <col>`` rather than
+    ``no such column: …``. ``_create_tables`` has INSERT paths into long-lived
+    tables (e.g. backfill writes to ``db_meta``) that can hit this when the
+    on-disk shape is older than the current build expects, so the guard must
+    classify this third spelling as an incompatible-database failure too —
+    otherwise the raw OperationalError escapes, ``main()`` never emits the
+    structured ``incompatible_database`` stderr, and the desktop launcher
+    shows the generic "Sidecar did not become healthy" timeout instead of
+    the actionable remediation.
+    """
+    import sqlite3
+
+    import db as db_module
+    import pytest
+    from db import Database, IncompatibleDatabaseError
+
+    def fake_create(self):
+        raise sqlite3.OperationalError(
+            "table db_meta has no column named value"
+        )
+
+    monkeypatch.setattr(db_module.Database, "_create_tables", fake_create)
+
+    with pytest.raises(IncompatibleDatabaseError) as excinfo:
+        Database(str(tmp_path / "stale.db"))
+    assert excinfo.value.db_path == str(tmp_path / "stale.db")
+    assert "has no column named" in (excinfo.value.cause or "")
+    assert "incompatible older version" in str(excinfo.value)
+
+
+def test_non_schema_operational_error_propagates(tmp_path, monkeypatch):
+    """Environmental OperationalErrors propagate as-is, not as IncompatibleDatabaseError.
+
+    The guard is for stale-schema failures ("no such column/table: …"). Other
+    OperationalErrors — file locked, read-only, disk full, I/O error — are
+    recoverable environmental problems and must surface accurately, otherwise
+    the user gets misleading "back up and remove your DB" remediation for a
+    perfectly good database that just needs a different fix.
+    """
+    import sqlite3
+
+    import db as db_module
+    import pytest
+    from db import Database, IncompatibleDatabaseError
+
+    def fake_create(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db_module.Database, "_create_tables", fake_create)
+
+    with pytest.raises(sqlite3.OperationalError) as excinfo:
+        Database(str(tmp_path / "locked.db"))
+    assert "locked" in str(excinfo.value)
+    assert not isinstance(excinfo.value, IncompatibleDatabaseError)
+
+
 def test_add_and_get_folder(tmp_path):
     """add_folder creates a folder, get_folder_tree returns it."""
     from db import Database
