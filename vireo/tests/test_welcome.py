@@ -111,6 +111,27 @@ def test_models_status_label_model_with_labels_ready(app_and_db, monkeypatch, tm
     assert data["classification"]["labels_ready"] is True
 
 
+def test_models_status_empty_label_file_not_ready(app_and_db, monkeypatch, tmp_path):
+    """An active-but-empty label file must NOT report ready: classify loads
+    and merges the files and treats an empty merged list as no labels, so
+    reporting ready here would redirect to /browse and then fail at classify."""
+    import models
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "bioclip-vit-b-16", "name": "BioCLIP", "downloaded": True,
+        "model_str": "ViT-B-16",
+    })
+    empty_file = tmp_path / "empty.txt"
+    empty_file.write_text("\n  \n")  # whitespace only — no species
+
+    app, db = app_and_db
+    db.set_workspace_active_labels([str(empty_file)])
+    client = app.test_client()
+    resp = client.get("/api/models/status")
+    data = resp.get_json()
+    assert data["needs_setup"] is True
+    assert data["classification"]["labels_ready"] is False
+
+
 def test_index_redirects_to_welcome_when_no_model(app_and_db, monkeypatch):
     """GET / redirects to /welcome when no classification model is available."""
     import models

@@ -1069,7 +1069,11 @@ def test_classify_plan_exposes_pending_and_eligible_mixed_blocked_and_done(
         db, _params(model_ids=["m1", "m2"]), str(tmp_path / "test.db"),
     )
     classify = plan["stages"]["Classify"]
-    assert classify["state"] == "will-run"
+    assert classify["state"] == "blocked", (
+        "mixed blocked/done shape has no runnable work, so it must emit "
+        "'blocked' (gates Start) — not 'will-run', which left Start enabled "
+        "behind a 'Blocked' summary and reached the unlabeled model"
+    )
     assert "Blocked" in classify["summary"]
     detail = classify["detail"]
     assert detail["pending"] == 0

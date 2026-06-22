@@ -2024,13 +2024,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         labels_ready = False
         if model_downloaded and not label_free:
             try:
-                from labels import get_active_labels
+                from labels import (
+                    get_active_labels,
+                    get_saved_labels,
+                    load_merged_labels,
+                )
 
                 ws_labels = _get_db().get_workspace_active_labels()
                 if ws_labels is not None:
-                    labels_ready = any(os.path.exists(p) for p in ws_labels)
+                    saved_by_file = {
+                        s["labels_file"]: s for s in get_saved_labels()
+                    }
+                    active_sets = [
+                        saved_by_file.get(p, {"labels_file": p}) for p in ws_labels
+                    ]
                 else:
-                    labels_ready = bool(get_active_labels())
+                    active_sets = get_active_labels()
+                # Require a non-empty MERGED label list, not just an existing
+                # path. classify_job._load_labels and the planner load the
+                # files and treat an empty merged list as "no labels", so an
+                # active-but-blank file must not report ready — otherwise we'd
+                # redirect to /browse and then block/fail at classify.
+                merged = load_merged_labels(active_sets) if active_sets else []
+                labels_ready = len(merged) > 0
             except Exception:
                 labels_ready = False
 

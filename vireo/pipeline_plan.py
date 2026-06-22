@@ -275,13 +275,16 @@ def _classify_plan(db, params, photo_ids, new_count=0):
             pending_total += pending
 
     if blocked and not pending_total:
-        # eligible=0 here even when some unblocked models happen to be
-        # fully cached — the stage is functionally blocked on missing
-        # labels and the summary text already explains that. Returning
-        # eligible>0 with pending=0 would let the UI render
-        # "Resume (0 left)" against a state that's actually "Blocked".
+        # Mixed shape: some models are blocked on missing labels and the rest
+        # have no pending work. There is nothing the stage can actually run, so
+        # emit "blocked" (not "will-run") — that's what the UI gates Start on.
+        # Returning "will-run" here showed a "Blocked" summary while leaving
+        # Start enabled, so a click still reached the unlabeled model and
+        # recorded a failed classify step. eligible=0 (not eligible>0 with
+        # pending=0, which would render "Resume (0 left)" against a blocked
+        # stage).
         return {
-            "state": "will-run",
+            "state": "blocked",
             "summary": (
                 f"Blocked — {len(blocked)} model{_plural(len(blocked))} "
                 f"need labels: {', '.join(blocked)}"
