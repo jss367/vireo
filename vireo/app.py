@@ -2159,7 +2159,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 log.debug("Folder health check failed", exc_info=True)
             _time.sleep(600)  # 10 minutes
 
-    threading.Thread(target=_folder_health_loop, daemon=True).start()
+    # Suppressed in tests via ``VIREO_DISABLE_STARTUP_BACKFILL_TIMERS``: the
+    # ``app_and_db`` fixture seeds folders at fictional paths like
+    # ``/photos/2024`` that don't exist on disk. After the 30s grace period
+    # this loop calls ``check_folder_health`` on the tmp_path DB, sees the
+    # paths missing, and flips folder status to ``'missing'`` — which causes
+    # ``get_photos`` to filter the seeded photos out and any subsequent
+    # assertion against them to fail with ``IndexError``. On the slow
+    # Windows CI runner the full suite takes ~48 min, so by the time the
+    # later predictions/photos tests reach the fixture the timer has long
+    # since fired.
+    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
+        threading.Thread(target=_folder_health_loop, daemon=True).start()
 
     app._job_runner = JobRunner(db=init_db)
     # XMP sidecars are read-modify-written files; serialize sync jobs so
