@@ -97,6 +97,10 @@ body { padding-bottom: 36px; }
   background: var(--danger, #E74C3C);
   color: #fff;
 }
+.stage-status-pill.blocked {
+  background: color-mix(in srgb, var(--danger, #E74C3C) 18%, transparent);
+  color: var(--danger, #E74C3C);
+}
 .stage-status-pill.cancelled {
   background: color-mix(in srgb, var(--warning, #F0A030) 20%, transparent);
   color: var(--warning, #F0A030);
@@ -195,6 +199,7 @@ body { padding-bottom: 36px; }
 .pipeline-plan-summary .plan-stage-row.will-run .plan-stage-pill { color: var(--accent, #24E5CA); }
 .pipeline-plan-summary .plan-stage-row.will-skip .plan-stage-pill { color: var(--text-dim, #5A8890); font-style: italic; }
 .pipeline-plan-summary .plan-stage-row.cancelled .plan-stage-pill { color: var(--warning, #F0A030); }
+.pipeline-plan-summary .plan-stage-row.blocked .plan-stage-pill { color: var(--danger, #E74C3C); }
 .pipeline-plan-summary .plan-stage-row.done-prior .plan-stage-pill {
   color: color-mix(in srgb, var(--accent, #24E5CA) 65%, var(--text-secondary, #B0CCCC));
 }
@@ -277,6 +282,7 @@ body { padding-bottom: 36px; }
 .btn-secondary:hover { background: var(--border-secondary, #1A4560); }
 .status-msg { font-size: 13px; color: var(--text-dim, #888); }
 .status-msg.ok { color: var(--accent, #24E5CA); }
+.status-msg.error { color: var(--danger, #E74C3C); }
 
 /* Readiness panel */
 .readiness-panel {
@@ -2296,6 +2302,21 @@ function updateStartButton() {
     }
   }
 
+  // Classify is blocked on missing species labels (the selected model can't
+  // run label-free). Gate Start so the user can't launch a run that would
+  // crash mid-pipeline at the classify stage — point them at Settings ›
+  // Labels, or let them turn Classify off to run the other stages. Mirrors
+  // the plan endpoint's `blocked` state (pipeline_plan._classify_plan).
+  if (!btn.disabled && _classifyBlocked()) {
+    btn.disabled = true;
+    if (actionStatus) {
+      actionStatus.textContent =
+        'Classify needs a species list — download one in Settings › Labels, '
+        + 'or turn Classify off to run the other stages.';
+      actionStatus.className = 'status-msg error';
+    }
+  }
+
   // Update preview button state
   var previewBtn = document.getElementById('btnPreviewFolders');
   var previewHint = document.getElementById('previewFoldersHint');
@@ -3903,6 +3924,7 @@ var _PILL_LABELS = {
   'will-run':   'Will run',
   'will-skip':  'Will skip',
   'done-prior': 'Already done',
+  'blocked':    'Needs labels',
 };
 
 // Map a stage's plan entry to the pill text, including counts and the
@@ -3920,6 +3942,7 @@ function _formatPillLabel(stage, planEntry, state) {
   if (state === 'failed')    return 'Failed';
   if (state === 'cancelled') return 'Cancelled';
   if (state === 'will-skip') return 'Will skip';
+  if (state === 'blocked')   return 'Needs labels';
 
   if (!planEntry) {
     // No plan entry yet (page still loading) — fall back to the bare
@@ -4005,6 +4028,19 @@ function _stageStateFor(stage) {
   var fromPlan = _pipelinePlan.stages && _pipelinePlan.stages[stage.suffix];
   if (!fromPlan) return 'will-run';
   return fromPlan.state || 'will-run';
+}
+
+// True when the Classify stage is enabled but the plan reports it can't run
+// because the selected model(s) have no labels and can't classify label-free.
+// A user-disabled Classify stage resolves to 'will-skip' via _stageStateFor,
+// so this correctly returns false and does not gate Start in that case.
+function _classifyBlocked() {
+  for (var i = 0; i < _STAGES.length; i++) {
+    if (_STAGES[i].suffix === 'Classify') {
+      return _stageStateFor(_STAGES[i]) === 'blocked';
+    }
+  }
+  return false;
 }
 
 function _stageSummaryFor(stage) {
@@ -4214,6 +4250,9 @@ async function refreshPipelinePlan() {
     updateSamVariantWarning(null);
   }
   refreshPipelineUI();
+  // The plan can flip Classify to 'blocked' (missing labels), which gates
+  // Start — recompute the button now that _pipelinePlan has been updated.
+  updateStartButton();
 }
 
 // Debounced version for chatty controls (label checkboxes, model picker).

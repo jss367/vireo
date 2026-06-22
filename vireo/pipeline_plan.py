@@ -185,6 +185,31 @@ def _classify_plan(db, params, photo_ids, new_count=0):
     )
     eligible = total_dets * unblocked_count
 
+    # Every selected model is blocked on missing labels and can't run
+    # label-free (Tree of Life). The classify stage cannot do any work for
+    # ANY scope — including a fresh import with no detections cached yet, so
+    # this must run BEFORE the total_dets == 0 early-return below. Surface a
+    # distinct "blocked" state (not "will-run") so the UI can gate Start and
+    # point the user at Settings > Labels, rather than letting the job crash
+    # mid-pipeline at classify_job._load_labels (which is exactly the
+    # fresh-install failure this guards against).
+    if unblocked_count == 0:
+        blocked_all = [m["name"] for m in models]
+        return {
+            "state": "blocked",
+            "summary": (
+                "Blocked — download a species list (Settings › Labels) "
+                f"for: {', '.join(blocked_all)}"
+            ),
+            "detail": {
+                "blocked_models": blocked_all,
+                "pending": 0,
+                "eligible": 0,
+                "stale": 0,
+                "fingerprint_outdated": False,
+            },
+        }
+
     stale_total = 0
     if total_dets > 0 and not params.reclassify:
         for m in models:

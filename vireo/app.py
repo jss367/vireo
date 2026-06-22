@@ -2002,7 +2002,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from models import get_active_model, get_models
 
         active = get_active_model()
-        classification_ready = bool(active and active.get("downloaded"))
+        model_downloaded = bool(active and active.get("downloaded"))
+
+        # A downloaded model is only usable if it can actually classify:
+        # either it supports label-free Tree-of-Life mode, or there is an
+        # active species list. Mirrors classify_job._load_labels' resolution
+        # order + TOL gate so this readiness signal answers the question the
+        # caller actually asks — "can this install classify?" — rather than
+        # the cheaper "is a model on disk?" (CORE_PHILOSOPHY: no black boxes).
+        # Without this, a fresh install with the default label-needing model
+        # but no labels reports ready and then fails mid-pipeline at classify.
+        tol_models = {
+            "hf-hub:imageomics/bioclip",
+            "hf-hub:imageomics/bioclip-2",
+        }
+        model_is_tol = bool(active and active.get("model_str") in tol_models)
+        labels_ready = False
+        if model_downloaded and not model_is_tol:
+            try:
+                from labels import get_active_labels
+
+                ws_labels = _get_db().get_workspace_active_labels()
+                if ws_labels is not None:
+                    labels_ready = any(os.path.exists(p) for p in ws_labels)
+                else:
+                    labels_ready = bool(get_active_labels())
+            except Exception:
+                labels_ready = False
+
+        classification_ready = model_downloaded and (model_is_tol or labels_ready)
 
         all_models = get_models()
         downloaded_ids = [m["id"] for m in all_models if m.get("downloaded")]
@@ -2011,6 +2039,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "needs_setup": not classification_ready,
             "classification": {
                 "ready": classification_ready,
+                "model_ready": model_downloaded,
+                "labels_ready": model_is_tol or labels_ready,
                 "model_name": active["name"] if active else None,
                 "model_id": active["id"] if active else None,
             },

@@ -1001,10 +1001,38 @@ def test_classify_plan_exposes_pending_and_eligible_blocked_only(tmp_path, monke
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
 
     plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
-    detail = plan["stages"]["Classify"]["detail"]
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "blocked"
+    assert classify["detail"]["blocked_models"] == ["SomeTimmModel"]
+    detail = classify["detail"]
     assert detail["eligible"] == 0  # no unblocked models
     assert detail["pending"] == 0
 
+
+def test_classify_plan_blocked_when_no_detections_and_no_labels(tmp_path, monkeypatch):
+    """Fresh install: a label-needing model with no labels and no detections
+    cached yet must report "blocked", not "will-run". This is the exact
+    first-run state that previously slipped through the total_dets==0
+    early-return and let the user launch a pipeline that crashes at classify.
+    """
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP ViT-B-16",
+         "model_str": "ViT-B-16",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "blocked"
+    assert "Settings" in classify["summary"]
+    assert classify["detail"]["blocked_models"] == ["BioCLIP ViT-B-16"]
 
 
 def test_classify_plan_exposes_pending_and_eligible_mixed_blocked_and_done(

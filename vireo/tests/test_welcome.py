@@ -30,11 +30,13 @@ def test_models_status_no_models_needs_setup(app_and_db, monkeypatch):
     assert data["classification"]["ready"] is False
 
 
-def test_models_status_with_model_ready(app_and_db, monkeypatch):
-    """When a classification model is downloaded, needs_setup is False."""
+def test_models_status_tol_model_ready_without_labels(app_and_db, monkeypatch):
+    """A downloaded Tree-of-Life model classifies label-free, so it's ready
+    even with no species list."""
     import models
     monkeypatch.setattr(models, "get_active_model", lambda: {
-        "id": "bioclip-vit-b-16", "name": "BioCLIP", "downloaded": True
+        "id": "bioclip-2", "name": "BioCLIP-2", "downloaded": True,
+        "model_str": "hf-hub:imageomics/bioclip-2",
     })
 
     app, _ = app_and_db
@@ -43,7 +45,52 @@ def test_models_status_with_model_ready(app_and_db, monkeypatch):
     data = resp.get_json()
     assert data["needs_setup"] is False
     assert data["classification"]["ready"] is True
-    assert data["classification"]["model_name"] == "BioCLIP"
+    assert data["classification"]["labels_ready"] is True
+    assert data["classification"]["model_name"] == "BioCLIP-2"
+
+
+def test_models_status_label_model_without_labels_needs_setup(app_and_db, monkeypatch):
+    """The default ViT-B-16 model needs a species list to classify. Downloaded
+    but with no labels, it is NOT ready — this is the fresh-install state that
+    previously reported ready and then failed mid-pipeline."""
+    import labels
+    import models
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "bioclip-vit-b-16", "name": "BioCLIP", "downloaded": True,
+        "model_str": "ViT-B-16",
+    })
+    monkeypatch.setattr(labels, "get_active_labels", lambda: [])
+
+    app, db = app_and_db
+    db.set_workspace_active_labels([])  # no active labels for the workspace
+    client = app.test_client()
+    resp = client.get("/api/models/status")
+    data = resp.get_json()
+    assert data["needs_setup"] is True
+    assert data["classification"]["ready"] is False
+    assert data["classification"]["model_ready"] is True
+    assert data["classification"]["labels_ready"] is False
+
+
+def test_models_status_label_model_with_labels_ready(app_and_db, monkeypatch, tmp_path):
+    """A label-needing model becomes ready once an active species list exists."""
+    import labels
+    import models
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "bioclip-vit-b-16", "name": "BioCLIP", "downloaded": True,
+        "model_str": "ViT-B-16",
+    })
+    labels_file = tmp_path / "region.txt"
+    labels_file.write_text("Cardinalis cardinalis\n")
+
+    app, db = app_and_db
+    db.set_workspace_active_labels([str(labels_file)])
+    client = app.test_client()
+    resp = client.get("/api/models/status")
+    data = resp.get_json()
+    assert data["needs_setup"] is False
+    assert data["classification"]["ready"] is True
+    assert data["classification"]["labels_ready"] is True
 
 
 def test_index_redirects_to_welcome_when_no_model(app_and_db, monkeypatch):
