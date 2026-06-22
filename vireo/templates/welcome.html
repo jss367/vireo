@@ -327,14 +327,21 @@ async function checkExiftool() {
       var box = document.createElement('div');
       box.className = 'warn-box';
       var strong = document.createElement('strong');
-      strong.textContent = '⚠ ExifTool not found.';
+      /* A populated path with available=false means shutil.which resolved
+         but the -ver probe failed — a broken install, not a missing one.
+         Distinguish so the user knows whether to install or to repair. */
+      var broken = !!(data && data.path);
+      strong.textContent = broken
+        ? '⚠ ExifTool is installed but won’t run.'
+        : '⚠ ExifTool not found.';
       box.appendChild(strong);
       box.appendChild(document.createTextNode(
         ' Vireo uses it to read capture dates, GPS, and camera info from your ' +
         'photos. Without it, scans still run but those details will be missing. ' +
         'To fix, '));
       var code = document.createElement('code');
-      code.textContent = (data && data.hint) || 'install ExifTool';
+      code.textContent = (data && data.hint) ||
+        (broken ? 'reinstall ExifTool' : 'install ExifTool');
       box.appendChild(code);
       box.appendChild(document.createTextNode(', then restart Vireo.'));
       el.appendChild(box);

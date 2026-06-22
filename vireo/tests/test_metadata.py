@@ -350,14 +350,34 @@ def test_extract_metadata_integration_with_summary(tmp_path):
 # ---- exiftool presence detection (exiftool_available / exiftool_status) ----
 
 
-def test_exiftool_available_reflects_which(monkeypatch):
-    """exiftool_available mirrors shutil.which without spawning a process."""
+def test_exiftool_available_requires_runnable_binary(monkeypatch):
+    """exiftool_available is True only when PATH resolves AND the probe runs."""
     import metadata
 
+    class _Ok:
+        returncode = 0
+        stdout = "12.76\n"
+
     monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+    monkeypatch.setattr(metadata.subprocess, "run", lambda *a, **k: _Ok())
     assert metadata.exiftool_available() is True
 
     monkeypatch.setattr(metadata.shutil, "which", lambda name: None)
+    assert metadata.exiftool_available() is False
+
+
+def test_exiftool_available_false_for_broken_install(monkeypatch):
+    """A PATH hit with a failing -ver probe is treated as unavailable.
+
+    Without this, scans would silently lose metadata while the UI rendered
+    a green "installed" state — the exact black box ``CORE_PHILOSOPHY``
+    forbids and Codex flagged on PR #1017.
+    """
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+    monkeypatch.setattr(metadata.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("broken perl")))
     assert metadata.exiftool_available() is False
 
 
@@ -395,7 +415,11 @@ def test_exiftool_status_present(monkeypatch):
 
 
 def test_exiftool_status_present_but_unrunnable(monkeypatch):
-    """A resolvable-but-broken binary stays available with version unknown."""
+    """A resolvable-but-broken binary is reported unavailable with the path kept.
+
+    Keeping the path lets the UI distinguish "not installed" from "broken
+    install" so the user can act on it.
+    """
     import metadata
 
     monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
@@ -406,5 +430,66 @@ def test_exiftool_status_present_but_unrunnable(monkeypatch):
     monkeypatch.setattr(metadata.subprocess, "run", _boom)
     status = metadata.exiftool_status()
 
-    assert status["available"] is True
+    assert status["available"] is False
+    assert status["path"] == "/usr/bin/exiftool"
     assert status["version"] is None
+    assert status["error"] and "broken perl" in status["error"]
+    assert "/usr/bin/exiftool" in status["hint"]
+
+
+def test_scan_metadata_warning_silent_when_available(monkeypatch):
+    """scan_metadata_warning returns None when exiftool runs cleanly."""
+    import metadata
+
+    class _Ok:
+        returncode = 0
+        stdout = "12.76\n"
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+    monkeypatch.setattr(metadata.subprocess, "run", lambda *a, **k: _Ok())
+    assert metadata.scan_metadata_warning() is None
+
+
+def test_scan_metadata_warning_warns_when_missing(monkeypatch):
+    """scan_metadata_warning returns a user-facing string when exiftool is gone."""
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: None)
+    warning = metadata.scan_metadata_warning()
+    assert warning is not None
+    assert "ExifTool" in warning
+    assert "capture date" in warning.lower()
+
+
+def test_scan_metadata_warning_warns_for_broken_install(monkeypatch):
+    """A broken (PATH-resolvable but unrunnable) install still triggers the warning."""
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+    monkeypatch.setattr(
+        metadata.subprocess, "run",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("broken perl")),
+    )
+    warning = metadata.scan_metadata_warning()
+    assert warning is not None
+    assert "ExifTool" in warning
+
+
+def test_exiftool_status_present_but_nonzero_returncode(monkeypatch):
+    """A returncode != 0 from -ver also marks the install unavailable."""
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+
+    class _Bad:
+        returncode = 2
+        stdout = ""
+        stderr = "Can't locate Image/ExifTool.pm"
+
+    monkeypatch.setattr(metadata.subprocess, "run", lambda *a, **k: _Bad())
+    status = metadata.exiftool_status()
+
+    assert status["available"] is False
+    assert status["path"] == "/usr/bin/exiftool"
+    assert status["version"] is None
+    assert "Can't locate Image/ExifTool.pm" in status["error"]

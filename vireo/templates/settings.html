@@ -2104,10 +2104,17 @@ async function loadExiftoolStatus() {
       statusEl.style.color = 'var(--accent)';
       detailEl.textContent = d.path || 'Reads capture date, GPS, and camera info during scans.';
     } else {
-      statusEl.textContent = 'Not installed';
+      /* A populated path with available=false means the binary resolved
+         on PATH but the -ver probe failed — a broken install, not a
+         missing one. Surface that distinction so the user knows whether
+         to install or to repair. */
+      var broken = !!(d && d.path);
+      statusEl.textContent = broken ? 'Installed but broken' : 'Not installed';
       statusEl.style.color = 'var(--danger)';
       detailEl.textContent = 'Scans won’t record dates, GPS, or camera info — ' +
-        ((d && d.hint) || 'install ExifTool') + ', then restart Vireo.';
+        ((d && d.hint) ||
+         (broken ? 'reinstall ExifTool' : 'install ExifTool')) +
+        ', then restart Vireo.';
     }
   } catch(e) {}
 }

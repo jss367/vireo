@@ -1313,17 +1313,14 @@ def _collection_accepts_manual_photos(rules):
 
 
 def _scan_metadata_warning():
-    """Return a user-facing warning when exiftool is missing, else ``None``.
+    """Thin wrapper over ``metadata.scan_metadata_warning`` for the scan paths.
 
-    Appended to the scan step's summary so a scan run without exiftool reads
-    as "completed, but degraded" instead of a clean success — photos indexed
-    in that run get no capture date, GPS, or camera info. Cheap PATH lookup;
-    safe to call once per scan.
+    Kept as a module-level alias so callers don't import ``metadata`` directly
+    at every call site; the implementation lives in ``metadata`` so the
+    pipeline-job module can share it.
     """
-    from metadata import exiftool_available
-    if exiftool_available():
-        return None
-    return "⚠ ExifTool not found — no capture dates, GPS, or camera info"
+    from metadata import scan_metadata_warning
+    return scan_metadata_warning()
 
 
 def create_app(db_path, thumb_cache_dir=None, api_token=None):
