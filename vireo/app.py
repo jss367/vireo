@@ -2001,21 +2001,85 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         threading.Timer(0.5, _shutdown).start()
         return jsonify({"status": "shutting_down"})
 
+    def _classification_readiness():
+        """Whether the active model can actually classify right now.
+
+        A downloaded model is only usable if it can run label-free — a
+        Tree-of-Life BioCLIP model, or a timm model with its intrinsic fixed
+        class head — or an active species list exists. Mirrors the label
+        gate in classify_job._load_labels and pipeline_plan
+        (model_type == "timm" is never blocked) so this readiness signal
+        answers the question callers actually ask — "can this install
+        classify?" — not the cheaper "is a model on disk?" (CORE_PHILOSOPHY:
+        no black boxes). Returns a dict with the active model and the flags
+        the status endpoint and the onboarding redirects both consume.
+        """
+        from models import get_active_model
+
+        active = get_active_model()
+        model_downloaded = bool(active and active.get("downloaded"))
+        tol_models = {
+            "hf-hub:imageomics/bioclip",
+            "hf-hub:imageomics/bioclip-2",
+        }
+        label_free = bool(active and (
+            active.get("model_str") in tol_models
+            or active.get("model_type") == "timm"
+        ))
+        labels_ready = False
+        if model_downloaded and not label_free:
+            try:
+                from labels import (
+                    get_active_labels,
+                    get_saved_labels,
+                    load_merged_labels,
+                )
+
+                ws_labels = _get_db().get_workspace_active_labels()
+                if ws_labels is not None:
+                    saved_by_file = {
+                        s["labels_file"]: s for s in get_saved_labels()
+                    }
+                    active_sets = [
+                        saved_by_file.get(p, {"labels_file": p}) for p in ws_labels
+                    ]
+                else:
+                    active_sets = get_active_labels()
+                # Require a non-empty MERGED label list, not just an existing
+                # path. classify_job._load_labels and the planner load the
+                # files and treat an empty merged list as "no labels", so an
+                # active-but-blank file must not report ready — otherwise we'd
+                # redirect to /browse and then block/fail at classify.
+                merged = load_merged_labels(active_sets) if active_sets else []
+                labels_ready = len(merged) > 0
+            except Exception:
+                labels_ready = False
+
+        usable = label_free or labels_ready
+        return {
+            "active": active,
+            "model_downloaded": model_downloaded,
+            "labels_ready": usable,
+            "ready": model_downloaded and usable,
+        }
+
     @app.route("/api/models/status")
     def api_models_status():
         """Lightweight model readiness check for first-launch detection."""
-        from models import get_active_model, get_models
+        from models import get_models
 
-        active = get_active_model()
-        classification_ready = bool(active and active.get("downloaded"))
+        r = _classification_readiness()
+        active = r["active"]
 
         all_models = get_models()
         downloaded_ids = [m["id"] for m in all_models if m.get("downloaded")]
 
         return jsonify({
-            "needs_setup": not classification_ready,
+            "needs_setup": not r["ready"],
             "classification": {
-                "ready": classification_ready,
+                "ready": r["ready"],
+                "model_ready": r["model_downloaded"],
+                "labels_ready": r["labels_ready"],
                 "model_name": active["name"] if active else None,
                 "model_id": active["id"] if active else None,
             },
@@ -2385,20 +2449,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/")
     def index():
-        from models import get_active_model
-        active = get_active_model()
-        if active and active.get("downloaded"):
-            return redirect("/browse")
-        user_cfg = cfg.load()
-        if user_cfg.get("setup_complete"):
+        # Resume onboarding until the install can actually classify, OR the
+        # user explicitly finished/skipped setup. Redirecting on
+        # "model downloaded" alone stranded a user who bailed after the model
+        # download but before the labels step: setup_complete stays false yet
+        # the model is on disk, so they'd land back in the blocked pipeline.
+        if _classification_readiness()["ready"] or cfg.load().get("setup_complete"):
             return redirect("/browse")
         return redirect("/welcome")
 
     @app.route("/welcome")
     def welcome():
-        from models import get_active_model
-        active = get_active_model()
-        if active and active.get("downloaded") and not request.args.get("force"):
+        if request.args.get("force"):
+            return render_template("welcome.html")
+        if _classification_readiness()["ready"] or cfg.load().get("setup_complete"):
             return redirect("/browse")
         return render_template("welcome.html")
 

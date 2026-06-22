@@ -5,10 +5,12 @@ from wait import wait_for_job_via_client
 
 
 def test_index_redirects_to_browse(app_and_db, monkeypatch):
-    """GET / redirects to /browse when a model is available."""
+    """GET / redirects to /browse when classification is usable (a label-free
+    Tree-of-Life model needs no species list)."""
     import models
     monkeypatch.setattr(models, "get_active_model", lambda: {
-        "id": "test", "name": "Test", "downloaded": True
+        "id": "bioclip-2", "name": "BioCLIP-2", "downloaded": True,
+        "model_str": "hf-hub:imageomics/bioclip-2",
     })
     app, _ = app_and_db
     client = app.test_client()
