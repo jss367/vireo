@@ -64,7 +64,6 @@ def test_old_predictions_schema_raises_incompatible(tmp_path):
     import sqlite3
 
     import pytest
-
     from db import Database, IncompatibleDatabaseError
 
     db_path = str(tmp_path / "old.db")
