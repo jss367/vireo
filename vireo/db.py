@@ -29,8 +29,11 @@ class IncompatibleDatabaseError(RuntimeError):
     migration path (e.g. an old ``predictions`` table lacking the
     ``classifier_model`` column). ``CREATE TABLE IF NOT EXISTS`` silently
     skips the stale table, so the mismatch only surfaces later as an
-    ``OperationalError`` ("no such column: ...") when a dependent index or
-    query runs. We convert that opaque failure into an actionable signal so
+    ``OperationalError``: SQLite spells it ``no such column: …`` or
+    ``no such table: …`` when a SELECT/index references the missing
+    schema, and ``table <name> has no column named <col>`` when an
+    INSERT/UPDATE targets an existing-but-stale table missing a newly
+    added column. We convert any of these into an actionable signal so
     callers can tell the user to back up and remove the file rather than
     crashing with a raw traceback.
 
@@ -311,21 +314,32 @@ class Database:
         # a database from an older Vireo (e.g. a pre-`classifier_model`
         # `predictions` table) only fails later when a dependent index/query
         # references the missing column. Convert *that* specific failure
-        # ("no such column/table: …") into a typed, actionable error so
-        # callers can guide the user to reset the file. Other
-        # OperationalErrors — file locked, read-only, full disk, I/O error —
-        # are environmental and recoverable; they must propagate as
-        # themselves so the user gets accurate diagnosis instead of
-        # misleading "back up and remove your DB" remediation. The
-        # per-column migrations inside `_create_tables` catch their own
-        # expected OperationalErrors, so only genuine schema mismatches
-        # reach this handler. On a fresh or current database this never
-        # raises.
+        # into a typed, actionable error so callers can guide the user to
+        # reset the file. SQLite spells the stale-schema mismatch three
+        # ways depending on the failing statement: `no such column: …`
+        # (SELECT / index expression referencing a missing column),
+        # `no such table: …` (referencing a missing table), and
+        # `table <name> has no column named <col>` (INSERT/UPDATE targeting
+        # an existing-but-stale table that lacks a newly added column —
+        # `_create_tables` has INSERT paths into long-lived tables like
+        # `db_meta` that can hit this when the on-disk shape is older
+        # than the current build expects). Other OperationalErrors — file
+        # locked, read-only, full disk, I/O error — are environmental and
+        # recoverable; they must propagate as themselves so the user gets
+        # accurate diagnosis instead of misleading "back up and remove
+        # your DB" remediation. The per-column migrations inside
+        # `_create_tables` catch their own expected OperationalErrors, so
+        # only genuine schema mismatches reach this handler. On a fresh
+        # or current database this never raises.
         try:
             self._create_tables()
         except sqlite3.OperationalError as e:
             msg = str(e).lower()
-            if msg.startswith("no such column") or msg.startswith("no such table"):
+            if (
+                msg.startswith("no such column")
+                or msg.startswith("no such table")
+                or "has no column named" in msg
+            ):
                 raise IncompatibleDatabaseError(self._db_path, str(e)) from e
             raise
         self.ensure_default_workspace()

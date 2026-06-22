@@ -100,6 +100,41 @@ def test_fresh_database_does_not_raise_incompatible(tmp_path):
     assert "classifier_model" in cols
 
 
+def test_insert_into_stale_table_raises_incompatible(tmp_path, monkeypatch):
+    """A stale-schema failure surfacing as ``has no column named …`` is caught.
+
+    SQLite reports a different OperationalError shape when an INSERT/UPDATE
+    targets an existing-but-stale table that's missing a newly added column:
+    ``table <name> has no column named <col>`` rather than
+    ``no such column: …``. ``_create_tables`` has INSERT paths into long-lived
+    tables (e.g. backfill writes to ``db_meta``) that can hit this when the
+    on-disk shape is older than the current build expects, so the guard must
+    classify this third spelling as an incompatible-database failure too —
+    otherwise the raw OperationalError escapes, ``main()`` never emits the
+    structured ``incompatible_database`` stderr, and the desktop launcher
+    shows the generic "Sidecar did not become healthy" timeout instead of
+    the actionable remediation.
+    """
+    import sqlite3
+
+    import db as db_module
+    import pytest
+    from db import Database, IncompatibleDatabaseError
+
+    def fake_create(self):
+        raise sqlite3.OperationalError(
+            "table db_meta has no column named value"
+        )
+
+    monkeypatch.setattr(db_module.Database, "_create_tables", fake_create)
+
+    with pytest.raises(IncompatibleDatabaseError) as excinfo:
+        Database(str(tmp_path / "stale.db"))
+    assert excinfo.value.db_path == str(tmp_path / "stale.db")
+    assert "has no column named" in (excinfo.value.cause or "")
+    assert "incompatible older version" in str(excinfo.value)
+
+
 def test_non_schema_operational_error_propagates(tmp_path, monkeypatch):
     """Environmental OperationalErrors propagate as-is, not as IncompatibleDatabaseError.
 
