@@ -10533,7 +10533,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             vireo_dir=vireo_dir,
             thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
         )
-        return jsonify({"ok": True, "imported": len(paths)})
+        # Audit import calls scanner.scan just like the standalone scan/import
+        # paths above. Without ExifTool the newly imported photos still lose
+        # capture date, GPS, and camera info; the frontend renders any warning
+        # as a toast so the user isn't told the import "succeeded" silently.
+        response = {"ok": True, "imported": len(paths)}
+        metadata_warning = _scan_metadata_warning()
+        if metadata_warning:
+            response["warning"] = metadata_warning
+        return jsonify(response)
 
     # -- Scan status (kept, non-job) --
 

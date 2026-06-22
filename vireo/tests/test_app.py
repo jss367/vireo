@@ -6558,3 +6558,61 @@ def test_api_exiftool_status_reports_present(app_and_db, monkeypatch):
     assert data["available"] is True
     assert data["path"] == "/usr/bin/exiftool"
     assert data["version"] == "12.76"
+
+
+def _touch_jpeg(path):
+    """Create a real 1x1 JPEG at ``path`` for endpoint-level scan tests."""
+    from PIL import Image
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    Image.new("RGB", (1, 1), "white").save(path, "JPEG")
+
+
+def test_api_audit_import_untracked_warns_when_exiftool_missing(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """/api/audit/import-untracked surfaces the degraded-scan warning when
+    ExifTool is unavailable. Without it the UI silently refreshes after a
+    scan that lost capture date / GPS / camera info."""
+    app, _db = app_and_db
+    import metadata
+    monkeypatch.setattr(metadata, "exiftool_available", lambda: False)
+
+    img_path = tmp_path / "shoot" / "IMG_0001.JPG"
+    _touch_jpeg(str(img_path))
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/audit/import-untracked",
+        json={"paths": [str(img_path)]},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert data["imported"] == 1
+    assert "warning" in data
+    assert "ExifTool" in data["warning"]
+
+
+def test_api_audit_import_untracked_silent_when_exiftool_present(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """When ExifTool runs cleanly the endpoint must NOT inject a warning
+    field — a stray warning would render as a false-positive toast on every
+    audit import."""
+    app, _db = app_and_db
+    import metadata
+    monkeypatch.setattr(metadata, "exiftool_available", lambda: True)
+
+    img_path = tmp_path / "shoot" / "IMG_0001.JPG"
+    _touch_jpeg(str(img_path))
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/audit/import-untracked",
+        json={"paths": [str(img_path)]},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert data["imported"] == 1
+    assert "warning" not in data

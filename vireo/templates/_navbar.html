@@ -7412,8 +7412,11 @@ function showToast(msg, type) {
   var container = document.getElementById('toastContainer');
   if (!container) return;
   var toast = document.createElement('div');
-  var bg = type === 'error' ? 'var(--danger)' : 'var(--accent)';
-  var color = type === 'error' ? 'var(--text-primary)' : 'var(--accent-text)';
+  var bg = type === 'error' ? 'var(--danger)'
+         : type === 'warning' ? 'var(--warning)'
+         : 'var(--accent)';
+  var color = (type === 'error' || type === 'warning')
+            ? 'var(--text-primary)' : 'var(--accent-text)';
   toast.style.cssText = 'pointer-events:auto;padding:10px 16px;border-radius:6px;font-size:14px;max-width:400px;word-break:break-word;background:' + bg + ';color:' + color + ';box-shadow:0 2px 8px rgba(0,0,0,0.3);opacity:0;transition:opacity 0.2s;';
   toast.textContent = msg;
   container.appendChild(toast);

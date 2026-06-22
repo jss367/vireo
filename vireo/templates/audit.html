@@ -470,11 +470,12 @@ function renderUntracked() {
 
 async function importFile(path) {
   try {
-    await safeFetch('/api/audit/import-untracked', {
+    var resp = await safeFetch('/api/audit/import-untracked', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({paths: [path]}),
     });
+    if (resp && resp.warning) showToast(resp.warning, 'warning');
   } catch(e) {}
   runUntrackedCheck();
 }
@@ -483,11 +484,12 @@ async function importAllUntracked() {
   if (untrackedData.length === 0) return;
   var paths = untrackedData.map(function(u) { return u.path; });
   try {
-    await safeFetch('/api/audit/import-untracked', {
+    var resp = await safeFetch('/api/audit/import-untracked', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({paths: paths}),
     });
+    if (resp && resp.warning) showToast(resp.warning, 'warning');
   } catch(e) {}
   runUntrackedCheck();
 }
