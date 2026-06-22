@@ -258,6 +258,7 @@ if (typeof safeEventSource === 'undefined') {
 
 var MODEL_ID = 'bioclip-vit-b-16';
 var modelAlreadyDownloaded = false;
+var classificationReady = false;
 
 async function checkModelStatus() {
   try {
@@ -266,6 +267,7 @@ async function checkModelStatus() {
     if (match && match.downloaded) {
       modelAlreadyDownloaded = true;
     }
+    classificationReady = !!(data && data.classification && data.classification.labels_ready);
   } catch(e) {
     /* Ignore — we'll attempt the download when the user clicks */
   }
@@ -549,6 +551,13 @@ async function skipLabels() {
 }
 
 checkModelStatus().then(function() {
+  // Resume mid-onboarding: if the model is already on disk but classification
+  // isn't usable yet (no labels), jump straight to the labels step rather than
+  // making the user re-click "Get Started".
+  if (modelAlreadyDownloaded && !classificationReady) {
+    showLabelsStep();
+    return;
+  }
   document.getElementById('downloadBtn').disabled = false;
 });
 </script>
