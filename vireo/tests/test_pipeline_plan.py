@@ -1078,6 +1078,56 @@ def test_classify_plan_mixed_blocked_with_no_detections_emits_blocked(
     assert classify["detail"]["eligible"] == 0
 
 
+def test_classify_plan_mixed_blocked_with_pending_emits_blocked(
+    tmp_path, monkeypatch,
+):
+    """Mixed scope with cached detections: one unblocked model has pending
+    classify work AND another selected model is blocked on missing labels.
+    Previously the `blocked and not pending_total` guard skipped this case
+    (pending_total > 0 from the runnable model) and the planner fell through
+    to "will-run" with blocked_models only buried in detail. The Start gate
+    only disables `state === "blocked"`, so the user clicked Start, the
+    classify job iterated every selected resolved spec, and the blocked
+    model failed at _load_labels — the exact missing-labels failure this PR
+    is meant to prevent. Must emit "blocked" so Start stays disabled until
+    the user either adds labels or deselects the blocked model.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _add_photo_with_detection(db, folder_id, "a.jpg")
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        # Label-free TOL model — unblocked, has pending work (no
+        # record_classifier_run was called for it, so the detection is
+        # uncached and pending_total > 0 for this model).
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+        # Label-needing model with no active labels — blocked.
+        {"id": "m2", "name": "BioCLIP ViT-B-16",
+         "model_str": "ViT-B-16",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    plan = compute_plan(
+        db, _params(model_ids=["m1", "m2"]), str(tmp_path / "test.db"),
+    )
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "blocked", (
+        "any blocked model in a mixed selection must emit 'blocked' (gates "
+        "Start) — falling through to 'will-run' when other models have "
+        "pending work let the missing-labels classify failure through on "
+        "launch"
+    )
+    assert classify["detail"]["blocked_models"] == ["BioCLIP ViT-B-16"]
+    assert classify["detail"]["pending"] == 0
+    assert classify["detail"]["eligible"] == 0
+
+
 def test_classify_plan_exposes_pending_and_eligible_mixed_blocked_and_done(
     tmp_path, monkeypatch,
 ):

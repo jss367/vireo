@@ -308,15 +308,17 @@ def _classify_plan(db, params, photo_ids, new_count=0):
             pending_per_model[m["name"]] = pending
             pending_total += pending
 
-    if blocked and not pending_total:
-        # Mixed shape: some models are blocked on missing labels and the rest
-        # have no pending work. There is nothing the stage can actually run, so
-        # emit "blocked" (not "will-run") — that's what the UI gates Start on.
-        # Returning "will-run" here showed a "Blocked" summary while leaving
-        # Start enabled, so a click still reached the unlabeled model and
-        # recorded a failed classify step. eligible=0 (not eligible>0 with
-        # pending=0, which would render "Resume (0 left)" against a blocked
-        # stage).
+    if blocked:
+        # Any selected model that's blocked on missing labels prevents
+        # launching the stage: pipeline_job.classify_stage iterates every
+        # selected resolved spec, and the blocked model fails at
+        # classify_job._load_labels. Emit "blocked" (gates Start) whether or
+        # not the other unblocked models have pending work — returning
+        # "will-run" in the mixed pending case left Start enabled and let the
+        # missing-labels failure through on launch. The user fixes labels or
+        # deselects the blocked model before the rest can run. eligible=0
+        # (not eligible>0 with pending=0, which would render "Resume (0
+        # left)" against a stage that's actually blocked).
         return {
             "state": "blocked",
             "summary": (
@@ -419,8 +421,6 @@ def _classify_plan(db, params, photo_ids, new_count=0):
     }
     if new_count > 0:
         detail["new_photos"] = new_count
-    if blocked:
-        detail["blocked_models"] = blocked
     return {"state": "will-run", "summary": summary, "detail": detail}
 
 
