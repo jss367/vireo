@@ -6522,3 +6522,39 @@ def test_encounter_species_chunks_large_photo_id_lists(app_and_db):
     # Both chunks were validated and tagged.
     for pid in (photo_ids[0], photo_ids[-1]):
         assert any(t["name"] == "Chunk Finch" for t in db.get_photo_keywords(pid))
+
+
+def test_api_exiftool_status_reports_missing(app_and_db, monkeypatch):
+    """/api/exiftool/status surfaces a missing binary with an install hint."""
+    app, db = app_and_db
+    import metadata
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: None)
+
+    client = app.test_client()
+    resp = client.get('/api/exiftool/status')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["available"] is False
+    assert data["path"] == ""
+    assert data["hint"]
+
+
+def test_api_exiftool_status_reports_present(app_and_db, monkeypatch):
+    """/api/exiftool/status reports the resolved path and version when found."""
+    app, db = app_and_db
+    import metadata
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+
+    class _Result:
+        returncode = 0
+        stdout = "12.76\n"
+
+    monkeypatch.setattr(metadata.subprocess, "run", lambda *a, **k: _Result())
+
+    client = app.test_client()
+    resp = client.get('/api/exiftool/status')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["available"] is True
+    assert data["path"] == "/usr/bin/exiftool"
+    assert data["version"] == "12.76"

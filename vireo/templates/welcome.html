@@ -104,6 +104,31 @@
     color: var(--text-dim); text-decoration: none;
   }
   .skip-link:hover { color: var(--text-secondary); }
+
+  .system-check {
+    max-width: 360px;
+    margin: 0 auto 24px;
+    text-align: left;
+    font-size: 13px;
+    min-height: 18px;
+  }
+  .system-check .checking { color: var(--text-dim); }
+  .system-check .ok { color: var(--accent); }
+  .system-check .warn-box {
+    padding: 12px 14px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    border: 1px solid var(--warning);
+    color: var(--text-primary);
+    line-height: 1.5;
+  }
+  .system-check .warn-box strong { color: var(--warning); }
+  .system-check .warn-box code {
+    background: var(--bg-tertiary);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
 </style>
 </head>
 <body>
@@ -117,6 +142,10 @@
     <li>Rate and cull your best shots</li>
     <li>Organize photos into collections</li>
   </ul>
+
+  <div class="system-check" id="systemCheck">
+    <span class="checking">Checking your system&hellip;</span>
+  </div>
 
   <div>
     <button class="btn-primary" id="downloadBtn" onclick="getStarted()" disabled>
@@ -277,6 +306,47 @@ async function skipSetup() {
   await safeFetch('/api/setup/complete', { method: 'POST' }, { toast: false });
   window.location.href = '/browse';
 }
+
+/* exiftool is the metadata backbone for every scan. Without it scans still
+   run but photos get no capture date, GPS, or camera info — so surface the
+   check here rather than letting it fail silently later. This is advisory:
+   it never blocks "Get Started" (the model download is independent).
+   Built with DOM nodes + textContent so the install hint can't inject. */
+async function checkExiftool() {
+  var el = document.getElementById('systemCheck');
+  try {
+    var data = await safeFetch('/api/exiftool/status', {}, { toast: false });
+    el.textContent = '';
+    if (data && data.available) {
+      var ok = document.createElement('span');
+      ok.className = 'ok';
+      ok.textContent = '✓ ExifTool found' +
+        (data.version ? ' (v' + data.version + ')' : '');
+      el.appendChild(ok);
+    } else {
+      var box = document.createElement('div');
+      box.className = 'warn-box';
+      var strong = document.createElement('strong');
+      strong.textContent = '⚠ ExifTool not found.';
+      box.appendChild(strong);
+      box.appendChild(document.createTextNode(
+        ' Vireo uses it to read capture dates, GPS, and camera info from your ' +
+        'photos. Without it, scans still run but those details will be missing. ' +
+        'To fix, '));
+      var code = document.createElement('code');
+      code.textContent = (data && data.hint) || 'install ExifTool';
+      box.appendChild(code);
+      box.appendChild(document.createTextNode(', then restart Vireo.'));
+      el.appendChild(box);
+    }
+  } catch (e) {
+    /* Status endpoint unreachable — leave the check blank rather than
+       showing a misleading warning. */
+    el.textContent = '';
+  }
+}
+
+checkExiftool();
 
 checkModelStatus().then(function() {
   document.getElementById('downloadBtn').disabled = false;

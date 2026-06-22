@@ -1312,6 +1312,20 @@ def _collection_accepts_manual_photos(rules):
     return False
 
 
+def _scan_metadata_warning():
+    """Return a user-facing warning when exiftool is missing, else ``None``.
+
+    Appended to the scan step's summary so a scan run without exiftool reads
+    as "completed, but degraded" instead of a clean success — photos indexed
+    in that run get no capture date, GPS, or camera info. Cheap PATH lookup;
+    safe to call once per scan.
+    """
+    from metadata import exiftool_available
+    if exiftool_available():
+        return None
+    return "⚠ ExifTool not found — no capture dates, GPS, or camera info"
+
+
 def create_app(db_path, thumb_cache_dir=None, api_token=None):
     """Create the Flask app for the Vireo photo browser.
 
@@ -8819,6 +8833,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "output_dir": cfg.get("darktable_output_dir"),
         })
 
+    @app.route("/api/exiftool/status")
+    def api_exiftool_status():
+        """Report whether the exiftool binary is installed.
+
+        exiftool is the metadata backbone for every scan (capture date, GPS,
+        camera/lens, dimensions). When it's absent scans still complete but
+        produce no metadata, so the welcome flow and Settings surface this
+        check up-front rather than letting the failure stay silent in the log.
+        """
+        from metadata import exiftool_status
+        return jsonify(exiftool_status())
+
     @app.route("/api/photos/open-external", methods=["POST"])
     def api_photos_open_external():
         import subprocess
@@ -11843,20 +11869,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # summary when a single root raises in both scan and cache
             # invalidation.
             failed_root_count = len(scan_failed_roots | cache_failed_roots)
+            metadata_warning = _scan_metadata_warning()
             if root_errors:
                 scan_summary = (
                     f"{photo_count} photos ({failed_root_count} of "
                     f"{len(roots_list)} root"
                     f"{'s' if len(roots_list) != 1 else ''} failed)"
                 )
+                if metadata_warning:
+                    scan_summary += f" — {metadata_warning}"
                 runner.update_step(
                     job["id"], "scan", status="failed", summary=scan_summary,
                     error=root_errors[0], error_count=len(root_errors),
                 )
             else:
+                scan_summary = f"{photo_count} photos"
+                if metadata_warning:
+                    scan_summary += f" — {metadata_warning}"
                 runner.update_step(
                     job["id"], "scan", status="completed",
-                    summary=f"{photo_count} photos",
+                    summary=scan_summary,
                 )
             # Skip the thumbnail phase when EVERY requested root's scan
             # raised. generate_all() walks the whole library looking
@@ -13404,8 +13436,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # failure can leave DB state that invalidates cached new-image counts.
                 _invalidate_new_images_after_scan(thread_db, scan_target)
             scan_count = job["progress"].get("total", 0)
+            scan_summary = f"{scan_count} photos"
+            metadata_warning = _scan_metadata_warning()
+            if metadata_warning:
+                scan_summary += f" — {metadata_warning}"
             runner.update_step(job["id"], "scan", status="completed",
-                               summary=f"{scan_count} photos")
+                               summary=scan_summary)
 
             # Phase 3: Generate thumbnails
             runner.update_step(job["id"], "thumbnails", status="running")

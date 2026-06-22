@@ -345,3 +345,68 @@ def test_extract_metadata_integration_with_summary(tmp_path):
     assert summary["exposure_time"] == 0.0005
     assert summary["iso"] == 3200
     assert summary["datetime_original"] == "2026:03:15 08:30:00"
+
+
+# ---- exiftool presence detection (exiftool_available / exiftool_status) ----
+
+
+def test_exiftool_available_reflects_which(monkeypatch):
+    """exiftool_available mirrors shutil.which without spawning a process."""
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+    assert metadata.exiftool_available() is True
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: None)
+    assert metadata.exiftool_available() is False
+
+
+def test_exiftool_status_missing(monkeypatch):
+    """When exiftool is absent, status reports unavailable with an install hint."""
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: None)
+    status = metadata.exiftool_status()
+
+    assert status["available"] is False
+    assert status["path"] == ""
+    assert status["version"] is None
+    assert status["hint"]  # platform-appropriate, non-empty
+
+
+def test_exiftool_status_present(monkeypatch):
+    """When exiftool resolves, status reports the path and parsed version."""
+    import subprocess
+
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+
+    class _Result:
+        returncode = 0
+        stdout = "12.76\n"
+
+    monkeypatch.setattr(
+        metadata.subprocess, "run", lambda *a, **k: _Result(),
+    )
+    status = metadata.exiftool_status()
+
+    assert status["available"] is True
+    assert status["path"] == "/usr/bin/exiftool"
+    assert status["version"] == "12.76"
+
+
+def test_exiftool_status_present_but_unrunnable(monkeypatch):
+    """A resolvable-but-broken binary stays available with version unknown."""
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+
+    def _boom(*a, **k):
+        raise OSError("broken perl")
+
+    monkeypatch.setattr(metadata.subprocess, "run", _boom)
+    status = metadata.exiftool_status()
+
+    assert status["available"] is True
+    assert status["version"] is None

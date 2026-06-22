@@ -6,6 +6,7 @@ Returns grouped tag dictionaries keyed by ExifTool group (EXIF, GPS, XMP, etc.).
 
 import json
 import logging
+import shutil
 import subprocess
 import sys
 
@@ -34,6 +35,48 @@ def _exiftool_install_hint() -> str:
     if sys.platform == "darwin":
         return "install it with: brew install exiftool"
     return "install it with your package manager (e.g. apt install libimage-exiftool-perl)"
+
+
+def exiftool_available():
+    """Return True if the exiftool binary is resolvable on PATH.
+
+    Cheap (no subprocess) — safe to call on every scan. Use
+    ``exiftool_status`` when the version is also wanted.
+    """
+    return shutil.which("exiftool") is not None
+
+
+def exiftool_status():
+    """Report exiftool presence, path, version, and an install hint.
+
+    Mirrors the shape of ``/api/darktable/status`` so the UI can render
+    external-dependency checks uniformly. Surfacing this matters because a
+    missing exiftool degrades every scan silently — photos lose their
+    capture date, GPS, and camera info with only a line in the log.
+    """
+    path = shutil.which("exiftool")
+    version = None
+    if path:
+        try:
+            result = subprocess.run(
+                ["exiftool", "-ver"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **no_window_kwargs(),
+            )
+            if result.returncode == 0:
+                version = result.stdout.strip() or None
+        except Exception:
+            # Binary is present but unrunnable (e.g. broken Perl install).
+            # Treat as available-but-version-unknown rather than failing.
+            pass
+    return {
+        "available": path is not None,
+        "path": path or "",
+        "version": version,
+        "hint": _exiftool_install_hint(),
+    }
 
 
 def _run_exiftool(file_paths, extra_args=None):
