@@ -6,6 +6,7 @@ Returns grouped tag dictionaries keyed by ExifTool group (EXIF, GPS, XMP, etc.).
 
 import json
 import logging
+import shutil
 import subprocess
 import sys
 
@@ -34,6 +35,93 @@ def _exiftool_install_hint() -> str:
     if sys.platform == "darwin":
         return "install it with: brew install exiftool"
     return "install it with your package manager (e.g. apt install libimage-exiftool-perl)"
+
+
+def exiftool_available():
+    """Return True if the exiftool binary resolves on PATH AND runs.
+
+    A PATH-only check misses broken installs (dangling wrapper, bad Perl)
+    where ``shutil.which`` succeeds but ``exiftool -ver`` fails — in that
+    case every scan loses metadata silently. Probes via ``-ver``; called
+    once per scan, not per photo.
+    """
+    return exiftool_status()["available"]
+
+
+def exiftool_status():
+    """Report exiftool presence, runnability, path, version, and a hint.
+
+    Mirrors the shape of ``/api/darktable/status`` so the UI can render
+    external-dependency checks uniformly. ``available`` is True only when
+    the binary both resolves on PATH and a ``-ver`` probe succeeds — a
+    PATH-only check would render broken installs as a healthy green state
+    while every scan loses capture date, GPS, and camera info.
+    """
+    path = shutil.which("exiftool")
+    if not path:
+        return {
+            "available": False,
+            "path": "",
+            "version": None,
+            "error": None,
+            "hint": _exiftool_install_hint(),
+        }
+
+    ran_ok = False
+    version = None
+    error = None
+    try:
+        result = subprocess.run(
+            ["exiftool", "-ver"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            **no_window_kwargs(),
+        )
+        if result.returncode == 0:
+            ran_ok = True
+            version = result.stdout.strip() or None
+        else:
+            error = (
+                result.stderr.strip()
+                or f"exiftool -ver exited with status {result.returncode}"
+            )
+    except Exception as e:
+        error = str(e) or e.__class__.__name__
+
+    if ran_ok:
+        return {
+            "available": True,
+            "path": path,
+            "version": version,
+            "error": None,
+            "hint": _exiftool_install_hint(),
+        }
+
+    return {
+        "available": False,
+        "path": path,
+        "version": None,
+        "error": error,
+        "hint": (
+            f"found at {path} but couldn't run — reinstall it "
+            f"({_exiftool_install_hint()})"
+        ),
+    }
+
+
+def scan_metadata_warning():
+    """Return a user-facing warning when exiftool is unavailable, else ``None``.
+
+    Appended to a scan step's summary so a scan run without a runnable
+    exiftool reads as "completed, but degraded" instead of a clean success
+    — photos indexed in that run get no capture date, GPS, or camera info.
+    Reused by every scan completion path (standalone scan, import, and
+    pipeline) so silent degradation is closed off uniformly.
+    """
+    if exiftool_available():
+        return None
+    return "⚠ ExifTool not found — no capture dates, GPS, or camera info"
 
 
 def _run_exiftool(file_paths, extra_args=None):

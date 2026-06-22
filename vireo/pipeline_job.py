@@ -1046,10 +1046,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     scan_to_thumb.put(_SENTINEL)
                     return
 
+                from metadata import scan_metadata_warning
+
                 summary = f"{total_broken} photos repaired"
                 if unreachable:
                     summary += (f", {unreachable} folder"
                                 f"{'s' if unreachable != 1 else ''} unreachable")
+                # Mirror the standalone scan/import paths in app.py: append
+                # the missing-exiftool warning so a repair scan that lost
+                # metadata reads as degraded, not as a clean success.
+                metadata_warning = scan_metadata_warning()
+                if metadata_warning:
+                    summary += f" — {metadata_warning}"
                 stages["scan"]["status"] = "completed"
                 runner.update_step(
                     job["id"], "scan", status="completed", summary=summary,
@@ -1257,9 +1265,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     job["id"], "scan", status="completed", summary="Cancelled",
                 )
             else:
+                from metadata import scan_metadata_warning
+
                 stages["scan"]["status"] = "completed"
+                # Pipeline scans use scanner.scan exactly like the standalone
+                # /api/jobs/scan path, so a missing exiftool silently strips
+                # capture dates, GPS, and camera info here too. Append the
+                # same warning the standalone path appends.
+                scan_summary = f"{stages['scan']['count']} photos"
+                metadata_warning = scan_metadata_warning()
+                if metadata_warning:
+                    scan_summary += f" — {metadata_warning}"
                 runner.update_step(job["id"], "scan", status="completed",
-                                   summary=f"{stages['scan']['count']} photos")
+                                   summary=scan_summary)
         except Exception as e:
             if str(e) == "scan cancelled" and (
                 _should_abort(abort) or runner.is_cancelled(job["id"])

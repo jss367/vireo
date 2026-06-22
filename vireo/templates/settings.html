@@ -1006,6 +1006,13 @@
       </div>
       <span class="setting-value" id="megadetectorStatus">-</span>
     </div>
+    <div class="setting-row">
+      <div class="setting-label">
+        ExifTool
+        <small id="exiftoolDetail">Reads capture date, GPS, and camera info during scans.</small>
+      </div>
+      <span class="setting-value" id="exiftoolStatus">-</span>
+    </div>
   </div>
 
   <!-- First-Launch Setup -->
@@ -2079,7 +2086,37 @@ async function loadSystemInfo() {
       mdDetail.textContent = d.megadetector_detail;
     }
   } catch(e) {}
+  loadExiftoolStatus();
   loadPipelineModels();
+}
+
+// exiftool is the metadata backbone for every scan; a missing binary
+// degrades scans silently, so report its presence next to the other
+// external dependencies.
+async function loadExiftoolStatus() {
+  var statusEl = document.getElementById('exiftoolStatus');
+  var detailEl = document.getElementById('exiftoolDetail');
+  if (!statusEl) return;
+  try {
+    var d = await safeFetch('/api/exiftool/status', {}, { toast: false });
+    if (d && d.available) {
+      statusEl.textContent = d.version ? 'Installed (v' + d.version + ')' : 'Installed';
+      statusEl.style.color = 'var(--accent)';
+      detailEl.textContent = d.path || 'Reads capture date, GPS, and camera info during scans.';
+    } else {
+      /* A populated path with available=false means the binary resolved
+         on PATH but the -ver probe failed — a broken install, not a
+         missing one. Surface that distinction so the user knows whether
+         to install or to repair. */
+      var broken = !!(d && d.path);
+      statusEl.textContent = broken ? 'Installed but broken' : 'Not installed';
+      statusEl.style.color = 'var(--danger)';
+      detailEl.textContent = 'Scans won’t record dates, GPS, or camera info — ' +
+        ((d && d.hint) ||
+         (broken ? 'reinstall ExifTool' : 'install ExifTool')) +
+        ', then restart Vireo.';
+    }
+  } catch(e) {}
 }
 
 async function loadPipelineModels() {
