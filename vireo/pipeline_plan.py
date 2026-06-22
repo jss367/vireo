@@ -227,6 +227,40 @@ def _classify_plan(db, params, photo_ids, new_count=0):
     fingerprint_reason = "label_set_changed" if fingerprint_outdated else None
 
     if total_dets == 0:
+        # Mixed shape with no detections cached yet: some selected models
+        # can run (label-free, or have labels) and others are blocked on
+        # missing labels. The earlier unblocked_count==0 guard doesn't fire
+        # here because at least one model is runnable, but classify_job
+        # iterates every selected model and the blocked ones will fail at
+        # _load_labels once MegaDetector creates detections. Emit "blocked"
+        # (gates Start) instead of "will-run" with no blocked_models, so
+        # the user fixes labels or deselects the blocked model before
+        # launching — same failure this PR is meant to prevent.
+        blocked_now = [
+            m["name"] for m in models
+            if label_resolution[m["id"]].get("blocked")
+        ]
+        if blocked_now:
+            return {
+                "state": "blocked",
+                "summary": (
+                    f"Blocked — {len(blocked_now)} model"
+                    f"{_plural(len(blocked_now))} need labels: "
+                    f"{', '.join(blocked_now)}"
+                ),
+                "detail": {
+                    "blocked_models": blocked_now,
+                    "total_dets": 0,
+                    "photos_with_dets": 0,
+                    "models": [m["name"] for m in models],
+                    "pending": 0,
+                    "eligible": 0,
+                    "new_photos": new_count,
+                    "stale": stale_total,
+                    "fingerprint_outdated": fingerprint_outdated,
+                    "fingerprint_reason": fingerprint_reason,
+                },
+            }
         if new_count > 0:
             summary = (
                 f"Will run — {new_count} new photo{_plural(new_count)} "

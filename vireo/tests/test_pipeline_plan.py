@@ -1035,6 +1035,49 @@ def test_classify_plan_blocked_when_no_detections_and_no_labels(tmp_path, monkey
     assert classify["detail"]["blocked_models"] == ["BioCLIP ViT-B-16"]
 
 
+def test_classify_plan_mixed_blocked_with_no_detections_emits_blocked(
+    tmp_path, monkeypatch,
+):
+    """Mixed scope, no detections cached yet: one label-free model can run,
+    another model is blocked on missing labels. The unblocked_count==0 guard
+    doesn't fire (one model is runnable), but classify_job iterates every
+    selected model and the blocked one will fail at _load_labels once
+    MegaDetector creates detections. The planner must emit "blocked" (gates
+    Start), not "will-run" — otherwise Start stays enabled, the user
+    launches, and the pipeline records the same missing-labels classify
+    failure this PR is meant to prevent.
+    """
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        # Label-free TOL model — unblocked.
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+        # Label-needing model with no active labels — blocked.
+        {"id": "m2", "name": "BioCLIP ViT-B-16",
+         "model_str": "ViT-B-16",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    plan = compute_plan(
+        db, _params(model_ids=["m1", "m2"]), str(tmp_path / "test.db"),
+    )
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "blocked", (
+        "mixed scope with no detections + one blocked model must emit "
+        "'blocked', not slip through the total_dets==0 'will-run' branch"
+    )
+    assert classify["detail"]["blocked_models"] == ["BioCLIP ViT-B-16"]
+    assert classify["detail"]["pending"] == 0
+    assert classify["detail"]["eligible"] == 0
+
+
 def test_classify_plan_exposes_pending_and_eligible_mixed_blocked_and_done(
     tmp_path, monkeypatch,
 ):
