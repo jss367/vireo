@@ -185,6 +185,31 @@ def _classify_plan(db, params, photo_ids, new_count=0):
     )
     eligible = total_dets * unblocked_count
 
+    # Every selected model is blocked on missing labels and can't run
+    # label-free (Tree of Life). The classify stage cannot do any work for
+    # ANY scope — including a fresh import with no detections cached yet, so
+    # this must run BEFORE the total_dets == 0 early-return below. Surface a
+    # distinct "blocked" state (not "will-run") so the UI can gate Start and
+    # point the user at Settings > Labels, rather than letting the job crash
+    # mid-pipeline at classify_job._load_labels (which is exactly the
+    # fresh-install failure this guards against).
+    if unblocked_count == 0:
+        blocked_all = [m["name"] for m in models]
+        return {
+            "state": "blocked",
+            "summary": (
+                "Blocked — download a species list (Settings › Labels) "
+                f"for: {', '.join(blocked_all)}"
+            ),
+            "detail": {
+                "blocked_models": blocked_all,
+                "pending": 0,
+                "eligible": 0,
+                "stale": 0,
+                "fingerprint_outdated": False,
+            },
+        }
+
     stale_total = 0
     if total_dets > 0 and not params.reclassify:
         for m in models:
@@ -202,6 +227,40 @@ def _classify_plan(db, params, photo_ids, new_count=0):
     fingerprint_reason = "label_set_changed" if fingerprint_outdated else None
 
     if total_dets == 0:
+        # Mixed shape with no detections cached yet: some selected models
+        # can run (label-free, or have labels) and others are blocked on
+        # missing labels. The earlier unblocked_count==0 guard doesn't fire
+        # here because at least one model is runnable, but classify_job
+        # iterates every selected model and the blocked ones will fail at
+        # _load_labels once MegaDetector creates detections. Emit "blocked"
+        # (gates Start) instead of "will-run" with no blocked_models, so
+        # the user fixes labels or deselects the blocked model before
+        # launching — same failure this PR is meant to prevent.
+        blocked_now = [
+            m["name"] for m in models
+            if label_resolution[m["id"]].get("blocked")
+        ]
+        if blocked_now:
+            return {
+                "state": "blocked",
+                "summary": (
+                    f"Blocked — {len(blocked_now)} model"
+                    f"{_plural(len(blocked_now))} need labels: "
+                    f"{', '.join(blocked_now)}"
+                ),
+                "detail": {
+                    "blocked_models": blocked_now,
+                    "total_dets": 0,
+                    "photos_with_dets": 0,
+                    "models": [m["name"] for m in models],
+                    "pending": 0,
+                    "eligible": 0,
+                    "new_photos": new_count,
+                    "stale": stale_total,
+                    "fingerprint_outdated": fingerprint_outdated,
+                    "fingerprint_reason": fingerprint_reason,
+                },
+            }
         if new_count > 0:
             summary = (
                 f"Will run — {new_count} new photo{_plural(new_count)} "
@@ -249,14 +308,19 @@ def _classify_plan(db, params, photo_ids, new_count=0):
             pending_per_model[m["name"]] = pending
             pending_total += pending
 
-    if blocked and not pending_total:
-        # eligible=0 here even when some unblocked models happen to be
-        # fully cached — the stage is functionally blocked on missing
-        # labels and the summary text already explains that. Returning
-        # eligible>0 with pending=0 would let the UI render
-        # "Resume (0 left)" against a state that's actually "Blocked".
+    if blocked:
+        # Any selected model that's blocked on missing labels prevents
+        # launching the stage: pipeline_job.classify_stage iterates every
+        # selected resolved spec, and the blocked model fails at
+        # classify_job._load_labels. Emit "blocked" (gates Start) whether or
+        # not the other unblocked models have pending work — returning
+        # "will-run" in the mixed pending case left Start enabled and let the
+        # missing-labels failure through on launch. The user fixes labels or
+        # deselects the blocked model before the rest can run. eligible=0
+        # (not eligible>0 with pending=0, which would render "Resume (0
+        # left)" against a stage that's actually blocked).
         return {
-            "state": "will-run",
+            "state": "blocked",
             "summary": (
                 f"Blocked — {len(blocked)} model{_plural(len(blocked))} "
                 f"need labels: {', '.join(blocked)}"
@@ -357,8 +421,6 @@ def _classify_plan(db, params, photo_ids, new_count=0):
     }
     if new_count > 0:
         detail["new_photos"] = new_count
-    if blocked:
-        detail["blocked_models"] = blocked
     return {"state": "will-run", "summary": summary, "detail": detail}
 
 

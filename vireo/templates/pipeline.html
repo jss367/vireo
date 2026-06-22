@@ -97,6 +97,10 @@ body { padding-bottom: 36px; }
   background: var(--danger, #E74C3C);
   color: #fff;
 }
+.stage-status-pill.blocked {
+  background: color-mix(in srgb, var(--danger, #E74C3C) 18%, transparent);
+  color: var(--danger, #E74C3C);
+}
 .stage-status-pill.cancelled {
   background: color-mix(in srgb, var(--warning, #F0A030) 20%, transparent);
   color: var(--warning, #F0A030);
@@ -195,6 +199,7 @@ body { padding-bottom: 36px; }
 .pipeline-plan-summary .plan-stage-row.will-run .plan-stage-pill { color: var(--accent, #24E5CA); }
 .pipeline-plan-summary .plan-stage-row.will-skip .plan-stage-pill { color: var(--text-dim, #5A8890); font-style: italic; }
 .pipeline-plan-summary .plan-stage-row.cancelled .plan-stage-pill { color: var(--warning, #F0A030); }
+.pipeline-plan-summary .plan-stage-row.blocked .plan-stage-pill { color: var(--danger, #E74C3C); }
 .pipeline-plan-summary .plan-stage-row.done-prior .plan-stage-pill {
   color: color-mix(in srgb, var(--accent, #24E5CA) 65%, var(--text-secondary, #B0CCCC));
 }
@@ -277,6 +282,7 @@ body { padding-bottom: 36px; }
 .btn-secondary:hover { background: var(--border-secondary, #1A4560); }
 .status-msg { font-size: 13px; color: var(--text-dim, #888); }
 .status-msg.ok { color: var(--accent, #24E5CA); }
+.status-msg.error { color: var(--danger, #E74C3C); }
 
 /* Readiness panel */
 .readiness-panel {
@@ -1118,6 +1124,11 @@ body { padding-bottom: 36px; }
   <div id="modelWarningBanner" style="display:none;background:var(--warning,#f0c040);color:#000;padding:8px 14px;border-radius:6px;margin:8px 0;font-size:13px;">
     <span id="modelWarningText"></span>
     <button onclick="this.parentElement.style.display='none'" style="float:right;background:none;border:none;cursor:pointer;font-size:16px;line-height:1;padding:0 4px;">&times;</button>
+  </div>
+  <div id="pipelineErrorBanner" data-testid="pipeline-error-banner" style="display:none;background:var(--danger,#e5484d);color:#fff;padding:10px 14px;border-radius:6px;margin:8px 0;font-size:13px;">
+    <button onclick="this.parentElement.style.display='none'" style="float:right;background:none;border:none;color:#fff;cursor:pointer;font-size:16px;line-height:1;padding:0 4px;">&times;</button>
+    <strong>Pipeline failed</strong>
+    <div id="pipelineErrorText" style="margin-top:4px;white-space:pre-line;"></div>
   </div>
 </div><!-- end pipeline-left -->
 
@@ -2296,6 +2307,47 @@ function updateStartButton() {
     }
   }
 
+  // Snapshot whether source + destination are configured *before* the
+  // classify gates below. The stage-1 "complete" indicator and the
+  // auto-expand of the destination card key off this; if we let the
+  // classify gate (which can flip while a plan refresh is pending) drive
+  // the source indicator, the source stage flickers between complete and
+  // incomplete every time the plan refetches.
+  var sourceReady = !btn.disabled;
+
+  // Classify is blocked on missing species labels (the selected model can't
+  // run label-free). Gate Start so the user can't launch a run that would
+  // crash mid-pipeline at the classify stage — point them at Settings ›
+  // Labels, or let them turn Classify off to run the other stages. Mirrors
+  // the plan endpoint's `blocked` state (pipeline_plan._classify_plan).
+  //
+  // If a plan refresh is queued or in-flight and Classify is enabled, we
+  // can't trust the blocked check yet: _stageStateFor falls back to
+  // "will-run" when _pipelinePlan is null, and a stale plan from before the
+  // user's latest model/label change might still say "will-run". Treat
+  // "Classify on, plan not current" as not ready and disable Start until
+  // the fresh response lands — otherwise a fast click during the debounce
+  // window posts /api/jobs/pipeline and hits the missing-labels failure.
+  if (!btn.disabled) {
+    var classifyEnableCb = document.getElementById('enableClassify');
+    var classifyOn = classifyEnableCb && classifyEnableCb.checked;
+    if (classifyOn && (_pipelinePlan === null || _planRefreshPending)) {
+      btn.disabled = true;
+      if (actionStatus) {
+        actionStatus.textContent = 'Checking pipeline plan…';
+        actionStatus.className = 'status-msg';
+      }
+    } else if (_classifyBlocked()) {
+      btn.disabled = true;
+      if (actionStatus) {
+        actionStatus.textContent =
+          'Classify needs a species list — download one in Settings › Labels, '
+          + 'or turn Classify off to run the other stages.';
+        actionStatus.className = 'status-msg error';
+      }
+    }
+  }
+
   // Update preview button state
   var previewBtn = document.getElementById('btnPreviewFolders');
   var previewHint = document.getElementById('previewFoldersHint');
@@ -2312,7 +2364,7 @@ function updateStartButton() {
   }
 
   // Update stage 1 indicator and auto-expand stage 2 when source is ready
-  var sourceReady = !btn.disabled;
+  // (sourceReady was captured above, before the classify gates).
   var numSource = document.getElementById('numSource');
   if (sourceReady) {
     numSource.classList.add('complete');
@@ -2447,11 +2499,46 @@ var _currentPipelineJobId = null;
 
 async function startPipeline() {
   if (_pipelineRunning) return;
+
+  // Belt-and-suspenders: updateStartButton() should already have disabled
+  // this button when Classify is enabled and the plan is mid-refresh, but
+  // a click can still beat the gate (race against debounce, programmatic
+  // invocation, etc.). If a refresh is queued or in-flight, await it now
+  // and bail if the fresh plan reports Classify is blocked — never POST
+  // /api/jobs/pipeline only to crash at the missing-labels classify step.
+  var classifyEnableCb = document.getElementById('enableClassify');
+  var classifyOn = classifyEnableCb && classifyEnableCb.checked;
+  if (classifyOn && (_pipelinePlan === null || _planRefreshPending)) {
+    if (_planDebounceTimer) {
+      clearTimeout(_planDebounceTimer);
+      _planDebounceTimer = null;
+    }
+    await refreshPipelinePlan();
+    // refreshPipelinePlan() already called updateStartButton(), which will
+    // have written the "Classify needs a species list" message if blocked.
+    if (_classifyBlocked()) return;
+    // If we still don't have a plan (e.g. import preview is still loading
+    // so refreshPipelinePlan returned without fetching), we genuinely can't
+    // verify whether Classify will be blocked. Bail with a clear message
+    // rather than gamble on a run that may crash mid-pipeline.
+    if (_pipelinePlan === null) {
+      var actionStatus = document.getElementById('pipelineActionStatus');
+      if (actionStatus) {
+        actionStatus.textContent =
+          'Still computing the pipeline plan — try again in a moment.';
+        actionStatus.className = 'status-msg';
+      }
+      return;
+    }
+  }
+
   _pipelineRunning = true;
   _pipelineAbort = false;
   _pipelineCancelling = false;
   _currentPipelineJobId = null;
   document.getElementById('modelWarningBanner').style.display = 'none';
+  var _prevErrBanner = document.getElementById('pipelineErrorBanner');
+  if (_prevErrBanner) _prevErrBanner.style.display = 'none';
 
   // Create new workspace if requested
   if (_destWorkspaceMode === 'new') {
@@ -2885,6 +2972,22 @@ function _updatePipelineStageUI(p) {
   }
 }
 
+// Strip the internal "[stage] Fatal:" prefix so the banner reads as a plain,
+// actionable sentence (the stage is already conveyed by the failed card pill).
+function _humanizePipelineError(msg) {
+  return String(msg).replace(/^\[\w+\]\s*/, '').replace(/^Fatal:\s*/i, '');
+}
+
+// Show a prominent, dismissible error banner with the full failure message(s).
+function _showPipelineError(messages) {
+  var banner = document.getElementById('pipelineErrorBanner');
+  var text = document.getElementById('pipelineErrorText');
+  if (!banner || !text) return;
+  text.textContent = messages.join('\n');
+  banner.style.display = '';
+  banner.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
 function _onPipelineComplete(result) {
   if (result.status === 'cancelled') {
     var actionStatus = document.getElementById('pipelineActionStatus');
@@ -3021,6 +3124,7 @@ function _onPipelineComplete(result) {
       var stage = match ? match[1] : 'unknown';
       errorStages[stage] = err;
     });
+    var firstFailedCard = null;
     for (var stage in errorStages) {
       var cardSuffix = _stageToCard[stage];
       if (cardSuffix) {
@@ -3029,7 +3133,19 @@ function _onPipelineComplete(result) {
         delete _runningStages[cardSuffix];
         _stageOutcomes[cardSuffix] = 'failed';
         _setPill(cardSuffix, 'failed');
+        if (!firstFailedCard) firstFailedCard = cardSuffix;
       }
+    }
+    // The per-card status span is easy to miss (and invisible when the card
+    // is collapsed), and errors whose stage has no card aren't shown at all.
+    // Surface the full, actionable message in a top-level banner and open the
+    // failed card so the user actually sees why the run stopped.
+    _showPipelineError(Object.keys(errorStages).map(function(s) {
+      return _humanizePipelineError(errorStages[s]);
+    }));
+    if (firstFailedCard) {
+      var failedCardEl = document.getElementById('card-' + firstFailedCard.toLowerCase());
+      if (failedCardEl) failedCardEl.classList.add('expanded');
     }
   }
 
@@ -3868,6 +3984,12 @@ var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'cancelled' | 'will-s
 var _pipelinePlan = null;
 var _planFetchSeq = 0;
 var _planDebounceTimer = null;
+// True while a /api/pipeline/plan refresh is queued (debounce timer set) or
+// the latest fetch is in-flight. Used by updateStartButton() so a fast click
+// during the debounce window — when _pipelinePlan is null or stale relative
+// to the user's most recent selection — can't enable Start and let the
+// missing-labels classify run slip through the blocked gate.
+var _planRefreshPending = false;
 
 var _STAGES = [
   { suffix: 'Scan',         label: 'Scan & Import',          enable: null },
@@ -3903,6 +4025,7 @@ var _PILL_LABELS = {
   'will-run':   'Will run',
   'will-skip':  'Will skip',
   'done-prior': 'Already done',
+  'blocked':    'Needs labels',
 };
 
 // Map a stage's plan entry to the pill text, including counts and the
@@ -3920,6 +4043,7 @@ function _formatPillLabel(stage, planEntry, state) {
   if (state === 'failed')    return 'Failed';
   if (state === 'cancelled') return 'Cancelled';
   if (state === 'will-skip') return 'Will skip';
+  if (state === 'blocked')   return 'Needs labels';
 
   if (!planEntry) {
     // No plan entry yet (page still loading) — fall back to the bare
@@ -4005,6 +4129,19 @@ function _stageStateFor(stage) {
   var fromPlan = _pipelinePlan.stages && _pipelinePlan.stages[stage.suffix];
   if (!fromPlan) return 'will-run';
   return fromPlan.state || 'will-run';
+}
+
+// True when the Classify stage is enabled but the plan reports it can't run
+// because the selected model(s) have no labels and can't classify label-free.
+// A user-disabled Classify stage resolves to 'will-skip' via _stageStateFor,
+// so this correctly returns false and does not gate Start in that case.
+function _classifyBlocked() {
+  for (var i = 0; i < _STAGES.length; i++) {
+    if (_STAGES[i].suffix === 'Classify') {
+      return _stageStateFor(_STAGES[i]) === 'blocked';
+    }
+  }
+  return false;
 }
 
 function _stageSummaryFor(stage) {
@@ -4186,11 +4323,15 @@ async function refreshPipelinePlan() {
   // Don't fetch a plan while a pipeline is running — live state is
   // authoritative, and the running stages would race the plan response.
   if (_pipelineRunning) return;
+  _planRefreshPending = true;
   var seq = ++_planFetchSeq;
   if (_planIsWaitingForImportPreview()) {
     _pipelinePlan = null;
     updateSamVariantWarning(null);
+    // Preview is loading; another refresh will fire when it completes.
+    // Leave _planRefreshPending true so Start stays gated until then.
     refreshPipelineUI();
+    updateStartButton();
     return;
   }
   try {
@@ -4202,6 +4343,8 @@ async function refreshPipelinePlan() {
     // Drop responses that arrived after a newer request — otherwise a slow
     // request can overwrite the result of a fresher one and the UI flickers
     // back to stale state right after the user changed a setting.
+    // Leave _planRefreshPending alone: the newer fetch still owns it and
+    // will clear it on its own completion.
     if (seq !== _planFetchSeq) return;
     _pipelinePlan = data;
     var extract = data && data.stages ? data.stages.Extract : null;
@@ -4213,16 +4356,27 @@ async function refreshPipelinePlan() {
     _pipelinePlan = null;
     updateSamVariantWarning(null);
   }
+  // Only the latest fetch clears the pending flag (older stale responses
+  // returned above without touching it).
+  _planRefreshPending = false;
   refreshPipelineUI();
+  // The plan can flip Classify to 'blocked' (missing labels), which gates
+  // Start — recompute the button now that _pipelinePlan has been updated.
+  updateStartButton();
 }
 
 // Debounced version for chatty controls (label checkboxes, model picker).
 function schedulePlanRefresh() {
   if (_planDebounceTimer) clearTimeout(_planDebounceTimer);
+  _planRefreshPending = true;
   _planDebounceTimer = setTimeout(function() {
     _planDebounceTimer = null;
     refreshPipelinePlan();
   }, 150);
+  // Reflect the pending state on Start immediately — the control change
+  // that triggered this may have invalidated the previous classify
+  // blocked/will-run answer.
+  updateStartButton();
 }
 
 function updateCardStates() {
