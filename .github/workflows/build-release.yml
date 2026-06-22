@@ -358,10 +358,14 @@ jobs:
           echo "=== Tauri build finished at $(date -u) ==="
 
       # Windows: no signing needed, use tauri-action.
-      # continue-on-error because Tauri can exit non-zero after producing
-      # valid installers (e.g. post-bundle steps fail). The upload step
-      # must still run to capture .msi artifacts.
+      # continue-on-error because Tauri can exit non-zero AFTER producing
+      # valid installers (e.g. cosmetic post-bundle steps fail). We tolerate
+      # that here, then the "Verify Windows installers" step below re-asserts
+      # that real artifacts exist — so a genuinely broken build (no installer
+      # produced) still fails the job loudly instead of silently shipping
+      # nothing through the release step's `if: always()`.
       - name: Build Tauri app (Windows)
+        id: build_windows
         if: runner.os == 'Windows'
         continue-on-error: true
         uses: tauri-apps/tauri-action@v0
@@ -372,6 +376,44 @@ jobs:
         with:
           tauriScript: npx tauri
           args: --target ${{ matrix.rust-target }}
+
+      # Fail loud if the Windows build produced no installer. This step has NO
+      # continue-on-error, so an empty bundle dir fails the job — the only thing
+      # we suppress above is Tauri's non-zero-but-successful exit, not a build
+      # that genuinely produced nothing to ship.
+      - name: Verify Windows installers
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          BUNDLE_DIR: src-tauri/target/${{ matrix.rust-target }}/release/bundle
+          BUILD_OUTCOME: ${{ steps.build_windows.outcome }}
+        run: |
+          echo "Searching for installers under: $BUNDLE_DIR"
+
+          if [[ ! -d "$BUNDLE_DIR" ]]; then
+            echo "::error::Windows build produced no bundle directory ($BUNDLE_DIR). The Tauri build failed before bundling."
+            exit 1
+          fi
+
+          mapfile -t INSTALLERS < <(find "$BUNDLE_DIR" \( -name '*.msi' -o -name '*.exe' \) -type f 2>/dev/null)
+
+          if [[ ${#INSTALLERS[@]} -eq 0 ]]; then
+            echo "::error::Windows build produced no .msi or .exe installer under $BUNDLE_DIR. Tauri exited but bundled nothing — refusing to ship a broken Windows release."
+            echo "Bundle directory contents for diagnosis:"
+            find "$BUNDLE_DIR" -type f 2>/dev/null || echo "(empty)"
+            exit 1
+          fi
+
+          echo "Found ${#INSTALLERS[@]} Windows installer(s):"
+          for f in "${INSTALLERS[@]}"; do
+            echo "  $f ($(du -h "$f" | cut -f1))"
+          done
+
+          # If Tauri itself reported failure AND yet we have installers, surface
+          # it as a warning so the cosmetic post-bundle failure stays visible.
+          if [[ "$BUILD_OUTCOME" == "failure" ]]; then
+            echo "::warning::Tauri build step reported failure but valid installers were produced (tolerated post-bundle error). Review the build log above."
+          fi
 
       # ── Dump resource monitor (Linux only) ─────────────────
       - name: Dump resource monitor log
