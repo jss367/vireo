@@ -100,6 +100,32 @@ def test_fresh_database_does_not_raise_incompatible(tmp_path):
     assert "classifier_model" in cols
 
 
+def test_non_schema_operational_error_propagates(tmp_path, monkeypatch):
+    """Environmental OperationalErrors propagate as-is, not as IncompatibleDatabaseError.
+
+    The guard is for stale-schema failures ("no such column/table: …"). Other
+    OperationalErrors — file locked, read-only, disk full, I/O error — are
+    recoverable environmental problems and must surface accurately, otherwise
+    the user gets misleading "back up and remove your DB" remediation for a
+    perfectly good database that just needs a different fix.
+    """
+    import sqlite3
+
+    import db as db_module
+    import pytest
+    from db import Database, IncompatibleDatabaseError
+
+    def fake_create(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db_module.Database, "_create_tables", fake_create)
+
+    with pytest.raises(sqlite3.OperationalError) as excinfo:
+        Database(str(tmp_path / "locked.db"))
+    assert "locked" in str(excinfo.value)
+    assert not isinstance(excinfo.value, IncompatibleDatabaseError)
+
+
 def test_add_and_get_folder(tmp_path):
     """add_folder creates a folder, get_folder_tree returns it."""
     from db import Database

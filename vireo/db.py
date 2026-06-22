@@ -310,16 +310,24 @@ class Database:
         # disk. `CREATE TABLE IF NOT EXISTS` silently skips a stale table, so
         # a database from an older Vireo (e.g. a pre-`classifier_model`
         # `predictions` table) only fails later when a dependent index/query
-        # references the missing column. Convert that opaque OperationalError
-        # into a typed, actionable error so callers can guide the user to
-        # reset the file instead of crashing with a raw traceback. The
+        # references the missing column. Convert *that* specific failure
+        # ("no such column/table: …") into a typed, actionable error so
+        # callers can guide the user to reset the file. Other
+        # OperationalErrors — file locked, read-only, full disk, I/O error —
+        # are environmental and recoverable; they must propagate as
+        # themselves so the user gets accurate diagnosis instead of
+        # misleading "back up and remove your DB" remediation. The
         # per-column migrations inside `_create_tables` catch their own
         # expected OperationalErrors, so only genuine schema mismatches
-        # propagate here. On a fresh or current database this never raises.
+        # reach this handler. On a fresh or current database this never
+        # raises.
         try:
             self._create_tables()
         except sqlite3.OperationalError as e:
-            raise IncompatibleDatabaseError(self._db_path, str(e)) from e
+            msg = str(e).lower()
+            if msg.startswith("no such column") or msg.startswith("no such table"):
+                raise IncompatibleDatabaseError(self._db_path, str(e)) from e
+            raise
         self.ensure_default_workspace()
         # Idempotent legacy-type migration. MUST run before genre seeding
         # so an upgraded DB with e.g. 'descriptive'/'event'/'people' rows
