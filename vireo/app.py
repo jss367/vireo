@@ -12087,7 +12087,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error("root path required")
             roots_list = [root]
 
+        from image_loader import is_excluded_scan_path
+
         for r in roots_list:
+            # Reject other-app data bundles (Apple Photos / Aperture / Photo
+            # Booth) before any stat: ``os.path.isdir`` on a ``.photoslibrary``
+            # path — or a symlink to one — itself trips the macOS
+            # "access data from other apps" TCC prompt, defeating the guards
+            # inside scan().
+            if is_excluded_scan_path(r):
+                return json_error(
+                    f"path is inside a macOS app-managed library and cannot "
+                    f"be scanned: {r}"
+                )
             if not os.path.isdir(r):
                 return json_error(f"directory not found: {r}")
 
@@ -12159,6 +12171,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not linked:
             return json_error("folder not found", 404)
         root = folder["path"]
+        from image_loader import is_excluded_scan_path
+        # See api_job_scan for why this must run before os.path.isdir.
+        if is_excluded_scan_path(root):
+            return json_error(
+                f"folder is inside a macOS app-managed library and cannot "
+                f"be scanned: {root}"
+            )
         if not os.path.isdir(root):
             return json_error(f"folder path no longer exists: {root}")
         runner = app._job_runner
@@ -12807,6 +12826,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not source or not destination:
             return json_error("source and destination are required")
+        from image_loader import is_excluded_scan_path
+        # See api_job_scan for why this must run before os.path.isdir.
+        if is_excluded_scan_path(source):
+            return json_error(
+                f"source is inside a macOS app-managed library and cannot "
+                f"be imported: {source}"
+            )
         if not os.path.isdir(source):
             return json_error(f"source directory not found: {source}")
         if not os.path.isabs(destination):
@@ -13380,6 +13406,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not source:
             return json_error("source is required")
+        from image_loader import is_excluded_scan_path
+        # See api_job_scan for why this must run before os.path.isdir.
+        if is_excluded_scan_path(source):
+            return json_error(
+                f"source is inside a macOS app-managed library and cannot "
+                f"be imported: {source}"
+            )
         if not os.path.isdir(source):
             return json_error(f"source directory not found: {source}")
         if copy:
