@@ -466,14 +466,16 @@ def test_move_folder_refuses_case_alias_missing_tracked_destination(move_env, mo
     import move as move_mod
 
     env = move_env
-    # User asks to move src into /tmp_path/DST — case-flipped from the
-    # existing on-disk /tmp_path/dst. /tmp_path/DST does not exist on disk.
-    dest_input = env["tmp_path"] / "DST"
+    # User asks to move src into a missing destination whose path differs only
+    # by case from a stale tracked DB row. Both parent and leaf are absent so
+    # samefile has nothing to compare, even on a case-insensitive filesystem.
+    dest_input = env["tmp_path"] / "missing_dest"
     assert not dest_input.exists()
-    # Stale tracked row at /tmp_path/dst/src — on a case-insensitive FS this
-    # is the same directory as the resolved landing /tmp_path/DST/src, but
-    # neither leaf exists on disk so samefile cannot collapse them.
-    stale_landing = env["dst"] / "src"
+    stale_parent = env["tmp_path"] / "MISSING_DEST"
+    assert not stale_parent.exists()
+    # On a case-insensitive FS this is the same directory as the resolved
+    # landing /tmp_path/missing_dest/src, but neither path exists on disk.
+    stale_landing = stale_parent / "src"
     assert not stale_landing.exists()
     env["db"].add_folder(str(stale_landing), name="src")
 
@@ -487,6 +489,7 @@ def test_move_folder_refuses_case_alias_missing_tracked_destination(move_env, mo
     # Source untouched, no copy started.
     assert (env["src"] / "bird1.jpg").exists()
     assert not stale_landing.exists()
+    assert not stale_parent.exists()
     assert not dest_input.exists()
 
 
