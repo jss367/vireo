@@ -574,7 +574,7 @@ def test_is_case_insensitive_path_probes_inside_target_fs(tmp_path, monkeypatch)
         names = {os.path.basename(a), os.path.basename(b)}
         return names == {"Mount", "mOUNT"}
 
-    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile)
+    monkeypatch.setattr(move_mod, "_samefile_tristate", fake_samefile)
 
     # Deepest existing ancestor of the missing leaf is `mount`. The fixed
     # probe must look inside `mount` and report case-sensitive (False).
@@ -604,11 +604,97 @@ def test_is_case_insensitive_path_detects_case_insensitive_fs(tmp_path, monkeypa
             and os.path.basename(a).lower() == os.path.basename(b).lower()
         )
 
-    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile)
+    monkeypatch.setattr(move_mod, "_samefile_tristate", fake_samefile)
 
     assert move_mod._is_case_insensitive_path(
         os.path.join(target_str, "missing_leaf")
     ) is True
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows paths are treated case-insensitive without POSIX probing",
+)
+def test_is_case_insensitive_path_inconclusive_child_probe_keeps_scanning(
+    tmp_path, monkeypatch,
+):
+    """If a letter-bearing child's case-flipped probe is inconclusive
+    (samefile raises — broken symlink, permission/race error), the loop
+    must keep scanning later entries rather than immediately classifying
+    the FS as case-sensitive off one unstatable entry. Otherwise a
+    case-insensitive POSIX volume whose listdir happens to put such an
+    entry first lets stale case-only tracked rows slip past the
+    case-folded overlap check.
+    """
+    import move as move_mod
+
+    target = tmp_path / "dir"
+    target.mkdir()
+    (target / "broken").touch()
+    (target / "child").touch()
+    target_str = str(target)
+
+    def fake_tristate(a, b):
+        names = {os.path.basename(a).lower(), os.path.basename(b).lower()}
+        if "broken" in names:
+            # Mimic stat raising on the flipped spelling of a broken entry.
+            return None
+        # Mimic case-insensitive FS folding "child"/"CHILD" to the same inode.
+        return os.path.basename(a).lower() == os.path.basename(b).lower()
+
+    monkeypatch.setattr(move_mod, "_samefile_tristate", fake_tristate)
+
+    assert move_mod._is_case_insensitive_path(
+        os.path.join(target_str, "missing_leaf")
+    ) is True
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows paths are treated case-insensitive without POSIX probing",
+)
+def test_is_case_insensitive_path_all_inconclusive_falls_back_to_temp_probe(
+    tmp_path, monkeypatch,
+):
+    """When every letter-bearing child's probe is inconclusive (every
+    flipped spelling raises), the scan must fall through to the temp-dir
+    probe rather than declaring the FS case-sensitive off the inconclusive
+    children. Mirrors the no-letter-children fallback for the case where
+    letter children exist but can't be resolved.
+    """
+    import move as move_mod
+
+    target = tmp_path / "dir"
+    target.mkdir()
+    (target / "broken1").touch()
+    (target / "broken2").touch()
+    target_str = str(target)
+
+    def fake_tristate(a, b):
+        # Every child probe inconclusive — but the temp-probe fallback
+        # uses `_samefile_or_false`, which we leave alone so the real
+        # probe-dir path runs. With the case-insensitive simulation
+        # below, the temp probe should return True.
+        return None
+
+    def fake_samefile_or_false(a, b):
+        # Mimic case-insensitive FS at `target`: anything whose dirname
+        # is `target` and whose basenames match case-folded is "same".
+        return (
+            os.path.dirname(a) == target_str
+            and os.path.dirname(b) == target_str
+            and os.path.basename(a).lower() == os.path.basename(b).lower()
+        )
+
+    monkeypatch.setattr(move_mod, "_samefile_tristate", fake_tristate)
+    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile_or_false)
+
+    assert move_mod._is_case_insensitive_path(
+        os.path.join(target_str, "missing_leaf")
+    ) is True
+
+    # Probe dir cleaned up — only the originals remain.
+    assert sorted(os.listdir(target)) == ["broken1", "broken2"]
 
 
 @pytest.mark.skipif(

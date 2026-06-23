@@ -119,11 +119,21 @@ def _first_missing_source_file(src_path, dest_path):
     return None
 
 
-def _samefile_or_false(a, b):
+def _samefile_tristate(a, b):
+    """Whether two paths resolve to the same inode, or None if samefile
+    raised (broken symlink, permission error, transient race — the probe
+    is INCONCLUSIVE, not negative). Callers that need a plain boolean wrap
+    with `_samefile_or_false`; callers that have to differentiate
+    "definitely different" from "couldn't check" use this directly."""
     try:
         return os.path.samefile(a, b)
     except OSError:
-        return False
+        return None
+
+
+def _samefile_or_false(a, b):
+    result = _samefile_tristate(a, b)
+    return False if result is None else result
 
 
 def _walk_up_paths(p):
@@ -182,13 +192,26 @@ def _is_case_insensitive_path(path):
         flipped = entry.swapcase()
         if flipped == entry:
             continue
-        return _samefile_or_false(
+        same = _samefile_tristate(
             os.path.join(cur, entry),
             os.path.join(cur, flipped),
         )
-    # No letter-bearing existing child to flip. Probe by creating our own
-    # temp dir inside `cur` with a known case-flippable suffix and asking
-    # samefile whether the flipped spelling resolves to the same inode.
+        # None means samefile raised (e.g. a broken symlink, permission/race
+        # error, or any entry whose flipped spelling can't be stat'd) — the
+        # child probe is inconclusive, not negative. Keep scanning later
+        # entries, and fall through to the temp-dir probe if every
+        # letter-bearing child is inconclusive: returning False off one
+        # unstatable entry would misread a case-insensitive POSIX FS as
+        # case-sensitive whenever such an entry happens to come first in
+        # the listdir order, letting stale case-only tracked rows slip past
+        # the overlap check.
+        if same is None:
+            continue
+        return same
+    # No conclusive letter-bearing child probe (either no letter children,
+    # or every probe raised). Probe by creating our own temp dir inside
+    # `cur` with a known case-flippable suffix and asking samefile whether
+    # the flipped spelling resolves to the same inode.
     try:
         probe = tempfile.mkdtemp(prefix=".vireo_case_probe_", suffix="A",
                                  dir=cur)
