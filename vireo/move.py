@@ -149,9 +149,7 @@ def _is_case_insensitive_path(path):
     same name (default macOS APFS, Windows).
 
     Walks up to the deepest existing ancestor of `path`, then probes the FS
-    *at* that ancestor by case-flipping one of its child entries: if both
-    spellings resolve (samefile) to the same inode, the FS at the ancestor
-    folds case. Probing via a child name rather than the ancestor's own
+    *at* that ancestor. Probing inside the ancestor rather than via its own
     basename matters when the deepest existing ancestor is a mount point —
     a case-sensitive APFS volume mounted at `/Volumes/Photos` under default
     case-insensitive macOS HFS+ would otherwise be misread as
@@ -159,19 +157,29 @@ def _is_case_insensitive_path(path):
     `Photos`, not what the mounted volume does below it), causing valid
     moves into the mount to be refused as "already managed".
 
-    When the ancestor has no letter-bearing existing child to flip (empty,
-    or only digit/symbol-named entries), creates a short-lived temp dir
-    *inside* the ancestor with a case-flippable suffix and probes via that
-    instead — otherwise a fresh destination tree on case-insensitive POSIX
-    (default macOS APFS at `/Volumes/Photos` with nothing in it yet) would
-    fall through as "case-sensitive" and let a stale tracked row like
-    `/Photos/Dst/src` slip past the case-folded overlap check against a
-    move landing at `/Photos/dst/src`.
+    Children give only NEGATIVE evidence: if any letter-bearing child's
+    case-flipped spelling also exists as a DISTINCT file (`samefile` ==
+    False), the FS is case-sensitive — that can't happen on a case-folding
+    FS. `samefile` == True via a child name is NOT confirmation of case
+    folding: `foo` and `FOO` can both be hard links or symlink aliases to
+    the same inode on a case-sensitive FS by user choice (or via a
+    symlinked parent), which would misread Linux ext4 as case-insensitive
+    and let `_tracked_destination_overlap` refuse a valid move because a
+    stale row differs from the destination only by case. So the positive
+    answer is always confirmed via a short-lived temp dir created *inside*
+    the ancestor with a case-flippable suffix — its flipped spelling can't
+    be a pre-existing user alias, so samefile on (probe, flipped_probe)
+    reflects FS behavior. The temp probe also covers the empty / no-letter-
+    children case, where a fresh case-insensitive POSIX destination
+    (`/Volumes/Photos` with nothing in it yet) would otherwise fall through
+    as "case-sensitive" and let a stale tracked row like `/Photos/Dst/src`
+    slip past the case-folded overlap check against a move into
+    `/Photos/dst/src`.
 
     Returns False on case-sensitive POSIX (Linux ext4/btrfs, opt-in APFS)
     and when no probe is possible at all (ancestor unreadable, not a
-    directory, or read-only so the temp-probe fallback can't write) — the
-    safe default, since spuriously folding case could merge two genuinely
+    directory, or read-only so the temp-probe can't write) — the safe
+    default, since spuriously folding case could merge two genuinely
     distinct paths.
     """
     if os.name == "nt":
@@ -188,30 +196,24 @@ def _is_case_insensitive_path(path):
         entries = os.listdir(cur)
     except OSError:
         return False
+    # Scan children for a definitive False (two distinct names both exist,
+    # impossible on a case-folding FS). Ignore None (samefile raised — broken
+    # symlink, permission/race, or any entry whose flipped spelling can't be
+    # stat'd; inconclusive, not negative) and ignore True (could be a real
+    # case fold OR a user-created hard link / symlink alias — confirmed below).
     for entry in entries:
         flipped = entry.swapcase()
         if flipped == entry:
             continue
-        same = _samefile_tristate(
+        if _samefile_tristate(
             os.path.join(cur, entry),
             os.path.join(cur, flipped),
-        )
-        # None means samefile raised (e.g. a broken symlink, permission/race
-        # error, or any entry whose flipped spelling can't be stat'd) — the
-        # child probe is inconclusive, not negative. Keep scanning later
-        # entries, and fall through to the temp-dir probe if every
-        # letter-bearing child is inconclusive: returning False off one
-        # unstatable entry would misread a case-insensitive POSIX FS as
-        # case-sensitive whenever such an entry happens to come first in
-        # the listdir order, letting stale case-only tracked rows slip past
-        # the overlap check.
-        if same is None:
-            continue
-        return same
-    # No conclusive letter-bearing child probe (either no letter children,
-    # or every probe raised). Probe by creating our own temp dir inside
-    # `cur` with a known case-flippable suffix and asking samefile whether
-    # the flipped spelling resolves to the same inode.
+        ) is False:
+            return False
+    # No child pair proved case-sensitive. Confirm case-insensitivity by
+    # creating our own probe dir with a known case-flippable suffix — the
+    # flipped name didn't exist a moment ago, so samefile reflects FS
+    # behavior rather than a pre-existing alias on a case-sensitive FS.
     try:
         probe = tempfile.mkdtemp(prefix=".vireo_case_probe_", suffix="A",
                                  dir=cur)

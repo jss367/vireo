@@ -586,8 +586,10 @@ def test_is_case_insensitive_path_probes_inside_target_fs(tmp_path, monkeypatch)
 
 
 def test_is_case_insensitive_path_detects_case_insensitive_fs(tmp_path, monkeypatch):
-    """When the deepest existing ancestor's FS folds case on its children,
-    the probe must return True via a child-entry case-flip."""
+    """When the deepest existing ancestor's FS folds case, the probe must
+    return True — confirmed via the temp-dir probe, since `samefile` True
+    on a pre-existing child name could be a user-created hard link / symlink
+    alias rather than real case folding."""
     import move as move_mod
 
     target = tmp_path / "dir"
@@ -596,15 +598,19 @@ def test_is_case_insensitive_path_detects_case_insensitive_fs(tmp_path, monkeypa
     target_str = str(target)
 
     def fake_samefile(a, b):
-        # Mimic case-insensitive FS at `target`: any two child names that
-        # differ only by case resolve to the same inode.
+        # Mimic case-insensitive FS at `target`: any two child names
+        # (including the temp probe dir we create) that differ only by
+        # case resolve to the same inode.
         return (
             os.path.dirname(a) == target_str
             and os.path.dirname(b) == target_str
             and os.path.basename(a).lower() == os.path.basename(b).lower()
         )
 
+    # Child probe alone is no longer authoritative for True — patch both
+    # entry points so the temp-dir confirmation also sees the case fold.
     monkeypatch.setattr(move_mod, "_samefile_tristate", fake_samefile)
+    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile)
 
     assert move_mod._is_case_insensitive_path(
         os.path.join(target_str, "missing_leaf")
@@ -618,13 +624,11 @@ def test_is_case_insensitive_path_detects_case_insensitive_fs(tmp_path, monkeypa
 def test_is_case_insensitive_path_inconclusive_child_probe_keeps_scanning(
     tmp_path, monkeypatch,
 ):
-    """If a letter-bearing child's case-flipped probe is inconclusive
-    (samefile raises — broken symlink, permission/race error), the loop
-    must keep scanning later entries rather than immediately classifying
-    the FS as case-sensitive off one unstatable entry. Otherwise a
-    case-insensitive POSIX volume whose listdir happens to put such an
-    entry first lets stale case-only tracked rows slip past the
-    case-folded overlap check.
+    """A letter-bearing child whose case-flipped probe raises (broken
+    symlink, permission/race) must not abort the scan as case-sensitive —
+    only a definitive `samefile` False (two distinct entries) does that.
+    Inconclusive Nones are skipped; True is non-authoritative and confirmed
+    via the temp-dir probe below.
     """
     import move as move_mod
 
@@ -639,14 +643,109 @@ def test_is_case_insensitive_path_inconclusive_child_probe_keeps_scanning(
         if "broken" in names:
             # Mimic stat raising on the flipped spelling of a broken entry.
             return None
-        # Mimic case-insensitive FS folding "child"/"CHILD" to the same inode.
+        # `child`/`CHILD` looks like an alias on a case-insensitive FS, but
+        # the new logic doesn't trust child True — the result comes from the
+        # temp-probe path below.
         return os.path.basename(a).lower() == os.path.basename(b).lower()
 
+    def fake_samefile_or_false(a, b):
+        # Temp-probe confirmation: mimic case-insensitive FS at `target`.
+        return (
+            os.path.dirname(a) == target_str
+            and os.path.dirname(b) == target_str
+            and os.path.basename(a).lower() == os.path.basename(b).lower()
+        )
+
     monkeypatch.setattr(move_mod, "_samefile_tristate", fake_tristate)
+    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile_or_false)
 
     assert move_mod._is_case_insensitive_path(
         os.path.join(target_str, "missing_leaf")
     ) is True
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows paths are treated case-insensitive without POSIX probing",
+)
+def test_is_case_insensitive_path_child_alias_confirmed_by_temp_probe(
+    tmp_path, monkeypatch,
+):
+    """On a case-SENSITIVE POSIX FS, `samefile` can be True for two distinct
+    child entries when they are hard links or symlink aliases (e.g. `foo`
+    and `FOO` both pointing to the same inode by user choice). Trusting that
+    child True would misclassify Linux ext4 as case-insensitive and let
+    `_tracked_destination_overlap` refuse a valid move into `dst/src` just
+    because a stale row `Dst/src` exists. The temp-dir probe is the
+    confirmation: it creates a fresh entry whose flipped spelling can't be
+    a pre-existing alias.
+    """
+    import move as move_mod
+
+    target = tmp_path / "dir"
+    target.mkdir()
+    (target / "foo").touch()
+    (target / "FOO").touch()  # pretend these are aliases for samefile
+    target_str = str(target)
+
+    def fake_tristate(a, b):
+        # Pre-existing children look aliased (matches a user hard-link /
+        # symlink setup on a case-sensitive FS).
+        names = {os.path.basename(a), os.path.basename(b)}
+        if names == {"foo", "FOO"}:
+            return True
+        return None
+
+    # Temp probe uses the real `_samefile_or_false`; on real case-sensitive
+    # POSIX tmp_path the probe and its flipped spelling do NOT resolve to
+    # the same inode, so the final answer is False.
+    monkeypatch.setattr(move_mod, "_samefile_tristate", fake_tristate)
+
+    assert move_mod._is_case_insensitive_path(
+        os.path.join(target_str, "missing_leaf")
+    ) is False
+
+    # Probe dir cleaned up — only the originals remain.
+    assert sorted(os.listdir(target)) == ["FOO", "foo"]
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows paths are treated case-insensitive without POSIX probing",
+)
+def test_is_case_insensitive_path_definitive_false_short_circuits(
+    tmp_path, monkeypatch,
+):
+    """A child pair where `samefile` returns False — two distinct entries
+    both exist as separate files — is impossible on a case-folding FS, so
+    the loop returns False immediately without running the temp probe."""
+    import move as move_mod
+
+    target = tmp_path / "dir"
+    target.mkdir()
+    (target / "alpha").touch()
+    (target / "ALPHA").touch()
+    target_str = str(target)
+
+    def fake_tristate(a, b):
+        # Mimic real case-sensitive FS: alpha and ALPHA are distinct files
+        # and samefile returns False on the pair.
+        names = {os.path.basename(a), os.path.basename(b)}
+        if names == {"alpha", "ALPHA"}:
+            return False
+        return None
+
+    def fail_probe(*_a, **_kw):
+        raise AssertionError(
+            "temp probe should not run after a definitive False child"
+        )
+
+    monkeypatch.setattr(move_mod, "_samefile_tristate", fake_tristate)
+    monkeypatch.setattr(move_mod.tempfile, "mkdtemp", fail_probe)
+
+    assert move_mod._is_case_insensitive_path(
+        os.path.join(target_str, "missing_leaf")
+    ) is False
 
 
 @pytest.mark.skipif(
