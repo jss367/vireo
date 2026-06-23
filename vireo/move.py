@@ -48,6 +48,20 @@ def resolve_folder_dest(folder_path, folder_name, destination):
     return os.path.join(destination, name)
 
 
+def _copy_missing(src_path, dest_path):
+    """Recursively copy only files that don't already exist at dest_path,
+    never overwriting an existing destination file. shutil fallback for a
+    merge when rsync is unavailable; mirrors rsync --ignore-existing."""
+    for root, _, files in os.walk(src_path):
+        rel = os.path.relpath(root, src_path)
+        target_dir = dest_path if rel == "." else os.path.join(dest_path, rel)
+        os.makedirs(target_dir, exist_ok=True)
+        for fn in files:
+            dst_file = os.path.join(target_dir, fn)
+            if not os.path.exists(dst_file):
+                shutil.copy2(os.path.join(root, fn), dst_file)
+
+
 def _first_missing_source_file(src_path, dest_path):
     """Return the relative path of the first source file absent (or
     size-mismatched) at dest_path, or None if every source file is present
@@ -247,12 +261,18 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     log.info("%s folder %s -> %s",
              "Merging" if dest_exists else "Moving", src_path, dest_path)
 
-    # Use rsync for robust copy with checksums. With --checksum, a merge
-    # skips files already present and identical and copies only what's
-    # missing — exactly what resuming an interrupted move requires.
+    # Use rsync for a robust copy. A merge/resume uses --ignore-existing so
+    # rsync only creates files absent at the destination and NEVER overwrites
+    # a file already there: this resumes an interrupted move (missing files get
+    # copied, already-copied ones are left alone) while guaranteeing a merge
+    # cannot destroy pre-existing destination data. A fresh move uses --checksum
+    # for integrity. Any genuine same-name collision (an existing dest file that
+    # differs from the source) is left untouched here and caught by the
+    # post-copy verification below, which then refuses to delete the originals.
+    rsync_flag = "--ignore-existing" if dest_exists else "--checksum"
     try:
         result = subprocess.run(
-            ["rsync", "-a", "--checksum", src_path + "/", dest_path + "/"],
+            ["rsync", "-a", rsync_flag, src_path + "/", dest_path + "/"],
             capture_output=True, text=True, timeout=3600,
         )
         if result.returncode != 0:
@@ -260,7 +280,10 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     except FileNotFoundError:
         # rsync not available, fall back to shutil
         try:
-            shutil.copytree(src_path, dest_path, dirs_exist_ok=dest_exists)
+            if dest_exists:
+                _copy_missing(src_path, dest_path)  # never overwrites
+            else:
+                shutil.copytree(src_path, dest_path)
         except Exception as exc:
             # Only remove a destination we created — never one that
             # pre-existed (a merge target may hold the user's own files).
@@ -303,8 +326,18 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     total_photos = len(all_photos)
 
     # Update DB first: cascade folder paths (safer — if rmtree fails,
-    # old folder becomes orphan on disk rather than DB pointing to deleted paths)
-    db.move_folder_path(folder_id, dest_path)
+    # old folder becomes orphan on disk rather than DB pointing to deleted paths).
+    # If the destination is ALREADY a tracked folder row (a merge into a folder
+    # Vireo already knows about), folders.path is UNIQUE, so repointing the
+    # source onto it would violate the constraint and fail after copying.
+    # Reassign the source's photos into the existing row instead.
+    existing_dest = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (dest_path,)
+    ).fetchone()
+    if existing_dest and existing_dest["id"] != folder_id:
+        db._merge_into_existing(folder_id, existing_dest["id"], dest_path)
+    else:
+        db.move_folder_path(folder_id, dest_path)
     db.update_folder_counts()
 
     # Rebase any developed-output subdirs nested under the configured

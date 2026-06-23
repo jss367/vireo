@@ -188,6 +188,59 @@ def test_move_folder_merge_resumes(move_env):
     assert folder["path"] == str(landing)
 
 
+def test_move_folder_merge_never_overwrites_existing_dest_file(move_env):
+    """A merge must not overwrite a pre-existing destination file. A same-name
+    file with differing content is left intact and the size mismatch aborts the
+    merge, preserving the originals (no data loss on either side)."""
+    from move import move_folder
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # User's own file sharing bird1's name but with different content/size.
+    (landing / "bird1.jpg").write_bytes(b"USER DATA - do not clobber")
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("Verification failed" in e for e in result["errors"])
+    # Pre-existing destination file untouched, originals preserved.
+    assert (landing / "bird1.jpg").read_bytes() == b"USER DATA - do not clobber"
+    assert (env["src"] / "bird1.jpg").exists()
+
+
+def test_move_folder_merge_into_tracked_folder(move_env):
+    """Merging into a destination that is already a tracked folder row
+    reassigns the source's photos into that row (no folders.path UNIQUE
+    violation) and removes the source folder row."""
+    from move import move_folder
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # Completed-but-untracked copy already on disk.
+    for fn in ("bird1.jpg", "bird1.xmp", "bird2.jpg"):
+        (landing / fn).write_bytes((env["src"] / fn).read_bytes())
+    # Destination already exists as its own folder row in the DB.
+    dest_fid = env["db"].add_folder(str(landing), name="src")
+    src_fid = env["fid_src"]
+
+    result = move_folder(
+        db=env["db"], folder_id=src_fid, destination=str(env["dst"]), merge=True
+    )
+    assert result["errors"] == []
+    # Source folder row merged away; photos now under the existing dest row.
+    assert env["db"].conn.execute(
+        "SELECT id FROM folders WHERE id = ?", (src_fid,)
+    ).fetchone() is None
+    cnt = env["db"].conn.execute(
+        "SELECT COUNT(*) c FROM photos WHERE folder_id = ?", (dest_fid,)
+    ).fetchone()["c"]
+    assert cnt == 2
+    assert not env["src"].exists()
+
+
 def test_move_folder_merge_verify_fail_preserves_originals_and_dest(move_env, monkeypatch):
     """If a source file is missing at the destination after copy, the merge
     aborts without deleting originals or the pre-existing destination."""
