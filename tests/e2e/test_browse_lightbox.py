@@ -528,14 +528,14 @@ def test_browse_lightbox_one_to_one_uses_device_pixels_and_natural_layout(live_s
             return img && img.complete && img.naturalWidth === 4000;
         }"""
     )
-    page.evaluate(
+    page.wait_for_function(
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
             window._lbRecomputeNativeZoom();
+            return window._lbNativeZoom > 1;
         }"""
     )
-    page.wait_for_function("window._lbNativeZoom > 1")
 
     page.keyboard.press("z")
     # The /full source is already at the original's resolution, so the 1:1 snap
@@ -834,14 +834,14 @@ def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, 
             return img && img.complete && img.naturalWidth === 1920;
         }"""
     )
-    page.evaluate(
+    page.wait_for_function(
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
             window._lbRecomputeNativeZoom();
+            return window._lbNativeZoom > 1;
         }"""
     )
-    page.wait_for_function("window._lbNativeZoom > 1")
 
     page.keyboard.press("z")
     page.wait_for_function(
@@ -914,14 +914,14 @@ def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page)
             return img && img.complete && img.naturalWidth === 1920;
         }"""
     )
-    page.evaluate(
+    page.wait_for_function(
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
             window._lbRecomputeNativeZoom();
+            return window._lbNativeZoom > 1;
         }"""
     )
-    page.wait_for_function("window._lbNativeZoom > 1")
 
     page.keyboard.press("z")
     page.wait_for_function(
