@@ -204,6 +204,40 @@ def test_check_untracked_skips_excluded_root_itself(tmp_path):
     assert check_untracked(db, [root]) == []
 
 
+def test_check_untracked_skips_root_nested_in_excluded_bundle(tmp_path):
+    """check_untracked must also reject roots that *sit inside* an excluded
+    bundle. A leaf-only check would let
+    ``.../Photos Library.photoslibrary/originals`` through (basename
+    ``originals`` is unremarkable) and os.walk would open the protected
+    bundle subtree, defeating the TCC-prompt guard.
+    """
+    from audit import check_untracked
+    from db import Database
+
+    root = str(tmp_path / "Photos Library.photoslibrary" / "originals")
+    os.makedirs(os.path.join(root, '0'))
+    Image.new('RGB', (100, 100)).save(os.path.join(root, '0', 'managed.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    assert check_untracked(db, [root]) == []
+
+
+def test_check_stray_sidecars_skips_root_nested_in_excluded_bundle(tmp_path):
+    """check_stray_sidecars must also reject roots nested inside an excluded
+    bundle so .xmp files inside the protected subtree don't trip the macOS
+    TCC prompt the bundle guard exists to avoid.
+    """
+    from audit import check_stray_sidecars
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "Photos Library.photoslibrary" / "originals")
+    os.makedirs(root)
+    write_sidecar(os.path.join(root, 'ghost.xmp'),
+                  flat_keywords={'Gone'}, hierarchical_keywords=set())
+
+    assert check_stray_sidecars([root]) == []
+
+
 def test_remove_orphans(tmp_path):
     """remove_orphans deletes DB entries for missing files."""
     from audit import remove_orphans

@@ -6,7 +6,7 @@ import os
 
 from image_loader import (
     SUPPORTED_EXTENSIONS,
-    is_excluded_scan_dir,
+    is_excluded_scan_path,
     prune_scan_dirs,
 )
 from xmp import read_keywords
@@ -151,10 +151,12 @@ def check_untracked(db, root_paths):
     for root in root_paths:
         if not os.path.isdir(root):
             continue
-        # prune_scan_dirs filters only children; if the root itself is the
-        # excluded bundle, os.walk would still open it. Skip the root before
-        # we touch it so the audit can't trip the macOS TCC prompt either.
-        if is_excluded_scan_dir(os.path.basename(os.path.normpath(root))):
+        # prune_scan_dirs filters only children; if the root is, or sits
+        # inside, an excluded bundle (e.g. a stale folder row pointing at
+        # ``.../Photos Library.photoslibrary/originals``), os.walk would
+        # still open it. Reject the whole subtree before we touch it so
+        # the audit can't trip the macOS TCC prompt either.
+        if is_excluded_scan_path(root):
             continue
         # os.walk (not Path.rglob) so we can prune other-app data bundles
         # (e.g. "Photos Library.photoslibrary") in place — rglob offers no way
@@ -197,7 +199,7 @@ def check_stray_sidecars(root_paths):
     for root in root_paths:
         if not os.path.isdir(root):
             continue
-        if is_excluded_scan_dir(os.path.basename(os.path.normpath(root))):
+        if is_excluded_scan_path(root):
             continue
         for dirpath, dirnames, filenames in os.walk(root):
             prune_scan_dirs(dirnames)

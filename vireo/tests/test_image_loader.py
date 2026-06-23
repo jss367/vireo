@@ -525,3 +525,36 @@ def test_prune_scan_dirs_noop_when_clean():
     dirnames = ["2026", "January"]
     assert prune_scan_dirs(dirnames) == []
     assert dirnames == ["2026", "January"]
+
+
+def test_is_excluded_scan_path_matches_nested_paths():
+    """The root-level guard must reject a path that *sits inside* an excluded
+    bundle, not only one whose leaf name is the bundle. Without this, a user
+    picking ``.../Photos Library.photoslibrary/originals`` directly — or a
+    stale folder row carried over from before the guard existed — still
+    drives os.walk into the protected bundle and re-trips macOS TCC."""
+    from image_loader import is_excluded_scan_path
+
+    # Leaf-is-bundle (the case the leaf-only check already caught).
+    assert is_excluded_scan_path("/Users/me/Pictures/Photos Library.photoslibrary")
+    # Nested under a bundle — the case the leaf-only check missed.
+    assert is_excluded_scan_path(
+        "/Users/me/Pictures/Photos Library.photoslibrary/originals"
+    )
+    assert is_excluded_scan_path(
+        "/Users/me/Pictures/Photos Library.photoslibrary/originals/2024/01"
+    )
+    assert is_excluded_scan_path(
+        "/Users/me/Photo Booth Library/Pictures/IMG.jpg"
+    )
+    # Case-insensitive on the bundle component.
+    assert is_excluded_scan_path(
+        "/Users/me/PHOTOS LIBRARY.PHOTOSLIBRARY/originals"
+    )
+    # Real photo folders must NOT be excluded.
+    assert not is_excluded_scan_path("/Users/me/Pictures/2026/January")
+    assert not is_excluded_scan_path("/Users/me/Pictures")
+    # Substring matches on non-bundle component names must NOT trigger.
+    assert not is_excluded_scan_path(
+        "/Users/me/Pictures/photoslibrary_backup/2024"
+    )

@@ -92,6 +92,29 @@ def test_count_new_images_skips_excluded_root_itself(db_with_workspace):
     assert result["per_root"][0]["new_count"] == 0
 
 
+def test_count_new_images_skips_root_nested_in_excluded_bundle(db_with_workspace):
+    """A configured root that *sits inside* an excluded bundle is reported as 0.
+
+    A leaf-only check would let ``.../Photos Library.photoslibrary/originals``
+    through (the leaf ``originals`` looks innocuous) and the banner would
+    inflate with managed images the scanner will never ingest — and re-trip
+    the macOS TCC prompt this guard exists to avoid. The root guard must
+    look at every ancestor, not just the leaf.
+    """
+    db, ws_id, tmp_path = db_with_workspace
+    nested = tmp_path / "Photos Library.photoslibrary" / "originals"
+    _touch_image(str(nested / "0" / "managed.jpg"))
+    db.add_folder(str(nested), name="originals")
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 0
+    assert result["sample"] == []
+    assert len(result["per_root"]) == 1
+    assert result["per_root"][0]["new_count"] == 0
+
+
 def test_count_new_images_returns_all_paths_when_sample_limit_is_none(tmp_path):
     # Set up a workspace with 10 new files on disk.
     db = Database(str(tmp_path / "test.db"))

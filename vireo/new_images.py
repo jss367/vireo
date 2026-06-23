@@ -7,7 +7,7 @@ from pathlib import Path
 
 from image_loader import (
     SUPPORTED_EXTENSIONS,
-    is_excluded_scan_dir,
+    is_excluded_scan_path,
     prune_scan_dirs,
 )
 
@@ -133,11 +133,13 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
         if not os.path.isdir(root_path):
             per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
             continue
-        # prune_scan_dirs filters only children; if the root itself is the
-        # excluded bundle (e.g. user added ``~/Pictures/Photos Library.photoslibrary``
-        # directly), os.walk would still open it and inflate the banner with
-        # managed images the scanner never ingests.
-        if is_excluded_scan_dir(Path(root_path).name):
+        # prune_scan_dirs filters only children; if the root is, or sits
+        # inside, an excluded bundle (e.g. user added
+        # ``~/Pictures/Photos Library.photoslibrary`` directly, or a stale
+        # folder row points at ``.../Photos Library.photoslibrary/originals``),
+        # os.walk would still open it and inflate the banner with managed
+        # images the scanner never ingests.
+        if is_excluded_scan_path(root_path):
             per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
             continue
 

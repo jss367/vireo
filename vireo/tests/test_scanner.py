@@ -107,6 +107,31 @@ def test_scan_skips_excluded_root_itself(tmp_path):
     assert db.get_folder_tree() == []
 
 
+def test_scan_skips_root_nested_in_excluded_bundle(tmp_path):
+    """scan() must reject roots that sit *inside* an excluded bundle, not
+    just roots whose leaf name matches.
+
+    A user can select ``.../Photos Library.photoslibrary/originals`` directly,
+    or a stale folder row from before this guard existed can carry the same
+    shape. The leaf basename (``originals``) is unremarkable, so a leaf-only
+    check passes — and os.walk then opens the protected bundle subtree and
+    re-trips the macOS TCC prompt this guard exists to avoid.
+    """
+    from db import Database
+    from scanner import scan
+
+    nested_root = str(tmp_path / "Photos Library.photoslibrary" / "originals")
+    _create_test_images(nested_root, {
+        '0': ['managed.jpg'],
+    })
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(nested_root, db)
+
+    assert db.get_photos(per_page=100) == []
+    assert db.get_folder_tree() == []
+
+
 def test_scan_discovers_photos(tmp_path):
     """scan() creates photo entries for all image files."""
     from db import Database

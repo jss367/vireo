@@ -143,6 +143,18 @@ def test_discover_source_files_skips_excluded_root_itself(tmp_path):
     assert discover_source_files(str(src), file_types="both") == []
 
 
+def test_discover_source_files_skips_source_nested_in_excluded_bundle(tmp_path):
+    """Picking a *subfolder* of a Photos library bundle as an import source
+    must also return no candidates. A leaf-only check would let
+    ``.../Photos Library.photoslibrary/originals`` through (basename
+    ``originals`` is unremarkable) and os.walk would open the protected
+    bundle subtree and re-trip the macOS TCC prompt this guard exists to
+    avoid. The guard must check every ancestor."""
+    src = tmp_path / "Photos Library.photoslibrary" / "originals"
+    _create_test_files(str(src / "0"), ["managed.jpg"])
+    assert discover_source_files(str(src), file_types="both") == []
+
+
 def test_ingest_copies_files_to_date_folders(tmp_path):
     """Files are copied to destination organized by EXIF date (falls back to mtime)."""
     src = tmp_path / "sd_card"

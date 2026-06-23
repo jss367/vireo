@@ -14,7 +14,7 @@ from image_loader import (
     IMAGE_EXTENSIONS,
     RAW_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
-    is_excluded_scan_dir,
+    is_excluded_scan_path,
     prune_scan_dirs,
 )
 from scanner import compute_file_hash
@@ -206,10 +206,11 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
     if not source_path.is_dir():
         return []
     # prune_scan_dirs filters only children of the walked root; if the
-    # selected source is itself an other-app data bundle (e.g. user picks
-    # ``~/Pictures/Photos Library.photoslibrary`` as an import source),
-    # os.walk would still open it and trip the macOS TCC prompt.
-    if is_excluded_scan_dir(source_path.name):
+    # selected source is, or sits inside, an other-app data bundle (e.g.
+    # user picks ``~/Pictures/Photos Library.photoslibrary`` or a child
+    # like ``.../Photos Library.photoslibrary/originals`` as an import
+    # source), os.walk would still open it and trip the macOS TCC prompt.
+    if is_excluded_scan_path(source_path):
         return []
 
     if isinstance(file_types, list):

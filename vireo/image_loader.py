@@ -55,6 +55,21 @@ def is_excluded_scan_dir(name):
     return lower in _EXCLUDED_DIR_NAMES or lower.endswith(_EXCLUDED_DIR_SUFFIXES)
 
 
+def is_excluded_scan_path(path):
+    """Return True if *path* is, or sits inside, an excluded bundle.
+
+    Used as the root-level guard for every walker that accepts a
+    user-chosen path. A leaf-only check is insufficient: a user can
+    select a child of the bundle directly (e.g.
+    ``~/Pictures/Photos Library.photoslibrary/originals``), and stale
+    folder rows from before this guard existed can carry the same
+    shape. Either way, opening it still trips the macOS TCC
+    "access data from other apps" prompt — so we reject the whole
+    subtree, not just the bundle root.
+    """
+    return any(is_excluded_scan_dir(part) for part in Path(path).parts)
+
+
 def prune_scan_dirs(dirnames):
     """Mutate an ``os.walk`` *dirnames* list in place, removing excluded
     bundles so the walk never recurses into them. Returns the removed names
