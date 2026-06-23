@@ -155,6 +155,13 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
                 if full in known:
                     _maybe_emit()
                     continue
+                # Mirror ``vireo/scanner.py``: os.walk lists broken symlinks
+                # in `filenames`, but scanner refuses to ingest them
+                # (os.path.isfile == False). Counting them as "new" would
+                # leave the banner stuck on files no scan can clear.
+                if not os.path.isfile(full):
+                    _maybe_emit()
+                    continue
                 # Suppress JPG working-copy companions of already-imported
                 # RAWs in the same folder. The scanner pairs them as
                 # ``companion_path`` rather than create a new primary photo,

@@ -46,6 +46,30 @@ def test_count_new_images_detects_unscanned_files(db_with_workspace):
     assert len(result["sample"]) == 2
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks required")
+def test_count_new_images_ignores_broken_symlinks(db_with_workspace):
+    """A dangling *.jpg symlink must not be counted as a "new image".
+
+    The os.walk path lists broken symlinks in `filenames`; the scanner
+    refuses to ingest them, so counting them inflates the banner with
+    files no scan can clear.
+    """
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "USA2026"
+    _touch_image(str(root / "real.jpg"))
+    db.add_folder(str(root), name="USA2026")
+    os.symlink(
+        str(root / "missing-target.jpg"),
+        str(root / "broken.jpg"),
+    )
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 1
+    assert all("broken.jpg" not in p for p in result["sample"])
+
+
 def test_count_new_images_returns_all_paths_when_sample_limit_is_none(tmp_path):
     # Set up a workspace with 10 new files on disk.
     db = Database(str(tmp_path / "test.db"))
