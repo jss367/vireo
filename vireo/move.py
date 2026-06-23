@@ -98,59 +98,65 @@ def _first_missing_source_file(src_path, dest_path):
     return None
 
 
+def _samefile_or_false(a, b):
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _walk_up_paths(p):
+    prev = None
+    while p and p != prev:
+        yield p
+        prev = p
+        p = os.path.dirname(p)
+
+
+def _path_equal_or_descends(candidate, ancestor):
+    """True if `candidate` resolves to the same directory as `ancestor`, or is
+    a descendant of it.
+
+    Folds together every directory-alias surface the move guards need:
+      - Symlinks: os.path.realpath.
+      - Windows case folding: os.path.normcase.
+      - Case-insensitive POSIX (default macOS APFS), where the above two are
+        not enough — os.path.realpath does not fold case and os.path.normcase
+        is a no-op on POSIX, so paths differing only by case string-compare
+        unequal even though they resolve to the same inode: os.path.samefile
+        (device + inode) is FS-truth on every platform and is used as a
+        fallback, including a walk-up ancestor check for the descendant case
+        where `candidate` itself doesn't exist yet.
+    """
+    real_c = os.path.normcase(os.path.realpath(candidate))
+    real_a = os.path.normcase(os.path.realpath(ancestor))
+    if real_c == real_a or real_c.startswith(real_a + os.sep):
+        return True
+
+    if os.path.exists(candidate) and os.path.exists(ancestor) \
+            and _samefile_or_false(candidate, ancestor):
+        return True
+
+    # Containment via case-only alias: walk up candidate's existing ancestors
+    # looking for one whose inode matches `ancestor`. Handles the case where
+    # the candidate leaf doesn't exist yet but its parent (or an ancestor) is
+    # a case-only alias of `ancestor` on a case-insensitive POSIX filesystem.
+    if os.path.exists(ancestor):
+        for anc in _walk_up_paths(os.path.dirname(candidate)):
+            if os.path.exists(anc) and _samefile_or_false(anc, ancestor):
+                return True
+    return False
+
+
 def _destination_overlaps_source(src_path, dest_path):
     """True if dest_path equals src_path or one is a descendant of the other.
 
     The post-copy rmtree(src_path) would delete the only copy of the files if
     dest and src refer to the same on-disk directory, so this is checked
-    before any copy. Aliases we must catch:
-      - Symlinks: handled by os.path.realpath.
-      - Windows case folding: handled by os.path.normcase.
-      - Case-insensitive POSIX (default macOS APFS): NOT handled by either —
-        os.path.realpath does not fold case and os.path.normcase is a no-op
-        on POSIX, so a destination differing from the source only by case
-        slips past the string comparison even though it resolves to the same
-        inode. os.path.samefile (device + inode) is FS-truth on every
-        platform, so we use it as a fallback for that case.
+    before any copy. See `_path_equal_or_descends` for the alias surface.
     """
-    real_src = os.path.normcase(os.path.realpath(src_path))
-    real_dest = os.path.normcase(os.path.realpath(dest_path))
-    if real_dest == real_src \
-            or real_dest.startswith(real_src + os.sep) \
-            or real_src.startswith(real_dest + os.sep):
-        return True
-
-    def _same(a, b):
-        try:
-            return os.path.samefile(a, b)
-        except OSError:
-            return False
-
-    if os.path.exists(src_path) and os.path.exists(dest_path) \
-            and _same(src_path, dest_path):
-        return True
-
-    # Containment via case-only alias: walk up the non-existent leaf until an
-    # extant ancestor is found, then samefile against the other path. If the
-    # existing ancestor of dest is the same inode as src (dest descends from
-    # src), or the existing ancestor of src is the same inode as dest (src
-    # descends from dest), they share storage.
-    def _walk_up(p):
-        prev = None
-        while p and p != prev:
-            yield p
-            prev = p
-            p = os.path.dirname(p)
-
-    if os.path.exists(src_path):
-        for anc in _walk_up(os.path.dirname(dest_path)):
-            if os.path.exists(anc) and _same(anc, src_path):
-                return True
-    if os.path.exists(dest_path):
-        for anc in _walk_up(os.path.dirname(src_path)):
-            if os.path.exists(anc) and _same(anc, dest_path):
-                return True
-    return False
+    return (_path_equal_or_descends(dest_path, src_path)
+            or _path_equal_or_descends(src_path, dest_path))
 
 
 def move_photos(db, photo_ids, destination, progress_cb=None):
@@ -354,18 +360,16 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # a tracked descendant. Match the destination itself and anything below
         # it. The cases this feature exists for — resuming an interrupted move,
         # or moving into an untracked folder — never hit this.
-        # Compare canonical (symlink-resolved, case-normalized) paths, not raw
-        # strings: a destination reached through a symlink alias of a tracked
-        # folder would slip past a string match and leave two folder rows
-        # managing the same on-disk tree.
-        real_dest = os.path.normcase(os.path.realpath(dest_path))
-        real_dest_prefix = real_dest + os.sep
+        # Comparison goes through _path_equal_or_descends so symlink aliases,
+        # Windows case folding, AND case-only aliases on case-insensitive POSIX
+        # (default macOS APFS) all collapse to the same tracked row — otherwise
+        # a destination reached via any of those would slip past and leave two
+        # folder rows managing the same on-disk tree.
         tracked = None
         for row in db.conn.execute(
             "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
         ):
-            rp = os.path.normcase(os.path.realpath(row["path"]))
-            if rp == real_dest or rp.startswith(real_dest_prefix):
+            if _path_equal_or_descends(row["path"], dest_path):
                 tracked = row
                 break
         if tracked:

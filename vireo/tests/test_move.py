@@ -362,6 +362,49 @@ def test_move_folder_merge_refuses_case_alias_self_destination(move_env, monkeyp
     assert (env["src"] / "bird2.jpg").exists()
 
 
+def test_move_folder_merge_refuses_case_alias_tracked_destination(move_env, monkeypatch):
+    """On a case-insensitive POSIX filesystem (default macOS APFS), a tracked
+    folder reached via a case-only alias must also be refused. realpath +
+    normcase don't fold case there, so the tracked-destination string compare
+    misses; the samefile fallback in `_path_equal_or_descends` catches it and
+    keeps two folder rows from managing the same on-disk tree.
+
+    Simulated on Linux the same way as the self-destination case-alias test:
+      1. Symlink so two distinct path strings share an inode.
+      2. realpath/normcase patched to no-ops so the string-based check doesn't
+         pre-empt the samefile fallback we want to exercise.
+    """
+    from move import move_folder
+
+    env = move_env
+    real_dst = env["tmp_path"] / "realdst"
+    landing = real_dst / "src"
+    landing.mkdir(parents=True)
+    # Pre-populate landing so dest_exists is True and the tracked check runs.
+    (landing / "bird1.jpg").write_bytes((env["src"] / "bird1.jpg").read_bytes())
+    env["db"].add_folder(str(landing), name="src")  # tracked at the real path
+
+    alias_dst = env["tmp_path"] / "alias_dst"
+    try:
+        os.symlink(str(real_dst), str(alias_dst))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(os.path, "normcase", lambda p: p)
+
+    # destination=alias_dst → resolved dest = alias_dst/src; string-compares
+    # unequal to the tracked landing path, but samefile makes them collapse.
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(alias_dst), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("already manage" in e for e in result["errors"])
+    # Source intact.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird2.jpg").exists()
+
+
 def test_move_folder_refuses_self_overlapping_destination(move_env):
     """A move whose resolved destination overlaps the source (here, the
     source's own parent → resolved dest == source) must be refused rather

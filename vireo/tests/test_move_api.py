@@ -129,6 +129,51 @@ def test_move_folder_preflight_requires_params(app_and_db):
     assert resp.status_code == 400
 
 
+def test_move_folder_rejects_non_object_body(app_and_db):
+    """A JSON body that isn't an object (e.g. an array) returns 400 instead of
+    crashing on body.get(...)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-folder", json=[1, 2, 3])
+    assert resp.status_code == 400
+    assert "object" in resp.get_json()["error"].lower()
+
+
+def test_move_folder_rejects_non_string_destination(app_and_db):
+    """A non-string destination returns 400 instead of raising TypeError in
+    os.path.isabs."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-folder", json={
+        "folder_id": 1,
+        "destination": 42,
+    })
+    assert resp.status_code == 400
+    assert "string" in resp.get_json()["error"].lower()
+
+
+def test_move_folder_rejects_non_bool_merge(app_and_db):
+    """A non-boolean merge parameter returns 400 — strings like "false" must
+    not be silently coerced to True."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-folder", json={
+        "folder_id": 1,
+        "destination": "/tmp/dest",
+        "merge": "false",  # truthy non-bool
+    })
+    assert resp.status_code == 400
+    assert "boolean" in resp.get_json()["error"].lower()
+
+
+def test_move_folder_preflight_rejects_non_object_body(app_and_db):
+    """Preflight: same type guard as the job endpoint."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json="not-an-object")
+    assert resp.status_code == 400
+
+
 def test_move_rules_crud(app_and_db):
     """CRUD operations on move rules via API."""
     app, _ = app_and_db

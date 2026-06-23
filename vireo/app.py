@@ -13314,13 +13314,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/jobs/move-folder", methods=["POST"])
     def api_job_move_folder():
         """Move an entire folder to a destination."""
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("JSON body must be an object")
         folder_id = body.get("folder_id")
         destination = body.get("destination", "")
-        merge = bool(body.get("merge", False))
+        merge_raw = body.get("merge", False)
+        if not isinstance(merge_raw, bool):
+            return json_error("merge must be a boolean")
+        merge = merge_raw
 
         if not folder_id:
             return json_error("folder_id required")
+        if not isinstance(destination, str):
+            return json_error("destination must be a string")
         if not destination:
             return json_error("destination required")
         if not os.path.isabs(destination):
@@ -13375,12 +13382,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         instead of silently failing on an existing destination."""
         from move import resolve_folder_dest
 
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("JSON body must be an object")
         folder_id = body.get("folder_id")
         destination = body.get("destination", "")
 
         if not folder_id:
             return json_error("folder_id required")
+        if not isinstance(destination, str):
+            return json_error("destination must be a string")
         if not destination:
             return json_error("destination required")
         if not os.path.isabs(destination):
