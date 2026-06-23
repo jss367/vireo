@@ -188,10 +188,10 @@ def test_move_folder_merge_resumes(move_env):
     assert folder["path"] == str(landing)
 
 
-def test_move_folder_merge_never_overwrites_existing_dest_file(move_env):
-    """A merge must not overwrite a pre-existing destination file. A same-name
-    file with differing content is left intact and the size mismatch aborts the
-    merge, preserving the originals (no data loss on either side)."""
+def test_move_folder_merge_never_overwrites_differing_dest_file(move_env):
+    """A same-name destination file with DIFFERENT content (different size)
+    is a hard conflict: the merge aborts before copying, leaving both the
+    destination file and the originals untouched."""
     from move import move_folder
 
     env = move_env
@@ -204,41 +204,58 @@ def test_move_folder_merge_never_overwrites_existing_dest_file(move_env):
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
     )
     assert result["moved"] == 0
-    assert any("Verification failed" in e for e in result["errors"])
+    assert any("Conflict" in e for e in result["errors"])
     # Pre-existing destination file untouched, originals preserved.
     assert (landing / "bird1.jpg").read_bytes() == b"USER DATA - do not clobber"
     assert (env["src"] / "bird1.jpg").exists()
 
 
-def test_move_folder_merge_into_tracked_folder(move_env):
-    """Merging into a destination that is already a tracked folder row
-    reassigns the source's photos into that row (no folders.path UNIQUE
-    violation) and removes the source folder row."""
+def test_move_folder_merge_detects_same_size_different_content(move_env):
+    """The dangerous case: a destination file with the SAME size but different
+    bytes must still be detected as a conflict (size alone is insufficient),
+    so the source is never deleted in favor of the wrong destination bytes."""
+    from move import move_folder
+
+    env = move_env
+    src_bytes = (env["src"] / "bird1.jpg").read_bytes()
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # Same length as the source, different content.
+    decoy = bytes((b + 1) % 256 for b in src_bytes)
+    assert len(decoy) == len(src_bytes) and decoy != src_bytes
+    (landing / "bird1.jpg").write_bytes(decoy)
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("Conflict" in e for e in result["errors"])
+    # Destination decoy untouched, source preserved (no silent data loss).
+    assert (landing / "bird1.jpg").read_bytes() == decoy
+    assert (env["src"] / "bird1.jpg").exists()
+
+
+def test_move_folder_merge_refuses_tracked_destination(move_env):
+    """Merging into a destination Vireo already tracks as a folder is refused
+    (a correct tracked-tree merge is out of scope and would dangle descendant
+    paths). Originals are preserved."""
     from move import move_folder
 
     env = move_env
     landing = env["dst"] / "src"
     landing.mkdir()
-    # Completed-but-untracked copy already on disk.
     for fn in ("bird1.jpg", "bird1.xmp", "bird2.jpg"):
         (landing / fn).write_bytes((env["src"] / fn).read_bytes())
     # Destination already exists as its own folder row in the DB.
-    dest_fid = env["db"].add_folder(str(landing), name="src")
-    src_fid = env["fid_src"]
+    env["db"].add_folder(str(landing), name="src")
 
     result = move_folder(
-        db=env["db"], folder_id=src_fid, destination=str(env["dst"]), merge=True
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
     )
-    assert result["errors"] == []
-    # Source folder row merged away; photos now under the existing dest row.
-    assert env["db"].conn.execute(
-        "SELECT id FROM folders WHERE id = ?", (src_fid,)
-    ).fetchone() is None
-    cnt = env["db"].conn.execute(
-        "SELECT COUNT(*) c FROM photos WHERE folder_id = ?", (dest_fid,)
-    ).fetchone()["c"]
-    assert cnt == 2
-    assert not env["src"].exists()
+    assert result["moved"] == 0
+    assert any("already managed by Vireo" in e for e in result["errors"])
+    # Source intact.
+    assert (env["src"] / "bird1.jpg").exists()
 
 
 def test_move_folder_refuses_self_overlapping_destination(move_env):

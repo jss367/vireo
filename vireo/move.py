@@ -1,5 +1,6 @@
 """Photo and folder move operations with copy-verify-delete safety."""
 
+import filecmp
 import logging
 import os
 import shutil
@@ -60,6 +61,25 @@ def _copy_missing(src_path, dest_path):
             dst_file = os.path.join(target_dir, fn)
             if not os.path.exists(dst_file):
                 shutil.copy2(os.path.join(root, fn), dst_file)
+
+
+def _find_content_conflict(src_path, dest_path):
+    """Return the relative path of the first source file that ALSO exists at
+    dest_path but with different content, or None. Run before a merge copies
+    anything: a same-name destination file is only safe to treat as "already
+    there" if its bytes match the source. A size match alone is not enough —
+    filecmp with shallow=False compares contents — so we never overwrite or
+    later delete the source over a genuinely different destination file."""
+    for root, _, files in os.walk(src_path):
+        rel = os.path.relpath(root, src_path)
+        for fn in files:
+            src_file = os.path.join(root, fn)
+            rel_name = fn if rel == "." else os.path.join(rel, fn)
+            dst_file = os.path.join(dest_path, rel_name)
+            if os.path.isfile(dst_file) and \
+                    not filecmp.cmp(src_file, dst_file, shallow=False):
+                return rel_name
+    return None
 
 
 def _first_missing_source_file(src_path, dest_path):
@@ -272,6 +292,34 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             "needs_merge": True,
         }
 
+    if dest_exists:
+        # Refuse merging into a destination Vireo already tracks as a folder.
+        # A correct merge of two tracked trees needs recursive folder/photo
+        # reconciliation we don't do here; a partial attempt would leave
+        # descendant folders pointing at the deleted source path. The cases
+        # this feature exists for — resuming an interrupted move, or moving
+        # into an untracked folder — never hit this.
+        tracked = db.conn.execute(
+            "SELECT id FROM folders WHERE path = ? AND id != ?",
+            (dest_path, folder_id),
+        ).fetchone()
+        if tracked:
+            return {"moved": 0, "errors": [
+                f"Destination is already managed by Vireo as folder {tracked['id']}. "
+                f"Merging into a tracked folder isn't supported."
+            ]}
+
+        # Refuse if any same-name file already at the destination differs in
+        # content. Never overwrite or later delete the user's data over a real
+        # collision — only files that are byte-identical (a genuine resume) may
+        # be treated as already-moved.
+        conflict = _find_content_conflict(src_path, dest_path)
+        if conflict is not None:
+            return {"moved": 0, "errors": [
+                f"Conflict: '{conflict}' already exists at the destination with "
+                f"different content. Nothing was copied or deleted."
+            ]}
+
     log.info("%s folder %s -> %s",
              "Merging" if dest_exists else "Moving", src_path, dest_path)
 
@@ -339,19 +387,12 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     ).fetchall()
     total_photos = len(all_photos)
 
-    # Update DB first: cascade folder paths (safer — if rmtree fails,
-    # old folder becomes orphan on disk rather than DB pointing to deleted paths).
-    # If the destination is ALREADY a tracked folder row (a merge into a folder
-    # Vireo already knows about), folders.path is UNIQUE, so repointing the
-    # source onto it would violate the constraint and fail after copying.
-    # Reassign the source's photos into the existing row instead.
-    existing_dest = db.conn.execute(
-        "SELECT id FROM folders WHERE path = ?", (dest_path,)
-    ).fetchone()
-    if existing_dest and existing_dest["id"] != folder_id:
-        db._merge_into_existing(folder_id, existing_dest["id"], dest_path)
-    else:
-        db.move_folder_path(folder_id, dest_path)
+    # Update DB first: cascade folder paths (safer — if rmtree fails, the old
+    # folder becomes an orphan on disk rather than the DB pointing to deleted
+    # paths). A merge into an already-tracked destination is refused above, so
+    # dest_path is never a different existing folder row here and this cascade
+    # (root + all descendants) cannot collide with folders.path UNIQUE.
+    db.move_folder_path(folder_id, dest_path)
     db.update_folder_counts()
 
     # Rebase any developed-output subdirs nested under the configured
