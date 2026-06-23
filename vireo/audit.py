@@ -217,6 +217,15 @@ def check_stray_sidecars(root_paths):
             for name in filenames:
                 if name.startswith("."):
                     continue
+                # safe_scan_walk classifies entries with follow_symlinks=False,
+                # so a symlink to a directory named like an image/sidecar (e.g.
+                # ``Albums/ghost.xmp -> RealAlbum``) lands in ``filenames``
+                # instead of ``dirnames``. Without this guard the loop would
+                # treat the link as a real sidecar or image — bogus stray
+                # reports plus a delete that would unlink a real directory.
+                # Matches the os.path.isfile guard in check_untracked_files.
+                if not os.path.isfile(os.path.join(dirpath, name)):
+                    continue
                 stem, ext = os.path.splitext(name)
                 if ext.lower() == ".xmp":
                     xmps.append(name)

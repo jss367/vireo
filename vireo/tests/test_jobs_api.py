@@ -499,6 +499,7 @@ def test_pipeline_job_rejects_macos_other_app_bundle(app_and_db, tmp_path):
             "/api/jobs/pipeline", json={"source": str(nested)},
         )
         assert resp.status_code == 400
+        assert "macos" in resp.get_json()["error"].lower()
 
 
 def test_pipeline_job_rejects_relative_destination(app_and_db, tmp_path):

@@ -151,7 +151,11 @@ def _follow_symlink_chain_textually(path_str, max_depth=40):
         if any(is_excluded_scan_dir(part) for part in Path(target).parts):
             return None
         current = target
-    return current
+    # Depth cap reached without terminating in a non-link. Fail closed:
+    # the caller treats ``None`` as "excluded", so a chain longer than
+    # ``max_depth`` that might still resolve into a protected bundle never
+    # gets allowed past the guard.
+    return None
 
 
 def prune_scan_dirs(dirnames):

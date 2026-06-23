@@ -286,6 +286,32 @@ def test_remove_orphans(tmp_path):
     assert photo is None
 
 
+def test_check_stray_sidecars_skips_symlinked_directory_with_image_suffix(tmp_path):
+    """A symlink to a directory whose name ends in .xmp/.jpg must not be
+    treated as a sidecar/image.
+
+    ``safe_scan_walk`` classifies entries with ``follow_symlinks=False``,
+    so a ``ghost.xmp -> RealAlbum`` link lands in ``filenames`` rather
+    than ``dirnames``. Without the ``os.path.isfile`` guard the audit
+    would report a bogus stray (and ``delete_stray_sidecars`` would then
+    unlink a real directory link).
+    """
+    from audit import check_stray_sidecars
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    real_dir = os.path.join(root, "RealAlbum")
+    os.makedirs(real_dir)
+    # Symlink with a sidecar-shaped name that points at a real directory.
+    os.symlink(real_dir, os.path.join(root, "ghost.xmp"))
+    # And one shaped like an image, to confirm the image side is ignored
+    # too (so a real ``ghost.xmp`` next to it wouldn't be silently matched
+    # against the link's basename).
+    os.symlink(real_dir, os.path.join(root, "decoy.jpg"))
+
+    assert check_stray_sidecars([root]) == []
+
+
 def test_check_stray_sidecars(tmp_path):
     """check_stray_sidecars flags .xmp files with no matching image,
     in both bird.xmp and bird.jpg.xmp naming styles."""
