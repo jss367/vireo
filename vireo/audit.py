@@ -158,6 +158,14 @@ def check_untracked(db, root_paths):
                 full = os.path.join(dirpath, name)
                 if full in known_paths:
                     continue
+                # os.walk lists dangling symlinks (and other non-regular
+                # entries) in `filenames`; the prior Path.rglob path gated on
+                # f.is_file(). scanner.scan skips non-files via os.path.isfile,
+                # so flagging one here would raise an untracked-image warning a
+                # rescan can never clear. os.path.isfile follows symlinks and
+                # returns False (not raise) for dangling targets.
+                if not os.path.isfile(full):
+                    continue
                 untracked.append({"path": full, "folder": dirpath})
 
     log.info("Untracked check: %d untracked files found", len(untracked))

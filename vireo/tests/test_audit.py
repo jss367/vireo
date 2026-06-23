@@ -146,6 +146,44 @@ def test_check_untracked_finds_new_files(tmp_path):
     assert 'new_file.jpg' in untracked[0]['path']
 
 
+def test_check_untracked_skips_dangling_symlink(tmp_path):
+    """A broken symlink with an image extension is not reported untracked.
+
+    os.walk lists dangling symlinks in filenames; since scanner.scan skips
+    non-files, flagging one would raise a warning a rescan can never clear.
+    """
+    from audit import check_untracked
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    # A symlink named like an image but pointing at a nonexistent target.
+    os.symlink(os.path.join(root, 'nonexistent.jpg'),
+               os.path.join(root, 'broken.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    untracked = check_untracked(db, [root])
+    assert untracked == []
+
+
+def test_check_untracked_skips_photo_library_bundle(tmp_path):
+    """check_untracked must not descend into a Photos library bundle."""
+    from audit import check_untracked
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    lib = os.path.join(root, 'Photos Library.photoslibrary', 'originals')
+    os.makedirs(lib)
+    Image.new('RGB', (100, 100)).save(os.path.join(lib, 'managed.jpg'))
+    Image.new('RGB', (100, 100)).save(os.path.join(root, 'real.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    untracked = check_untracked(db, [root])
+    paths = [u['path'] for u in untracked]
+    assert any('real.jpg' in p for p in paths)
+    assert not any('.photoslibrary' in p for p in paths)
+
+
 def test_remove_orphans(tmp_path):
     """remove_orphans deletes DB entries for missing files."""
     from audit import remove_orphans
