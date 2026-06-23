@@ -241,6 +241,24 @@ def test_move_folder_merge_into_tracked_folder(move_env):
     assert not env["src"].exists()
 
 
+def test_move_folder_refuses_self_overlapping_destination(move_env):
+    """A move whose resolved destination overlaps the source (here, the
+    source's own parent → resolved dest == source) must be refused rather
+    than no-op-copy then delete the source."""
+    from move import move_folder
+
+    env = move_env
+    parent = str(env["src"].parent)  # resolve_folder_dest(...) == src path
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=parent, merge=True
+    )
+    assert result["moved"] == 0
+    assert any("overlaps" in e for e in result["errors"])
+    # Source folder fully intact.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird2.jpg").exists()
+
+
 def test_move_folder_merge_verify_fail_preserves_originals_and_dest(move_env, monkeypatch):
     """If a source file is missing at the destination after copy, the merge
     aborts without deleting originals or the pre-existing destination."""

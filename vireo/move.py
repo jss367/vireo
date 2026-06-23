@@ -250,6 +250,20 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     folder_name = folder["name"] or os.path.basename(src_path)
     dest_path = resolve_folder_dest(src_path, folder["name"], destination)
 
+    # Refuse a destination that overlaps the source. Moving a folder into
+    # itself (or into one of its own descendants) would make the post-copy
+    # rmtree(src) delete the only copy of the files. This is especially
+    # dangerous for a merge, where a destination equal to the source passes
+    # verification trivially (every source file is already "there") before the
+    # delete wipes everything.
+    abs_src = os.path.abspath(src_path)
+    abs_dest = os.path.abspath(dest_path)
+    if abs_dest == abs_src or abs_dest.startswith(abs_src + os.sep) \
+            or abs_src.startswith(abs_dest + os.sep):
+        return {"moved": 0, "errors": [
+            f"Destination overlaps the source folder: {dest_path}"
+        ]}
+
     dest_exists = os.path.exists(dest_path)
     if dest_exists and not merge:
         return {
