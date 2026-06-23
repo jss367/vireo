@@ -132,6 +132,38 @@ def _walk_up_paths(p):
         p = os.path.dirname(p)
 
 
+def _is_case_insensitive_path(path):
+    """Whether the filesystem holding `path` treats two case variants as the
+    same name (default macOS APFS, Windows).
+
+    Walks up to the deepest existing ancestor of `path`, then probes by
+    swapping the case of that ancestor's basename: if the case-flipped
+    variant resolves (samefile) to the same inode, the FS folds case. Walks
+    further up when a basename has no letters to flip. Returns False on
+    case-sensitive POSIX (Linux ext4/btrfs, opt-in APFS) and when nothing
+    along the walk yields a probe-able component — the safe default, since
+    spuriously folding case could merge two genuinely distinct paths.
+    """
+    if os.name == "nt":
+        return True
+    cur = path
+    while cur and not os.path.exists(cur):
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+    while cur:
+        head, tail = os.path.split(cur)
+        flipped = tail.swapcase()
+        if flipped != tail:
+            flipped_path = os.path.join(head, flipped) if head else flipped
+            return _samefile_or_false(cur, flipped_path)
+        if not head or head == cur:
+            return False
+        cur = head
+    return False
+
+
 def _path_equal_or_descends(candidate, ancestor):
     """True if `candidate` resolves to the same directory as `ancestor`, or is
     a descendant of it.
@@ -146,6 +178,10 @@ def _path_equal_or_descends(candidate, ancestor):
         (device + inode) is FS-truth on every platform and is used as a
         fallback, including a walk-up ancestor check for the descendant case
         where `candidate` itself doesn't exist yet.
+      - Two missing leaves on case-insensitive POSIX, where neither path
+        exists yet so samefile has nothing to compare: probe the FS for
+        case-insensitivity via the deepest existing ancestor and, if so,
+        redo the string compare case-folded.
     """
     real_c = os.path.normcase(os.path.realpath(candidate))
     real_a = os.path.normcase(os.path.realpath(ancestor))
@@ -164,6 +200,18 @@ def _path_equal_or_descends(candidate, ancestor):
         for anc in _walk_up_paths(os.path.dirname(candidate)):
             if os.path.exists(anc) and _samefile_or_false(anc, ancestor):
                 return True
+
+    # Both leaves missing on a case-insensitive POSIX volume: e.g., a stale
+    # folders.path row that differs from the resolved destination only by
+    # case before either path has been created on disk. samefile can't fold
+    # case for paths that don't exist; probe the FS for case-insensitivity
+    # and redo the string compare case-folded so the stale row is still
+    # caught before any copy.
+    if os.name != "nt" and _is_case_insensitive_path(ancestor):
+        lower_c = real_c.lower()
+        lower_a = real_a.lower()
+        if lower_c == lower_a or lower_c.startswith(lower_a + os.sep):
+            return True
     return False
 
 

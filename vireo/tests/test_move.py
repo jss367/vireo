@@ -451,6 +451,45 @@ def test_move_folder_merge_refuses_case_alias_tracked_destination(move_env, monk
     assert (env["src"] / "bird2.jpg").exists()
 
 
+def test_move_folder_refuses_case_alias_missing_tracked_destination(move_env, monkeypatch):
+    """On a case-insensitive POSIX filesystem (default macOS APFS), a stale
+    tracked folder row whose path differs from the resolved destination only
+    by case must still be refused even when both leaves are missing on disk.
+    realpath/normcase don't fold case there and samefile has nothing to
+    compare across two non-existing paths, so without the FS case-insensitivity
+    probe, _path_equal_or_descends would let the move copy first and leave two
+    folder rows managing the same on-disk tree.
+
+    Simulated on Linux by patching the case-insensitivity probe to True so the
+    case-folded fallback runs without requiring an actual case-insensitive FS.
+    """
+    import move as move_mod
+
+    env = move_env
+    # User asks to move src into /tmp_path/DST — case-flipped from the
+    # existing on-disk /tmp_path/dst. /tmp_path/DST does not exist on disk.
+    dest_input = env["tmp_path"] / "DST"
+    assert not dest_input.exists()
+    # Stale tracked row at /tmp_path/dst/src — on a case-insensitive FS this
+    # is the same directory as the resolved landing /tmp_path/DST/src, but
+    # neither leaf exists on disk so samefile cannot collapse them.
+    stale_landing = env["dst"] / "src"
+    assert not stale_landing.exists()
+    env["db"].add_folder(str(stale_landing), name="src")
+
+    monkeypatch.setattr(move_mod, "_is_case_insensitive_path", lambda p: True)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(dest_input)
+    )
+    assert result["moved"] == 0
+    assert any("already manage" in e for e in result["errors"])
+    # Source untouched, no copy started.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert not stale_landing.exists()
+    assert not dest_input.exists()
+
+
 def test_move_folder_refuses_self_overlapping_destination(move_env):
     """A move whose resolved destination overlaps the source (here, the
     source's own parent → resolved dest == source) must be refused rather
