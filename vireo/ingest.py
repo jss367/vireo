@@ -15,7 +15,7 @@ from image_loader import (
     RAW_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
     is_excluded_scan_path,
-    prune_scan_dirs,
+    safe_scan_walk,
 )
 from scanner import compute_file_hash
 
@@ -226,13 +226,13 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
         allowed = SUPPORTED_EXTENSIONS
 
     if recursive:
-        # os.walk (not Path.rglob) so we can prune other-app data bundles
-        # (e.g. "Photos Library.photoslibrary") in place — picking ~/Pictures
-        # as an import source would otherwise walk the whole Photos library
-        # and trip the macOS "access data from other apps" prompt.
+        # safe_scan_walk skips other-app data bundles (e.g.
+        # "Photos Library.photoslibrary") without stat-following any
+        # symlinked child that points at one — picking ~/Pictures as an
+        # import source would otherwise walk the whole Photos library and
+        # re-trip the macOS "access data from other apps" prompt.
         candidates = []
-        for dirpath, dirnames, filenames in os.walk(source_path):
-            prune_scan_dirs(dirnames)
+        for dirpath, _dirnames, filenames in safe_scan_walk(str(source_path)):
             candidates.extend(Path(dirpath) / name for name in filenames)
     else:
         candidates = list(source_path.iterdir())

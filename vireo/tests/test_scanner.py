@@ -168,6 +168,44 @@ def test_scan_skips_restrict_dirs_inside_excluded_bundle(tmp_path):
     assert not any('.photoslibrary' in p for p in folder_paths)
 
 
+def test_scan_skips_symlinked_excluded_bundle_child(tmp_path):
+    """A child symlink in the scan root whose target is an excluded
+    bundle must be dropped before ``os.walk``'s classification stat
+    follows the link.
+
+    The previous walker called ``os.walk`` → ``DirEntry.is_dir()`` to
+    classify each child; that follows symlinks, so for a child like
+    ``LibraryAlias -> Photos Library.photoslibrary`` the stat alone
+    reached into the protected bundle and re-tripped the macOS TCC
+    prompt this change exists to avoid — even though
+    ``prune_scan_dirs`` would have removed the entry from recursion
+    afterwards. The walker has to skip the link textually
+    (``os.readlink``) before any followed call.
+    """
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    from db import Database
+    from scanner import scan
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _create_test_images(str(bundle), {'originals/0': ['managed.jpg']})
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['real.jpg']})
+    os.symlink(str(bundle), os.path.join(root, "LibraryAlias"))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    photos = db.get_photos(per_page=100)
+    filenames = {p['filename'] for p in photos}
+    assert filenames == {'real.jpg'}
+
+    folder_paths = [f['path'] for f in db.get_folder_tree()]
+    assert not any('.photoslibrary' in p for p in folder_paths)
+    assert not any('LibraryAlias' in p for p in folder_paths)
+
+
 def test_scan_rejects_excluded_root_before_statting(tmp_path, monkeypatch):
     """The bundle guard must run BEFORE ``Path.is_dir`` on the root.
 

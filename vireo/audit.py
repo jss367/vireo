@@ -7,7 +7,7 @@ import os
 from image_loader import (
     SUPPORTED_EXTENSIONS,
     is_excluded_scan_path,
-    prune_scan_dirs,
+    safe_scan_walk,
 )
 from xmp import read_keywords
 
@@ -161,23 +161,25 @@ def check_untracked(db, root_paths):
             continue
         if not os.path.isdir(root):
             continue
-        # os.walk (not Path.rglob) so we can prune other-app data bundles
-        # (e.g. "Photos Library.photoslibrary") in place — rglob offers no way
-        # to stop descending and would walk the whole Photos library.
-        for dirpath, dirnames, filenames in os.walk(root):
-            prune_scan_dirs(dirnames)
+        # safe_scan_walk replaces os.walk + prune_scan_dirs so we never
+        # stat-follow a symlinked excluded bundle (e.g. a child like
+        # ``LibraryAlias -> Photos Library.photoslibrary``) — the os.walk
+        # classification call alone would re-trip the macOS TCC prompt.
+        # rglob offered no way to stop descending; this walker does.
+        for dirpath, _dirnames, filenames in safe_scan_walk(root):
             for name in filenames:
                 if name.startswith(".") or os.path.splitext(name)[1].lower() not in SUPPORTED_EXTENSIONS:
                     continue
                 full = os.path.join(dirpath, name)
                 if full in known_paths:
                     continue
-                # os.walk lists dangling symlinks (and other non-regular
-                # entries) in `filenames`; the prior Path.rglob path gated on
-                # f.is_file(). scanner.scan skips non-files via os.path.isfile,
-                # so flagging one here would raise an untracked-image warning a
-                # rescan can never clear. os.path.isfile follows symlinks and
-                # returns False (not raise) for dangling targets.
+                # safe_scan_walk surfaces dangling symlinks (and other
+                # non-regular entries) in ``filenames``; the prior
+                # Path.rglob path gated on f.is_file(). scanner.scan skips
+                # non-files via os.path.isfile, so flagging one here would
+                # raise an untracked-image warning a rescan can never
+                # clear. os.path.isfile follows symlinks and returns False
+                # (not raise) for dangling targets.
                 if not os.path.isfile(full):
                     continue
                 untracked.append({"path": full, "folder": dirpath})
@@ -207,8 +209,9 @@ def check_stray_sidecars(root_paths):
             continue
         if not os.path.isdir(root):
             continue
-        for dirpath, dirnames, filenames in os.walk(root):
-            prune_scan_dirs(dirnames)
+        # See check_untracked_files for why safe_scan_walk supersedes
+        # os.walk + prune_scan_dirs here.
+        for dirpath, _dirnames, filenames in safe_scan_walk(root):
             image_names = set()
             xmps = []
             for name in filenames:

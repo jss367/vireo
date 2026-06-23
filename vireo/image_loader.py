@@ -101,11 +101,110 @@ def is_excluded_scan_path(path):
 def prune_scan_dirs(dirnames):
     """Mutate an ``os.walk`` *dirnames* list in place, removing excluded
     bundles so the walk never recurses into them. Returns the removed names
-    (useful for logging what was skipped)."""
+    (useful for logging what was skipped).
+
+    Note: by the time this runs, ``os.walk`` has already called
+    ``DirEntry.is_dir()`` on every child to populate ``dirnames`` — and that
+    call follows symlinks, so a child like ``LibraryAlias ->
+    Photos Library.photoslibrary`` is stat'ed against the bundle target
+    *before* pruning. Use :func:`safe_scan_walk` for user-chosen roots so
+    the symlink target is never stat-followed.
+    """
     removed = [d for d in dirnames if is_excluded_scan_dir(d)]
     if removed:
         dirnames[:] = [d for d in dirnames if d not in removed]
     return removed
+
+
+def _symlink_target_is_excluded(entry):
+    """Return True if *entry* is a symlink whose target basename names an
+    excluded bundle. Uses ``os.readlink`` (purely textual — never follows
+    the link), so a link pointing at ``Photos Library.photoslibrary`` can
+    be classified without statting the protected bundle target."""
+    try:
+        if not entry.is_symlink():
+            return False
+    except OSError:
+        return False
+    try:
+        target = os.readlink(entry.path)
+    except OSError:
+        return False
+    if not target:
+        return False
+    # Strip trailing separators before taking the basename so a link target
+    # spelled ``.../Photos Library.photoslibrary/`` is still matched.
+    target_name = os.path.basename(target.rstrip("/").rstrip("\\"))
+    return is_excluded_scan_dir(target_name)
+
+
+def safe_scan_walk(top, onerror=None):
+    """Yield ``(dirpath, dirnames, filenames)`` like ``os.walk(top,
+    followlinks=False)``, but never stat-following a symlinked excluded
+    bundle.
+
+    The stock ``os.walk`` classifies each child by calling
+    ``DirEntry.is_dir()``, which follows symlinks. If a user-chosen root
+    contains ``LibraryAlias -> Photos Library.photoslibrary``, that
+    classification stat alone reaches into the protected bundle and
+    re-trips the macOS "access data from other apps" TCC prompt — even
+    though the subsequent :func:`prune_scan_dirs` would remove the entry
+    from recursion. We need to detect symlinks pointing at excluded
+    bundles *before* any stat that follows them; ``os.readlink`` is the
+    only call here that touches a symlink, and it returns the literal
+    target string without resolving it.
+
+    Direct-name exclusion (``is_excluded_scan_dir``) is also applied
+    here, so callers don't need a separate ``prune_scan_dirs`` step on
+    ``dirnames``. Classification uses ``follow_symlinks=False``, matching
+    ``os.walk(followlinks=False)``'s recursion behaviour — symlinks to
+    non-excluded directories are surfaced in ``filenames`` (not
+    ``dirnames``) and never recursed into. Callers that already filter
+    ``filenames`` with ``os.path.isfile`` (which returns False for
+    directories, including symlinked dirs) discard those entries
+    automatically.
+    """
+    try:
+        scandir_it = os.scandir(top)
+    except OSError as exc:
+        if onerror is not None:
+            onerror(exc)
+        return
+    dirs = []
+    nondirs = []
+    skipped = []
+    with scandir_it:
+        for entry in scandir_it:
+            name = entry.name
+            # Name-based exclusion catches direct bundle entries
+            # (``Photos Library.photoslibrary``) without any stat.
+            if is_excluded_scan_dir(name):
+                skipped.append(name)
+                continue
+            # Symlink whose target names an excluded bundle. os.readlink
+            # is textual and never follows the link, so this is safe even
+            # when the target is a protected macOS bundle.
+            if _symlink_target_is_excluded(entry):
+                skipped.append(name)
+                continue
+            try:
+                entry_is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError as exc:
+                if onerror is not None:
+                    onerror(exc)
+                entry_is_dir = False
+            if entry_is_dir:
+                dirs.append(name)
+            else:
+                nondirs.append(name)
+    if skipped:
+        log.info(
+            "Skipping other-app data bundle(s) under %s: %s",
+            top, ", ".join(skipped),
+        )
+    yield top, dirs, nondirs
+    for subdir in dirs:
+        yield from safe_scan_walk(os.path.join(top, subdir), onerror=onerror)
 
 
 def load_image(file_path, max_size=1024):

@@ -8,7 +8,7 @@ from pathlib import Path
 from image_loader import (
     SUPPORTED_EXTENSIONS,
     is_excluded_scan_path,
-    prune_scan_dirs,
+    safe_scan_walk,
 )
 
 log = logging.getLogger(__name__)
@@ -147,13 +147,13 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
             continue
 
         root_new = 0
-        for dirpath, dirnames, filenames in os.walk(root_path):
-            # Mirror ``vireo/scanner.py``: never descend into other-app data
-            # bundles (e.g. "Photos Library.photoslibrary"). Counting files
-            # inside them would both trigger the macOS "access data from other
-            # apps" prompt and inflate the "new images" banner with photos the
-            # scanner will never ingest.
-            prune_scan_dirs(dirnames)
+        # safe_scan_walk skips other-app data bundles (e.g.
+        # "Photos Library.photoslibrary") without stat-following any
+        # symlinked child that points at one — the os.walk classification
+        # stat alone is enough to trip the macOS TCC prompt. Mirror what
+        # scanner.scan() will eventually pick up, so the "new images"
+        # banner can't be inflated by files the scanner will never ingest.
+        for dirpath, _dirnames, filenames in safe_scan_walk(root_path):
             for name in filenames:
                 files_checked += 1
                 # Mirror ``vireo/scanner.py``: skip dotfiles (e.g. macOS

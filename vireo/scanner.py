@@ -20,7 +20,7 @@ from image_loader import (
     SUPPORTED_EXTENSIONS,
     extract_working_copy,
     is_excluded_scan_path,
-    prune_scan_dirs,
+    safe_scan_walk,
 )
 from metadata import extract_metadata
 from PIL import Image
@@ -1093,21 +1093,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     else:
         if recursive:
             checked = 0
-            for dirpath, dirnames, filenames in os.walk(
+            # safe_scan_walk replaces os.walk + prune_scan_dirs. It excludes
+            # other-app data bundles (e.g. "Photos Library.photoslibrary"
+            # sitting in ~/Pictures) without ever stat-following a symlink
+            # to one — os.walk's classification call follows symlinks and
+            # would re-trip the macOS "access data from other apps" TCC
+            # prompt for a child like ``LibraryAlias -> Photos
+            # Library.photoslibrary`` before prune_scan_dirs could reject it.
+            for dirpath, _dirnames, filenames in safe_scan_walk(
                 str(root_path), onerror=_on_walk_error,
             ):
                 _check_cancelled()
-                # Don't recurse into other-app data bundles (e.g.
-                # "Photos Library.photoslibrary" sitting in ~/Pictures).
-                # Pruning dirnames in place stops os.walk descending and
-                # avoids the recurring macOS "access data from other apps"
-                # TCC prompt the library would otherwise trigger.
-                skipped = prune_scan_dirs(dirnames)
-                if skipped:
-                    log.info(
-                        "Skipping other-app data bundle(s) under %s: %s",
-                        dirpath, ", ".join(skipped),
-                    )
                 for name in filenames:
                     checked += 1
                     if checked % 100 == 0:

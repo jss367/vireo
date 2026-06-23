@@ -614,3 +614,142 @@ def test_is_excluded_scan_path_tolerates_non_string_inputs():
     assert is_excluded_scan_path(0.5) is False
     assert is_excluded_scan_path(["/Users/me/Pictures"]) is False
     assert is_excluded_scan_path({"path": "/Users/me/Pictures"}) is False
+
+
+def test_safe_scan_walk_skips_symlinked_excluded_bundle(tmp_path, caplog):
+    """A child symlink whose target is an excluded bundle must be dropped
+    before any stat that follows the link.
+
+    ``os.walk`` classifies each child by calling ``DirEntry.is_dir()``,
+    which follows symlinks. For a child like ``LibraryAlias -> Photos
+    Library.photoslibrary`` that classification stat alone reaches into
+    the protected bundle and re-trips the macOS TCC "access data from
+    other apps" prompt this guard exists to avoid — even though
+    ``prune_scan_dirs`` would have removed the entry from recursion
+    afterwards. ``safe_scan_walk`` must read the symlink target textually
+    (``os.readlink``, no stat-follow) and skip the entry before
+    classification.
+    """
+    import logging
+
+    import pytest
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    from image_loader import safe_scan_walk
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    (bundle / "originals").mkdir(parents=True)
+    (bundle / "originals" / "managed.jpg").write_bytes(b"")
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    (root / "real.jpg").write_bytes(b"")
+    os.symlink(str(bundle), str(root / "LibraryAlias"))
+
+    seen = []
+    with caplog.at_level(logging.INFO, logger="image_loader"):
+        for _dirpath, dirnames, filenames in safe_scan_walk(str(root)):
+            for name in filenames + dirnames:
+                seen.append(name)
+
+    assert "real.jpg" in seen
+    # The symlink must not surface as a child dir (else os.walk would
+    # recurse) or a file (else os.path.isfile would follow it and trip
+    # the same prompt).
+    assert "LibraryAlias" not in seen
+    assert "managed.jpg" not in seen
+    # The skip was deliberate, not just a missed entry — the log line
+    # records what we dropped under this root.
+    assert any(
+        "LibraryAlias" in r.getMessage()
+        for r in caplog.records
+        if r.name == "image_loader"
+    )
+
+
+def test_safe_scan_walk_skips_direct_bundle_child_without_stat(tmp_path):
+    """A direct (non-symlinked) bundle child must be dropped by name
+    before any ``is_dir()`` call. ``os.walk``'s classification stat on
+    the bundle root itself is enough to trip the macOS TCC prompt, so a
+    name match has to win before any stat happens.
+    """
+    from image_loader import safe_scan_walk
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    (root / "real.jpg").write_bytes(b"")
+    bundle = root / "Photos Library.photoslibrary"
+    (bundle / "originals" / "0").mkdir(parents=True)
+    (bundle / "originals" / "0" / "managed.jpg").write_bytes(b"")
+
+    seen_paths = []
+    for dirpath, dirnames, filenames in safe_scan_walk(str(root)):
+        for name in filenames:
+            seen_paths.append(os.path.join(dirpath, name))
+        for name in dirnames:
+            seen_paths.append(os.path.join(dirpath, name))
+
+    assert any(p.endswith("real.jpg") for p in seen_paths)
+    assert not any(".photoslibrary" in p for p in seen_paths)
+    assert not any("managed.jpg" in p for p in seen_paths)
+
+
+def test_safe_scan_walk_matches_os_walk_for_normal_trees(tmp_path):
+    """Outside of bundle exclusion, ``safe_scan_walk`` yields the same
+    files as the normal walker for the same recursion semantics
+    (``followlinks=False``). Pin this so future tweaks don't accidentally
+    drop legitimate photos.
+    """
+    from image_loader import safe_scan_walk
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "b").mkdir()
+    (tmp_path / "top.jpg").write_bytes(b"")
+    (tmp_path / "a" / "mid.jpg").write_bytes(b"")
+    (tmp_path / "a" / "b" / "deep.jpg").write_bytes(b"")
+
+    collected = set()
+    for dirpath, _dirnames, filenames in safe_scan_walk(str(tmp_path)):
+        for name in filenames:
+            collected.add(os.path.relpath(
+                os.path.join(dirpath, name), str(tmp_path)
+            ))
+
+    assert collected == {
+        "top.jpg",
+        os.path.join("a", "mid.jpg"),
+        os.path.join("a", "b", "deep.jpg"),
+    }
+
+
+def test_safe_scan_walk_surfaces_permission_errors_via_onerror(tmp_path):
+    """``safe_scan_walk`` must mirror ``os.walk(onerror=...)``: a directory
+    the kernel refuses to enter is reported via the callback, not swallowed.
+    Regression guard: the scanner's partial-discovery callback relies on
+    this to surface denied paths.
+    """
+    import pytest
+    if sys.platform == "win32":
+        pytest.skip("POSIX permissions required")
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root bypasses POSIX mode bits; cannot deny self")
+    from image_loader import safe_scan_walk
+
+    (tmp_path / "ok.jpg").write_bytes(b"")
+    forbidden = tmp_path / "forbidden"
+    forbidden.mkdir()
+    (forbidden / "hidden.jpg").write_bytes(b"")
+    os.chmod(str(forbidden), 0o000)
+
+    errors = []
+    try:
+        for _dirpath, _dirnames, _filenames in safe_scan_walk(
+            str(tmp_path), onerror=errors.append
+        ):
+            pass
+        assert any(str(forbidden) in str(getattr(e, "filename", "") or e)
+                   for e in errors), (
+            f"denied path not reported via onerror callback: {errors}"
+        )
+    finally:
+        os.chmod(str(forbidden), 0o755)
