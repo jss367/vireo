@@ -493,6 +493,85 @@ def test_move_folder_refuses_case_alias_missing_tracked_destination(move_env, mo
     assert not dest_input.exists()
 
 
+def test_is_case_insensitive_path_probes_inside_target_fs(tmp_path, monkeypatch):
+    """The case-insensitivity probe must test the FS at the deepest existing
+    ancestor by case-flipping a CHILD entry, not by case-flipping the
+    ancestor's own basename. Otherwise a case-sensitive APFS volume mounted
+    at /Volumes/Photos under default case-insensitive macOS HFS+ is wrongly
+    classified case-insensitive (the basename probe asks /Volumes how it
+    resolves "Photos", which is case-insensitive, instead of asking the
+    mounted volume how it resolves its own children), and valid moves into
+    the volume get refused as overlapping a stale case-only alias.
+    """
+    import move as move_mod
+
+    mount = tmp_path / "Mount"
+    mount.mkdir()
+    # Letter-named child so a child probe has something to flip.
+    (mount / "child").mkdir()
+    mount_str = str(mount)
+
+    def fake_samefile(a, b):
+        # Mimic the misleading scenario: case-flipping the mount point's
+        # own basename in its parent directory collapses (the parent FS
+        # folds case), while case-flipping a child name under the mount
+        # does not (the mount's FS is case-sensitive).
+        names = {os.path.basename(a), os.path.basename(b)}
+        return names == {"Mount", "mOUNT"}
+
+    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile)
+
+    # Deepest existing ancestor of the missing leaf is `mount`. The fixed
+    # probe must look inside `mount` and report case-sensitive (False).
+    # The pre-fix code probed `os.path.basename(mount)` in its parent and
+    # returned True — the regression we're guarding against.
+    assert move_mod._is_case_insensitive_path(
+        os.path.join(mount_str, "missing", "sub")
+    ) is False
+
+
+def test_is_case_insensitive_path_detects_case_insensitive_fs(tmp_path, monkeypatch):
+    """When the deepest existing ancestor's FS folds case on its children,
+    the probe must return True via a child-entry case-flip."""
+    import move as move_mod
+
+    target = tmp_path / "dir"
+    target.mkdir()
+    (target / "child").touch()
+    target_str = str(target)
+
+    def fake_samefile(a, b):
+        # Mimic case-insensitive FS at `target`: any two child names that
+        # differ only by case resolve to the same inode.
+        return (
+            os.path.dirname(a) == target_str
+            and os.path.dirname(b) == target_str
+            and os.path.basename(a).lower() == os.path.basename(b).lower()
+        )
+
+    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile)
+
+    assert move_mod._is_case_insensitive_path(
+        os.path.join(target_str, "missing_leaf")
+    ) is True
+
+
+def test_is_case_insensitive_path_no_letter_children_returns_false(tmp_path):
+    """No probe-able child entry → conservative False. Otherwise a folder
+    of digit-only names could be flipped no-op-wise and report True/False
+    based on whatever samefile happened to return."""
+    import move as move_mod
+
+    target = tmp_path / "digits"
+    target.mkdir()
+    (target / "123").touch()
+    (target / "456").mkdir()
+
+    assert move_mod._is_case_insensitive_path(
+        os.path.join(str(target), "missing")
+    ) is False
+
+
 def test_move_folder_refuses_self_overlapping_destination(move_env):
     """A move whose resolved destination overlaps the source (here, the
     source's own parent → resolved dest == source) must be refused rather

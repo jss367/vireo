@@ -136,13 +136,21 @@ def _is_case_insensitive_path(path):
     """Whether the filesystem holding `path` treats two case variants as the
     same name (default macOS APFS, Windows).
 
-    Walks up to the deepest existing ancestor of `path`, then probes by
-    swapping the case of that ancestor's basename: if the case-flipped
-    variant resolves (samefile) to the same inode, the FS folds case. Walks
-    further up when a basename has no letters to flip. Returns False on
-    case-sensitive POSIX (Linux ext4/btrfs, opt-in APFS) and when nothing
-    along the walk yields a probe-able component — the safe default, since
-    spuriously folding case could merge two genuinely distinct paths.
+    Walks up to the deepest existing ancestor of `path`, then probes the FS
+    *at* that ancestor by case-flipping one of its child entries: if both
+    spellings resolve (samefile) to the same inode, the FS at the ancestor
+    folds case. Probing via a child name rather than the ancestor's own
+    basename matters when the deepest existing ancestor is a mount point —
+    a case-sensitive APFS volume mounted at `/Volumes/Photos` under default
+    case-insensitive macOS HFS+ would otherwise be misread as
+    case-insensitive (the basename probe tests `/Volumes`'s handling of
+    `Photos`, not what the mounted volume does below it), causing valid
+    moves into the mount to be refused as "already managed".
+
+    Returns False on case-sensitive POSIX (Linux ext4/btrfs, opt-in APFS)
+    and when the ancestor has no probe-able child entry (empty, unreadable,
+    or only no-letter names) — the safe default, since spuriously folding
+    case could merge two genuinely distinct paths.
     """
     if os.name == "nt":
         return True
@@ -152,15 +160,20 @@ def _is_case_insensitive_path(path):
         if parent == cur:
             return False
         cur = parent
-    while cur:
-        head, tail = os.path.split(cur)
-        flipped = tail.swapcase()
-        if flipped != tail:
-            flipped_path = os.path.join(head, flipped) if head else flipped
-            return _samefile_or_false(cur, flipped_path)
-        if not head or head == cur:
-            return False
-        cur = head
+    if not cur or not os.path.isdir(cur):
+        return False
+    try:
+        entries = os.listdir(cur)
+    except OSError:
+        return False
+    for entry in entries:
+        flipped = entry.swapcase()
+        if flipped == entry:
+            continue
+        return _samefile_or_false(
+            os.path.join(cur, entry),
+            os.path.join(cur, flipped),
+        )
     return False
 
 
