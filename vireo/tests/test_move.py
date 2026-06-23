@@ -141,6 +141,87 @@ def test_move_folder_copies_tree(move_env):
     assert folder["path"] == str(env["dst"] / "src")
 
 
+def test_move_folder_refuses_existing_dest_without_merge(move_env):
+    """move_folder refuses an existing destination and preserves originals."""
+    from move import move_folder
+
+    env = move_env
+    # Pre-create the resolved landing path (dst/src)
+    landing = env["dst"] / "src"
+    landing.mkdir()
+
+    result = move_folder(db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]))
+    assert result["moved"] == 0
+    assert result.get("needs_merge") is True
+    assert any("already exists" in e for e in result["errors"])
+    # Originals untouched
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird2.jpg").exists()
+
+
+def test_move_folder_merge_resumes(move_env):
+    """merge=True copies only missing files into an existing destination,
+    verifies, then removes originals and updates the DB path."""
+    from move import move_folder
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # Simulate a partially-completed prior move: bird1 already copied.
+    (landing / "bird1.jpg").write_bytes((env["src"] / "bird1.jpg").read_bytes())
+    # And a leftover rsync temp file from the interrupted run.
+    (landing / ".bird2.jpg.AbCdEf").write_bytes(b"partial")
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["errors"] == []
+    # Missing file got copied; both now present at destination
+    assert (landing / "bird1.jpg").exists()
+    assert (landing / "bird2.jpg").exists()
+    # Originals removed
+    assert not env["src"].exists()
+    # DB path updated to the merged location
+    folder = env["db"].conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (env["fid_src"],)
+    ).fetchone()
+    assert folder["path"] == str(landing)
+
+
+def test_move_folder_merge_verify_fail_preserves_originals_and_dest(move_env, monkeypatch):
+    """If a source file is missing at the destination after copy, the merge
+    aborts without deleting originals or the pre-existing destination."""
+    import move as move_mod
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    sentinel = landing / "user_file.txt"
+    sentinel.write_text("pre-existing")
+
+    # Force the copy step to be a no-op so a source file is "missing" at dest.
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("Verification failed" in e for e in result["errors"])
+    # Originals preserved, pre-existing destination file untouched
+    assert (env["src"] / "bird1.jpg").exists()
+    assert sentinel.exists()
+
+
+def test_resolve_folder_dest():
+    """resolve_folder_dest places the folder inside the destination."""
+    from move import resolve_folder_dest
+
+    assert resolve_folder_dest("/a/birds", "birds", "/nas/photos") == "/nas/photos/birds"
+    # Falls back to basename when name is empty
+    assert resolve_folder_dest("/a/birds/", "", "/nas/photos") == "/nas/photos/birds"
+
+
 def test_move_folder_updates_counts(move_env):
     """move_folder updates photo_count on folders."""
     from move import move_folder

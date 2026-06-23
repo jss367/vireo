@@ -36,6 +36,34 @@ def _copy_and_verify(src, dst):
     return True
 
 
+def resolve_folder_dest(folder_path, folder_name, destination):
+    """Compute the final landing path for a folder move.
+
+    The source folder is placed *inside* destination, keeping its name —
+    e.g. moving /local/birds to /nas/photos yields /nas/photos/birds.
+    Shared by move_folder() and the preflight route so the resolved path
+    is computed in exactly one place.
+    """
+    name = folder_name or os.path.basename(folder_path.rstrip("/\\"))
+    return os.path.join(destination, name)
+
+
+def _first_missing_source_file(src_path, dest_path):
+    """Return the relative path of the first source file absent (or
+    size-mismatched) at dest_path, or None if every source file is present
+    and matches. Used to verify a merge before deleting originals."""
+    for root, _, files in os.walk(src_path):
+        rel = os.path.relpath(root, src_path)
+        for fn in files:
+            src_file = os.path.join(root, fn)
+            rel_name = fn if rel == "." else os.path.join(rel, fn)
+            dst_file = os.path.join(dest_path, rel_name)
+            if not os.path.isfile(dst_file) or \
+                    os.path.getsize(src_file) != os.path.getsize(dst_file):
+                return rel_name
+    return None
+
+
 def move_photos(db, photo_ids, destination, progress_cb=None):
     """Move individual photos to a destination directory.
 
@@ -168,7 +196,8 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
     return {"moved": moved, "errors": errors, "destination_folder_id": dest_folder_id}
 
 
-def move_folder(db, folder_id, destination, progress_cb=None, developed_dir=""):
+def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
+                merge=False):
     """Move an entire folder (and subfolders) to a destination.
 
     The folder is placed inside the destination, preserving its name.
@@ -179,6 +208,14 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir=""):
         folder_id: ID of the source folder
         destination: absolute path to parent destination directory
         progress_cb: optional callback(current, total, filename)
+        merge: when False (default), refuse to write into a destination
+            that already exists — the safe all-or-nothing behavior. When
+            True, merge/resume into the existing destination: rsync skips
+            files already present with a matching checksum and copies only
+            what is missing (this is how an interrupted move is resumed).
+            Originals are deleted only after every source file is verified
+            present at the destination. A failed merge never removes the
+            destination, since it may hold the user's pre-existing files.
         developed_dir: optional path to the configured
             `darktable_output_dir`. When set, the folder's developed
             subdirectory — nested under a hash of its source path, see
@@ -197,14 +234,22 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir=""):
 
     src_path = folder["path"]
     folder_name = folder["name"] or os.path.basename(src_path)
-    dest_path = os.path.join(destination, folder_name)
+    dest_path = resolve_folder_dest(src_path, folder["name"], destination)
 
-    if os.path.exists(dest_path):
-        return {"moved": 0, "errors": [f"Destination already exists: {dest_path}"]}
+    dest_exists = os.path.exists(dest_path)
+    if dest_exists and not merge:
+        return {
+            "moved": 0,
+            "errors": [f"Destination already exists: {dest_path}"],
+            "needs_merge": True,
+        }
 
-    log.info("Moving folder %s -> %s", src_path, dest_path)
+    log.info("%s folder %s -> %s",
+             "Merging" if dest_exists else "Moving", src_path, dest_path)
 
-    # Use rsync for robust copy with checksums
+    # Use rsync for robust copy with checksums. With --checksum, a merge
+    # skips files already present and identical and copies only what's
+    # missing — exactly what resuming an interrupted move requires.
     try:
         result = subprocess.run(
             ["rsync", "-a", "--checksum", src_path + "/", dest_path + "/"],
@@ -215,21 +260,38 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir=""):
     except FileNotFoundError:
         # rsync not available, fall back to shutil
         try:
-            shutil.copytree(src_path, dest_path)
+            shutil.copytree(src_path, dest_path, dirs_exist_ok=dest_exists)
         except Exception as exc:
-            shutil.rmtree(dest_path, ignore_errors=True)
+            # Only remove a destination we created — never one that
+            # pre-existed (a merge target may hold the user's own files).
+            if not dest_exists:
+                shutil.rmtree(dest_path, ignore_errors=True)
             return {"moved": 0, "errors": [f"Copy failed: {exc}"]}
     except subprocess.TimeoutExpired:
         return {"moved": 0, "errors": ["rsync timed out after 1 hour"]}
 
-    # Verify file count
-    src_count = sum(1 for _, _, files in os.walk(src_path) for _ in files)
-    dst_count = sum(1 for _, _, files in os.walk(dest_path) for _ in files)
-    if src_count != dst_count:
-        shutil.rmtree(dest_path, ignore_errors=True)
-        return {"moved": 0, "errors": [
-            f"File count mismatch: source={src_count}, dest={dst_count}. Originals preserved."
-        ]}
+    # Verify before deleting originals.
+    if dest_exists:
+        # Merge: the destination may legitimately hold extra unrelated
+        # files (and leftover temp files from an interrupted run), so a
+        # count comparison is meaningless. Instead require that every
+        # source file is present at the destination with a matching size.
+        missing = _first_missing_source_file(src_path, dest_path)
+        if missing is not None:
+            return {"moved": 0, "errors": [
+                f"Verification failed: '{missing}' missing or size mismatch "
+                f"at destination. Originals preserved."
+            ]}
+    else:
+        # Fresh move into a destination we created: a whole-tree file
+        # count is a cheap, sufficient integrity check.
+        src_count = sum(1 for _, _, files in os.walk(src_path) for _ in files)
+        dst_count = sum(1 for _, _, files in os.walk(dest_path) for _ in files)
+        if src_count != dst_count:
+            shutil.rmtree(dest_path, ignore_errors=True)
+            return {"moved": 0, "errors": [
+                f"File count mismatch: source={src_count}, dest={dst_count}. Originals preserved."
+            ]}
 
     # Count photos for progress
     all_photos = db.conn.execute(
