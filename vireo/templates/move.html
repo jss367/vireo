@@ -565,7 +565,7 @@ async function executeQuickMove(folderId, destination) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({folder_id: folderId, destination: destination}),
     });
-    showToast('Move started (job ' + resp.job_id + ') — track progress in the bottom panel');
+    showToast('Move started (job ' + resp.job_id + ') — track progress in the bottom panel', 'info');
   } catch (e) {
     // safeFetch already shows error toast
   }
@@ -693,7 +693,7 @@ async function executePhotoMove(photoIds, destination) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: photoIds, destination: destination}),
     });
-    showToast('Move started (job ' + resp.job_id + ') — track progress in the bottom panel');
+    showToast('Move started (job ' + resp.job_id + ') — track progress in the bottom panel', 'info');
     // Clear selection after starting
     clearPhotoSelection();
   } catch (e) {
@@ -914,14 +914,14 @@ async function saveRule() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: name, destination: dest, criteria: criteria}),
       });
-      showToast('Rule updated');
+      showToast('Rule updated', 'success');
     } else {
       await safeFetch('/api/move-rules', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: name, destination: dest, criteria: criteria}),
       });
-      showToast('Rule created');
+      showToast('Rule created', 'success');
     }
     hideRuleForm();
     loadRules();
@@ -939,7 +939,7 @@ async function deleteRule(ruleId) {
   showConfirm('Delete Rule', 'Are you sure you want to delete this rule? This cannot be undone.', async function() {
     try {
       await safeFetch('/api/move-rules/' + ruleId, {method: 'DELETE'});
-      showToast('Rule deleted');
+      showToast('Rule deleted', 'success');
       loadRules();
     } catch (e) {
       // safeFetch handles error toast
@@ -977,7 +977,7 @@ async function runRule(ruleId) {
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({photo_ids: photoIds, destination: rule.destination, rule_id: ruleId}),
           });
-          showToast('Rule running (job ' + resp.job_id + ') — track progress in the bottom panel');
+          showToast('Rule running (job ' + resp.job_id + ') — track progress in the bottom panel', 'info');
         } catch (e) {
           // safeFetch handles error toast
         }
