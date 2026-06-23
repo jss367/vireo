@@ -277,6 +277,52 @@ def test_move_folder_merge_refuses_tracked_descendant(move_env):
     assert (env["src"] / "bird1.jpg").exists()
 
 
+def test_move_folder_refuses_missing_tracked_destination_before_copy(move_env):
+    """A stale tracked destination row must block the move even when the
+    resolved destination does not currently exist on disk."""
+    from move import move_folder
+
+    env = move_env
+    landing = env["dst"] / "src"
+    assert not landing.exists()
+    env["db"].add_folder(str(landing), name="src")
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
+    )
+
+    assert result["moved"] == 0
+    assert any("already manage" in e for e in result["errors"])
+    assert (env["src"] / "bird1.jpg").exists()
+    assert not landing.exists()
+
+
+def test_move_folder_refuses_missing_tracked_descendant_before_copy(move_env):
+    """A stale tracked descendant row would collide when source children
+    cascade to the destination path, so it must block before any copy."""
+    from move import move_folder
+
+    env = move_env
+    source_child = env["src"] / "sub"
+    source_child.mkdir()
+    env["db"].add_folder(str(source_child), name="sub")
+
+    landing = env["dst"] / "src"
+    tracked_child = landing / "sub"
+    assert not landing.exists()
+    env["db"].add_folder(str(tracked_child), name="sub")
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
+    )
+
+    assert result["moved"] == 0
+    assert any("already manage" in e for e in result["errors"])
+    assert (env["src"] / "bird1.jpg").exists()
+    assert source_child.exists()
+    assert not landing.exists()
+
+
 def test_move_folder_merge_refuses_symlinked_tracked_destination(move_env):
     """A tracked folder reached via a symlink alias must be detected by the
     tracked-destination check (canonical realpath compare), not slip past a

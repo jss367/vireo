@@ -178,6 +178,16 @@ def _destination_overlaps_source(src_path, dest_path):
             or _path_equal_or_descends(src_path, dest_path))
 
 
+def _tracked_destination_overlap(db, folder_id, dest_path):
+    """Return another tracked folder at or below dest_path, if one exists."""
+    for row in db.conn.execute(
+        "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
+    ):
+        if _path_equal_or_descends(row["path"], dest_path):
+            return row
+    return None
+
+
 def move_photos(db, photo_ids, destination, progress_cb=None):
     """Move individual photos to a destination directory.
 
@@ -362,6 +372,29 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             f"Destination overlaps the source folder: {dest_path}"
         ]}
 
+    # Refuse moving into — or around — a destination Vireo already tracks as a
+    # folder, regardless of whether that path currently exists on disk. A
+    # correct tracked-tree merge needs recursive folder/photo reconciliation we
+    # don't do here; a partial attempt would leave folders pointing at the
+    # deleted source path, or collide on the folders.path UNIQUE constraint when
+    # the source's children cascade onto a tracked descendant. Match the
+    # destination itself and anything below it. The cases this feature exists
+    # for — resuming an interrupted move, or moving into an untracked folder —
+    # never hit this.
+    #
+    # Comparison goes through _path_equal_or_descends so symlink aliases, Windows
+    # case folding, AND case-only aliases on case-insensitive POSIX (default
+    # macOS APFS) all collapse to the same tracked row — otherwise a destination
+    # reached via any of those would slip past and leave two folder rows managing
+    # the same on-disk tree.
+    tracked = _tracked_destination_overlap(db, folder_id, dest_path)
+    if tracked:
+        return {"moved": 0, "errors": [
+            f"Destination overlaps a folder Vireo already manages "
+            f"({tracked['path']}). Merging into or around a tracked folder "
+            f"isn't supported."
+        ]}
+
     dest_exists = os.path.exists(dest_path)
     if dest_exists and not merge:
         return {
@@ -371,32 +404,6 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         }
 
     if dest_exists:
-        # Refuse merging into — or around — a destination Vireo already tracks
-        # as a folder. A correct merge of two tracked trees needs recursive
-        # folder/photo reconciliation we don't do here; a partial attempt would
-        # leave folders pointing at the deleted source path, or collide on the
-        # folders.path UNIQUE constraint when the source's children cascade onto
-        # a tracked descendant. Match the destination itself and anything below
-        # it. The cases this feature exists for — resuming an interrupted move,
-        # or moving into an untracked folder — never hit this.
-        # Comparison goes through _path_equal_or_descends so symlink aliases,
-        # Windows case folding, AND case-only aliases on case-insensitive POSIX
-        # (default macOS APFS) all collapse to the same tracked row — otherwise
-        # a destination reached via any of those would slip past and leave two
-        # folder rows managing the same on-disk tree.
-        tracked = None
-        for row in db.conn.execute(
-            "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
-        ):
-            if _path_equal_or_descends(row["path"], dest_path):
-                tracked = row
-                break
-        if tracked:
-            return {"moved": 0, "errors": [
-                f"Destination overlaps a folder Vireo already manages "
-                f"({tracked['path']}). Merging into or around a tracked folder "
-                f"isn't supported."
-            ]}
 
         # Refuse if any same-name file already at the destination differs in
         # content. Never overwrite or later delete the user's data over a real
