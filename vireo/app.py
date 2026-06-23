@@ -9962,6 +9962,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(paths, list):
             return json_error("paths must be a list", 400)
 
+        from image_loader import is_excluded_scan_path
         from ingest import discover_source_files
 
         ft = file_types if file_types else "both"
@@ -9970,6 +9971,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Non-string entries (dicts, lists, numbers) can't be dict keys
             # and aren't valid paths — skip them rather than 500.
             if not isinstance(p, str):
+                continue
+            # Reject macOS app-managed library bundles before any stat:
+            # ``os.path.isdir`` on a ``.photoslibrary`` path — or a symlink to
+            # one — itself trips the "access data from other apps" TCC prompt,
+            # and the folder browser sends every child of ``~/Pictures`` here
+            # the moment the picker opens.
+            if is_excluded_scan_path(p):
+                counts[p] = 0
                 continue
             if not os.path.isdir(p):
                 counts[p] = 0

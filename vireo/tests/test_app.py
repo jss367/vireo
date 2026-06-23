@@ -3528,6 +3528,44 @@ def test_api_browse_photo_counts_skips_non_string_entries(app_and_db, tmp_path):
     assert data["counts"] == {str(real): 1}
 
 
+def test_api_browse_photo_counts_skips_macos_other_app_bundles(app_and_db, tmp_path):
+    """POST /api/browse/photo-counts must reject macOS app-managed library
+    bundles (``.photoslibrary`` etc.) BEFORE ``os.path.isdir`` runs.
+
+    The folder browser fires this endpoint with every child of the picker
+    root the moment it opens — for ``~/Pictures`` that includes ``Photos
+    Library.photoslibrary``. ``os.path.isdir`` on that path itself trips
+    the macOS "access data from other apps" TCC prompt the exclusion
+    guards exist to avoid, so the check has to happen first.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "img.jpg").write_bytes(b"x")
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    (bundle / "originals").mkdir()
+    (bundle / "originals" / "managed.jpg").write_bytes(b"x")
+    nested = bundle / "originals"
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        '/api/browse/photo-counts',
+        json={
+            "paths": [str(real), str(bundle), str(nested)],
+            "file_types": [".jpg"],
+        },
+        content_type='application/json',
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["counts"][str(real)] == 1
+    # Bundle root and a path nested inside it must both report 0 without
+    # recursing into the managed contents.
+    assert data["counts"][str(bundle)] == 0
+    assert data["counts"][str(nested)] == 0
+
+
 def test_api_browse_photo_counts_respects_file_types(app_and_db, tmp_path):
     """POST /api/browse/photo-counts only counts files matching requested types."""
     d = tmp_path / "mixed"
