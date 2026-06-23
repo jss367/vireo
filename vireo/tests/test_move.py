@@ -587,6 +587,59 @@ def test_path_equal_or_descends_folds_root_case_alias_in_candidate(
     ) is False
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX filesystem-root scenario; Windows uses drive-rooted paths",
+)
+def test_path_equal_or_descends_handles_case_fold_root_at_filesystem_root():
+    """When the probed case-insensitive root is the filesystem root itself
+    (a writable case-insensitive POSIX volume mounted at `/`, or any
+    destination whose first missing component sits directly under `/`),
+    `root + os.sep` doubles to "//" and no real path starts with it.
+    Without the trailing-separator handling, the case-folded compare is
+    silently skipped and a stale tracked row like `/photos/src` slips past
+    `_tracked_destination_overlap` against a move into `/Photos/src` —
+    leaving two folder rows managing the same on-disk tree once the copy
+    starts.
+    """
+    import move as move_mod
+
+    # Both paths missing on disk (typical stale-row + fresh-move scenario).
+    # The existence-based samefile checks early-return None for missing
+    # paths, so the case-folded suffix compare is the only path that
+    # catches this — with case_insensitive_root="/", the root prefix is the
+    # bare separator and the suffix strip leaves the full path minus "/".
+    assert move_mod._path_equal_or_descends(
+        "/__vireo_missing_for_test/PHOTOS/src",
+        "/__vireo_missing_for_test/photos/src",
+        case_insensitive_root="/",
+    ) is True
+
+    # Equal paths under the root (canonical match through the case-folded
+    # fallback when both leaves are missing).
+    assert move_mod._path_equal_or_descends(
+        "/__vireo_missing_for_test/photos/src",
+        "/__vireo_missing_for_test/photos/src",
+        case_insensitive_root="/",
+    ) is True
+
+    # Descendant of a case-aliased ancestor — the candidate's longer suffix
+    # must still match the ancestor's via the prefix compare.
+    assert move_mod._path_equal_or_descends(
+        "/__vireo_missing_for_test/Photos/dst/inner",
+        "/__vireo_missing_for_test/photos/dst",
+        case_insensitive_root="/",
+    ) is True
+
+    # Genuinely distinct paths (not just case-different) still return False
+    # — the case-fold-at-root edge must not cause over-folding.
+    assert move_mod._path_equal_or_descends(
+        "/__vireo_missing_for_test/other/src",
+        "/__vireo_missing_for_test/photos/src",
+        case_insensitive_root="/",
+    ) is False
+
+
 def test_tracked_destination_overlap_skips_rows_outside_ci_root(move_env, monkeypatch):
     """End-to-end: `_tracked_destination_overlap` must NOT return a stale
     row whose path differs from the destination above the case-insensitive
@@ -843,12 +896,13 @@ def test_is_case_insensitive_path_child_alias_confirmed_by_temp_probe(
     os.name == "nt",
     reason="Windows paths are treated case-insensitive without POSIX probing",
 )
-def test_is_case_insensitive_path_definitive_false_short_circuits(
+def test_is_case_insensitive_path_child_scan_short_circuits_on_definitive_false(
     tmp_path, monkeypatch,
 ):
-    """A child pair where `samefile` returns False — two distinct entries
-    both exist as separate files — is impossible on a case-folding FS, so
-    the loop returns False immediately without running the temp probe."""
+    """When the temp probe can't write (read-only ancestor), the child-scan
+    fallback returns False as soon as it sees a case-twin pair with
+    distinct inodes (`samefile` == False) — impossible on a case-folding
+    FS — without statting every other entry under the ancestor."""
     import move as move_mod
 
     target = tmp_path / "dir"
@@ -856,6 +910,10 @@ def test_is_case_insensitive_path_definitive_false_short_circuits(
     (target / "alpha").touch()
     (target / "ALPHA").touch()
     target_str = str(target)
+
+    def fake_mkdtemp(*_a, **_kw):
+        # Simulate a read-only ancestor so the child-scan fallback runs.
+        raise OSError("read-only — exercise child-scan fallback")
 
     def fake_tristate(a, b):
         # Mimic real case-sensitive FS: alpha and ALPHA are distinct files
@@ -865,17 +923,72 @@ def test_is_case_insensitive_path_definitive_false_short_circuits(
             return False
         return None
 
-    def fail_probe(*_a, **_kw):
-        raise AssertionError(
-            "temp probe should not run after a definitive False child"
-        )
-
+    monkeypatch.setattr(move_mod.tempfile, "mkdtemp", fake_mkdtemp)
     monkeypatch.setattr(move_mod, "_samefile_tristate", fake_tristate)
-    monkeypatch.setattr(move_mod.tempfile, "mkdtemp", fail_probe)
 
     assert move_mod._is_case_insensitive_path(
         os.path.join(target_str, "missing_leaf")
     ) is False
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows paths are treated case-insensitive without POSIX probing",
+)
+def test_is_case_insensitive_path_temp_probe_runs_before_child_scan(
+    tmp_path, monkeypatch,
+):
+    """The temp probe is conclusive in both directions with O(1) syscalls,
+    so it must run first when the ancestor is writable — the child-scan
+    fallback is read-only and only worthwhile when mkdtemp can't write.
+    Before this ordering, `move_folder()` re-stat'd every entry under the
+    destination's deepest existing ancestor on every move (the per-entry
+    samefile probe is inconclusive on a typical case-sensitive directory
+    with no case-twin children), turning the preflight guard into
+    O(entries) wasted syscalls per move on big photo trees.
+    """
+    import move as move_mod
+
+    target = tmp_path / "dir"
+    target.mkdir()
+    # Many letter-bearing entries — the OLD scan-first order would call
+    # _samefile_tristate once per entry before reaching the temp probe.
+    for i in range(50):
+        (target / f"entry_{i}").touch()
+
+    call_order = []
+    real_mkdtemp = move_mod.tempfile.mkdtemp
+    real_tristate = move_mod._samefile_tristate
+
+    def tracked_mkdtemp(*a, **kw):
+        call_order.append("mkdtemp")
+        return real_mkdtemp(*a, **kw)
+
+    def tracked_tristate(a, b):
+        # Only count per-entry child-scan probes against pre-existing
+        # entries; ignore the temp probe's own samefile call (which goes
+        # through _samefile_or_false → _samefile_tristate).
+        if not (os.path.basename(a).startswith(".vireo_case_probe_")
+                or os.path.basename(b).startswith(".vireo_case_probe_")):
+            call_order.append("tristate")
+        return real_tristate(a, b)
+
+    monkeypatch.setattr(move_mod.tempfile, "mkdtemp", tracked_mkdtemp)
+    monkeypatch.setattr(move_mod, "_samefile_tristate", tracked_tristate)
+
+    # Real tmp_path is case-sensitive on Linux CI; the temp probe creates
+    # a fresh dir whose flipped name doesn't exist, so samefile raises and
+    # `_samefile_or_false` returns False. That answer is final, with zero
+    # child-scan calls — the regression we're guarding against.
+    move_mod._is_case_insensitive_path(
+        os.path.join(str(target), "missing_leaf")
+    )
+
+    assert "mkdtemp" in call_order, "temp probe should have run"
+    assert "tristate" not in call_order, (
+        f"child-scan probes should not run when temp probe succeeds; "
+        f"call order was {call_order}"
+    )
 
 
 @pytest.mark.skipif(

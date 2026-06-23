@@ -148,40 +148,38 @@ def _is_case_insensitive_path(path):
     """Whether the filesystem holding `path` treats two case variants as the
     same name (default macOS APFS, Windows).
 
-    Walks up to the deepest existing ancestor of `path`, then probes the FS
-    *at* that ancestor. Probing inside the ancestor rather than via its own
+    Walks up to the deepest existing ancestor of `path`, then creates a
+    short-lived probe dir *inside* it with a known case-flippable suffix
+    and asks samefile whether the swapped spelling resolves to the same
+    inode. The probe name didn't exist a moment ago, so the result reflects
+    FS behavior rather than a pre-existing user alias (hard link / symlink
+    on a case-sensitive FS), and is conclusive in both directions — True on
+    a case-folding FS, raises (and `_samefile_or_false` returns False) on a
+    case-sensitive one. Probing inside the ancestor rather than via its own
     basename matters when the deepest existing ancestor is a mount point —
     a case-sensitive APFS volume mounted at `/Volumes/Photos` under default
     case-insensitive macOS HFS+ would otherwise be misread as
     case-insensitive (the basename probe tests `/Volumes`'s handling of
-    `Photos`, not what the mounted volume does below it), causing valid
-    moves into the mount to be refused as "already managed".
+    `Photos`, not what the mounted volume does below it).
 
-    Children give only NEGATIVE evidence: if any letter-bearing child's
-    case-flipped spelling also exists as a DISTINCT file (`samefile` ==
-    False), the FS is case-sensitive — that can't happen on a case-folding
-    FS. `samefile` == True via a child name is NOT confirmation of case
-    folding: `foo` and `FOO` can both be hard links or symlink aliases to
-    the same inode on a case-sensitive FS by user choice (or via a
-    symlinked parent), which would misread Linux ext4 as case-insensitive
-    and let `_tracked_destination_overlap` refuse a valid move because a
-    stale row differs from the destination only by case. So the positive
-    answer is always confirmed via a short-lived temp dir created *inside*
-    the ancestor with a case-flippable suffix — its flipped spelling can't
-    be a pre-existing user alias, so samefile on (probe, flipped_probe)
-    reflects FS behavior. The temp probe also covers the empty / no-letter-
-    children case, where a fresh case-insensitive POSIX destination
-    (`/Volumes/Photos` with nothing in it yet) would otherwise fall through
-    as "case-sensitive" and let a stale tracked row like `/Photos/Dst/src`
-    slip past the case-folded overlap check against a move into
-    `/Photos/dst/src`.
+    Falls back to scanning existing children for NEGATIVE evidence only
+    when the temp probe can't write (read-only ancestor): if any
+    letter-bearing child's case-flipped spelling also exists as a DISTINCT
+    file (`samefile` == False), the FS is case-sensitive — that can't
+    happen on a case-folding FS. `samefile` == True via a pre-existing
+    child name is never trusted, since it could be a user-created hard link
+    or symlink alias on a case-sensitive FS. A previous version of this
+    function scanned children first as an optimization to short-circuit on
+    that definitive False, but `move_folder()` reaches this on every move,
+    and on the typical case-sensitive destination with no case-twin
+    children every per-entry samefile probe is inconclusive (the flipped
+    name doesn't exist; samefile raises) — turning a single move into
+    O(entries) wasted stats before the temp probe ran anyway.
 
     Returns False on case-sensitive POSIX (Linux ext4/btrfs, opt-in APFS)
     and when no probe is possible at all (ancestor not a directory, or
-    read-only so the temp-probe can't write) — the safe default, since
-    spuriously folding case could merge two genuinely distinct paths.
-    An unreadable but writable+executable ancestor (drop-box style) is
-    still classified via the temp probe alone.
+    read-only AND no child evidence) — the safe default, since spuriously
+    folding case could merge two genuinely distinct paths.
     """
     if os.name == "nt":
         return True
@@ -194,18 +192,26 @@ def _is_case_insensitive_path(path):
     if not cur or not os.path.isdir(cur):
         return False
     try:
+        probe = tempfile.mkdtemp(prefix=".vireo_case_probe_", suffix="A",
+                                 dir=cur)
+    except OSError:
+        probe = None
+    if probe is not None:
+        try:
+            flipped = probe[:-1] + probe[-1].swapcase()
+            return _samefile_or_false(probe, flipped)
+        finally:
+            with contextlib.suppress(OSError):
+                os.rmdir(probe)
+    # Temp probe denied (read-only ancestor). Scan existing children for a
+    # definitive False (two distinct case-twin entries — impossible on a
+    # case-folding FS). With no temp probe available we have no way to
+    # confirm a positive answer, so True via a child name is not trusted
+    # and the function returns False if no definitive False is found.
+    try:
         entries = os.listdir(cur)
     except OSError:
-        # Listing denied (e.g., a +wx drop-box ancestor with no read perm).
-        # Inconclusive, not negative — the temp probe below can still write
-        # into a +wx directory, so skip the child-pair short-circuit rather
-        # than silently classifying a case-folding FS as case-sensitive.
-        entries = ()
-    # Scan children for a definitive False (two distinct names both exist,
-    # impossible on a case-folding FS). Ignore None (samefile raised — broken
-    # symlink, permission/race, or any entry whose flipped spelling can't be
-    # stat'd; inconclusive, not negative) and ignore True (could be a real
-    # case fold OR a user-created hard link / symlink alias — confirmed below).
+        return False
     for entry in entries:
         flipped = entry.swapcase()
         if flipped == entry:
@@ -215,21 +221,7 @@ def _is_case_insensitive_path(path):
             os.path.join(cur, flipped),
         ) is False:
             return False
-    # No child pair proved case-sensitive. Confirm case-insensitivity by
-    # creating our own probe dir with a known case-flippable suffix — the
-    # flipped name didn't exist a moment ago, so samefile reflects FS
-    # behavior rather than a pre-existing alias on a case-sensitive FS.
-    try:
-        probe = tempfile.mkdtemp(prefix=".vireo_case_probe_", suffix="A",
-                                 dir=cur)
-    except OSError:
-        return False
-    try:
-        flipped = probe[:-1] + probe[-1].swapcase()
-        return _samefile_or_false(probe, flipped)
-    finally:
-        with contextlib.suppress(OSError):
-            os.rmdir(probe)
+    return False
 
 
 def _case_insensitive_root(path):
@@ -347,7 +339,14 @@ def _path_equal_or_descends(candidate, ancestor,
         case_insensitive_root = _case_insensitive_root(ancestor)
     if case_insensitive_root:
         root = case_insensitive_root
-        root_with_sep = root + os.sep
+        # `root` may already end with `os.sep` — the filesystem root "/"
+        # (deepest existing ancestor is `/` when everything below the
+        # destination is missing on a case-insensitive POSIX volume mounted
+        # at /), or a Windows drive root like "C:\\". `root + os.sep` would
+        # double the boundary to "//" / "C:\\\\" and never match any real
+        # path, silently skipping the case-folded compare and letting a
+        # stale row like `/photos/src` slip past a move into `/Photos/src`.
+        root_with_sep = root if root.endswith(os.sep) else root + os.sep
         if not (real_a == root or real_a.startswith(root_with_sep)):
             return False  # ancestor isn't actually inside the probed root.
         # The case-fold root can appear under a case-only alias in the
@@ -360,8 +359,9 @@ def _path_equal_or_descends(candidate, ancestor,
         # of the root doesn't exist and samefile raises.
         real_c_low = real_c.lower()
         root_low = root.lower()
+        root_low_with_sep = root_with_sep.lower()
         if real_c_low != root_low \
-                and not real_c_low.startswith(root_low + os.sep):
+                and not real_c_low.startswith(root_low_with_sep):
             return False  # candidate is above or beside the case-fold subtree.
         candidate_root = real_c[:len(root)]
         if candidate_root != root \
@@ -369,7 +369,14 @@ def _path_equal_or_descends(candidate, ancestor,
             return False  # case-variant of the root is distinct on the parent FS.
         suffix_c = real_c[len(root):].lower()
         suffix_a = real_a[len(root):].lower()
-        if suffix_c == suffix_a or suffix_c.startswith(suffix_a + os.sep):
+        # suffix_a == "" means real_a IS the root itself; we've already
+        # established real_c is at or under root, so real_c descends from
+        # real_a unconditionally. Without this, a root like `/` strips
+        # to "" for the ancestor while leaving "photos/src" for the
+        # candidate — and `suffix_c.startswith("" + os.sep)` is False
+        # because the leading separator was already consumed by the root.
+        if suffix_a == "" or suffix_c == suffix_a \
+                or suffix_c.startswith(suffix_a + os.sep):
             return True
     return False
 
