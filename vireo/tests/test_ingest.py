@@ -232,6 +232,65 @@ def test_discover_source_files_non_recursive_does_not_stat_bundle_children(
     assert names == {"real.jpg"}
 
 
+def test_discover_source_files_recursive_streams_candidates(
+    tmp_path, monkeypatch
+):
+    """The recursive walk must stream candidate paths through the
+    image-extension/``is_file()`` filter rather than collecting every
+    walked filename first. A source like a home directory or external
+    disk root can yield millions of non-image filenames; buffering them
+    all before the filter would balloon memory proportional to the whole
+    tree and stall the preview before any photo is copied. The previous
+    ``Path.rglob`` implementation was consumed lazily by ``sorted()`` —
+    keep the same streaming behaviour.
+
+    Verified by tracking the interleave of ``safe_scan_walk`` yields
+    and ``Path.is_file`` filter calls. If the recursive branch buffers
+    every yield first, every ``is_file`` call happens *after* every
+    yield; streaming produces interleaved calls.
+    """
+    from pathlib import Path
+
+    import ingest as ingest_mod
+
+    real_walk = ingest_mod.safe_scan_walk
+    real_is_file = Path.is_file
+
+    events = []
+
+    def tracking_walk(top, onerror=None):
+        # Yield one filename per tuple so each name's emission is its own
+        # observable event in `events`.
+        for dirpath, _dirnames, filenames in real_walk(top, onerror=onerror):
+            for name in filenames:
+                events.append(("yield", name))
+                yield dirpath, [], [name]
+
+    def tracking_is_file(self):
+        events.append(("is_file", self.name))
+        return real_is_file(self)
+
+    monkeypatch.setattr(ingest_mod, "safe_scan_walk", tracking_walk)
+    monkeypatch.setattr(Path, "is_file", tracking_is_file)
+
+    src = tmp_path / "src"
+    _create_test_files(str(src), ["a.jpg", "b.txt", "c.jpg", "d.txt"])
+
+    files = discover_source_files(str(src), file_types="both")
+    assert {f.name for f in files} == {"a.jpg", "c.jpg"}
+
+    yield_indices = [i for i, (kind, _) in enumerate(events) if kind == "yield"]
+    is_file_indices = [
+        i for i, (kind, _) in enumerate(events) if kind == "is_file"
+    ]
+    assert yield_indices and is_file_indices
+    assert min(is_file_indices) < max(yield_indices), (
+        "discover_source_files buffered every walked candidate before "
+        "running the image filter — see the streaming requirement in "
+        "ingest.discover_source_files. Event order: " + repr(events)
+    )
+
+
 def test_discover_source_files_rejects_excluded_source_before_statting(
     tmp_path, monkeypatch
 ):
