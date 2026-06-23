@@ -9933,7 +9933,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/browse", methods=["GET"])
     def api_browse():
         """List subdirectories at a given path for folder browser."""
+        from image_loader import is_excluded_scan_path
         path = request.args.get("path", os.path.expanduser("~"))
+        # Reject macOS app-managed library bundles before any stat:
+        # ``os.path.isdir`` on a ``.photoslibrary`` path — or a symlink to one
+        # — itself trips the "access data from other apps" TCC prompt, and the
+        # folder picker hits this listing endpoint before posting children to
+        # ``/api/browse/photo-counts``, so the per-child guard there is too
+        # late on its own.
+        if is_excluded_scan_path(path):
+            return json_error("path is not a valid directory")
         if not os.path.isdir(path):
             return json_error("path is not a valid directory")
         dirs = []
@@ -9942,6 +9951,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if name.startswith("."):
                     continue
                 full = os.path.join(path, name)
+                # Skip excluded bundles (and symlinks resolving to them)
+                # before ``os.path.isdir`` would stat them.
+                if is_excluded_scan_path(full):
+                    continue
                 if os.path.isdir(full):
                     dirs.append({"name": name, "path": full})
         except PermissionError:

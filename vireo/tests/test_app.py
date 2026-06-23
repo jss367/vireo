@@ -3404,6 +3404,66 @@ def test_api_browse_invalid_path(app_and_db):
     assert resp.status_code == 400
 
 
+def test_api_browse_rejects_macos_other_app_bundle_root(app_and_db, tmp_path, monkeypatch):
+    """GET /api/browse must reject a ``.photoslibrary`` root BEFORE ``os.path.isdir``.
+
+    The folder picker passes the user-selected path straight to this endpoint;
+    ``os.path.isdir`` on a Photos Library bundle (or a symlink to one) trips
+    the macOS "access data from other apps" TCC prompt the exclusion guards
+    exist to avoid, so the check has to happen first. Monkey-patch
+    ``os.path.isdir`` to fail loudly if it ever runs on the bundle path.
+    """
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+
+    real_isdir = os.path.isdir
+
+    def guarded_isdir(p):
+        if str(p) == str(bundle):
+            raise AssertionError(f"os.path.isdir called on excluded bundle: {p}")
+        return real_isdir(p)
+
+    monkeypatch.setattr(os.path, "isdir", guarded_isdir)
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get(f'/api/browse?path={bundle}')
+    assert resp.status_code == 400
+
+
+def test_api_browse_skips_macos_other_app_bundle_children(app_and_db, tmp_path, monkeypatch):
+    """GET /api/browse must omit ``.photoslibrary`` children from the listing
+    without stat'ing them.
+
+    When the picker opens ``~/Pictures``, this endpoint enumerates every child
+    and would normally call ``os.path.isdir`` on each. For a sibling like
+    ``Photos Library.photoslibrary`` that stat itself trips the macOS TCC
+    prompt; verify the guard skips it before any stat and that regular
+    siblings are still returned.
+    """
+    parent = tmp_path / "pictures"
+    parent.mkdir()
+    (parent / "real").mkdir()
+    bundle = parent / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    (bundle / "originals").mkdir()
+
+    real_isdir = os.path.isdir
+
+    def guarded_isdir(p):
+        if str(p).startswith(str(bundle)):
+            raise AssertionError(f"os.path.isdir called on excluded bundle child: {p}")
+        return real_isdir(p)
+
+    monkeypatch.setattr(os.path, "isdir", guarded_isdir)
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get(f'/api/browse?path={parent}')
+    assert resp.status_code == 200
+    names = [d['name'] for d in resp.get_json()['dirs']]
+    assert 'real' in names
+    assert 'Photos Library.photoslibrary' not in names
+
+
 def test_api_browse_mkdir(app_and_db, tmp_path):
     """POST /api/browse/mkdir creates a new directory."""
     new_dir = str(tmp_path / "new_folder")
