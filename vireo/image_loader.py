@@ -66,8 +66,27 @@ def is_excluded_scan_path(path):
     shape. Either way, opening it still trips the macOS TCC
     "access data from other apps" prompt — so we reject the whole
     subtree, not just the bundle root.
+
+    Also resolves symlinks before checking. A user-selected root may be a
+    symlink whose literal path components don't name the bundle (e.g.
+    ``~/PhotoLib -> Photos Library.photoslibrary``); ``Path.is_dir()`` and
+    ``os.walk()`` follow the link into the protected bundle regardless, so
+    skipping the resolve would let the walkers re-trip the macOS TCC prompt.
     """
-    return any(is_excluded_scan_dir(part) for part in Path(path).parts)
+    p = Path(path)
+    if any(is_excluded_scan_dir(part) for part in p.parts):
+        return True
+    # Resolve symlinks. os.path.realpath() never raises (returns its input
+    # for missing paths) and resolves intermediate links too, so an alias
+    # anywhere in the chain (e.g. ``~/Aliases/MyLib/originals`` where
+    # ``MyLib`` links to the bundle) still gets caught.
+    try:
+        resolved = Path(os.path.realpath(str(p)))
+    except OSError:
+        return False
+    if resolved == p:
+        return False
+    return any(is_excluded_scan_dir(part) for part in resolved.parts)
 
 
 def prune_scan_dirs(dirnames):

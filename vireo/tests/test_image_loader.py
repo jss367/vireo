@@ -558,3 +558,42 @@ def test_is_excluded_scan_path_matches_nested_paths():
     assert not is_excluded_scan_path(
         "/Users/me/Pictures/photoslibrary_backup/2024"
     )
+
+
+def test_is_excluded_scan_path_resolves_symlinked_root(tmp_path):
+    """A symlink whose target is (or sits inside) an excluded bundle must
+    be rejected. Without resolving, ``Path(path).parts`` reveals nothing
+    about the bundle, but ``Path.is_dir()`` / ``os.walk()`` follow the
+    link anyway — so the walker would still open the protected subtree
+    and re-trip the macOS TCC prompt this guard exists to avoid.
+    """
+    import pytest
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    from image_loader import is_excluded_scan_path
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    (bundle / "originals").mkdir(parents=True)
+
+    # Direct symlink at the bundle itself.
+    direct_link = tmp_path / "PhotoLibLink"
+    os.symlink(str(bundle), str(direct_link))
+    assert is_excluded_scan_path(str(direct_link))
+
+    # Symlink at a child *inside* the bundle.
+    child_link = tmp_path / "OriginalsLink"
+    os.symlink(str(bundle / "originals"), str(child_link))
+    assert is_excluded_scan_path(str(child_link))
+
+    # Intermediate symlink on the way to the bundle subtree.
+    alias_dir = tmp_path / "Aliases"
+    alias_dir.mkdir()
+    os.symlink(str(bundle), str(alias_dir / "MyLib"))
+    assert is_excluded_scan_path(str(alias_dir / "MyLib" / "originals"))
+
+    # A symlink to a normal folder must NOT be excluded.
+    normal = tmp_path / "real_photos"
+    normal.mkdir()
+    normal_link = tmp_path / "PhotosLink"
+    os.symlink(str(normal), str(normal_link))
+    assert not is_excluded_scan_path(str(normal_link))
