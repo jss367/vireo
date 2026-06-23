@@ -303,12 +303,19 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # a tracked descendant. Match the destination itself and anything below
         # it. The cases this feature exists for — resuming an interrupted move,
         # or moving into an untracked folder — never hit this.
-        prefix = dest_path + os.sep
-        tracked = db.conn.execute(
-            "SELECT id, path FROM folders "
-            "WHERE (path = ? OR substr(path, 1, ?) = ?) AND id != ?",
-            (dest_path, len(prefix), prefix, folder_id),
-        ).fetchone()
+        # Compare canonical (symlink-resolved, case-normalized) paths, not raw
+        # strings: a destination reached through a symlink alias of a tracked
+        # folder would slip past a string match and leave two folder rows
+        # managing the same on-disk tree. real_dest is computed above.
+        real_dest_prefix = real_dest + os.sep
+        tracked = None
+        for row in db.conn.execute(
+            "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
+        ):
+            rp = os.path.normcase(os.path.realpath(row["path"]))
+            if rp == real_dest or rp.startswith(real_dest_prefix):
+                tracked = row
+                break
         if tracked:
             return {"moved": 0, "errors": [
                 f"Destination overlaps a folder Vireo already manages "

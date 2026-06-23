@@ -277,6 +277,33 @@ def test_move_folder_merge_refuses_tracked_descendant(move_env):
     assert (env["src"] / "bird1.jpg").exists()
 
 
+def test_move_folder_merge_refuses_symlinked_tracked_destination(move_env):
+    """A tracked folder reached via a symlink alias must be detected by the
+    tracked-destination check (canonical realpath compare), not slip past a
+    raw-string match."""
+    from move import move_folder
+
+    env = move_env
+    real_dst = env["tmp_path"] / "realdst"
+    landing = real_dst / "src"
+    landing.mkdir(parents=True)
+    env["db"].add_folder(str(landing), name="src")  # tracked at its real path
+
+    link = env["tmp_path"] / "dstlink"
+    try:
+        os.symlink(str(real_dst), str(link))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    # Destination via the alias resolves (realpath) to the tracked landing.
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(link), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("already manage" in e for e in result["errors"])
+    assert (env["src"] / "bird1.jpg").exists()
+
+
 def test_move_folder_merge_refuses_symlinked_self_destination(move_env):
     """A destination that is a symlink alias of the source's parent resolves
     (via realpath) to the source itself and must be refused, not no-op-copied
