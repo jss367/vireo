@@ -79,6 +79,7 @@ ALL_PAGES = [
     {"id": "variants",        "label": "Variants",        "href": "/variants"},
     {"id": "dashboard",       "label": "Dashboard",       "href": "/dashboard"},
     {"id": "audit",           "label": "Audit",           "href": "/audit"},
+    {"id": "move",            "label": "Move",            "href": "/move"},
     {"id": "compare",         "label": "Compare",         "href": "/compare"},
     {"id": "zoom_test",       "label": "Zoom Test",       "href": "/zoom-test"},
     {"id": "settings",        "label": "Settings",        "href": "/settings"},
