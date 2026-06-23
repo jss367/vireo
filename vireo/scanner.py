@@ -1048,6 +1048,20 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         for d in restrict_dirs:
             _check_cancelled()
             dp = Path(d)
+            # The outer ``is_excluded_scan_path(root_path)`` guard above only
+            # covers ``root``. restrict_dirs entries can independently point
+            # into an other-app data bundle — e.g. a stale folder row from
+            # before this guard, or a duplicate the caller built from
+            # workspace_folders pointing at
+            # ``~/Pictures/Photos Library.photoslibrary/originals``. Calling
+            # ``dp.is_dir()`` / ``dp.iterdir()`` on that subtree would still
+            # trip the macOS "access data from other apps" TCC prompt this
+            # guard exists to avoid. Reject before any filesystem access.
+            if is_excluded_scan_path(dp):
+                log.info(
+                    "Skipping other-app data bundle in restrict_dirs: %s", dp,
+                )
+                continue
             if dp.is_dir():
                 # iterdir() raises PermissionError when the kernel refuses
                 # enumeration (macOS TCC EPERM, POSIX EACCES). Route through
@@ -1241,6 +1255,11 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         if restrict_dirs is not None:
             for d in restrict_dirs:
                 dp = Path(d)
+                # Same bundle guard as the discovery loop above — never
+                # register or stat a path inside an other-app data bundle,
+                # even when the caller stuffed one into ``restrict_dirs``.
+                if is_excluded_scan_path(dp):
+                    continue
                 if dp.is_dir():
                     _ensure_folder(dp)
 
