@@ -533,6 +533,60 @@ def test_path_equal_or_descends_case_fold_scoped_to_ci_root(tmp_path):
     ) is False
 
 
+def test_path_equal_or_descends_folds_root_case_alias_in_candidate(
+    tmp_path, monkeypatch,
+):
+    """The probed case-insensitive root itself can be spelled differently
+    by case in a stale candidate row (e.g. row `/Photos/DST/src` against
+    move target `/Photos/dst/src`, where `/Photos/dst` is the deepest
+    existing case-folding ancestor). The literal `startswith(root)` check
+    rejected such a row before the suffix was folded, so
+    `_tracked_destination_overlap` missed the stale row and a move could
+    leave two folder rows managing the same on-disk tree. The fix matches
+    the root prefix case-insensitively and confirms via samefile that the
+    candidate's variant is the same on-disk directory."""
+    import move as move_mod
+
+    base = tmp_path / "Photos"
+    base.mkdir()
+    root_dir = base / "dst"
+    root_dir.mkdir()
+    root_real = os.path.realpath(str(root_dir))
+
+    # Move target's missing leaf under the existing case-folding root.
+    dest = str(root_dir / "src")
+    # Stale tracked row whose root-level segment is a case-only alias of
+    # `root_dir`. Missing on disk on the case-sensitive Linux CI host.
+    stale = str(base / "DST" / "src")
+
+    real_samefile = move_mod._samefile_or_false
+
+    def fake_samefile(a, b):
+        # Mimic case-folding FS at `base`: two children of `base` whose
+        # basenames differ only by case resolve to the same inode, even
+        # when one of them doesn't actually exist on the underlying
+        # case-sensitive host FS. Fall through to the real probe for
+        # everything else so unrelated paths still behave normally.
+        if os.path.dirname(a) == str(base) and os.path.dirname(b) == str(base):
+            if os.path.basename(a).lower() == os.path.basename(b).lower():
+                return True
+        return real_samefile(a, b)
+
+    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile)
+
+    assert move_mod._path_equal_or_descends(
+        stale, dest, case_insensitive_root=root_real
+    ) is True
+
+    # Sanity: an ABOVE-root case variant (parent FS case-sensitive) must
+    # still be rejected — the samefile check on the candidate's root-level
+    # prefix is what distinguishes the two scenarios.
+    sibling_root = str(tmp_path / "PHOTOS" / "dst" / "src")
+    assert move_mod._path_equal_or_descends(
+        sibling_root, dest, case_insensitive_root=root_real
+    ) is False
+
+
 def test_tracked_destination_overlap_skips_rows_outside_ci_root(move_env, monkeypatch):
     """End-to-end: `_tracked_destination_overlap` must NOT return a stale
     row whose path differs from the destination above the case-insensitive
@@ -605,6 +659,15 @@ def test_tracked_destination_overlap_caches_case_insensitivity_probe(move_env, m
     # the row count must not bump the probe count.
     resolved_dest = os.path.realpath(str(dest_input / "src"))
     dest_probes = [p for p in calls if os.path.realpath(p) == resolved_dest]
+    # Lower bound on POSIX: the destination probe MUST be exercised at
+    # least once. Without this, the upper-bound assertion passes vacuously
+    # if a future refactor skips the resolved-destination probe entirely.
+    # Windows short-circuits to True without listing, so no probe fires.
+    if os.name != "nt":
+        assert len(dest_probes) >= 1, (
+            f"expected at least one resolved-destination probe on POSIX, "
+            f"got 0 (all calls: {calls})"
+        )
     assert len(dest_probes) <= 2, (
         f"expected dest probe to be cached (≤2 calls), "
         f"got {len(dest_probes)} (all calls: {calls})"

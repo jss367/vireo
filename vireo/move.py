@@ -350,8 +350,23 @@ def _path_equal_or_descends(candidate, ancestor,
         root_with_sep = root + os.sep
         if not (real_a == root or real_a.startswith(root_with_sep)):
             return False  # ancestor isn't actually inside the probed root.
-        if not (real_c == root or real_c.startswith(root_with_sep)):
+        # The case-fold root can appear under a case-only alias in the
+        # candidate (stale row `/Photos/DST/src` against probed root
+        # `/Photos/dst`). Match the root prefix case-insensitively, then
+        # confirm via samefile that the candidate's variant is the same
+        # on-disk directory — that distinguishes a real case-fold alias
+        # from a distinct path on a case-sensitive parent FS (e.g. `/mnt`
+        # vs `/MNT` mount-point pair on Linux), where the case-only twin
+        # of the root doesn't exist and samefile raises.
+        real_c_low = real_c.lower()
+        root_low = root.lower()
+        if real_c_low != root_low \
+                and not real_c_low.startswith(root_low + os.sep):
             return False  # candidate is above or beside the case-fold subtree.
+        candidate_root = real_c[:len(root)]
+        if candidate_root != root \
+                and not _samefile_or_false(candidate_root, root):
+            return False  # case-variant of the root is distinct on the parent FS.
         suffix_c = real_c[len(root):].lower()
         suffix_a = real_a[len(root):].lower()
         if suffix_c == suffix_a or suffix_c.startswith(suffix_a + os.sep):
