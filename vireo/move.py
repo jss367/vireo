@@ -1,10 +1,12 @@
 """Photo and folder move operations with copy-verify-delete safety."""
 
+import contextlib
 import filecmp
 import logging
 import os
 import shutil
 import subprocess
+import tempfile
 
 log = logging.getLogger(__name__)
 
@@ -117,11 +119,21 @@ def _first_missing_source_file(src_path, dest_path):
     return None
 
 
-def _samefile_or_false(a, b):
+def _samefile_tristate(a, b):
+    """Whether two paths resolve to the same inode, or None if samefile
+    raised (broken symlink, permission error, transient race — the probe
+    is INCONCLUSIVE, not negative). Callers that need a plain boolean wrap
+    with `_samefile_or_false`; callers that have to differentiate
+    "definitely different" from "couldn't check" use this directly."""
     try:
         return os.path.samefile(a, b)
     except OSError:
-        return False
+        return None
+
+
+def _samefile_or_false(a, b):
+    result = _samefile_tristate(a, b)
+    return False if result is None else result
 
 
 def _walk_up_paths(p):
@@ -132,7 +144,136 @@ def _walk_up_paths(p):
         p = os.path.dirname(p)
 
 
-def _path_equal_or_descends(candidate, ancestor):
+def _is_case_insensitive_path(path):
+    """Whether the filesystem holding `path` treats two case variants as the
+    same name (default macOS APFS, Windows).
+
+    Walks up to the deepest existing ancestor of `path`, then creates a
+    short-lived probe dir *inside* it with a known case-flippable suffix
+    and asks samefile whether the swapped spelling resolves to the same
+    inode. The probe name didn't exist a moment ago, so the result reflects
+    FS behavior rather than a pre-existing user alias (hard link / symlink
+    on a case-sensitive FS), and is conclusive in both directions — True on
+    a case-folding FS, raises (and `_samefile_or_false` returns False) on a
+    case-sensitive one. Probing inside the ancestor rather than via its own
+    basename matters when the deepest existing ancestor is a mount point —
+    a case-sensitive APFS volume mounted at `/Volumes/Photos` under default
+    case-insensitive macOS HFS+ would otherwise be misread as
+    case-insensitive (the basename probe tests `/Volumes`'s handling of
+    `Photos`, not what the mounted volume does below it).
+
+    Falls back to scanning existing children for NEGATIVE evidence only
+    when the temp probe can't write (read-only ancestor): if any
+    letter-bearing child's case-flipped spelling also exists as a DISTINCT
+    file (`samefile` == False), the FS is case-sensitive — that can't
+    happen on a case-folding FS. `samefile` == True via a pre-existing
+    child name is never trusted, since it could be a user-created hard link
+    or symlink alias on a case-sensitive FS. A previous version of this
+    function scanned children first as an optimization to short-circuit on
+    that definitive False, but `move_folder()` reaches this on every move,
+    and on the typical case-sensitive destination with no case-twin
+    children every per-entry samefile probe is inconclusive (the flipped
+    name doesn't exist; samefile raises) — turning a single move into
+    O(entries) wasted stats before the temp probe ran anyway.
+
+    Returns False on case-sensitive POSIX (Linux ext4/btrfs, opt-in APFS)
+    and when no probe is possible at all (ancestor not a directory, or
+    read-only AND no child evidence) — the safe default, since spuriously
+    folding case could merge two genuinely distinct paths.
+    """
+    if os.name == "nt":
+        return True
+    cur = path
+    while cur and not os.path.exists(cur):
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+    if not cur or not os.path.isdir(cur):
+        return False
+    try:
+        probe = tempfile.mkdtemp(prefix=".vireo_case_probe_", suffix="A",
+                                 dir=cur)
+    except OSError:
+        probe = None
+    if probe is not None:
+        try:
+            flipped = probe[:-1] + probe[-1].swapcase()
+            return _samefile_or_false(probe, flipped)
+        finally:
+            with contextlib.suppress(OSError):
+                os.rmdir(probe)
+    # Temp probe denied (read-only ancestor). Scan existing children for a
+    # definitive False (two distinct case-twin entries — impossible on a
+    # case-folding FS). With no temp probe available we have no way to
+    # confirm a positive answer, so True via a child name is not trusted
+    # and the function returns False if no definitive False is found.
+    try:
+        entries = os.listdir(cur)
+    except OSError:
+        return False
+    for entry in entries:
+        flipped = entry.swapcase()
+        if flipped == entry:
+            continue
+        if _samefile_tristate(
+            os.path.join(cur, entry),
+            os.path.join(cur, flipped),
+        ) is False:
+            return False
+    return False
+
+
+def _case_insensitive_root(path):
+    """Realpath of the deepest existing ancestor of `path` whose filesystem
+    folds case, or None when no such ancestor exists. Used to scope the
+    case-folded fallback in `_path_equal_or_descends` to the subtree that
+    actually folds — see that function's docstring for why a full-path
+    `.lower()` would otherwise collapse genuinely distinct paths on the
+    parent (case-sensitive) filesystem.
+
+    Walks the same deepest-existing-ancestor path as the probe inside
+    `_is_case_insensitive_path` and delegates to it for the fold check, so
+    test monkeypatches of `_is_case_insensitive_path` still take effect.
+    On Windows, the boundary is the deepest existing ancestor's drive root.
+    """
+    if os.name == "nt":
+        if not _is_case_insensitive_path(path):
+            return None
+        cur = path
+        while cur and not os.path.exists(cur):
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                return None
+            cur = parent
+        if not cur:
+            return None
+        drive, _ = os.path.splitdrive(os.path.realpath(cur))
+        return (drive + os.sep) if drive else os.path.realpath(cur)
+    if not _is_case_insensitive_path(path):
+        return None
+    cur = path
+    while cur and not os.path.exists(cur):
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+    if not cur or not os.path.isdir(cur):
+        return None
+    return os.path.realpath(cur)
+
+
+# Sentinel for "case-insensitive root not yet probed" — distinct from the
+# probed-and-None result (the FS is case-sensitive). Callers inside a loop
+# pass the probed value, including a literal None, so lazy re-probing per
+# row never happens — the regression `_tracked_destination_overlap` is
+# guarding against would otherwise re-run the probe per scanned row on any
+# case-sensitive POSIX host (Linux ext4, opt-in APFS).
+_UNPROBED_CI_ROOT = object()
+
+
+def _path_equal_or_descends(candidate, ancestor,
+                            case_insensitive_root=_UNPROBED_CI_ROOT):
     """True if `candidate` resolves to the same directory as `ancestor`, or is
     a descendant of it.
 
@@ -146,6 +287,26 @@ def _path_equal_or_descends(candidate, ancestor):
         (device + inode) is FS-truth on every platform and is used as a
         fallback, including a walk-up ancestor check for the descendant case
         where `candidate` itself doesn't exist yet.
+      - Two missing leaves on case-insensitive POSIX, where neither path
+        exists yet so samefile has nothing to compare: probe the FS for
+        case-insensitivity via the deepest existing ancestor and, if so,
+        redo the string compare case-folded — but only over the portion of
+        the path actually on the case-folding filesystem.
+
+    `case_insensitive_root`: realpath of the deepest existing case-insensitive
+    ancestor of `ancestor`, or None for case-sensitive (no case-folded fallback
+    runs). Pass the result of `_case_insensitive_root(ancestor)` if you've
+    already computed it (e.g., inside a loop with a fixed ancestor) so the
+    probe doesn't re-run per call. Omit (sentinel default) to probe lazily;
+    an explicit None means "already probed, no case-insensitive root" and
+    skips the lazy probe.
+
+    Scoping the case fold to inside this root matters when only part of the
+    path tree folds — a case-insensitive APFS/CIFS volume mounted at
+    `/mnt/photos` on a case-sensitive Linux root FS, for example. A stale row
+    `/MNT/photos/dst/src` and a move into `/mnt/photos/dst/src` are distinct
+    paths because `/MNT` does not resolve to `/mnt` on the parent FS; folding
+    the full path with `.lower()` would wrongly refuse the valid move.
     """
     real_c = os.path.normcase(os.path.realpath(candidate))
     real_a = os.path.normcase(os.path.realpath(ancestor))
@@ -164,6 +325,59 @@ def _path_equal_or_descends(candidate, ancestor):
         for anc in _walk_up_paths(os.path.dirname(candidate)):
             if os.path.exists(anc) and _samefile_or_false(anc, ancestor):
                 return True
+
+    # Both leaves missing on a case-insensitive POSIX volume: e.g., a stale
+    # folders.path row that differs from the resolved destination only by
+    # case before either path has been created on disk. samefile can't fold
+    # case for paths that don't exist; probe the FS for case-insensitivity
+    # and redo the string compare case-folded so the stale row is still
+    # caught before any copy. Restrict the case-folded compare to the subtree
+    # below the probed case-insensitive ancestor — anything above it is on
+    # the parent (case-sensitive) FS and must match exactly, character-for-
+    # character, or we'd collapse distinct paths.
+    if case_insensitive_root is _UNPROBED_CI_ROOT:
+        case_insensitive_root = _case_insensitive_root(ancestor)
+    if case_insensitive_root:
+        root = case_insensitive_root
+        # `root` may already end with `os.sep` — the filesystem root "/"
+        # (deepest existing ancestor is `/` when everything below the
+        # destination is missing on a case-insensitive POSIX volume mounted
+        # at /), or a Windows drive root like "C:\\". `root + os.sep` would
+        # double the boundary to "//" / "C:\\\\" and never match any real
+        # path, silently skipping the case-folded compare and letting a
+        # stale row like `/photos/src` slip past a move into `/Photos/src`.
+        root_with_sep = root if root.endswith(os.sep) else root + os.sep
+        if not (real_a == root or real_a.startswith(root_with_sep)):
+            return False  # ancestor isn't actually inside the probed root.
+        # The case-fold root can appear under a case-only alias in the
+        # candidate (stale row `/Photos/DST/src` against probed root
+        # `/Photos/dst`). Match the root prefix case-insensitively, then
+        # confirm via samefile that the candidate's variant is the same
+        # on-disk directory — that distinguishes a real case-fold alias
+        # from a distinct path on a case-sensitive parent FS (e.g. `/mnt`
+        # vs `/MNT` mount-point pair on Linux), where the case-only twin
+        # of the root doesn't exist and samefile raises.
+        real_c_low = real_c.lower()
+        root_low = root.lower()
+        root_low_with_sep = root_with_sep.lower()
+        if real_c_low != root_low \
+                and not real_c_low.startswith(root_low_with_sep):
+            return False  # candidate is above or beside the case-fold subtree.
+        candidate_root = real_c[:len(root)]
+        if candidate_root != root \
+                and not _samefile_or_false(candidate_root, root):
+            return False  # case-variant of the root is distinct on the parent FS.
+        suffix_c = real_c[len(root):].lower()
+        suffix_a = real_a[len(root):].lower()
+        # suffix_a == "" means real_a IS the root itself; we've already
+        # established real_c is at or under root, so real_c descends from
+        # real_a unconditionally. Without this, a root like `/` strips
+        # to "" for the ancestor while leaving "photos/src" for the
+        # candidate — and `suffix_c.startswith("" + os.sep)` is False
+        # because the leading separator was already consumed by the root.
+        if suffix_a == "" or suffix_c == suffix_a \
+                or suffix_c.startswith(suffix_a + os.sep):
+            return True
     return False
 
 
@@ -176,6 +390,27 @@ def _destination_overlaps_source(src_path, dest_path):
     """
     return (_path_equal_or_descends(dest_path, src_path)
             or _path_equal_or_descends(src_path, dest_path))
+
+
+def _tracked_destination_overlap(db, folder_id, dest_path):
+    """Return another tracked folder at or below dest_path, if one exists.
+
+    The case-insensitive root of `dest_path` is probed once and reused for
+    every row — otherwise the probe (an os.listdir of the deepest existing
+    ancestor, plus samefile of two child paths) re-runs per non-matching row,
+    making this O(tracked_folders × destination_entries) before any copy on
+    large catalogs or network-backed destinations.
+    """
+    dest_ci_root = _case_insensitive_root(dest_path)
+    for row in db.conn.execute(
+        "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
+    ):
+        if _path_equal_or_descends(
+            row["path"], dest_path,
+            case_insensitive_root=dest_ci_root,
+        ):
+            return row
+    return None
 
 
 def move_photos(db, photo_ids, destination, progress_cb=None):
@@ -362,6 +597,29 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             f"Destination overlaps the source folder: {dest_path}"
         ]}
 
+    # Refuse moving into — or around — a destination Vireo already tracks as a
+    # folder, regardless of whether that path currently exists on disk. A
+    # correct tracked-tree merge needs recursive folder/photo reconciliation we
+    # don't do here; a partial attempt would leave folders pointing at the
+    # deleted source path, or collide on the folders.path UNIQUE constraint when
+    # the source's children cascade onto a tracked descendant. Match the
+    # destination itself and anything below it. The cases this feature exists
+    # for — resuming an interrupted move, or moving into an untracked folder —
+    # never hit this.
+    #
+    # Comparison goes through _path_equal_or_descends so symlink aliases, Windows
+    # case folding, AND case-only aliases on case-insensitive POSIX (default
+    # macOS APFS) all collapse to the same tracked row — otherwise a destination
+    # reached via any of those would slip past and leave two folder rows managing
+    # the same on-disk tree.
+    tracked = _tracked_destination_overlap(db, folder_id, dest_path)
+    if tracked:
+        return {"moved": 0, "errors": [
+            f"Destination overlaps a folder Vireo already manages "
+            f"({tracked['path']}). Merging into or around a tracked folder "
+            f"isn't supported."
+        ]}
+
     dest_exists = os.path.exists(dest_path)
     if dest_exists and not merge:
         return {
@@ -371,32 +629,6 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         }
 
     if dest_exists:
-        # Refuse merging into — or around — a destination Vireo already tracks
-        # as a folder. A correct merge of two tracked trees needs recursive
-        # folder/photo reconciliation we don't do here; a partial attempt would
-        # leave folders pointing at the deleted source path, or collide on the
-        # folders.path UNIQUE constraint when the source's children cascade onto
-        # a tracked descendant. Match the destination itself and anything below
-        # it. The cases this feature exists for — resuming an interrupted move,
-        # or moving into an untracked folder — never hit this.
-        # Comparison goes through _path_equal_or_descends so symlink aliases,
-        # Windows case folding, AND case-only aliases on case-insensitive POSIX
-        # (default macOS APFS) all collapse to the same tracked row — otherwise
-        # a destination reached via any of those would slip past and leave two
-        # folder rows managing the same on-disk tree.
-        tracked = None
-        for row in db.conn.execute(
-            "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
-        ):
-            if _path_equal_or_descends(row["path"], dest_path):
-                tracked = row
-                break
-        if tracked:
-            return {"moved": 0, "errors": [
-                f"Destination overlaps a folder Vireo already manages "
-                f"({tracked['path']}). Merging into or around a tracked folder "
-                f"isn't supported."
-            ]}
 
         # Refuse if any same-name file already at the destination differs in
         # content. Never overwrite or later delete the user's data over a real
