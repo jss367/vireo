@@ -275,11 +275,13 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # rmtree(src) delete the only copy of the files. This is especially
     # dangerous for a merge, where a destination equal to the source passes
     # verification trivially (every source file is already "there") before the
-    # delete wipes everything.
-    abs_src = os.path.abspath(src_path)
-    abs_dest = os.path.abspath(dest_path)
-    if abs_dest == abs_src or abs_dest.startswith(abs_src + os.sep) \
-            or abs_src.startswith(abs_dest + os.sep):
+    # delete wipes everything. Resolve symlinks (realpath) and normalize case
+    # so a symlinked or differently-cased alias of the same directory is still
+    # caught — abspath alone would miss a symlinked destination.
+    real_src = os.path.normcase(os.path.realpath(src_path))
+    real_dest = os.path.normcase(os.path.realpath(dest_path))
+    if real_dest == real_src or real_dest.startswith(real_src + os.sep) \
+            or real_src.startswith(real_dest + os.sep):
         return {"moved": 0, "errors": [
             f"Destination overlaps the source folder: {dest_path}"
         ]}
@@ -293,20 +295,25 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         }
 
     if dest_exists:
-        # Refuse merging into a destination Vireo already tracks as a folder.
-        # A correct merge of two tracked trees needs recursive folder/photo
-        # reconciliation we don't do here; a partial attempt would leave
-        # descendant folders pointing at the deleted source path. The cases
-        # this feature exists for — resuming an interrupted move, or moving
-        # into an untracked folder — never hit this.
+        # Refuse merging into — or around — a destination Vireo already tracks
+        # as a folder. A correct merge of two tracked trees needs recursive
+        # folder/photo reconciliation we don't do here; a partial attempt would
+        # leave folders pointing at the deleted source path, or collide on the
+        # folders.path UNIQUE constraint when the source's children cascade onto
+        # a tracked descendant. Match the destination itself and anything below
+        # it. The cases this feature exists for — resuming an interrupted move,
+        # or moving into an untracked folder — never hit this.
+        prefix = dest_path + os.sep
         tracked = db.conn.execute(
-            "SELECT id FROM folders WHERE path = ? AND id != ?",
-            (dest_path, folder_id),
+            "SELECT id, path FROM folders "
+            "WHERE (path = ? OR substr(path, 1, ?) = ?) AND id != ?",
+            (dest_path, len(prefix), prefix, folder_id),
         ).fetchone()
         if tracked:
             return {"moved": 0, "errors": [
-                f"Destination is already managed by Vireo as folder {tracked['id']}. "
-                f"Merging into a tracked folder isn't supported."
+                f"Destination overlaps a folder Vireo already manages "
+                f"({tracked['path']}). Merging into or around a tracked folder "
+                f"isn't supported."
             ]}
 
         # Refuse if any same-name file already at the destination differs in
