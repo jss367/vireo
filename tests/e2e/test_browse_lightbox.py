@@ -538,6 +538,11 @@ def test_browse_lightbox_one_to_one_uses_device_pixels_and_natural_layout(live_s
     page.wait_for_function("window._lbNativeZoom > 1")
 
     page.keyboard.press("z")
+    # The /full source is already at the original's resolution, so the 1:1 snap
+    # applies synchronously — but under CPU contention the 'z' keydown can be
+    # processed slightly after page.keyboard.press resolves. Wait for the snap
+    # to land before sampling layout so the metrics read can't race it.
+    page.wait_for_function("window._lbZoom > 1.001")
     metrics = page.evaluate(
         """() => {
             const t = document.getElementById('lightboxTransform');
@@ -920,7 +925,11 @@ def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page)
 
     # Wait until the deferred swap has actually issued the held /original
     # request — i.e. we are genuinely in the "loading 1:1" state Codex flagged.
-    deadline = time.time() + 2
+    # The swap is scheduled on a debounced timer, so allow generous headroom:
+    # under CPU contention (e.g. a full e2e run) that timer plus the preloader
+    # round-trip can take well over 2s, and a too-tight deadline here fails the
+    # assert before the request is even captured.
+    deadline = time.time() + 5
     while "route" not in held_original and time.time() < deadline:
         page.wait_for_timeout(25)
     assert "route" in held_original
