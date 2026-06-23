@@ -281,6 +281,18 @@ body { padding-bottom: 36px; }
   margin-top: 4px;
 }
 
+/* Resolved-destination preview under the Move-folder destination input */
+.dest-preview {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  word-break: break-all;
+}
+.dest-preview .dest-preview-path {
+  color: var(--text-secondary);
+  font-family: var(--font-mono, monospace);
+}
+
 /* Empty state */
 .empty-state {
   text-align: center;
@@ -361,10 +373,11 @@ body { padding-bottom: 36px; }
       <div class="form-row">
         <label>Destination</label>
         <div class="dest-row">
-          <input type="text" id="quickDestInput" placeholder="/path/to/destination">
+          <input type="text" id="quickDestInput" placeholder="/path/to/destination" oninput="updateQuickMoveBtn()">
           <button class="btn btn-secondary btn-small" onclick="openBrowser('quickDestInput')">Browse</button>
         </div>
       </div>
+      <div class="dest-preview" id="quickDestPreview"></div>
 
       <div style="margin-top:16px;">
         <button class="btn btn-primary" id="quickMoveBtn" onclick="startQuickMove()" disabled>Move Folder</button>
@@ -538,6 +551,32 @@ function updateQuickMoveBtn() {
   var fid = document.getElementById('quickFolderSelect').value;
   var dest = document.getElementById('quickDestInput').value.trim();
   document.getElementById('quickMoveBtn').disabled = !(fid && dest);
+  updateQuickMovePreview();
+}
+
+// Compute the final landing path, mirroring move.py move_folder():
+// the source folder is placed *inside* the destination, keeping its name.
+function resolvedMoveDest(folder, destination) {
+  var folderName = (folder && folder.name) ||
+    (folder ? folder.path.replace(/\/+$/, '').split('/').pop() : '');
+  return destination.replace(/\/+$/, '') + '/' + folderName;
+}
+
+function updateQuickMovePreview() {
+  var preview = document.getElementById('quickDestPreview');
+  var fid = parseInt(document.getElementById('quickFolderSelect').value);
+  var dest = document.getElementById('quickDestInput').value.trim();
+  if (!fid || !dest) {
+    preview.textContent = '';
+    return;
+  }
+  var folder = allFolders.find(function(f) { return f.id === fid; });
+  var finalPath = resolvedMoveDest(folder, dest);
+  preview.textContent = 'Folder will be moved to: ';
+  var pathSpan = document.createElement('span');
+  pathSpan.className = 'dest-preview-path';
+  pathSpan.textContent = finalPath;
+  preview.appendChild(pathSpan);
 }
 
 function startQuickMove() {
@@ -548,10 +587,11 @@ function startQuickMove() {
   var folder = allFolders.find(function(f) { return f.id === fid; });
   var folderName = folder ? folder.path : 'folder #' + fid;
   var photoCount = folder ? (folder.photo_count || 0) : '?';
+  var finalPath = resolvedMoveDest(folder, dest);
 
   showConfirm(
     'Move Folder',
-    'Move "' + folderName + '" (' + photoCount + ' photos) to "' + dest + '"? Files will be copied and verified before originals are removed.',
+    'Move "' + folderName + '" (' + photoCount + ' photos) to "' + finalPath + '"? Files will be copied and verified before originals are removed.',
     function() {
       executeQuickMove(fid, dest);
     }
