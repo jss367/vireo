@@ -288,9 +288,13 @@ def test_resolve_folder_dest():
     """resolve_folder_dest places the folder inside the destination."""
     from move import resolve_folder_dest
 
-    assert resolve_folder_dest("/a/birds", "birds", "/nas/photos") == "/nas/photos/birds"
+    # Compare against os.path.join so the expectation is platform-correct
+    # (Windows joins with a backslash).
+    assert resolve_folder_dest("/a/birds", "birds", "/nas/photos") == \
+        os.path.join("/nas/photos", "birds")
     # Falls back to basename when name is empty
-    assert resolve_folder_dest("/a/birds/", "", "/nas/photos") == "/nas/photos/birds"
+    assert resolve_folder_dest("/a/birds/", "", "/nas/photos") == \
+        os.path.join("/nas/photos", "birds")
 
 
 def test_move_folder_updates_counts(move_env):
