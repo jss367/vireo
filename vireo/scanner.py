@@ -978,9 +978,6 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             RuntimeError("scan cancelled") at cancellation checkpoints.
     """
     root_path = Path(root)
-    if not root_path.is_dir():
-        log.warning("Root path does not exist or is not a directory: %s", root)
-        return
     # Don't open the root at all if the root is, or sits inside, an
     # other-app data bundle. prune_scan_dirs below only filters
     # *children*, so a root of e.g.
@@ -988,11 +985,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # selected/stale subfolder like ``.../Photos Library.photoslibrary/originals``
     # — would still trigger the macOS "access data from other apps" TCC
     # prompt this guard exists to avoid. Check every ancestor, not just
-    # the leaf name.
+    # the leaf name. This must run BEFORE ``root_path.is_dir()``: is_dir
+    # follows symlinks and stat's the target, so for a directly selected
+    # bundle (or a symlink to one), the existence test alone is enough
+    # to trip the TCC prompt — mirroring the restrict_dirs branch below.
     if is_excluded_scan_path(root_path):
         log.info(
             "Skipping other-app data bundle as scan root: %s", root_path,
         )
+        return
+    if not root_path.is_dir():
+        log.warning("Root path does not exist or is not a directory: %s", root)
         return
 
     def _check_cancelled():

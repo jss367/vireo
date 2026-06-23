@@ -168,6 +168,42 @@ def test_scan_skips_restrict_dirs_inside_excluded_bundle(tmp_path):
     assert not any('.photoslibrary' in p for p in folder_paths)
 
 
+def test_scan_rejects_excluded_root_before_statting(tmp_path, monkeypatch):
+    """The bundle guard must run BEFORE ``Path.is_dir`` on the root.
+
+    ``Path.is_dir`` follows symlinks and stat's the target, so for a
+    directly selected bundle (or a symlink to one) the existence test
+    alone is enough to trip the macOS "access data from other apps" TCC
+    prompt the guard exists to avoid. Tested by failing the test if
+    ``Path.is_dir`` is ever called on a path the exclusion check covers —
+    if the order is wrong, the stat sneaks in before the guard returns.
+    """
+    from pathlib import Path
+
+    from db import Database
+    from scanner import scan
+
+    real_is_dir = Path.is_dir
+
+    def guarded_is_dir(self):
+        from image_loader import is_excluded_scan_path
+        if is_excluded_scan_path(self):
+            raise AssertionError(
+                f"is_dir() called on excluded path before guard: {self}"
+            )
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", guarded_is_dir)
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _create_test_images(str(bundle), {'originals/0': ['managed.jpg']})
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(bundle), db)
+
+    assert db.get_photos(per_page=100) == []
+
+
 def test_scan_discovers_photos(tmp_path):
     """scan() creates photo entries for all image files."""
     from db import Database

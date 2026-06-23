@@ -238,6 +238,38 @@ def test_check_stray_sidecars_skips_root_nested_in_excluded_bundle(tmp_path):
     assert check_stray_sidecars([root]) == []
 
 
+def test_audit_rejects_excluded_root_before_statting(tmp_path, monkeypatch):
+    """Both audit walkers must run the bundle guard BEFORE ``os.path.isdir``.
+
+    ``isdir`` follows symlinks and stat's the target, which alone trips the
+    macOS TCC prompt for a directly selected bundle or a symlink to one.
+    Tested by failing if ``os.path.isdir`` is called on a path the
+    exclusion check covers — if the order is wrong, the stat sneaks in
+    before the guard returns.
+    """
+    from audit import check_stray_sidecars, check_untracked
+    from db import Database
+    from image_loader import is_excluded_scan_path
+
+    real_isdir = os.path.isdir
+
+    def guarded_isdir(path):
+        if is_excluded_scan_path(path):
+            raise AssertionError(
+                f"os.path.isdir called on excluded path before guard: {path}"
+            )
+        return real_isdir(path)
+
+    monkeypatch.setattr(os.path, "isdir", guarded_isdir)
+
+    bundle = str(tmp_path / "Photos Library.photoslibrary")
+    os.makedirs(os.path.join(bundle, "originals"))
+
+    db = Database(str(tmp_path / "test.db"))
+    assert check_untracked(db, [bundle]) == []
+    assert check_stray_sidecars([bundle]) == []
+
+
 def test_remove_orphans(tmp_path):
     """remove_orphans deletes DB entries for missing files."""
     from audit import remove_orphans

@@ -149,14 +149,17 @@ def check_untracked(db, root_paths):
 
     untracked = []
     for root in root_paths:
-        if not os.path.isdir(root):
-            continue
         # prune_scan_dirs filters only children; if the root is, or sits
         # inside, an excluded bundle (e.g. a stale folder row pointing at
         # ``.../Photos Library.photoslibrary/originals``), os.walk would
         # still open it. Reject the whole subtree before we touch it so
-        # the audit can't trip the macOS TCC prompt either.
+        # the audit can't trip the macOS TCC prompt either. This must run
+        # BEFORE ``os.path.isdir`` — isdir follows symlinks and stat's the
+        # target, so for a directly selected bundle (or a symlink to one)
+        # the existence test alone is enough to trip TCC.
         if is_excluded_scan_path(root):
+            continue
+        if not os.path.isdir(root):
             continue
         # os.walk (not Path.rglob) so we can prune other-app data bundles
         # (e.g. "Photos Library.photoslibrary") in place — rglob offers no way
@@ -197,9 +200,12 @@ def check_stray_sidecars(root_paths):
     """
     strays = []
     for root in root_paths:
-        if not os.path.isdir(root):
-            continue
+        # Reject excluded bundles before ``os.path.isdir`` — isdir follows
+        # symlinks and stat's the target, which is enough to trip the macOS
+        # TCC prompt for a directly selected bundle or a symlink to one.
         if is_excluded_scan_path(root):
+            continue
+        if not os.path.isdir(root):
             continue
         for dirpath, dirnames, filenames in os.walk(root):
             prune_scan_dirs(dirnames)

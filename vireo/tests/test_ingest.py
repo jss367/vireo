@@ -155,6 +155,37 @@ def test_discover_source_files_skips_source_nested_in_excluded_bundle(tmp_path):
     assert discover_source_files(str(src), file_types="both") == []
 
 
+def test_discover_source_files_rejects_excluded_source_before_statting(
+    tmp_path, monkeypatch
+):
+    """The bundle guard must run BEFORE ``Path.is_dir`` on the source.
+
+    ``Path.is_dir`` follows symlinks and stat's the target, which alone
+    trips the macOS TCC prompt for a directly selected bundle or a
+    symlink to one. Fails the test if ``Path.is_dir`` is called on a
+    path the exclusion check covers — if the order is wrong, the stat
+    sneaks in before the guard returns.
+    """
+    from pathlib import Path
+
+    from image_loader import is_excluded_scan_path
+
+    real_is_dir = Path.is_dir
+
+    def guarded_is_dir(self):
+        if is_excluded_scan_path(self):
+            raise AssertionError(
+                f"is_dir() called on excluded path before guard: {self}"
+            )
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", guarded_is_dir)
+
+    src = tmp_path / "Photos Library.photoslibrary"
+    _create_test_files(str(src / "originals"), ["managed.jpg"])
+    assert discover_source_files(str(src), file_types="both") == []
+
+
 def test_ingest_copies_files_to_date_folders(tmp_path):
     """Files are copied to destination organized by EXIF date (falls back to mtime)."""
     src = tmp_path / "sd_card"

@@ -115,6 +115,40 @@ def test_count_new_images_skips_root_nested_in_excluded_bundle(db_with_workspace
     assert result["per_root"][0]["new_count"] == 0
 
 
+def test_count_new_images_rejects_excluded_root_before_statting(
+    db_with_workspace, monkeypatch
+):
+    """The bundle guard must run BEFORE ``os.path.isdir`` on each root.
+
+    ``isdir`` follows symlinks and stat's the target, which alone trips
+    the macOS TCC prompt for a directly selected bundle or a symlink to
+    one. Fails the test if ``os.path.isdir`` is called on a path the
+    exclusion check covers — if the order is wrong, the stat sneaks in
+    before the guard returns.
+    """
+    from image_loader import is_excluded_scan_path
+    from new_images import count_new_images_for_workspace
+
+    real_isdir = os.path.isdir
+
+    def guarded_isdir(path):
+        if is_excluded_scan_path(path):
+            raise AssertionError(
+                f"os.path.isdir called on excluded path before guard: {path}"
+            )
+        return real_isdir(path)
+
+    monkeypatch.setattr(os.path, "isdir", guarded_isdir)
+
+    db, ws_id, tmp_path = db_with_workspace
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _touch_image(str(bundle / "originals" / "managed.jpg"))
+    db.add_folder(str(bundle), name="Photos Library.photoslibrary")
+
+    result = count_new_images_for_workspace(db, ws_id)
+    assert result["new_count"] == 0
+
+
 def test_count_new_images_returns_all_paths_when_sample_limit_is_none(tmp_path):
     # Set up a workspace with 10 new files on disk.
     db = Database(str(tmp_path / "test.db"))

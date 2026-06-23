@@ -130,16 +130,19 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
 
     for root in roots:
         root_path = root["path"]
-        if not os.path.isdir(root_path):
-            per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
-            continue
         # prune_scan_dirs filters only children; if the root is, or sits
         # inside, an excluded bundle (e.g. user added
         # ``~/Pictures/Photos Library.photoslibrary`` directly, or a stale
         # folder row points at ``.../Photos Library.photoslibrary/originals``),
         # os.walk would still open it and inflate the banner with managed
-        # images the scanner never ingests.
+        # images the scanner never ingests. This must run BEFORE
+        # ``os.path.isdir`` — isdir follows symlinks and stat's the target,
+        # so for a directly selected bundle (or a symlink to one) the
+        # existence test alone is enough to trip the macOS TCC prompt.
         if is_excluded_scan_path(root_path):
+            per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
+            continue
+        if not os.path.isdir(root_path):
             per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
             continue
 

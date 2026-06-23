@@ -203,14 +203,17 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
         Sorted list of Path objects for matching files
     """
     source_path = Path(source_dir)
-    if not source_path.is_dir():
-        return []
     # prune_scan_dirs filters only children of the walked root; if the
     # selected source is, or sits inside, an other-app data bundle (e.g.
     # user picks ``~/Pictures/Photos Library.photoslibrary`` or a child
     # like ``.../Photos Library.photoslibrary/originals`` as an import
     # source), os.walk would still open it and trip the macOS TCC prompt.
+    # This must run BEFORE ``source_path.is_dir()`` — is_dir follows
+    # symlinks and stat's the target, so for a directly selected bundle
+    # (or a symlink to one) the existence test alone is enough to trip TCC.
     if is_excluded_scan_path(source_path):
+        return []
+    if not source_path.is_dir():
         return []
 
     if isinstance(file_types, list):
