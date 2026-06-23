@@ -589,7 +589,7 @@ function updateQuickMovePreview() {
   preview.appendChild(pathSpan);
 }
 
-function startQuickMove() {
+async function startQuickMove() {
   var fid = parseInt(document.getElementById('quickFolderSelect').value);
   var dest = document.getElementById('quickDestInput').value.trim();
   if (!fid || !dest) return;
@@ -597,25 +597,50 @@ function startQuickMove() {
   var folder = allFolders.find(function(f) { return f.id === fid; });
   var folderName = folder ? folder.path : 'folder #' + fid;
   var photoCount = folder ? (folder.photo_count || 0) : '?';
-  var finalPath = resolvedMoveDest(folder, dest);
 
-  showConfirm(
-    'Move Folder',
-    'Move "' + folderName + '" (' + photoCount + ' photos) to "' + finalPath + '"? Files will be copied and verified before originals are removed.',
-    function() {
-      executeQuickMove(fid, dest);
-    }
-  );
+  // Ask the backend for the resolved destination and whether it already
+  // exists, so we can offer merge/resume instead of failing on collision.
+  var pf;
+  try {
+    pf = await safeFetch('/api/move-folder/preflight', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({folder_id: fid, destination: dest}),
+    });
+  } catch (e) {
+    return;  // safeFetch already shows error toast
+  }
+
+  var finalPath = pf.resolved_dest;
+  if (pf.exists) {
+    var n = pf.file_count;
+    showConfirm(
+      'Destination Exists — Merge & Resume',
+      '"' + finalPath + '" already exists and contains ' + n + ' file' + (n !== 1 ? 's' : '') +
+        '. Merge "' + folderName + '" (' + photoCount + ' photos) into it? Files already present with a matching size are skipped; only missing files are copied. Originals are removed only after every source file is verified at the destination.',
+      function() {
+        executeQuickMove(fid, dest, true);
+      }
+    );
+  } else {
+    showConfirm(
+      'Move Folder',
+      'Move "' + folderName + '" (' + photoCount + ' photos) to "' + finalPath + '"? Files will be copied and verified before originals are removed.',
+      function() {
+        executeQuickMove(fid, dest, false);
+      }
+    );
+  }
 }
 
-async function executeQuickMove(folderId, destination) {
+async function executeQuickMove(folderId, destination, merge) {
   try {
     var resp = await safeFetch('/api/jobs/move-folder', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({folder_id: folderId, destination: destination}),
+      body: JSON.stringify({folder_id: folderId, destination: destination, merge: !!merge}),
     });
-    showToast('Move started (job ' + resp.job_id + ') — track progress in the bottom panel', 'info');
+    showToast((merge ? 'Merge' : 'Move') + ' started (job ' + resp.job_id + ') — track progress in the bottom panel', 'info');
   } catch (e) {
     // safeFetch already shows error toast
   }

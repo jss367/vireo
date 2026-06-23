@@ -141,6 +141,428 @@ def test_move_folder_copies_tree(move_env):
     assert folder["path"] == str(env["dst"] / "src")
 
 
+def test_move_folder_refuses_existing_dest_without_merge(move_env):
+    """move_folder refuses an existing destination and preserves originals."""
+    from move import move_folder
+
+    env = move_env
+    # Pre-create the resolved landing path (dst/src)
+    landing = env["dst"] / "src"
+    landing.mkdir()
+
+    result = move_folder(db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]))
+    assert result["moved"] == 0
+    assert result.get("needs_merge") is True
+    assert any("already exists" in e for e in result["errors"])
+    # Originals untouched
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird2.jpg").exists()
+
+
+def test_move_folder_merge_resumes(move_env):
+    """merge=True copies only missing files into an existing destination,
+    verifies, then removes originals and updates the DB path."""
+    from move import move_folder
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # Simulate a partially-completed prior move: bird1 already copied.
+    (landing / "bird1.jpg").write_bytes((env["src"] / "bird1.jpg").read_bytes())
+    # And a leftover rsync temp file from the interrupted run.
+    (landing / ".bird2.jpg.AbCdEf").write_bytes(b"partial")
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["errors"] == []
+    # Missing file got copied; both now present at destination
+    assert (landing / "bird1.jpg").exists()
+    assert (landing / "bird2.jpg").exists()
+    # Originals removed
+    assert not env["src"].exists()
+    # DB path updated to the merged location
+    folder = env["db"].conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (env["fid_src"],)
+    ).fetchone()
+    assert folder["path"] == str(landing)
+
+
+def test_move_folder_merge_never_overwrites_differing_dest_file(move_env):
+    """A same-name destination file with DIFFERENT content (different size)
+    is a hard conflict: the merge aborts before copying, leaving both the
+    destination file and the originals untouched."""
+    from move import move_folder
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # User's own file sharing bird1's name but with different content/size.
+    (landing / "bird1.jpg").write_bytes(b"USER DATA - do not clobber")
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("Conflict" in e for e in result["errors"])
+    # Pre-existing destination file untouched, originals preserved.
+    assert (landing / "bird1.jpg").read_bytes() == b"USER DATA - do not clobber"
+    assert (env["src"] / "bird1.jpg").exists()
+
+
+def test_move_folder_merge_detects_same_size_different_content(move_env):
+    """The dangerous case: a destination file with the SAME size but different
+    bytes must still be detected as a conflict (size alone is insufficient),
+    so the source is never deleted in favor of the wrong destination bytes."""
+    from move import move_folder
+
+    env = move_env
+    src_bytes = (env["src"] / "bird1.jpg").read_bytes()
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # Same length as the source, different content.
+    decoy = bytes((b + 1) % 256 for b in src_bytes)
+    assert len(decoy) == len(src_bytes) and decoy != src_bytes
+    (landing / "bird1.jpg").write_bytes(decoy)
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("Conflict" in e for e in result["errors"])
+    # Destination decoy untouched, source preserved (no silent data loss).
+    assert (landing / "bird1.jpg").read_bytes() == decoy
+    assert (env["src"] / "bird1.jpg").exists()
+
+
+def test_move_folder_merge_refuses_tracked_destination(move_env):
+    """Merging into a destination Vireo already tracks as a folder is refused
+    (a correct tracked-tree merge is out of scope and would dangle descendant
+    paths). Originals are preserved."""
+    from move import move_folder
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    for fn in ("bird1.jpg", "bird1.xmp", "bird2.jpg"):
+        (landing / fn).write_bytes((env["src"] / fn).read_bytes())
+    # Destination already exists as its own folder row in the DB.
+    env["db"].add_folder(str(landing), name="src")
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("already manage" in e for e in result["errors"])
+    # Source intact.
+    assert (env["src"] / "bird1.jpg").exists()
+
+
+def test_move_folder_merge_refuses_tracked_descendant(move_env):
+    """A tracked folder *below* the (untracked) destination must also block the
+    merge — its path would collide when the source's children cascade onto it."""
+    from move import move_folder
+
+    env = move_env
+    landing = env["dst"] / "src"
+    (landing / "sub").mkdir(parents=True)
+    # A tracked folder below the destination root.
+    env["db"].add_folder(str(landing / "sub"), name="sub")
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("already manage" in e for e in result["errors"])
+    assert (env["src"] / "bird1.jpg").exists()
+
+
+def test_move_folder_merge_refuses_symlinked_tracked_destination(move_env):
+    """A tracked folder reached via a symlink alias must be detected by the
+    tracked-destination check (canonical realpath compare), not slip past a
+    raw-string match."""
+    from move import move_folder
+
+    env = move_env
+    real_dst = env["tmp_path"] / "realdst"
+    landing = real_dst / "src"
+    landing.mkdir(parents=True)
+    env["db"].add_folder(str(landing), name="src")  # tracked at its real path
+
+    link = env["tmp_path"] / "dstlink"
+    try:
+        os.symlink(str(real_dst), str(link))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    # Destination via the alias resolves (realpath) to the tracked landing.
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(link), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("already manage" in e for e in result["errors"])
+    assert (env["src"] / "bird1.jpg").exists()
+
+
+def test_move_folder_merge_refuses_symlinked_self_destination(move_env):
+    """A destination that is a symlink alias of the source's parent resolves
+    (via realpath) to the source itself and must be refused, not no-op-copied
+    then deleted."""
+    from move import move_folder
+
+    env = move_env
+    link = env["tmp_path"] / "alias"
+    try:
+        os.symlink(str(env["src"].parent), str(link))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    # destination = alias → resolved dest == alias/src, realpath == src path
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(link), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("overlaps the source" in e for e in result["errors"])
+    assert (env["src"] / "bird1.jpg").exists()
+
+
+def test_move_folder_merge_refuses_case_alias_self_destination(move_env, monkeypatch):
+    """On a case-insensitive POSIX filesystem (default macOS APFS),
+    os.path.normcase is a no-op and os.path.realpath does not fold case, so
+    a destination that differs from the source only by case still resolves
+    to the same inode but string-compares unequal. The overlap guard must
+    fall back to os.path.samefile (device + inode) so the merge is refused
+    before shutil.rmtree deletes the only copy of the source files.
+
+    Simulated on Linux by:
+      1. Using a symlink so two distinct path strings share an inode.
+      2. Patching realpath/normcase to no-ops so the existing string-based
+         check doesn't pre-empt the samefile fallback we want to exercise.
+    """
+    from move import move_folder
+
+    env = move_env
+    alias_parent = env["tmp_path"] / "alias_parent"
+    try:
+        os.symlink(str(env["src"].parent), str(alias_parent))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(os.path, "normcase", lambda p: p)
+
+    # destination=alias_parent → resolved dest = alias_parent/src; samefile
+    # against env["src"] returns True because the symlink shares the inode.
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(alias_parent), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("overlaps the source" in e for e in result["errors"])
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird2.jpg").exists()
+
+
+def test_move_folder_merge_refuses_case_alias_tracked_destination(move_env, monkeypatch):
+    """On a case-insensitive POSIX filesystem (default macOS APFS), a tracked
+    folder reached via a case-only alias must also be refused. realpath +
+    normcase don't fold case there, so the tracked-destination string compare
+    misses; the samefile fallback in `_path_equal_or_descends` catches it and
+    keeps two folder rows from managing the same on-disk tree.
+
+    Simulated on Linux the same way as the self-destination case-alias test:
+      1. Symlink so two distinct path strings share an inode.
+      2. realpath/normcase patched to no-ops so the string-based check doesn't
+         pre-empt the samefile fallback we want to exercise.
+    """
+    from move import move_folder
+
+    env = move_env
+    real_dst = env["tmp_path"] / "realdst"
+    landing = real_dst / "src"
+    landing.mkdir(parents=True)
+    # Pre-populate landing so dest_exists is True and the tracked check runs.
+    (landing / "bird1.jpg").write_bytes((env["src"] / "bird1.jpg").read_bytes())
+    env["db"].add_folder(str(landing), name="src")  # tracked at the real path
+
+    alias_dst = env["tmp_path"] / "alias_dst"
+    try:
+        os.symlink(str(real_dst), str(alias_dst))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(os.path, "normcase", lambda p: p)
+
+    # destination=alias_dst → resolved dest = alias_dst/src; string-compares
+    # unequal to the tracked landing path, but samefile makes them collapse.
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(alias_dst), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("already manage" in e for e in result["errors"])
+    # Source intact.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird2.jpg").exists()
+
+
+def test_move_folder_refuses_self_overlapping_destination(move_env):
+    """A move whose resolved destination overlaps the source (here, the
+    source's own parent → resolved dest == source) must be refused rather
+    than no-op-copy then delete the source."""
+    from move import move_folder
+
+    env = move_env
+    parent = str(env["src"].parent)  # resolve_folder_dest(...) == src path
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=parent, merge=True
+    )
+    assert result["moved"] == 0
+    assert any("overlaps" in e for e in result["errors"])
+    # Source folder fully intact.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird2.jpg").exists()
+
+
+def test_move_folder_merge_verify_fail_preserves_originals_and_dest(move_env, monkeypatch):
+    """If a source file is missing at the destination after copy, the merge
+    aborts without deleting originals or the pre-existing destination."""
+    import move as move_mod
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    sentinel = landing / "user_file.txt"
+    sentinel.write_text("pre-existing")
+
+    # Force the copy step to be a no-op so a source file is "missing" at dest.
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("Verification failed" in e for e in result["errors"])
+    # Originals preserved, pre-existing destination file untouched
+    assert (env["src"] / "bird1.jpg").exists()
+    assert sentinel.exists()
+
+
+def test_move_folder_merge_rejects_symlinked_dest_file(move_env, monkeypatch):
+    """A destination entry that is a symlink to the source file must fail
+    verification, not be accepted as an independent copy. Otherwise rsync
+    --ignore-existing leaves the symlink alone and the post-copy
+    rmtree(src_path) would destroy the symlink's target — the only copy."""
+    import move as move_mod
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # Place real copies of the files we DON'T want the test to trip over,
+    # so verification reaches the symlinked entry rather than failing on
+    # the first plain-missing file.
+    (landing / "bird1.xmp").write_bytes((env["src"] / "bird1.xmp").read_bytes())
+    (landing / "bird2.jpg").write_bytes((env["src"] / "bird2.jpg").read_bytes())
+    # bird1.jpg at dest is a SYMLINK back to the source file.
+    try:
+        os.symlink(str(env["src"] / "bird1.jpg"), str(landing / "bird1.jpg"))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    # Force rsync to no-op (it would normally honor --ignore-existing and
+    # leave the symlink anyway; this just removes the dependency on rsync).
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("Verification failed" in e and "bird1.jpg" in e
+               for e in result["errors"])
+    # The source file MUST still exist — that's the safety property.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird1.jpg").read_bytes() != b""
+
+
+def test_move_folder_merge_rejects_symlinked_dest_subdir(move_env, monkeypatch):
+    """A destination subdirectory that is a symlink back into the source
+    tree must also fail verification. os.path.isfile/getsize on the joined
+    path would silently follow the link to the source's own bytes and
+    pass — and then rmtree(src_path) would destroy the only copy."""
+    import move as move_mod
+
+    env = move_env
+    # Reshape source: put bird1 inside a real subdirectory.
+    sub_src = env["src"] / "sub"
+    sub_src.mkdir()
+    (env["src"] / "bird1.jpg").rename(sub_src / "bird1.jpg")
+    (env["src"] / "bird1.xmp").rename(sub_src / "bird1.xmp")
+
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # Real copy of the file in src root (bird2) so verification reaches
+    # the symlinked subdirectory entries.
+    (landing / "bird2.jpg").write_bytes((env["src"] / "bird2.jpg").read_bytes())
+    # The "sub" dir at the destination is a SYMLINK back into the source.
+    try:
+        os.symlink(str(sub_src), str(landing / "sub"))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("Verification failed" in e for e in result["errors"])
+    # Source files still present at the real path — not destroyed via the
+    # symlinked-parent shortcut.
+    assert (sub_src / "bird1.jpg").exists()
+
+
+def test_move_folder_merge_rejects_broken_symlink(move_env, monkeypatch):
+    """A broken symlink at the destination (lexists True, isfile False) must
+    also fail verification, not be silently accepted as missing-then-fine."""
+    import move as move_mod
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    (landing / "bird1.xmp").write_bytes((env["src"] / "bird1.xmp").read_bytes())
+    (landing / "bird2.jpg").write_bytes((env["src"] / "bird2.jpg").read_bytes())
+    # Broken symlink — target doesn't exist.
+    try:
+        os.symlink(str(env["tmp_path"] / "nope.jpg"), str(landing / "bird1.jpg"))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("Verification failed" in e for e in result["errors"])
+    assert (env["src"] / "bird1.jpg").exists()
+
+
+def test_resolve_folder_dest():
+    """resolve_folder_dest places the folder inside the destination."""
+    from move import resolve_folder_dest
+
+    # Compare against os.path.join so the expectation is platform-correct
+    # (Windows joins with a backslash).
+    assert resolve_folder_dest("/a/birds", "birds", "/nas/photos") == \
+        os.path.join("/nas/photos", "birds")
+    # Falls back to basename when name is empty
+    assert resolve_folder_dest("/a/birds/", "", "/nas/photos") == \
+        os.path.join("/nas/photos", "birds")
+
+
 def test_move_folder_updates_counts(move_env):
     """move_folder updates photo_count on folders."""
     from move import move_folder

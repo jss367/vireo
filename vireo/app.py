@@ -13362,12 +13362,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/jobs/move-folder", methods=["POST"])
     def api_job_move_folder():
         """Move an entire folder to a destination."""
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("JSON body must be an object")
         folder_id = body.get("folder_id")
         destination = body.get("destination", "")
+        merge_raw = body.get("merge", False)
+        if not isinstance(merge_raw, bool):
+            return json_error("merge must be a boolean")
+        merge = merge_raw
 
         if not folder_id:
             return json_error("folder_id required")
+        if not isinstance(destination, str):
+            return json_error("destination must be a string")
         if not destination:
             return json_error("destination required")
         if not os.path.isabs(destination):
@@ -13405,14 +13413,55 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 destination=destination,
                 progress_cb=progress_cb,
                 developed_dir=developed_dir,
+                merge=merge,
             )
 
         job_id = runner.start(
             "move-folder", work,
-            config={"folder_id": folder_id, "destination": destination},
+            config={"folder_id": folder_id, "destination": destination, "merge": merge},
             workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
+
+    @app.route("/api/move-folder/preflight", methods=["POST"])
+    def api_move_folder_preflight():
+        """Report the resolved destination for a folder move and whether it
+        already exists, so the UI can offer a merge/resume confirmation
+        instead of silently failing on an existing destination."""
+        from move import resolve_folder_dest
+
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("JSON body must be an object")
+        folder_id = body.get("folder_id")
+        destination = body.get("destination", "")
+
+        if not folder_id:
+            return json_error("folder_id required")
+        if not isinstance(destination, str):
+            return json_error("destination must be a string")
+        if not destination:
+            return json_error("destination required")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
+        folder = _get_db().conn.execute(
+            "SELECT path, name FROM folders WHERE id = ?", (folder_id,)
+        ).fetchone()
+        if not folder:
+            return json_error("Folder not found", status=404)
+
+        resolved = resolve_folder_dest(folder["path"], folder["name"], destination)
+        exists = os.path.isdir(resolved)
+        file_count = 0
+        if exists:
+            file_count = sum(1 for _, _, files in os.walk(resolved) for _ in files)
+
+        return jsonify({
+            "resolved_dest": resolved,
+            "exists": exists,
+            "file_count": file_count,
+        })
 
     @app.route("/api/jobs/import-full", methods=["POST"])
     def api_job_import_full():
