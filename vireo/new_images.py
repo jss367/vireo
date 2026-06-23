@@ -5,7 +5,7 @@ import threading
 import time
 from pathlib import Path
 
-from image_loader import SUPPORTED_EXTENSIONS
+from image_loader import SUPPORTED_EXTENSIONS, prune_scan_dirs
 
 log = logging.getLogger(__name__)
 
@@ -131,7 +131,13 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
             continue
 
         root_new = 0
-        for dirpath, _dirnames, filenames in os.walk(root_path):
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            # Mirror ``vireo/scanner.py``: never descend into other-app data
+            # bundles (e.g. "Photos Library.photoslibrary"). Counting files
+            # inside them would both trigger the macOS "access data from other
+            # apps" prompt and inflate the "new images" banner with photos the
+            # scanner will never ingest.
+            prune_scan_dirs(dirnames)
             for name in filenames:
                 files_checked += 1
                 # Mirror ``vireo/scanner.py``: skip dotfiles (e.g. macOS

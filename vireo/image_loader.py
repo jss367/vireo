@@ -30,6 +30,40 @@ RAW_EXTENSIONS = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | RAW_EXTENSIONS
 
+# macOS "package" directories that hold OTHER apps' managed data. Walking
+# into them triggers Sequoia's "<app> would like to access data from other
+# apps" (kTCCServiceSystemPolicyAppData) consent prompt — and because such a
+# bundle holds thousands of files, the prompt reappears on every file the
+# walk touches, so clicking Allow never makes it stop. The contents are also
+# app-managed derivatives we'd never want to ingest. Any directory walker
+# that traverses user-chosen roots (~/Pictures by default contains
+# "Photos Library.photoslibrary") must prune these. Matched case-insensitively.
+_EXCLUDED_DIR_SUFFIXES = (
+    ".photoslibrary",          # Apple Photos
+    ".photolibrary",           # legacy iPhoto / older Photos
+    ".migratedphotolibrary",
+    ".aplibrary",              # Aperture
+    ".migratedaplibrary",
+)
+_EXCLUDED_DIR_NAMES = frozenset({"photo booth library"})
+
+
+def is_excluded_scan_dir(name):
+    """Return True if a directory basename is an other-app data bundle that
+    directory walkers must not descend into (see _EXCLUDED_DIR_* above)."""
+    lower = name.lower()
+    return lower in _EXCLUDED_DIR_NAMES or lower.endswith(_EXCLUDED_DIR_SUFFIXES)
+
+
+def prune_scan_dirs(dirnames):
+    """Mutate an ``os.walk`` *dirnames* list in place, removing excluded
+    bundles so the walk never recurses into them. Returns the removed names
+    (useful for logging what was skipped)."""
+    removed = [d for d in dirnames if is_excluded_scan_dir(d)]
+    if removed:
+        dirnames[:] = [d for d in dirnames if d not in removed]
+    return removed
+
 
 def load_image(file_path, max_size=1024):
     """Load an image file and return a PIL Image, resized to max_size.

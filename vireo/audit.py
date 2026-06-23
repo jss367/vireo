@@ -3,9 +3,8 @@ and silent file corruption (bit rot)."""
 
 import logging
 import os
-from pathlib import Path
 
-from image_loader import SUPPORTED_EXTENSIONS
+from image_loader import SUPPORTED_EXTENSIONS, prune_scan_dirs
 from xmp import read_keywords
 
 log = logging.getLogger(__name__)
@@ -146,22 +145,20 @@ def check_untracked(db, root_paths):
 
     untracked = []
     for root in root_paths:
-        root_path = Path(root)
-        if not root_path.is_dir():
+        if not os.path.isdir(root):
             continue
-        for f in root_path.rglob("*"):
-            if (
-                f.is_file()
-                and f.suffix.lower() in SUPPORTED_EXTENSIONS
-                and not f.name.startswith(".")
-                and str(f) not in known_paths
-            ):
-                untracked.append(
-                    {
-                        "path": str(f),
-                        "folder": str(f.parent),
-                    }
-                )
+        # os.walk (not Path.rglob) so we can prune other-app data bundles
+        # (e.g. "Photos Library.photoslibrary") in place — rglob offers no way
+        # to stop descending and would walk the whole Photos library.
+        for dirpath, dirnames, filenames in os.walk(root):
+            prune_scan_dirs(dirnames)
+            for name in filenames:
+                if name.startswith(".") or os.path.splitext(name)[1].lower() not in SUPPORTED_EXTENSIONS:
+                    continue
+                full = os.path.join(dirpath, name)
+                if full in known_paths:
+                    continue
+                untracked.append({"path": full, "folder": dirpath})
 
     log.info("Untracked check: %d untracked files found", len(untracked))
     return untracked
@@ -183,7 +180,8 @@ def check_stray_sidecars(root_paths):
     for root in root_paths:
         if not os.path.isdir(root):
             continue
-        for dirpath, _dirnames, filenames in os.walk(root):
+        for dirpath, dirnames, filenames in os.walk(root):
+            prune_scan_dirs(dirnames)
             image_names = set()
             xmps = []
             for name in filenames:

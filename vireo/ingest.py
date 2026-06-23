@@ -10,7 +10,12 @@ from datetime import datetime
 from pathlib import Path
 
 from grouping import read_exif_timestamp
-from image_loader import IMAGE_EXTENSIONS, RAW_EXTENSIONS, SUPPORTED_EXTENSIONS
+from image_loader import (
+    IMAGE_EXTENSIONS,
+    RAW_EXTENSIONS,
+    SUPPORTED_EXTENSIONS,
+    prune_scan_dirs,
+)
 from scanner import compute_file_hash
 
 log = logging.getLogger(__name__)
@@ -209,7 +214,17 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
     else:
         allowed = SUPPORTED_EXTENSIONS
 
-    candidates = source_path.rglob("*") if recursive else source_path.iterdir()
+    if recursive:
+        # os.walk (not Path.rglob) so we can prune other-app data bundles
+        # (e.g. "Photos Library.photoslibrary") in place — picking ~/Pictures
+        # as an import source would otherwise walk the whole Photos library
+        # and trip the macOS "access data from other apps" prompt.
+        candidates = []
+        for dirpath, dirnames, filenames in os.walk(source_path):
+            prune_scan_dirs(dirnames)
+            candidates.extend(Path(dirpath) / name for name in filenames)
+    else:
+        candidates = list(source_path.iterdir())
     return sorted(
         f
         for f in candidates

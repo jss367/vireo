@@ -15,7 +15,12 @@ from pathlib import Path
 
 import imagehash
 from db import commit_with_retry
-from image_loader import RAW_EXTENSIONS, SUPPORTED_EXTENSIONS, extract_working_copy
+from image_loader import (
+    RAW_EXTENSIONS,
+    SUPPORTED_EXTENSIONS,
+    extract_working_copy,
+    prune_scan_dirs,
+)
 from metadata import extract_metadata
 from PIL import Image
 from xmp import read_hierarchical_keywords, read_keywords
@@ -1057,10 +1062,21 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     else:
         if recursive:
             checked = 0
-            for dirpath, _dirnames, filenames in os.walk(
+            for dirpath, dirnames, filenames in os.walk(
                 str(root_path), onerror=_on_walk_error,
             ):
                 _check_cancelled()
+                # Don't recurse into other-app data bundles (e.g.
+                # "Photos Library.photoslibrary" sitting in ~/Pictures).
+                # Pruning dirnames in place stops os.walk descending and
+                # avoids the recurring macOS "access data from other apps"
+                # TCC prompt the library would otherwise trigger.
+                skipped = prune_scan_dirs(dirnames)
+                if skipped:
+                    log.info(
+                        "Skipping other-app data bundle(s) under %s: %s",
+                        dirpath, ", ".join(skipped),
+                    )
                 for name in filenames:
                     checked += 1
                     if checked % 100 == 0:

@@ -493,3 +493,35 @@ def test_load_image_does_not_retry_on_unsupported_format(tmp_path, monkeypatch):
     img = image_loader.load_image(str(src), max_size=200)
     assert img is None
     assert calls["n"] == 1  # no retry
+
+
+def test_is_excluded_scan_dir_matches_photo_library_bundles():
+    from image_loader import is_excluded_scan_dir
+
+    assert is_excluded_scan_dir("Photos Library.photoslibrary")
+    assert is_excluded_scan_dir("Old Library.photolibrary")
+    assert is_excluded_scan_dir("Aperture.aplibrary")
+    assert is_excluded_scan_dir("PHOTOS LIBRARY.PHOTOSLIBRARY")  # case-insensitive
+    assert is_excluded_scan_dir("Photo Booth Library")
+    # Real photo folders must NOT be excluded.
+    assert not is_excluded_scan_dir("2026")
+    assert not is_excluded_scan_dir("Pictures")
+    assert not is_excluded_scan_dir("photoslibrary_backup")  # not a suffix match
+
+
+def test_prune_scan_dirs_removes_in_place_and_reports():
+    from image_loader import prune_scan_dirs
+
+    dirnames = ["2026", "Photos Library.photoslibrary", "January"]
+    removed = prune_scan_dirs(dirnames)
+
+    assert removed == ["Photos Library.photoslibrary"]
+    assert dirnames == ["2026", "January"]  # mutated in place
+
+
+def test_prune_scan_dirs_noop_when_clean():
+    from image_loader import prune_scan_dirs
+
+    dirnames = ["2026", "January"]
+    assert prune_scan_dirs(dirnames) == []
+    assert dirnames == ["2026", "January"]
