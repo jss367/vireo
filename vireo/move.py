@@ -232,7 +232,56 @@ def _is_case_insensitive_path(path):
             os.rmdir(probe)
 
 
-def _path_equal_or_descends(candidate, ancestor, ancestor_case_insensitive=None):
+def _case_insensitive_root(path):
+    """Realpath of the deepest existing ancestor of `path` whose filesystem
+    folds case, or None when no such ancestor exists. Used to scope the
+    case-folded fallback in `_path_equal_or_descends` to the subtree that
+    actually folds — see that function's docstring for why a full-path
+    `.lower()` would otherwise collapse genuinely distinct paths on the
+    parent (case-sensitive) filesystem.
+
+    Walks the same deepest-existing-ancestor path as the probe inside
+    `_is_case_insensitive_path` and delegates to it for the fold check, so
+    test monkeypatches of `_is_case_insensitive_path` still take effect.
+    On Windows, the boundary is the deepest existing ancestor's drive root.
+    """
+    if os.name == "nt":
+        if not _is_case_insensitive_path(path):
+            return None
+        cur = path
+        while cur and not os.path.exists(cur):
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                return None
+            cur = parent
+        if not cur:
+            return None
+        drive, _ = os.path.splitdrive(os.path.realpath(cur))
+        return (drive + os.sep) if drive else os.path.realpath(cur)
+    if not _is_case_insensitive_path(path):
+        return None
+    cur = path
+    while cur and not os.path.exists(cur):
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+    if not cur or not os.path.isdir(cur):
+        return None
+    return os.path.realpath(cur)
+
+
+# Sentinel for "case-insensitive root not yet probed" — distinct from the
+# probed-and-None result (the FS is case-sensitive). Callers inside a loop
+# pass the probed value, including a literal None, so lazy re-probing per
+# row never happens — the regression `_tracked_destination_overlap` is
+# guarding against would otherwise re-run the probe per scanned row on any
+# case-sensitive POSIX host (Linux ext4, opt-in APFS).
+_UNPROBED_CI_ROOT = object()
+
+
+def _path_equal_or_descends(candidate, ancestor,
+                            case_insensitive_root=_UNPROBED_CI_ROOT):
     """True if `candidate` resolves to the same directory as `ancestor`, or is
     a descendant of it.
 
@@ -249,11 +298,23 @@ def _path_equal_or_descends(candidate, ancestor, ancestor_case_insensitive=None)
       - Two missing leaves on case-insensitive POSIX, where neither path
         exists yet so samefile has nothing to compare: probe the FS for
         case-insensitivity via the deepest existing ancestor and, if so,
-        redo the string compare case-folded.
+        redo the string compare case-folded — but only over the portion of
+        the path actually on the case-folding filesystem.
 
-    `ancestor_case_insensitive`: pass the result of `_is_case_insensitive_path(
-    ancestor)` if you've already computed it (e.g. inside a loop with a fixed
-    ancestor) so the probe doesn't re-run per call. None means probe lazily.
+    `case_insensitive_root`: realpath of the deepest existing case-insensitive
+    ancestor of `ancestor`, or None for case-sensitive (no case-folded fallback
+    runs). Pass the result of `_case_insensitive_root(ancestor)` if you've
+    already computed it (e.g., inside a loop with a fixed ancestor) so the
+    probe doesn't re-run per call. Omit (sentinel default) to probe lazily;
+    an explicit None means "already probed, no case-insensitive root" and
+    skips the lazy probe.
+
+    Scoping the case fold to inside this root matters when only part of the
+    path tree folds — a case-insensitive APFS/CIFS volume mounted at
+    `/mnt/photos` on a case-sensitive Linux root FS, for example. A stale row
+    `/MNT/photos/dst/src` and a move into `/mnt/photos/dst/src` are distinct
+    paths because `/MNT` does not resolve to `/mnt` on the parent FS; folding
+    the full path with `.lower()` would wrongly refuse the valid move.
     """
     real_c = os.path.normcase(os.path.realpath(candidate))
     real_a = os.path.normcase(os.path.realpath(ancestor))
@@ -278,15 +339,23 @@ def _path_equal_or_descends(candidate, ancestor, ancestor_case_insensitive=None)
     # case before either path has been created on disk. samefile can't fold
     # case for paths that don't exist; probe the FS for case-insensitivity
     # and redo the string compare case-folded so the stale row is still
-    # caught before any copy.
-    if os.name != "nt":
-        if ancestor_case_insensitive is None:
-            ancestor_case_insensitive = _is_case_insensitive_path(ancestor)
-        if ancestor_case_insensitive:
-            lower_c = real_c.lower()
-            lower_a = real_a.lower()
-            if lower_c == lower_a or lower_c.startswith(lower_a + os.sep):
-                return True
+    # caught before any copy. Restrict the case-folded compare to the subtree
+    # below the probed case-insensitive ancestor — anything above it is on
+    # the parent (case-sensitive) FS and must match exactly, character-for-
+    # character, or we'd collapse distinct paths.
+    if case_insensitive_root is _UNPROBED_CI_ROOT:
+        case_insensitive_root = _case_insensitive_root(ancestor)
+    if case_insensitive_root:
+        root = case_insensitive_root
+        root_with_sep = root + os.sep
+        if not (real_a == root or real_a.startswith(root_with_sep)):
+            return False  # ancestor isn't actually inside the probed root.
+        if not (real_c == root or real_c.startswith(root_with_sep)):
+            return False  # candidate is above or beside the case-fold subtree.
+        suffix_c = real_c[len(root):].lower()
+        suffix_a = real_a[len(root):].lower()
+        if suffix_c == suffix_a or suffix_c.startswith(suffix_a + os.sep):
+            return True
     return False
 
 
@@ -304,21 +373,19 @@ def _destination_overlaps_source(src_path, dest_path):
 def _tracked_destination_overlap(db, folder_id, dest_path):
     """Return another tracked folder at or below dest_path, if one exists.
 
-    The FS case-insensitivity of `dest_path` is probed once and reused for
+    The case-insensitive root of `dest_path` is probed once and reused for
     every row — otherwise the probe (an os.listdir of the deepest existing
     ancestor, plus samefile of two child paths) re-runs per non-matching row,
     making this O(tracked_folders × destination_entries) before any copy on
     large catalogs or network-backed destinations.
     """
-    dest_case_insensitive = (
-        True if os.name == "nt" else _is_case_insensitive_path(dest_path)
-    )
+    dest_ci_root = _case_insensitive_root(dest_path)
     for row in db.conn.execute(
         "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
     ):
         if _path_equal_or_descends(
             row["path"], dest_path,
-            ancestor_case_insensitive=dest_case_insensitive,
+            case_insensitive_root=dest_ci_root,
         ):
             return row
     return None

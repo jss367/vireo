@@ -493,6 +493,73 @@ def test_move_folder_refuses_case_alias_missing_tracked_destination(move_env, mo
     assert not dest_input.exists()
 
 
+def test_path_equal_or_descends_case_fold_scoped_to_ci_root(tmp_path):
+    """The case-folded fallback in `_path_equal_or_descends` must only fold
+    the suffix below the probed case-insensitive root — not the whole path.
+    Otherwise a tracked row whose path differs from the resolved destination
+    in a component ABOVE the case-folding subtree (a case-insensitive APFS
+    or CIFS volume mounted at /mnt/photos under a case-sensitive Linux root
+    FS: stale row /MNT/photos/dst/src vs move into /mnt/photos/dst/src) would
+    falsely collapse as overlap and refuse a valid move, even though `/MNT`
+    is a distinct directory from `/mnt` on the parent (case-sensitive) FS.
+    Case-only differences BELOW the root must still collapse."""
+    import move as move_mod
+
+    ci_root = tmp_path / "ci_root"
+    ci_root.mkdir()
+    ci_root_real = os.path.realpath(str(ci_root))
+    dest = str(ci_root / "dst" / "src")
+
+    # Above the root — a case-flipped component on the case-sensitive parent
+    # FS is a genuinely distinct path. Must NOT register as overlap.
+    above_root = str(tmp_path / "CI_ROOT" / "dst" / "src")
+    assert move_mod._path_equal_or_descends(
+        above_root, dest, case_insensitive_root=ci_root_real
+    ) is False
+
+    # Below the root — case-only difference on the case-folding FS aliases
+    # to the same on-disk directory. Must register as overlap.
+    below_root = str(ci_root / "DST" / "src")
+    assert move_mod._path_equal_or_descends(
+        below_root, dest, case_insensitive_root=ci_root_real
+    ) is True
+
+    # Sibling of the root on the parent FS — distinct path, must NOT
+    # register even when both paths happen to case-fold to the same string
+    # when lowercased in full.
+    sibling = str(tmp_path / "ci_root2" / "dst" / "src")
+    assert move_mod._path_equal_or_descends(
+        sibling, dest, case_insensitive_root=ci_root_real
+    ) is False
+
+
+def test_tracked_destination_overlap_skips_rows_outside_ci_root(move_env, monkeypatch):
+    """End-to-end: `_tracked_destination_overlap` must NOT return a stale
+    row whose path differs from the destination above the case-insensitive
+    boundary. Before the fix, the full-path `.lower()` fallback collapsed
+    /MNT/photos/dst/src with /mnt/photos/dst/src on a Linux box with a
+    case-insensitive subvolume mounted at /mnt/photos and refused valid
+    moves into that subvolume as "already managed"."""
+    import move as move_mod
+
+    env = move_env
+    ci_root = env["tmp_path"] / "ci_root"
+    ci_root.mkdir()
+    dest = str(ci_root / "dst" / "src")
+    assert not os.path.exists(dest)
+
+    above_root = str(env["tmp_path"] / "CI_ROOT" / "dst" / "src")
+    env["db"].add_folder(above_root, name="src")
+
+    # Force the probe True so the case-fold branch is exercised regardless
+    # of the host FS (CI tends to be case-sensitive ext4).
+    monkeypatch.setattr(move_mod, "_is_case_insensitive_path", lambda p: True)
+
+    assert move_mod._tracked_destination_overlap(
+        env["db"], env["fid_src"], dest
+    ) is None
+
+
 def test_tracked_destination_overlap_caches_case_insensitivity_probe(move_env, monkeypatch):
     """The FS case-insensitivity probe is os.listdir-backed and re-running it
     per tracked-folder row turns the preflight guard into
