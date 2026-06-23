@@ -15,7 +15,14 @@ from pathlib import Path
 
 import imagehash
 from db import commit_with_retry
-from image_loader import RAW_EXTENSIONS, SUPPORTED_EXTENSIONS, extract_working_copy
+from image_loader import (
+    RAW_EXTENSIONS,
+    SUPPORTED_EXTENSIONS,
+    extract_working_copy,
+    is_excluded_scan_path,
+    safe_iter_dir,
+    safe_scan_walk,
+)
 from metadata import extract_metadata
 from PIL import Image
 from xmp import read_hierarchical_keywords, read_keywords
@@ -972,6 +979,22 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             RuntimeError("scan cancelled") at cancellation checkpoints.
     """
     root_path = Path(root)
+    # Don't open the root at all if the root is, or sits inside, an
+    # other-app data bundle. prune_scan_dirs below only filters
+    # *children*, so a root of e.g.
+    # ``~/Pictures/Photos Library.photoslibrary`` — or a directly
+    # selected/stale subfolder like ``.../Photos Library.photoslibrary/originals``
+    # — would still trigger the macOS "access data from other apps" TCC
+    # prompt this guard exists to avoid. Check every ancestor, not just
+    # the leaf name. This must run BEFORE ``root_path.is_dir()``: is_dir
+    # follows symlinks and stat's the target, so for a directly selected
+    # bundle (or a symlink to one), the existence test alone is enough
+    # to trip the TCC prompt — mirroring the restrict_dirs branch below.
+    if is_excluded_scan_path(root_path):
+        log.info(
+            "Skipping other-app data bundle as scan root: %s", root_path,
+        )
+        return
     if not root_path.is_dir():
         log.warning("Root path does not exist or is not a directory: %s", root)
         return
@@ -1022,6 +1045,14 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         else:
             log.warning("os.walk error at %s: %s", err.filename, err)
 
+    # Tracks restrict_dirs entries that survive the bundle guard, so the
+    # working-copy extraction pass below scopes its SQL query to the same
+    # set the discovery loop actually visited. Without this, a stale folder
+    # row inside an excluded bundle (carried over from before the guard)
+    # would be re-touched by ``_extract_working_copies`` reading
+    # ``folder_path/filename`` — re-tripping the macOS TCC prompt this guard
+    # exists to avoid.
+    effective_restrict_dirs = []
     if restrict_dirs is not None:
         # Only enumerate files in the specified directories (non-recursive).
         # root is still used as the folder hierarchy root for _ensure_folder.
@@ -1029,22 +1060,37 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         for d in restrict_dirs:
             _check_cancelled()
             dp = Path(d)
+            # The outer ``is_excluded_scan_path(root_path)`` guard above only
+            # covers ``root``. restrict_dirs entries can independently point
+            # into an other-app data bundle — e.g. a stale folder row from
+            # before this guard, or a duplicate the caller built from
+            # workspace_folders pointing at
+            # ``~/Pictures/Photos Library.photoslibrary/originals``. Calling
+            # ``dp.is_dir()`` / ``dp.iterdir()`` on that subtree would still
+            # trip the macOS "access data from other apps" TCC prompt this
+            # guard exists to avoid. Reject before any filesystem access.
+            if is_excluded_scan_path(dp):
+                log.info(
+                    "Skipping other-app data bundle in restrict_dirs: %s", dp,
+                )
+                continue
+            effective_restrict_dirs.append(d)
             if dp.is_dir():
-                # iterdir() raises PermissionError when the kernel refuses
-                # enumeration (macOS TCC EPERM, POSIX EACCES). Route through
-                # _on_walk_error so denials are surfaced via
-                # permission_error_callback the same way the recursive path
-                # does. _on_walk_error re-raises when no callback is
-                # registered, so callers like pipeline_job's repair scan
-                # (which counts unreachable folders via `except OSError`)
-                # keep their failure semantics; only callers that opted in
-                # to partial-success by passing the callback fall through to
-                # `continue`.
-                try:
-                    entries = list(dp.iterdir())
-                except PermissionError as e:
-                    _on_walk_error(e)
-                    continue
+                # safe_iter_dir mirrors iterdir() but drops excluded
+                # bundle children (direct ``Photos Library.photoslibrary``
+                # entries or symlinks pointing into one) before the
+                # is_file()/suffix filter below would stat them — that
+                # stat alone would re-trip the macOS "access data from
+                # other apps" TCC prompt this guard exists to avoid.
+                # Permission denials route through _on_walk_error: when
+                # ``permission_error_callback`` is registered the helper
+                # logs + invokes it and returns, so the generator yields
+                # nothing and the for-loop falls through to the next
+                # ``d``. Without a callback, _on_walk_error re-raises so
+                # callers like pipeline_job's repair scan (``except
+                # (OSError, RuntimeError)``) keep their loud failure
+                # semantics — we deliberately don't catch that raise.
+                entries = list(safe_iter_dir(str(dp), onerror=_on_walk_error))
                 for f in entries:
                     _check_cancelled()
                     if (f.is_file()
@@ -1057,7 +1103,14 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     else:
         if recursive:
             checked = 0
-            for dirpath, _dirnames, filenames in os.walk(
+            # safe_scan_walk replaces os.walk + prune_scan_dirs. It excludes
+            # other-app data bundles (e.g. "Photos Library.photoslibrary"
+            # sitting in ~/Pictures) without ever stat-following a symlink
+            # to one — os.walk's classification call follows symlinks and
+            # would re-trip the macOS "access data from other apps" TCC
+            # prompt for a child like ``LibraryAlias -> Photos
+            # Library.photoslibrary`` before prune_scan_dirs could reject it.
+            for dirpath, _dirnames, filenames in safe_scan_walk(
                 str(root_path), onerror=_on_walk_error,
             ):
                 _check_cancelled()
@@ -1086,11 +1139,18 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                             continue
                         image_files.append(Path(full))
         else:
-            try:
-                entries = list(root_path.iterdir())
-            except PermissionError as e:
-                _on_walk_error(e)
-                entries = []
+            # safe_iter_dir mirrors iterdir() but drops excluded bundle
+            # children before the is_file() filter below would stat
+            # them. A normal root like ~/Pictures can hold ``Photos
+            # Library.photoslibrary`` (or a symlink to one) as a direct
+            # child; a bare iterdir + is_file() would stat that bundle
+            # and re-trip the macOS "access data from other apps" TCC
+            # prompt this guard exists to avoid, even though the
+            # extension filter would have rejected it afterwards.
+            # Permission denials route through _on_walk_error (callback
+            # → empty entries, no callback → re-raise) the same way the
+            # restrict_dirs branch above does.
+            entries = list(safe_iter_dir(str(root_path), onerror=_on_walk_error))
             for checked, f in enumerate(entries, 1):
                 if checked % 100 == 0:
                     _check_cancelled()
@@ -1211,6 +1271,11 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         if restrict_dirs is not None:
             for d in restrict_dirs:
                 dp = Path(d)
+                # Same bundle guard as the discovery loop above — never
+                # register or stat a path inside an other-app data bundle,
+                # even when the caller stuffed one into ``restrict_dirs``.
+                if is_excluded_scan_path(dp):
+                    continue
                 if dp.is_dir():
                     _ensure_folder(dp)
 
@@ -1642,7 +1707,13 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # backward. ``status_callback`` still announces the phase.
         if vireo_dir:
             if restrict_dirs is not None:
-                wc_scope = [(str(d), "exact") for d in restrict_dirs]
+                # Use the bundle-filtered list — see ``effective_restrict_dirs``
+                # above. Reusing the raw ``restrict_dirs`` here would let a
+                # stale DB row inside an excluded bundle re-enter the
+                # working-copy extractor, which reads ``folder_path/filename``
+                # and re-trips the macOS TCC prompt the scan loop's guard
+                # already skipped.
+                wc_scope = [(str(d), "exact") for d in effective_restrict_dirs]
             elif not recursive:
                 wc_scope = [(str(root_path), "exact")]
             else:

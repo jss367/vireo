@@ -31,6 +31,31 @@ def test_job_scan_invalid_root(app_and_db):
     assert resp.status_code == 400
 
 
+def test_job_scan_rejects_macos_other_app_bundle(app_and_db, tmp_path):
+    """POST /api/jobs/scan must reject a ``.photoslibrary`` root before
+    calling ``os.path.isdir`` on it. ``os.path.isdir`` against an Apple
+    Photos bundle on macOS itself trips the kTCCServiceSystemPolicyAppData
+    prompt this guard exists to prevent, so the rejection must happen
+    before any stat.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+
+    resp = client.post('/api/jobs/scan', json={'root': str(bundle)})
+    assert resp.status_code == 400
+    assert "macos" in resp.get_json()["error"].lower()
+
+    # Nested paths inside the bundle (e.g. stale folder rows pointing at
+    # ``.../Photos Library.photoslibrary/originals``) must be rejected too.
+    nested = bundle / "originals"
+    nested.mkdir()
+    resp = client.post('/api/jobs/scan', json={'root': str(nested)})
+    assert resp.status_code == 400
+
+
 def test_job_status_endpoint(app_and_db, tmp_path):
     """GET /api/jobs/<id> returns job status."""
     app, db = app_and_db
@@ -360,6 +385,67 @@ def test_ingest_nonexistent_source(app_and_db, tmp_path):
         assert "not found" in resp.get_json()["error"]
 
 
+def test_ingest_rejects_macos_other_app_bundle(app_and_db, tmp_path):
+    """POST /api/jobs/ingest must reject a ``.photoslibrary`` source before
+    calling ``os.path.isdir``. See test_job_scan_rejects_macos_other_app_bundle.
+    """
+    app, _ = app_and_db
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/ingest", json={
+            "source": str(bundle),
+            "destination": str(dst),
+        })
+        assert resp.status_code == 400
+        assert "macos" in resp.get_json()["error"].lower()
+
+
+def test_import_full_rejects_macos_other_app_bundle(app_and_db, tmp_path):
+    """POST /api/jobs/import-full must reject a ``.photoslibrary`` source
+    before calling ``os.path.isdir``."""
+    app, _ = app_and_db
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/import-full", json={
+            "source": str(bundle),
+            "destination": str(dst),
+        })
+        assert resp.status_code == 400
+        assert "macos" in resp.get_json()["error"].lower()
+
+
+def test_scan_and_ingest_reject_non_string_path_with_400(app_and_db, tmp_path):
+    """JSON primitives (``{"root": 123}``, ``{"source": true}``) reach the
+    excluded-bundle helper before the directory check. The helper must not
+    raise ``TypeError`` on those — otherwise routes return 500 instead of
+    the 400 the directory validation produced before this PR.
+    """
+    app, _ = app_and_db
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/scan", json={"root": 123})
+        assert resp.status_code == 400
+
+        resp = c.post("/api/jobs/ingest", json={
+            "source": True,
+            "destination": str(dst),
+        })
+        assert resp.status_code == 400
+
+        resp = c.post("/api/jobs/import-full", json={
+            "source": 42,
+            "destination": str(dst),
+        })
+        assert resp.status_code == 400
+
+
 def test_ingest_relative_destination(app_and_db, tmp_path):
     """POST /api/jobs/ingest validates destination is absolute."""
     app, db = app_and_db
@@ -379,6 +465,41 @@ def test_pipeline_job_requires_source_or_collection(app_and_db):
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={})
         assert resp.status_code == 400
+
+
+def test_pipeline_job_rejects_macos_other_app_bundle(app_and_db, tmp_path):
+    """POST /api/jobs/pipeline must reject a ``.photoslibrary`` source
+    (single or in ``sources``) before calling ``os.path.isdir``.
+
+    Like /api/jobs/scan and /api/jobs/ingest, the pipeline route stat's
+    the source up front to return a clean 400 for missing dirs. On
+    macOS that pre-stat against an Apple Photos bundle trips the
+    kTCCServiceSystemPolicyAppData prompt this guard exists to prevent,
+    so the rejection must happen before any stat.
+    """
+    app, _ = app_and_db
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={"source": str(bundle)})
+        assert resp.status_code == 400
+        assert "macos" in resp.get_json()["error"].lower()
+
+        # Same shape via the ``sources`` list path.
+        resp = client.post(
+            "/api/jobs/pipeline", json={"sources": [str(bundle)]},
+        )
+        assert resp.status_code == 400
+        assert "macos" in resp.get_json()["error"].lower()
+
+        # Nested paths inside the bundle must be rejected too.
+        nested = bundle / "originals"
+        nested.mkdir()
+        resp = client.post(
+            "/api/jobs/pipeline", json={"source": str(nested)},
+        )
+        assert resp.status_code == 400
+        assert "macos" in resp.get_json()["error"].lower()
 
 
 def test_pipeline_job_rejects_relative_destination(app_and_db, tmp_path):

@@ -79,6 +79,22 @@ def test_folder_rescan_missing_path_returns_400(app_and_db, tmp_path, monkeypatc
         assert "no longer exists" in resp.get_json().get("error", "")
 
 
+def test_folder_rescan_rejects_macos_other_app_bundle(app_and_db, tmp_path):
+    """A folder row pointing inside a macOS app-managed library (e.g. a
+    stale row from before the prune guards landed) must be rejected
+    BEFORE ``os.path.isdir`` runs — that stat itself trips the macOS
+    "access data from other apps" TCC prompt the guards exist to avoid.
+    """
+    app, db = app_and_db
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    fid = db.add_folder(str(bundle), name="stale-bundle")
+    with app.test_client() as c:
+        resp = c.post(f"/api/folders/{fid}/rescan", json={})
+        assert resp.status_code == 400
+        assert "macos" in resp.get_json().get("error", "").lower()
+
+
 def test_folder_rescan_rejects_folder_outside_active_workspace(app_and_db, tmp_path):
     """A folder that exists globally but is NOT linked to the active
     workspace must 404 — otherwise a rescan would pollute the active

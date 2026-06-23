@@ -146,6 +146,130 @@ def test_check_untracked_finds_new_files(tmp_path):
     assert 'new_file.jpg' in untracked[0]['path']
 
 
+def test_check_untracked_skips_dangling_symlink(tmp_path):
+    """A broken symlink with an image extension is not reported untracked.
+
+    os.walk lists dangling symlinks in filenames; since scanner.scan skips
+    non-files, flagging one would raise a warning a rescan can never clear.
+    """
+    from audit import check_untracked
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    # A symlink named like an image but pointing at a nonexistent target.
+    os.symlink(os.path.join(root, 'nonexistent.jpg'),
+               os.path.join(root, 'broken.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    untracked = check_untracked(db, [root])
+    assert untracked == []
+
+
+def test_check_untracked_skips_photo_library_bundle(tmp_path):
+    """check_untracked must not descend into a Photos library bundle."""
+    from audit import check_untracked
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    lib = os.path.join(root, 'Photos Library.photoslibrary', 'originals')
+    os.makedirs(lib)
+    Image.new('RGB', (100, 100)).save(os.path.join(lib, 'managed.jpg'))
+    Image.new('RGB', (100, 100)).save(os.path.join(root, 'real.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    untracked = check_untracked(db, [root])
+    paths = [u['path'] for u in untracked]
+    assert any('real.jpg' in p for p in paths)
+    assert not any('.photoslibrary' in p for p in paths)
+
+
+def test_check_untracked_skips_excluded_root_itself(tmp_path):
+    """check_untracked must not open a root that *is* the excluded bundle.
+
+    A configured folder root of ``~/Pictures/Photos Library.photoslibrary``
+    would otherwise have os.walk open the bundle (prune_scan_dirs only
+    filters *children*), defeating the TCC-prompt guard.
+    """
+    from audit import check_untracked
+    from db import Database
+
+    root = str(tmp_path / "Photos Library.photoslibrary")
+    os.makedirs(os.path.join(root, 'originals'))
+    Image.new('RGB', (100, 100)).save(
+        os.path.join(root, 'originals', 'managed.jpg')
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    assert check_untracked(db, [root]) == []
+
+
+def test_check_untracked_skips_root_nested_in_excluded_bundle(tmp_path):
+    """check_untracked must also reject roots that *sit inside* an excluded
+    bundle. A leaf-only check would let
+    ``.../Photos Library.photoslibrary/originals`` through (basename
+    ``originals`` is unremarkable) and os.walk would open the protected
+    bundle subtree, defeating the TCC-prompt guard.
+    """
+    from audit import check_untracked
+    from db import Database
+
+    root = str(tmp_path / "Photos Library.photoslibrary" / "originals")
+    os.makedirs(os.path.join(root, '0'))
+    Image.new('RGB', (100, 100)).save(os.path.join(root, '0', 'managed.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    assert check_untracked(db, [root]) == []
+
+
+def test_check_stray_sidecars_skips_root_nested_in_excluded_bundle(tmp_path):
+    """check_stray_sidecars must also reject roots nested inside an excluded
+    bundle so .xmp files inside the protected subtree don't trip the macOS
+    TCC prompt the bundle guard exists to avoid.
+    """
+    from audit import check_stray_sidecars
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "Photos Library.photoslibrary" / "originals")
+    os.makedirs(root)
+    write_sidecar(os.path.join(root, 'ghost.xmp'),
+                  flat_keywords={'Gone'}, hierarchical_keywords=set())
+
+    assert check_stray_sidecars([root]) == []
+
+
+def test_audit_rejects_excluded_root_before_statting(tmp_path, monkeypatch):
+    """Both audit walkers must run the bundle guard BEFORE ``os.path.isdir``.
+
+    ``isdir`` follows symlinks and stat's the target, which alone trips the
+    macOS TCC prompt for a directly selected bundle or a symlink to one.
+    Tested by failing if ``os.path.isdir`` is called on a path the
+    exclusion check covers — if the order is wrong, the stat sneaks in
+    before the guard returns.
+    """
+    from audit import check_stray_sidecars, check_untracked
+    from db import Database
+    from image_loader import is_excluded_scan_path
+
+    real_isdir = os.path.isdir
+
+    def guarded_isdir(path):
+        if is_excluded_scan_path(path):
+            raise AssertionError(
+                f"os.path.isdir called on excluded path before guard: {path}"
+            )
+        return real_isdir(path)
+
+    monkeypatch.setattr(os.path, "isdir", guarded_isdir)
+
+    bundle = str(tmp_path / "Photos Library.photoslibrary")
+    os.makedirs(os.path.join(bundle, "originals"))
+
+    db = Database(str(tmp_path / "test.db"))
+    assert check_untracked(db, [bundle]) == []
+    assert check_stray_sidecars([bundle]) == []
+
+
 def test_remove_orphans(tmp_path):
     """remove_orphans deletes DB entries for missing files."""
     from audit import remove_orphans
@@ -160,6 +284,32 @@ def test_remove_orphans(tmp_path):
 
     photo = db.get_photo(pid)
     assert photo is None
+
+
+def test_check_stray_sidecars_skips_symlinked_directory_with_image_suffix(tmp_path):
+    """A symlink to a directory whose name ends in .xmp/.jpg must not be
+    treated as a sidecar/image.
+
+    ``safe_scan_walk`` classifies entries with ``follow_symlinks=False``,
+    so a ``ghost.xmp -> RealAlbum`` link lands in ``filenames`` rather
+    than ``dirnames``. Without the ``os.path.isfile`` guard the audit
+    would report a bogus stray (and ``delete_stray_sidecars`` would then
+    unlink a real directory link).
+    """
+    from audit import check_stray_sidecars
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    real_dir = os.path.join(root, "RealAlbum")
+    os.makedirs(real_dir)
+    # Symlink with a sidecar-shaped name that points at a real directory.
+    os.symlink(real_dir, os.path.join(root, "ghost.xmp"))
+    # And one shaped like an image, to confirm the image side is ignored
+    # too (so a real ``ghost.xmp`` next to it wouldn't be silently matched
+    # against the link's basename).
+    os.symlink(real_dir, os.path.join(root, "decoy.jpg"))
+
+    assert check_stray_sidecars([root]) == []
 
 
 def test_check_stray_sidecars(tmp_path):

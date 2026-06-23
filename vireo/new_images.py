@@ -5,7 +5,11 @@ import threading
 import time
 from pathlib import Path
 
-from image_loader import SUPPORTED_EXTENSIONS
+from image_loader import (
+    SUPPORTED_EXTENSIONS,
+    is_excluded_scan_path,
+    safe_scan_walk,
+)
 
 log = logging.getLogger(__name__)
 
@@ -126,12 +130,30 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
 
     for root in roots:
         root_path = root["path"]
+        # prune_scan_dirs filters only children; if the root is, or sits
+        # inside, an excluded bundle (e.g. user added
+        # ``~/Pictures/Photos Library.photoslibrary`` directly, or a stale
+        # folder row points at ``.../Photos Library.photoslibrary/originals``),
+        # os.walk would still open it and inflate the banner with managed
+        # images the scanner never ingests. This must run BEFORE
+        # ``os.path.isdir`` — isdir follows symlinks and stat's the target,
+        # so for a directly selected bundle (or a symlink to one) the
+        # existence test alone is enough to trip the macOS TCC prompt.
+        if is_excluded_scan_path(root_path):
+            per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
+            continue
         if not os.path.isdir(root_path):
             per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
             continue
 
         root_new = 0
-        for dirpath, _dirnames, filenames in os.walk(root_path):
+        # safe_scan_walk skips other-app data bundles (e.g.
+        # "Photos Library.photoslibrary") without stat-following any
+        # symlinked child that points at one — the os.walk classification
+        # stat alone is enough to trip the macOS TCC prompt. Mirror what
+        # scanner.scan() will eventually pick up, so the "new images"
+        # banner can't be inflated by files the scanner will never ingest.
+        for dirpath, _dirnames, filenames in safe_scan_walk(root_path):
             for name in filenames:
                 files_checked += 1
                 # Mirror ``vireo/scanner.py``: skip dotfiles (e.g. macOS
@@ -147,6 +169,13 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
                     continue
                 full = os.path.join(dirpath, name)
                 if full in known:
+                    _maybe_emit()
+                    continue
+                # Mirror ``vireo/scanner.py``: os.walk lists broken symlinks
+                # in `filenames`, but scanner refuses to ingest them
+                # (os.path.isfile == False). Counting them as "new" would
+                # leave the banner stuck on files no scan can clear.
+                if not os.path.isfile(full):
                     _maybe_emit()
                     continue
                 # Suppress JPG working-copy companions of already-imported

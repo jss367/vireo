@@ -9933,7 +9933,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/browse", methods=["GET"])
     def api_browse():
         """List subdirectories at a given path for folder browser."""
+        from image_loader import is_excluded_scan_path
         path = request.args.get("path", os.path.expanduser("~"))
+        # Reject macOS app-managed library bundles before any stat:
+        # ``os.path.isdir`` on a ``.photoslibrary`` path — or a symlink to one
+        # — itself trips the "access data from other apps" TCC prompt, and the
+        # folder picker hits this listing endpoint before posting children to
+        # ``/api/browse/photo-counts``, so the per-child guard there is too
+        # late on its own.
+        if is_excluded_scan_path(path):
+            return json_error("path is not a valid directory")
         if not os.path.isdir(path):
             return json_error("path is not a valid directory")
         dirs = []
@@ -9942,6 +9951,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if name.startswith("."):
                     continue
                 full = os.path.join(path, name)
+                # Skip excluded bundles (and symlinks resolving to them)
+                # before ``os.path.isdir`` would stat them.
+                if is_excluded_scan_path(full):
+                    continue
                 if os.path.isdir(full):
                     dirs.append({"name": name, "path": full})
         except PermissionError:
@@ -9962,6 +9975,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(paths, list):
             return json_error("paths must be a list", 400)
 
+        from image_loader import is_excluded_scan_path
         from ingest import discover_source_files
 
         ft = file_types if file_types else "both"
@@ -9970,6 +9984,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Non-string entries (dicts, lists, numbers) can't be dict keys
             # and aren't valid paths — skip them rather than 500.
             if not isinstance(p, str):
+                continue
+            # Reject macOS app-managed library bundles before any stat:
+            # ``os.path.isdir`` on a ``.photoslibrary`` path — or a symlink to
+            # one — itself trips the "access data from other apps" TCC prompt,
+            # and the folder browser sends every child of ``~/Pictures`` here
+            # the moment the picker opens.
+            if is_excluded_scan_path(p):
+                counts[p] = 0
                 continue
             if not os.path.isdir(p):
                 counts[p] = 0
@@ -12087,7 +12109,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error("root path required")
             roots_list = [root]
 
+        from image_loader import is_excluded_scan_path
+
         for r in roots_list:
+            # Reject other-app data bundles (Apple Photos / Aperture / Photo
+            # Booth) before any stat: ``os.path.isdir`` on a ``.photoslibrary``
+            # path — or a symlink to one — itself trips the macOS
+            # "access data from other apps" TCC prompt, defeating the guards
+            # inside scan().
+            if is_excluded_scan_path(r):
+                return json_error(
+                    f"path is inside a macOS app-managed library and cannot "
+                    f"be scanned: {r}"
+                )
             if not os.path.isdir(r):
                 return json_error(f"directory not found: {r}")
 
@@ -12159,6 +12193,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not linked:
             return json_error("folder not found", 404)
         root = folder["path"]
+        from image_loader import is_excluded_scan_path
+        # See api_job_scan for why this must run before os.path.isdir.
+        if is_excluded_scan_path(root):
+            return json_error(
+                f"folder is inside a macOS app-managed library and cannot "
+                f"be scanned: {root}"
+            )
         if not os.path.isdir(root):
             return json_error(f"folder path no longer exists: {root}")
         runner = app._job_runner
@@ -12807,6 +12848,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not source or not destination:
             return json_error("source and destination are required")
+        from image_loader import is_excluded_scan_path
+        # See api_job_scan for why this must run before os.path.isdir.
+        if is_excluded_scan_path(source):
+            return json_error(
+                f"source is inside a macOS app-managed library and cannot "
+                f"be imported: {source}"
+            )
         if not os.path.isdir(source):
             return json_error(f"source directory not found: {source}")
         if not os.path.isabs(destination):
@@ -13380,6 +13428,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not source:
             return json_error("source is required")
+        from image_loader import is_excluded_scan_path
+        # See api_job_scan for why this must run before os.path.isdir.
+        if is_excluded_scan_path(source):
+            return json_error(
+                f"source is inside a macOS app-managed library and cannot "
+                f"be imported: {source}"
+            )
         if not os.path.isdir(source):
             return json_error(f"source directory not found: {source}")
         if copy:
@@ -15434,12 +15489,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # folders. Rejecting on stale placeholder paths would falsely 400 an
         # otherwise-valid snapshot-backed run.
         if source_snapshot_id is None:
+            from image_loader import is_excluded_scan_path
+
+            # Reject other-app data bundles (Apple Photos / Aperture / Photo
+            # Booth) before any stat: ``os.path.isdir`` on a ``.photoslibrary``
+            # path — or a symlink to one — itself trips the macOS
+            # "access data from other apps" TCC prompt, defeating the guards
+            # inside scan()/discover_source_files() that run_pipeline_job will
+            # eventually call. Mirror the same pre-stat rejection here so a
+            # saved or user-typed pipeline source can't reach isdir first.
             if sources:
                 for s in sources:
+                    if is_excluded_scan_path(s):
+                        return json_error(
+                            f"source is inside a macOS app-managed library "
+                            f"and cannot be scanned: {s}"
+                        )
                     if not os.path.isdir(s):
                         return json_error(f"source directory not found: {s}")
-            elif source and not os.path.isdir(source):
-                return json_error(f"source directory not found: {source}")
+            elif source:
+                if is_excluded_scan_path(source):
+                    return json_error(
+                        f"source is inside a macOS app-managed library and "
+                        f"cannot be scanned: {source}"
+                    )
+                if not os.path.isdir(source):
+                    return json_error(f"source directory not found: {source}")
 
         destination = body.get("destination")
         # Copy-ingest ("destination") is incompatible with snapshot runs:

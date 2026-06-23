@@ -10,7 +10,14 @@ from datetime import datetime
 from pathlib import Path
 
 from grouping import read_exif_timestamp
-from image_loader import IMAGE_EXTENSIONS, RAW_EXTENSIONS, SUPPORTED_EXTENSIONS
+from image_loader import (
+    IMAGE_EXTENSIONS,
+    RAW_EXTENSIONS,
+    SUPPORTED_EXTENSIONS,
+    is_excluded_scan_path,
+    safe_iter_dir,
+    safe_scan_walk,
+)
 from scanner import compute_file_hash
 
 log = logging.getLogger(__name__)
@@ -197,6 +204,16 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
         Sorted list of Path objects for matching files
     """
     source_path = Path(source_dir)
+    # prune_scan_dirs filters only children of the walked root; if the
+    # selected source is, or sits inside, an other-app data bundle (e.g.
+    # user picks ``~/Pictures/Photos Library.photoslibrary`` or a child
+    # like ``.../Photos Library.photoslibrary/originals`` as an import
+    # source), os.walk would still open it and trip the macOS TCC prompt.
+    # This must run BEFORE ``source_path.is_dir()`` — is_dir follows
+    # symlinks and stat's the target, so for a directly selected bundle
+    # (or a symlink to one) the existence test alone is enough to trip TCC.
+    if is_excluded_scan_path(source_path):
+        return []
     if not source_path.is_dir():
         return []
 
@@ -209,7 +226,37 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
     else:
         allowed = SUPPORTED_EXTENSIONS
 
-    candidates = source_path.rglob("*") if recursive else source_path.iterdir()
+    if recursive:
+        # safe_scan_walk skips other-app data bundles (e.g.
+        # "Photos Library.photoslibrary") without stat-following any
+        # symlinked child that points at one — picking ~/Pictures as an
+        # import source would otherwise walk the whole Photos library and
+        # re-trip the macOS "access data from other apps" prompt.
+        #
+        # Stream the walk into the filter below rather than collecting
+        # every walked path first: a source like a home directory or
+        # external disk root can yield millions of non-image filenames,
+        # and materializing those would make memory grow with the whole
+        # tree (and stall the preview before any photo is copied). The
+        # previous Path.rglob path was likewise consumed lazily by
+        # ``sorted()``.
+        def _candidate_paths():
+            for dirpath, _dirnames, filenames in safe_scan_walk(str(source_path)):
+                for name in filenames:
+                    yield Path(dirpath) / name
+        candidates = _candidate_paths()
+    else:
+        # safe_iter_dir drops excluded bundle children before the
+        # is_file() filter below would stat them. With recursion off, a
+        # source like ~/Pictures still contains ``Photos
+        # Library.photoslibrary`` (or a symlink to one) as a direct
+        # child; a bare iterdir + is_file() would stat that bundle and
+        # re-trip the macOS "access data from other apps" TCC prompt
+        # this guard exists to avoid, even though the extension filter
+        # would have rejected it afterwards. ``safe_iter_dir`` is itself
+        # a generator — pass it straight through to the filter so we
+        # don't materialize the directory listing twice.
+        candidates = safe_iter_dir(str(source_path))
     return sorted(
         f
         for f in candidates

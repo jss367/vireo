@@ -133,6 +133,195 @@ def test_discover_source_files_nonexistent_dir():
     assert files == []
 
 
+def test_discover_source_files_skips_excluded_root_itself(tmp_path):
+    """Picking a Photos library bundle directly as an import source must
+    return no candidates — without a root-level guard, os.walk would still
+    open the bundle (prune_scan_dirs only filters children) and trip the
+    macOS TCC prompt this guard exists to avoid."""
+    src = tmp_path / "Photos Library.photoslibrary"
+    _create_test_files(str(src / "originals"), ["managed.jpg"])
+    assert discover_source_files(str(src), file_types="both") == []
+
+
+def test_discover_source_files_skips_source_nested_in_excluded_bundle(tmp_path):
+    """Picking a *subfolder* of a Photos library bundle as an import source
+    must also return no candidates. A leaf-only check would let
+    ``.../Photos Library.photoslibrary/originals`` through (basename
+    ``originals`` is unremarkable) and os.walk would open the protected
+    bundle subtree and re-trip the macOS TCC prompt this guard exists to
+    avoid. The guard must check every ancestor."""
+    src = tmp_path / "Photos Library.photoslibrary" / "originals"
+    _create_test_files(str(src / "0"), ["managed.jpg"])
+    assert discover_source_files(str(src), file_types="both") == []
+
+
+def test_discover_source_files_non_recursive_skips_bundle_children(tmp_path):
+    """``discover_source_files(recursive=False)`` on a normal source
+    like ``~/Pictures`` must drop excluded bundle children (direct
+    ``Photos Library.photoslibrary`` entries or symlinks pointing at
+    one) before the ``is_file()`` filter would stat them. A bare
+    ``iterdir() + is_file()`` would follow the symlink to the bundle
+    target and re-trip the macOS "access data from other apps" TCC
+    prompt this guard exists to avoid.
+    """
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _create_test_files(str(bundle / "originals"), ["managed.jpg"])
+
+    src = tmp_path / "sd_card"
+    _create_test_files(str(src), ["real.jpg"])
+    # Direct bundle child as a sibling.
+    _create_test_files(
+        str(src / "Photos Library.photoslibrary" / "originals"),
+        ["direct_managed.jpg"],
+    )
+    # Symlinked bundle child.
+    os.symlink(str(bundle), str(src / "LibraryAlias"))
+
+    files = discover_source_files(
+        str(src), file_types="both", recursive=False
+    )
+    names = {f.name for f in files}
+    assert names == {"real.jpg"}
+
+
+def test_discover_source_files_non_recursive_does_not_stat_bundle_children(
+    tmp_path, monkeypatch
+):
+    """Belt-and-braces guard for the non-recursive branch. Fails if
+    ``Path.is_file`` is ever called on an excluded child — that
+    ``is_file`` follows symlinks and would re-trip the macOS TCC
+    prompt before the extension filter could reject the entry.
+    """
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    from pathlib import Path
+
+    from image_loader import is_excluded_scan_path
+
+    real_is_file = Path.is_file
+
+    def guarded_is_file(self):
+        if is_excluded_scan_path(self):
+            raise AssertionError(
+                f"is_file() called on excluded path before guard: {self}"
+            )
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", guarded_is_file)
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _create_test_files(str(bundle / "originals"), ["managed.jpg"])
+
+    src = tmp_path / "sd_card"
+    _create_test_files(str(src), ["real.jpg"])
+    _create_test_files(
+        str(src / "Photos Library.photoslibrary" / "originals"),
+        ["direct_managed.jpg"],
+    )
+    os.symlink(str(bundle), str(src / "LibraryAlias"))
+
+    files = discover_source_files(
+        str(src), file_types="both", recursive=False
+    )
+    names = {f.name for f in files}
+    assert names == {"real.jpg"}
+
+
+def test_discover_source_files_recursive_streams_candidates(
+    tmp_path, monkeypatch
+):
+    """The recursive walk must stream candidate paths through the
+    image-extension/``is_file()`` filter rather than collecting every
+    walked filename first. A source like a home directory or external
+    disk root can yield millions of non-image filenames; buffering them
+    all before the filter would balloon memory proportional to the whole
+    tree and stall the preview before any photo is copied. The previous
+    ``Path.rglob`` implementation was consumed lazily by ``sorted()`` —
+    keep the same streaming behaviour.
+
+    Verified by tracking the interleave of ``safe_scan_walk`` yields
+    and ``Path.is_file`` filter calls. If the recursive branch buffers
+    every yield first, every ``is_file`` call happens *after* every
+    yield; streaming produces interleaved calls.
+    """
+    from pathlib import Path
+
+    import ingest as ingest_mod
+
+    real_walk = ingest_mod.safe_scan_walk
+    real_is_file = Path.is_file
+
+    events = []
+
+    def tracking_walk(top, onerror=None):
+        # Yield one filename per tuple so each name's emission is its own
+        # observable event in `events`.
+        for dirpath, _dirnames, filenames in real_walk(top, onerror=onerror):
+            for name in filenames:
+                events.append(("yield", name))
+                yield dirpath, [], [name]
+
+    def tracking_is_file(self):
+        events.append(("is_file", self.name))
+        return real_is_file(self)
+
+    monkeypatch.setattr(ingest_mod, "safe_scan_walk", tracking_walk)
+    monkeypatch.setattr(Path, "is_file", tracking_is_file)
+
+    src = tmp_path / "src"
+    _create_test_files(str(src), ["a.jpg", "b.txt", "c.jpg", "d.txt"])
+
+    files = discover_source_files(str(src), file_types="both")
+    assert {f.name for f in files} == {"a.jpg", "c.jpg"}
+
+    yield_indices = [i for i, (kind, _) in enumerate(events) if kind == "yield"]
+    is_file_indices = [
+        i for i, (kind, _) in enumerate(events) if kind == "is_file"
+    ]
+    assert yield_indices and is_file_indices
+    assert min(is_file_indices) < max(yield_indices), (
+        "discover_source_files buffered every walked candidate before "
+        "running the image filter — see the streaming requirement in "
+        "ingest.discover_source_files. Event order: " + repr(events)
+    )
+
+
+def test_discover_source_files_rejects_excluded_source_before_statting(
+    tmp_path, monkeypatch
+):
+    """The bundle guard must run BEFORE ``Path.is_dir`` on the source.
+
+    ``Path.is_dir`` follows symlinks and stat's the target, which alone
+    trips the macOS TCC prompt for a directly selected bundle or a
+    symlink to one. Fails the test if ``Path.is_dir`` is called on a
+    path the exclusion check covers — if the order is wrong, the stat
+    sneaks in before the guard returns.
+    """
+    from pathlib import Path
+
+    from image_loader import is_excluded_scan_path
+
+    real_is_dir = Path.is_dir
+
+    def guarded_is_dir(self):
+        if is_excluded_scan_path(self):
+            raise AssertionError(
+                f"is_dir() called on excluded path before guard: {self}"
+            )
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", guarded_is_dir)
+
+    src = tmp_path / "Photos Library.photoslibrary"
+    _create_test_files(str(src / "originals"), ["managed.jpg"])
+    assert discover_source_files(str(src), file_types="both") == []
+
+
 def test_ingest_copies_files_to_date_folders(tmp_path):
     """Files are copied to destination organized by EXIF date (falls back to mtime)."""
     src = tmp_path / "sd_card"

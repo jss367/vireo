@@ -54,6 +54,248 @@ def test_scan_discovers_folders(tmp_path):
     assert os.path.join(root, '2024', 'January') in paths
 
 
+def test_scan_skips_photos_library_bundle(tmp_path):
+    """scan() must not descend into a macOS Photos library bundle.
+
+    Walking into "*.photoslibrary" (which ~/Pictures contains by default)
+    triggers the recurring macOS "access data from other apps" TCC prompt and
+    would ingest app-managed derivatives. Images inside the bundle must be
+    ignored while real sibling photos are still discovered.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        '': ['real.jpg'],
+        'Photos Library.photoslibrary/originals/0': ['managed.jpg'],
+        'Photo Booth Library/Pictures': ['booth.jpg'],
+    })
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    photos = db.get_photos(per_page=100)
+    filenames = {p['filename'] for p in photos}
+    assert filenames == {'real.jpg'}
+
+    folder_paths = [f['path'] for f in db.get_folder_tree()]
+    assert not any('.photoslibrary' in p for p in folder_paths)
+    assert not any('Photo Booth Library' in p for p in folder_paths)
+
+
+def test_scan_skips_excluded_root_itself(tmp_path):
+    """scan() must not open the root when the root *is* the excluded bundle.
+
+    prune_scan_dirs only filters children, so if a user selects (or imports)
+    ``~/Pictures/Photos Library.photoslibrary`` directly as a scan root,
+    os.walk would still open the bundle and trip the macOS TCC prompt this
+    guard exists to avoid. The guard must short-circuit before any walk.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "Photos Library.photoslibrary")
+    _create_test_images(root, {
+        'originals/0': ['managed.jpg'],
+    })
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    assert db.get_photos(per_page=100) == []
+    assert db.get_folder_tree() == []
+
+
+def test_scan_skips_root_nested_in_excluded_bundle(tmp_path):
+    """scan() must reject roots that sit *inside* an excluded bundle, not
+    just roots whose leaf name matches.
+
+    A user can select ``.../Photos Library.photoslibrary/originals`` directly,
+    or a stale folder row from before this guard existed can carry the same
+    shape. The leaf basename (``originals``) is unremarkable, so a leaf-only
+    check passes — and os.walk then opens the protected bundle subtree and
+    re-trips the macOS TCC prompt this guard exists to avoid.
+    """
+    from db import Database
+    from scanner import scan
+
+    nested_root = str(tmp_path / "Photos Library.photoslibrary" / "originals")
+    _create_test_images(nested_root, {
+        '0': ['managed.jpg'],
+    })
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(nested_root, db)
+
+    assert db.get_photos(per_page=100) == []
+    assert db.get_folder_tree() == []
+
+
+def test_scan_skips_restrict_dirs_inside_excluded_bundle(tmp_path):
+    """scan() must reject ``restrict_dirs`` entries that point inside an
+    excluded bundle even when the outer ``root`` is unremarkable.
+
+    The pipeline / repair paths build ``restrict_dirs`` from existing
+    folder rows in the workspace, which can include stale entries from
+    before the bundle guards landed (e.g. ``.../Photos Library.photoslibrary/
+    originals``). The outer root guard (``is_excluded_scan_path(root_path)``)
+    only checks ``root``; without a per-entry guard the restrict_dirs branch
+    still calls ``dp.is_dir()`` / ``dp.iterdir()`` on the protected
+    subtree and re-trips the macOS TCC prompt this change exists to avoid.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        '': ['real.jpg'],
+    })
+    bundle_sub = str(
+        tmp_path / "photos" / "Photos Library.photoslibrary" / "originals"
+    )
+    _create_test_images(bundle_sub, {'': ['managed.jpg']})
+
+    db = Database(str(tmp_path / "test.db"))
+    # Both the real top-level folder and a bundle-internal "originals"
+    # subfolder are passed as restrict_dirs (the shape pipeline_job would
+    # produce from a workspace that had previously linked the bundle).
+    scan(root, db, restrict_dirs=[root, bundle_sub])
+
+    photos = db.get_photos(per_page=100)
+    assert {p['filename'] for p in photos} == {'real.jpg'}
+    folder_paths = [f['path'] for f in db.get_folder_tree()]
+    assert not any('.photoslibrary' in p for p in folder_paths)
+
+
+def test_scan_filters_excluded_restrict_dirs_from_working_copy_scope(
+    tmp_path, monkeypatch,
+):
+    """The working-copy extraction pass must scope to the
+    ``restrict_dirs`` entries the discovery loop actually walked, not
+    the raw caller-supplied list.
+
+    The discovery loop already drops excluded restrict_dirs (covered by
+    :func:`test_scan_skips_restrict_dirs_inside_excluded_bundle`), but the
+    post-scan ``_extract_working_copies`` call used to reuse the raw
+    ``restrict_dirs`` to build ``wc_scope``. If a stale DB row already
+    pointed at a bundle-internal folder (e.g. from before the bundle guard
+    landed), the extractor's SQL match would still pick it up and the
+    follow-up file read of ``folder_path/filename`` would re-trip the
+    macOS "access data from other apps" TCC prompt — exactly the prompt
+    this guard exists to avoid. The scope passed to the extractor must
+    therefore mirror the filtered set.
+    """
+    import scanner
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['real.jpg']})
+    bundle_sub = str(
+        tmp_path / "photos" / "Photos Library.photoslibrary" / "originals"
+    )
+    _create_test_images(bundle_sub, {'': ['managed.jpg']})
+
+    captured = {}
+
+    def fake_extract_working_copies(db, vireo_dir, *, progress_callback=None,
+                                    status_callback=None, scope=None,
+                                    cancel_check=None):
+        captured["scope"] = scope
+
+    monkeypatch.setattr(scanner, "_extract_working_copies",
+                        fake_extract_working_copies)
+
+    db = Database(str(tmp_path / "test.db"))
+    scanner.scan(
+        root, db,
+        restrict_dirs=[root, bundle_sub],
+        vireo_dir=str(tmp_path / "vireo_dir"),
+    )
+
+    assert "scope" in captured, "expected _extract_working_copies to be called"
+    scope_paths = [entry[0] if isinstance(entry, tuple) else entry
+                   for entry in (captured["scope"] or [])]
+    assert root in scope_paths
+    assert all(".photoslibrary" not in p for p in scope_paths), (
+        f"bundle-internal restrict_dir leaked into wc_scope: {scope_paths}"
+    )
+
+
+def test_scan_skips_symlinked_excluded_bundle_child(tmp_path):
+    """A child symlink in the scan root whose target is an excluded
+    bundle must be dropped before ``os.walk``'s classification stat
+    follows the link.
+
+    The previous walker called ``os.walk`` → ``DirEntry.is_dir()`` to
+    classify each child; that follows symlinks, so for a child like
+    ``LibraryAlias -> Photos Library.photoslibrary`` the stat alone
+    reached into the protected bundle and re-tripped the macOS TCC
+    prompt this change exists to avoid — even though
+    ``prune_scan_dirs`` would have removed the entry from recursion
+    afterwards. The walker has to skip the link textually
+    (``os.readlink``) before any followed call.
+    """
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    from db import Database
+    from scanner import scan
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _create_test_images(str(bundle), {'originals/0': ['managed.jpg']})
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['real.jpg']})
+    os.symlink(str(bundle), os.path.join(root, "LibraryAlias"))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    photos = db.get_photos(per_page=100)
+    filenames = {p['filename'] for p in photos}
+    assert filenames == {'real.jpg'}
+
+    folder_paths = [f['path'] for f in db.get_folder_tree()]
+    assert not any('.photoslibrary' in p for p in folder_paths)
+    assert not any('LibraryAlias' in p for p in folder_paths)
+
+
+def test_scan_rejects_excluded_root_before_statting(tmp_path, monkeypatch):
+    """The bundle guard must run BEFORE ``Path.is_dir`` on the root.
+
+    ``Path.is_dir`` follows symlinks and stat's the target, so for a
+    directly selected bundle (or a symlink to one) the existence test
+    alone is enough to trip the macOS "access data from other apps" TCC
+    prompt the guard exists to avoid. Tested by failing the test if
+    ``Path.is_dir`` is ever called on a path the exclusion check covers —
+    if the order is wrong, the stat sneaks in before the guard returns.
+    """
+    from pathlib import Path
+
+    from db import Database
+    from scanner import scan
+
+    real_is_dir = Path.is_dir
+
+    def guarded_is_dir(self):
+        from image_loader import is_excluded_scan_path
+        if is_excluded_scan_path(self):
+            raise AssertionError(
+                f"is_dir() called on excluded path before guard: {self}"
+            )
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", guarded_is_dir)
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _create_test_images(str(bundle), {'originals/0': ['managed.jpg']})
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(bundle), db)
+
+    assert db.get_photos(per_page=100) == []
+
+
 def test_scan_discovers_photos(tmp_path):
     """scan() creates photo entries for all image files."""
     from db import Database
@@ -136,6 +378,88 @@ def test_scan_non_recursive_only_finds_root_photos(tmp_path):
     photos = db.get_photos(per_page=100)
     filenames = {p['filename'] for p in photos}
     assert filenames == {'root.jpg'}
+
+
+def test_scan_non_recursive_skips_bundle_children_before_stat(tmp_path):
+    """In ``scan(recursive=False)``, a normal root like ``~/Pictures``
+    still contains ``Photos Library.photoslibrary`` (or a symlink to
+    one) as a direct child. A bare ``iterdir() + is_file()`` would
+    stat the bundle target while filtering by extension and re-trip
+    the macOS "access data from other apps" TCC prompt this change
+    exists to avoid. The non-recursive branch must drop excluded
+    children before any followed stat.
+    """
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    from db import Database
+    from scanner import scan
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _create_test_images(str(bundle), {'originals': ['managed.jpg']})
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['real.jpg']})
+    # Direct bundle child as a sibling of real.jpg.
+    direct_bundle = os.path.join(root, "Photos Library.photoslibrary")
+    _create_test_images(direct_bundle, {'originals': ['direct_managed.jpg']})
+    # Symlinked bundle child.
+    os.symlink(str(bundle), os.path.join(root, "LibraryAlias"))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db, recursive=False)
+
+    photos = db.get_photos(per_page=100)
+    filenames = {p['filename'] for p in photos}
+    assert filenames == {'real.jpg'}
+
+    folder_paths = [f['path'] for f in db.get_folder_tree()]
+    assert not any('.photoslibrary' in p for p in folder_paths)
+    assert not any('LibraryAlias' in p for p in folder_paths)
+
+
+def test_scan_non_recursive_does_not_stat_bundle_children(tmp_path, monkeypatch):
+    """Belt-and-braces for the non-recursive branch: if any code path
+    calls ``Path.is_file`` on a child that ``is_excluded_scan_path``
+    covers, the test fails — that ``is_file`` follows symlinks and
+    would re-trip the macOS TCC prompt before the extension filter
+    could reject the entry.
+    """
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    from pathlib import Path
+
+    from db import Database
+    from scanner import scan
+
+    real_is_file = Path.is_file
+
+    def guarded_is_file(self):
+        from image_loader import is_excluded_scan_path
+        if is_excluded_scan_path(self):
+            raise AssertionError(
+                f"is_file() called on excluded path before guard: {self}"
+            )
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", guarded_is_file)
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _create_test_images(str(bundle), {'originals': ['managed.jpg']})
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['real.jpg']})
+    _create_test_images(
+        os.path.join(root, "Photos Library.photoslibrary"),
+        {'originals': ['direct_managed.jpg']},
+    )
+    os.symlink(str(bundle), os.path.join(root, "LibraryAlias"))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db, recursive=False)
+
+    photos = db.get_photos(per_page=100)
+    filenames = {p['filename'] for p in photos}
+    assert filenames == {'real.jpg'}
 
 
 def test_scan_reads_dimensions(tmp_path):
@@ -2718,13 +3042,16 @@ def test_scan_restrict_dirs_surfaces_permission_denied(tmp_path, monkeypatch):
     raised PermissionError unhandled and the entire pipeline scan stage
     failed with no PERMISSION_DENIED entry in job["errors"].
 
-    Mocks Path.iterdir for the locked subtree (rather than chmod 0o000) so
+    Mocks os.scandir for the locked subtree (rather than chmod 0o000) so
     the assertion holds regardless of test-runner uid: chmod-based denial
     silently bypasses for root, which would let the locked file slip in.
+    Targets ``image_loader.os.scandir`` because ``safe_iter_dir`` (the
+    restrict_dirs enumerator) calls ``os.scandir`` directly — patching
+    ``Path.iterdir`` would miss the actual code path.
     """
     import errno as _errno
-    from pathlib import Path as _Path
 
+    import image_loader
     from db import Database
     from scanner import scan
 
@@ -2736,16 +3063,16 @@ def test_scan_restrict_dirs_surfaces_permission_denied(tmp_path, monkeypatch):
     allowed = os.path.join(root, 'allowed')
     forbidden = os.path.join(root, 'forbidden')
 
-    real_iterdir = _Path.iterdir
+    real_scandir = image_loader.os.scandir
 
-    def fake_iterdir(self):
-        if str(self) == forbidden:
+    def fake_scandir(path):
+        if str(path) == forbidden:
             raise PermissionError(
-                _errno.EACCES, "Permission denied", str(self),
+                _errno.EACCES, "Permission denied", str(path),
             )
-        return real_iterdir(self)
+        return real_scandir(path)
 
-    monkeypatch.setattr(_Path, "iterdir", fake_iterdir)
+    monkeypatch.setattr(image_loader.os, "scandir", fake_scandir)
 
     db = Database(str(tmp_path / "test.db"))
     denied = []
@@ -2781,10 +3108,14 @@ def test_scan_restrict_dirs_raises_permission_error_without_callback(
     which silently turned denied folders into "successfully repaired" —
     a black-box regression. Partial-success is opt-in via the callback;
     every other caller must keep the loud failure semantics they had.
+
+    Patches ``image_loader.os.scandir`` because ``safe_iter_dir`` (the
+    restrict_dirs enumerator) calls ``os.scandir`` — patching
+    ``Path.iterdir`` would miss the actual code path.
     """
     import errno as _errno
-    from pathlib import Path as _Path
 
+    import image_loader
     from db import Database
     from scanner import scan
 
@@ -2792,16 +3123,16 @@ def test_scan_restrict_dirs_raises_permission_error_without_callback(
     _create_test_images(root, {'forbidden': ['hidden.jpg']})
     forbidden = os.path.join(root, 'forbidden')
 
-    real_iterdir = _Path.iterdir
+    real_scandir = image_loader.os.scandir
 
-    def fake_iterdir(self):
-        if str(self) == forbidden:
+    def fake_scandir(path):
+        if str(path) == forbidden:
             raise PermissionError(
-                _errno.EACCES, "Permission denied", str(self),
+                _errno.EACCES, "Permission denied", str(path),
             )
-        return real_iterdir(self)
+        return real_scandir(path)
 
-    monkeypatch.setattr(_Path, "iterdir", fake_iterdir)
+    monkeypatch.setattr(image_loader.os, "scandir", fake_scandir)
 
     db = Database(str(tmp_path / "test.db"))
     with pytest.raises(PermissionError):

@@ -3,9 +3,12 @@ and silent file corruption (bit rot)."""
 
 import logging
 import os
-from pathlib import Path
 
-from image_loader import SUPPORTED_EXTENSIONS
+from image_loader import (
+    SUPPORTED_EXTENSIONS,
+    is_excluded_scan_path,
+    safe_scan_walk,
+)
 from xmp import read_keywords
 
 log = logging.getLogger(__name__)
@@ -146,22 +149,40 @@ def check_untracked(db, root_paths):
 
     untracked = []
     for root in root_paths:
-        root_path = Path(root)
-        if not root_path.is_dir():
+        # prune_scan_dirs filters only children; if the root is, or sits
+        # inside, an excluded bundle (e.g. a stale folder row pointing at
+        # ``.../Photos Library.photoslibrary/originals``), os.walk would
+        # still open it. Reject the whole subtree before we touch it so
+        # the audit can't trip the macOS TCC prompt either. This must run
+        # BEFORE ``os.path.isdir`` — isdir follows symlinks and stat's the
+        # target, so for a directly selected bundle (or a symlink to one)
+        # the existence test alone is enough to trip TCC.
+        if is_excluded_scan_path(root):
             continue
-        for f in root_path.rglob("*"):
-            if (
-                f.is_file()
-                and f.suffix.lower() in SUPPORTED_EXTENSIONS
-                and not f.name.startswith(".")
-                and str(f) not in known_paths
-            ):
-                untracked.append(
-                    {
-                        "path": str(f),
-                        "folder": str(f.parent),
-                    }
-                )
+        if not os.path.isdir(root):
+            continue
+        # safe_scan_walk replaces os.walk + prune_scan_dirs so we never
+        # stat-follow a symlinked excluded bundle (e.g. a child like
+        # ``LibraryAlias -> Photos Library.photoslibrary``) — the os.walk
+        # classification call alone would re-trip the macOS TCC prompt.
+        # rglob offered no way to stop descending; this walker does.
+        for dirpath, _dirnames, filenames in safe_scan_walk(root):
+            for name in filenames:
+                if name.startswith(".") or os.path.splitext(name)[1].lower() not in SUPPORTED_EXTENSIONS:
+                    continue
+                full = os.path.join(dirpath, name)
+                if full in known_paths:
+                    continue
+                # safe_scan_walk surfaces dangling symlinks (and other
+                # non-regular entries) in ``filenames``; the prior
+                # Path.rglob path gated on f.is_file(). scanner.scan skips
+                # non-files via os.path.isfile, so flagging one here would
+                # raise an untracked-image warning a rescan can never
+                # clear. os.path.isfile follows symlinks and returns False
+                # (not raise) for dangling targets.
+                if not os.path.isfile(full):
+                    continue
+                untracked.append({"path": full, "folder": dirpath})
 
     log.info("Untracked check: %d untracked files found", len(untracked))
     return untracked
@@ -181,13 +202,29 @@ def check_stray_sidecars(root_paths):
     """
     strays = []
     for root in root_paths:
+        # Reject excluded bundles before ``os.path.isdir`` — isdir follows
+        # symlinks and stat's the target, which is enough to trip the macOS
+        # TCC prompt for a directly selected bundle or a symlink to one.
+        if is_excluded_scan_path(root):
+            continue
         if not os.path.isdir(root):
             continue
-        for dirpath, _dirnames, filenames in os.walk(root):
+        # See check_untracked_files for why safe_scan_walk supersedes
+        # os.walk + prune_scan_dirs here.
+        for dirpath, _dirnames, filenames in safe_scan_walk(root):
             image_names = set()
             xmps = []
             for name in filenames:
                 if name.startswith("."):
+                    continue
+                # safe_scan_walk classifies entries with follow_symlinks=False,
+                # so a symlink to a directory named like an image/sidecar (e.g.
+                # ``Albums/ghost.xmp -> RealAlbum``) lands in ``filenames``
+                # instead of ``dirnames``. Without this guard the loop would
+                # treat the link as a real sidecar or image — bogus stray
+                # reports plus a delete that would unlink a real directory.
+                # Matches the os.path.isfile guard in check_untracked_files.
+                if not os.path.isfile(os.path.join(dirpath, name)):
                     continue
                 stem, ext = os.path.splitext(name)
                 if ext.lower() == ".xmp":
