@@ -597,3 +597,20 @@ def test_is_excluded_scan_path_resolves_symlinked_root(tmp_path):
     normal_link = tmp_path / "PhotosLink"
     os.symlink(str(normal), str(normal_link))
     assert not is_excluded_scan_path(str(normal_link))
+
+
+def test_is_excluded_scan_path_tolerates_non_string_inputs():
+    """Truthy non-string JSON primitives (``{"root": 123}``,
+    ``{"source": true}``) can reach this helper before the route's
+    ``os.path.isdir`` validation. ``Path(int)``/``Path(bool)`` raise
+    ``TypeError``; the helper must swallow that and return False so the
+    downstream ``isdir`` check still produces the route's 400 response
+    rather than a 500.
+    """
+    from image_loader import is_excluded_scan_path
+
+    assert is_excluded_scan_path(123) is False
+    assert is_excluded_scan_path(True) is False
+    assert is_excluded_scan_path(0.5) is False
+    assert is_excluded_scan_path(["/Users/me/Pictures"]) is False
+    assert is_excluded_scan_path({"path": "/Users/me/Pictures"}) is False

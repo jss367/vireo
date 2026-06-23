@@ -72,8 +72,17 @@ def is_excluded_scan_path(path):
     ``~/PhotoLib -> Photos Library.photoslibrary``); ``Path.is_dir()`` and
     ``os.walk()`` follow the link into the protected bundle regardless, so
     skipping the resolve would let the walkers re-trip the macOS TCC prompt.
+
+    Non-path inputs (e.g. JSON primitives like ``123`` or ``True`` that
+    sneak through ``body.get("root")`` before the route's directory check)
+    are treated as "not excluded" rather than raising. ``Path(int)`` raises
+    ``TypeError``; without this guard the route would return 500 instead of
+    the 400 the subsequent ``os.path.isdir`` check produces.
     """
-    p = Path(path)
+    try:
+        p = Path(path)
+    except TypeError:
+        return False
     if any(is_excluded_scan_dir(part) for part in p.parts):
         return True
     # Resolve symlinks. os.path.realpath() never raises (returns its input

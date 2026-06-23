@@ -420,6 +420,32 @@ def test_import_full_rejects_macos_other_app_bundle(app_and_db, tmp_path):
         assert "macos" in resp.get_json()["error"].lower()
 
 
+def test_scan_and_ingest_reject_non_string_path_with_400(app_and_db, tmp_path):
+    """JSON primitives (``{"root": 123}``, ``{"source": true}``) reach the
+    excluded-bundle helper before the directory check. The helper must not
+    raise ``TypeError`` on those — otherwise routes return 500 instead of
+    the 400 the directory validation produced before this PR.
+    """
+    app, _ = app_and_db
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/scan", json={"root": 123})
+        assert resp.status_code == 400
+
+        resp = c.post("/api/jobs/ingest", json={
+            "source": True,
+            "destination": str(dst),
+        })
+        assert resp.status_code == 400
+
+        resp = c.post("/api/jobs/import-full", json={
+            "source": 42,
+            "destination": str(dst),
+        })
+        assert resp.status_code == 400
+
+
 def test_ingest_relative_destination(app_and_db, tmp_path):
     """POST /api/jobs/ingest validates destination is absolute."""
     app, db = app_and_db
