@@ -70,6 +70,28 @@ def test_count_new_images_ignores_broken_symlinks(db_with_workspace):
     assert all("broken.jpg" not in p for p in result["sample"])
 
 
+def test_count_new_images_skips_excluded_root_itself(db_with_workspace):
+    """A configured root that *is* an other-app data bundle is reported as 0.
+
+    prune_scan_dirs only filters children; without a root-level guard
+    os.walk would still open ``Photos Library.photoslibrary`` and inflate
+    the banner with managed images the scanner will never ingest, plus
+    trip the macOS TCC prompt this guard exists to avoid.
+    """
+    db, ws_id, tmp_path = db_with_workspace
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _touch_image(str(bundle / "originals" / "managed.jpg"))
+    db.add_folder(str(bundle), name="Photos Library.photoslibrary")
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 0
+    assert result["sample"] == []
+    assert len(result["per_root"]) == 1
+    assert result["per_root"][0]["new_count"] == 0
+
+
 def test_count_new_images_returns_all_paths_when_sample_limit_is_none(tmp_path):
     # Set up a workspace with 10 new files on disk.
     db = Database(str(tmp_path / "test.db"))

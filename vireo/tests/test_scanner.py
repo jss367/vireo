@@ -84,6 +84,29 @@ def test_scan_skips_photos_library_bundle(tmp_path):
     assert not any('Photo Booth Library' in p for p in folder_paths)
 
 
+def test_scan_skips_excluded_root_itself(tmp_path):
+    """scan() must not open the root when the root *is* the excluded bundle.
+
+    prune_scan_dirs only filters children, so if a user selects (or imports)
+    ``~/Pictures/Photos Library.photoslibrary`` directly as a scan root,
+    os.walk would still open the bundle and trip the macOS TCC prompt this
+    guard exists to avoid. The guard must short-circuit before any walk.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "Photos Library.photoslibrary")
+    _create_test_images(root, {
+        'originals/0': ['managed.jpg'],
+    })
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    assert db.get_photos(per_page=100) == []
+    assert db.get_folder_tree() == []
+
+
 def test_scan_discovers_photos(tmp_path):
     """scan() creates photo entries for all image files."""
     from db import Database

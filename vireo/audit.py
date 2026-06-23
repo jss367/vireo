@@ -4,7 +4,11 @@ and silent file corruption (bit rot)."""
 import logging
 import os
 
-from image_loader import SUPPORTED_EXTENSIONS, prune_scan_dirs
+from image_loader import (
+    SUPPORTED_EXTENSIONS,
+    is_excluded_scan_dir,
+    prune_scan_dirs,
+)
 from xmp import read_keywords
 
 log = logging.getLogger(__name__)
@@ -147,6 +151,11 @@ def check_untracked(db, root_paths):
     for root in root_paths:
         if not os.path.isdir(root):
             continue
+        # prune_scan_dirs filters only children; if the root itself is the
+        # excluded bundle, os.walk would still open it. Skip the root before
+        # we touch it so the audit can't trip the macOS TCC prompt either.
+        if is_excluded_scan_dir(os.path.basename(os.path.normpath(root))):
+            continue
         # os.walk (not Path.rglob) so we can prune other-app data bundles
         # (e.g. "Photos Library.photoslibrary") in place — rglob offers no way
         # to stop descending and would walk the whole Photos library.
@@ -187,6 +196,8 @@ def check_stray_sidecars(root_paths):
     strays = []
     for root in root_paths:
         if not os.path.isdir(root):
+            continue
+        if is_excluded_scan_dir(os.path.basename(os.path.normpath(root))):
             continue
         for dirpath, dirnames, filenames in os.walk(root):
             prune_scan_dirs(dirnames)

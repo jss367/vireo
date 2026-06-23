@@ -19,6 +19,7 @@ from image_loader import (
     RAW_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
     extract_working_copy,
+    is_excluded_scan_dir,
     prune_scan_dirs,
 )
 from metadata import extract_metadata
@@ -979,6 +980,16 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     root_path = Path(root)
     if not root_path.is_dir():
         log.warning("Root path does not exist or is not a directory: %s", root)
+        return
+    # Don't open the root at all if the root itself is an other-app data
+    # bundle. prune_scan_dirs below only filters *children*, so a root of
+    # e.g. ``~/Pictures/Photos Library.photoslibrary`` would still trigger
+    # the macOS "access data from other apps" TCC prompt this guard exists
+    # to avoid.
+    if is_excluded_scan_dir(root_path.name):
+        log.info(
+            "Skipping other-app data bundle as scan root: %s", root_path,
+        )
         return
 
     def _check_cancelled():

@@ -133,6 +133,16 @@ def test_discover_source_files_nonexistent_dir():
     assert files == []
 
 
+def test_discover_source_files_skips_excluded_root_itself(tmp_path):
+    """Picking a Photos library bundle directly as an import source must
+    return no candidates — without a root-level guard, os.walk would still
+    open the bundle (prune_scan_dirs only filters children) and trip the
+    macOS TCC prompt this guard exists to avoid."""
+    src = tmp_path / "Photos Library.photoslibrary"
+    _create_test_files(str(src / "originals"), ["managed.jpg"])
+    assert discover_source_files(str(src), file_types="both") == []
+
+
 def test_ingest_copies_files_to_date_folders(tmp_path):
     """Files are copied to destination organized by EXIF date (falls back to mtime)."""
     src = tmp_path / "sd_card"

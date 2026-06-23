@@ -5,7 +5,11 @@ import threading
 import time
 from pathlib import Path
 
-from image_loader import SUPPORTED_EXTENSIONS, prune_scan_dirs
+from image_loader import (
+    SUPPORTED_EXTENSIONS,
+    is_excluded_scan_dir,
+    prune_scan_dirs,
+)
 
 log = logging.getLogger(__name__)
 
@@ -127,6 +131,13 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
     for root in roots:
         root_path = root["path"]
         if not os.path.isdir(root_path):
+            per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
+            continue
+        # prune_scan_dirs filters only children; if the root itself is the
+        # excluded bundle (e.g. user added ``~/Pictures/Photos Library.photoslibrary``
+        # directly), os.walk would still open it and inflate the banner with
+        # managed images the scanner never ingests.
+        if is_excluded_scan_dir(Path(root_path).name):
             per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
             continue
 

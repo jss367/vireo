@@ -184,6 +184,26 @@ def test_check_untracked_skips_photo_library_bundle(tmp_path):
     assert not any('.photoslibrary' in p for p in paths)
 
 
+def test_check_untracked_skips_excluded_root_itself(tmp_path):
+    """check_untracked must not open a root that *is* the excluded bundle.
+
+    A configured folder root of ``~/Pictures/Photos Library.photoslibrary``
+    would otherwise have os.walk open the bundle (prune_scan_dirs only
+    filters *children*), defeating the TCC-prompt guard.
+    """
+    from audit import check_untracked
+    from db import Database
+
+    root = str(tmp_path / "Photos Library.photoslibrary")
+    os.makedirs(os.path.join(root, 'originals'))
+    Image.new('RGB', (100, 100)).save(
+        os.path.join(root, 'originals', 'managed.jpg')
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    assert check_untracked(db, [root]) == []
+
+
 def test_remove_orphans(tmp_path):
     """remove_orphans deletes DB entries for missing files."""
     from audit import remove_orphans
