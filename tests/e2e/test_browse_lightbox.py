@@ -542,7 +542,14 @@ def test_browse_lightbox_one_to_one_uses_device_pixels_and_natural_layout(live_s
     # applies synchronously — but under CPU contention the 'z' keydown can be
     # processed slightly after page.keyboard.press resolves. Wait for the snap
     # to land before sampling layout so the metrics read can't race it.
-    page.wait_for_function("window._lbZoom > 1.001")
+    page.wait_for_function(
+        """() => (
+            window._lbZoom > 1.001 &&
+            window._lbNativeZoom > 1 &&
+            window._lbFitScale > 0 &&
+            !window._lbPending1To1
+        )"""
+    )
     metrics = page.evaluate(
         """() => {
             const t = document.getElementById('lightboxTransform');
