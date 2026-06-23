@@ -15489,12 +15489,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # folders. Rejecting on stale placeholder paths would falsely 400 an
         # otherwise-valid snapshot-backed run.
         if source_snapshot_id is None:
+            from image_loader import is_excluded_scan_path
+
+            # Reject other-app data bundles (Apple Photos / Aperture / Photo
+            # Booth) before any stat: ``os.path.isdir`` on a ``.photoslibrary``
+            # path — or a symlink to one — itself trips the macOS
+            # "access data from other apps" TCC prompt, defeating the guards
+            # inside scan()/discover_source_files() that run_pipeline_job will
+            # eventually call. Mirror the same pre-stat rejection here so a
+            # saved or user-typed pipeline source can't reach isdir first.
             if sources:
                 for s in sources:
+                    if is_excluded_scan_path(s):
+                        return json_error(
+                            f"source is inside a macOS app-managed library "
+                            f"and cannot be scanned: {s}"
+                        )
                     if not os.path.isdir(s):
                         return json_error(f"source directory not found: {s}")
-            elif source and not os.path.isdir(source):
-                return json_error(f"source directory not found: {source}")
+            elif source:
+                if is_excluded_scan_path(source):
+                    return json_error(
+                        f"source is inside a macOS app-managed library and "
+                        f"cannot be scanned: {source}"
+                    )
+                if not os.path.isdir(source):
+                    return json_error(f"source directory not found: {source}")
 
         destination = body.get("destination")
         # Copy-ingest ("destination") is incompatible with snapshot runs:

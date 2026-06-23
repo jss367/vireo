@@ -173,20 +173,36 @@ def prune_scan_dirs(dirnames):
 
 
 def _symlink_target_is_excluded(entry):
-    """Return True if *entry* is a symlink whose target path contains an
-    excluded bundle anywhere along it. Uses ``os.readlink`` (purely textual
-    — never follows the link), so a link pointing into a protected bundle
-    can be classified without statting the bundle target.
+    """Return True if *entry* is a symlink whose target sits in (or whose
+    symlink chain reaches) an excluded bundle. Uses ``os.readlink`` /
+    ``os.path.islink`` only — never a stat that follows the link — so a
+    link pointing into a protected bundle is classified without statting
+    the bundle target.
 
-    Checks every component of the target path, not just the basename: a
-    file-named link like
-    ``IMG.jpg -> ../Photos Library.photoslibrary/originals/IMG.jpg`` has a
-    basename (``IMG.jpg``) that doesn't match any bundle, yet
-    ``os.path.isfile`` / ``Path.is_file`` on the link would still follow it
-    and stat the managed Photos file, re-tripping the macOS TCC prompt.
-    Relative targets are joined against the link's parent and normalized
-    (still purely textual — ``os.path.normpath`` does not stat) so ``..``
-    segments resolve before the component check.
+    Two shapes are caught, neither matched by a basename-only check:
+
+    1. A file-named link whose target path names an excluded bundle
+       directly, e.g.
+       ``IMG.jpg -> ../Photos Library.photoslibrary/originals/IMG.jpg`` —
+       the immediate target's parts include the bundle suffix.
+    2. A chained link whose immediate target is a *plain* path that
+       itself contains, or resolves through, another link into the
+       bundle, e.g. ``LibraryAlias -> MidAlias`` where
+       ``MidAlias -> Photos Library.photoslibrary`` (or a file-named
+       variant ``IMG.jpg -> MidAlias/originals/IMG.jpg``). Without
+       chasing the chain, the immediate target ``MidAlias`` looks
+       benign, but ``os.path.isfile`` / ``Path.is_file`` would follow
+       both hops and re-trip the macOS TCC prompt.
+
+    The chain is followed via :func:`is_excluded_scan_path`, which walks
+    components one at a time using textual ``islink``+``readlink``. That
+    component-by-component walk keeps each ``lstat`` confined to the
+    link node — it never resolves an intermediate link far enough to
+    touch the protected bundle.
+
+    Relative targets are joined against the link's parent and
+    normalized (still purely textual — ``os.path.normpath`` does not
+    stat) so ``..`` segments resolve before classification.
     """
     try:
         if not entry.is_symlink():
@@ -202,7 +218,7 @@ def _symlink_target_is_excluded(entry):
     if not os.path.isabs(target):
         target = os.path.join(os.path.dirname(entry.path), target)
     target = os.path.normpath(target)
-    return any(is_excluded_scan_dir(part) for part in Path(target).parts)
+    return is_excluded_scan_path(target)
 
 
 def safe_iter_dir(top, onerror=None):

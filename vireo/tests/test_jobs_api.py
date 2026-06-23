@@ -467,6 +467,40 @@ def test_pipeline_job_requires_source_or_collection(app_and_db):
         assert resp.status_code == 400
 
 
+def test_pipeline_job_rejects_macos_other_app_bundle(app_and_db, tmp_path):
+    """POST /api/jobs/pipeline must reject a ``.photoslibrary`` source
+    (single or in ``sources``) before calling ``os.path.isdir``.
+
+    Like /api/jobs/scan and /api/jobs/ingest, the pipeline route stat's
+    the source up front to return a clean 400 for missing dirs. On
+    macOS that pre-stat against an Apple Photos bundle trips the
+    kTCCServiceSystemPolicyAppData prompt this guard exists to prevent,
+    so the rejection must happen before any stat.
+    """
+    app, _ = app_and_db
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={"source": str(bundle)})
+        assert resp.status_code == 400
+        assert "macos" in resp.get_json()["error"].lower()
+
+        # Same shape via the ``sources`` list path.
+        resp = client.post(
+            "/api/jobs/pipeline", json={"sources": [str(bundle)]},
+        )
+        assert resp.status_code == 400
+        assert "macos" in resp.get_json()["error"].lower()
+
+        # Nested paths inside the bundle must be rejected too.
+        nested = bundle / "originals"
+        nested.mkdir()
+        resp = client.post(
+            "/api/jobs/pipeline", json={"source": str(nested)},
+        )
+        assert resp.status_code == 400
+
+
 def test_pipeline_job_rejects_relative_destination(app_and_db, tmp_path):
     """Pipeline endpoint should reject relative destination paths."""
     app, _ = app_and_db

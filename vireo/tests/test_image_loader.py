@@ -856,6 +856,63 @@ def test_safe_scan_walk_skips_file_symlink_into_excluded_bundle(tmp_path):
     assert "ABS.jpg" not in seen
 
 
+def test_safe_scan_walk_skips_chained_symlink_into_bundle(tmp_path):
+    """A symlink whose *immediate* target is a plain path but resolves
+    through another link into an excluded bundle must be dropped.
+
+    Two chain shapes ``_symlink_target_is_excluded`` must catch:
+
+    * ``LibraryAlias -> MidAlias`` where ``MidAlias -> Photos
+      Library.photoslibrary``: the first readlink yields ``MidAlias``,
+      whose parts don't match any bundle, so a one-hop check would
+      surface the entry. Downstream ``Path.is_dir`` / ``os.path.isfile``
+      then follow both hops and stat the protected bundle — re-tripping
+      the macOS TCC "access data from other apps" prompt.
+    * ``IMG.jpg -> MidAlias/originals/IMG.jpg`` (same MidAlias): the
+      file-named link's immediate target is a path through MidAlias.
+      ``os.path.isfile`` follows the chain into the managed Photos file.
+
+    Use ``is_excluded_scan_path`` on the readlink target so the chain is
+    walked component-by-component textually (each ``islink`` confined to
+    the link node, never resolving deep enough to touch the bundle).
+    """
+    import pytest
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    from image_loader import safe_scan_walk
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    (bundle / "originals").mkdir(parents=True)
+    (bundle / "originals" / "managed.jpg").write_bytes(b"")
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    (root / "real.jpg").write_bytes(b"")
+    # The intermediate link MidAlias sits adjacent to the entries that
+    # reference it through their own targets.
+    os.symlink(str(bundle), str(root / "MidAlias"))
+    # Chained directory link: LibraryAlias -> MidAlias -> bundle.
+    os.symlink("MidAlias", str(root / "LibraryAlias"))
+    # Chained file link whose target path goes through MidAlias.
+    os.symlink(
+        os.path.join("MidAlias", "originals", "managed.jpg"),
+        str(root / "IMG.jpg"),
+    )
+
+    seen = set()
+    for _dirpath, dirnames, filenames in safe_scan_walk(str(root)):
+        seen.update(filenames)
+        seen.update(dirnames)
+
+    assert "real.jpg" in seen
+    # All three chained entries must be dropped before any stat that
+    # would follow the chain into the bundle.
+    assert "MidAlias" not in seen
+    assert "LibraryAlias" not in seen
+    assert "IMG.jpg" not in seen
+    assert "managed.jpg" not in seen
+
+
 def test_safe_scan_walk_matches_os_walk_for_normal_trees(tmp_path):
     """Outside of bundle exclusion, ``safe_scan_walk`` yields the same
     files as the normal walker for the same recursion semantics
