@@ -132,6 +132,42 @@ def test_scan_skips_root_nested_in_excluded_bundle(tmp_path):
     assert db.get_folder_tree() == []
 
 
+def test_scan_skips_restrict_dirs_inside_excluded_bundle(tmp_path):
+    """scan() must reject ``restrict_dirs`` entries that point inside an
+    excluded bundle even when the outer ``root`` is unremarkable.
+
+    The pipeline / repair paths build ``restrict_dirs`` from existing
+    folder rows in the workspace, which can include stale entries from
+    before the bundle guards landed (e.g. ``.../Photos Library.photoslibrary/
+    originals``). The outer root guard (``is_excluded_scan_path(root_path)``)
+    only checks ``root``; without a per-entry guard the restrict_dirs branch
+    still calls ``dp.is_dir()`` / ``dp.iterdir()`` on the protected
+    subtree and re-trips the macOS TCC prompt this change exists to avoid.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        '': ['real.jpg'],
+    })
+    bundle_sub = str(
+        tmp_path / "photos" / "Photos Library.photoslibrary" / "originals"
+    )
+    _create_test_images(bundle_sub, {'': ['managed.jpg']})
+
+    db = Database(str(tmp_path / "test.db"))
+    # Both the real top-level folder and a bundle-internal "originals"
+    # subfolder are passed as restrict_dirs (the shape pipeline_job would
+    # produce from a workspace that had previously linked the bundle).
+    scan(root, db, restrict_dirs=[root, bundle_sub])
+
+    photos = db.get_photos(per_page=100)
+    assert {p['filename'] for p in photos} == {'real.jpg'}
+    folder_paths = [f['path'] for f in db.get_folder_tree()]
+    assert not any('.photoslibrary' in p for p in folder_paths)
+
+
 def test_scan_discovers_photos(tmp_path):
     """scan() creates photo entries for all image files."""
     from db import Database
