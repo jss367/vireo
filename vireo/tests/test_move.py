@@ -493,6 +493,57 @@ def test_move_folder_refuses_case_alias_missing_tracked_destination(move_env, mo
     assert not dest_input.exists()
 
 
+def test_tracked_destination_overlap_caches_case_insensitivity_probe(move_env, monkeypatch):
+    """The FS case-insensitivity probe is os.listdir-backed and re-running it
+    per tracked-folder row turns the preflight guard into
+    O(tracked_folders × destination_entries) before any copy starts. The
+    overlap check must compute it once for the resolved destination and
+    reuse that result for every row it scans.
+    """
+    import move as move_mod
+
+    env = move_env
+    # Many unrelated tracked rows. Each forces the missing-leaves fallback
+    # in _path_equal_or_descends (realpath compare unequal, both leaves
+    # missing or ancestor missing), which is the branch that calls the
+    # probe — so without caching, the probe fires once per row.
+    dest_input = env["tmp_path"] / "missing_dest_cache_probe"
+    assert not dest_input.exists()
+    for i in range(8):
+        env["db"].add_folder(
+            str(env["tmp_path"] / f"unrelated_{i}" / "leaf"), name="leaf"
+        )
+
+    calls = []
+    real_probe = move_mod._is_case_insensitive_path
+
+    def counting_probe(path):
+        calls.append(path)
+        return real_probe(path)
+
+    monkeypatch.setattr(move_mod, "_is_case_insensitive_path", counting_probe)
+
+    move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(dest_input)
+    )
+
+    # Count probes whose argument is the resolved destination. move_folder
+    # resolves `destination` to `destination/<source_folder_name>` before
+    # the overlap check, so the probed path is the landing dir, not the raw
+    # input. The expected pattern with caching is 2 probes: one from
+    # _destination_overlaps_source(src, dest)'s symmetric check against
+    # dest, and one cached probe from _tracked_destination_overlap. Without
+    # caching, the row loop would add 8 more (one per added row) — the
+    # regression we're guarding against. The exact bound matters: bumping
+    # the row count must not bump the probe count.
+    resolved_dest = os.path.realpath(str(dest_input / "src"))
+    dest_probes = [p for p in calls if os.path.realpath(p) == resolved_dest]
+    assert len(dest_probes) <= 2, (
+        f"expected dest probe to be cached (≤2 calls), "
+        f"got {len(dest_probes)} (all calls: {calls})"
+    )
+
+
 def test_is_case_insensitive_path_probes_inside_target_fs(tmp_path, monkeypatch):
     """The case-insensitivity probe must test the FS at the deepest existing
     ancestor by case-flipping a CHILD entry, not by case-flipping the

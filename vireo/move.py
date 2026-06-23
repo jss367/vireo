@@ -177,7 +177,7 @@ def _is_case_insensitive_path(path):
     return False
 
 
-def _path_equal_or_descends(candidate, ancestor):
+def _path_equal_or_descends(candidate, ancestor, ancestor_case_insensitive=None):
     """True if `candidate` resolves to the same directory as `ancestor`, or is
     a descendant of it.
 
@@ -195,6 +195,10 @@ def _path_equal_or_descends(candidate, ancestor):
         exists yet so samefile has nothing to compare: probe the FS for
         case-insensitivity via the deepest existing ancestor and, if so,
         redo the string compare case-folded.
+
+    `ancestor_case_insensitive`: pass the result of `_is_case_insensitive_path(
+    ancestor)` if you've already computed it (e.g. inside a loop with a fixed
+    ancestor) so the probe doesn't re-run per call. None means probe lazily.
     """
     real_c = os.path.normcase(os.path.realpath(candidate))
     real_a = os.path.normcase(os.path.realpath(ancestor))
@@ -220,11 +224,14 @@ def _path_equal_or_descends(candidate, ancestor):
     # case for paths that don't exist; probe the FS for case-insensitivity
     # and redo the string compare case-folded so the stale row is still
     # caught before any copy.
-    if os.name != "nt" and _is_case_insensitive_path(ancestor):
-        lower_c = real_c.lower()
-        lower_a = real_a.lower()
-        if lower_c == lower_a or lower_c.startswith(lower_a + os.sep):
-            return True
+    if os.name != "nt":
+        if ancestor_case_insensitive is None:
+            ancestor_case_insensitive = _is_case_insensitive_path(ancestor)
+        if ancestor_case_insensitive:
+            lower_c = real_c.lower()
+            lower_a = real_a.lower()
+            if lower_c == lower_a or lower_c.startswith(lower_a + os.sep):
+                return True
     return False
 
 
@@ -240,11 +247,24 @@ def _destination_overlaps_source(src_path, dest_path):
 
 
 def _tracked_destination_overlap(db, folder_id, dest_path):
-    """Return another tracked folder at or below dest_path, if one exists."""
+    """Return another tracked folder at or below dest_path, if one exists.
+
+    The FS case-insensitivity of `dest_path` is probed once and reused for
+    every row — otherwise the probe (an os.listdir of the deepest existing
+    ancestor, plus samefile of two child paths) re-runs per non-matching row,
+    making this O(tracked_folders × destination_entries) before any copy on
+    large catalogs or network-backed destinations.
+    """
+    dest_case_insensitive = (
+        True if os.name == "nt" else _is_case_insensitive_path(dest_path)
+    )
     for row in db.conn.execute(
         "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
     ):
-        if _path_equal_or_descends(row["path"], dest_path):
+        if _path_equal_or_descends(
+            row["path"], dest_path,
+            ancestor_case_insensitive=dest_case_insensitive,
+        ):
             return row
     return None
 
