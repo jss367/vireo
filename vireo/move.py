@@ -177,10 +177,11 @@ def _is_case_insensitive_path(path):
     `/Photos/dst/src`.
 
     Returns False on case-sensitive POSIX (Linux ext4/btrfs, opt-in APFS)
-    and when no probe is possible at all (ancestor unreadable, not a
-    directory, or read-only so the temp-probe can't write) — the safe
-    default, since spuriously folding case could merge two genuinely
-    distinct paths.
+    and when no probe is possible at all (ancestor not a directory, or
+    read-only so the temp-probe can't write) — the safe default, since
+    spuriously folding case could merge two genuinely distinct paths.
+    An unreadable but writable+executable ancestor (drop-box style) is
+    still classified via the temp probe alone.
     """
     if os.name == "nt":
         return True
@@ -195,7 +196,11 @@ def _is_case_insensitive_path(path):
     try:
         entries = os.listdir(cur)
     except OSError:
-        return False
+        # Listing denied (e.g., a +wx drop-box ancestor with no read perm).
+        # Inconclusive, not negative — the temp probe below can still write
+        # into a +wx directory, so skip the child-pair short-circuit rather
+        # than silently classifying a case-folding FS as case-sensitive.
+        entries = ()
     # Scan children for a definitive False (two distinct names both exist,
     # impossible on a case-folding FS). Ignore None (samefile raised — broken
     # symlink, permission/race, or any entry whose flipped spelling can't be

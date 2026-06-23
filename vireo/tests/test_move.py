@@ -885,6 +885,49 @@ def test_is_case_insensitive_path_empty_ancestor_unwritable_returns_false(tmp_pa
         os.chmod(target, original_mode)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows paths are treated case-insensitive without POSIX probing",
+)
+def test_is_case_insensitive_path_unreadable_ancestor_falls_back_to_temp_probe(
+    tmp_path, monkeypatch,
+):
+    """A +wx (drop-box) ancestor without read permission can still receive
+    a fresh temp dir, so an os.listdir denial must be inconclusive — fall
+    through to the temp probe instead of declaring the FS case-sensitive.
+    Otherwise a stale tracked row like /Photos/Dst/src can slip past the
+    case-folded overlap check on a case-insensitive POSIX destination."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root bypasses dir-read permissions")
+    import move as move_mod
+
+    target = tmp_path / "dropbox"
+    target.mkdir()
+    target_str = str(target)
+
+    def fake_samefile(a, b):
+        return (
+            os.path.dirname(a) == os.path.dirname(b)
+            and os.path.basename(a).lower() == os.path.basename(b).lower()
+        )
+
+    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile)
+
+    original_mode = target.stat().st_mode
+    os.chmod(target, 0o300)  # write+execute, not readable
+    try:
+        with pytest.raises(OSError):
+            os.listdir(target_str)
+        assert move_mod._is_case_insensitive_path(
+            os.path.join(target_str, "missing", "sub")
+        ) is True
+    finally:
+        os.chmod(target, original_mode)
+
+    # Probe dir cleaned up.
+    assert os.listdir(target) == []
+
+
 def test_move_folder_refuses_self_overlapping_destination(move_env):
     """A move whose resolved destination overlaps the source (here, the
     source's own parent → resolved dest == source) must be refused rather
