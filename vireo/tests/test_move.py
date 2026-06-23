@@ -2,11 +2,33 @@
 
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
 from db import Database
+
+
+def _tmp_folds_case():
+    """True if the filesystem holding pytest's temp dir folds case (macOS
+    APFS default, Windows NTFS). Some tests below build scenarios where two
+    case variants of an ancestor path must resolve to DISTINCT on-disk
+    directories — only possible on a case-sensitive parent FS. On a folding
+    host the two variants are the same directory and the assertion under
+    test can't hold; skip rather than miscompare.
+    """
+    with tempfile.TemporaryDirectory(suffix="A") as d:
+        flipped = d[:-1] + "a"
+        if flipped == d:
+            return False
+        try:
+            return os.path.samefile(d, flipped)
+        except OSError:
+            return False
+
+
+_TMP_FOLDS_CASE = _tmp_folds_case()
 
 
 @pytest.fixture
@@ -493,6 +515,11 @@ def test_move_folder_refuses_case_alias_missing_tracked_destination(move_env, mo
     assert not dest_input.exists()
 
 
+@pytest.mark.skipif(
+    _TMP_FOLDS_CASE,
+    reason="Scenario requires a case-sensitive parent FS so the "
+           "case-flipped ancestor names resolve to distinct directories.",
+)
 def test_path_equal_or_descends_case_fold_scoped_to_ci_root(tmp_path):
     """The case-folded fallback in `_path_equal_or_descends` must only fold
     the suffix below the probed case-insensitive root — not the whole path.
@@ -533,6 +560,11 @@ def test_path_equal_or_descends_case_fold_scoped_to_ci_root(tmp_path):
     ) is False
 
 
+@pytest.mark.skipif(
+    _TMP_FOLDS_CASE,
+    reason="Sibling-root assertion requires a case-sensitive parent FS so "
+           "the case-flipped root spelling is a distinct on-disk directory.",
+)
 def test_path_equal_or_descends_folds_root_case_alias_in_candidate(
     tmp_path, monkeypatch,
 ):
@@ -567,9 +599,9 @@ def test_path_equal_or_descends_folds_root_case_alias_in_candidate(
         # when one of them doesn't actually exist on the underlying
         # case-sensitive host FS. Fall through to the real probe for
         # everything else so unrelated paths still behave normally.
-        if os.path.dirname(a) == str(base) and os.path.dirname(b) == str(base):
-            if os.path.basename(a).lower() == os.path.basename(b).lower():
-                return True
+        if (os.path.dirname(a) == str(base) and os.path.dirname(b) == str(base)
+                and os.path.basename(a).lower() == os.path.basename(b).lower()):
+            return True
         return real_samefile(a, b)
 
     monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile)
@@ -640,6 +672,11 @@ def test_path_equal_or_descends_handles_case_fold_root_at_filesystem_root():
     ) is False
 
 
+@pytest.mark.skipif(
+    _TMP_FOLDS_CASE,
+    reason="Scenario requires a case-sensitive parent FS so the "
+           "above-root case-flipped row is a distinct on-disk path.",
+)
 def test_tracked_destination_overlap_skips_rows_outside_ci_root(move_env, monkeypatch):
     """End-to-end: `_tracked_destination_overlap` must NOT return a stale
     row whose path differs from the destination above the case-insensitive
@@ -848,8 +885,9 @@ def test_is_case_insensitive_path_inconclusive_child_probe_keeps_scanning(
 
 
 @pytest.mark.skipif(
-    os.name == "nt",
-    reason="Windows paths are treated case-insensitive without POSIX probing",
+    os.name == "nt" or _TMP_FOLDS_CASE,
+    reason="Setup creates `foo` and `FOO` as distinct sibling files; only "
+           "possible on a case-sensitive parent FS (not Windows / macOS APFS).",
 )
 def test_is_case_insensitive_path_child_alias_confirmed_by_temp_probe(
     tmp_path, monkeypatch,
