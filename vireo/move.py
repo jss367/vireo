@@ -84,14 +84,33 @@ def _find_content_conflict(src_path, dest_path):
 
 def _first_missing_source_file(src_path, dest_path):
     """Return the relative path of the first source file absent (or
-    size-mismatched) at dest_path, or None if every source file is present
-    and matches. Used to verify a merge before deleting originals."""
+    size-mismatched, or a symlink) at dest_path, or None if every source
+    file is present and matches. Used to verify a merge before deleting
+    originals.
+
+    A symlinked destination entry is treated as missing: `os.path.isfile` /
+    `os.path.getsize` follow the link, so a symlink pointing back into the
+    source tree (directly, or via a symlinked parent directory) would pass
+    a size compare even though no independent copy exists at the
+    destination — and the post-copy `shutil.rmtree(src_path)` would then
+    destroy the only copy. `lexists` lets a broken symlink count as
+    missing instead of crashing later checks; `islink` catches the direct
+    case; `samefile` catches the symlinked-parent case where `src_file`
+    and `dst_file` resolve to the same inode.
+    """
     for root, _, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
         for fn in files:
             src_file = os.path.join(root, fn)
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
+            if not os.path.lexists(dst_file) or os.path.islink(dst_file):
+                return rel_name
+            try:
+                if os.path.samefile(src_file, dst_file):
+                    return rel_name
+            except OSError:
+                return rel_name
             if not os.path.isfile(dst_file) or \
                     os.path.getsize(src_file) != os.path.getsize(dst_file):
                 return rel_name
@@ -434,8 +453,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         missing = _first_missing_source_file(src_path, dest_path)
         if missing is not None:
             return {"moved": 0, "errors": [
-                f"Verification failed: '{missing}' missing or size mismatch "
-                f"at destination. Originals preserved."
+                f"Verification failed: '{missing}' missing, size mismatch, "
+                f"or symlinked at destination. Originals preserved."
             ]}
     else:
         # Fresh move into a destination we created: a whole-tree file

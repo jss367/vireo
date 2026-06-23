@@ -448,6 +448,108 @@ def test_move_folder_merge_verify_fail_preserves_originals_and_dest(move_env, mo
     assert sentinel.exists()
 
 
+def test_move_folder_merge_rejects_symlinked_dest_file(move_env, monkeypatch):
+    """A destination entry that is a symlink to the source file must fail
+    verification, not be accepted as an independent copy. Otherwise rsync
+    --ignore-existing leaves the symlink alone and the post-copy
+    rmtree(src_path) would destroy the symlink's target — the only copy."""
+    import move as move_mod
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # Place real copies of the files we DON'T want the test to trip over,
+    # so verification reaches the symlinked entry rather than failing on
+    # the first plain-missing file.
+    (landing / "bird1.xmp").write_bytes((env["src"] / "bird1.xmp").read_bytes())
+    (landing / "bird2.jpg").write_bytes((env["src"] / "bird2.jpg").read_bytes())
+    # bird1.jpg at dest is a SYMLINK back to the source file.
+    try:
+        os.symlink(str(env["src"] / "bird1.jpg"), str(landing / "bird1.jpg"))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    # Force rsync to no-op (it would normally honor --ignore-existing and
+    # leave the symlink anyway; this just removes the dependency on rsync).
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("Verification failed" in e and "bird1.jpg" in e
+               for e in result["errors"])
+    # The source file MUST still exist — that's the safety property.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird1.jpg").read_bytes() != b""
+
+
+def test_move_folder_merge_rejects_symlinked_dest_subdir(move_env, monkeypatch):
+    """A destination subdirectory that is a symlink back into the source
+    tree must also fail verification. os.path.isfile/getsize on the joined
+    path would silently follow the link to the source's own bytes and
+    pass — and then rmtree(src_path) would destroy the only copy."""
+    import move as move_mod
+
+    env = move_env
+    # Reshape source: put bird1 inside a real subdirectory.
+    sub_src = env["src"] / "sub"
+    sub_src.mkdir()
+    (env["src"] / "bird1.jpg").rename(sub_src / "bird1.jpg")
+    (env["src"] / "bird1.xmp").rename(sub_src / "bird1.xmp")
+
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # Real copy of the file in src root (bird2) so verification reaches
+    # the symlinked subdirectory entries.
+    (landing / "bird2.jpg").write_bytes((env["src"] / "bird2.jpg").read_bytes())
+    # The "sub" dir at the destination is a SYMLINK back into the source.
+    try:
+        os.symlink(str(sub_src), str(landing / "sub"))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("Verification failed" in e for e in result["errors"])
+    # Source files still present at the real path — not destroyed via the
+    # symlinked-parent shortcut.
+    assert (sub_src / "bird1.jpg").exists()
+
+
+def test_move_folder_merge_rejects_broken_symlink(move_env, monkeypatch):
+    """A broken symlink at the destination (lexists True, isfile False) must
+    also fail verification, not be silently accepted as missing-then-fine."""
+    import move as move_mod
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    (landing / "bird1.xmp").write_bytes((env["src"] / "bird1.xmp").read_bytes())
+    (landing / "bird2.jpg").write_bytes((env["src"] / "bird2.jpg").read_bytes())
+    # Broken symlink — target doesn't exist.
+    try:
+        os.symlink(str(env["tmp_path"] / "nope.jpg"), str(landing / "bird1.jpg"))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("Verification failed" in e for e in result["errors"])
+    assert (env["src"] / "bird1.jpg").exists()
+
+
 def test_resolve_folder_dest():
     """resolve_folder_dest places the folder inside the destination."""
     from move import resolve_folder_dest
