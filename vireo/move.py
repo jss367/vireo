@@ -98,6 +98,61 @@ def _first_missing_source_file(src_path, dest_path):
     return None
 
 
+def _destination_overlaps_source(src_path, dest_path):
+    """True if dest_path equals src_path or one is a descendant of the other.
+
+    The post-copy rmtree(src_path) would delete the only copy of the files if
+    dest and src refer to the same on-disk directory, so this is checked
+    before any copy. Aliases we must catch:
+      - Symlinks: handled by os.path.realpath.
+      - Windows case folding: handled by os.path.normcase.
+      - Case-insensitive POSIX (default macOS APFS): NOT handled by either —
+        os.path.realpath does not fold case and os.path.normcase is a no-op
+        on POSIX, so a destination differing from the source only by case
+        slips past the string comparison even though it resolves to the same
+        inode. os.path.samefile (device + inode) is FS-truth on every
+        platform, so we use it as a fallback for that case.
+    """
+    real_src = os.path.normcase(os.path.realpath(src_path))
+    real_dest = os.path.normcase(os.path.realpath(dest_path))
+    if real_dest == real_src \
+            or real_dest.startswith(real_src + os.sep) \
+            or real_src.startswith(real_dest + os.sep):
+        return True
+
+    def _same(a, b):
+        try:
+            return os.path.samefile(a, b)
+        except OSError:
+            return False
+
+    if os.path.exists(src_path) and os.path.exists(dest_path) \
+            and _same(src_path, dest_path):
+        return True
+
+    # Containment via case-only alias: walk up the non-existent leaf until an
+    # extant ancestor is found, then samefile against the other path. If the
+    # existing ancestor of dest is the same inode as src (dest descends from
+    # src), or the existing ancestor of src is the same inode as dest (src
+    # descends from dest), they share storage.
+    def _walk_up(p):
+        prev = None
+        while p and p != prev:
+            yield p
+            prev = p
+            p = os.path.dirname(p)
+
+    if os.path.exists(src_path):
+        for anc in _walk_up(os.path.dirname(dest_path)):
+            if os.path.exists(anc) and _same(anc, src_path):
+                return True
+    if os.path.exists(dest_path):
+        for anc in _walk_up(os.path.dirname(src_path)):
+            if os.path.exists(anc) and _same(anc, dest_path):
+                return True
+    return False
+
+
 def move_photos(db, photo_ids, destination, progress_cb=None):
     """Move individual photos to a destination directory.
 
@@ -275,13 +330,9 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # rmtree(src) delete the only copy of the files. This is especially
     # dangerous for a merge, where a destination equal to the source passes
     # verification trivially (every source file is already "there") before the
-    # delete wipes everything. Resolve symlinks (realpath) and normalize case
-    # so a symlinked or differently-cased alias of the same directory is still
-    # caught — abspath alone would miss a symlinked destination.
-    real_src = os.path.normcase(os.path.realpath(src_path))
-    real_dest = os.path.normcase(os.path.realpath(dest_path))
-    if real_dest == real_src or real_dest.startswith(real_src + os.sep) \
-            or real_src.startswith(real_dest + os.sep):
+    # delete wipes everything. See _destination_overlaps_source for the alias
+    # surface (symlinks, Windows case folding, case-insensitive POSIX).
+    if _destination_overlaps_source(src_path, dest_path):
         return {"moved": 0, "errors": [
             f"Destination overlaps the source folder: {dest_path}"
         ]}
@@ -306,7 +357,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # Compare canonical (symlink-resolved, case-normalized) paths, not raw
         # strings: a destination reached through a symlink alias of a tracked
         # folder would slip past a string match and leave two folder rows
-        # managing the same on-disk tree. real_dest is computed above.
+        # managing the same on-disk tree.
+        real_dest = os.path.normcase(os.path.realpath(dest_path))
         real_dest_prefix = real_dest + os.sep
         tracked = None
         for row in db.conn.execute(

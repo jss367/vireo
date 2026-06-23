@@ -326,6 +326,42 @@ def test_move_folder_merge_refuses_symlinked_self_destination(move_env):
     assert (env["src"] / "bird1.jpg").exists()
 
 
+def test_move_folder_merge_refuses_case_alias_self_destination(move_env, monkeypatch):
+    """On a case-insensitive POSIX filesystem (default macOS APFS),
+    os.path.normcase is a no-op and os.path.realpath does not fold case, so
+    a destination that differs from the source only by case still resolves
+    to the same inode but string-compares unequal. The overlap guard must
+    fall back to os.path.samefile (device + inode) so the merge is refused
+    before shutil.rmtree deletes the only copy of the source files.
+
+    Simulated on Linux by:
+      1. Using a symlink so two distinct path strings share an inode.
+      2. Patching realpath/normcase to no-ops so the existing string-based
+         check doesn't pre-empt the samefile fallback we want to exercise.
+    """
+    from move import move_folder
+
+    env = move_env
+    alias_parent = env["tmp_path"] / "alias_parent"
+    try:
+        os.symlink(str(env["src"].parent), str(alias_parent))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(os.path, "normcase", lambda p: p)
+
+    # destination=alias_parent → resolved dest = alias_parent/src; samefile
+    # against env["src"] returns True because the symlink shares the inode.
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(alias_parent), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("overlaps the source" in e for e in result["errors"])
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird2.jpg").exists()
+
+
 def test_move_folder_refuses_self_overlapping_destination(move_env):
     """A move whose resolved destination overlaps the source (here, the
     source's own parent → resolved dest == source) must be refused rather
