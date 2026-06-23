@@ -15,6 +15,7 @@ from image_loader import (
     RAW_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
     is_excluded_scan_path,
+    safe_iter_dir,
     safe_scan_walk,
 )
 from scanner import compute_file_hash
@@ -235,7 +236,15 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
         for dirpath, _dirnames, filenames in safe_scan_walk(str(source_path)):
             candidates.extend(Path(dirpath) / name for name in filenames)
     else:
-        candidates = list(source_path.iterdir())
+        # safe_iter_dir drops excluded bundle children before the
+        # is_file() filter below would stat them. With recursion off, a
+        # source like ~/Pictures still contains ``Photos
+        # Library.photoslibrary`` (or a symlink to one) as a direct
+        # child; a bare iterdir + is_file() would stat that bundle and
+        # re-trip the macOS "access data from other apps" TCC prompt
+        # this guard exists to avoid, even though the extension filter
+        # would have rejected it afterwards.
+        candidates = list(safe_iter_dir(str(source_path)))
     return sorted(
         f
         for f in candidates

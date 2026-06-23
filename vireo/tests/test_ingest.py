@@ -155,6 +155,83 @@ def test_discover_source_files_skips_source_nested_in_excluded_bundle(tmp_path):
     assert discover_source_files(str(src), file_types="both") == []
 
 
+def test_discover_source_files_non_recursive_skips_bundle_children(tmp_path):
+    """``discover_source_files(recursive=False)`` on a normal source
+    like ``~/Pictures`` must drop excluded bundle children (direct
+    ``Photos Library.photoslibrary`` entries or symlinks pointing at
+    one) before the ``is_file()`` filter would stat them. A bare
+    ``iterdir() + is_file()`` would follow the symlink to the bundle
+    target and re-trip the macOS "access data from other apps" TCC
+    prompt this guard exists to avoid.
+    """
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _create_test_files(str(bundle / "originals"), ["managed.jpg"])
+
+    src = tmp_path / "sd_card"
+    _create_test_files(str(src), ["real.jpg"])
+    # Direct bundle child as a sibling.
+    _create_test_files(
+        str(src / "Photos Library.photoslibrary" / "originals"),
+        ["direct_managed.jpg"],
+    )
+    # Symlinked bundle child.
+    os.symlink(str(bundle), str(src / "LibraryAlias"))
+
+    files = discover_source_files(
+        str(src), file_types="both", recursive=False
+    )
+    names = {f.name for f in files}
+    assert names == {"real.jpg"}
+
+
+def test_discover_source_files_non_recursive_does_not_stat_bundle_children(
+    tmp_path, monkeypatch
+):
+    """Belt-and-braces guard for the non-recursive branch. Fails if
+    ``Path.is_file`` is ever called on an excluded child — that
+    ``is_file`` follows symlinks and would re-trip the macOS TCC
+    prompt before the extension filter could reject the entry.
+    """
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    from pathlib import Path
+
+    from image_loader import is_excluded_scan_path
+
+    real_is_file = Path.is_file
+
+    def guarded_is_file(self):
+        if is_excluded_scan_path(self):
+            raise AssertionError(
+                f"is_file() called on excluded path before guard: {self}"
+            )
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", guarded_is_file)
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _create_test_files(str(bundle / "originals"), ["managed.jpg"])
+
+    src = tmp_path / "sd_card"
+    _create_test_files(str(src), ["real.jpg"])
+    _create_test_files(
+        str(src / "Photos Library.photoslibrary" / "originals"),
+        ["direct_managed.jpg"],
+    )
+    os.symlink(str(bundle), str(src / "LibraryAlias"))
+
+    files = discover_source_files(
+        str(src), file_types="both", recursive=False
+    )
+    names = {f.name for f in files}
+    assert names == {"real.jpg"}
+
+
 def test_discover_source_files_rejects_excluded_source_before_statting(
     tmp_path, monkeypatch
 ):

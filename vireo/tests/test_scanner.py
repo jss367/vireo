@@ -380,6 +380,88 @@ def test_scan_non_recursive_only_finds_root_photos(tmp_path):
     assert filenames == {'root.jpg'}
 
 
+def test_scan_non_recursive_skips_bundle_children_before_stat(tmp_path):
+    """In ``scan(recursive=False)``, a normal root like ``~/Pictures``
+    still contains ``Photos Library.photoslibrary`` (or a symlink to
+    one) as a direct child. A bare ``iterdir() + is_file()`` would
+    stat the bundle target while filtering by extension and re-trip
+    the macOS "access data from other apps" TCC prompt this change
+    exists to avoid. The non-recursive branch must drop excluded
+    children before any followed stat.
+    """
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    from db import Database
+    from scanner import scan
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _create_test_images(str(bundle), {'originals': ['managed.jpg']})
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['real.jpg']})
+    # Direct bundle child as a sibling of real.jpg.
+    direct_bundle = os.path.join(root, "Photos Library.photoslibrary")
+    _create_test_images(direct_bundle, {'originals': ['direct_managed.jpg']})
+    # Symlinked bundle child.
+    os.symlink(str(bundle), os.path.join(root, "LibraryAlias"))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db, recursive=False)
+
+    photos = db.get_photos(per_page=100)
+    filenames = {p['filename'] for p in photos}
+    assert filenames == {'real.jpg'}
+
+    folder_paths = [f['path'] for f in db.get_folder_tree()]
+    assert not any('.photoslibrary' in p for p in folder_paths)
+    assert not any('LibraryAlias' in p for p in folder_paths)
+
+
+def test_scan_non_recursive_does_not_stat_bundle_children(tmp_path, monkeypatch):
+    """Belt-and-braces for the non-recursive branch: if any code path
+    calls ``Path.is_file`` on a child that ``is_excluded_scan_path``
+    covers, the test fails — that ``is_file`` follows symlinks and
+    would re-trip the macOS TCC prompt before the extension filter
+    could reject the entry.
+    """
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    from pathlib import Path
+
+    from db import Database
+    from scanner import scan
+
+    real_is_file = Path.is_file
+
+    def guarded_is_file(self):
+        from image_loader import is_excluded_scan_path
+        if is_excluded_scan_path(self):
+            raise AssertionError(
+                f"is_file() called on excluded path before guard: {self}"
+            )
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", guarded_is_file)
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _create_test_images(str(bundle), {'originals': ['managed.jpg']})
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['real.jpg']})
+    _create_test_images(
+        os.path.join(root, "Photos Library.photoslibrary"),
+        {'originals': ['direct_managed.jpg']},
+    )
+    os.symlink(str(bundle), os.path.join(root, "LibraryAlias"))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db, recursive=False)
+
+    photos = db.get_photos(per_page=100)
+    filenames = {p['filename'] for p in photos}
+    assert filenames == {'real.jpg'}
+
+
 def test_scan_reads_dimensions(tmp_path):
     """scan() reads image dimensions."""
     from db import Database
@@ -2960,13 +3042,16 @@ def test_scan_restrict_dirs_surfaces_permission_denied(tmp_path, monkeypatch):
     raised PermissionError unhandled and the entire pipeline scan stage
     failed with no PERMISSION_DENIED entry in job["errors"].
 
-    Mocks Path.iterdir for the locked subtree (rather than chmod 0o000) so
+    Mocks os.scandir for the locked subtree (rather than chmod 0o000) so
     the assertion holds regardless of test-runner uid: chmod-based denial
     silently bypasses for root, which would let the locked file slip in.
+    Targets ``image_loader.os.scandir`` because ``safe_iter_dir`` (the
+    restrict_dirs enumerator) calls ``os.scandir`` directly — patching
+    ``Path.iterdir`` would miss the actual code path.
     """
     import errno as _errno
-    from pathlib import Path as _Path
 
+    import image_loader
     from db import Database
     from scanner import scan
 
@@ -2978,16 +3063,16 @@ def test_scan_restrict_dirs_surfaces_permission_denied(tmp_path, monkeypatch):
     allowed = os.path.join(root, 'allowed')
     forbidden = os.path.join(root, 'forbidden')
 
-    real_iterdir = _Path.iterdir
+    real_scandir = image_loader.os.scandir
 
-    def fake_iterdir(self):
-        if str(self) == forbidden:
+    def fake_scandir(path):
+        if str(path) == forbidden:
             raise PermissionError(
-                _errno.EACCES, "Permission denied", str(self),
+                _errno.EACCES, "Permission denied", str(path),
             )
-        return real_iterdir(self)
+        return real_scandir(path)
 
-    monkeypatch.setattr(_Path, "iterdir", fake_iterdir)
+    monkeypatch.setattr(image_loader.os, "scandir", fake_scandir)
 
     db = Database(str(tmp_path / "test.db"))
     denied = []
@@ -3023,10 +3108,14 @@ def test_scan_restrict_dirs_raises_permission_error_without_callback(
     which silently turned denied folders into "successfully repaired" —
     a black-box regression. Partial-success is opt-in via the callback;
     every other caller must keep the loud failure semantics they had.
+
+    Patches ``image_loader.os.scandir`` because ``safe_iter_dir`` (the
+    restrict_dirs enumerator) calls ``os.scandir`` — patching
+    ``Path.iterdir`` would miss the actual code path.
     """
     import errno as _errno
-    from pathlib import Path as _Path
 
+    import image_loader
     from db import Database
     from scanner import scan
 
@@ -3034,16 +3123,16 @@ def test_scan_restrict_dirs_raises_permission_error_without_callback(
     _create_test_images(root, {'forbidden': ['hidden.jpg']})
     forbidden = os.path.join(root, 'forbidden')
 
-    real_iterdir = _Path.iterdir
+    real_scandir = image_loader.os.scandir
 
-    def fake_iterdir(self):
-        if str(self) == forbidden:
+    def fake_scandir(path):
+        if str(path) == forbidden:
             raise PermissionError(
-                _errno.EACCES, "Permission denied", str(self),
+                _errno.EACCES, "Permission denied", str(path),
             )
-        return real_iterdir(self)
+        return real_scandir(path)
 
-    monkeypatch.setattr(_Path, "iterdir", fake_iterdir)
+    monkeypatch.setattr(image_loader.os, "scandir", fake_scandir)
 
     db = Database(str(tmp_path / "test.db"))
     with pytest.raises(PermissionError):

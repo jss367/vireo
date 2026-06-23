@@ -67,11 +67,25 @@ def is_excluded_scan_path(path):
     "access data from other apps" prompt — so we reject the whole
     subtree, not just the bundle root.
 
-    Also resolves symlinks before checking. A user-selected root may be a
+    Also follows symlinks textually. A user-selected root may be a
     symlink whose literal path components don't name the bundle (e.g.
-    ``~/PhotoLib -> Photos Library.photoslibrary``); ``Path.is_dir()`` and
-    ``os.walk()`` follow the link into the protected bundle regardless, so
-    skipping the resolve would let the walkers re-trip the macOS TCC prompt.
+    ``~/PhotoLib -> Photos Library.photoslibrary``); ``Path.is_dir()``
+    and ``os.walk()`` would follow the link into the protected bundle
+    regardless, so the walkers must reject these before any stat that
+    follows the link.
+
+    We do NOT use ``os.path.realpath`` for that resolution. ``realpath``
+    walks the resolved chain by ``lstat``-ing every component along the
+    way — including the bundle target itself once a link points at it —
+    and the very reason this guard exists is to avoid any stat that
+    reaches into the protected bundle. Instead we walk the path one
+    component at a time, using ``os.path.islink`` (which ``lstat``s only
+    the link node — these live outside the bundle when the user picked
+    an alias like ``~/PhotoLibAlias``) and ``os.readlink`` (purely
+    textual — reads just the link's stored target string). Neither call
+    stats anything below a resolved link, so even a directly selected
+    alias like ``~/PhotoLibAlias -> Photos Library.photoslibrary``
+    never reaches into the protected bundle.
 
     Non-path inputs (e.g. JSON primitives like ``123`` or ``True`` that
     sneak through ``body.get("root")`` before the route's directory check)
@@ -85,17 +99,59 @@ def is_excluded_scan_path(path):
         return False
     if any(is_excluded_scan_dir(part) for part in p.parts):
         return True
-    # Resolve symlinks. os.path.realpath() never raises (returns its input
-    # for missing paths) and resolves intermediate links too, so an alias
-    # anywhere in the chain (e.g. ``~/Aliases/MyLib/originals`` where
-    # ``MyLib`` links to the bundle) still gets caught.
-    try:
-        resolved = Path(os.path.realpath(str(p)))
-    except OSError:
+    parts = p.parts
+    if not parts:
         return False
-    if resolved == p:
-        return False
-    return any(is_excluded_scan_dir(part) for part in resolved.parts)
+    # Walk component by component. Each iteration appends one literal
+    # part of the original path, then follows any symlink chain from the
+    # accumulated location purely textually. If a chain target's
+    # components name an excluded bundle, we stop immediately — so for
+    # ``~/Aliases/MyLib/originals`` (MyLib → bundle), we detect the
+    # bundle while processing ``MyLib`` and never construct or stat
+    # ``MyLib/originals`` against the resolved target.
+    current = parts[0]
+    for i, part in enumerate(parts):
+        if i > 0:
+            current = os.path.join(current, part)
+        resolved = _follow_symlink_chain_textually(current)
+        if resolved is None:
+            return True
+        current = resolved
+    return False
+
+
+def _follow_symlink_chain_textually(path_str, max_depth=40):
+    """Follow the symlink chain starting at *path_str* using only
+    ``os.path.islink`` + ``os.readlink``. Returns the chain's terminal
+    path (or *path_str* unchanged when nothing is a link) — or ``None``
+    if any link in the chain points at or into an excluded bundle.
+
+    ``os.path.islink`` ``lstat``s the link node itself, never the
+    resolved target; ``os.readlink`` only reads the link's stored
+    target bytes. Together they never stat anything under a resolved
+    link, which is what lets this helper classify
+    ``~/PhotoLibAlias -> Photos Library.photoslibrary`` without
+    reaching into the protected bundle.
+    """
+    current = path_str
+    visited = set()
+    for _ in range(max_depth):
+        if current in visited:
+            return current
+        visited.add(current)
+        try:
+            if not os.path.islink(current):
+                return current
+            target = os.readlink(current)
+        except OSError:
+            return current
+        if not os.path.isabs(target):
+            target = os.path.join(os.path.dirname(current), target)
+        target = os.path.normpath(target)
+        if any(is_excluded_scan_dir(part) for part in Path(target).parts):
+            return None
+        current = target
+    return current
 
 
 def prune_scan_dirs(dirnames):
@@ -147,6 +203,47 @@ def _symlink_target_is_excluded(entry):
         target = os.path.join(os.path.dirname(entry.path), target)
     target = os.path.normpath(target)
     return any(is_excluded_scan_dir(part) for part in Path(target).parts)
+
+
+def safe_iter_dir(top, onerror=None):
+    """Yield ``Path`` objects for direct children of *top*, skipping
+    excluded bundles by name and symlinks whose target sits inside one.
+
+    Use this instead of ``Path.iterdir()`` (or ``os.scandir``) in
+    non-recursive walks where the caller will then call ``Path.is_file()``
+    / ``Path.suffix`` / ``stat()`` on each entry. Those calls follow
+    symlinks, so a child like ``LibraryAlias -> Photos
+    Library.photoslibrary`` — or a direct bundle child ``Photos
+    Library.photoslibrary`` itself — would stat the bundle target and
+    re-trip the macOS "access data from other apps" TCC prompt this
+    guard exists to avoid, even though the caller's extension/name
+    filter would have rejected the entry afterwards.
+
+    Classification uses ``DirEntry.is_dir(follow_symlinks=False)`` and
+    ``os.readlink`` (purely textual) — never a stat that follows a link
+    into a protected bundle.
+    """
+    try:
+        scandir_it = os.scandir(top)
+    except OSError as exc:
+        if onerror is not None:
+            onerror(exc)
+        return
+    skipped = []
+    with scandir_it:
+        for entry in scandir_it:
+            if is_excluded_scan_dir(entry.name):
+                skipped.append(entry.name)
+                continue
+            if _symlink_target_is_excluded(entry):
+                skipped.append(entry.name)
+                continue
+            yield Path(entry.path)
+    if skipped:
+        log.info(
+            "Skipping other-app data bundle(s) under %s: %s",
+            top, ", ".join(skipped),
+        )
 
 
 def safe_scan_walk(top, onerror=None):

@@ -616,6 +616,120 @@ def test_is_excluded_scan_path_tolerates_non_string_inputs():
     assert is_excluded_scan_path({"path": "/Users/me/Pictures"}) is False
 
 
+def test_is_excluded_scan_path_resolves_symlinks_without_realpath(
+    tmp_path, monkeypatch,
+):
+    """Symlink resolution must not go through ``os.path.realpath``.
+
+    ``realpath`` walks the resolved chain by ``lstat``-ing every
+    component along the way — including the bundle target once a link
+    points at it — which is exactly the kind of stat the macOS
+    "access data from other apps" TCC prompt watches for. Fail the
+    test if the helper ever calls ``os.path.realpath`` on an input
+    that's a symlink (or contains one). With purely textual resolution
+    (``os.path.islink`` + ``os.readlink``) the call must never happen.
+    """
+    import pytest
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    import os.path as ospath
+
+    import image_loader
+
+    real_realpath = ospath.realpath
+    calls = []
+
+    def trapped_realpath(p, *args, **kwargs):
+        calls.append(p)
+        return real_realpath(p, *args, **kwargs)
+
+    monkeypatch.setattr(image_loader.os.path, "realpath", trapped_realpath)
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    (bundle / "originals").mkdir(parents=True)
+
+    direct_link = tmp_path / "PhotoLibLink"
+    os.symlink(str(bundle), str(direct_link))
+    chained_link = tmp_path / "ChainLink"
+    os.symlink(str(direct_link), str(chained_link))
+    alias_dir = tmp_path / "Aliases"
+    alias_dir.mkdir()
+    os.symlink(str(bundle), str(alias_dir / "MyLib"))
+
+    assert image_loader.is_excluded_scan_path(str(direct_link))
+    assert image_loader.is_excluded_scan_path(str(chained_link))
+    assert image_loader.is_excluded_scan_path(str(alias_dir / "MyLib"))
+    assert image_loader.is_excluded_scan_path(str(alias_dir / "MyLib" / "originals"))
+
+    assert calls == [], (
+        f"is_excluded_scan_path must not call os.path.realpath "
+        f"(it lstats inside the bundle); got calls for {calls}"
+    )
+
+
+def test_safe_iter_dir_skips_bundle_children_and_yields_paths(tmp_path):
+    """``safe_iter_dir`` mirrors ``Path.iterdir`` but drops excluded
+    bundle children — direct ``Photos Library.photoslibrary`` entries
+    or symlinks pointing at one — before the caller can stat them with
+    ``f.is_file()``. Without this, a non-recursive scan/ingest of a
+    parent like ``~/Pictures`` would stat the bundle target via
+    ``is_file`` (which follows symlinks) and re-trip the macOS TCC
+    "access data from other apps" prompt this guard exists to avoid.
+    """
+    import pytest
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    from image_loader import safe_iter_dir
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    (bundle / "originals").mkdir(parents=True)
+    (bundle / "originals" / "managed.jpg").write_bytes(b"")
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    (root / "real.jpg").write_bytes(b"")
+    (root / "Photos Library.photoslibrary").mkdir()
+    (root / "Photos Library.photoslibrary" / "managed.jpg").write_bytes(b"")
+    os.symlink(str(bundle), str(root / "LibraryAlias"))
+    (root / "sub").mkdir()
+    (root / "sub" / "deep.jpg").write_bytes(b"")  # not yielded — only direct children
+
+    names = {p.name for p in safe_iter_dir(str(root))}
+
+    assert "real.jpg" in names
+    assert "sub" in names
+    assert "Photos Library.photoslibrary" not in names
+    assert "LibraryAlias" not in names
+
+
+def test_safe_iter_dir_surfaces_permission_errors_via_onerror(tmp_path):
+    """Mirrors ``safe_scan_walk``: a directory the kernel refuses to
+    open is reported via the callback, not swallowed. Scanner's
+    non-recursive partial-discovery callback depends on this.
+    """
+    import pytest
+    if sys.platform == "win32":
+        pytest.skip("POSIX permissions required")
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root bypasses POSIX mode bits; cannot deny self")
+    from image_loader import safe_iter_dir
+
+    forbidden = tmp_path / "forbidden"
+    forbidden.mkdir()
+    (forbidden / "hidden.jpg").write_bytes(b"")
+    os.chmod(str(forbidden), 0o000)
+
+    errors = []
+    try:
+        list(safe_iter_dir(str(forbidden), onerror=errors.append))
+        assert any(str(forbidden) in str(getattr(e, "filename", "") or e)
+                   for e in errors), (
+            f"denied path not reported via onerror callback: {errors}"
+        )
+    finally:
+        os.chmod(str(forbidden), 0o755)
+
+
 def test_safe_scan_walk_skips_symlinked_excluded_bundle(tmp_path, caplog):
     """A child symlink whose target is an excluded bundle must be dropped
     before any stat that follows the link.

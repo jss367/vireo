@@ -20,6 +20,7 @@ from image_loader import (
     SUPPORTED_EXTENSIONS,
     extract_working_copy,
     is_excluded_scan_path,
+    safe_iter_dir,
     safe_scan_walk,
 )
 from metadata import extract_metadata
@@ -1075,21 +1076,21 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 continue
             effective_restrict_dirs.append(d)
             if dp.is_dir():
-                # iterdir() raises PermissionError when the kernel refuses
-                # enumeration (macOS TCC EPERM, POSIX EACCES). Route through
-                # _on_walk_error so denials are surfaced via
-                # permission_error_callback the same way the recursive path
-                # does. _on_walk_error re-raises when no callback is
-                # registered, so callers like pipeline_job's repair scan
-                # (which counts unreachable folders via `except OSError`)
-                # keep their failure semantics; only callers that opted in
-                # to partial-success by passing the callback fall through to
-                # `continue`.
-                try:
-                    entries = list(dp.iterdir())
-                except PermissionError as e:
-                    _on_walk_error(e)
-                    continue
+                # safe_iter_dir mirrors iterdir() but drops excluded
+                # bundle children (direct ``Photos Library.photoslibrary``
+                # entries or symlinks pointing into one) before the
+                # is_file()/suffix filter below would stat them — that
+                # stat alone would re-trip the macOS "access data from
+                # other apps" TCC prompt this guard exists to avoid.
+                # Permission denials route through _on_walk_error: when
+                # ``permission_error_callback`` is registered the helper
+                # logs + invokes it and returns, so the generator yields
+                # nothing and the for-loop falls through to the next
+                # ``d``. Without a callback, _on_walk_error re-raises so
+                # callers like pipeline_job's repair scan (``except
+                # (OSError, RuntimeError)``) keep their loud failure
+                # semantics — we deliberately don't catch that raise.
+                entries = list(safe_iter_dir(str(dp), onerror=_on_walk_error))
                 for f in entries:
                     _check_cancelled()
                     if (f.is_file()
@@ -1138,11 +1139,18 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                             continue
                         image_files.append(Path(full))
         else:
-            try:
-                entries = list(root_path.iterdir())
-            except PermissionError as e:
-                _on_walk_error(e)
-                entries = []
+            # safe_iter_dir mirrors iterdir() but drops excluded bundle
+            # children before the is_file() filter below would stat
+            # them. A normal root like ~/Pictures can hold ``Photos
+            # Library.photoslibrary`` (or a symlink to one) as a direct
+            # child; a bare iterdir + is_file() would stat that bundle
+            # and re-trip the macOS "access data from other apps" TCC
+            # prompt this guard exists to avoid, even though the
+            # extension filter would have rejected it afterwards.
+            # Permission denials route through _on_walk_error (callback
+            # → empty entries, no callback → re-raise) the same way the
+            # restrict_dirs branch above does.
+            entries = list(safe_iter_dir(str(root_path), onerror=_on_walk_error))
             for checked, f in enumerate(entries, 1):
                 if checked % 100 == 0:
                     _check_cancelled()
