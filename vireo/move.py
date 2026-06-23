@@ -1,10 +1,12 @@
 """Photo and folder move operations with copy-verify-delete safety."""
 
+import contextlib
 import filecmp
 import logging
 import os
 import shutil
 import subprocess
+import tempfile
 
 log = logging.getLogger(__name__)
 
@@ -147,10 +149,20 @@ def _is_case_insensitive_path(path):
     `Photos`, not what the mounted volume does below it), causing valid
     moves into the mount to be refused as "already managed".
 
+    When the ancestor has no letter-bearing existing child to flip (empty,
+    or only digit/symbol-named entries), creates a short-lived temp dir
+    *inside* the ancestor with a case-flippable suffix and probes via that
+    instead — otherwise a fresh destination tree on case-insensitive POSIX
+    (default macOS APFS at `/Volumes/Photos` with nothing in it yet) would
+    fall through as "case-sensitive" and let a stale tracked row like
+    `/Photos/Dst/src` slip past the case-folded overlap check against a
+    move landing at `/Photos/dst/src`.
+
     Returns False on case-sensitive POSIX (Linux ext4/btrfs, opt-in APFS)
-    and when the ancestor has no probe-able child entry (empty, unreadable,
-    or only no-letter names) — the safe default, since spuriously folding
-    case could merge two genuinely distinct paths.
+    and when no probe is possible at all (ancestor unreadable, not a
+    directory, or read-only so the temp-probe fallback can't write) — the
+    safe default, since spuriously folding case could merge two genuinely
+    distinct paths.
     """
     if os.name == "nt":
         return True
@@ -174,7 +186,20 @@ def _is_case_insensitive_path(path):
             os.path.join(cur, entry),
             os.path.join(cur, flipped),
         )
-    return False
+    # No letter-bearing existing child to flip. Probe by creating our own
+    # temp dir inside `cur` with a known case-flippable suffix and asking
+    # samefile whether the flipped spelling resolves to the same inode.
+    try:
+        probe = tempfile.mkdtemp(prefix=".vireo_case_probe_", suffix="A",
+                                 dir=cur)
+    except OSError:
+        return False
+    try:
+        flipped = probe[:-1] + probe[-1].swapcase()
+        return _samefile_or_false(probe, flipped)
+    finally:
+        with contextlib.suppress(OSError):
+            os.rmdir(probe)
 
 
 def _path_equal_or_descends(candidate, ancestor, ancestor_case_insensitive=None):

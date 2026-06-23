@@ -607,10 +607,12 @@ def test_is_case_insensitive_path_detects_case_insensitive_fs(tmp_path, monkeypa
     ) is True
 
 
-def test_is_case_insensitive_path_no_letter_children_returns_false(tmp_path):
-    """No probe-able child entry → conservative False. Otherwise a folder
-    of digit-only names could be flipped no-op-wise and report True/False
-    based on whatever samefile happened to return."""
+def test_is_case_insensitive_path_no_letter_children_falls_back_to_temp_probe(tmp_path):
+    """When no existing child has a letter to flip, the probe creates its
+    own temp dir inside the ancestor and asks samefile whether the
+    case-flipped spelling resolves to the same inode. On a case-sensitive
+    Linux FS this returns False (correct), and the probe dir must be
+    cleaned up so the destination is left as the function found it."""
     import move as move_mod
 
     target = tmp_path / "digits"
@@ -618,9 +620,72 @@ def test_is_case_insensitive_path_no_letter_children_returns_false(tmp_path):
     (target / "123").touch()
     (target / "456").mkdir()
 
+    # CI runs on case-sensitive Linux ext4: the temp-probe falls through
+    # to the same answer the digit-only listing gave before the fallback
+    # existed.
     assert move_mod._is_case_insensitive_path(
         os.path.join(str(target), "missing")
     ) is False
+
+    # No leftover probe dir — listdir still sees only the originals.
+    assert sorted(os.listdir(target)) == ["123", "456"]
+
+
+def test_is_case_insensitive_path_empty_ancestor_detects_case_insensitive_fs(
+    tmp_path, monkeypatch,
+):
+    """A fresh case-insensitive POSIX destination tree (default macOS APFS at
+    /Volumes/Photos with nothing in it yet) must still be classified as
+    case-insensitive, so a stale tracked row like /Photos/Dst/src vs a
+    move into /Photos/dst/src is still caught by the case-folded overlap
+    check. Before the temp-probe fallback, an empty ancestor returned
+    False unconditionally and let the stale alias slip through, leaving
+    two folder rows managing the same on-disk tree.
+    """
+    import move as move_mod
+
+    target = tmp_path / "empty_dest_root"
+    target.mkdir()
+    target_str = str(target)
+
+    def fake_samefile(a, b):
+        # Mimic case-insensitive FS at `target`: any two sibling names
+        # under it that differ only by case resolve to the same inode.
+        return (
+            os.path.dirname(a) == target_str
+            and os.path.dirname(b) == target_str
+            and os.path.basename(a).lower() == os.path.basename(b).lower()
+        )
+
+    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile)
+
+    assert move_mod._is_case_insensitive_path(
+        os.path.join(target_str, "missing", "sub")
+    ) is True
+
+    # Probe dir cleaned up — only originals (none, here) remain.
+    assert os.listdir(target) == []
+
+
+def test_is_case_insensitive_path_empty_ancestor_unwritable_returns_false(tmp_path):
+    """If the deepest existing ancestor is empty AND read-only, the
+    temp-probe fallback can't write a probe dir. Return False rather than
+    guessing — spuriously folding case could collapse two genuinely
+    distinct paths."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root bypasses dir-write permissions")
+    import move as move_mod
+
+    target = tmp_path / "ro_empty"
+    target.mkdir()
+    original_mode = target.stat().st_mode
+    os.chmod(target, 0o500)  # readable+executable, not writable
+    try:
+        assert move_mod._is_case_insensitive_path(
+            os.path.join(str(target), "missing")
+        ) is False
+    finally:
+        os.chmod(target, original_mode)
 
 
 def test_move_folder_refuses_self_overlapping_destination(move_env):
