@@ -544,6 +544,10 @@ def test_tracked_destination_overlap_caches_case_insensitivity_probe(move_env, m
     )
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows paths are treated case-insensitive without POSIX probing",
+)
 def test_is_case_insensitive_path_probes_inside_target_fs(tmp_path, monkeypatch):
     """The case-insensitivity probe must test the FS at the deepest existing
     ancestor by case-flipping a CHILD entry, not by case-flipping the
@@ -607,22 +611,26 @@ def test_is_case_insensitive_path_detects_case_insensitive_fs(tmp_path, monkeypa
     ) is True
 
 
-def test_is_case_insensitive_path_no_letter_children_falls_back_to_temp_probe(tmp_path):
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows paths are treated case-insensitive without POSIX probing",
+)
+def test_is_case_insensitive_path_no_letter_children_falls_back_to_temp_probe(
+    tmp_path, monkeypatch,
+):
     """When no existing child has a letter to flip, the probe creates its
     own temp dir inside the ancestor and asks samefile whether the
-    case-flipped spelling resolves to the same inode. On a case-sensitive
-    Linux FS this returns False (correct), and the probe dir must be
-    cleaned up so the destination is left as the function found it."""
+    case-flipped spelling resolves to the same inode. The probe result is
+    returned, and the probe dir must be cleaned up so the destination is left
+    as the function found it."""
     import move as move_mod
 
     target = tmp_path / "digits"
     target.mkdir()
     (target / "123").touch()
     (target / "456").mkdir()
+    monkeypatch.setattr(move_mod, "_samefile_or_false", lambda _a, _b: False)
 
-    # CI runs on case-sensitive Linux ext4: the temp-probe falls through
-    # to the same answer the digit-only listing gave before the fallback
-    # existed.
     assert move_mod._is_case_insensitive_path(
         os.path.join(str(target), "missing")
     ) is False
@@ -667,6 +675,10 @@ def test_is_case_insensitive_path_empty_ancestor_detects_case_insensitive_fs(
     assert os.listdir(target) == []
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows paths are treated case-insensitive without POSIX probing",
+)
 def test_is_case_insensitive_path_empty_ancestor_unwritable_returns_false(tmp_path):
     """If the deepest existing ancestor is empty AND read-only, the
     temp-probe fallback can't write a probe dir. Return False rather than
