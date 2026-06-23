@@ -168,6 +168,60 @@ def test_scan_skips_restrict_dirs_inside_excluded_bundle(tmp_path):
     assert not any('.photoslibrary' in p for p in folder_paths)
 
 
+def test_scan_filters_excluded_restrict_dirs_from_working_copy_scope(
+    tmp_path, monkeypatch,
+):
+    """The working-copy extraction pass must scope to the
+    ``restrict_dirs`` entries the discovery loop actually walked, not
+    the raw caller-supplied list.
+
+    The discovery loop already drops excluded restrict_dirs (covered by
+    :func:`test_scan_skips_restrict_dirs_inside_excluded_bundle`), but the
+    post-scan ``_extract_working_copies`` call used to reuse the raw
+    ``restrict_dirs`` to build ``wc_scope``. If a stale DB row already
+    pointed at a bundle-internal folder (e.g. from before the bundle guard
+    landed), the extractor's SQL match would still pick it up and the
+    follow-up file read of ``folder_path/filename`` would re-trip the
+    macOS "access data from other apps" TCC prompt — exactly the prompt
+    this guard exists to avoid. The scope passed to the extractor must
+    therefore mirror the filtered set.
+    """
+    import scanner
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['real.jpg']})
+    bundle_sub = str(
+        tmp_path / "photos" / "Photos Library.photoslibrary" / "originals"
+    )
+    _create_test_images(bundle_sub, {'': ['managed.jpg']})
+
+    captured = {}
+
+    def fake_extract_working_copies(db, vireo_dir, *, progress_callback=None,
+                                    status_callback=None, scope=None,
+                                    cancel_check=None):
+        captured["scope"] = scope
+
+    monkeypatch.setattr(scanner, "_extract_working_copies",
+                        fake_extract_working_copies)
+
+    db = Database(str(tmp_path / "test.db"))
+    scanner.scan(
+        root, db,
+        restrict_dirs=[root, bundle_sub],
+        vireo_dir=str(tmp_path / "vireo_dir"),
+    )
+
+    assert "scope" in captured, "expected _extract_working_copies to be called"
+    scope_paths = [entry[0] if isinstance(entry, tuple) else entry
+                   for entry in (captured["scope"] or [])]
+    assert root in scope_paths
+    assert all(".photoslibrary" not in p for p in scope_paths), (
+        f"bundle-internal restrict_dir leaked into wc_scope: {scope_paths}"
+    )
+
+
 def test_scan_skips_symlinked_excluded_bundle_child(tmp_path):
     """A child symlink in the scan root whose target is an excluded
     bundle must be dropped before ``os.walk``'s classification stat

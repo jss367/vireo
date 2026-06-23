@@ -694,6 +694,54 @@ def test_safe_scan_walk_skips_direct_bundle_child_without_stat(tmp_path):
     assert not any("managed.jpg" in p for p in seen_paths)
 
 
+def test_safe_scan_walk_skips_file_symlink_into_excluded_bundle(tmp_path):
+    """A file-named symlink whose target sits inside an excluded bundle
+    must be dropped during walk classification, not surfaced as a filename.
+
+    A previous version of ``_symlink_target_is_excluded`` checked only the
+    *basename* of the symlink target. For a link like
+    ``IMG.jpg -> ../Photos Library.photoslibrary/originals/IMG.jpg`` that
+    basename (``IMG.jpg``) doesn't match any bundle, so the link surfaced
+    in ``filenames``; downstream callers then ran ``os.path.isfile`` /
+    ``Path.is_file`` which followed the link, stat'd the managed Photos
+    file, and re-tripped the macOS TCC prompt this guard exists to avoid.
+    Check every component of the target path, not just the basename.
+    """
+    import pytest
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    from image_loader import safe_scan_walk
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    (bundle / "originals").mkdir(parents=True)
+    (bundle / "originals" / "managed.jpg").write_bytes(b"")
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    (root / "real.jpg").write_bytes(b"")
+    # Relative link reaching into the bundle (the case the basename-only
+    # check missed).
+    os.symlink(
+        os.path.join("..", "Photos Library.photoslibrary",
+                     "originals", "managed.jpg"),
+        str(root / "IMG.jpg"),
+    )
+    # Absolute link, same shape — covers callers that pass absolute targets.
+    os.symlink(
+        str(bundle / "originals" / "managed.jpg"),
+        str(root / "ABS.jpg"),
+    )
+
+    seen = set()
+    for _dirpath, dirnames, filenames in safe_scan_walk(str(root)):
+        seen.update(filenames)
+        seen.update(dirnames)
+
+    assert "real.jpg" in seen
+    assert "IMG.jpg" not in seen
+    assert "ABS.jpg" not in seen
+
+
 def test_safe_scan_walk_matches_os_walk_for_normal_trees(tmp_path):
     """Outside of bundle exclusion, ``safe_scan_walk`` yields the same
     files as the normal walker for the same recursion semantics

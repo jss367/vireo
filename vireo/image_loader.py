@@ -117,10 +117,21 @@ def prune_scan_dirs(dirnames):
 
 
 def _symlink_target_is_excluded(entry):
-    """Return True if *entry* is a symlink whose target basename names an
-    excluded bundle. Uses ``os.readlink`` (purely textual — never follows
-    the link), so a link pointing at ``Photos Library.photoslibrary`` can
-    be classified without statting the protected bundle target."""
+    """Return True if *entry* is a symlink whose target path contains an
+    excluded bundle anywhere along it. Uses ``os.readlink`` (purely textual
+    — never follows the link), so a link pointing into a protected bundle
+    can be classified without statting the bundle target.
+
+    Checks every component of the target path, not just the basename: a
+    file-named link like
+    ``IMG.jpg -> ../Photos Library.photoslibrary/originals/IMG.jpg`` has a
+    basename (``IMG.jpg``) that doesn't match any bundle, yet
+    ``os.path.isfile`` / ``Path.is_file`` on the link would still follow it
+    and stat the managed Photos file, re-tripping the macOS TCC prompt.
+    Relative targets are joined against the link's parent and normalized
+    (still purely textual — ``os.path.normpath`` does not stat) so ``..``
+    segments resolve before the component check.
+    """
     try:
         if not entry.is_symlink():
             return False
@@ -132,10 +143,10 @@ def _symlink_target_is_excluded(entry):
         return False
     if not target:
         return False
-    # Strip trailing separators before taking the basename so a link target
-    # spelled ``.../Photos Library.photoslibrary/`` is still matched.
-    target_name = os.path.basename(target.rstrip("/").rstrip("\\"))
-    return is_excluded_scan_dir(target_name)
+    if not os.path.isabs(target):
+        target = os.path.join(os.path.dirname(entry.path), target)
+    target = os.path.normpath(target)
+    return any(is_excluded_scan_dir(part) for part in Path(target).parts)
 
 
 def safe_scan_walk(top, onerror=None):

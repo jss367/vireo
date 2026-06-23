@@ -1044,6 +1044,14 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         else:
             log.warning("os.walk error at %s: %s", err.filename, err)
 
+    # Tracks restrict_dirs entries that survive the bundle guard, so the
+    # working-copy extraction pass below scopes its SQL query to the same
+    # set the discovery loop actually visited. Without this, a stale folder
+    # row inside an excluded bundle (carried over from before the guard)
+    # would be re-touched by ``_extract_working_copies`` reading
+    # ``folder_path/filename`` — re-tripping the macOS TCC prompt this guard
+    # exists to avoid.
+    effective_restrict_dirs = []
     if restrict_dirs is not None:
         # Only enumerate files in the specified directories (non-recursive).
         # root is still used as the folder hierarchy root for _ensure_folder.
@@ -1065,6 +1073,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     "Skipping other-app data bundle in restrict_dirs: %s", dp,
                 )
                 continue
+            effective_restrict_dirs.append(d)
             if dp.is_dir():
                 # iterdir() raises PermissionError when the kernel refuses
                 # enumeration (macOS TCC EPERM, POSIX EACCES). Route through
@@ -1690,7 +1699,13 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # backward. ``status_callback`` still announces the phase.
         if vireo_dir:
             if restrict_dirs is not None:
-                wc_scope = [(str(d), "exact") for d in restrict_dirs]
+                # Use the bundle-filtered list — see ``effective_restrict_dirs``
+                # above. Reusing the raw ``restrict_dirs`` here would let a
+                # stale DB row inside an excluded bundle re-enter the
+                # working-copy extractor, which reads ``folder_path/filename``
+                # and re-trips the macOS TCC prompt the scan loop's guard
+                # already skipped.
+                wc_scope = [(str(d), "exact") for d in effective_restrict_dirs]
             elif not recursive:
                 wc_scope = [(str(root_path), "exact")]
             else:
