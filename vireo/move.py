@@ -71,10 +71,12 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
         raise err
 
     copied = 0
+    created_dirs = []
     for root, dirs, files in os.walk(src_path, onerror=_raise):
         rel = os.path.relpath(root, src_path)
         target_dir = dest_path if rel == "." else os.path.join(dest_path, rel)
         os.makedirs(target_dir, exist_ok=True)
+        created_dirs.append((root, target_dir))
         # os.walk lists a symlinked subdirectory in `dirs` but, with its
         # default followlinks=False, never recurses into it — so its contents
         # would be silently dropped here while the post-copy file-count
@@ -99,6 +101,18 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
             copied += 1
             if progress_cb:
                 progress_cb(copied, total_files, fn, "Copying files")
+
+    # Mirror directory metadata (mode, mtime) for a fresh move, matching the
+    # primary rsync -a path and the shutil.copytree this fallback replaced.
+    # os.makedirs creates dirs with default permissions, so without this a
+    # private 0700 source folder would land as 0755 and the original metadata
+    # is lost once the source is deleted. copy2 above already preserves file
+    # metadata. Run after all contents exist so child writes don't re-bump a
+    # parent's mtime. Skipped on a merge: a pre-existing destination dir keeps
+    # the user's own metadata rather than being overwritten with the source's.
+    if not skip_existing:
+        for src_dir, target_dir in created_dirs:
+            shutil.copystat(src_dir, target_dir)
 
 
 def _run_rsync_streamed(src_path, dest_path, rsync_flag, total_files,

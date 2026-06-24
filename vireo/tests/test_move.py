@@ -1535,6 +1535,36 @@ def test_move_folder_shutil_fallback_aborts_on_unreadable_subdir(move_env, monke
     assert (env["src"] / "bird1.jpg").exists()
 
 
+def test_move_folder_shutil_fallback_preserves_dir_mode(move_env, monkeypatch):
+    """The shutil fallback must preserve directory permissions on a fresh
+    move (matching rsync -a / the old copytree). os.makedirs alone would
+    drop a private 0700 folder down to the umask default before the source
+    is deleted, permanently losing the metadata."""
+    import move as move_mod
+
+    if os.name == "nt":
+        pytest.skip("POSIX directory modes not meaningful on Windows")
+
+    env = move_env
+    sub = env["src"] / "private"
+    sub.mkdir()
+    (sub / "secret.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 20)
+    os.chmod(str(sub), 0o700)
+
+    monkeypatch.setattr(move_mod.subprocess, "Popen",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            FileNotFoundError("rsync")))
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
+    )
+    assert result["errors"] == []
+    dest_sub = env["dst"] / "src" / "private"
+    assert dest_sub.is_dir()
+    assert (os.stat(str(dest_sub)).st_mode & 0o777) == 0o700
+    assert not env["src"].exists()
+
+
 def test_move_folder_fresh_move_detects_late_source_file(move_env, monkeypatch):
     """A file added to the source after the upfront file count but before
     verification — a concurrent writer race rsync's scan missed — must be
