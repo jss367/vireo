@@ -20,6 +20,14 @@ log = logging.getLogger(__name__)
 # rsync is silent during its initial file-list build and the destination scan
 # a merge (--ignore-existing) performs, which over a slow SMB share can take
 # several minutes before the first file transfers.
+#
+# Known limitation: progress is detected per FILE (rsync emits one
+# --out-format=%n line per item, not continuous byte progress), so a single
+# file whose transfer exceeds this window over a very slow link could be
+# killed mid-flight. That can't happen for Vireo's data — source files are RAW
+# frames (tens of MB; ~12s/file even on the slow SMB share this was built for),
+# orders of magnitude under the window — so it's accepted rather than paying
+# the complexity of char-level --info=progress2 byte-progress parsing.
 RSYNC_STALL_TIMEOUT = 1800  # 30 minutes
 
 
