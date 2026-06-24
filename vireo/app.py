@@ -13463,7 +13463,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             dir_limit = 2000
             stack = [resolved]
             dirs_seen = 0
-            while stack:
+            while stack and not file_count_truncated:
                 if file_count >= file_limit or dirs_seen >= dir_limit:
                     file_count_truncated = True
                     break
@@ -13475,6 +13475,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     continue
                 with scanner:
                     for entry in scanner:
+                        # Check the caps inside the inner loop so a single
+                        # directory with a huge number of children cannot
+                        # blow past either limit before we bail out.
+                        if file_count >= file_limit or dirs_seen + len(stack) >= dir_limit:
+                            file_count_truncated = True
+                            break
                         try:
                             is_dir = entry.is_dir(follow_symlinks=False)
                         except OSError:
@@ -13483,9 +13489,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             stack.append(entry.path)
                         else:
                             file_count += 1
-                            if file_count >= file_limit:
-                                file_count_truncated = True
-                                break
 
         return jsonify({
             "resolved_dest": resolved,

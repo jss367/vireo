@@ -147,6 +147,33 @@ def test_move_folder_preflight_caps_existing_destination_count(app_and_db, tmp_p
     assert data["file_count_truncated"] is True
 
 
+def test_move_folder_preflight_caps_existing_destination_dir_fanout(app_and_db, tmp_path):
+    """A flat fanout of subdirectories must trip the dir cap mid-scan, not after enumerating all of them."""
+    app, db = app_and_db
+    dst = tmp_path / "dest"
+    dst.mkdir()
+
+    folder = db.get_folder_tree()[0]
+    folder_name = folder["name"] or os.path.basename(folder["path"].rstrip("/\\"))
+    landing = dst / folder_name
+    landing.mkdir()
+    # No files at all; just a large flat set of subdirectories. The cap is 2000,
+    # so 2500 children must not all be queued before truncation is reported.
+    for idx in range(2500):
+        (landing / f"sub-{idx:04d}").mkdir()
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(dst),
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["exists"] is True
+    assert data["file_count"] == 0
+    assert data["file_count_truncated"] is True
+
+
 def test_move_folder_preflight_requires_params(app_and_db):
     """Preflight without folder_id returns 400."""
     app, _ = app_and_db
