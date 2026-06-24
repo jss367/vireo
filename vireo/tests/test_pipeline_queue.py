@@ -23,6 +23,16 @@ def _fill_slots(runner, workspace_id=1):
     start. Returns ``(ids, release_event)``; call ``release_event.set()``
     to let them finish. Used by tests that need the next enqueue to
     land in the ``queued`` state.
+
+    The blocker work_fn's release-wait timeout is generous (60s) so the
+    slot stays occupied even when CI scheduling jitter (xdist ``-n 2``
+    with thousands of tests, OOM-prone runners) delays the surrounding
+    test work by several seconds. With a tight timeout the blocker
+    returns, the slot opens, and a queued test job auto-promotes from
+    ``queued`` to ``running`` before the assertion runs — surfacing as
+    an intermittent ``'running' == 'queued'`` failure unrelated to the
+    behavior under test. Tests are still expected to call
+    ``release.set()`` promptly; this timeout is only the safety net.
     """
     from jobs import SLOT_CAP
     release = threading.Event()
@@ -32,7 +42,7 @@ def _fill_slots(runner, workspace_id=1):
         evt = started_events[i]
         def work(job, _evt=evt, _release=release):
             _evt.set()
-            _release.wait(timeout=5.0)
+            _release.wait(timeout=60.0)
             return {}
         ids.append(runner.enqueue_pipeline(
             work_fn=work, config={}, workspace_id=workspace_id,
