@@ -13399,10 +13399,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             last_phase = {"value": None}
 
             def progress_cb(current, total, filename, phase="Moving folder"):
+                # Only update keys JobRunner pre-seeds in job["progress"]
+                # (current/total/current_file). Do NOT insert "phase" here:
+                # this runs on the worker thread outside the runner lock, and
+                # adding a new key races _snapshot_job's locked dict() copy
+                # ("dictionary changed size during iteration"). push_event
+                # below mirrors phase onto job["progress"] under the lock.
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
                 job["progress"]["current_file"] = filename
-                job["progress"]["phase"] = phase
                 # The copy phase fires once per file; on a large folder that
                 # would flood the SSE stream and tie up Flask threads. Throttle
                 # to every 10th file, but always emit on a phase change and on

@@ -1496,6 +1496,45 @@ def test_move_folder_shutil_fallback_preserves_dir_symlink(move_env, monkeypatch
     assert not env["src"].exists()
 
 
+def test_move_folder_shutil_fallback_aborts_on_unreadable_subdir(move_env, monkeypatch):
+    """If the shutil fallback can't read a source subdirectory, it must abort
+    the move rather than silently skip the subtree. The count verification
+    would otherwise also skip it (same default walk), match, and delete the
+    originals leaving the destination incomplete."""
+    import move as move_mod
+
+    env = move_env
+    sub = env["src"] / "sub"
+    sub.mkdir()
+    (sub / "nest.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 30)
+
+    monkeypatch.setattr(move_mod.subprocess, "Popen",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            FileNotFoundError("rsync")))
+
+    # Force os.walk to surface a scandir error for the subdirectory, as it
+    # would on a permission failure (default os.walk swallows this).
+    real_walk = move_mod.os.walk
+
+    def _walk_with_error(path, *a, **k):
+        onerror = k.get("onerror")
+        for root, dirs, files in real_walk(path, *a, **k):
+            if onerror is not None and os.path.basename(root) == "sub":
+                onerror(OSError(13, "Permission denied", str(sub)))
+            yield root, dirs, files
+
+    monkeypatch.setattr(move_mod.os, "walk", _walk_with_error)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
+    )
+    # Move aborted, originals preserved.
+    assert result["moved"] == 0
+    assert any("Copy failed" in e for e in result["errors"])
+    assert env["src"].exists()
+    assert (env["src"] / "bird1.jpg").exists()
+
+
 def test_move_folder_fresh_move_detects_late_source_file(move_env, monkeypatch):
     """A file added to the source after the upfront file count but before
     verification — a concurrent writer race rsync's scan missed — must be

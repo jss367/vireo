@@ -61,8 +61,17 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
     the shutil fallback when rsync is unavailable, so a fresh move (creating
     dest_path) and a merge share one progress-emitting walk.
     """
+    # os.walk swallows scandir errors by default, so an unreadable source
+    # subdirectory would be silently skipped here — and the fresh-move count
+    # verification (also a default os.walk) would skip it too, so the counts
+    # match and the catalog update + rmtree(src) proceed on an incomplete
+    # copy. shutil.copytree (the old fallback) raised instead; re-raise so the
+    # caller aborts the move before anything is deleted.
+    def _raise(err):
+        raise err
+
     copied = 0
-    for root, dirs, files in os.walk(src_path):
+    for root, dirs, files in os.walk(src_path, onerror=_raise):
         rel = os.path.relpath(root, src_path)
         target_dir = dest_path if rel == "." else os.path.join(dest_path, rel)
         os.makedirs(target_dir, exist_ok=True)
