@@ -188,7 +188,7 @@ jobs:
       # run is a few minutes slower but well under the 60-minute job timeout.
       - name: Run tests with coverage (Linux)
         if: needs.changes.outputs.python == 'true' && runner.os == 'Linux'
-        run: python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short --cov=vireo --cov-report=term-missing --cov-fail-under=40
+        run: python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short --timeout=120 --timeout-method=thread --cov=vireo --cov-report=term-missing --cov-fail-under=40
 
       # macOS/Windows verify platform-specific code paths. The coverage gate is
       # skipped here because POSIX-only tests don't run on Windows, which would
@@ -197,7 +197,7 @@ jobs:
       # worker crashes on the heavier ML tests.
       - name: Run tests (macOS / Windows)
         if: needs.changes.outputs.python == 'true' && runner.os != 'Linux'
-        run: python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short
+        run: python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short --timeout=120 --timeout-method=thread
 
   # Aggregate gate: a single check named ``test`` that branch protection can
   # require, independent of how many OS legs the matrix above runs. A matrix
