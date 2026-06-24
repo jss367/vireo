@@ -646,8 +646,10 @@ function scheduleQuickPreflight(fid, dest) {
   // exists/new-folder text for the wrong destination.
   var seq = ++quickPreflightSeq;
   // The preflight route rejects non-absolute paths, so wait until the input
-  // looks absolute (POSIX '/...' or Windows 'C:\...') before asking.
-  var isAbs = dest.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(dest);
+  // looks absolute before asking. Accept POSIX '/...', Windows drive paths
+  // ('C:\...'), and Windows UNC paths ('\\server\share') — all of which
+  // os.path.isabs() treats as absolute on their respective backends.
+  var isAbs = dest.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(dest) || /^\\\\/.test(dest);
   if (!isAbs) return;
   quickPreflightTimer = setTimeout(function() { runQuickPreflight(fid, dest, seq); }, 350);
 }
