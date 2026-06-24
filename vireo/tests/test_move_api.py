@@ -284,6 +284,47 @@ def test_move_folder_preflight_caps_existing_destination_dir_fanout(app_and_db, 
     assert data["file_count_truncated"] is True
 
 
+def test_scan_dir_file_count_stops_walking_after_truncation(tmp_path, monkeypatch):
+    """Once the inner-loop cap trips ``truncated`` mid-scan, the outer walk
+    must stop immediately — not keep popping the already-queued sibling
+    directories until ``dirs_seen`` mechanically catches up to ``dir_limit``.
+
+    On a flat fanout NAS target, the queued-sibling drain is the same
+    worker-stalling behavior the cap is meant to avoid: it can open ~dir_limit
+    extra directories after the decision to truncate is already made.
+    """
+    import app as app_module
+
+    # 30 subdirectories under one root. With dir_limit=10, the inner for-loop
+    # appends children to the stack one at a time. After the 9th append the
+    # check ``dirs_seen (1) + len(stack) (9) >= 10`` trips and sets
+    # ``truncated`` — but the stack still holds 9 queued sibling dirs.
+    root = tmp_path / "fanout"
+    root.mkdir()
+    for d in range(30):
+        (root / f"sub-{d:02d}").mkdir()
+
+    real_scandir = os.scandir
+    scanned = []
+
+    def counting_scandir(path):
+        scanned.append(str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(app_module.os, "scandir", counting_scandir)
+
+    file_count, truncated = app_module._scan_dir_file_count(
+        str(root), file_limit=None, dir_limit=10)
+
+    assert truncated is True
+    assert file_count == 0
+    # Only the root dir should have been scanned. Before the fix, the outer
+    # ``while stack:`` would have kept popping the 9 already-queued children
+    # and called os.scandir on each one even though ``truncated`` was already
+    # True — exactly the worker-stalling drain the cap is meant to prevent.
+    assert len(scanned) == 1, scanned
+
+
 def test_move_folder_preflight_exact_mode_counts_past_quick_cap(app_and_db, tmp_path):
     """mode='exact' counts past the 1000-file quick-scan cap and reports the
     true number with truncated=False, since the destination's true size is

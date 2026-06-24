@@ -464,7 +464,12 @@ def _scan_dir_file_count(root_path, file_limit=None, dir_limit=None):
     dirs_seen = 0
     truncated = False
     stack = [root_path]
-    while stack:
+    # `not truncated` in the outer condition stops the walk the moment the
+    # inner loop trips a cap. Without it, we'd keep popping queued sibling
+    # directories until `dirs_seen` mechanically caught up to `dir_limit` —
+    # which on a flat fanout means opening every already-queued child, the
+    # exact worker-stalling case the cap is supposed to prevent.
+    while stack and not truncated:
         if file_limit is not None and file_count >= file_limit:
             truncated = True
             break
