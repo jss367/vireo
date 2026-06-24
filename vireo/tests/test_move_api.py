@@ -284,9 +284,10 @@ def test_move_folder_preflight_caps_existing_destination_dir_fanout(app_and_db, 
     assert data["file_count_truncated"] is True
 
 
-def test_move_folder_preflight_exact_mode_counts_uncapped(app_and_db, tmp_path):
-    """mode='exact' walks the destination uncapped, returning the true count
-    and truncated=False even past the 1000-file quick-scan cap."""
+def test_move_folder_preflight_exact_mode_counts_past_quick_cap(app_and_db, tmp_path):
+    """mode='exact' counts past the 1000-file quick-scan cap and reports the
+    true number with truncated=False, since the destination's true size is
+    well under the larger exact-mode cap."""
     app, db = app_and_db
     dst = tmp_path / "dest"
     dst.mkdir()
@@ -310,6 +311,55 @@ def test_move_folder_preflight_exact_mode_counts_uncapped(app_and_db, tmp_path):
     assert data["file_count"] == 1001
     assert data["file_count_truncated"] is False
     assert "preview" not in data
+
+
+def test_move_folder_preflight_exact_mode_is_capped_not_unbounded(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """mode='exact' must NOT walk the destination tree uncapped. The UI's
+    requestExactDestCount fires from the keystroke-driven path, so an
+    unbounded walk on a hoarder-NAS target with millions of files would pin
+    a Flask worker for minutes (the UI seq guard only discards stale replies,
+    not server-side work). Exact mode passes a generous but finite cap so the
+    worst case is seconds, and the response surfaces truncated=True if the
+    cap was hit — the UI already renders that as 'at least N'."""
+    import app as app_module
+
+    app, db = app_and_db
+    dst = tmp_path / "dest"
+    dst.mkdir()
+    folder = db.get_folder_tree()[0]
+    folder_name = folder["name"] or os.path.basename(folder["path"].rstrip("/\\"))
+    landing = dst / folder_name
+    landing.mkdir()
+
+    captured = {}
+
+    def fake_scan(root_path, file_limit=None, dir_limit=None):
+        captured["file_limit"] = file_limit
+        captured["dir_limit"] = dir_limit
+        # Pretend the cap was hit so the truncated flag can be checked too.
+        return file_limit or 0, True
+
+    monkeypatch.setattr(app_module, "_scan_dir_file_count", fake_scan)
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(dst),
+        "mode": "exact",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Both caps must be set (not None) so the walk is bounded, and both must
+    # be much larger than the quick-mode caps so realistic libraries never
+    # see "at least N" from exact mode.
+    assert captured["file_limit"] is not None and captured["file_limit"] >= 100000
+    assert captured["dir_limit"] is not None and captured["dir_limit"] >= 50000
+    # Truncation from the helper must surface in the response so the UI can
+    # render "at least N" instead of implying an exact total.
+    assert data["file_count_truncated"] is True
+    assert data["file_count"] == captured["file_limit"]
 
 
 def test_move_folder_preflight_preview_reports_transfer_counts(app_and_db, tmp_path):

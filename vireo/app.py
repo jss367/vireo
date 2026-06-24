@@ -13521,9 +13521,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         * ``"quick"`` (default) — caps the destination file count at 1000 so
           the live, keystroke-debounced status line stays instant even when
           the destination holds millions of files.
-        * ``"exact"`` — walks the destination uncapped for the true file
-          count. The UI fires this in the background to replace the capped
-          "at least 1000" line once the fast check reported a truncation.
+        * ``"exact"`` — walks the destination with a much larger cap
+          (100k files / 50k dirs) than ``quick`` so the true count is
+          reported for any realistic photo library, while still bounding
+          the Flask worker thread on pathological NAS targets (millions
+          of unrelated files). The UI fires this in the background to
+          replace the capped "at least 1000" line once the fast check
+          reported a truncation, and still renders "at least N" if the
+          exact walk itself truncated.
         * ``"preview"`` — keeps the destination count on the capped fast
           path (same as ``quick``) and adds a ``preview_merge`` block
           reporting how many source files would actually copy vs. be
@@ -13567,7 +13572,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         file_count_truncated = False
         if exists:
             if mode == "exact":
-                file_count, file_count_truncated = _scan_dir_file_count(resolved)
+                # Generous cap, not uncapped: requestExactDestCount fires from
+                # the keystroke-driven path, and an unbounded walk on a NAS
+                # target with millions of files would pin a Flask worker for
+                # minutes (the UI seq guard only discards stale replies, not
+                # server-side work). 100k/50k is large enough that any
+                # realistic photo library reports its true count, and small
+                # enough that the worst case is seconds, not minutes.
+                file_count, file_count_truncated = _scan_dir_file_count(
+                    resolved, file_limit=100000, dir_limit=50000)
             else:
                 # Both "quick" and "preview" cap the destination scan. The
                 # merge dialog uses preview_merge's copy/skip counts, not
