@@ -1239,8 +1239,8 @@ def test_move_folder_merge_verify_fail_preserves_originals_and_dest(move_env, mo
     sentinel.write_text("pre-existing")
 
     # Force the copy step to be a no-op so a source file is "missing" at dest.
-    monkeypatch.setattr(move_mod, "_run_rsync",
-                        lambda *a, **k: (0, ""))
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+                        lambda *a, **k: (0, "", False))
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
@@ -1275,8 +1275,8 @@ def test_move_folder_merge_rejects_symlinked_dest_file(move_env, monkeypatch):
 
     # Force rsync to no-op (it would normally honor --ignore-existing and
     # leave the symlink anyway; this just removes the dependency on rsync).
-    monkeypatch.setattr(move_mod, "_run_rsync",
-                        lambda *a, **k: (0, ""))
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+                        lambda *a, **k: (0, "", False))
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
@@ -1314,8 +1314,8 @@ def test_move_folder_merge_rejects_symlinked_dest_subdir(move_env, monkeypatch):
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not supported on this platform")
 
-    monkeypatch.setattr(move_mod, "_run_rsync",
-                        lambda *a, **k: (0, ""))
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+                        lambda *a, **k: (0, "", False))
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
@@ -1343,8 +1343,8 @@ def test_move_folder_merge_rejects_broken_symlink(move_env, monkeypatch):
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not supported on this platform")
 
-    monkeypatch.setattr(move_mod, "_run_rsync",
-                        lambda *a, **k: (0, ""))
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+                        lambda *a, **k: (0, "", False))
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
@@ -1381,59 +1381,6 @@ def test_move_folder_updates_counts(move_env):
     assert row["photo_count"] == 2
 
 
-def test_move_folder_reports_file_progress(move_env):
-    """move_folder reports progress in file units while copying, ending at
-    N-of-N. The denominator is the folder's file count (3: two jpgs + one xmp),
-    not the photo count (2). Regression: progress used to fire only once, at
-    the very end, so the UI bar sat frozen for the whole copy."""
-    from move import move_folder
-
-    env = move_env
-    calls = []
-    result = move_folder(
-        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]),
-        progress_cb=lambda cur, tot, fn: calls.append((cur, tot, fn)),
-    )
-    assert result["errors"] == []
-    assert calls, "progress_cb was never called"
-    # Denominator is the file count, reported consistently on every call.
-    assert all(tot == 3 for _, tot, _ in calls)
-    # Counter is monotonic and finishes at the full count.
-    currents = [cur for cur, _, _ in calls]
-    assert currents == sorted(currents)
-    assert currents[-1] == 3
-
-
-def test_run_rsync_streams_per_file_progress(tmp_path):
-    """_run_rsync advances the counter once per transferred file and seeds it
-    with the baseline of already-present files."""
-    import shutil as _shutil
-    from move import _run_rsync
-
-    if _shutil.which("rsync") is None:
-        pytest.skip("rsync not available")
-
-    src = tmp_path / "src"
-    src.mkdir()
-    for i in range(3):
-        (src / f"f{i}.bin").write_bytes(b"x" * (i + 1))
-    dst = tmp_path / "dst"
-
-    calls = []
-    rc, stderr = _run_rsync(
-        str(src), str(dst), "--checksum",
-        progress_cb=lambda cur, tot, fn: calls.append((cur, tot, fn)),
-        baseline=2, total=5,
-    )
-    assert rc == 0, stderr
-    currents = [cur for cur, _, _ in calls]
-    # Three files transferred, counted on top of the baseline of 2 → 3,4,5.
-    assert currents == [3, 4, 5]
-    assert all(tot == 5 for _, tot, _ in calls)
-    # Filenames are reported, directory lines are not counted.
-    assert {fn for _, _, fn in calls} == {"f0.bin", "f1.bin", "f2.bin"}
-
-
 def test_move_photos_progress_callback(move_env):
     """move_photos calls progress callback with current/total."""
     from move import move_photos
@@ -1450,3 +1397,249 @@ def test_move_photos_progress_callback(move_env):
     assert calls[0][0] == 1  # current=1
     assert calls[1][0] == 2  # current=2
     assert calls[0][1] == 2  # total=2
+
+
+def test_move_folder_reports_phases_and_per_file_progress(move_env):
+    """move_folder streams the move through named phases and reports each
+    file as it is copied, instead of one progress call at the end."""
+    from move import move_folder
+
+    env = move_env
+    calls = []
+    result = move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+        progress_cb=lambda cur, tot, fn, phase: calls.append(
+            (cur, tot, fn, phase)
+        ),
+    )
+    assert result["errors"] == []
+    phases = [c[3] for c in calls]
+    # The move walks through these phases in order.
+    for expected in ("Checking destination", "Copying files",
+                     "Verifying copy", "Updating catalog",
+                     "Removing originals", "Done"):
+        assert expected in phases, f"missing phase {expected!r} in {phases}"
+
+    # The copy phase reports a real denominator (3 files: 2 jpgs + 1 xmp)
+    # and at least one per-file update naming the file being copied.
+    copy_calls = [c for c in calls if c[3] == "Copying files"]
+    assert copy_calls, "no copy-phase progress reported"
+    total = copy_calls[-1][1]
+    assert total == 3
+    named = [c for c in copy_calls if c[0] > 0 and c[2]]
+    assert named, "no per-file progress during copy"
+    assert all(c[1] == total for c in copy_calls)
+
+
+def test_move_folder_progress_shutil_fallback(move_env, monkeypatch):
+    """When rsync is unavailable, the shutil fallback still reports per-file
+    copy progress through the same phase contract."""
+    import move as move_mod
+
+    def _no_rsync(*a, **k):
+        raise FileNotFoundError("rsync")
+
+    monkeypatch.setattr(move_mod.subprocess, "Popen", _no_rsync)
+
+    env = move_env
+    calls = []
+    result = move_mod.move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+        progress_cb=lambda cur, tot, fn, phase: calls.append(
+            (cur, tot, fn, phase)
+        ),
+    )
+    assert result["errors"] == []
+    assert (env["dst"] / "src" / "bird1.jpg").exists()
+    copy_calls = [c for c in calls if c[3] == "Copying files" and c[0] > 0]
+    assert copy_calls, "shutil fallback reported no per-file progress"
+    assert copy_calls[-1][1] == 3  # same 3-file denominator
+
+
+def test_move_folder_shutil_fallback_preserves_dir_symlink(move_env, monkeypatch):
+    """The shutil fallback (rsync unavailable) must not silently drop a
+    symlinked subdirectory. os.walk doesn't recurse into one, so without
+    explicit handling its contents would never reach the destination yet the
+    count verification would still pass and delete the originals. The symlink
+    must be recreated at the destination, matching rsync -a."""
+    import move as move_mod
+
+    env = move_env
+    # A symlinked subdirectory inside the source pointing at an external dir.
+    external = env["tmp_path"] / "external"
+    external.mkdir()
+    (external / "target.txt").write_text("payload")
+    try:
+        os.symlink(str(external), str(env["src"] / "linkdir"))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(move_mod.subprocess, "Popen",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            FileNotFoundError("rsync")))
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
+    )
+    assert result["errors"] == []
+    landing = env["dst"] / "src"
+    link = landing / "linkdir"
+    # The symlink is preserved as a symlink, still resolving to the payload.
+    assert link.is_symlink()
+    assert (link / "target.txt").read_text() == "payload"
+    # External target untouched; source removed after a verified copy.
+    assert (external / "target.txt").exists()
+    assert not env["src"].exists()
+
+
+def test_move_folder_shutil_fallback_aborts_on_unreadable_subdir(move_env, monkeypatch):
+    """If the shutil fallback can't read a source subdirectory, it must abort
+    the move rather than silently skip the subtree. The count verification
+    would otherwise also skip it (same default walk), match, and delete the
+    originals leaving the destination incomplete."""
+    import move as move_mod
+
+    env = move_env
+    sub = env["src"] / "sub"
+    sub.mkdir()
+    (sub / "nest.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 30)
+
+    monkeypatch.setattr(move_mod.subprocess, "Popen",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            FileNotFoundError("rsync")))
+
+    # Force os.walk to surface a scandir error for the subdirectory, as it
+    # would on a permission failure (default os.walk swallows this).
+    real_walk = move_mod.os.walk
+
+    def _walk_with_error(path, *a, **k):
+        onerror = k.get("onerror")
+        for root, dirs, files in real_walk(path, *a, **k):
+            if onerror is not None and os.path.basename(root) == "sub":
+                onerror(OSError(13, "Permission denied", str(sub)))
+            yield root, dirs, files
+
+    monkeypatch.setattr(move_mod.os, "walk", _walk_with_error)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
+    )
+    # Move aborted, originals preserved.
+    assert result["moved"] == 0
+    assert any("Copy failed" in e for e in result["errors"])
+    assert env["src"].exists()
+    assert (env["src"] / "bird1.jpg").exists()
+
+
+def test_move_folder_shutil_fallback_preserves_dir_mode(move_env, monkeypatch):
+    """The shutil fallback must preserve directory permissions on a fresh
+    move (matching rsync -a / the old copytree). os.makedirs alone would
+    drop a private 0700 folder down to the umask default before the source
+    is deleted, permanently losing the metadata."""
+    import move as move_mod
+
+    if os.name == "nt":
+        pytest.skip("POSIX directory modes not meaningful on Windows")
+
+    env = move_env
+    sub = env["src"] / "private"
+    sub.mkdir()
+    (sub / "secret.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 20)
+    os.chmod(str(sub), 0o700)
+
+    monkeypatch.setattr(move_mod.subprocess, "Popen",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            FileNotFoundError("rsync")))
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
+    )
+    assert result["errors"] == []
+    dest_sub = env["dst"] / "src" / "private"
+    assert dest_sub.is_dir()
+    assert (os.stat(str(dest_sub)).st_mode & 0o777) == 0o700
+    assert not env["src"].exists()
+
+
+def test_move_folder_shutil_fallback_preserves_file_symlink(move_env, monkeypatch):
+    """The shutil fallback must preserve a symlinked file as a symlink rather
+    than dereferencing it through copy2 (matching rsync -a). Dereferencing
+    would silently replace the link with its target's bytes and could write
+    through a symlinked destination entry."""
+    import move as move_mod
+
+    env = move_env
+    external = env["tmp_path"] / "ext_target.txt"
+    external.write_text("external payload")
+    try:
+        os.symlink(str(external), str(env["src"] / "alias.txt"))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(move_mod.subprocess, "Popen",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            FileNotFoundError("rsync")))
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
+    )
+    assert result["errors"] == []
+    dest_link = env["dst"] / "src" / "alias.txt"
+    assert dest_link.is_symlink()
+    # samefile compares by inode/device, so it tolerates the `\\?\` extended-length
+    # prefix Windows stamps onto absolute symlink targets returned by os.readlink.
+    assert os.path.samefile(str(dest_link), str(external))
+    # External target untouched; source removed after a verified copy.
+    assert external.read_text() == "external payload"
+    assert not env["src"].exists()
+
+
+def test_move_folder_fresh_move_detects_late_source_file(move_env, monkeypatch):
+    """A file added to the source after the upfront file count but before
+    verification — a concurrent writer race rsync's scan missed — must be
+    detected before `shutil.rmtree(src_path)` would silently delete it.
+
+    Trusting the upfront `total_files` as the source count makes this
+    silently incorrect: src now holds total_files+1 files, rsync copied
+    only total_files of them, dst_count equals total_files, and a stale
+    count compare passes — then rmtree wipes the new source file.
+    Verification must re-examine the source against the destination
+    instead of reusing the pre-copy count."""
+    import shutil as _shutil
+
+    import move as move_mod
+
+    env = move_env
+    landing = env["dst"] / "src"
+    assert not landing.exists()  # fresh move (no merge path)
+
+    def _copy_then_inject(src_path, dest_path, *args, **kwargs):
+        # Stand in for rsync: copy the tree as it looked when scanning began,
+        # then simulate a concurrent writer adding a new file to the source
+        # before verification runs.
+        _shutil.copytree(src_path, dest_path)
+        (env["src"] / "late_arrival.jpg").write_bytes(b"new content")
+        return 0, "", False
+
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", _copy_then_inject)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]),
+    )
+    # The move must abort — assert the safety property (originals survive,
+    # late arrival is not silently deleted) without coupling to the exact
+    # error wording. A count-mismatch fix surfaces this differently from a
+    # per-source-file presence check; both are valid signals.
+    assert result["moved"] == 0
+    assert result["errors"], "expected an error explaining why verification failed"
+    assert (env["src"] / "late_arrival.jpg").exists(), \
+        "the late source file was silently deleted"
+    assert (env["src"] / "late_arrival.jpg").read_bytes() == b"new content"
+    # The pre-existing source files must also still be present — a fresh
+    # move that aborts at verification preserves originals.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird2.jpg").exists()
